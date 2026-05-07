@@ -1,0 +1,83 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      serde:
+        patterns:
+          - "serde"
+          - "serde_*"
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      tokio:
+        patterns:
+          - "tokio"
+          - "tokio-*"
+          - "async-trait"
+      tracing:
+        patterns:
+          - "tracing"
+          - "tracing-*"
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      oxc:
+        patterns:
+          - "oxfmt"
+          - "oxlint"
+          - "oxlint-tsgolint"
+      svelte:
+        patterns:
+          - "svelte"
+          - "svelte-*"
+          - "@sveltejs/*"
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+      testing-library:
+        patterns:
+          - "@testing-library/*"
+      typescript:
+        patterns:
+          - "typescript"
+          - "@typescript/*"
+          - "@types/*"
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

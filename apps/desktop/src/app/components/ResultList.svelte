@@ -1,0 +1,55 @@
+<script lang="ts">
+  import { messages } from "../lib/i18n/index.svelte";
+  import type { SearchResultDto } from "../lib/types";
+  import ResultItem from "./ResultItem.svelte";
+
+  type Props = {
+    items: SearchResultDto[];
+    selectedIndex: number;
+    onSelect: (index: number) => void;
+    onConfirm: (index: number) => void;
+    emptyMessage?: string;
+  };
+
+  const { items, selectedIndex, onSelect, onConfirm, emptyMessage }: Props = $props();
+
+  const effectiveEmpty = $derived(emptyMessage ?? messages().palette.empty);
+
+  let listEl: HTMLDivElement | undefined = $state();
+
+  $effect(() => {
+    if (!listEl) return;
+    const nodes = listEl.querySelectorAll<HTMLElement>(".result-item");
+    nodes[selectedIndex]?.scrollIntoView({ block: "nearest" });
+  });
+</script>
+
+<div class="result-list" role="listbox" bind:this={listEl}>
+  {#if items.length === 0}
+    <p class="empty">{effectiveEmpty}</p>
+  {:else}
+    {#each items as item, index (item.id)}
+      <ResultItem
+        {item}
+        {index}
+        selected={index === selectedIndex}
+        {onSelect}
+        {onConfirm}
+      />
+    {/each}
+  {/if}
+</div>
+
+<style>
+  .result-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .empty {
+    padding: 1.5rem 1rem;
+    color: var(--muted, rgba(255, 255, 255, 0.4));
+    font-size: 0.875rem;
+    text-align: center;
+  }
+</style>

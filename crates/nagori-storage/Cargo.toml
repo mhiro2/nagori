@@ -1,0 +1,29 @@
+[package]
+name = "nagori-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nagori-core = { path = "../nagori-core" }
+nagori-search = { path = "../nagori-search" }
+regex.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support"] }
+tempfile.workspace = true
+
+[[bench]]
+name = "storage_search"
+harness = false
+
+[lints]
+workspace = true

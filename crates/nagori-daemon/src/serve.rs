@@ -1,0 +1,199 @@
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+#[cfg(not(unix))]
+use nagori_core::AppError;
+use nagori_core::Result;
+#[cfg(unix)]
+use nagori_ipc::{AuthToken, accept_loop, bind_unix, default_token_path, write_token_file};
+use nagori_platform::{ClipboardReader, WindowBehavior};
+use tokio::signal;
+use tracing::{info, warn};
+
+use crate::{CaptureLoop, MaintenanceService, NagoriRuntime};
+
+#[derive(Debug, Clone)]
+pub struct DaemonConfig {
+    pub socket_path: PathBuf,
+    pub token_path: PathBuf,
+    pub capture_interval: Duration,
+    pub maintenance_interval: Duration,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_socket_path(),
+            token_path: default_token_path_local(),
+            capture_interval: Duration::from_millis(500),
+            maintenance_interval: Duration::from_mins(30),
+        }
+    }
+}
+
+pub fn default_socket_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("nagori")
+        .join("nagori.sock")
+}
+
+#[cfg(unix)]
+fn default_token_path_local() -> PathBuf {
+    default_token_path()
+}
+
+#[cfg(not(unix))]
+fn default_token_path_local() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("nagori")
+        .join("nagori.token")
+}
+
+/// Bind the IPC socket, mint a per-launch auth token, and spawn the accept loop.
+///
+/// The bind happens synchronously up-front so a failure (socket-in-use,
+/// permission denied, parent dir missing) terminates `run_daemon` startup
+/// instead of leaving a half-alive process. The auth token is written to a
+/// sibling `0o600` file; only callers who can read that file
+/// (== same user ownership as the daemon) will authenticate.
+async fn spawn_ipc_server(
+    runtime: NagoriRuntime,
+    config: &DaemonConfig,
+) -> Result<tokio::task::JoinHandle<()>> {
+    #[cfg(unix)]
+    {
+        let listener = bind_unix(&config.socket_path).await?;
+        let token = AuthToken::generate()?;
+        write_token_file(&config.token_path, &token)?;
+        Ok(tokio::spawn(async move {
+            let result = accept_loop(listener, token, move |request| {
+                let runtime = runtime.clone();
+                async move { runtime.handle_ipc(request).await }
+            })
+            .await;
+            if let Err(err) = result {
+                warn!(error = %err, "ipc_server_terminated");
+            }
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, config);
+        Err(AppError::Unsupported(
+            "IPC requires a Unix-like platform".to_owned(),
+        ))
+    }
+}
+
+pub async fn run_daemon<R>(
+    runtime: NagoriRuntime,
+    reader: R,
+    config: DaemonConfig,
+    window: Option<Arc<dyn WindowBehavior>>,
+) -> Result<()>
+where
+    R: ClipboardReader + 'static,
+{
+    let store = runtime.store().clone();
+    let shutdown = runtime.shutdown_handle();
+    // Fail closed: refuse to start if the persisted settings can't be loaded
+    // — running on `Default` means we'd ignore the user's denylist /
+    // secret_handling / cli_ipc_enabled / capture_enabled and silently
+    // re-enable a more permissive policy.
+    runtime.refresh_settings_from_store().await?;
+    let settings_rx = runtime.settings_subscribe();
+
+    if let Some(parent) = config.socket_path.parent() {
+        nagori_storage::ensure_private_directory(parent)?;
+    }
+
+    let capture_handle = {
+        let store = store.clone();
+        let shutdown = shutdown.clone();
+        let interval = config.capture_interval;
+        let settings_rx = settings_rx.clone();
+        let window = window.clone();
+        let search_cache = runtime.search_cache_handle();
+        tokio::spawn(async move {
+            let settings = settings_rx.borrow().clone();
+            let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
+                .with_search_cache(search_cache);
+            if let Some(w) = window {
+                capture = capture.with_window(w);
+            }
+            let shutdown_signal = async move { shutdown.notified().await };
+            if let Err(err) = capture
+                .run_polling_with_settings(interval, settings_rx, shutdown_signal)
+                .await
+            {
+                warn!(error = %err, "capture_loop_terminated");
+            }
+        })
+    };
+
+    let maintenance_handle = {
+        let store = store.clone();
+        let shutdown = shutdown.clone();
+        let interval = config.maintenance_interval;
+        let mut settings_rx = settings_rx.clone();
+        let search_cache = runtime.search_cache_handle();
+        tokio::spawn(async move {
+            let maintenance =
+                MaintenanceService::new(store.clone()).with_search_cache(search_cache);
+            loop {
+                let settings = settings_rx.borrow().clone();
+                if let Err(err) = maintenance.run(&settings).await {
+                    warn!(error = %err, "maintenance_failed");
+                }
+                tokio::select! {
+                    () = shutdown.notified() => return,
+                    changed = settings_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    },
+                    () = tokio::time::sleep(interval) => {},
+                }
+            }
+        })
+    };
+
+    let serve_handle = if runtime.current_settings().cli_ipc_enabled {
+        Some(spawn_ipc_server(runtime.clone(), &config).await?)
+    } else {
+        info!("ipc_disabled_by_settings");
+        None
+    };
+
+    info!(socket = %config.socket_path.display(), "daemon_started");
+
+    tokio::select! {
+        () = shutdown.notified() => {},
+        result = signal::ctrl_c() => {
+            if let Err(err) = result {
+                warn!(error = %err, "ctrl_c_failed");
+            }
+            shutdown.notify_waiters();
+        }
+    }
+
+    info!("daemon_shutting_down");
+    capture_handle.abort();
+    maintenance_handle.abort();
+    if let Some(handle) = serve_handle {
+        handle.abort();
+    }
+
+    if config.socket_path.exists() {
+        let _ = std::fs::remove_file(&config.socket_path);
+    }
+    // Remove the token file on shutdown so a CLI launched after the daemon
+    // exits gets a clean "no daemon running" error instead of trying a
+    // stale token against a fresh process.
+    if config.token_path.exists() {
+        let _ = std::fs::remove_file(&config.token_path);
+    }
+
+    Ok(())
+}

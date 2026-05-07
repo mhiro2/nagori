@@ -1,0 +1,72 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Nagori",
+  "identifier": "dev.nagori.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm --filter @nagori/desktop dev",
+    "beforeBuildCommand": "pnpm --filter @nagori/desktop build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nagori",
+        "width": 720,
+        "height": 480,
+        "minWidth": 480,
+        "minHeight": 320,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "center": true,
+        "focus": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "img-src": ["'self'", "asset:", "data:", "https://asset.localhost", "nagori-image:", "http://nagori-image.localhost"],
+        "font-src": ["'self'", "data:"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "script-src": ["'self'", "'wasm-unsafe-eval'"],
+        "connect-src": [
+          "'self'",
+          "ipc:",
+          "http://ipc.localhost"
+        ],
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "frame-ancestors": "'none'"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "Local-first, AI-assisted clipboard manager.",
+    "longDescription": "Nagori is a local-first clipboard manager with full-text search, optional AI actions, and explicit secret/regex policies. History stays on the user's machine; remote AI calls require explicit opt-in.",
+    "copyright": "Copyright (c) 2026 Masaaki Hirotsu",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "26.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"]
+      }
+    }
+  }
+}

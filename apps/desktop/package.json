@@ -1,0 +1,40 @@
+{
+  "name": "@nagori/desktop",
+  "private": true,
+  "description": "Nagori desktop UI shell (Tauri WebView).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "typecheck": "tsgo --noEmit",
+    "lint": "oxlint -c ../../.oxlintrc.json src",
+    "fmt": "oxfmt -c ../../.oxfmtrc.json src",
+    "fmt:check": "oxfmt -c ../../.oxfmtrc.json --check src",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "catalog:tauri",
+    "svelte": "catalog:frontend"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "catalog:frontend",
+    "@tauri-apps/cli": "catalog:tauri",
+    "@testing-library/jest-dom": "catalog:testing",
+    "@testing-library/svelte": "catalog:testing",
+    "@testing-library/user-event": "catalog:testing",
+    "@typescript/native-preview": "catalog:tooling",
+    "@vitest/coverage-v8": "catalog:testing",
+    "esbuild": "catalog:tooling",
+    "jsdom": "catalog:testing",
+    "oxfmt": "catalog:tooling",
+    "oxlint": "catalog:tooling",
+    "oxlint-tsgolint": "catalog:tooling",
+    "svelte-check": "catalog:frontend",
+    "vite": "catalog:frontend",
+    "vitest": "catalog:testing"
+  }
+}

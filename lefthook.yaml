@@ -1,0 +1,21 @@
+output:
+  - summary
+  - meta
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt-check:
+      run: make fmt-check
+    lint:
+      run: make lint
+    typecheck:
+      run: make desktop-typecheck
+
+pre-push:
+  parallel: true
+  commands:
+    test:
+      run: make test
+    deny-check:
+      run: make deny-check

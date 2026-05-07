@@ -1,0 +1,51 @@
+{
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+  "categories": {
+    "correctness": "error",
+    "perf": "warn",
+    "suspicious": "warn",
+    "style": "off"
+  },
+  "env": {
+    "browser": true,
+    "es2024": true,
+    "node": true,
+    "builtin": true
+  },
+  "options": {
+    "reportUnusedDisableDirectives": "warn",
+    "typeAware": true,
+    "denyWarnings": true
+  },
+  "rules": {
+    "no-console": "warn",
+    "no-underscore-dangle": ["warn", { "allow": ["__TAURI_INTERNALS__"] }],
+    "no-unassigned-import": ["warn", { "allow": ["**/*.css"] }]
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.spec.ts", "**/*.test.svelte"],
+      "env": { "vitest": true },
+      "rules": {
+        "no-console": "off",
+        "no-unsafe-type-assertion": "off"
+      }
+    },
+    {
+      "files": ["*.config.{js,ts,mjs,cjs}"],
+      "rules": {
+        "no-console": "off"
+      }
+    }
+  ],
+  "ignorePatterns": [
+    "dist",
+    "build",
+    "node_modules",
+    "src-tauri",
+    ".svelte-kit",
+    ".vite",
+    "coverage",
+    "**/*.tsbuildinfo"
+  ]
+}

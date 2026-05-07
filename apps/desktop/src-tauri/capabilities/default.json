@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Webview-side permissions for the main window. The frontend only calls `invoke` (custom commands registered via `generate_handler!`) and `listen` for backend events; everything else (tray, global shortcut, autostart, notifications, window show/hide) is driven from Rust and does not need a JS capability. Keeping the surface this small limits what a WebView compromise can reach.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

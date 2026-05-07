@@ -1,0 +1,47 @@
+name: E2E (macOS)
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "apps/desktop/src-tauri/**"
+      - "scripts/e2e-macos.sh"
+      - ".github/workflows/e2e-macos.yaml"
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+permissions:
+  contents: read
+
+jobs:
+  clipboard:
+    name: Clipboard E2E
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: e2e-macos
+      - name: Build nagori CLI (release)
+        run: cargo build --release -p nagori-cli
+      - name: Run clipboard E2E
+        run: ./scripts/e2e-macos.sh
+        env:
+          NAGORI_E2E_BIN: ${{ github.workspace }}/target/release/nagori

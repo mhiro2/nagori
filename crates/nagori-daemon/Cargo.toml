@@ -1,0 +1,24 @@
+[package]
+name = "nagori-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dirs.workspace = true
+nagori-ai = { path = "../nagori-ai" }
+nagori-core = { path = "../nagori-core" }
+nagori-ipc = { path = "../nagori-ipc" }
+nagori-platform = { path = "../nagori-platform" }
+nagori-search = { path = "../nagori-search" }
+nagori-storage = { path = "../nagori-storage" }
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

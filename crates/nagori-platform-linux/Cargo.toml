@@ -1,0 +1,13 @@
+[package]
+name = "nagori-platform-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nagori-core = { path = "../nagori-core" }
+
+[lints]
+workspace = true

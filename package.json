@@ -1,0 +1,23 @@
+{
+  "name": "nagori",
+  "private": true,
+  "description": "Local-first, AI-assisted clipboard manager.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "pnpm --filter @nagori/desktop dev",
+    "build": "pnpm --filter @nagori/desktop build",
+    "preview": "pnpm --filter @nagori/desktop preview",
+    "check": "pnpm -r --parallel run check",
+    "lint": "pnpm -r --parallel run lint",
+    "fmt": "pnpm -r --parallel run fmt",
+    "fmt:check": "pnpm -r --parallel run fmt:check",
+    "typecheck": "pnpm -r --parallel run typecheck",
+    "test": "pnpm -r --parallel run test"
+  },
+  "packageManager": "pnpm@10.33.2",
+  "pnpm": {
+    "overrides": {
+      "chokidar": "5.0.0"
+    }
+  }
+}

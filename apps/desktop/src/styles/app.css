@@ -1,0 +1,72 @@
+:root {
+  color-scheme: dark light;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', 'Segoe UI',
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  --bg: #14161a;
+  --bg-elevated: rgba(255, 255, 255, 0.03);
+  --bg-overlay: #1d1f23;
+  --bg-selected: rgba(120, 160, 255, 0.18);
+  --bg-code: rgba(0, 0, 0, 0.25);
+  --fg: #f5f5f5;
+  --muted: rgba(255, 255, 255, 0.5);
+  --border: rgba(255, 255, 255, 0.08);
+  --accent: #6c8dff;
+  --warning: #f59e0b;
+  --danger: #f87171;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #fafafa;
+  --bg-elevated: rgba(0, 0, 0, 0.02);
+  --bg-overlay: #ffffff;
+  --bg-selected: rgba(108, 141, 255, 0.18);
+  --bg-code: rgba(0, 0, 0, 0.04);
+  --fg: #0f1115;
+  --muted: rgba(0, 0, 0, 0.55);
+  --border: rgba(0, 0, 0, 0.1);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]),
+  :root[data-theme='system'] {
+    --bg: #fafafa;
+    --bg-elevated: rgba(0, 0, 0, 0.02);
+    --bg-overlay: #ffffff;
+    --bg-selected: rgba(108, 141, 255, 0.18);
+    --bg-code: rgba(0, 0, 0, 0.04);
+    --fg: #0f1115;
+    --muted: rgba(0, 0, 0, 0.55);
+    --border: rgba(0, 0, 0, 0.1);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font-family: inherit;
+}

@@ -1,0 +1,1029 @@
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    str::FromStr,
+    sync::Arc,
+};
+
+use anyhow::{Context, Result, anyhow};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use nagori_ai::LocalAiProvider;
+use nagori_core::{
+    AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
+    Sensitivity, SettingsRepository,
+};
+use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path, run_daemon};
+use nagori_ipc::{
+    AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
+    DeleteEntryRequest, DoctorReport, EntryDto, GetEntryRequest, IpcClient, IpcRequest,
+    IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest, PinEntryRequest,
+    RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
+};
+use nagori_search::normalize_text;
+use nagori_storage::SqliteStore;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+use nagori_platform::PermissionChecker;
+#[cfg(target_os = "macos")]
+use nagori_platform_macos::{
+    MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "nagori")]
+#[command(about = "Local-first clipboard history CLI")]
+struct Cli {
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
+    /// Path to the daemon socket. When omitted, the CLI uses the local DB
+    /// directly unless `--auto-ipc` is set, which auto-connects to the
+    /// default socket if the daemon is reachable.
+    #[arg(long, global = true)]
+    ipc: Option<PathBuf>,
+    /// Try the default socket; fall back to direct DB access if unreachable.
+    #[arg(long, global = true)]
+    auto_ipc: bool,
+    /// Pretty JSON output (single payload).
+    #[arg(long, global = true)]
+    json: bool,
+    /// JSON Lines output (one record per line). Conflicts with --json.
+    #[arg(long, global = true, conflicts_with = "json")]
+    jsonl: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    List(ListArgs),
+    Search(SearchArgs),
+    Get(GetArgs),
+    Add(AddArgs),
+    Delete(IdArgs),
+    Pin(IdArgs),
+    Unpin(IdArgs),
+    Copy(IdArgs),
+    Paste(IdArgs),
+    Clear(ClearArgs),
+    Ai(AiArgs),
+    Doctor,
+    Daemon(DaemonArgs),
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long)]
+    pinned: bool,
+    /// Include full text for Private/Secret entries.
+    #[arg(long)]
+    include_sensitive: bool,
+}
+
+#[derive(Debug, Args)]
+struct SearchArgs {
+    query: String,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+}
+
+#[derive(Debug, Args)]
+struct GetArgs {
+    id: String,
+    #[arg(long)]
+    include_sensitive: bool,
+}
+
+#[derive(Debug, Args)]
+struct AddArgs {
+    #[arg(long, conflicts_with = "stdin")]
+    text: Option<String>,
+    #[arg(long)]
+    stdin: bool,
+}
+
+#[derive(Debug, Args)]
+struct IdArgs {
+    id: String,
+}
+
+#[derive(Debug, Args)]
+#[command(group = clap::ArgGroup::new("clear_scope").required(true).args(&["older_than_days", "all"]))]
+struct ClearArgs {
+    #[arg(long)]
+    older_than_days: Option<i64>,
+    /// Wipe every unpinned entry. Required when no time window is given.
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Debug, Args)]
+struct AiArgs {
+    action: AiActionName,
+    id: String,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum AiActionName {
+    Summarize,
+    Translate,
+    FormatJson,
+    FormatMarkdown,
+    ExplainCode,
+    Rewrite,
+    ExtractTasks,
+    RedactSecrets,
+}
+
+#[derive(Debug, Args)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    command: DaemonCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    Status,
+    Run(DaemonRunArgs),
+    Stop,
+}
+
+#[derive(Debug, Args)]
+struct DaemonRunArgs {
+    #[arg(long, default_value_t = 500)]
+    capture_interval_ms: u64,
+    #[arg(long, default_value_t = 30)]
+    maintenance_interval_min: u64,
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match dispatch(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(exit_code_for(&err))
+        }
+    }
+}
+
+async fn dispatch(cli: Cli) -> Result<()> {
+    if matches!(
+        cli.command,
+        Command::Daemon(DaemonArgs {
+            command: DaemonCommand::Run(_)
+        })
+    ) {
+        init_tracing();
+        return run_daemon_command(cli).await;
+    }
+    if let Some(socket) = cli.ipc.clone() {
+        return run_ipc_command(cli, socket).await;
+    }
+    // `--db <path>` is an explicit direct-DB request; honor it as-is so the
+    // user can still poke at an offline DB even with a daemon running.
+    if cli.db.is_none() {
+        let writes = is_write_command(&cli.command);
+        // Writes default to IPC so the daemon stays the single source of
+        // truth for capture / settings / clipboard state. Reads only try
+        // IPC under explicit `--auto-ipc`, preserving the existing
+        // "read straight from disk" UX for casual queries.
+        if writes || cli.auto_ipc {
+            let candidate = default_socket_path();
+            if let Ok(token) = nagori_ipc::read_token_file(&nagori_ipc::default_token_path())
+                && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
+                    .send(IpcRequest::Health)
+                    .await
+                    .is_ok()
+            {
+                return run_ipc_command(cli, candidate).await;
+            }
+            if writes {
+                anyhow::bail!(
+                    "write commands require a running daemon. Run `nagori daemon run` \
+                     or pass an explicit `--db <path>` to operate on a local DB."
+                );
+            }
+        }
+    }
+    run_local_command(cli).await
+}
+
+const fn is_write_command(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::Add(_)
+            | Command::Delete(_)
+            | Command::Pin(_)
+            | Command::Unpin(_)
+            | Command::Copy(_)
+            | Command::Paste(_)
+            | Command::Clear(_)
+            | Command::Ai(_)
+    )
+}
+
+fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if let Some(app) = err.downcast_ref::<AppError>() {
+        return match app {
+            AppError::NotFound => 4,
+            AppError::Policy(_) => 5,
+            AppError::InvalidInput(_) => 2,
+            AppError::Permission(_) => 6,
+            AppError::Unsupported(_) => 7,
+            AppError::Storage(_)
+            | AppError::Search(_)
+            | AppError::Platform(_)
+            | AppError::Ai(_) => 8,
+        };
+    }
+    let message = err.to_string().to_lowercase();
+    if message.contains("not found") {
+        4
+    } else if message.contains("policy") {
+        5
+    } else if message.contains("invalid") {
+        2
+    } else {
+        1
+    }
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nagori=debug"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+// The CLI dispatcher intentionally mirrors the subcommand enum one-to-one.
+#[allow(clippy::too_many_lines)]
+async fn run_local_command(cli: Cli) -> Result<()> {
+    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
+    if let Some(parent) = db_path.parent() {
+        nagori_storage::ensure_private_directory(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let store = SqliteStore::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let format = OutputFormat::from(cli.json, cli.jsonl);
+
+    match cli.command {
+        Command::List(args) => {
+            let entries = if args.pinned {
+                store.list_pinned().await?
+            } else {
+                store.list_recent(args.limit).await?
+            };
+            print_entries(entries, format, args.include_sensitive)?;
+        }
+        Command::Search(args) => {
+            let query = SearchQuery::new(&args.query, normalize_text(&args.query), args.limit);
+            let results = store.search(query).await?;
+            print_search_results(results, format)?;
+        }
+        Command::Get(args) => {
+            let id = parse_id(&args.id)?;
+            let entry = store
+                .get(id)
+                .await?
+                .ok_or_else(|| anyhow::Error::new(AppError::NotFound))?;
+            let include_text = args.include_sensitive
+                || !matches!(
+                    entry.sensitivity,
+                    Sensitivity::Private | Sensitivity::Secret
+                );
+            print_entry(&entry, format, include_text)?;
+        }
+        Command::Add(args) => {
+            let text = read_text(args)?;
+            let runtime = build_headless_runtime(store.clone());
+            let id = runtime.add_text(text).await?;
+            let entry = store
+                .get(id)
+                .await?
+                .context("entry not found after insert")?;
+            print_entry(
+                &entry,
+                format,
+                is_text_safe_for_default_output(entry.sensitivity),
+            )?;
+        }
+        Command::Delete(args) => {
+            store.mark_deleted(parse_id(&args.id)?).await?;
+            print_ack(format);
+        }
+        Command::Pin(args) => {
+            store.set_pinned(parse_id(&args.id)?, true).await?;
+            print_ack(format);
+        }
+        Command::Unpin(args) => {
+            store.set_pinned(parse_id(&args.id)?, false).await?;
+            print_ack(format);
+        }
+        Command::Copy(args) => {
+            let id = parse_id(&args.id)?;
+            let runtime = build_runtime(store.clone())?;
+            runtime.copy_entry(id).await?;
+            print_ack(format);
+        }
+        Command::Paste(args) => {
+            let id = parse_id(&args.id)?;
+            let runtime = build_runtime(store.clone())?;
+            runtime.paste_entry(id, None).await?;
+            print_ack(format);
+        }
+        Command::Clear(args) => {
+            let cutoff = match clear_request_from_args(&args)? {
+                ClearRequest::All => OffsetDateTime::now_utc(),
+                ClearRequest::OlderThanDays { days } => {
+                    OffsetDateTime::now_utc() - time::Duration::days(i64::from(days))
+                }
+            };
+            let deleted = store.clear_older_than(cutoff).await?;
+            print_clear_result(deleted, format);
+        }
+        Command::Ai(args) => {
+            let runtime = build_headless_runtime(store.clone());
+            let output = runtime
+                .run_ai_action(parse_id(&args.id)?, ai_action_id(&args.action))
+                .await?;
+            print_ai_output(&output.into(), format)?;
+        }
+        Command::Doctor => {
+            print_local_doctor(&db_path, &store).await?;
+        }
+        Command::Daemon(args) => match args.command {
+            DaemonCommand::Status => {
+                let settings = store.get_settings().await?;
+                print_status(&db_path, &settings, format)?;
+            }
+            DaemonCommand::Run(_) => unreachable!("handled before run_local_command"),
+            DaemonCommand::Stop => {
+                anyhow::bail!("daemon stop requires --ipc <socket>");
+            }
+        },
+    }
+
+    Ok(())
+}
+
+async fn run_daemon_command(cli: Cli) -> Result<()> {
+    let Command::Daemon(DaemonArgs {
+        command: DaemonCommand::Run(args),
+    }) = cli.command
+    else {
+        unreachable!()
+    };
+    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
+    if let Some(parent) = db_path.parent() {
+        nagori_storage::ensure_private_directory(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let store = SqliteStore::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+    let socket_path = cli.ipc.clone().unwrap_or_else(default_socket_path);
+    let config = DaemonConfig {
+        socket_path,
+        token_path: nagori_ipc::default_token_path(),
+        capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
+        maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let clipboard = Arc::new(MacosClipboard::new()?);
+        let window: Arc<dyn nagori_platform::WindowBehavior> = Arc::new(MacosWindowBehavior::new());
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(MacosPermissionChecker);
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(clipboard.clone())
+            .paste(Arc::new(MacosPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .socket_path(config.socket_path.clone())
+            .build();
+        run_daemon(runtime, clipboard, config, Some(window)).await?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (store, config);
+        anyhow::bail!("daemon run is only available on macOS in this build");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
+    let token_path = nagori_ipc::default_token_path();
+    let token = nagori_ipc::read_token_file(&token_path).map_err(|err| {
+        anyhow!(
+            "failed to read IPC auth token from {}: {err}. Is the daemon running?",
+            token_path.display()
+        )
+    })?;
+    let client = IpcClient::new(
+        socket_path
+            .to_str()
+            .ok_or_else(|| anyhow!("ipc socket path must be valid UTF-8"))?,
+        token,
+    );
+    let format = OutputFormat::from(cli.json, cli.jsonl);
+    match cli.command {
+        Command::List(args) => {
+            let request = if args.pinned {
+                IpcRequest::ListPinned(ListPinnedRequest {
+                    include_sensitive: args.include_sensitive,
+                })
+            } else {
+                IpcRequest::ListRecent(ListRecentRequest {
+                    limit: args.limit,
+                    include_sensitive: args.include_sensitive,
+                })
+            };
+            let resp = client.send(request).await?;
+            print_dto_entries(expect_entries(resp)?, format)?;
+        }
+        Command::Search(args) => {
+            let resp = client
+                .send(IpcRequest::Search(SearchRequest {
+                    query: args.query,
+                    limit: args.limit,
+                }))
+                .await?;
+            print_dto_search(expect_search(resp)?, format)?;
+        }
+        Command::Get(args) => {
+            let resp = client
+                .send(IpcRequest::GetEntry(GetEntryRequest {
+                    id: parse_id(&args.id)?,
+                    include_sensitive: args.include_sensitive,
+                }))
+                .await?;
+            print_dto_entry(&expect_entry(resp)?, format)?;
+        }
+        Command::Add(args) => {
+            let text = read_text(args)?;
+            let resp = client
+                .send(IpcRequest::AddEntry(AddEntryRequest { text }))
+                .await?;
+            print_dto_entry(&expect_entry(resp)?, format)?;
+        }
+        Command::Delete(args) => {
+            expect_ack(
+                client
+                    .send(IpcRequest::DeleteEntry(DeleteEntryRequest {
+                        id: parse_id(&args.id)?,
+                    }))
+                    .await?,
+            )?;
+            print_ack(format);
+        }
+        Command::Pin(args) => {
+            expect_ack(
+                client
+                    .send(IpcRequest::PinEntry(PinEntryRequest {
+                        id: parse_id(&args.id)?,
+                        pinned: true,
+                    }))
+                    .await?,
+            )?;
+            print_ack(format);
+        }
+        Command::Unpin(args) => {
+            expect_ack(
+                client
+                    .send(IpcRequest::PinEntry(PinEntryRequest {
+                        id: parse_id(&args.id)?,
+                        pinned: false,
+                    }))
+                    .await?,
+            )?;
+            print_ack(format);
+        }
+        Command::Copy(args) => {
+            expect_ack(
+                client
+                    .send(IpcRequest::CopyEntry(CopyEntryRequest {
+                        id: parse_id(&args.id)?,
+                    }))
+                    .await?,
+            )?;
+            print_ack(format);
+        }
+        Command::Paste(args) => {
+            expect_ack(
+                client
+                    .send(IpcRequest::PasteEntry(PasteEntryRequest {
+                        id: parse_id(&args.id)?,
+                        format: None,
+                    }))
+                    .await?,
+            )?;
+            print_ack(format);
+        }
+        Command::Ai(args) => {
+            let resp = client
+                .send(IpcRequest::RunAiAction(RunAiActionRequest {
+                    id: parse_id(&args.id)?,
+                    action: ai_action_id(&args.action),
+                }))
+                .await?;
+            print_ai_output(&expect_ai_output(resp)?, format)?;
+        }
+        Command::Clear(args) => {
+            let request = clear_request_from_args(&args)?;
+            let resp = client.send(IpcRequest::Clear(request)).await?;
+            print_clear_result(expect_cleared(resp)?.deleted, format);
+        }
+        Command::Doctor => {
+            let resp = client.send(IpcRequest::Doctor).await?;
+            print_doctor_report(&expect_doctor(resp)?, format)?;
+        }
+        Command::Daemon(args) => match args.command {
+            DaemonCommand::Status => {
+                let resp = client.send(IpcRequest::Health).await?;
+                let IpcResponse::Health(health) = resp else {
+                    anyhow::bail!("unexpected ipc response");
+                };
+                if format.is_json() {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": health.ok,
+                            "version": health.version,
+                        }))?
+                    );
+                } else {
+                    println!("ok\t{}", health.version);
+                }
+            }
+            DaemonCommand::Stop => {
+                expect_ack(client.send(IpcRequest::Shutdown).await?)?;
+                print_ack(format);
+            }
+            DaemonCommand::Run(_) => unreachable!("handled before run_ipc_command"),
+        },
+    }
+    Ok(())
+}
+
+fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
+    #[cfg(target_os = "macos")]
+    {
+        let clipboard = Arc::new(MacosClipboard::new()?);
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(MacosPermissionChecker);
+        Ok(NagoriRuntime::builder(store)
+            .clipboard(clipboard)
+            .paste(Arc::new(MacosPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .build())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(NagoriRuntime::builder(store)
+            .ai(Arc::new(LocalAiProvider::default()))
+            .build())
+    }
+}
+
+fn build_headless_runtime(store: SqliteStore) -> NagoriRuntime {
+    NagoriRuntime::builder(store)
+        .ai(Arc::new(LocalAiProvider::default()))
+        .build()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OutputFormat {
+    Text,
+    Json,
+    Jsonl,
+}
+
+impl OutputFormat {
+    const fn from(json: bool, jsonl: bool) -> Self {
+        match (json, jsonl) {
+            (_, true) => Self::Jsonl,
+            (true, _) => Self::Json,
+            _ => Self::Text,
+        }
+    }
+
+    const fn is_json(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonl)
+    }
+}
+
+fn read_text(args: AddArgs) -> Result<String> {
+    if args.stdin {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        Ok(buffer)
+    } else {
+        args.text
+            .ok_or_else(|| anyhow!("either --text or --stdin must be provided"))
+    }
+}
+
+fn default_db_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("nagori")
+        .join("nagori.sqlite")
+}
+
+fn parse_id(value: &str) -> Result<EntryId> {
+    EntryId::from_str(value)
+        .map_err(|err| AppError::InvalidInput(format!("invalid entry id: {value}: {err}")).into())
+}
+
+const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
+    !matches!(sensitivity, Sensitivity::Private | Sensitivity::Secret)
+}
+
+fn print_entries(
+    entries: Vec<ClipboardEntry>,
+    format: OutputFormat,
+    include_sensitive: bool,
+) -> Result<()> {
+    let resolve = |entry: &ClipboardEntry| -> bool {
+        include_sensitive
+            || !matches!(
+                entry.sensitivity,
+                Sensitivity::Private | Sensitivity::Secret
+            )
+    };
+    match format {
+        OutputFormat::Json => {
+            let values = entries
+                .iter()
+                .map(|entry| entry_json(entry, resolve(entry)))
+                .collect::<Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        OutputFormat::Jsonl => {
+            for entry in &entries {
+                println!(
+                    "{}",
+                    serde_json::to_string(&entry_json(entry, resolve(entry))?)?
+                );
+            }
+        }
+        OutputFormat::Text => {
+            for entry in entries {
+                let kind = entry.content_kind();
+                let text = if resolve(&entry) {
+                    entry.plain_text().unwrap_or_default()
+                } else {
+                    &entry.search.preview
+                };
+                println!("{}\t{:?}\t{}", entry.id, kind, text);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_entry(entry: &ClipboardEntry, format: OutputFormat, include_text: bool) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&entry_json(entry, include_text)?)?
+        ),
+        OutputFormat::Jsonl => println!(
+            "{}",
+            serde_json::to_string(&entry_json(entry, include_text)?)?
+        ),
+        OutputFormat::Text => {
+            if include_text {
+                println!("{}", entry.plain_text().unwrap_or_default());
+            } else {
+                println!(
+                    "{}\t{:?}\t{}",
+                    entry.id, entry.sensitivity, entry.search.preview
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_search_results(
+    results: Vec<nagori_core::SearchResult>,
+    format: OutputFormat,
+) -> Result<()> {
+    let make_value = |result: &nagori_core::SearchResult| -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "id": result.entry_id,
+            "kind": result.content_kind,
+            "preview": result.preview,
+            "score": result.score,
+            "created_at": format_json_time(result.created_at)?,
+            "pinned": result.pinned,
+            "sensitivity": result.sensitivity,
+            "rank_reasons": result.rank_reason,
+        }))
+    };
+    match format {
+        OutputFormat::Json => {
+            let values = results.iter().map(make_value).collect::<Result<Vec<_>>>()?;
+            println!("{}", serde_json::to_string_pretty(&values)?);
+        }
+        OutputFormat::Jsonl => {
+            for result in &results {
+                println!("{}", serde_json::to_string(&make_value(result)?)?);
+            }
+        }
+        OutputFormat::Text => {
+            for result in results {
+                println!(
+                    "{}\t{:.1}\t{:?}\t{}",
+                    result.entry_id, result.score, result.content_kind, result.preview
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_dto_entries(entries: Vec<EntryDto>, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&entries)?),
+        OutputFormat::Jsonl => {
+            for entry in &entries {
+                println!("{}", serde_json::to_string(entry)?);
+            }
+        }
+        OutputFormat::Text => {
+            for entry in entries {
+                println!("{}\t{:?}\t{}", entry.id, entry.kind, entry.preview);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_dto_entry(entry: &EntryDto, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(entry)?),
+        OutputFormat::Jsonl => println!("{}", serde_json::to_string(entry)?),
+        OutputFormat::Text => {
+            if let Some(text) = &entry.text {
+                println!("{text}");
+            } else {
+                println!("{}\t{:?}\t{}", entry.id, entry.sensitivity, entry.preview);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_dto_search(response: SearchResponse, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response.results)?),
+        OutputFormat::Jsonl => {
+            for result in &response.results {
+                println!("{}", serde_json::to_string(result)?);
+            }
+        }
+        OutputFormat::Text => {
+            for result in response.results {
+                print_dto_search_row(&result);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_clear_result(deleted: usize, format: OutputFormat) {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!("{}", serde_json::json!({ "deleted": deleted }));
+        }
+        OutputFormat::Text => println!("deleted {deleted}"),
+    }
+}
+
+fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!("{}", serde_json::to_string_pretty(report)?);
+        }
+        OutputFormat::Text => {
+            println!("version\t{}", report.version);
+            println!("socket\t{}", report.socket_path);
+            if !report.db_path.is_empty() {
+                println!("db\t{}", report.db_path);
+            }
+            println!("capture_enabled\t{}", report.capture_enabled);
+            println!("auto_paste_enabled\t{}", report.auto_paste_enabled);
+            println!("ai_enabled\t{}", report.ai_enabled);
+            println!("local_only_mode\t{}", report.local_only_mode);
+            println!("ai_provider\t{}", report.ai_provider);
+            for permission in &report.permissions {
+                let suffix = permission
+                    .message
+                    .as_deref()
+                    .map_or_else(String::new, |msg| format!("\t{msg}"));
+                println!(
+                    "permission\t{}\t{}{}",
+                    permission.kind, permission.state, suffix
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
+    let settings = store.get_settings().await?;
+    let provider_label = match &settings.ai_provider {
+        nagori_core::settings::AiProviderSetting::None => "none".to_owned(),
+        nagori_core::settings::AiProviderSetting::Local => "local".to_owned(),
+        nagori_core::settings::AiProviderSetting::Remote { name } => format!("remote:{name}"),
+    };
+    println!("version\t{}", env!("CARGO_PKG_VERSION"));
+    println!("db\t{}", db_path.display());
+    println!("capture_enabled\t{}", settings.capture_enabled);
+    println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);
+    println!("ai_enabled\t{}", settings.ai_enabled);
+    println!("local_only_mode\t{}", settings.local_only_mode);
+    println!("ai_provider\t{provider_label}");
+    #[cfg(target_os = "macos")]
+    {
+        let checker = MacosPermissionChecker;
+        if let Ok(statuses) = checker.check().await {
+            for status in statuses {
+                let suffix = status
+                    .message
+                    .as_deref()
+                    .map_or_else(String::new, |msg| format!("\t{msg}"));
+                println!(
+                    "permission\t{:?}\t{:?}{}",
+                    status.kind, status.state, suffix
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_dto_search_row(result: &SearchResultDto) {
+    println!(
+        "{}\t{:.1}\t{:?}\t{}",
+        result.id, result.score, result.kind, result.preview
+    );
+}
+
+fn entry_json(entry: &ClipboardEntry, include_text: bool) -> Result<serde_json::Value> {
+    let text = include_text.then(|| entry.plain_text().unwrap_or_default().to_owned());
+    Ok(serde_json::json!({
+        "id": entry.id,
+        "kind": entry.content_kind(),
+        "text": text,
+        "preview": entry.search.preview,
+        "created_at": format_json_time(entry.metadata.created_at)?,
+        "updated_at": format_json_time(entry.metadata.updated_at)?,
+        "last_used_at": entry.metadata.last_used_at.map(format_json_time).transpose()?,
+        "use_count": entry.metadata.use_count,
+        "pinned": entry.lifecycle.pinned,
+        "sensitivity": entry.sensitivity,
+    }))
+}
+
+fn format_json_time(value: OffsetDateTime) -> Result<String> {
+    value.format(&Rfc3339).map_err(Into::into)
+}
+
+fn print_ack(format: OutputFormat) {
+    if format.is_json() {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
+    }
+}
+
+fn print_ai_output(output: &AiOutputDto, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!("{}", serde_json::to_string_pretty(output)?);
+        }
+        OutputFormat::Text => {
+            println!("{}", output.text);
+            for warning in &output.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_status(db_path: &Path, settings: &AppSettings, format: OutputFormat) -> Result<()> {
+    if format.is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "db": db_path,
+                "capture_enabled": settings.capture_enabled,
+                "ai_enabled": settings.ai_enabled,
+                "auto_paste_enabled": settings.auto_paste_enabled,
+                "history_retention_count": settings.history_retention_count,
+            }))?
+        );
+    } else {
+        println!("ok\t{}", db_path.display());
+    }
+    Ok(())
+}
+
+const fn ai_action_id(action: &AiActionName) -> AiActionId {
+    match action {
+        AiActionName::Summarize => AiActionId::Summarize,
+        AiActionName::Translate => AiActionId::Translate,
+        AiActionName::FormatJson => AiActionId::FormatJson,
+        AiActionName::FormatMarkdown => AiActionId::FormatMarkdown,
+        AiActionName::ExplainCode => AiActionId::ExplainCode,
+        AiActionName::Rewrite => AiActionId::Rewrite,
+        AiActionName::ExtractTasks => AiActionId::ExtractTasks,
+        AiActionName::RedactSecrets => AiActionId::RedactSecrets,
+    }
+}
+
+fn expect_entry(response: IpcResponse) -> Result<EntryDto> {
+    match response {
+        IpcResponse::Entry(entry) => Ok(entry),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_entries(response: IpcResponse) -> Result<Vec<EntryDto>> {
+    match response {
+        IpcResponse::Entries(entries) => Ok(entries),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_search(response: IpcResponse) -> Result<SearchResponse> {
+    match response {
+        IpcResponse::Search(value) => Ok(value),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_ai_output(response: IpcResponse) -> Result<AiOutputDto> {
+    match response {
+        IpcResponse::AiOutput(value) => Ok(value),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_ack(response: IpcResponse) -> Result<()> {
+    match response {
+        IpcResponse::Ack => Ok(()),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_cleared(response: IpcResponse) -> Result<ClearResponse> {
+    match response {
+        IpcResponse::Cleared(value) => Ok(value),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn clear_request_from_args(args: &ClearArgs) -> Result<ClearRequest> {
+    // The clap arg group enforces "exactly one of --all / --older-than-days",
+    // so reaching this point with neither set means a clap bug or a manual
+    // struct construction. Defend in depth.
+    match (args.older_than_days, args.all) {
+        (Some(days), false) => {
+            let days = u32::try_from(days)
+                .map_err(|_| AppError::InvalidInput("--older-than-days must be >= 0".into()))?;
+            Ok(ClearRequest::OlderThanDays { days })
+        }
+        (None, true) => Ok(ClearRequest::All),
+        _ => Err(AppError::InvalidInput("specify --all or --older-than-days".into()).into()),
+    }
+}
+
+fn expect_doctor(response: IpcResponse) -> Result<DoctorReport> {
+    match response {
+        IpcResponse::Doctor(value) => Ok(value),
+        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}

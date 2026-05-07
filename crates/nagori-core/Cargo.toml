@@ -1,0 +1,30 @@
+[package]
+name = "nagori-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+regex.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# `tokio::try_join!` is a runtime-agnostic macro. We need it to fan the
+# substring/FTS/ngram candidate fetches out concurrently inside
+# `SearchService::search`; the `macros` feature is the smallest surface
+# that gives us that without pulling in a runtime.
+tokio = { workspace = true, features = ["macros"] }
+unicode-normalization.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
