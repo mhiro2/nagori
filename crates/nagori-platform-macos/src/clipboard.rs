@@ -180,7 +180,9 @@ impl MacosClipboard {
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
 
+    // Keep this async so the cfg-neutral caller can await both platform variants.
     #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unused_async)]
     async fn write_image_bytes(&self, _bytes: Vec<u8>, _mime: &str) -> Result<()> {
         Err(AppError::Unsupported(
             "image clipboard writes are macOS-only".to_owned(),
