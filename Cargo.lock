@@ -2823,7 +2823,7 @@ name = "nagori-ipc"
 version = "0.0.0"
 dependencies = [
  "dirs 6.0.0",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "hex",
  "libc",
  "nagori-core",

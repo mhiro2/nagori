@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 nagori-core = { path = "../nagori-core" }
 dirs.workspace = true
-getrandom = "0.3"
+getrandom = "0.4"
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
