@@ -12,7 +12,9 @@ use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
     Sensitivity, SettingsRepository,
 };
-use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path, run_daemon};
+#[cfg(target_os = "macos")]
+use nagori_daemon::run_daemon;
+use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path};
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
     DeleteEntryRequest, DoctorReport, EntryDto, GetEntryRequest, IpcClient, IpcRequest,
@@ -23,6 +25,7 @@ use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+#[cfg(target_os = "macos")]
 use nagori_platform::PermissionChecker;
 #[cfg(target_os = "macos")]
 use nagori_platform_macos::{
@@ -373,6 +376,8 @@ async fn run_local_command(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+// On non-macOS the body short-circuits via `bail!`, so no `.await` runs.
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unused_async))]
 async fn run_daemon_command(cli: Cli) -> Result<()> {
     let Command::Daemon(DaemonArgs {
         command: DaemonCommand::Run(args),
@@ -409,13 +414,13 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             .socket_path(config.socket_path.clone())
             .build();
         run_daemon(runtime, clipboard, config, Some(window)).await?;
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (store, config);
-        anyhow::bail!("daemon run is only available on macOS in this build");
+        anyhow::bail!("daemon run is only available on macOS in this build")
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -573,6 +578,8 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+// On non-macOS the body never returns Err, but the macOS path needs `?`.
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
 fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
     #[cfg(target_os = "macos")]
     {
