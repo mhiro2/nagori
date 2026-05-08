@@ -1567,10 +1567,25 @@ fn bool_int(value: bool) -> i64 {
     i64::from(value)
 }
 
+/// Render the user's normalized query into an FTS5 MATCH expression.
+///
+/// Each surviving token is wrapped in `"..."` so FTS5 treats it as a
+/// phrase string rather than a bareword that could parse as an operator.
+/// We *also* split on the FTS5 metacharacters `(`, `)`, `:`, `*`, and `"`
+/// in addition to whitespace: a bareword like `foo:bar` would tokenize
+/// fine inside quotes, but a query consisting solely of those chars
+/// (e.g. `(` or `:`) previously produced `"("` — a phrase that the
+/// tokenizer collapses to zero tokens, raising an FTS5 syntax error at
+/// runtime. Stripping them at split time keeps the resulting expression
+/// well-formed and removes any path for an unmatched `"` or
+/// column-filter `:` to leak through unescaped. Empty fragments are
+/// discarded so a query of pure punctuation returns the empty string,
+/// which the caller treats as "no FTS candidates".
 fn fts_query(query: &str) -> String {
     query
-        .split_whitespace()
-        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ':' | '*' | '"'))
+        .filter(|part| !part.is_empty())
+        .map(|part| format!("\"{part}\""))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1622,6 +1637,36 @@ mod tests {
         let mut entry = EntryFactory::from_text(text);
         entry.search.normalized_text = normalize_text(entry.plain_text().unwrap());
         store.insert(entry).await.unwrap()
+    }
+
+    #[test]
+    fn fts_query_wraps_alnum_tokens_in_quotes() {
+        assert_eq!(fts_query("hello world"), r#""hello" "world""#);
+    }
+
+    #[test]
+    fn fts_query_strips_fts5_metacharacters() {
+        // `(`, `)`, `:`, `*`, `"` are all FTS5-meaningful outside a
+        // phrase string. They must not survive into the rendered MATCH
+        // expression — even quoted, an unmatched `"` would corrupt the
+        // expression, and `:` could be parsed as a column filter when
+        // we later switch to column-scoped queries.
+        assert_eq!(fts_query("foo:bar"), r#""foo" "bar""#);
+        assert_eq!(fts_query("foo*"), r#""foo""#);
+        assert_eq!(fts_query("(foo)"), r#""foo""#);
+        assert_eq!(fts_query(r#"say "hi""#), r#""say" "hi""#);
+    }
+
+    #[test]
+    fn fts_query_returns_empty_for_pure_punctuation() {
+        // A query that collapses to zero tokens must produce the empty
+        // string so the caller can short-circuit before issuing an
+        // invalid FTS5 MATCH (the tokenizer would otherwise reject a
+        // phrase that yields no terms).
+        assert!(fts_query("(").is_empty());
+        assert!(fts_query(":*").is_empty());
+        assert!(fts_query("\"\"").is_empty());
+        assert!(fts_query("   ").is_empty());
     }
 
     #[test]
