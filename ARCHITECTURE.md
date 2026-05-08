@@ -602,7 +602,12 @@ not duplicate runtime logic.
 **Frontend layout** (`apps/desktop/src/app/components/`):
 
 - `Palette.svelte` — top-level container. Stacks `SearchBox` →
-  `OnboardingBanner` → (`ResultList` + `PreviewPane`) → `StatusBar`.
+  `FilterChips` → `OnboardingBanner` → (`ResultList` + `PreviewPane`)
+  → `StatusBar`.
+- `FilterChips.svelte` — quick-filter row directly under the search
+  input. Single-select toggles for *Today* / *Last 7 days* / *Pinned*;
+  the active preset feeds `currentFilters()` into every
+  `searchClipboard` call. Re-clicking the active chip clears it.
 - `OnboardingBanner.svelte` — only renders when `get_permissions`
   reports Accessibility as missing; offers an *Open System Settings*
   deep-link.

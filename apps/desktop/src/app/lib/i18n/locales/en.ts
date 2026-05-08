@@ -17,6 +17,12 @@ export type Messages = {
       actions: string;
       settings: string;
     };
+    filters: {
+      toolbarLabel: string;
+      today: string;
+      last7days: string;
+      pinned: string;
+    };
   };
   preview: {
     empty: string;
@@ -246,6 +252,12 @@ export const en: Messages = {
       paste: 'Paste',
       actions: 'Actions',
       settings: 'Settings',
+    },
+    filters: {
+      toolbarLabel: 'Quick filters',
+      today: 'Today',
+      last7days: 'Last 7 days',
+      pinned: 'Pinned',
     },
   },
   preview: {

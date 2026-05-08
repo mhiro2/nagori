@@ -9,6 +9,7 @@ import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
+import { currentFilters } from './searchFilters.svelte';
 import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
 const fallbackFixture = (): SearchResultDto[] => [
@@ -64,10 +65,12 @@ export const refreshRecent = async (): Promise<void> => {
   searchState.loading = true;
   searchState.errorMessage = undefined;
   try {
+    const filters = currentFilters();
     const response = await searchClipboard({
       query: '',
       mode: 'Recent',
       limit: 50,
+      ...(filters !== undefined ? { filters } : {}),
     });
     if (ticket !== inflight) return;
     searchState.results = response.results;
@@ -135,10 +138,12 @@ export const runQuery = async (raw: string): Promise<void> => {
   searchState.loading = true;
   searchState.errorMessage = undefined;
   try {
+    const filters = currentFilters();
     const response = await searchClipboard({
       query: raw,
       mode: 'Auto',
       limit: 50,
+      ...(filters !== undefined ? { filters } : {}),
     });
     if (ticket !== inflight) return;
     searchState.results = response.results;

@@ -14,6 +14,12 @@ export const ja: Messages = {
       actions: 'アクション',
       settings: '設定',
     },
+    filters: {
+      toolbarLabel: 'クイックフィルタ',
+      today: '今日',
+      last7days: '過去7日',
+      pinned: 'ピン留め',
+    },
   },
   preview: {
     empty: 'プレビューする項目を選択してください。',

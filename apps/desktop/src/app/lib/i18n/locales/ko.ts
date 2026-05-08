@@ -14,6 +14,12 @@ export const ko: Messages = {
       actions: '동작',
       settings: '설정',
     },
+    filters: {
+      toolbarLabel: '빠른 필터',
+      today: '오늘',
+      last7days: '최근 7일',
+      pinned: '고정됨',
+    },
   },
   preview: {
     empty: '미리 볼 항목을 선택하세요.',

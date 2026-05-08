@@ -31,6 +31,7 @@
   import { refreshSettings, settingsState } from "../stores/settings.svelte";
   import { showSettings } from "../stores/view.svelte";
   import ActionMenu from "./ActionMenu.svelte";
+  import FilterChips from "./FilterChips.svelte";
   import OnboardingBanner from "./OnboardingBanner.svelte";
   import PreviewPane from "./PreviewPane.svelte";
   import ResultList from "./ResultList.svelte";
@@ -157,6 +158,7 @@
 
 <section class="palette" style="--palette-row-count: {paletteRowCount}">
   <SearchBox value={searchState.query} onInput={handleInput} onKeydown={handleKeydown} />
+  <FilterChips />
   <OnboardingBanner />
   <div class="body" class:single-column={!showPreviewPane && !previewExpanded} class:preview-only={previewExpanded}>
     {#if !previewExpanded}

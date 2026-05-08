@@ -14,6 +14,12 @@ export const zhHans: Messages = {
       actions: '操作',
       settings: '设置',
     },
+    filters: {
+      toolbarLabel: '快速筛选',
+      today: '今天',
+      last7days: '近 7 天',
+      pinned: '已置顶',
+    },
   },
   preview: {
     empty: '选择一个项目进行预览。',
