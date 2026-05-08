@@ -103,14 +103,20 @@ impl Drop for PooledConn<'_> {
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        // Atomically create the DB file with `0600` *before* SQLite opens
+        // it, closing the TOCTOU window where `Connection::open` would
+        // otherwise create the file under the process umask (typically
+        // world-readable) and only get tightened to `0600` afterwards. A
+        // peer process running as the same user could read clipboard
+        // history during that window; pre-creating with the right mode
+        // means SQLite never sees a permissive file.
+        pre_create_db_file_private(path)?;
         let mut primary = Connection::open(path).map_err(|err| storage_err(&err))?;
         configure_connection(&primary)?;
-        // Tighten the DB file to `0600` after open. SQLite creates the
-        // file with the process umask, which can leave it world-readable
-        // on a permissive shell. Clipboard history is sensitive — restrict
-        // it to the owning user. The WAL/SHM sidecars get the same mask
-        // as soon as SQLite touches them; we only need to fix the main
-        // file we opened.
+        // Defensive post-open tighten: covers the WAL/SHM sidecars that
+        // `PRAGMA journal_mode = WAL` just created under the process
+        // umask, plus re-asserts `0600` on the main file in case the
+        // pre-create path saw an existing file we don't fully trust.
         harden_db_file_permissions(path)?;
         // Run migrations on the primary connection before populating the
         // rest of the pool. Otherwise additional connections opening in
@@ -1007,12 +1013,53 @@ fn escape_like(input: &str) -> String {
 #[cfg(unix)]
 fn harden_db_file_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, perms).map_err(|err| storage_err_io(&err))
+    let mode = || std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, mode()).map_err(|err| storage_err_io(&err))?;
+    // WAL/SHM sidecars are created by SQLite under the process umask once
+    // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist;
+    // the ones SQLite creates after this call are still racy in principle,
+    // but the parent directory is already `0o700` (`ensure_private_directory`)
+    // so the only attacker reachable inside the window is another process
+    // running as the same user.
+    for suffix in ["-wal", "-shm"] {
+        let mut sibling = path.as_os_str().to_owned();
+        sibling.push(suffix);
+        let sibling = std::path::PathBuf::from(sibling);
+        if sibling.exists() {
+            std::fs::set_permissions(&sibling, mode()).map_err(|err| storage_err_io(&err))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 fn harden_db_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Atomically create the `SQLite` main file with mode `0o600` if it does not
+/// already exist, eliminating the TOCTOU window between `Connection::open`
+/// and a subsequent `chmod`. If the file is already there (subsequent
+/// daemon launch), enforce the mask defensively in case an earlier build
+/// left it world-readable.
+#[cfg(unix)]
+fn pre_create_db_file_private(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if path.exists() {
+        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|err| storage_err_io(&err));
+    }
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| storage_err_io(&err))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn pre_create_db_file_private(_path: &Path) -> Result<()> {
     Ok(())
 }
 
