@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { hidePalette } from "./lib/commands";
-  import { isTauri } from "./lib/tauri";
+  import { messages } from "./lib/i18n/index.svelte";
+  import { TAURI_EVENTS, subscribe } from "./lib/tauri";
   import PaletteRoute from "./routes/PaletteRoute.svelte";
   import SettingsRoute from "./routes/SettingsRoute.svelte";
   import { showPalette, showSettings, viewState } from "./stores/view.svelte";
+
+  const t = $derived(messages());
 
   // Hide-on-blur and Esc are window-level concerns (the palette is the
   // window). Components can still consume Escape inside ActionMenu / inputs
@@ -30,31 +33,22 @@
     window.addEventListener("keydown", handleEscape);
     window.addEventListener("blur", handleBlur);
 
-    const unlisteners: Array<() => void> = [];
-    if (isTauri()) {
-      // Tray "Open Settings" emits this event; switch route on receipt.
-      void (async () => {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisteners.push(
-          await listen<string>("nagori://navigate", (event) => {
-            if (event.payload === "settings") showSettings();
-            else if (event.payload === "palette") showPalette();
-          }),
-        );
-        // Accessibility loss / paste failure: surface a toast that nudges
-        // the user into Settings, where they can re-grant the permission.
-        unlisteners.push(
-          await listen<{ error?: string }>("nagori://paste_failed", (event) => {
-            pasteFailureMessage = event.payload?.error ?? "Auto-paste failed.";
-          }),
-        );
-      })();
-    }
+    // Tray "Open Settings" emits this event; switch route on receipt.
+    const offNavigate = subscribe<string>(TAURI_EVENTS.navigate, (payload) => {
+      if (payload === "settings") showSettings();
+      else if (payload === "palette") showPalette();
+    });
+    // Accessibility loss / paste failure: surface a toast that nudges the
+    // user into Settings, where they can re-grant the permission.
+    const offPasteFailed = subscribe<{ error?: string }>(TAURI_EVENTS.pasteFailed, (payload) => {
+      pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
+    });
 
     return () => {
       window.removeEventListener("keydown", handleEscape);
       window.removeEventListener("blur", handleBlur);
-      for (const off of unlisteners) off();
+      offNavigate();
+      offPasteFailed();
     };
   });
 
@@ -79,12 +73,12 @@
   {#if pasteFailureMessage}
     <div class="toast" role="status">
       <div class="toast-body">
-        <strong>Auto-paste failed</strong>
+        <strong>{t.toasts.autoPasteFailedTitle}</strong>
         <span class="toast-detail">{pasteFailureMessage}</span>
       </div>
       <div class="toast-actions">
-        <button type="button" onclick={openSettingsFromToast}>Settings</button>
-        <button type="button" onclick={dismissToast}>Dismiss</button>
+        <button type="button" onclick={openSettingsFromToast}>{t.toasts.openSettings}</button>
+        <button type="button" onclick={dismissToast}>{t.toasts.dismiss}</button>
       </div>
     </div>
   {/if}

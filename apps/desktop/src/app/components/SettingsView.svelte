@@ -1,20 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { describeError } from "../lib/errors";
   import { getSettings, updateSettings } from "../lib/commands";
   import { SUPPORTED_LOCALES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
-  import { isTauri } from "../lib/tauri";
+  import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
-  import type {
-    AiProviderSetting,
-    Appearance,
-    AppSettings,
-    ContentKind,
-    LocaleSetting,
-    PaletteHotkeyAction,
-    PasteFormat,
-    RecentOrder,
-    SecondaryHotkeyAction,
-    SecretHandling,
+  import {
+    CONTENT_KINDS,
+    type AiProviderSetting,
+    type Appearance,
+    type AppSettings,
+    type ContentKind,
+    type LocaleSetting,
+    type PaletteHotkeyAction,
+    type PasteFormat,
+    type RecentOrder,
+    type SecondaryHotkeyAction,
+    type SecretHandling,
   } from "../lib/types";
   import { showPalette } from "../stores/view.svelte";
 
@@ -24,15 +26,6 @@
   type Tab = "general" | "privacy" | "ai" | "cli" | "advanced";
 
   const TABS: readonly Tab[] = ["general", "privacy", "ai", "cli", "advanced"];
-  const CAPTURE_KINDS: readonly ContentKind[] = [
-    "text",
-    "url",
-    "code",
-    "image",
-    "fileList",
-    "richText",
-    "unknown",
-  ];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
     "pin",
     "delete",
@@ -71,28 +64,25 @@
     const next = new Set(settings.captureKinds);
     if (enabled) next.add(kind);
     else next.delete(kind);
-    settings.captureKinds = CAPTURE_KINDS.filter((candidate) => next.has(candidate));
+    settings.captureKinds = CONTENT_KINDS.filter((candidate) => next.has(candidate));
   };
 
   // Hotkey override editors store the trimmed accelerator string back onto
   // the settings map; an empty value drops the override so the palette
   // falls back to the default binding declared in `keybindings.ts`.
-  const setPaletteOverride = (action: PaletteHotkeyAction, raw: string): void => {
+  const setOverride = <Action extends string, Field extends "paletteHotkeys" | "secondaryHotkeys">(
+    field: Field,
+    action: Action,
+    raw: string,
+  ): void => {
     if (!settings) return;
     const value = raw.trim();
-    const next: Partial<Record<PaletteHotkeyAction, string>> = { ...settings.paletteHotkeys };
+    const next: Partial<Record<Action, string>> = {
+      ...(settings[field] as Partial<Record<Action, string>>),
+    };
     if (value.length === 0) delete next[action];
     else next[action] = value;
-    settings.paletteHotkeys = next;
-  };
-
-  const setSecondaryOverride = (action: SecondaryHotkeyAction, raw: string): void => {
-    if (!settings) return;
-    const value = raw.trim();
-    const next: Partial<Record<SecondaryHotkeyAction, string>> = { ...settings.secondaryHotkeys };
-    if (value.length === 0) delete next[action];
-    else next[action] = value;
-    settings.secondaryHotkeys = next;
+    (settings[field] as Partial<Record<Action, string>>) = next;
   };
 
   const clampRowCount = (raw: number): number => {
@@ -141,7 +131,7 @@
         setLocale(s.locale);
         applyAppearance(s.appearance);
       } catch (err: unknown) {
-        error = err instanceof Error ? err.message : String(err);
+        error = describeError(err);
       } finally {
         loading = false;
       }
@@ -158,28 +148,17 @@
     try {
       await updateSettings(settings);
     } catch (err: unknown) {
-      error = err instanceof Error ? err.message : String(err);
+      error = describeError(err);
     } finally {
       saving = false;
     }
   };
 
-  onMount(() => {
-    if (!isTauri()) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<HotkeyFailurePayload>(
-        "nagori://hotkey_register_failed",
-        (event) => {
-          hotkeyError = event.payload.error || event.payload.hotkey;
-        },
-      );
-    })();
-    return () => {
-      unlisten?.();
-    };
-  });
+  onMount(() =>
+    subscribe<HotkeyFailurePayload>(TAURI_EVENTS.hotkeyRegisterFailed, (payload) => {
+      hotkeyError = payload.error || payload.hotkey;
+    }),
+  );
 </script>
 
 <section class="settings">
@@ -299,7 +278,7 @@
                 placeholder={t.settings.hotkeys.placeholder}
                 value={settings.paletteHotkeys[action] ?? ""}
                 oninput={(e) =>
-                  setPaletteOverride(action, (e.target as HTMLInputElement).value)}
+                  setOverride("paletteHotkeys", action, (e.target as HTMLInputElement).value)}
               />
             </label>
           {/each}
@@ -315,7 +294,7 @@
                 placeholder={t.settings.hotkeys.placeholder}
                 value={settings.secondaryHotkeys[action] ?? ""}
                 oninput={(e) =>
-                  setSecondaryOverride(action, (e.target as HTMLInputElement).value)}
+                  setOverride("secondaryHotkeys", action, (e.target as HTMLInputElement).value)}
               />
             </label>
           {/each}
@@ -444,7 +423,7 @@
         <div class="stack">
           <span>{t.settings.privacy.captureKinds}</span>
           <div class="checkbox-grid">
-            {#each CAPTURE_KINDS as kind (kind)}
+            {#each CONTENT_KINDS as kind (kind)}
               <label>
                 <input
                   type="checkbox"

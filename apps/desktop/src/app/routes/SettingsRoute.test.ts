@@ -3,6 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => false),
+  subscribe: vi.fn(() => () => {}),
+  TAURI_EVENTS: {
+    navigate: 'nagori://navigate',
+    pasteFailed: 'nagori://paste_failed',
+    hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+  },
 }));
 
 vi.mock('../lib/commands', () => ({

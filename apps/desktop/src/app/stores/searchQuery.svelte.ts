@@ -8,7 +8,7 @@ import { searchClipboard } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
-import type { SearchResultDto } from '../lib/types';
+import type { SearchRequest, SearchResultDto } from '../lib/types';
 import { currentFilters } from './searchFilters.svelte';
 import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
@@ -54,22 +54,21 @@ const SEARCH_DEBOUNCE_MS = 80;
 let pendingQueryTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingQueryRaw: string | undefined;
 
-export const refreshRecent = async (): Promise<void> => {
-  if (!isTauri()) {
-    searchState.results = fallbackFixture();
-    searchState.selectedIndex = 0;
-    reconcileMultiSelect(searchState.results.map((r) => r.id));
-    return;
-  }
+const setQuery = (raw: string): void => {
+  // Skip the assignment when nothing changed so downstream `$derived` /
+  // `$effect` chains don't re-run on every keystroke that didn't actually
+  // mutate the value (IME composition, repeated arrow keys, etc.).
+  if (searchState.query !== raw) searchState.query = raw;
+};
+
+const runSearch = async (request: SearchRequest): Promise<void> => {
   const ticket = ++inflight;
   searchState.loading = true;
   searchState.errorMessage = undefined;
   try {
     const filters = currentFilters();
     const response = await searchClipboard({
-      query: '',
-      mode: 'Recent',
-      limit: 50,
+      ...request,
       ...(filters !== undefined ? { filters } : {}),
     });
     if (ticket !== inflight) return;
@@ -85,13 +84,23 @@ export const refreshRecent = async (): Promise<void> => {
   }
 };
 
+export const refreshRecent = async (): Promise<void> => {
+  if (!isTauri()) {
+    searchState.results = fallbackFixture();
+    searchState.selectedIndex = 0;
+    reconcileMultiSelect(searchState.results.map((r) => r.id));
+    return;
+  }
+  await runSearch({ query: '', mode: 'Recent', limit: 50 });
+};
+
 /// Debounced entry point used by the search input. Cancels any pending
 /// timer, mirrors the raw input into `searchState.query` immediately so the
 /// box stays controlled, then schedules `runQuery` after the debounce
 /// window. Callers that need synchronous behaviour (tests, programmatic
 /// refresh after pin/delete) still call `runQuery` directly.
 export const scheduleQuery = (raw: string): void => {
-  searchState.query = raw;
+  setQuery(raw);
   pendingQueryRaw = raw;
   if (pendingQueryTimer !== undefined) {
     clearTimeout(pendingQueryTimer);
@@ -122,7 +131,7 @@ export const runQuery = async (raw: string): Promise<void> => {
     pendingQueryTimer = undefined;
     pendingQueryRaw = undefined;
   }
-  searchState.query = raw;
+  setQuery(raw);
   if (raw.trim() === '') {
     await refreshRecent();
     return;
@@ -134,26 +143,5 @@ export const runQuery = async (raw: string): Promise<void> => {
     reconcileMultiSelect(searchState.results.map((r) => r.id));
     return;
   }
-  const ticket = ++inflight;
-  searchState.loading = true;
-  searchState.errorMessage = undefined;
-  try {
-    const filters = currentFilters();
-    const response = await searchClipboard({
-      query: raw,
-      mode: 'Auto',
-      limit: 50,
-      ...(filters !== undefined ? { filters } : {}),
-    });
-    if (ticket !== inflight) return;
-    searchState.results = response.results;
-    searchState.selectedIndex = 0;
-    searchState.lastElapsedMs = response.elapsedMs;
-    reconcileMultiSelect(response.results.map((r) => r.id));
-  } catch (err) {
-    if (ticket !== inflight) return;
-    searchState.errorMessage = describeError(err);
-  } finally {
-    if (ticket === inflight) searchState.loading = false;
-  }
+  await runSearch({ query: raw, mode: 'Auto', limit: 50 });
 };

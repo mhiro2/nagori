@@ -255,4 +255,10 @@ export const ko: Messages = {
     ko: '한국어',
     'zh-Hans': '简体中文',
   },
+  toasts: {
+    autoPasteFailedTitle: '자동 붙여넣기에 실패했습니다',
+    autoPasteFailedFallback: '자동 붙여넣기에 실패했습니다.',
+    openSettings: '설정 열기',
+    dismiss: '닫기',
+  },
 };

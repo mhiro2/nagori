@@ -62,3 +62,37 @@ const normalizeError = (raw: unknown): CommandError => {
     recoverable: false,
   };
 };
+
+// Event names emitted from the Rust side. Centralised so a typo on either
+// side of the bridge is a single edit, not a treasure hunt.
+export const TAURI_EVENTS = {
+  navigate: 'nagori://navigate',
+  pasteFailed: 'nagori://paste_failed',
+  hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+} as const;
+
+export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];
+
+// Subscribe to a Tauri event without leaking listeners across the dynamic
+// import await. If the consumer cleans up before `listen()` resolves we
+// immediately unsubscribe instead of pushing the late unlisten into a list
+// the caller has already drained.
+// oxlint-disable-next-line no-unnecessary-type-parameters
+export const subscribe = <T>(
+  event: TauriEventName,
+  handler: (payload: T) => void,
+): (() => void) => {
+  if (!isTauri()) return () => {};
+  let cancelled = false;
+  let unlisten: (() => void) | undefined;
+  void (async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const off = await listen<T>(event, (e) => handler(e.payload));
+    if (cancelled) off();
+    else unlisten = off;
+  })();
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+};

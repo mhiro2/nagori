@@ -1,5 +1,6 @@
 <script lang="ts">
   import { runAiAction, saveAiResult } from "../lib/commands";
+  import { describeError } from "../lib/errors";
   import { messages } from "../lib/i18n/index.svelte";
   import { isTauri } from "../lib/tauri";
   import type { AiActionId, SearchResultDto } from "../lib/types";
@@ -64,38 +65,92 @@
       const result = await runAiAction(id, target.id);
       lastResult = result.text;
     } catch (err) {
-      runError = err instanceof Error ? err.message : t.actionMenu.runFailed;
+      runError = describeError(err);
       lastResult = undefined;
     } finally {
       pending = undefined;
     }
   };
 
-  const copyResult = async (): Promise<void> => {
-    if (lastResult === undefined) return;
+  // Reset feedback after a beat so repeated actions still flash visibly.
+  // Each flag owns its own timer so a quick second click doesn't let the
+  // first run's lingering timeout flip the freshly-set `true` back to
+  // `false`. Cleared on unmount to avoid post-destroy state writes.
+  const FLASH_MS = 1500;
+  type FlashTimer = ReturnType<typeof setTimeout> | undefined;
+  let copyFlashTimer: FlashTimer = undefined;
+  let saveFlashTimer: FlashTimer = undefined;
+
+  const flashOk = async (
+    setOk: (value: boolean) => void,
+    timerRef: { value: FlashTimer },
+    fn: () => Promise<void>,
+  ): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(lastResult);
-      copyOk = true;
-      // Reset feedback after a beat so repeated copies still flash visibly.
-      setTimeout(() => (copyOk = false), 1500);
+      await fn();
+      setOk(true);
+      if (timerRef.value !== undefined) clearTimeout(timerRef.value);
+      timerRef.value = setTimeout(() => {
+        timerRef.value = undefined;
+        setOk(false);
+      }, FLASH_MS);
     } catch {
-      copyOk = false;
+      setOk(false);
     }
   };
 
+  const copyTimerRef = {
+    get value() {
+      return copyFlashTimer;
+    },
+    set value(v: FlashTimer) {
+      copyFlashTimer = v;
+    },
+  };
+  const saveTimerRef = {
+    get value() {
+      return saveFlashTimer;
+    },
+    set value(v: FlashTimer) {
+      saveFlashTimer = v;
+    },
+  };
+
+  const copyResult = (): Promise<void> => {
+    const text = lastResult;
+    if (text === undefined) return Promise.resolve();
+    return flashOk(
+      (v) => (copyOk = v),
+      copyTimerRef,
+      () => navigator.clipboard.writeText(text),
+    );
+  };
+
   const saveResult = async (): Promise<void> => {
-    if (lastResult === undefined || !isTauri()) return;
+    const text = lastResult;
+    if (text === undefined || !isTauri()) return;
     saving = true;
     try {
-      await saveAiResult(lastResult);
-      saveOk = true;
-      setTimeout(() => (saveOk = false), 1500);
-    } catch {
-      saveOk = false;
+      await flashOk(
+        (v) => (saveOk = v),
+        saveTimerRef,
+        async () => {
+          await saveAiResult(text);
+        },
+      );
     } finally {
       saving = false;
     }
   };
+
+  // Cancel any in-flight flash timers on destroy so they don't fire
+  // setOk(false) into a state that no longer has a consumer.
+  $effect(() => {
+    return () => {
+      if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
+      if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
+    };
+  });
 </script>
 
 {#if open}

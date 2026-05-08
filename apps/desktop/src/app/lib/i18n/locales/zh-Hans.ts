@@ -251,4 +251,10 @@ export const zhHans: Messages = {
     ko: '한국어',
     'zh-Hans': '简体中文',
   },
+  toasts: {
+    autoPasteFailedTitle: '自动粘贴失败',
+    autoPasteFailedFallback: '自动粘贴失败。',
+    openSettings: '打开设置',
+    dismiss: '关闭',
+  },
 };

@@ -2,12 +2,13 @@
 // locale; additional dictionaries live in `locales/`. Every locale must
 // structurally match `Messages`.
 
+import type { LocaleSetting } from '../types';
 import { en, type Messages } from './locales/en';
 import { ja } from './locales/ja';
 import { ko } from './locales/ko';
 import { zhHans } from './locales/zh-Hans';
 
-export type Locale = 'en' | 'ja' | 'ko' | 'zh-Hans';
+export type Locale = LocaleSetting;
 
 export const SUPPORTED_LOCALES: readonly Locale[] = ['en', 'ja', 'ko', 'zh-Hans'];
 

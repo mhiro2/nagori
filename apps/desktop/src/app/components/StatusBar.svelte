@@ -1,6 +1,6 @@
 <script lang="ts">
   import { messages } from "../lib/i18n/index.svelte";
-  import { aiEnabled, captureEnabled, settingsState } from "../stores/settings.svelte";
+  import { aiEnabled, captureEnabled } from "../stores/settings.svelte";
 
   type Props = {
     entryCount: number;
@@ -15,10 +15,6 @@
 
   const capture = $derived(captureEnabled());
   const ai = $derived(aiEnabled());
-  // Reference settingsState so the derived re-runs when settings reload.
-  $effect(() => {
-    void settingsState.loaded;
-  });
 </script>
 
 <footer class="status">

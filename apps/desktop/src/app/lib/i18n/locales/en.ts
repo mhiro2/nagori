@@ -237,6 +237,12 @@ export type Messages = {
     ko: string;
     'zh-Hans': string;
   };
+  toasts: {
+    autoPasteFailedTitle: string;
+    autoPasteFailedFallback: string;
+    openSettings: string;
+    dismiss: string;
+  };
 };
 
 export const en: Messages = {
@@ -495,5 +501,11 @@ export const en: Messages = {
     ja: '日本語',
     ko: '한국어',
     'zh-Hans': '简体中文',
+  },
+  toasts: {
+    autoPasteFailedTitle: 'Auto-paste failed',
+    autoPasteFailedFallback: 'Auto-paste failed.',
+    openSettings: 'Settings',
+    dismiss: 'Dismiss',
   },
 };

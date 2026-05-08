@@ -7,6 +7,18 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// Intl.DateTimeFormat construction is one of V8's slower hot paths; cache one
+// formatter per locale tag so result-row renders don't rebuild it.
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+const dateFormatterFor = (tag: string): Intl.DateTimeFormat => {
+  let fmt = dateFormatterCache.get(tag);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(tag);
+    dateFormatterCache.set(tag, fmt);
+  }
+  return fmt;
+};
+
 export const formatRelativeTime = (isoTimestamp: string, now: Date = new Date()): string => {
   const target = new Date(isoTimestamp).getTime();
   if (Number.isNaN(target)) return '';
@@ -16,7 +28,7 @@ export const formatRelativeTime = (isoTimestamp: string, now: Date = new Date())
   if (delta < HOUR) return t.minutesAgo(Math.floor(delta / MINUTE));
   if (delta < DAY) return t.hoursAgo(Math.floor(delta / HOUR));
   if (delta < 7 * DAY) return t.daysAgo(Math.floor(delta / DAY));
-  return new Date(target).toLocaleDateString(dateLocaleTag());
+  return dateFormatterFor(dateLocaleTag()).format(target);
 };
 
 export const truncatePreview = (text: string, max: number = 120): string => {

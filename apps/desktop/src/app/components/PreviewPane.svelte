@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatRelativeTime } from "../lib/formatting";
+  import { formatByteCount, formatRelativeTime } from "../lib/formatting";
   import { messages } from "../lib/i18n/index.svelte";
   import type { EntryPreviewDto, SearchResultDto } from "../lib/types";
   import { tokenize } from "./tokenize";
@@ -85,7 +85,7 @@
         {/if}
         {#if preview}
           <dt>{t.preview.fields.size}</dt>
-          <dd>{preview.metadata.byteCount.toLocaleString()} B</dd>
+          <dd>{formatByteCount(preview.metadata.byteCount)}</dd>
         {/if}
         <dt>{t.preview.fields.rank}</dt>
         <dd>{item.rankReasons.join(", ") || t.preview.none}</dd>

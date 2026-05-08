@@ -47,8 +47,24 @@
   const selected = $derived(currentSelection());
   const resultIds = $derived(searchState.results.map((r) => r.id));
 
+  // Debounce so rapid arrow-key navigation across a 50-row list doesn't fire
+  // a `get_entry_preview` IPC per row. Only the row the user settles on
+  // crosses the bridge.
+  const PREVIEW_DEBOUNCE_MS = 60;
+  let previewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    void hydratePreview(selected?.id);
+    const id = selected?.id;
+    if (previewDebounceTimer !== undefined) clearTimeout(previewDebounceTimer);
+    previewDebounceTimer = setTimeout(() => {
+      previewDebounceTimer = undefined;
+      void hydratePreview(id);
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => {
+      if (previewDebounceTimer !== undefined) {
+        clearTimeout(previewDebounceTimer);
+        previewDebounceTimer = undefined;
+      }
+    };
   });
 
   const handleInput = (next: string): void => {

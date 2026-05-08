@@ -2,6 +2,16 @@
 
 export type ContentKind = 'text' | 'url' | 'code' | 'image' | 'fileList' | 'richText' | 'unknown';
 
+export const CONTENT_KINDS: readonly ContentKind[] = [
+  'text',
+  'url',
+  'code',
+  'image',
+  'fileList',
+  'richText',
+  'unknown',
+];
+
 export type Sensitivity = 'Unknown' | 'Public' | 'Private' | 'Secret' | 'Blocked';
 
 export type SearchMode = 'Auto' | 'Recent' | 'Exact' | 'Fuzzy' | 'FullText' | 'Semantic';

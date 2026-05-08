@@ -257,4 +257,10 @@ export const ja: Messages = {
     ko: '한국어',
     'zh-Hans': '简体中文',
   },
+  toasts: {
+    autoPasteFailedTitle: '自動ペーストに失敗しました',
+    autoPasteFailedFallback: '自動ペーストに失敗しました。',
+    openSettings: '設定を開く',
+    dismiss: '閉じる',
+  },
 };
