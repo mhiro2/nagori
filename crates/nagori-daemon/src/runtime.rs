@@ -21,6 +21,7 @@ use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::OffsetDateTime;
 use tokio::sync::{Notify, watch};
+use tracing::error;
 
 use crate::search_cache::{
     CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
@@ -97,7 +98,19 @@ impl NagoriRuntime {
     }
 
     fn publish_settings(&self, settings: AppSettings) {
-        let _ = self.settings_tx.send(settings);
+        // `watch::Sender::send` only fails when *every* receiver has been
+        // dropped — i.e. the daemon is mid-teardown or every subscriber
+        // (capture loop, maintenance, IPC) has crashed. There is no
+        // "stale config" downstream in that case because there is no
+        // downstream left, but the absence of subscribers itself is the
+        // signal: the daemon's settings fanout has effectively shut down
+        // while the runtime keeps accepting writes. Surface it loudly
+        // instead of silently swallowing it so this is visible in logs
+        // rather than discovered when reload-after-restart "fixes"
+        // things.
+        if let Err(err) = self.settings_tx.send(settings) {
+            error!(error = %err, "settings_broadcast_failed reason=no_receivers");
+        }
     }
 
     pub async fn refresh_settings_from_store(&self) -> Result<AppSettings> {
