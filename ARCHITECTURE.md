@@ -215,6 +215,20 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   separate `SearchRepository.upsert_document` step in the live path.
 - The cache is invalidated on **both** sides of the insert; see
   [section 8](#8-search) for why.
+- A wall-clock gap of ≥ 30 s between two `capture_once` invocations is
+  treated as a host-paused signal (sleep / suspend / lid close) and arms
+  a one-shot content-hash cross-check on the next tick: even if the
+  observed sequence still matches `last_sequence`, the body is read and
+  the new content hash is compared against the last captured one before
+  any insert decision. macOS can lap the pasteboard `changeCount`
+  silently across a sleep cycle, so without this defence a fresh
+  post-wake clip whose sequence happens to collide with the pre-sleep
+  value would be skipped as a duplicate. The detector uses `SystemTime`
+  rather than `Instant` because Darwin's `Instant` is `CLOCK_UPTIME_RAW`
+  and stops while the system sleeps. The pristine launch path under
+  `capture_initial_clipboard_on_launch=false` also anchors the content
+  hash so a post-wake resync without any user copy correctly recognises
+  the unchanged pre-launch clipboard and does **not** promote it.
 
 The pipeline is purely async over `tokio`; the macOS adapter polls
 NSPasteboard with backoff and reports a `ClipboardSequence` so the loop

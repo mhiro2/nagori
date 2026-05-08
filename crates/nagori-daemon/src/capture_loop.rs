@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
@@ -18,6 +18,23 @@ use crate::search_cache::SharedSearchCache;
 /// the failure visible without burying everything else.
 const PLATFORM_WARN_INTERVAL: Duration = Duration::from_mins(1);
 
+/// Inter-tick wall-clock gap that we treat as "the host paused" (sleep,
+/// suspend, lid close, container freeze). On macOS the pasteboard
+/// `changeCount` can lap silently across a sleep cycle, so a post-wake clip
+/// whose sequence happens to collide with the pre-sleep value would be
+/// skipped as a duplicate. Above this gap we cross-check the next read
+/// against the last captured content hash before trusting the sequence
+/// dedup. We deliberately use `SystemTime` (wall clock) rather than
+/// `Instant`: Rust's `Instant` on Darwin is `CLOCK_UPTIME_RAW` and does
+/// **not** advance while the system is asleep, so a monotonic-clock
+/// heuristic would never see a sleep gap on the very platform we care
+/// about. `SystemTime` jitters under NTP and is theoretically vulnerable
+/// to manual clock changes, but the false-positive cost is just one
+/// extra body read and content-hash comparison. The 30-second threshold
+/// sits well above any normal scheduling jitter at the default 500 ms
+/// cadence (60x headroom) yet small enough to catch even short naps.
+const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
@@ -33,6 +50,23 @@ pub struct CaptureLoop<R, E, A> {
     /// skipped, so whatever was already on the pasteboard at startup never
     /// reaches storage.
     pristine: bool,
+    /// Wall-clock anchor for the previous `capture_once` invocation. Used to
+    /// spot host-paused gaps (sleep / suspend) and resync the dedup baseline.
+    /// `SystemTime` rather than `Instant` because Darwin's `Instant` is
+    /// `CLOCK_UPTIME_RAW` and freezes during sleep — see the
+    /// `RESYNC_GAP_THRESHOLD` doc comment for details.
+    last_tick_at: Option<SystemTime>,
+    /// Content hash of the most recent snapshot we observed (captured or
+    /// otherwise). Used to confirm a post-resync sequence collision is a
+    /// genuine duplicate before re-inserting the same content.
+    last_content_hash: Option<String>,
+    /// One-shot flag that survives across one tick boundary. When set, the
+    /// next `capture_once` invocation bypasses the cheap sequence-based
+    /// dedup short-circuit and instead reads the body so the content hash
+    /// can be compared against `last_content_hash`. We set this on a
+    /// detected wake gap to defend against a potentially lapped pasteboard
+    /// `changeCount`.
+    force_content_check: bool,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -52,6 +86,9 @@ where
             last_platform_warn_at: None,
             search_cache: None,
             pristine: true,
+            last_tick_at: None,
+            last_content_hash: None,
+            force_content_check: false,
         }
     }
 
@@ -101,8 +138,35 @@ where
         self.settings = settings;
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn capture_once(&mut self) -> Result<Option<EntryId>> {
+        self.capture_once_at(SystemTime::now()).await
+    }
+
+    /// Test seam for `capture_once` that lets the caller pin the wall-clock
+    /// "now" used for gap detection. Production callers should use
+    /// `capture_once`; tests use this to simulate sleep gaps without driving
+    /// real time.
+    #[allow(clippy::too_many_lines)]
+    pub async fn capture_once_at(&mut self, now: SystemTime) -> Result<Option<EntryId>> {
+        // Detect a host-paused gap (sleep / suspend / lid close). We do not
+        // clear `last_sequence` here — clearing the baseline outright would
+        // re-capture an unchanged pre-launch clipboard once
+        // `capture_initial_clipboard_on_launch=false` had already discarded
+        // it. Instead, arm a one-shot `force_content_check` flag that makes
+        // the next tick's dedup decision content-aware.
+        if let Some(prev) = self.last_tick_at {
+            // `duration_since` is `Err` if the wall clock was rolled back
+            // (NTP step backwards, manual change). Treat that as zero gap
+            // rather than a wake signal — the user changing their clock is
+            // not a sleep cycle.
+            let gap = now.duration_since(prev).unwrap_or(Duration::ZERO);
+            if gap >= RESYNC_GAP_THRESHOLD {
+                info!(gap_secs = gap.as_secs(), "capture_loop_resync_after_gap");
+                self.force_content_check = true;
+            }
+        }
+        self.last_tick_at = Some(now);
+
         if !self.settings.capture_enabled {
             return Ok(None);
         }
@@ -117,19 +181,34 @@ where
         // `SensitivityClassifier` actually fire for things like 1Password
         // ⌘C → ⌘Tab → paste flows.
         let sequence = self.reader.current_sequence().await?;
-        if self.last_sequence.as_ref() == Some(&sequence) {
+        // Peek without consuming. We only clear `force_content_check` after
+        // the body read succeeds — otherwise a transient `current_snapshot`
+        // failure between the gap-detection tick and the actual recheck
+        // would drop the flag, and the next tick would dedup-skip the
+        // colliding sequence again. Re-trying with the flag still set is
+        // safe because the body-read path is idempotent.
+        let force_content_check = self.force_content_check;
+        if !force_content_check && self.last_sequence.as_ref() == Some(&sequence) {
             return Ok(None);
         }
         // Honour the "skip whatever was on the clipboard before launch" flag
-        // by anchoring `last_sequence` to the first sequence we observe and
-        // bailing out without reading the body. Subsequent ticks behave
-        // normally because `pristine` flips to `false`.
+        // by anchoring `last_sequence` (and `last_content_hash`, so a future
+        // wake-resync can recognise the unchanged pre-launch content) on the
+        // first observation. Without the hash anchor here, a sleep gap
+        // entered before any user copy would force a body read on the next
+        // tick and re-introduce the pre-launch clipboard. Flip `pristine`
+        // last — only after the snapshot read succeeds — so a transient
+        // platform error keeps us in the pristine state and we retry on
+        // the next tick instead of stranding the loop with no baseline.
         if self.pristine && !self.settings.capture_initial_clipboard_on_launch {
+            let snapshot = self.reader.current_snapshot().await?;
+            self.last_sequence = Some(snapshot.sequence.clone());
+            if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
+                self.last_content_hash = Some(entry.metadata.content_hash.value);
+            }
             self.pristine = false;
-            self.last_sequence = Some(sequence);
             return Ok(None);
         }
-        self.pristine = false;
         let frontmost_source = if let Some(window) = &self.window {
             window
                 .frontmost_app()
@@ -142,6 +221,10 @@ where
         };
 
         let mut snapshot = self.reader.current_snapshot().await?;
+        // Snapshot succeeded — only now is it safe to consume the wake-gap
+        // flag and flip pristine.
+        self.force_content_check = false;
+        self.pristine = false;
         self.last_sequence = Some(snapshot.sequence.clone());
         if snapshot.source.is_none() {
             snapshot.source = frontmost_source;
@@ -150,6 +233,17 @@ where
         let Some(mut entry) = EntryFactory::from_snapshot(snapshot) else {
             return Ok(None);
         };
+        // Wake-gap content cross-check: if a sleep gap forced the body read
+        // and the resulting hash matches the last captured content, treat
+        // the changeCount nudge as spurious and skip without inserting.
+        // Refresh `last_content_hash` either way so subsequent gaps still
+        // have something to compare against.
+        if force_content_check
+            && self.last_content_hash.as_deref() == Some(entry.metadata.content_hash.value.as_str())
+        {
+            return Ok(None);
+        }
+        self.last_content_hash = Some(entry.metadata.content_hash.value.clone());
         if !self.settings.capture_kinds.contains(&entry.content_kind()) {
             info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
             let _ = self
@@ -772,6 +866,320 @@ mod tests {
             .expect("post-launch clip should be inserted");
         let stored = store.get(id).await.unwrap().expect("stored row");
         assert_eq!(stored.plain_text(), Some("post launch clip"));
+    }
+
+    #[tokio::test]
+    async fn capture_once_resyncs_dedup_baseline_after_long_gap() {
+        // macOS pasteboard's `changeCount` can lap silently across a sleep
+        // cycle, so a fresh post-wake clip may collide with `last_sequence`
+        // and get skipped as a duplicate. Simulate that with a reader that
+        // returns the *same* sequence value for two distinct payloads, then
+        // drive a >30s wall-clock gap between two `capture_once` calls. The
+        // first capture lands; without the gap-based resync the second
+        // capture would dedupe out and storage would never see the new text.
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct StubReader {
+            sequence: ClipboardSequence,
+            text: Mutex<String>,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for StubReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                let text = self.text.lock().unwrap().clone();
+                Ok(ClipboardSnapshot {
+                    sequence: self.sequence.clone(),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: vec![ClipboardRepresentation {
+                        mime_type: "text/plain".to_owned(),
+                        data: ClipboardData::Text(text),
+                    }],
+                })
+            }
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                Ok(self.sequence.clone())
+            }
+        }
+
+        let reader = StubReader {
+            sequence: ClipboardSequence("colliding-seq".to_owned()),
+            text: Mutex::new("pre-sleep clip".to_owned()),
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ =
+            CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default());
+
+        let t0 = SystemTime::now();
+        let pre_id = loop_
+            .capture_once_at(t0)
+            .await
+            .unwrap()
+            .expect("pre-sleep capture should record an entry");
+
+        // Swap in a different payload while keeping the sequence pinned —
+        // the bug we're guarding against is that the platform-level dedup
+        // counter has lapped, not that the content is the same.
+        *loop_.reader.text.lock().unwrap() = "post-wake clip".to_owned();
+
+        // Same sequence, no gap → still skipped (sanity check that the
+        // dedup short-circuit is otherwise live).
+        let no_gap = loop_.capture_once_at(t0 + Duration::from_secs(1)).await;
+        assert!(
+            no_gap.unwrap().is_none(),
+            "without a gap the dedup must hold"
+        );
+
+        // Long gap → resync triggers, snapshot is read, fresh row lands.
+        let post_id = loop_
+            .capture_once_at(t0 + Duration::from_secs(45))
+            .await
+            .unwrap()
+            .expect("post-wake capture should bypass the lapped sequence");
+        assert_ne!(pre_id, post_id);
+
+        let entries = store.list_recent(10).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        let texts: Vec<_> = entries
+            .iter()
+            .filter_map(|e| e.plain_text().map(str::to_owned))
+            .collect();
+        assert!(texts.iter().any(|t| t == "pre-sleep clip"));
+        assert!(texts.iter().any(|t| t == "post-wake clip"));
+    }
+
+    #[tokio::test]
+    async fn capture_once_skips_unchanged_pre_launch_clip_after_resync_gap() {
+        // Regression for the privacy interaction between
+        // `capture_initial_clipboard_on_launch=false` and the wake-gap
+        // resync: if the user wakes the host without copying anything, the
+        // resync must not promote the still-pre-launch clipboard into the
+        // store. The pristine launch path now anchors `last_content_hash`
+        // to the initial clip's hash so the post-gap content cross-check
+        // recognises it as unchanged and skips.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        clipboard
+            .write_text("preexisting clipboard value")
+            .await
+            .expect("seed clipboard");
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            ..AppSettings::default()
+        };
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+
+        let t0 = SystemTime::now();
+        // First tick anchors the pre-launch clipboard without inserting it.
+        assert!(loop_.capture_once_at(t0).await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+
+        // Wake gap with no user copy in between — clipboard contents are
+        // identical to the pre-launch value. The resync must not insert.
+        assert!(
+            loop_
+                .capture_once_at(t0 + Duration::from_secs(45))
+                .await
+                .unwrap()
+                .is_none(),
+        );
+        assert!(
+            store.list_recent(10).await.unwrap().is_empty(),
+            "wake-gap resync must not promote the unchanged pre-launch clip",
+        );
+
+        // A genuine post-wake copy still flows through.
+        clipboard
+            .write_text("post wake user copy")
+            .await
+            .expect("clipboard write");
+        let id = loop_
+            .capture_once_at(t0 + Duration::from_secs(46))
+            .await
+            .unwrap()
+            .expect("a real post-wake copy must still be captured");
+        let stored = store.get(id).await.unwrap().expect("stored row");
+        assert_eq!(stored.plain_text(), Some("post wake user copy"));
+    }
+
+    #[tokio::test]
+    async fn pristine_skip_retries_on_snapshot_failure() {
+        // Regression: the pristine launch path under
+        // `capture_initial_clipboard_on_launch=false` must not flip
+        // `pristine` until the snapshot read succeeds. Otherwise a single
+        // platform-level read failure on tick 1 leaves the loop with no
+        // baseline (pristine=false, last_sequence=None) and tick 2 happily
+        // captures the still-pre-launch clipboard.
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct FlakyReader {
+            text: String,
+            snapshot_attempts: Mutex<u32>,
+            fail_until_attempt: u32,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for FlakyReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                let attempt = {
+                    let mut guard = self.snapshot_attempts.lock().unwrap();
+                    *guard += 1;
+                    *guard
+                };
+                if attempt < self.fail_until_attempt {
+                    return Err(AppError::Platform(
+                        "simulated transient read failure".to_owned(),
+                    ));
+                }
+                Ok(ClipboardSnapshot {
+                    sequence: ClipboardSequence(ContentHash::sha256(self.text.as_bytes()).value),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: vec![ClipboardRepresentation {
+                        mime_type: "text/plain".to_owned(),
+                        data: ClipboardData::Text(self.text.clone()),
+                    }],
+                })
+            }
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                Ok(ClipboardSequence(
+                    ContentHash::sha256(self.text.as_bytes()).value,
+                ))
+            }
+        }
+
+        let reader = FlakyReader {
+            text: "preexisting clipboard value".to_owned(),
+            snapshot_attempts: Mutex::new(0),
+            fail_until_attempt: 2,
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            ..AppSettings::default()
+        };
+        let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
+
+        // Tick 1: snapshot fails. pristine must stay true so tick 2 retries
+        // the launch-skip semantic instead of falling through to the
+        // body-read path with no baseline.
+        assert!(loop_.capture_once().await.is_err());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+
+        // Tick 2: snapshot succeeds. Pre-launch content anchored, no row.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(
+            store.list_recent(10).await.unwrap().is_empty(),
+            "after a failed launch-tick retry the pre-launch clip must still be skipped",
+        );
+    }
+
+    #[tokio::test]
+    async fn force_content_check_survives_snapshot_failure() {
+        // Regression: a wake gap arms `force_content_check` so the next
+        // tick re-reads the body even if the sequence still matches. If
+        // that read fails transiently, the flag must persist through to
+        // the following tick — otherwise the colliding sequence would be
+        // dedup-skipped again and the post-wake content lost.
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct ScriptedReader {
+            sequence: ClipboardSequence,
+            text: Mutex<String>,
+            snapshot_attempts: Mutex<u32>,
+            fail_attempt: u32,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for ScriptedReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                let attempt = {
+                    let mut guard = self.snapshot_attempts.lock().unwrap();
+                    *guard += 1;
+                    *guard
+                };
+                if attempt == self.fail_attempt {
+                    return Err(AppError::Platform("simulated flake".to_owned()));
+                }
+                Ok(ClipboardSnapshot {
+                    sequence: self.sequence.clone(),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: vec![ClipboardRepresentation {
+                        mime_type: "text/plain".to_owned(),
+                        data: ClipboardData::Text(self.text.lock().unwrap().clone()),
+                    }],
+                })
+            }
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                Ok(self.sequence.clone())
+            }
+        }
+
+        let reader = ScriptedReader {
+            sequence: ClipboardSequence("colliding-seq".to_owned()),
+            text: Mutex::new("pre-sleep clip".to_owned()),
+            snapshot_attempts: Mutex::new(0),
+            fail_attempt: 2,
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ =
+            CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default());
+
+        let t0 = SystemTime::now();
+        // Tick 1 (attempt 1 of current_snapshot succeeds): pre-sleep clip
+        // captured.
+        loop_
+            .capture_once_at(t0)
+            .await
+            .unwrap()
+            .expect("pre-sleep capture");
+
+        // Swap content but keep sequence pinned (the lapped-changeCount
+        // case the resync defends against).
+        *loop_.reader.text.lock().unwrap() = "post-wake clip".to_owned();
+
+        // Tick 2 (attempt 2 fails): wake gap arms force; snapshot fails;
+        // force must NOT be cleared.
+        assert!(
+            loop_
+                .capture_once_at(t0 + Duration::from_secs(45))
+                .await
+                .is_err(),
+        );
+
+        // Tick 3 (attempt 3 succeeds): no fresh gap, but force from tick 2
+        // is still set → body re-read despite sequence collision → captured.
+        let post_id = loop_
+            .capture_once_at(t0 + Duration::from_secs(46))
+            .await
+            .unwrap()
+            .expect("post-wake clip should land on the retry tick");
+        let stored = store.get(post_id).await.unwrap().expect("stored row");
+        assert_eq!(stored.plain_text(), Some("post-wake clip"));
     }
 
     #[tokio::test]
