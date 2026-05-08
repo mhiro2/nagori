@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use nagori_core::{AiActionId, AppError, EntryId, SearchQuery, Sensitivity};
+use nagori_core::{AiActionId, AppError, EntryId, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity};
 use nagori_search::normalize_text;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -195,7 +195,13 @@ pub async fn paste_entry_from_palette(
         }
     }
 
-    tokio::time::sleep(Duration::from_millis(settings.paste_delay_ms)).await;
+    // Defensive clamp at the use site: `save_settings` already rejects values
+    // above `MAX_PASTE_DELAY_MS`, but a stale settings row written by an
+    // older daemon, a hand-edited DB, or a future field-rename refactor
+    // could still surface `u64::MAX` here. Clamping locally keeps the
+    // palette responsive even when the persistence-layer guard is bypassed.
+    let delay_ms = settings.paste_delay_ms.min(MAX_PASTE_DELAY_MS);
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
     // Surface paste failures (Accessibility revoked, Noop controller on
     // unsupported platforms, etc.) — the palette previously rendered them

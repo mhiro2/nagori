@@ -4,6 +4,30 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::ContentKind;
+use crate::errors::{AppError, Result};
+use crate::limits::MAX_ENTRY_SIZE_BYTES;
+
+/// Maximum entries the user can ask retention to keep. Beyond this the
+/// retention sweep would no longer fit in a single transaction without
+/// risking commit timeouts on slower disks.
+pub const MAX_RETENTION_COUNT: usize = 1_000_000;
+
+/// Upper bound for `history_retention_days`. ~10 years of capture; values
+/// above this stop being meaningful for a clipboard manager and start
+/// hurting retention sweep performance.
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+/// Upper bound for `paste_delay_ms`.
+///
+/// The synthesised ⌘V keystroke needs a few-tens-of-ms wait after focus
+/// restoration, but anything beyond a second is indistinguishable from
+/// "paste hung" to the user — and at `u64::MAX` the palette would deadlock
+/// until the OS killed the daemon.
+pub const MAX_PASTE_DELAY_MS: u64 = 1000;
+
+/// Visible row range for the palette result list. Below 1 the palette is
+/// empty; above 64 layout overflows the popup and wastes the LRU.
+pub const MAX_PALETTE_ROW_COUNT: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -175,6 +199,50 @@ pub enum Locale {
     Ko,
     #[serde(rename = "zh-Hans")]
     ZhHans,
+}
+
+impl AppSettings {
+    /// Validate value-range invariants that the wire format alone cannot
+    /// enforce. Run on every entry point that mutates persisted settings —
+    /// the storage `save_settings` path, the IPC `UpdateSettings` handler,
+    /// and the desktop / CLI startup load — so a hand-edited config file or
+    /// a buggy frontend cannot wedge the daemon with values like
+    /// `paste_delay_ms = u64::MAX` or `palette_row_count = 0`.
+    ///
+    /// `global_hotkey` shape validation lives in `nagori-storage` because it
+    /// depends on the platform-specific accelerator parser; this method
+    /// covers everything else and is the single source of truth for the
+    /// numeric ranges.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=MAX_RETENTION_COUNT).contains(&self.history_retention_count) {
+            return Err(AppError::InvalidInput(format!(
+                "history_retention_count must be between 1 and {MAX_RETENTION_COUNT}"
+            )));
+        }
+        if !(1..=MAX_ENTRY_SIZE_BYTES).contains(&self.max_entry_size_bytes) {
+            return Err(AppError::InvalidInput(format!(
+                "max_entry_size_bytes must be between 1 and {MAX_ENTRY_SIZE_BYTES}"
+            )));
+        }
+        if let Some(days) = self.history_retention_days
+            && (days == 0 || days > MAX_RETENTION_DAYS)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "history_retention_days must be between 1 and {MAX_RETENTION_DAYS}"
+            )));
+        }
+        if self.paste_delay_ms > MAX_PASTE_DELAY_MS {
+            return Err(AppError::InvalidInput(format!(
+                "paste_delay_ms must be <= {MAX_PASTE_DELAY_MS}"
+            )));
+        }
+        if !(1..=MAX_PALETTE_ROW_COUNT).contains(&self.palette_row_count) {
+            return Err(AppError::InvalidInput(format!(
+                "palette_row_count must be between 1 and {MAX_PALETTE_ROW_COUNT}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for AppSettings {

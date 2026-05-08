@@ -1047,10 +1047,6 @@ fn configure_connection(conn: &Connection) -> Result<()> {
 }
 
 const MAX_READ_LIMIT: usize = 200;
-const MAX_RETENTION_COUNT: usize = 1_000_000;
-const MAX_ENTRY_SIZE_BYTES: usize = nagori_core::MAX_ENTRY_SIZE_BYTES;
-const MAX_RETENTION_DAYS: u32 = 3650;
-const MAX_PASTE_DELAY_MS: u64 = 1000;
 
 /// Recent-entry window the substring (LIKE) candidate scanner is restricted
 /// to. The substring path can't hit a secondary index for `%term%`, so we
@@ -1168,29 +1164,7 @@ fn is_valid_hotkey_key(key: &str) -> bool {
 
 fn validate_settings(settings: &AppSettings) -> Result<()> {
     validate_hotkey(&settings.global_hotkey)?;
-    if !(1..=MAX_RETENTION_COUNT).contains(&settings.history_retention_count) {
-        return Err(AppError::InvalidInput(format!(
-            "history_retention_count must be between 1 and {MAX_RETENTION_COUNT}"
-        )));
-    }
-    if !(1..=MAX_ENTRY_SIZE_BYTES).contains(&settings.max_entry_size_bytes) {
-        return Err(AppError::InvalidInput(format!(
-            "max_entry_size_bytes must be between 1 and {MAX_ENTRY_SIZE_BYTES}"
-        )));
-    }
-    if let Some(days) = settings.history_retention_days
-        && days > MAX_RETENTION_DAYS
-    {
-        return Err(AppError::InvalidInput(format!(
-            "history_retention_days must be <= {MAX_RETENTION_DAYS}"
-        )));
-    }
-    if settings.paste_delay_ms > MAX_PASTE_DELAY_MS {
-        return Err(AppError::InvalidInput(format!(
-            "paste_delay_ms must be <= {MAX_PASTE_DELAY_MS}"
-        )));
-    }
-    Ok(())
+    settings.validate()
 }
 
 fn prune_deleted_search_rows(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -1274,10 +1248,17 @@ impl nagori_core::SettingsRepository for SqliteStore {
                 })
                 .optional()
                 .map_err(|err| storage_err(&err))?;
-            match value {
-                Some(value) => serde_json::from_str(&value).map_err(|err| json_err(&err)),
-                None => Ok(AppSettings::default()),
-            }
+            let settings: AppSettings = match value {
+                Some(value) => serde_json::from_str(&value).map_err(|err| json_err(&err))?,
+                None => return Ok(AppSettings::default()),
+            };
+            // Hand-edited or downgraded rows can carry out-of-range values
+            // (`paste_delay_ms = u64::MAX`, `palette_row_count = 0`, …) that
+            // wedge the consumer. Validate on every load — the same gate
+            // `save_settings` enforces — so a corrupt row surfaces loudly
+            // instead of silently freezing paste or breaking the palette.
+            settings.validate()?;
+            Ok(settings)
         })
         .await
     }
