@@ -209,6 +209,20 @@ async fn dispatch(cli: Cli) -> Result<()> {
                      or pass an explicit `--db <path>` to operate on a local DB."
                 );
             }
+            // `--auto-ipc` was set but the daemon either had no readable
+            // token or failed the health probe. Reads silently fall back
+            // to opening the SQLite file directly, which is documented in
+            // `docs/cli.md` but easy to miss — and in this mode any writes
+            // the daemon makes after our snapshot won't reach us, and any
+            // local cache invalidation we'd normally trigger via IPC isn't
+            // delivered to the running daemon. Surface the fallback at
+            // warn! (stderr) so a user debugging stale results sees the
+            // mismatch instead of having to bisect why their query lags.
+            init_tracing();
+            tracing::warn!(
+                socket = %candidate.display(),
+                "ipc_fallback_to_local_db reason=daemon_unreachable mode=local-fallback"
+            );
         }
     }
     run_local_command(cli).await
@@ -258,10 +272,13 @@ fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nagori=debug"));
-    tracing_subscriber::fmt()
+    // `try_init` (instead of `init`) so callers in different branches
+    // (daemon path vs. IPC-fallback warn) can both invoke this without
+    // panicking on a double-set global subscriber.
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .init();
+        .try_init();
 }
 
 // The CLI dispatcher intentionally mirrors the subcommand enum one-to-one.
