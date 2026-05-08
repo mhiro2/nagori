@@ -41,6 +41,7 @@ export type Messages = {
     aiOn: string;
     aiOff: string;
     entryCount: CountFormatter;
+    selectedCount: CountFormatter;
   };
   actionMenu: {
     title: string;
@@ -270,6 +271,7 @@ export const en: Messages = {
     aiOn: 'AI on',
     aiOff: 'AI off',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
+    selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
   },
   actionMenu: {
     title: 'AI actions',

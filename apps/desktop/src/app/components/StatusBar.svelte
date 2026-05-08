@@ -7,9 +7,10 @@
     elapsedMs: number | undefined;
     loading: boolean;
     errorMessage: string | undefined;
+    selectedCount?: number;
   };
 
-  const { entryCount, elapsedMs, loading, errorMessage }: Props = $props();
+  const { entryCount, elapsedMs, loading, errorMessage, selectedCount = 0 }: Props = $props();
   const t = $derived(messages());
 
   const capture = $derived(captureEnabled());
@@ -31,6 +32,10 @@
       {#if elapsedMs !== undefined}
         <span class="dot">·</span>
         <span>{t.palette.elapsed(elapsedMs)}</span>
+      {/if}
+      {#if selectedCount > 0}
+        <span class="dot">·</span>
+        <span class="multi">{t.status.selectedCount(selectedCount)}</span>
       {/if}
     {/if}
   </span>
@@ -95,6 +100,10 @@
   }
   .dot {
     opacity: 0.5;
+  }
+  .multi {
+    color: var(--accent, #6c8dff);
+    font-weight: 600;
   }
   .hints {
     display: flex;

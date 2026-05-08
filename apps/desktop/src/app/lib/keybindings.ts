@@ -21,6 +21,8 @@ export type PaletteAction =
   | 'clear-query'
   | 'open-preview'
   | 'open-settings'
+  | 'multi-toggle'
+  | 'multi-select-all'
   | 'close';
 
 export type Binding = {
@@ -46,6 +48,13 @@ export const PALETTE_BINDINGS: readonly Binding[] = [
   { action: 'toggle-pin', key: 'p', meta: true },
   { action: 'delete', key: 'Backspace', meta: true },
   { action: 'open-settings', key: ',', meta: true },
+  // `j` is unused as a shortcut elsewhere in the palette and Cmd+J has
+  // no OS-reserved meaning on macOS, so it can serve as the keyboard
+  // toggle for multi-select without stealing typing in the search box.
+  // (Plain Space would conflict with typing a literal space; Cmd+A
+  // would break the input's native select-all-text behaviour.)
+  { action: 'multi-toggle', key: 'j', meta: true },
+  { action: 'multi-select-all', key: 'a', meta: true, shift: true },
   { action: 'close', key: 'Escape' },
 ];
 

@@ -38,6 +38,7 @@ export const zhHans: Messages = {
     aiOn: 'AI 已开启',
     aiOff: 'AI 已关闭',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hans')} 项`,
+    selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
   },
   actionMenu: {
     title: 'AI 操作',

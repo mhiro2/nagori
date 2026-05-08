@@ -38,6 +38,7 @@ export const ko: Messages = {
     aiOn: 'AI 켜짐',
     aiOff: 'AI 꺼짐',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
+    selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
   },
   actionMenu: {
     title: 'AI 동작',

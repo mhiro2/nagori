@@ -31,7 +31,11 @@ describe('ResultItem', () => {
       },
     });
     await fireEvent.click(getByRole('option'));
-    expect(onConfirm).toHaveBeenCalledWith(7);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm.mock.calls[0]?.[0]).toBe(7);
+    // Modifier-aware multi-select uses the second argument; just verify
+    // the click forwards a MouseEvent so Palette can read metaKey/shiftKey.
+    expect(onConfirm.mock.calls[0]?.[1]).toBeInstanceOf(MouseEvent);
   });
 
   it('calls onSelect on mouse-enter so the row tracks the cursor', async () => {

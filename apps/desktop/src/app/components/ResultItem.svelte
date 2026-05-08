@@ -48,12 +48,13 @@
   type Props = {
     item: SearchResultDto;
     selected: boolean;
+    marked?: boolean;
     index: number;
     onSelect: (index: number) => void;
-    onConfirm: (index: number) => void;
+    onConfirm: (index: number, event?: MouseEvent) => void;
   };
 
-  const { item, selected, index, onSelect, onConfirm }: Props = $props();
+  const { item, selected, marked = false, index, onSelect, onConfirm }: Props = $props();
 
   const previewText = $derived(truncatePreview(collapseWhitespace(item.preview)));
   const timeLabel = $derived(formatRelativeTime(item.createdAt));
@@ -65,13 +66,15 @@
   type="button"
   class="result-item"
   class:selected
+  class:marked
   role="option"
   aria-selected={selected}
   data-kind={item.kind}
   data-sensitivity={item.sensitivity}
   onmouseenter={() => onSelect(index)}
-  onclick={() => onConfirm(index)}
+  onclick={(event) => onConfirm(index, event)}
 >
+  <span class="multi-mark" class:active={marked} aria-hidden="true">{marked ? "✓" : ""}</span>
   <span class="kind-badge" aria-hidden="true">{badge(item.kind)}</span>
 
   {#if url}
@@ -114,6 +117,20 @@
   }
   .result-item.selected {
     background: var(--bg-selected, rgba(120, 160, 255, 0.18));
+  }
+  .result-item.marked {
+    box-shadow: inset 3px 0 0 var(--accent, #6c8dff);
+  }
+  .multi-mark {
+    flex: none;
+    width: 1.1rem;
+    text-align: center;
+    color: var(--accent, #6c8dff);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .multi-mark.active {
+    color: var(--accent, #6c8dff);
   }
   .kind-badge {
     flex: none;

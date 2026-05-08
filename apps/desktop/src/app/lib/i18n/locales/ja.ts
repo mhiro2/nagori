@@ -38,6 +38,7 @@ export const ja: Messages = {
     aiOn: 'AI 有効',
     aiOff: 'AI 無効',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
+    selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
   },
   actionMenu: {
     title: 'AI アクション',

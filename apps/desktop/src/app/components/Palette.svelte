@@ -5,10 +5,19 @@
   import {
     confirmSelection,
     confirmSelectionWithAlternateFormat,
+    copyMultiSelection,
     copySelection,
+    deleteMultiSelection,
     deleteSelection,
     togglePinSelection,
   } from "../stores/searchActions";
+  import {
+    clearMultiSelect,
+    multiSelectState,
+    rangeSelectMulti,
+    selectAllMulti,
+    toggleMultiSelect,
+  } from "../stores/searchMultiSelect.svelte";
   import { hydratePreview, previewState } from "../stores/searchPreview.svelte";
   import { refreshRecent, scheduleQuery, searchState } from "../stores/searchQuery.svelte";
   import {
@@ -45,8 +54,26 @@
     scheduleQuery(next);
   };
 
-  const handleConfirm = (index: number): void => {
+  const handleConfirm = (index: number, event?: MouseEvent): void => {
     selectByIndex(index);
+    const id = searchState.results[index]?.id;
+    if (id !== undefined) {
+      // macOS-style modifier-click on a row: Cmd toggles single,
+      // Shift extends from the anchor. Both bypass the paste/copy
+      // confirm that a plain click would otherwise trigger.
+      if (event?.metaKey) {
+        toggleMultiSelect(id);
+        return;
+      }
+      if (event?.shiftKey) {
+        rangeSelectMulti(searchState.results.map((r) => r.id), id);
+        return;
+      }
+    }
+    if (multiSelectState.selected.size > 0) {
+      void copyMultiSelection();
+      return;
+    }
     void confirmSelection();
   };
 
@@ -80,13 +107,16 @@
         selectLast();
         break;
       case "confirm":
-        void confirmSelection();
+        if (multiSelectState.selected.size > 0) void copyMultiSelection();
+        else void confirmSelection();
         break;
       case "confirm-alternate-format":
-        void confirmSelectionWithAlternateFormat();
+        if (multiSelectState.selected.size > 0) void copyMultiSelection();
+        else void confirmSelectionWithAlternateFormat();
         break;
       case "copy":
-        void copySelection();
+        if (multiSelectState.selected.size > 0) void copyMultiSelection();
+        else void copySelection();
         break;
       case "open-actions":
         actionMenuOpen = true;
@@ -95,7 +125,8 @@
         void togglePinSelection();
         break;
       case "delete":
-        void deleteSelection();
+        if (multiSelectState.selected.size > 0) void deleteMultiSelection();
+        else void deleteSelection();
         break;
       case "clear-query":
         scheduleQuery("");
@@ -106,8 +137,17 @@
       case "open-settings":
         showSettings();
         break;
+      case "multi-toggle": {
+        const id = currentSelection()?.id;
+        if (id !== undefined) toggleMultiSelect(id);
+        break;
+      }
+      case "multi-select-all":
+        selectAllMulti(searchState.results.map((r) => r.id));
+        break;
       case "close":
         if (actionMenuOpen) actionMenuOpen = false;
+        else if (multiSelectState.selected.size > 0) clearMultiSelect();
         else if (previewExpanded) previewExpanded = false;
         else if (isTauri()) void closePalette();
         break;
@@ -123,6 +163,7 @@
       <ResultList
         items={searchState.results}
         selectedIndex={searchState.selectedIndex}
+        multiSelected={multiSelectState.selected}
         onSelect={handleSelect}
         onConfirm={handleConfirm}
       />
@@ -136,6 +177,7 @@
     elapsedMs={searchState.lastElapsedMs}
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
+    selectedCount={multiSelectState.selected.size}
   />
 </section>
 

@@ -9,6 +9,7 @@ import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
+import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
 const fallbackFixture = (): SearchResultDto[] => [
   {
@@ -56,6 +57,7 @@ export const refreshRecent = async (): Promise<void> => {
   if (!isTauri()) {
     searchState.results = fallbackFixture();
     searchState.selectedIndex = 0;
+    reconcileMultiSelect(searchState.results.map((r) => r.id));
     return;
   }
   const ticket = ++inflight;
@@ -71,6 +73,7 @@ export const refreshRecent = async (): Promise<void> => {
     searchState.results = response.results;
     searchState.selectedIndex = 0;
     searchState.lastElapsedMs = response.elapsedMs;
+    reconcileMultiSelect(response.results.map((r) => r.id));
   } catch (err) {
     if (ticket !== inflight) return;
     searchState.errorMessage = describeError(err);
@@ -125,6 +128,7 @@ export const runQuery = async (raw: string): Promise<void> => {
     const lower = raw.toLowerCase();
     searchState.results = fallbackFixture().filter((r) => r.preview.toLowerCase().includes(lower));
     searchState.selectedIndex = 0;
+    reconcileMultiSelect(searchState.results.map((r) => r.id));
     return;
   }
   const ticket = ++inflight;
@@ -140,6 +144,7 @@ export const runQuery = async (raw: string): Promise<void> => {
     searchState.results = response.results;
     searchState.selectedIndex = 0;
     searchState.lastElapsedMs = response.elapsedMs;
+    reconcileMultiSelect(response.results.map((r) => r.id));
   } catch (err) {
     if (ticket !== inflight) return;
     searchState.errorMessage = describeError(err);

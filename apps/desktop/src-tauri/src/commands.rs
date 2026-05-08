@@ -261,14 +261,28 @@ pub async fn delete_entry(state: State<'_, AppState>, id: String) -> CommandResu
 /// Bulk-delete a list of entries. Used by the palette's multi-select mode
 /// so users can select rows with Shift/Cmd-click and discard them in one
 /// sweep instead of issuing N round-trips.
+///
+/// Per-id `NotFound` is swallowed (the entry was concurrently swept by
+/// retention or another delete path — the user's intent of "make this
+/// gone" is already satisfied) so a single stale id can't abort the
+/// whole batch and leave the earlier deletes committed without telling
+/// the frontend. Other failures propagate and the frontend reconciles
+/// against `list_recent` after the call.
 #[tauri::command]
 pub async fn delete_entries(state: State<'_, AppState>, ids: Vec<String>) -> CommandResult<usize> {
     let mut purged = 0_usize;
     for id in ids {
         let entry_id = parse_entry_id(&id)?;
-        state.runtime.delete_entry(entry_id).await?;
-        state.clear_last_pasted_if(entry_id);
-        purged += 1;
+        match state.runtime.delete_entry(entry_id).await {
+            Ok(()) => {
+                state.clear_last_pasted_if(entry_id);
+                purged += 1;
+            }
+            Err(AppError::NotFound) => {
+                state.clear_last_pasted_if(entry_id);
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
     Ok(purged)
 }
@@ -288,11 +302,13 @@ pub async fn copy_entries_combined(
     let mut chunks: Vec<String> = Vec::with_capacity(ids.len());
     for id in ids {
         let entry_id = parse_entry_id(&id)?;
-        let entry = state
-            .runtime
-            .get_entry(entry_id)
-            .await?
-            .ok_or(AppError::NotFound)?;
+        // Skip ids that were concurrently swept by retention / another
+        // delete path. Aborting the whole copy because one row of a
+        // multi-selection raced with the maintenance loop would be
+        // worse than producing a slightly shorter joined string.
+        let Some(entry) = state.runtime.get_entry(entry_id).await? else {
+            continue;
+        };
         if matches!(
             entry.sensitivity,
             Sensitivity::Blocked | Sensitivity::Secret
@@ -318,9 +334,21 @@ pub async fn copy_entries_combined(
     // text to land on the OS clipboard so the user can ⌘V it elsewhere.
     // Round-trip through `copy_entry` so the clipboard write happens via the
     // same path the palette uses for single-row copies.
-    let id = state.runtime.add_text(combined).await?;
-    state.runtime.copy_entry(id).await?;
-    Ok(())
+    //
+    // A retention sweep or IPC clear can race between `add_text` and
+    // `copy_entry` and remove the just-inserted row. Retry once before
+    // giving up — the user pressed bulk-copy expecting the OS clipboard
+    // to actually contain the combined text.
+    let id = state.runtime.add_text(combined.clone()).await?;
+    match state.runtime.copy_entry(id).await {
+        Ok(()) => Ok(()),
+        Err(AppError::NotFound) => {
+            let id = state.runtime.add_text(combined).await?;
+            state.runtime.copy_entry(id).await?;
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Soft-delete every non-pinned entry. Surfaced through both the secondary

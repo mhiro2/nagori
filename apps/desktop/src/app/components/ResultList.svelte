@@ -7,11 +7,13 @@
     items: SearchResultDto[];
     selectedIndex: number;
     onSelect: (index: number) => void;
-    onConfirm: (index: number) => void;
+    onConfirm: (index: number, event?: MouseEvent) => void;
+    multiSelected?: ReadonlySet<string>;
     emptyMessage?: string;
   };
 
-  const { items, selectedIndex, onSelect, onConfirm, emptyMessage }: Props = $props();
+  const { items, selectedIndex, onSelect, onConfirm, multiSelected, emptyMessage }: Props =
+    $props();
 
   const effectiveEmpty = $derived(emptyMessage ?? messages().palette.empty);
 
@@ -33,6 +35,7 @@
         {item}
         {index}
         selected={index === selectedIndex}
+        marked={multiSelected?.has(item.id) ?? false}
         {onSelect}
         {onConfirm}
       />
