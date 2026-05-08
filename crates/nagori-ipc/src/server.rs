@@ -20,6 +20,19 @@ use crate::{IpcEnvelope, IpcRequest, IpcResponse};
 #[cfg(unix)]
 const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
 
+/// Cap each daemon -> client response at the same byte budget the client
+/// already enforces (`crate::MAX_IPC_BYTES`). The check runs *after*
+/// `serde_json::to_vec`, so the handler still pays for constructing and
+/// serialising the response — bounding peak daemon RSS for pathological
+/// requests (e.g. `ListRecent` with `limit = usize::MAX`) requires
+/// request-level limits at each handler. What this guard does buy is:
+/// (a) we never write a line the client's bounded reader would reject as a
+/// truncated half-JSON, and (b) we drop the oversized payload immediately
+/// in favour of a small structured rejection so the connection can be
+/// reused instead of stalling until timeout.
+#[cfg(unix)]
+const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
+
 #[cfg(unix)]
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -155,7 +168,29 @@ where
                     recoverable: true,
                 }),
             };
-            if let Ok(payload) = serde_json::to_vec(&response) {
+            let payload = match serde_json::to_vec(&response) {
+                Ok(payload) if payload.len() < MAX_IPC_RESPONSE_BYTES => Some(payload),
+                Ok(payload) => {
+                    // The daemon already paid the allocation by the time we
+                    // get here, so this branch protects the *wire* and the
+                    // client's bounded reader — not daemon RSS. Replace with
+                    // a small error envelope so the caller sees a structured
+                    // rejection it can act on (retry with a tighter limit)
+                    // instead of timing out on a truncated half-JSON.
+                    let oversized = IpcResponse::Error(crate::IpcError {
+                        code: "response_too_large".to_owned(),
+                        message: format!(
+                            "response would be {} bytes, exceeds limit {}",
+                            payload.len(),
+                            MAX_IPC_RESPONSE_BYTES
+                        ),
+                        recoverable: false,
+                    });
+                    serde_json::to_vec(&oversized).ok()
+                }
+                Err(_) => None,
+            };
+            if let Some(payload) = payload {
                 let _ = stream.write_all(&payload).await;
                 let _ = stream.write_all(b"\n").await;
             }
