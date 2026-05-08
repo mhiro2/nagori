@@ -74,7 +74,7 @@
   onmouseenter={() => onSelect(index)}
   onclick={(event) => onConfirm(index, event)}
 >
-  <span class="multi-mark" class:active={marked} aria-hidden="true">{marked ? "✓" : ""}</span>
+  <span class="multi-mark" aria-hidden="true">{marked ? "✓" : ""}</span>
   <span class="kind-badge" aria-hidden="true">{badge(item.kind)}</span>
 
   {#if url}
@@ -128,9 +128,6 @@
     color: var(--accent, #6c8dff);
     font-size: 0.85rem;
     font-weight: 600;
-  }
-  .multi-mark.active {
-    color: var(--accent, #6c8dff);
   }
   .kind-badge {
     flex: none;

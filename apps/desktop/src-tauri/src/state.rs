@@ -67,6 +67,30 @@ impl AppState {
             *slot = None;
         }
     }
+
+    /// Paste the tracked last-pasted entry, falling back to the recency
+    /// head when none is tracked or the tracked id has been retention-swept.
+    /// Returns `AppError::NotFound` when neither path has anything to paste
+    /// (no last-pasted slot and an empty history).
+    pub async fn repaste_last_or_recency(&self) -> Result<()> {
+        if let Some(id) = self.last_pasted() {
+            match self.runtime.paste_entry(id, None).await {
+                Ok(()) => {
+                    self.record_last_pasted(id);
+                    return Ok(());
+                }
+                Err(AppError::NotFound) => self.clear_last_pasted_if(id),
+                Err(err) => return Err(err),
+            }
+        }
+        let entries = self.runtime.list_recent(1).await?;
+        let Some(entry) = entries.into_iter().next() else {
+            return Err(AppError::NotFound);
+        };
+        self.runtime.paste_entry(entry.id, None).await?;
+        self.record_last_pasted(entry.id);
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]

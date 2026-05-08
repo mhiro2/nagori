@@ -142,17 +142,22 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
         return;
     }
+    perform_clear_on_quit(handle);
+}
+
+/// Block the runtime briefly so the soft-delete completes before tauri
+/// destroys the tokio runtime. A 1s ceiling keeps a wedged DB from
+/// freezing the quit path indefinitely. No-op when `clear_on_quit` is
+/// disabled or the app state is gone.
+#[cfg(target_os = "macos")]
+fn perform_clear_on_quit(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
     let runtime = state.runtime.clone();
-    let snapshot = runtime.current_settings();
-    if !snapshot.clear_on_quit {
+    if !runtime.current_settings().clear_on_quit {
         return;
     }
-    // Block the runtime briefly so the soft-delete completes before tauri
-    // destroys the tokio runtime. A 1s ceiling keeps a wedged DB from
-    // freezing the quit path indefinitely.
     let _ = tauri::async_runtime::block_on(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -410,56 +415,22 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
     let app = handle.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let runtime = state.runtime.clone();
         match action {
             SecondaryHotkeyAction::RepasteLast => {
-                // Mirror the Tauri `repaste_last` command: prefer the
-                // explicitly tracked last-pasted id so a fresh capture from
-                // another app cannot replace it, falling back to the
-                // recency-list head only when the user has not pasted yet
-                // or when the tracked entry has been retention-swept (the
-                // daemon maintenance loop and IPC `Clear` paths delete by
-                // id without notifying `AppState`, so a stale slot would
-                // otherwise turn the hotkey into a no-op).
-                if let Some(id) = state.last_pasted() {
-                    match runtime.paste_entry(id, None).await {
-                        Ok(()) => {
-                            state.record_last_pasted(id);
-                            return;
-                        }
-                        Err(nagori_core::AppError::NotFound) => state.clear_last_pasted_if(id),
-                        Err(err) => {
-                            tracing::warn!(error = %err, "repaste_last_paste_failed");
-                            let _ = app.emit(
-                                "nagori://paste_failed",
-                                serde_json::json!({ "error": err.to_string() }),
-                            );
-                            return;
-                        }
-                    }
-                }
-                let entries = match runtime.list_recent(1).await {
-                    Ok(entries) => entries,
+                // Empty-history is silent; other failures surface via the
+                // toast event so the user knows their hotkey did nothing.
+                match state.repaste_last_or_recency().await {
+                    Ok(()) | Err(nagori_core::AppError::NotFound) => {}
                     Err(err) => {
-                        tracing::warn!(error = %err, "repaste_last_lookup_failed");
-                        return;
+                        tracing::warn!(error = %err, "repaste_last_paste_failed");
+                        let _ = app.emit(
+                            "nagori://paste_failed",
+                            serde_json::json!({ "error": err.to_string() }),
+                        );
                     }
-                };
-                let Some(entry) = entries.into_iter().next() else {
-                    return;
-                };
-                let id = entry.id;
-                if let Err(err) = runtime.paste_entry(id, None).await {
-                    tracing::warn!(error = %err, "repaste_last_paste_failed");
-                    let _ = app.emit(
-                        "nagori://paste_failed",
-                        serde_json::json!({ "error": err.to_string() }),
-                    );
-                } else {
-                    state.record_last_pasted(id);
                 }
             }
-            SecondaryHotkeyAction::ClearHistory => match runtime.clear_non_pinned().await {
+            SecondaryHotkeyAction::ClearHistory => match state.runtime.clear_non_pinned().await {
                 Ok(purged) => {
                     state.clear_last_pasted();
                     let _ = app
@@ -491,21 +462,7 @@ fn install_clear_on_quit_hook(handle: &tauri::AppHandle) {
         if !matches!(event, WindowEvent::CloseRequested { .. }) {
             return;
         }
-        let runtime = app.state::<AppState>().runtime.clone();
-        let snapshot = runtime.current_settings();
-        if !snapshot.clear_on_quit {
-            return;
-        }
-        // Block the runtime briefly so the soft-delete completes before
-        // the app fully tears down. A 1s ceiling keeps a wedged DB from
-        // freezing the quit path.
-        let _ = tauri::async_runtime::block_on(async move {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                runtime.clear_non_pinned(),
-            )
-            .await
-        });
+        perform_clear_on_quit(&app);
     });
 }
 

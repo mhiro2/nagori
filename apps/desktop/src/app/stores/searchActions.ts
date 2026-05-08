@@ -1,9 +1,3 @@
-// User-driven actions on the current selection: paste, copy, pin/unpin,
-// delete. Each action funnels Tauri command errors back into
-// `searchState.errorMessage` so the status bar surfaces them uniformly,
-// and pin/delete re-run the active query so the list reflects the new
-// state of the row.
-
 import {
   copyEntriesCombined as copyEntriesCombinedCmd,
   copyEntryFromPalette as copyEntryCmd,
@@ -74,34 +68,25 @@ export const deleteSelection = async (): Promise<void> => {
   await runQuery(searchState.query);
 };
 
-/// Order the multi-selected ids by their position in the visible result
-/// list so the combined-copy text reads top-to-bottom (matching what the
-/// user sees) rather than insertion order. Falls through to the raw set
-/// when a selected id is no longer in the visible list — that can only
-/// happen mid-reconcile and is harmless because the daemon will accept
-/// any subset.
+// Order the multi-selected ids by their position in the visible result
+// list so the combined-copy text reads top-to-bottom. Selected ids that
+// no longer appear in the list (concurrent reconcile) tail-append in
+// insertion order — the daemon accepts any subset, so this is harmless.
 const orderedMultiSelection = (): string[] => {
   const set = multiSelectState.selected;
   if (set.size === 0) return [];
   const ordered = searchState.results.map((r) => r.id).filter((id) => set.has(id));
+  const seen = new Set(ordered);
   for (const id of set) {
-    if (!ordered.includes(id)) ordered.push(id);
+    if (!seen.has(id)) ordered.push(id);
   }
   return ordered;
 };
 
-// Run the active query and re-apply any error the bulk action surfaced.
-// `runQuery` resets `errorMessage` at the start of its request, so without
-// this dance the action's failure message would flash and disappear.
-//
-// `queryBeforeAction` must be captured by the caller BEFORE awaiting the
-// bulk IPC, not after — the user can type a newer query during that await
-// too, and we don't want to resurrect a stale error that arrived after
-// they moved on. We restore the action error only when (a) the active
-// query is still the one the user had before kicking off the action and
-// (b) the refresh itself didn't surface its own error, since "I couldn't
-// even reload the list" is more important to show than the original
-// action failure.
+// `runQuery` resets `errorMessage` at request start, so re-apply the
+// action's error after the refresh — but only when (a) the active query
+// hasn't moved on, and (b) the refresh itself didn't surface its own
+// error (which is more important to show).
 const refreshPreservingError = async (
   capturedError: string | undefined,
   queryBeforeAction: string,
@@ -113,38 +98,20 @@ const refreshPreservingError = async (
   searchState.errorMessage = capturedError;
 };
 
-export const copyMultiSelection = async (): Promise<void> => {
+const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Promise<void> => {
   const ids = orderedMultiSelection();
   if (ids.length === 0 || !isTauri()) return;
   const queryBeforeAction = searchState.query;
   let actionError: string | undefined;
   try {
-    await copyEntriesCombinedCmd(ids);
+    await perform(ids);
   } catch (err) {
     actionError = describeError(err);
   }
   if (actionError === undefined) clearMultiSelect();
-  // Even on failure: the daemon may have inserted a partial combined
-  // entry, and either way `reconcileMultiSelect` (driven by runQuery)
-  // is the only place that drops stale ids from the visible list.
   await refreshPreservingError(actionError, queryBeforeAction);
 };
 
-export const deleteMultiSelection = async (): Promise<void> => {
-  const ids = orderedMultiSelection();
-  if (ids.length === 0 || !isTauri()) return;
-  const queryBeforeAction = searchState.query;
-  let actionError: string | undefined;
-  try {
-    await deleteEntriesCmd(ids);
-  } catch (err) {
-    actionError = describeError(err);
-  }
-  if (actionError === undefined) clearMultiSelect();
-  // Refresh on both branches: if the bulk delete aborted partway, the
-  // earlier rows are already gone from the DB and the visible list
-  // would otherwise still show them. Letting `runQuery` re-fetch and
-  // `reconcileMultiSelect` prune the set keeps the UI honest about
-  // what's actually left.
-  await refreshPreservingError(actionError, queryBeforeAction);
-};
+export const copyMultiSelection = (): Promise<void> => runBulkAction(copyEntriesCombinedCmd);
+
+export const deleteMultiSelection = (): Promise<void> => runBulkAction(deleteEntriesCmd);

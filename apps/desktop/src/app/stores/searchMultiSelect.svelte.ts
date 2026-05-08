@@ -1,19 +1,11 @@
-// Multi-select state for the result list. Kept separate from the
-// single-cursor selection in `searchSelection.ts` because the cursor
-// always points at *one* row (used for preview, single-confirm, etc.)
-// while the multi-select set tracks an opt-in "batch" of rows the user
-// has marked for bulk copy/delete. Resetting on a new query is the
-// caller's responsibility — see `searchQuery.runQuery`.
-//
-// Storage choice: a plain `Set<string>` re-assigned on every mutation.
-// Svelte 5 runes don't observe `Set.add`/`delete` calls, so toggling by
-// constructing a fresh set is the simplest way to keep `$derived` views
-// in lock-step without pulling in `svelte/reactivity`.
+// Svelte 5 runes don't observe `Set.add`/`delete`, so every mutation
+// re-assigns `selected` to a fresh `Set` to keep `$derived` views in
+// lock-step without pulling in `svelte/reactivity`.
 
 type MultiSelectState = {
   selected: Set<string>;
-  /// Anchor for shift-click range selection. The most recently
-  /// toggled-on id; range select treats it as the start of the run.
+  // Anchor for shift-click range selection — the most recently
+  // toggled-on id.
   anchor: string | undefined;
 };
 
@@ -41,8 +33,15 @@ export const toggleMultiSelect = (id: string): void => {
 };
 
 export const selectAllMulti = (ids: readonly string[]): void => {
+  const current = multiSelectState.selected;
+  const allCovered = current.size === ids.length && ids.every((id) => current.has(id));
+  const lastId = ids.at(-1);
+  if (allCovered) {
+    if (multiSelectState.anchor !== lastId) multiSelectState.anchor = lastId;
+    return;
+  }
   multiSelectState.selected = new Set(ids);
-  multiSelectState.anchor = ids.at(-1);
+  multiSelectState.anchor = lastId;
 };
 
 export const clearMultiSelect = (): void => {
@@ -51,10 +50,8 @@ export const clearMultiSelect = (): void => {
   multiSelectState.anchor = undefined;
 };
 
-/// Range-select helper: marks every id between the current anchor and
-/// `targetId` (inclusive, in list order) as selected. Falls back to a
-/// single-id toggle when no anchor exists yet — without this the first
-/// shift-click after a reset would do nothing, which feels broken.
+// Falls back to a single-id toggle when no anchor exists yet so the
+// first shift-click after a reset still does something visible.
 export const rangeSelectMulti = (orderedIds: readonly string[], targetId: string): void => {
   const targetIdx = orderedIds.indexOf(targetId);
   if (targetIdx < 0) return;
@@ -77,9 +74,8 @@ export const rangeSelectMulti = (orderedIds: readonly string[], targetId: string
   multiSelectState.selected = next;
 };
 
-/// Drop ids that no longer appear in the result list. Called after a
-/// query change wipes the visible rows so the count in the status bar
-/// doesn't lie about phantom selections the user can no longer see.
+// Drop ids that no longer appear in the result list so the status-bar
+// count doesn't lie about phantom selections the user can't see.
 export const reconcileMultiSelect = (visibleIds: readonly string[]): void => {
   if (multiSelectState.selected.size === 0) return;
   const visible = new Set(visibleIds);

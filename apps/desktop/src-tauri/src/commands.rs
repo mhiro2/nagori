@@ -364,33 +364,17 @@ pub async fn clear_history(state: State<'_, AppState>) -> CommandResult<usize> {
     Ok(purged)
 }
 
-/// Re-paste the entry the user most recently pasted via the palette. We
-/// track the last-pasted id on `AppState` so a fresh capture from another
-/// app cannot bump the slot before the user reaches for the hotkey; only
-/// when no paste has happened yet (e.g. fresh launch) do we fall back to
-/// the recency-list head. If the tracked id was retention-swept (daemon
-/// maintenance loop or external IPC `Clear`/CLI delete) the paste call
-/// returns `NotFound`; clear the stale slot and retry against the most
-/// recent entry instead of bubbling the error to the user.
+/// Re-paste the entry the user most recently pasted via the palette,
+/// falling back to the recency-list head when no paste has happened yet
+/// or the tracked id has been retention-swept. The shared `AppState`
+/// helper backs both this command and the `RepasteLast` secondary hotkey.
 #[tauri::command]
 pub async fn repaste_last(state: State<'_, AppState>) -> CommandResult<()> {
-    if let Some(id) = state.last_pasted() {
-        match state.runtime.paste_entry(id, None).await {
-            Ok(()) => {
-                state.record_last_pasted(id);
-                return Ok(());
-            }
-            Err(AppError::NotFound) => state.clear_last_pasted_if(id),
-            Err(err) => return Err(err.into()),
-        }
+    match state.repaste_last_or_recency().await {
+        Ok(()) => Ok(()),
+        Err(AppError::NotFound) => Err(CommandError::invalid_input("no recent entry to re-paste")),
+        Err(err) => Err(err.into()),
     }
-    let entries = state.runtime.list_recent(1).await?;
-    let Some(entry) = entries.into_iter().next() else {
-        return Err(CommandError::invalid_input("no recent entry to re-paste"));
-    };
-    state.runtime.paste_entry(entry.id, None).await?;
-    state.record_last_pasted(entry.id);
-    Ok(())
 }
 
 #[tauri::command]

@@ -627,32 +627,16 @@ pub struct AppSettingsDto {
     pub palette_hotkeys: BTreeMap<PaletteHotkeyAction, String>,
     #[serde(default)]
     pub secondary_hotkeys: BTreeMap<SecondaryHotkeyAction, String>,
-    #[serde(default = "default_palette_row_count_dto")]
+    #[serde(default = "nagori_core::settings::default_palette_row_count")]
     pub palette_row_count: u32,
-    #[serde(default = "default_show_preview_pane_dto")]
+    #[serde(default = "nagori_core::settings::default_show_preview_pane")]
     pub show_preview_pane: bool,
-    #[serde(default = "default_show_in_menu_bar_dto")]
+    #[serde(default = "nagori_core::settings::default_show_in_menu_bar")]
     pub show_in_menu_bar: bool,
     #[serde(default)]
     pub clear_on_quit: bool,
-    #[serde(default = "default_capture_initial_clipboard_on_launch_dto")]
+    #[serde(default = "nagori_core::settings::default_capture_initial_clipboard_on_launch")]
     pub capture_initial_clipboard_on_launch: bool,
-}
-
-const fn default_palette_row_count_dto() -> u32 {
-    8
-}
-
-const fn default_show_preview_pane_dto() -> bool {
-    true
-}
-
-const fn default_show_in_menu_bar_dto() -> bool {
-    true
-}
-
-const fn default_capture_initial_clipboard_on_launch_dto() -> bool {
-    true
 }
 
 impl Default for SecretHandlingDto {

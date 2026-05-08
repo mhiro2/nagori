@@ -209,36 +209,36 @@ where
             self.pristine = false;
             return Ok(None);
         }
-        let frontmost_source = if let Some(window) = &self.window {
-            window
-                .frontmost_app()
-                .await
-                .ok()
-                .flatten()
-                .map(|front| front.source)
-        } else {
-            None
-        };
-
-        // Suppress capture if the frontmost app's focused element is a
-        // secure text field (password input). Anchor `last_sequence` so
-        // a steady-state focus on the same field doesn't loop the AX
-        // query every poll for the same clip; subsequent ticks short-
-        // circuit on the sequence dedup until the user copies again.
-        // A platform error from `frontmost_focused_is_secure` is treated
-        // as `false` (allow capture) so a missing Accessibility grant or
-        // a transient FFI hiccup degrades open — the
+        // Run both AX queries concurrently — each spawns its own
+        // system-wide AX walk via spawn_blocking, so the wall-clock
+        // cost is parallel rather than additive on the per-tick hot
+        // path. A platform error from `frontmost_focused_is_secure`
+        // degrades to `false` (allow capture) so a missing
+        // Accessibility grant or transient FFI hiccup fails open; the
         // `SensitivityClassifier` secret detector and password-manager
         // bundle denylist still run downstream as the second line of
-        // defence. We deliberately do *not* clear `force_content_check`
+        // defence.
+        let (frontmost_source, secure_focus) = if let Some(window) = &self.window {
+            let (front_res, secure_res) =
+                tokio::join!(window.frontmost_app(), window.frontmost_focused_is_secure(),);
+            (
+                front_res.ok().flatten().map(|front| front.source),
+                secure_res.unwrap_or(false),
+            )
+        } else {
+            (None, false)
+        };
+
+        // Anchor `last_sequence` so a steady-state focus on the same
+        // field doesn't loop the AX query every poll for the same
+        // clip. We deliberately do *not* clear `force_content_check`
         // here: the wake-gap one-shot was armed to defend against a
         // lapped pasteboard `changeCount`, which only matters for the
-        // next *captured* clip. Leaving the flag set means that when the
-        // user moves out of the secure field, the very next tick still
-        // does the content-hash cross-check before trusting the dedup.
-        if let Some(window) = &self.window
-            && window.frontmost_focused_is_secure().await.unwrap_or(false)
-        {
+        // next *captured* clip. Leaving the flag set means that when
+        // the user moves out of the secure field, the very next tick
+        // still does the content-hash cross-check before trusting the
+        // dedup.
+        if secure_focus {
             info!("capture_skipped reason=secure_field");
             let _ = self
                 .audit

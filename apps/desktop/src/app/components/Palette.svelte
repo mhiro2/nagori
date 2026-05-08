@@ -41,11 +41,11 @@
   let actionMenuOpen = $state(false);
 
   $effect(() => {
-    void refreshRecent();
-    void refreshSettings();
+    void Promise.all([refreshRecent(), refreshSettings()]);
   });
 
   const selected = $derived(currentSelection());
+  const resultIds = $derived(searchState.results.map((r) => r.id));
 
   $effect(() => {
     void hydratePreview(selected?.id);
@@ -59,15 +59,12 @@
     selectByIndex(index);
     const id = searchState.results[index]?.id;
     if (id !== undefined) {
-      // macOS-style modifier-click on a row: Cmd toggles single,
-      // Shift extends from the anchor. Both bypass the paste/copy
-      // confirm that a plain click would otherwise trigger.
       if (event?.metaKey) {
         toggleMultiSelect(id);
         return;
       }
       if (event?.shiftKey) {
-        rangeSelectMulti(searchState.results.map((r) => r.id), id);
+        rangeSelectMulti(resultIds, id);
         return;
       }
     }
@@ -82,9 +79,6 @@
     selectByIndex(index);
   };
 
-  // The settings store re-renders Palette whenever the user flips
-  // showPreviewPane or paletteRowCount. Mirroring the value into a $derived
-  // keeps the markup readable without re-deriving on each access below.
   const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
   const paletteBindings = $derived(buildBindings(settingsState.settings?.paletteHotkeys ?? {}));
@@ -144,7 +138,7 @@
         break;
       }
       case "multi-select-all":
-        selectAllMulti(searchState.results.map((r) => r.id));
+        selectAllMulti(resultIds);
         break;
       case "close":
         if (actionMenuOpen) actionMenuOpen = false;

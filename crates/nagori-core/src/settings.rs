@@ -218,19 +218,19 @@ impl Default for AppSettings {
     }
 }
 
-const fn default_palette_row_count() -> u32 {
+pub const fn default_palette_row_count() -> u32 {
     8
 }
 
-const fn default_show_preview_pane() -> bool {
+pub const fn default_show_preview_pane() -> bool {
     true
 }
 
-const fn default_show_in_menu_bar() -> bool {
+pub const fn default_show_in_menu_bar() -> bool {
     true
 }
 
-const fn default_capture_initial_clipboard_on_launch() -> bool {
+pub const fn default_capture_initial_clipboard_on_launch() -> bool {
     true
 }
 
