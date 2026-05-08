@@ -4,6 +4,7 @@
   "description": "Local-first, AI-assisted clipboard manager.",
   "license": "MIT",
   "scripts": {
+    "preinstall": "npx only-allow pnpm",
     "dev": "pnpm --filter @nagori/desktop dev",
     "build": "pnpm --filter @nagori/desktop build",
     "preview": "pnpm --filter @nagori/desktop preview",
