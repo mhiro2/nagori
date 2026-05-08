@@ -5,7 +5,7 @@ use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
     EntryRepository, Result, SecretAction, Sensitivity, SensitivityClassifier,
 };
-use nagori_platform::{ClipboardReader, WindowBehavior};
+use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -249,7 +249,37 @@ where
             return Ok(None);
         }
 
-        let mut snapshot = self.reader.current_snapshot().await?;
+        let mut snapshot = match self
+            .reader
+            .current_snapshot_with_max(self.settings.max_entry_size_bytes)
+            .await?
+        {
+            CapturedSnapshot::Captured(snapshot) => snapshot,
+            CapturedSnapshot::Oversized {
+                sequence,
+                observed_bytes,
+                limit,
+            } => {
+                warn!(
+                    bytes = observed_bytes,
+                    limit, "capture_skipped reason=oversized stage=pre_read"
+                );
+                let _ = self
+                    .audit
+                    .record(
+                        "capture_skipped",
+                        None,
+                        Some(&format!("oversized:pre_read:{observed_bytes}>{limit}")),
+                    )
+                    .await;
+                // Anchor the sequence so the next poll skips this same
+                // oversized clip without re-probing pasteboard sizes.
+                self.force_content_check = false;
+                self.pristine = false;
+                self.last_sequence = Some(sequence);
+                return Ok(None);
+            }
+        };
         // Snapshot succeeded — only now is it safe to consume the wake-gap
         // flag and flip pristine.
         self.force_content_check = false;

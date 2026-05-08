@@ -6,7 +6,7 @@ use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
     ClipboardSequence, ClipboardSnapshot, Result,
 };
-use nagori_platform::{ClipboardReader, ClipboardWriter};
+use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
@@ -85,6 +85,77 @@ impl ClipboardReader for MacosClipboard {
         tokio::task::spawn_blocking(pasteboard_sequence)
             .await
             .map_err(|err| AppError::Platform(err.to_string()))
+    }
+
+    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
+        // Same locking discipline as `current_snapshot` — hold the arboard
+        // mutex across both the AppKit size probe and the per-rep load so a
+        // concurrent writer cannot race a torn snapshot in between.
+        let clipboard = self.clipboard.clone();
+        tokio::task::spawn_blocking(move || -> Result<CapturedSnapshot> {
+            let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+
+            // Phase 1: peek byte sizes without materialising payloads. On
+            // macOS, NSData backs each `dataForType` result with bytes
+            // already paged into our address space, but skipping `to_vec()`
+            // still avoids the second copy into a Rust `Vec<u8>` and lets
+            // NSData drop on scope exit, freeing both copies promptly.
+            // NSString's `length()` is in UTF-16 code units; UTF-8 byte
+            // length is always >= UTF-16 unit count, so `length() >
+            // max_bytes` is a sound (one-sided) reject gate — it never
+            // false-rejects a string that would have fit. The converse
+            // does *not* hold: a string with `length() <= max_bytes` can
+            // still exceed `max_bytes` after UTF-8 encoding (e.g. CJK at
+            // ~3 bytes/codepoint vs. 2 bytes/UTF-16 unit). Phase 1 is
+            // therefore a cheap pre-filter for the obvious outliers, not
+            // a precise admission check.
+            #[cfg(target_os = "macos")]
+            if let Some(observed) = oversized_payload(max_bytes) {
+                drop(guard);
+                return Ok(CapturedSnapshot::Oversized {
+                    sequence: pasteboard_sequence(),
+                    observed_bytes: observed,
+                    limit: max_bytes,
+                });
+            }
+
+            // Phase 2: load the snapshot. Phase 1 only rejected the
+            // obvious oversize cases; reps that pass it can still grow
+            // past `max_bytes` once decoded to UTF-8, and the aggregate
+            // of multiple reps is not bounded here at all. The capture
+            // loop's post-load `payload_bytes > max_entry_size_bytes`
+            // check is the authoritative limit — Phase 1 just spares
+            // us the worst allocations. Mirror `current_snapshot`
+            // exactly so the two entry points cannot drift.
+            let plain = match guard.get_text() {
+                Ok(text) => Some(text),
+                Err(arboard::Error::ContentNotAvailable) => None,
+                Err(err) => return Err(platform_err(&err)),
+            };
+
+            let mut representations = Vec::new();
+
+            #[cfg(target_os = "macos")]
+            collect_macos_extras(&mut representations);
+
+            if let Some(text) = plain {
+                representations.push(ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text(text),
+                });
+            }
+
+            let snapshot = ClipboardSnapshot {
+                sequence: pasteboard_sequence(),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations,
+            };
+            drop(guard);
+            Ok(CapturedSnapshot::Captured(snapshot))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 }
 
@@ -265,6 +336,52 @@ fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
             });
         }
     }
+}
+
+/// Probe `NSPasteboard` for any single representation whose byte length
+/// exceeds `max_bytes`, returning the observed length on first hit.
+///
+/// `NSData::length` is constant-time and avoids the `to_vec()` copy that
+/// `ns_data_to_vec` would otherwise perform. `NSString::length` returns
+/// UTF-16 code units; UTF-8 byte length is always >= UTF-16 unit count
+/// (every non-empty UTF-16 unit maps to >= 1 UTF-8 byte), so comparing
+/// `length() > max_bytes` cannot reject a string that would actually fit.
+#[cfg(target_os = "macos")]
+fn oversized_payload(max_bytes: usize) -> Option<usize> {
+    // SAFETY: AppKit FFI on the shared pasteboard. All getters return
+    // optional retained references and we only read `.length()` on the
+    // returned objects, which has no observable side effects and does not
+    // require holding the pasteboard lock beyond the call itself.
+    unsafe {
+        let pb = NSPasteboard::generalPasteboard();
+
+        if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
+            && data.length() > max_bytes
+        {
+            return Some(data.length());
+        }
+        if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
+            && data.length() > max_bytes
+        {
+            return Some(data.length());
+        }
+        if let Some(string) = pb.stringForType(NSPasteboardTypeHTML)
+            && string.length() > max_bytes
+        {
+            return Some(string.length());
+        }
+        if let Some(string) = pb.stringForType(NSPasteboardTypeRTF)
+            && string.length() > max_bytes
+        {
+            return Some(string.length());
+        }
+        if let Some(string) = pb.stringForType(objc2_app_kit::NSPasteboardTypeString)
+            && string.length() > max_bytes
+        {
+            return Some(string.length());
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]

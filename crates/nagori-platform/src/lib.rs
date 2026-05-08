@@ -4,7 +4,7 @@ pub mod paste;
 pub mod permissions;
 pub mod window;
 
-pub use clipboard::{ClipboardReader, ClipboardWriter, MemoryClipboard};
+pub use clipboard::{CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard};
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
 pub use paste::{NoopPasteController, PasteController, PasteResult};
 pub use permissions::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
