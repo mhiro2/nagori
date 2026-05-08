@@ -119,6 +119,7 @@ pub async fn paste_entry(
         .runtime
         .paste_entry(entry_id, format.map(Into::into))
         .await?;
+    state.record_last_pasted(entry_id);
     Ok(())
 }
 
@@ -205,6 +206,7 @@ pub async fn paste_entry_from_palette(
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         return Err(err.into());
     }
+    state.record_last_pasted(entry_id);
     Ok(())
 }
 
@@ -252,6 +254,114 @@ pub async fn add_entry(state: State<'_, AppState>, text: String) -> CommandResul
 pub async fn delete_entry(state: State<'_, AppState>, id: String) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
     state.runtime.delete_entry(entry_id).await?;
+    state.clear_last_pasted_if(entry_id);
+    Ok(())
+}
+
+/// Bulk-delete a list of entries. Used by the palette's multi-select mode
+/// so users can select rows with Shift/Cmd-click and discard them in one
+/// sweep instead of issuing N round-trips.
+#[tauri::command]
+pub async fn delete_entries(state: State<'_, AppState>, ids: Vec<String>) -> CommandResult<usize> {
+    let mut purged = 0_usize;
+    for id in ids {
+        let entry_id = parse_entry_id(&id)?;
+        state.runtime.delete_entry(entry_id).await?;
+        state.clear_last_pasted_if(entry_id);
+        purged += 1;
+    }
+    Ok(purged)
+}
+
+/// Concatenate the text of multiple entries with newline separators and
+/// write the result to the system clipboard. Image / file-list entries are
+/// silently skipped — the multi-select UI surfaces the count of skipped
+/// entries to the user. Used by the palette's bulk copy action.
+#[tauri::command]
+pub async fn copy_entries_combined(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> CommandResult<()> {
+    if ids.is_empty() {
+        return Err(CommandError::invalid_input("no entries selected"));
+    }
+    let mut chunks: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let entry_id = parse_entry_id(&id)?;
+        let entry = state
+            .runtime
+            .get_entry(entry_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        if matches!(
+            entry.sensitivity,
+            Sensitivity::Blocked | Sensitivity::Secret
+        ) {
+            continue;
+        }
+        let text = match &entry.content {
+            nagori_core::ClipboardContent::Text(t) => Some(t.text.clone()),
+            nagori_core::ClipboardContent::Url(u) => Some(u.raw.clone()),
+            nagori_core::ClipboardContent::Code(c) => Some(c.text.clone()),
+            nagori_core::ClipboardContent::RichText(r) => Some(r.plain_text.clone()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            chunks.push(text);
+        }
+    }
+    if chunks.is_empty() {
+        return Err(CommandError::invalid_input("no copyable text in selection"));
+    }
+    let combined = chunks.join("\n");
+    // `add_text` only inserts a row; the bulk-copy intent is for the joined
+    // text to land on the OS clipboard so the user can ⌘V it elsewhere.
+    // Round-trip through `copy_entry` so the clipboard write happens via the
+    // same path the palette uses for single-row copies.
+    let id = state.runtime.add_text(combined).await?;
+    state.runtime.copy_entry(id).await?;
+    Ok(())
+}
+
+/// Soft-delete every non-pinned entry. Surfaced through both the secondary
+/// "Clear history" hotkey and the palette's multi-select bulk-clear. Pinned
+/// entries are intentionally preserved.
+#[tauri::command]
+pub async fn clear_history(state: State<'_, AppState>) -> CommandResult<usize> {
+    let purged = state.runtime.clear_non_pinned().await?;
+    // Bulk-clear may have removed the tracked last-pasted entry. Drop the
+    // pointer so the next repaste falls through to the recency fallback
+    // instead of returning NotFound for an evicted id.
+    state.clear_last_pasted();
+    Ok(purged)
+}
+
+/// Re-paste the entry the user most recently pasted via the palette. We
+/// track the last-pasted id on `AppState` so a fresh capture from another
+/// app cannot bump the slot before the user reaches for the hotkey; only
+/// when no paste has happened yet (e.g. fresh launch) do we fall back to
+/// the recency-list head. If the tracked id was retention-swept (daemon
+/// maintenance loop or external IPC `Clear`/CLI delete) the paste call
+/// returns `NotFound`; clear the stale slot and retry against the most
+/// recent entry instead of bubbling the error to the user.
+#[tauri::command]
+pub async fn repaste_last(state: State<'_, AppState>) -> CommandResult<()> {
+    if let Some(id) = state.last_pasted() {
+        match state.runtime.paste_entry(id, None).await {
+            Ok(()) => {
+                state.record_last_pasted(id);
+                return Ok(());
+            }
+            Err(AppError::NotFound) => state.clear_last_pasted_if(id),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let entries = state.runtime.list_recent(1).await?;
+    let Some(entry) = entries.into_iter().next() else {
+        return Err(CommandError::invalid_input("no recent entry to re-paste"));
+    };
+    state.runtime.paste_entry(entry.id, None).await?;
+    state.record_last_pasted(entry.id);
     Ok(())
 }
 

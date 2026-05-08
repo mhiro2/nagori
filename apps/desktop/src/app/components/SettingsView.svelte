@@ -10,8 +10,10 @@
     AppSettings,
     ContentKind,
     LocaleSetting,
+    PaletteHotkeyAction,
     PasteFormat,
     RecentOrder,
+    SecondaryHotkeyAction,
     SecretHandling,
   } from "../lib/types";
   import { showPalette } from "../stores/view.svelte";
@@ -30,6 +32,18 @@
     "fileList",
     "richText",
     "unknown",
+  ];
+  const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
+    "pin",
+    "delete",
+    "paste-as-plain",
+    "copy-without-paste",
+    "clear",
+    "open-preview",
+  ];
+  const SECONDARY_HOTKEY_ACTIONS: readonly SecondaryHotkeyAction[] = [
+    "repaste-last",
+    "clear-history",
   ];
 
   const providerTag = (value: AiProviderSetting): AiProviderTag =>
@@ -58,6 +72,32 @@
     if (enabled) next.add(kind);
     else next.delete(kind);
     settings.captureKinds = CAPTURE_KINDS.filter((candidate) => next.has(candidate));
+  };
+
+  // Hotkey override editors store the trimmed accelerator string back onto
+  // the settings map; an empty value drops the override so the palette
+  // falls back to the default binding declared in `keybindings.ts`.
+  const setPaletteOverride = (action: PaletteHotkeyAction, raw: string): void => {
+    if (!settings) return;
+    const value = raw.trim();
+    const next: Partial<Record<PaletteHotkeyAction, string>> = { ...settings.paletteHotkeys };
+    if (value.length === 0) delete next[action];
+    else next[action] = value;
+    settings.paletteHotkeys = next;
+  };
+
+  const setSecondaryOverride = (action: SecondaryHotkeyAction, raw: string): void => {
+    if (!settings) return;
+    const value = raw.trim();
+    const next: Partial<Record<SecondaryHotkeyAction, string>> = { ...settings.secondaryHotkeys };
+    if (value.length === 0) delete next[action];
+    else next[action] = value;
+    settings.secondaryHotkeys = next;
+  };
+
+  const clampRowCount = (raw: number): number => {
+    if (!Number.isFinite(raw)) return 8;
+    return Math.max(3, Math.min(20, Math.round(raw)));
   };
 
   // Lists are edited as a single textarea joined by newlines so users can
@@ -209,6 +249,77 @@
         {#if hotkeyError}
           <p class="status error">{hotkeyError}</p>
         {/if}
+        <label class="stack">
+          <span>
+            <input type="checkbox" bind:checked={settings.captureInitialClipboardOnLaunch} />
+            {t.settings.capture.captureInitialClipboard}
+          </span>
+          <span class="help">{t.settings.capture.captureInitialClipboardHelp}</span>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>{t.settings.display.legend}</legend>
+        <label>
+          {t.settings.display.rowCount}
+          <input
+            type="number"
+            min="3"
+            max="20"
+            step="1"
+            value={settings.paletteRowCount}
+            oninput={(e) => {
+              if (!settings) return;
+              settings.paletteRowCount = clampRowCount(
+                Number((e.target as HTMLInputElement).value),
+              );
+            }}
+          />
+        </label>
+        <span class="help">{t.settings.display.rowCountHelp}</span>
+        <label class="stack">
+          <span>
+            <input type="checkbox" bind:checked={settings.showPreviewPane} />
+            {t.settings.display.previewPane}
+          </span>
+          <span class="help">{t.settings.display.previewPaneHelp}</span>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>{t.settings.hotkeys.legend}</legend>
+        <p class="subhead">{t.settings.hotkeys.paletteHeading}</p>
+        <p class="help">{t.settings.hotkeys.paletteHelp}</p>
+        <div class="hotkey-grid">
+          {#each PALETTE_HOTKEY_ACTIONS as action (action)}
+            <label class="hotkey-row">
+              <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
+              <input
+                type="text"
+                placeholder={t.settings.hotkeys.placeholder}
+                value={settings.paletteHotkeys[action] ?? ""}
+                oninput={(e) =>
+                  setPaletteOverride(action, (e.target as HTMLInputElement).value)}
+              />
+            </label>
+          {/each}
+        </div>
+        <p class="subhead">{t.settings.hotkeys.secondaryHeading}</p>
+        <p class="help">{t.settings.hotkeys.secondaryHelp}</p>
+        <div class="hotkey-grid">
+          {#each SECONDARY_HOTKEY_ACTIONS as action (action)}
+            <label class="hotkey-row">
+              <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
+              <input
+                type="text"
+                placeholder={t.settings.hotkeys.placeholder}
+                value={settings.secondaryHotkeys[action] ?? ""}
+                oninput={(e) =>
+                  setSecondaryOverride(action, (e.target as HTMLInputElement).value)}
+              />
+            </label>
+          {/each}
+        </div>
       </fieldset>
 
       <fieldset>
@@ -262,6 +373,16 @@
           {t.settings.integration.autoLaunch}
         </label>
         <p class="help">{t.settings.integration.autoLaunchHelp}</p>
+        <label>
+          <input type="checkbox" bind:checked={settings.showInMenuBar} />
+          {t.settings.integration.menuBar}
+        </label>
+        <p class="help">{t.settings.integration.menuBarHelp}</p>
+        <label>
+          <input type="checkbox" bind:checked={settings.clearOnQuit} />
+          {t.settings.integration.clearOnQuit}
+        </label>
+        <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
       </fieldset>
     {/if}
 
@@ -558,6 +679,25 @@
   .help {
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
+  }
+  .subhead {
+    margin: 0.25rem 0 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted, rgba(255, 255, 255, 0.65));
+  }
+  .hotkey-grid {
+    display: grid;
+    grid-template-columns: minmax(11rem, 1fr) 2fr;
+    gap: 0.4rem 0.6rem;
+  }
+  .hotkey-row {
+    display: contents;
+  }
+  .hotkey-label {
+    align-self: center;
+    font-size: 0.875rem;
   }
   input[type="text"],
   input[type="number"],

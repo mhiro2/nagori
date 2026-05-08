@@ -96,6 +96,9 @@ export const ko: Messages = {
         plain_text: '일반 텍스트',
       },
       hotkey: '전역 단축키',
+      captureInitialClipboard: '시작 시 클립보드 캡처',
+      captureInitialClipboardHelp:
+        '활성화하면 시작 시점의 클립보드 내용을 기록에 추가합니다. 비활성화하면 기존 내용은 무시됩니다.',
     },
     retention: {
       legend: '보존',
@@ -174,6 +177,39 @@ export const ko: Messages = {
       legend: 'OS 통합',
       autoLaunch: '로그인 시 자동 실행',
       autoLaunchHelp: 'launchd LaunchAgent를 등록해 로그인 시 Nagori를 시작합니다.',
+      menuBar: '메뉴 막대에 표시',
+      menuBarHelp:
+        'macOS 메뉴 막대에 Nagori 트레이 아이콘을 표시합니다. 백그라운드 전용으로 사용하려면 비활성화하세요.',
+      clearOnQuit: '종료 시 고정되지 않은 기록 삭제',
+      clearOnQuitHelp:
+        '앱이 종료될 때 고정되지 않은 모든 항목을 제거합니다. 고정된 항목은 보존됩니다.',
+    },
+    display: {
+      legend: '팔레트 표시',
+      rowCount: '표시 행 수',
+      rowCountHelp: '스크롤 전 팔레트에 표시할 최대 행 수(3–20).',
+      previewPane: '미리보기 패널 표시',
+      previewPaneHelp: '비활성화하면 결과 목록이 전체 너비를 차지해 팔레트가 컴팩트해집니다.',
+    },
+    hotkeys: {
+      legend: '단축키',
+      paletteHeading: '팔레트 단축키',
+      paletteHelp: '팔레트 내 단축키를 재정의합니다. 비워 두면 기본값이 유지됩니다.',
+      secondaryHeading: '보조 전역 단축키',
+      secondaryHelp: '메인 팔레트 단축키와 함께 등록되는 선택적인 시스템 전역 단축키입니다.',
+      placeholder: '예: Cmd+Shift+P',
+      paletteActions: {
+        pin: '선택 항목 고정/해제',
+        delete: '선택 항목 삭제',
+        'paste-as-plain': '일반 텍스트로 붙여넣기',
+        'copy-without-paste': '붙여넣기 없이 복사만',
+        clear: '검색어 지우기',
+        'open-preview': '확장 미리보기 토글',
+      },
+      secondaryActions: {
+        'repaste-last': '가장 최근 항목 다시 붙여넣기',
+        'clear-history': '고정되지 않은 기록 삭제',
+      },
     },
   },
   keybindings: {

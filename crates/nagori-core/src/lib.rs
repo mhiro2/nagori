@@ -17,5 +17,8 @@ pub use repositories::{AuditLog, EntryRepository, SearchRepository, SettingsRepo
 pub use services::{
     FtsCandidate, NgramCandidate, Ranker, SearchCandidateProvider, SearchPlan, SearchService,
 };
-pub use settings::{AppSettings, Appearance, Locale, PasteFormat, RecentOrder, SecretHandling};
+pub use settings::{
+    AppSettings, Appearance, Locale, PaletteHotkeyAction, PasteFormat, RecentOrder,
+    SecondaryHotkeyAction, SecretHandling,
+};
 pub use text::normalize_text;

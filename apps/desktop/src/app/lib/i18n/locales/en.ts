@@ -94,6 +94,8 @@ export type Messages = {
       pasteFormatDefault: string;
       pasteFormatOptions: { preserve: string; plain_text: string };
       hotkey: string;
+      captureInitialClipboard: string;
+      captureInitialClipboardHelp: string;
     };
     retention: {
       legend: string;
@@ -159,6 +161,37 @@ export type Messages = {
       legend: string;
       autoLaunch: string;
       autoLaunchHelp: string;
+      menuBar: string;
+      menuBarHelp: string;
+      clearOnQuit: string;
+      clearOnQuitHelp: string;
+    };
+    display: {
+      legend: string;
+      rowCount: string;
+      rowCountHelp: string;
+      previewPane: string;
+      previewPaneHelp: string;
+    };
+    hotkeys: {
+      legend: string;
+      paletteHeading: string;
+      paletteHelp: string;
+      secondaryHeading: string;
+      secondaryHelp: string;
+      placeholder: string;
+      paletteActions: {
+        pin: string;
+        delete: string;
+        'paste-as-plain': string;
+        'copy-without-paste': string;
+        clear: string;
+        'open-preview': string;
+      };
+      secondaryActions: {
+        'repaste-last': string;
+        'clear-history': string;
+      };
     };
   };
   keybindings: {
@@ -295,6 +328,9 @@ export const en: Messages = {
         plain_text: 'Plain text',
       },
       hotkey: 'Global hotkey',
+      captureInitialClipboard: 'Capture clipboard at launch',
+      captureInitialClipboardHelp:
+        'When enabled, the contents of the clipboard at startup are added to history. Disable to ignore whatever was already on the clipboard.',
     },
     retention: {
       legend: 'Retention',
@@ -374,6 +410,40 @@ export const en: Messages = {
       legend: 'OS integration',
       autoLaunch: 'Launch at login',
       autoLaunchHelp: 'Register a launchd LaunchAgent so Nagori starts on login.',
+      menuBar: 'Show in menu bar',
+      menuBarHelp:
+        'Display the Nagori tray icon in the macOS menu bar. Disable for a fully background experience.',
+      clearOnQuit: 'Clear non-pinned history on quit',
+      clearOnQuitHelp:
+        'When the app exits, all non-pinned entries are removed. Pinned entries are preserved.',
+    },
+    display: {
+      legend: 'Palette display',
+      rowCount: 'Visible rows',
+      rowCountHelp: 'Maximum number of result rows shown before scrolling (3–20).',
+      previewPane: 'Show preview pane',
+      previewPaneHelp: 'Hide to keep the palette compact; the result list takes the full width.',
+    },
+    hotkeys: {
+      legend: 'Hotkeys',
+      paletteHeading: 'Palette shortcuts',
+      paletteHelp: 'Override the in-palette accelerators. Leave a field empty to keep the default.',
+      secondaryHeading: 'Secondary global hotkeys',
+      secondaryHelp:
+        'Optional system-wide accelerators registered alongside the main palette hotkey.',
+      placeholder: 'e.g. Cmd+Shift+P',
+      paletteActions: {
+        pin: 'Pin / unpin selection',
+        delete: 'Delete selection',
+        'paste-as-plain': 'Paste as plain text',
+        'copy-without-paste': 'Copy without pasting',
+        clear: 'Clear search query',
+        'open-preview': 'Toggle expanded preview',
+      },
+      secondaryActions: {
+        'repaste-last': 'Repaste most recent entry',
+        'clear-history': 'Clear non-pinned history',
+      },
     },
   },
   keybindings: {

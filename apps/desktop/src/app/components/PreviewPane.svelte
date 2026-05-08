@@ -9,9 +9,10 @@
     preview: EntryPreviewDto | undefined;
     loading: boolean;
     errorMessage: string | undefined;
+    expanded?: boolean;
   };
 
-  const { item, preview, loading, errorMessage }: Props = $props();
+  const { item, preview, loading, errorMessage, expanded = false }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? "");
   const showHighlighting = $derived(
@@ -40,7 +41,7 @@
   }
 </script>
 
-<aside class="preview-pane">
+<aside class="preview-pane" class:expanded>
   {#if item}
     <header class="head">
       <span class="kind">{preview?.title ?? item.kind}</span>
@@ -106,6 +107,9 @@
     background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
     min-height: 0;
     overflow: hidden;
+  }
+  .preview-pane.expanded {
+    border-left: none;
   }
   .head {
     display: flex;

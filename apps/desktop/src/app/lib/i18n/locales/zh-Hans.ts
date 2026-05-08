@@ -94,6 +94,9 @@ export const zhHans: Messages = {
         plain_text: '纯文本',
       },
       hotkey: '全局快捷键',
+      captureInitialClipboard: '启动时捕获剪贴板',
+      captureInitialClipboardHelp:
+        '启用后会把启动时的剪贴板内容加入历史。关闭则忽略已经存在的内容。',
     },
     retention: {
       legend: '保留策略',
@@ -172,6 +175,37 @@ export const zhHans: Messages = {
       legend: '系统集成',
       autoLaunch: '登录时自动启动',
       autoLaunchHelp: '注册 launchd LaunchAgent 在登录时启动 Nagori。',
+      menuBar: '在菜单栏显示',
+      menuBarHelp: '在 macOS 菜单栏显示 Nagori 的托盘图标。如果只想后台运行，可以关闭。',
+      clearOnQuit: '退出时清除未固定历史',
+      clearOnQuitHelp: '退出应用时清除所有未固定的条目。固定的条目会保留。',
+    },
+    display: {
+      legend: '面板显示',
+      rowCount: '可见行数',
+      rowCountHelp: '滚动前面板中显示的最大行数（3–20）。',
+      previewPane: '显示预览栏',
+      previewPaneHelp: '关闭后结果列表占满整个宽度，让面板更紧凑。',
+    },
+    hotkeys: {
+      legend: '快捷键',
+      paletteHeading: '面板内快捷键',
+      paletteHelp: '覆盖面板内的快捷键。留空则保留默认值。',
+      secondaryHeading: '附加全局快捷键',
+      secondaryHelp: '与主面板快捷键并行注册的可选系统级快捷键。',
+      placeholder: '例如 Cmd+Shift+P',
+      paletteActions: {
+        pin: '固定 / 取消固定',
+        delete: '删除所选',
+        'paste-as-plain': '以纯文本粘贴',
+        'copy-without-paste': '只复制不粘贴',
+        clear: '清空查询',
+        'open-preview': '切换扩展预览',
+      },
+      secondaryActions: {
+        'repaste-last': '再次粘贴最近条目',
+        'clear-history': '清除未固定历史',
+      },
     },
   },
   keybindings: {

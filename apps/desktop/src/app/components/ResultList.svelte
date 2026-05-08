@@ -45,6 +45,11 @@
     flex: 1;
     overflow-y: auto;
     min-height: 0;
+    /* Cap visible rows by --palette-row-count when set on a parent (Palette).
+       Each row is roughly 3rem tall (item padding + line-height); the cap
+       lets the user shrink the palette without forcing every list to
+       hard-code a height. */
+    max-height: calc(var(--palette-row-count, 8) * 3rem);
   }
   .empty {
     padding: 1.5rem 1rem;

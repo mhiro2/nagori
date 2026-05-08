@@ -41,6 +41,13 @@ const baseSettings = (): AppSettings => ({
   appearance: 'system',
   autoLaunch: false,
   secretHandling: 'store_redacted',
+  paletteHotkeys: {},
+  secondaryHotkeys: {},
+  paletteRowCount: 8,
+  showPreviewPane: true,
+  showInMenuBar: true,
+  clearOnQuit: false,
+  captureInitialClipboardOnLaunch: true,
 });
 
 const accessibility = (state: PermissionStatus['state']): PermissionStatus => ({

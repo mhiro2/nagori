@@ -31,6 +31,13 @@ const baseSettings = (): AppSettings => ({
   appearance: 'system',
   autoLaunch: false,
   secretHandling: 'store_redacted',
+  paletteHotkeys: {},
+  secondaryHotkeys: {},
+  paletteRowCount: 8,
+  showPreviewPane: true,
+  showInMenuBar: true,
+  clearOnQuit: false,
+  captureInitialClipboardOnLaunch: true,
 });
 
 beforeEach(() => {
@@ -121,6 +128,30 @@ describe('command wrappers', () => {
       run: () => commands.deleteEntry('id'),
       cmd: 'delete_entry',
       args: { id: 'id' },
+    },
+    {
+      name: 'deleteEntries',
+      run: () => commands.deleteEntries(['a', 'b']),
+      cmd: 'delete_entries',
+      args: { ids: ['a', 'b'] },
+    },
+    {
+      name: 'copyEntriesCombined',
+      run: () => commands.copyEntriesCombined(['a', 'b']),
+      cmd: 'copy_entries_combined',
+      args: { ids: ['a', 'b'] },
+    },
+    {
+      name: 'clearHistory',
+      run: () => commands.clearHistory(),
+      cmd: 'clear_history',
+      args: undefined,
+    },
+    {
+      name: 'repasteLast',
+      run: () => commands.repasteLast(),
+      cmd: 'repaste_last',
+      args: undefined,
     },
     {
       name: 'pinEntry',

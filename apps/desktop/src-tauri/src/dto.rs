@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use nagori_core::settings::AiProviderSetting;
 use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
-    Locale, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode, SearchResult,
-    SecretHandling, Sensitivity,
+    Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode,
+    SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity,
 };
 use nagori_platform::{PermissionKind, PermissionState, PermissionStatus};
 use serde::{Deserialize, Serialize};
@@ -621,6 +623,36 @@ pub struct AppSettingsDto {
     pub auto_launch: bool,
     #[serde(default)]
     pub secret_handling: SecretHandlingDto,
+    #[serde(default)]
+    pub palette_hotkeys: BTreeMap<PaletteHotkeyAction, String>,
+    #[serde(default)]
+    pub secondary_hotkeys: BTreeMap<SecondaryHotkeyAction, String>,
+    #[serde(default = "default_palette_row_count_dto")]
+    pub palette_row_count: u32,
+    #[serde(default = "default_show_preview_pane_dto")]
+    pub show_preview_pane: bool,
+    #[serde(default = "default_show_in_menu_bar_dto")]
+    pub show_in_menu_bar: bool,
+    #[serde(default)]
+    pub clear_on_quit: bool,
+    #[serde(default = "default_capture_initial_clipboard_on_launch_dto")]
+    pub capture_initial_clipboard_on_launch: bool,
+}
+
+const fn default_palette_row_count_dto() -> u32 {
+    8
+}
+
+const fn default_show_preview_pane_dto() -> bool {
+    true
+}
+
+const fn default_show_in_menu_bar_dto() -> bool {
+    true
+}
+
+const fn default_capture_initial_clipboard_on_launch_dto() -> bool {
+    true
 }
 
 impl Default for SecretHandlingDto {
@@ -654,6 +686,13 @@ impl From<AppSettings> for AppSettingsDto {
             appearance: value.appearance.into(),
             auto_launch: value.auto_launch,
             secret_handling: value.secret_handling.into(),
+            palette_hotkeys: value.palette_hotkeys,
+            secondary_hotkeys: value.secondary_hotkeys,
+            palette_row_count: value.palette_row_count,
+            show_preview_pane: value.show_preview_pane,
+            show_in_menu_bar: value.show_in_menu_bar,
+            clear_on_quit: value.clear_on_quit,
+            capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
         }
     }
 }
@@ -683,6 +722,13 @@ impl From<AppSettingsDto> for AppSettings {
             appearance: value.appearance.into(),
             auto_launch: value.auto_launch,
             secret_handling: value.secret_handling.into(),
+            palette_hotkeys: value.palette_hotkeys,
+            secondary_hotkeys: value.secondary_hotkeys,
+            palette_row_count: value.palette_row_count,
+            show_preview_pane: value.show_preview_pane,
+            show_in_menu_bar: value.show_in_menu_bar,
+            clear_on_quit: value.clear_on_quit,
+            capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
         }
     }
 }
@@ -800,9 +846,16 @@ mod tests {
 
     #[test]
     fn app_settings_dto_round_trip_preserves_every_field() {
+        use nagori_core::{PaletteHotkeyAction, SecondaryHotkeyAction};
+        use std::collections::BTreeMap;
         // Pin every field so a future addition that forgets one of the
         // conversion arms (camelCase serde rename, secret_handling default,
         // ai_provider variants, locale tag) trips this test.
+        let mut palette_hotkeys = BTreeMap::new();
+        palette_hotkeys.insert(PaletteHotkeyAction::Pin, "Cmd+Alt+P".to_owned());
+        let mut secondary_hotkeys = BTreeMap::new();
+        secondary_hotkeys.insert(SecondaryHotkeyAction::RepasteLast, "Cmd+Alt+V".to_owned());
+
         let original = AppSettings {
             global_hotkey: "Cmd+Shift+V".to_owned(),
             history_retention_count: 1234,
@@ -830,6 +883,13 @@ mod tests {
             appearance: Appearance::Dark,
             auto_launch: true,
             secret_handling: SecretHandling::StoreFull,
+            palette_hotkeys: palette_hotkeys.clone(),
+            secondary_hotkeys: secondary_hotkeys.clone(),
+            palette_row_count: 12,
+            show_preview_pane: false,
+            show_in_menu_bar: false,
+            clear_on_quit: true,
+            capture_initial_clipboard_on_launch: false,
         };
 
         let dto: AppSettingsDto = original.clone().into();
@@ -871,6 +931,13 @@ mod tests {
             restored.secret_handling,
             SecretHandling::StoreFull
         ));
+        assert_eq!(restored.palette_hotkeys, palette_hotkeys);
+        assert_eq!(restored.secondary_hotkeys, secondary_hotkeys);
+        assert_eq!(restored.palette_row_count, 12);
+        assert!(!restored.show_preview_pane);
+        assert!(!restored.show_in_menu_bar);
+        assert!(restored.clear_on_quit);
+        assert!(!restored.capture_initial_clipboard_on_launch);
     }
 
     #[test]

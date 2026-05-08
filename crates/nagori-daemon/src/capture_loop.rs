@@ -27,6 +27,12 @@ pub struct CaptureLoop<R, E, A> {
     window: Option<Arc<dyn WindowBehavior>>,
     last_platform_warn_at: Option<Instant>,
     search_cache: Option<SharedSearchCache>,
+    /// `true` until the loop has observed and acted on its first sequence.
+    /// When `capture_initial_clipboard_on_launch` is `false`, the first
+    /// observed sequence is recorded as `last_sequence` and the body read is
+    /// skipped, so whatever was already on the pasteboard at startup never
+    /// reaches storage.
+    pristine: bool,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -45,7 +51,16 @@ where
             window: None,
             last_platform_warn_at: None,
             search_cache: None,
+            pristine: true,
         }
+    }
+
+    /// Reset the dedup baseline so the next observed sequence is treated as
+    /// fresh content. Useful after macOS sleep/wake when the pasteboard
+    /// counter can lap silently and we'd otherwise skip a real change as a
+    /// duplicate.
+    pub fn reset_sequence_baseline(&mut self) {
+        self.last_sequence = None;
     }
 
     fn note_capture_error(&mut self, err: &AppError) {
@@ -86,6 +101,7 @@ where
         self.settings = settings;
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn capture_once(&mut self) -> Result<Option<EntryId>> {
         if !self.settings.capture_enabled {
             return Ok(None);
@@ -104,6 +120,16 @@ where
         if self.last_sequence.as_ref() == Some(&sequence) {
             return Ok(None);
         }
+        // Honour the "skip whatever was on the clipboard before launch" flag
+        // by anchoring `last_sequence` to the first sequence we observe and
+        // bailing out without reading the body. Subsequent ticks behave
+        // normally because `pristine` flips to `false`.
+        if self.pristine && !self.settings.capture_initial_clipboard_on_launch {
+            self.pristine = false;
+            self.last_sequence = Some(sequence);
+            return Ok(None);
+        }
+        self.pristine = false;
         let frontmost_source = if let Some(window) = &self.window {
             window
                 .frontmost_app()
@@ -711,6 +737,41 @@ mod tests {
             cache.lock().unwrap().is_empty(),
             "successful capture must invalidate the attached search cache",
         );
+    }
+
+    #[tokio::test]
+    async fn capture_once_skips_existing_clipboard_when_disabled_on_launch() {
+        // capture_initial_clipboard_on_launch=false: whatever was on the
+        // pasteboard before Nagori started must be ignored, but a *new*
+        // clip after that point should still be captured.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        clipboard
+            .write_text("preexisting clipboard value")
+            .await
+            .expect("seed clipboard");
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            ..AppSettings::default()
+        };
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+
+        // First tick observes the existing sequence and discards it.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+
+        // A user-initiated clip after launch must still flow through.
+        clipboard
+            .write_text("post launch clip")
+            .await
+            .expect("clipboard write");
+        let id = loop_
+            .capture_once()
+            .await
+            .unwrap()
+            .expect("post-launch clip should be inserted");
+        let stored = store.get(id).await.unwrap().expect("stored row");
+        assert_eq!(stored.plain_text(), Some("post launch clip"));
     }
 
     #[tokio::test]

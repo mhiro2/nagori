@@ -46,6 +46,15 @@ export const addEntry = (text: string): Promise<EntryDto> => invoke('add_entry',
 
 export const deleteEntry = (id: string): Promise<void> => invoke('delete_entry', { id });
 
+export const deleteEntries = (ids: string[]): Promise<number> => invoke('delete_entries', { ids });
+
+export const copyEntriesCombined = (ids: string[]): Promise<void> =>
+  invoke('copy_entries_combined', { ids });
+
+export const clearHistory = (): Promise<number> => invoke('clear_history');
+
+export const repasteLast = (): Promise<void> => invoke('repaste_last');
+
 export const pinEntry = (id: string, pinned: boolean): Promise<void> =>
   invoke('pin_entry', { id, pinned });
 

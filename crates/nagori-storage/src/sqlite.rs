@@ -231,6 +231,32 @@ impl SqliteStore {
         .await
     }
 
+    /// Soft-delete every non-pinned entry. Used by the desktop's
+    /// `clear_on_quit` setting and the secondary "Clear history" hotkey.
+    /// Pinned rows survive so users can keep curated snippets across the
+    /// purge.
+    pub async fn clear_non_pinned(&self) -> Result<usize> {
+        self.run_blocking(move |store| {
+            let now = format_time(OffsetDateTime::now_utc())?;
+            let mut conn = store.conn()?;
+            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let changed = tx
+                .execute(
+                    "UPDATE entries
+                 SET deleted_at = ?1, updated_at = ?1
+                 WHERE pinned = 0 AND deleted_at IS NULL",
+                    params![now],
+                )
+                .map_err(|err| storage_err(&err))?;
+            if changed > 0 {
+                prune_deleted_search_rows(&tx)?;
+            }
+            tx.commit().map_err(|err| storage_err(&err))?;
+            Ok(changed)
+        })
+        .await
+    }
+
     pub async fn enforce_retention_count(&self, max_entries: usize) -> Result<usize> {
         if max_entries == 0 {
             return Ok(0);
@@ -1911,6 +1937,29 @@ mod tests {
         assert!(surviving.contains(&pinned), "pinned should survive cutoff");
         assert!(surviving.contains(&fresh), "fresh row must remain");
         assert!(!surviving.contains(&stale), "stale row should be cleared");
+    }
+
+    #[tokio::test]
+    async fn clear_non_pinned_purges_only_unpinned_rows() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pinned = insert_text(&store, "pinned anchor").await;
+        let unpinned_a = insert_text(&store, "ephemeral one").await;
+        let unpinned_b = insert_text(&store, "ephemeral two").await;
+        store.set_pinned(pinned, true).await.unwrap();
+
+        let removed = store.clear_non_pinned().await.unwrap();
+        assert_eq!(removed, 2);
+
+        let surviving = store
+            .list_recent(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(surviving, vec![pinned], "only pinned row must survive");
+        assert!(!surviving.contains(&unpinned_a));
+        assert!(!surviving.contains(&unpinned_b));
     }
 
     #[tokio::test]

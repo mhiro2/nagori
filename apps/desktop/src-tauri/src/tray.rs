@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, Wry};
 use crate::state::AppState;
 use crate::toggle_main_palette;
 
-const TRAY_ID: &str = "nagori-main";
+pub(crate) const TRAY_ID: &str = "nagori-main";
 const ID_TOGGLE_PALETTE: &str = "tray.toggle_palette";
 const ID_TOGGLE_CAPTURE: &str = "tray.toggle_capture";
 const ID_OPEN_SETTINGS: &str = "tray.open_settings";
@@ -97,6 +97,17 @@ pub fn refresh(app: &AppHandle, capture_enabled: bool) {
         return;
     };
     handles.set_capture_label(capture_enabled);
+}
+
+/// Toggle whether the tray icon is currently shown in the menu bar. Idempotent:
+/// calling repeatedly with the same `visible` is a no-op.
+pub fn set_visible(app: &AppHandle, visible: bool) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    if let Err(err) = tray.set_visible(visible) {
+        tracing::warn!(error = %err, visible, "tray_set_visible_failed");
+    }
 }
 
 fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {

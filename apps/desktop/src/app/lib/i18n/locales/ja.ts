@@ -96,6 +96,9 @@ export const ja: Messages = {
         plain_text: 'プレーンテキスト',
       },
       hotkey: 'グローバルホットキー',
+      captureInitialClipboard: '起動時にクリップボードを取り込む',
+      captureInitialClipboardHelp:
+        '有効にすると起動時点でのクリップボードを履歴に追加します。無効にすると既存の内容は無視されます。',
     },
     retention: {
       legend: '保持ポリシー',
@@ -175,6 +178,40 @@ export const ja: Messages = {
       legend: 'OS 連携',
       autoLaunch: 'ログイン時に自動起動',
       autoLaunchHelp: 'launchd の LaunchAgent を登録してログイン時に Nagori を起動します。',
+      menuBar: 'メニューバーに表示',
+      menuBarHelp:
+        'macOS のメニューバーに Nagori のトレイアイコンを表示します。バックグラウンド常駐のみで使う場合は無効にできます。',
+      clearOnQuit: '終了時にピン留め以外を削除',
+      clearOnQuitHelp:
+        'アプリ終了時にピン留めしていない履歴をすべて削除します。ピン留めした項目は残ります。',
+    },
+    display: {
+      legend: 'パレット表示',
+      rowCount: '表示行数',
+      rowCountHelp: 'スクロール前にパレットへ表示する最大行数（3〜20）。',
+      previewPane: 'プレビューペインを表示',
+      previewPaneHelp: '無効にするとリストが横幅いっぱいに広がり、パレットがコンパクトになります。',
+    },
+    hotkeys: {
+      legend: 'ホットキー',
+      paletteHeading: 'パレット内ショートカット',
+      paletteHelp: 'パレット内のショートカットを上書きできます。空欄の場合は既定値が使われます。',
+      secondaryHeading: '追加グローバルホットキー',
+      secondaryHelp:
+        'メインのパレットホットキーと並行して登録される、任意のシステム全域ショートカットです。',
+      placeholder: '例: Cmd+Shift+P',
+      paletteActions: {
+        pin: '選択をピン留め切替',
+        delete: '選択を削除',
+        'paste-as-plain': 'プレーンテキストでペースト',
+        'copy-without-paste': 'ペーストせずコピーのみ',
+        clear: '検索クエリをクリア',
+        'open-preview': '拡大プレビューを開閉',
+      },
+      secondaryActions: {
+        'repaste-last': '直近のエントリを再ペースト',
+        'clear-history': 'ピン留め以外の履歴を削除',
+      },
     },
   },
   keybindings: {

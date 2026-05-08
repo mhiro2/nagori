@@ -10,6 +10,9 @@ use nagori_daemon::NagoriRuntime;
 use state::AppState;
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+use nagori_core::SecondaryHotkeyAction;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -27,16 +30,12 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 None,
             ))
-            .plugin(
-                tauri_plugin_global_shortcut::Builder::new()
-                    .with_handler(|app, _shortcut, event| {
-                        use tauri_plugin_global_shortcut::ShortcutState;
-                        if matches!(event.state(), ShortcutState::Pressed) {
-                            toggle_main_palette(app);
-                        }
-                    })
-                    .build(),
-            )
+            // Per-shortcut handlers attach in `spawn_settings_subscribers`
+            // (primary palette toggle and `register_secondary_hotkeys`) so
+            // each accelerator only fires its own callback. Registering a
+            // global `with_handler` here would additionally run the palette
+            // toggle for *every* shortcut, hijacking secondary hotkeys.
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     };
 
     builder
@@ -60,7 +59,10 @@ pub fn run() {
             app.manage(state);
 
             #[cfg(target_os = "macos")]
-            tray::install(app.handle())?;
+            {
+                tray::install(app.handle())?;
+                install_clear_on_quit_hook(app.handle());
+            }
 
             #[cfg(target_os = "macos")]
             spawn_settings_subscribers(app.handle());
@@ -94,6 +96,10 @@ pub fn run() {
             commands::get_entry_preview,
             commands::add_entry,
             commands::delete_entry,
+            commands::delete_entries,
+            commands::copy_entries_combined,
+            commands::clear_history,
+            commands::repaste_last,
             commands::pin_entry,
             commands::run_ai_action,
             commands::save_ai_result,
@@ -105,27 +111,72 @@ pub fn run() {
             commands::toggle_palette,
             commands::hide_palette,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
             // Replacing the previous `expect` so the user sees the
             // underlying error (DB path, permission, etc.) instead of
             // only the generic panic banner. Exit non-zero so launchd /
             // login items can detect the failure.
-            tracing::error!(error = %err, "tauri_run_failed");
+            tracing::error!(error = %err, "tauri_build_failed");
             eprintln!("nagori: tauri runtime failed: {err}");
             std::process::exit(1);
+        })
+        .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            on_run_event(app_handle, &event);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = app_handle;
+                let _ = event;
+            }
         });
+}
+
+/// macOS-only run-event hook. We listen for `RunEvent::ExitRequested` so the
+/// tray "Quit" entry (which invokes `app.exit(0)` directly and bypasses the
+/// per-window `WindowEvent::CloseRequested` listener installed in
+/// `install_clear_on_quit_hook`) still honours the `clear_on_quit` setting
+/// before the runtime tears down.
+#[cfg(target_os = "macos")]
+fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
+    if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+        return;
+    }
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let runtime = state.runtime.clone();
+    let snapshot = runtime.current_settings();
+    if !snapshot.clear_on_quit {
+        return;
+    }
+    // Block the runtime briefly so the soft-delete completes before tauri
+    // destroys the tokio runtime. A 1s ceiling keeps a wedged DB from
+    // freezing the quit path indefinitely.
+    let _ = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.clear_non_pinned(),
+        )
+        .await
+    });
 }
 
 /// Spawn background tasks that subscribe to settings changes:
 ///   * keep the global hotkey in sync with `AppSettings.global_hotkey`,
 ///   * keep launch-at-login in sync with `AppSettings.auto_launch`,
+///   * keep secondary global shortcuts in sync with
+///     `AppSettings.secondary_hotkeys`,
+///   * keep the menu-bar tray icon visible/hidden per
+///     `AppSettings.show_in_menu_bar`,
 ///   * notify the user once when capture is paused / resumed,
 ///   * notify the user when the AI provider transitions into `enabled` so
 ///     they realise remote calls may now happen.
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_lines)]
 fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
     use nagori_core::SettingsRepository;
+    use std::collections::BTreeMap;
     use tauri::Emitter;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     use tauri_plugin_notification::NotificationExt;
@@ -151,8 +202,11 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         let mut current_capture = initial.capture_enabled;
         let mut current_ai_enabled = initial.ai_enabled;
         let mut current_auto_launch = initial.auto_launch;
+        let mut current_show_in_menu_bar = initial.show_in_menu_bar;
+        let mut current_secondary: BTreeMap<SecondaryHotkeyAction, String> =
+            initial.secondary_hotkeys.clone();
 
-        if let Err(err) = app.global_shortcut().register(current_hotkey.as_str()) {
+        if let Err(err) = register_primary_hotkey(&app, current_hotkey.as_str()) {
             tracing::warn!(error = %err, "global_shortcut_register_failed");
             // Surface to the UI so the settings page can prompt the user to
             // pick a different hotkey rather than silently leaving the
@@ -173,13 +227,22 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             tracing::warn!(error = %err, "auto_launch_sync_failed");
         }
 
+        // Initial reconciliation for tray + secondary shortcuts. The active
+        // map returned by the registrar reflects what actually bound — a
+        // failure leaves the prior accelerator out of `current_secondary`
+        // so later reconciles won't try to unregister something we never
+        // registered (which would tear down a sibling action sharing the
+        // same accelerator).
+        tray::set_visible(&app, current_show_in_menu_bar);
+        current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
+
         while settings_rx.changed().await.is_ok() {
             let snapshot = settings_rx.borrow().clone();
 
             if snapshot.global_hotkey != current_hotkey {
                 let next = snapshot.global_hotkey.clone();
                 let _ = app.global_shortcut().unregister(current_hotkey.as_str());
-                if let Err(err) = app.global_shortcut().register(next.as_str()) {
+                if let Err(err) = register_primary_hotkey(&app, next.as_str()) {
                     tracing::warn!(
                         error = %err,
                         new = %next,
@@ -192,7 +255,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                             "error": err.to_string(),
                         }),
                     );
-                    let _ = app.global_shortcut().register(current_hotkey.as_str());
+                    let _ = register_primary_hotkey(&app, current_hotkey.as_str());
                 } else {
                     current_hotkey = next;
                 }
@@ -233,10 +296,216 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                 }
             }
 
+            if snapshot.show_in_menu_bar != current_show_in_menu_bar {
+                current_show_in_menu_bar = snapshot.show_in_menu_bar;
+                tray::set_visible(&app, current_show_in_menu_bar);
+            }
+
+            if snapshot.secondary_hotkeys != current_secondary {
+                current_secondary = register_secondary_hotkeys(
+                    &app,
+                    &current_secondary,
+                    &snapshot.secondary_hotkeys,
+                );
+            }
+
             // Refresh the tray menu so the "Pause Capture" / "Resume
             // Capture" label tracks the current state.
             tray::refresh(&app, current_capture);
         }
+    });
+}
+
+/// Register the primary palette-toggle hotkey with its own handler. We use
+/// `on_shortcut` rather than the plugin-level `with_handler` so the toggle
+/// only fires when the user presses *this* accelerator — secondary hotkeys
+/// (registered with their own handlers) would otherwise also trigger the
+/// palette toggle because `with_handler` runs for every shortcut.
+#[cfg(target_os = "macos")]
+fn register_primary_hotkey(
+    app: &tauri::AppHandle,
+    accelerator: &str,
+) -> std::result::Result<(), tauri_plugin_global_shortcut::Error> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+    app.global_shortcut()
+        .on_shortcut(accelerator, |handle, _shortcut, event| {
+            if matches!(event.state(), ShortcutState::Pressed) {
+                toggle_main_palette(handle);
+            }
+        })
+}
+
+/// Reconcile the registered secondary global shortcuts. Each entry maps a
+/// `SecondaryHotkeyAction` to an accelerator string; we unregister anything
+/// that disappeared or whose binding changed, then register the new set with
+/// per-action handlers. Returns the map of bindings that are *actually*
+/// registered after this call so the caller can carry partial-failure state
+/// into the next reconcile (otherwise a later reconcile would unregister an
+/// accelerator we never managed to bind in the first place, taking down a
+/// sibling action that happened to share it).
+#[cfg(target_os = "macos")]
+fn register_secondary_hotkeys(
+    app: &tauri::AppHandle,
+    previous: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+    next: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+) -> std::collections::BTreeMap<SecondaryHotkeyAction, String> {
+    use tauri::Emitter;
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let mut active = previous.clone();
+
+    for (action, accel) in previous {
+        // Only unregister if the next map either drops the binding or
+        // changes the accelerator — leaving an unchanged binding alone
+        // avoids a brief window where the shortcut is unregistered.
+        if next.get(action) != Some(accel) {
+            let _ = app.global_shortcut().unregister(accel.as_str());
+            active.remove(action);
+        }
+    }
+
+    for (action, accel) in next {
+        if accel.trim().is_empty() {
+            continue;
+        }
+        if previous.get(action) == Some(accel) {
+            continue;
+        }
+        let captured = *action;
+        let result =
+            app.global_shortcut()
+                .on_shortcut(accel.as_str(), move |handle, _shortcut, event| {
+                    if matches!(event.state(), ShortcutState::Pressed) {
+                        dispatch_secondary_hotkey(handle, captured);
+                    }
+                });
+        if let Err(err) = result {
+            tracing::warn!(
+                error = %err,
+                accel = %accel,
+                action = ?action,
+                "secondary_hotkey_register_failed",
+            );
+            let _ = app.emit(
+                "nagori://hotkey_register_failed",
+                serde_json::json!({
+                    "hotkey": accel,
+                    "error": err.to_string(),
+                    "kind": "secondary",
+                }),
+            );
+        } else {
+            active.insert(*action, accel.clone());
+        }
+    }
+
+    active
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyAction) {
+    use tauri::Emitter;
+    use tauri_plugin_notification::NotificationExt;
+
+    let app = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let runtime = state.runtime.clone();
+        match action {
+            SecondaryHotkeyAction::RepasteLast => {
+                // Mirror the Tauri `repaste_last` command: prefer the
+                // explicitly tracked last-pasted id so a fresh capture from
+                // another app cannot replace it, falling back to the
+                // recency-list head only when the user has not pasted yet
+                // or when the tracked entry has been retention-swept (the
+                // daemon maintenance loop and IPC `Clear` paths delete by
+                // id without notifying `AppState`, so a stale slot would
+                // otherwise turn the hotkey into a no-op).
+                if let Some(id) = state.last_pasted() {
+                    match runtime.paste_entry(id, None).await {
+                        Ok(()) => {
+                            state.record_last_pasted(id);
+                            return;
+                        }
+                        Err(nagori_core::AppError::NotFound) => state.clear_last_pasted_if(id),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "repaste_last_paste_failed");
+                            let _ = app.emit(
+                                "nagori://paste_failed",
+                                serde_json::json!({ "error": err.to_string() }),
+                            );
+                            return;
+                        }
+                    }
+                }
+                let entries = match runtime.list_recent(1).await {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "repaste_last_lookup_failed");
+                        return;
+                    }
+                };
+                let Some(entry) = entries.into_iter().next() else {
+                    return;
+                };
+                let id = entry.id;
+                if let Err(err) = runtime.paste_entry(id, None).await {
+                    tracing::warn!(error = %err, "repaste_last_paste_failed");
+                    let _ = app.emit(
+                        "nagori://paste_failed",
+                        serde_json::json!({ "error": err.to_string() }),
+                    );
+                } else {
+                    state.record_last_pasted(id);
+                }
+            }
+            SecondaryHotkeyAction::ClearHistory => match runtime.clear_non_pinned().await {
+                Ok(purged) => {
+                    state.clear_last_pasted();
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Nagori")
+                        .body(format!("Cleared {purged} non-pinned entries."))
+                        .show();
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "clear_history_failed");
+                }
+            },
+        }
+    });
+}
+
+/// Wire the macOS window-close handler to honour `clear_on_quit`. When the
+/// user closes the (sole) main window with the setting enabled, we purge
+/// non-pinned history before tauri tears the runtime down.
+#[cfg(target_os = "macos")]
+fn install_clear_on_quit_hook(handle: &tauri::AppHandle) {
+    use tauri::WindowEvent;
+    let Some(window) = handle.get_webview_window("main") else {
+        return;
+    };
+    let app = handle.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, WindowEvent::CloseRequested { .. }) {
+            return;
+        }
+        let runtime = app.state::<AppState>().runtime.clone();
+        let snapshot = runtime.current_settings();
+        if !snapshot.clear_on_quit {
+            return;
+        }
+        // Block the runtime briefly so the soft-delete completes before
+        // the app fully tears down. A 1s ceiling keeps a wedged DB from
+        // freezing the quit path.
+        let _ = tauri::async_runtime::block_on(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                runtime.clear_non_pinned(),
+            )
+            .await
+        });
     });
 }
 

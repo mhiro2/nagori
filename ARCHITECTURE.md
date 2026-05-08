@@ -803,15 +803,28 @@ change.
   `capture_enabled`), *Settings…*, *Quit Nagori*. The settings entry
   emits the Tauri event `nagori://navigate` with payload `"settings"`;
   the frontend listens via `@tauri-apps/api/event` and switches its
-  route.
+  route. Visibility is gated by `AppSettings.show_in_menu_bar`; toggling
+  the setting installs or removes the tray icon at runtime.
 - **Auto-launch (`tauri-plugin-autostart`)** — registers a
   `MacosLauncher::LaunchAgent` on demand. The settings subscriber keeps
   the LaunchAgent in sync with `AppSettings.auto_launch`; toggling the
   checkbox enables / disables the agent without a relaunch.
+- **Secondary hotkeys** — `AppSettings.secondary_hotkeys`
+  (`SecondaryHotkeyAction → accelerator`) is reconciled by the same
+  watch channel. `RepasteLast` re-pastes the most recent entry;
+  `ClearHistory` deletes every non-pinned row. Conflicts surface via
+  the same `nagori://hotkey_register_failed` event used by the primary
+  hotkey.
+- **Clear-on-quit** — when `AppSettings.clear_on_quit` is true, the
+  main window's `WindowEvent::CloseRequested` handler synchronously
+  deletes non-pinned entries before tear-down. Pinned entries are
+  always preserved.
 - **Notifications (`tauri-plugin-notification`)** — one-shot "ready"
   alert after setup, plus state-change toasts when `capture_enabled` or
-  `ai_enabled` flip. No-op silently if notification permission is not
-  granted.
+  `ai_enabled` flip. Auto-paste failures (e.g. revoked Accessibility)
+  emit `nagori://paste_failed`; the palette renders an in-window toast
+  with a one-click jump into Settings. No-op silently if notification
+  permission is not granted.
 - **Permissions deep link** — the `open_accessibility_settings`
   command shells out to `open(1)` with the
   `x-apple.systempreferences:` URL so the onboarding banner can take

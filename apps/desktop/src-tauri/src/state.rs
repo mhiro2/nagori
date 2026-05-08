@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use std::{sync::Arc, time::Duration};
@@ -7,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use nagori_ai::LocalAiProvider;
 #[cfg(target_os = "macos")]
 use nagori_core::SourceApp;
-use nagori_core::{AppError, Result};
+use nagori_core::{AppError, EntryId, Result};
 use nagori_daemon::NagoriRuntime;
 #[cfg(target_os = "macos")]
 use nagori_daemon::{CaptureLoop, MaintenanceService};
@@ -31,6 +30,43 @@ pub struct AppState {
     /// box.
     #[cfg(target_os = "macos")]
     pub previous_frontmost: Arc<Mutex<Option<SourceApp>>>,
+    /// Most recently pasted entry id. Powers the "repaste last" secondary
+    /// hotkey so it targets the entry the user actually pasted instead of
+    /// whatever happens to top the recency list (a fresh capture from
+    /// elsewhere can otherwise hijack the slot between pastes).
+    pub last_pasted_id: Mutex<Option<EntryId>>,
+}
+
+impl AppState {
+    pub fn record_last_pasted(&self, id: EntryId) {
+        if let Ok(mut slot) = self.last_pasted_id.lock() {
+            *slot = Some(id);
+        }
+    }
+
+    pub fn last_pasted(&self) -> Option<EntryId> {
+        self.last_pasted_id.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// Clear the last-pasted slot if it currently holds `id`. Called after
+    /// any path that removes the entry (single delete, bulk delete) so the
+    /// next "repaste last" falls through to the recency fallback rather
+    /// than failing with `NotFound`.
+    pub fn clear_last_pasted_if(&self, id: EntryId) {
+        if let Ok(mut slot) = self.last_pasted_id.lock()
+            && *slot == Some(id)
+        {
+            *slot = None;
+        }
+    }
+
+    /// Clear the last-pasted slot unconditionally. Used by `clear_history`
+    /// and other bulk-purge paths where any tracked id is presumed gone.
+    pub fn clear_last_pasted(&self) {
+        if let Ok(mut slot) = self.last_pasted_id.lock() {
+            *slot = None;
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -165,6 +201,7 @@ impl AppState {
             runtime,
             window,
             previous_frontmost: Arc::new(Mutex::new(None)),
+            last_pasted_id: Mutex::new(None),
         })
     }
 
@@ -174,7 +211,10 @@ impl AppState {
         let runtime = NagoriRuntime::builder(store)
             .ai(Arc::new(LocalAiProvider::default()))
             .build();
-        Self { runtime }
+        Self {
+            runtime,
+            last_pasted_id: Mutex::new(None),
+        }
     }
 }
 

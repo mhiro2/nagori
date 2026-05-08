@@ -119,6 +119,16 @@ export type PasteFormat = 'preserve' | 'plain_text';
 export type RecentOrder = 'by_recency' | 'by_use_count' | 'pinned_first_then_recency';
 export type Appearance = 'light' | 'dark' | 'system';
 
+export type PaletteHotkeyAction =
+  | 'pin'
+  | 'delete'
+  | 'paste-as-plain'
+  | 'copy-without-paste'
+  | 'clear'
+  | 'open-preview';
+
+export type SecondaryHotkeyAction = 'repaste-last' | 'clear-history';
+
 export type AppSettings = {
   globalHotkey: string;
   historyRetentionCount: number;
@@ -142,6 +152,13 @@ export type AppSettings = {
   appearance: Appearance;
   autoLaunch: boolean;
   secretHandling: SecretHandling;
+  paletteHotkeys: Partial<Record<PaletteHotkeyAction, string>>;
+  secondaryHotkeys: Partial<Record<SecondaryHotkeyAction, string>>;
+  paletteRowCount: number;
+  showPreviewPane: boolean;
+  showInMenuBar: boolean;
+  clearOnQuit: boolean;
+  captureInitialClipboardOnLaunch: boolean;
 };
 
 export type PermissionKind =

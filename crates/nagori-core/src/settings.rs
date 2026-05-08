@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,38 @@ pub struct AppSettings {
     /// `StoreRedacted` so the durable copy on disk is the redacted form, not
     /// the raw secret — even if the user later exports the DB.
     pub secret_handling: SecretHandling,
+    /// User-overridable bindings for in-palette local actions. Missing keys
+    /// fall back to the built-in defaults defined on the frontend; this map
+    /// is intentionally sparse so users only need to record overrides.
+    #[serde(default)]
+    pub palette_hotkeys: BTreeMap<PaletteHotkeyAction, String>,
+    /// Optional auxiliary global shortcuts beyond `global_hotkey`. The value
+    /// is the same accelerator-string format `tauri-plugin-global-shortcut`
+    /// accepts. Empty entries are ignored.
+    #[serde(default)]
+    pub secondary_hotkeys: BTreeMap<SecondaryHotkeyAction, String>,
+    /// Number of result rows displayed in the palette before scrolling kicks
+    /// in. Used purely for visual sizing — search itself is independent.
+    #[serde(default = "default_palette_row_count")]
+    pub palette_row_count: u32,
+    /// Whether the right-hand preview pane is shown. When `false` the
+    /// palette becomes single-column for higher information density.
+    #[serde(default = "default_show_preview_pane")]
+    pub show_preview_pane: bool,
+    /// Whether the menu-bar tray icon is visible. When `false` the user
+    /// reaches Nagori only through the global hotkey / CLI.
+    #[serde(default = "default_show_in_menu_bar")]
+    pub show_in_menu_bar: bool,
+    /// When `true`, all non-pinned entries are cleared during app shutdown.
+    /// Pinned entries are always preserved.
+    #[serde(default)]
+    pub clear_on_quit: bool,
+    /// When `false`, the capture loop discards the very first clipboard
+    /// sequence it sees on launch (skipping whatever was already on the
+    /// pasteboard before Nagori started). Default `true` preserves the
+    /// previous behaviour of capturing the existing clipboard contents.
+    #[serde(default = "default_capture_initial_clipboard_on_launch")]
+    pub capture_initial_clipboard_on_launch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +103,36 @@ pub enum Appearance {
     Dark,
     #[default]
     System,
+}
+
+/// Identifier for a user-rebindable in-palette action.
+///
+/// The frontend owns the default key bindings; this enum exists so the
+/// override map has a stable wire format that does not drift if the UI
+/// introduces alias actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaletteHotkeyAction {
+    Pin,
+    Delete,
+    PasteAsPlain,
+    CopyWithoutPaste,
+    Clear,
+    OpenPreview,
+}
+
+/// Identifier for an auxiliary global shortcut.
+///
+/// Each variant is registered alongside the primary palette hotkey
+/// independently, and may be left unbound by omitting the entry from the
+/// settings map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecondaryHotkeyAction {
+    /// Re-paste the most recently used entry without opening the palette.
+    RepasteLast,
+    /// Clear non-pinned history.
+    ClearHistory,
 }
 
 /// Handling strategy for entries classified as `Sensitivity::Secret`.
@@ -144,8 +207,31 @@ impl Default for AppSettings {
             appearance: Appearance::default(),
             auto_launch: false,
             secret_handling: SecretHandling::default(),
+            palette_hotkeys: BTreeMap::new(),
+            secondary_hotkeys: BTreeMap::new(),
+            palette_row_count: default_palette_row_count(),
+            show_preview_pane: default_show_preview_pane(),
+            show_in_menu_bar: default_show_in_menu_bar(),
+            clear_on_quit: false,
+            capture_initial_clipboard_on_launch: default_capture_initial_clipboard_on_launch(),
         }
     }
+}
+
+const fn default_palette_row_count() -> u32 {
+    8
+}
+
+const fn default_show_preview_pane() -> bool {
+    true
+}
+
+const fn default_show_in_menu_bar() -> bool {
+    true
+}
+
+const fn default_capture_initial_clipboard_on_launch() -> bool {
+    true
 }
 
 pub fn default_capture_kinds() -> BTreeSet<ContentKind> {

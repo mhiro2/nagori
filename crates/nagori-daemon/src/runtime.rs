@@ -448,6 +448,15 @@ impl NagoriRuntime {
         Ok(())
     }
 
+    /// Soft-delete every non-pinned entry. Returns the number of rows
+    /// purged so callers can surface "cleared N entries" toasts.
+    pub async fn clear_non_pinned(&self) -> Result<usize> {
+        self.invalidate_search_cache();
+        let purged = self.store.clear_non_pinned().await?;
+        self.invalidate_search_cache();
+        Ok(purged)
+    }
+
     pub async fn pin_entry(&self, id: EntryId, pinned: bool) -> Result<()> {
         // `recent_entries` hoists pinned rows to the top, so flipping the
         // pin bit reorders the empty-query result; the cache must drop hits
