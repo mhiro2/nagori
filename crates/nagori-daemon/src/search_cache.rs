@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use nagori_core::{RecentOrder, SearchFilters, SearchMode, SearchQuery, SearchResult};
+use tracing::warn;
 
 /// Maximum normalized-query length that participates in the cache.
 ///
@@ -178,6 +179,29 @@ pub type SharedSearchCache = Arc<Mutex<RecentSearchCache>>;
 
 pub fn new_shared_cache() -> SharedSearchCache {
     Arc::new(Mutex::new(RecentSearchCache::default()))
+}
+
+/// Acquire a [`SharedSearchCache`] guard, recovering from a poisoned mutex.
+///
+/// If a previous holder panicked while the cache was locked, the OS-level
+/// `Mutex` returns `Err(PoisonError)` on every subsequent `lock()`. The
+/// review found that callers were silently dropping the guard in that case,
+/// so a poisoned cache would keep serving stale invalidations: an
+/// `invalidate()` call would no-op while a follow-up `put_if_epoch` could
+/// still succeed. Recovering the inner data and forcing a fresh
+/// invalidation closes that gap — a poisoned guard implies an in-flight
+/// mutation panicked, so the cache cannot be trusted regardless. The state
+/// inside is just a `Vec` that has no held invariants beyond LRU ordering,
+/// so taking the inner value is safe.
+pub fn lock_or_recover(cache: &SharedSearchCache) -> MutexGuard<'_, RecentSearchCache> {
+    cache.lock().unwrap_or_else(|poison| {
+        warn!("search_cache_mutex_poisoned reason=recovering");
+        let mut guard = poison.into_inner();
+        // Force-invalidate so any half-applied state from the panicking
+        // holder cannot leak into subsequent hits.
+        guard.invalidate();
+        guard
+    })
 }
 
 #[cfg(test)]

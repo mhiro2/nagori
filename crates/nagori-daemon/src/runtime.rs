@@ -22,7 +22,9 @@ use nagori_storage::SqliteStore;
 use time::OffsetDateTime;
 use tokio::sync::{Notify, watch};
 
-use crate::search_cache::{CacheKey, CacheLookup, SharedSearchCache, new_shared_cache};
+use crate::search_cache::{
+    CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
+};
 
 #[derive(Clone)]
 pub struct NagoriRuntime {
@@ -83,9 +85,7 @@ impl NagoriRuntime {
     /// [`crate::search_cache::RecentSearchCache::put_if_epoch`] from a
     /// search that started in parallel and snapshotted the older epoch.
     pub fn invalidate_search_cache(&self) {
-        if let Ok(mut cache) = self.search_cache.lock() {
-            cache.invalidate();
-        }
+        lock_or_recover(&self.search_cache).invalidate();
     }
 
     pub fn settings_subscribe(&self) -> watch::Receiver<AppSettings> {
@@ -410,21 +410,17 @@ impl NagoriRuntime {
         // `invalidate` between the SQLite read and our acquisition of the
         // lock again.
         let cached_epoch = if key.is_eligible() {
-            match self.search_cache.lock() {
-                Ok(mut cache) => match cache.lookup(&key) {
-                    CacheLookup::Hit(hit) => return Ok(hit),
-                    CacheLookup::Miss { epoch } => Some(epoch),
-                },
-                Err(_) => None,
+            let mut cache = lock_or_recover(&self.search_cache);
+            match cache.lookup(&key) {
+                CacheLookup::Hit(hit) => return Ok(hit),
+                CacheLookup::Miss { epoch } => Some(epoch),
             }
         } else {
             None
         };
         let results = self.store.search(query).await?;
-        if let Some(epoch) = cached_epoch
-            && let Ok(mut cache) = self.search_cache.lock()
-        {
-            cache.put_if_epoch(key, results.clone(), epoch);
+        if let Some(epoch) = cached_epoch {
+            lock_or_recover(&self.search_cache).put_if_epoch(key, results.clone(), epoch);
         }
         Ok(results)
     }

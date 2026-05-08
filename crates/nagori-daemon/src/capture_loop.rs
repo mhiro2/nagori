@@ -9,7 +9,7 @@ use nagori_platform::{ClipboardReader, WindowBehavior};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::search_cache::SharedSearchCache;
+use crate::search_cache::{SharedSearchCache, lock_or_recover};
 
 /// Minimum gap between two consecutive `AppError::Platform` warnings out of
 /// the capture loop. The OS-level clipboard read can fail repeatedly (e.g.
@@ -341,17 +341,13 @@ where
         // a concurrent `runtime.search()` could lock the cache between
         // SQLite commit and our post-invalidate and serve a pre-insert hit
         // even though the new row is already durable.
-        if let Some(cache) = &self.search_cache
-            && let Ok(mut guard) = cache.lock()
-        {
-            guard.invalidate();
+        if let Some(cache) = &self.search_cache {
+            lock_or_recover(cache).invalidate();
         }
         let id = self.entries.insert(entry).await?;
         info!(entry_id = %id, "entry_inserted");
-        if let Some(cache) = &self.search_cache
-            && let Ok(mut guard) = cache.lock()
-        {
-            guard.invalidate();
+        if let Some(cache) = &self.search_cache {
+            lock_or_recover(cache).invalidate();
         }
         Ok(Some(id))
     }

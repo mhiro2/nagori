@@ -3,7 +3,7 @@ use nagori_storage::SqliteStore;
 use time::{Duration, OffsetDateTime};
 use tracing::info;
 
-use crate::search_cache::SharedSearchCache;
+use crate::search_cache::{SharedSearchCache, lock_or_recover};
 
 #[derive(Clone)]
 pub struct MaintenanceService {
@@ -106,10 +106,8 @@ impl MaintenanceService {
     }
 
     fn invalidate_cache(&self) {
-        if let Some(cache) = &self.search_cache
-            && let Ok(mut guard) = cache.lock()
-        {
-            guard.invalidate();
+        if let Some(cache) = &self.search_cache {
+            lock_or_recover(cache).invalidate();
         }
     }
 
