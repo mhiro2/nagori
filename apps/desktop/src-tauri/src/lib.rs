@@ -61,7 +61,6 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 tray::install(app.handle())?;
-                install_clear_on_quit_hook(app.handle());
             }
 
             #[cfg(target_os = "macos")]
@@ -132,11 +131,22 @@ pub fn run() {
         });
 }
 
-/// macOS-only run-event hook. We listen for `RunEvent::ExitRequested` so the
-/// tray "Quit" entry (which invokes `app.exit(0)` directly and bypasses the
-/// per-window `WindowEvent::CloseRequested` listener installed in
-/// `install_clear_on_quit_hook`) still honours the `clear_on_quit` setting
-/// before the runtime tears down.
+/// One-shot guard so multiple `RunEvent::ExitRequested` deliveries (or any
+/// future caller of [`perform_clear_on_quit`]) cannot trigger the soft-delete
+/// twice on the same shutdown — a second pass would race the tokio runtime
+/// teardown that the first pass started.
+#[cfg(target_os = "macos")]
+static CLEAR_ON_QUIT_FIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// macOS-only run-event hook. `RunEvent::ExitRequested` fires for tray
+/// "Quit", `Cmd+Q`, and dock-menu Quit, all of which actually tear the
+/// process down — so it's the single right place to honour
+/// `clear_on_quit`. We deliberately do **not** wire a parallel
+/// `WindowEvent::CloseRequested` handler: on macOS, closing the main
+/// window only hides it, and previously the close hook ran the soft-delete
+/// via `block_on` on the UI thread, freezing the user's desktop for up to
+/// the 1 s timeout while purging history they never asked to lose.
 #[cfg(target_os = "macos")]
 fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
@@ -145,12 +155,19 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     perform_clear_on_quit(handle);
 }
 
-/// Block the runtime briefly so the soft-delete completes before tauri
-/// destroys the tokio runtime. A 1s ceiling keeps a wedged DB from
-/// freezing the quit path indefinitely. No-op when `clear_on_quit` is
-/// disabled or the app state is gone.
+/// Block the tauri runtime briefly so the soft-delete completes before it
+/// destroys the tokio runtime. The 1 s ceiling keeps a wedged DB from
+/// freezing the quit path indefinitely; this is acceptable here because
+/// `RunEvent::ExitRequested` is the documented place to do pre-shutdown
+/// work and the user has already asked us to exit. The [`CLEAR_ON_QUIT_FIRED`]
+/// guard makes the call idempotent so a re-entrant `ExitRequested` cannot
+/// race a half-completed clear.
 #[cfg(target_os = "macos")]
 fn perform_clear_on_quit(handle: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if CLEAR_ON_QUIT_FIRED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
@@ -445,24 +462,6 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
                 }
             },
         }
-    });
-}
-
-/// Wire the macOS window-close handler to honour `clear_on_quit`. When the
-/// user closes the (sole) main window with the setting enabled, we purge
-/// non-pinned history before tauri tears the runtime down.
-#[cfg(target_os = "macos")]
-fn install_clear_on_quit_hook(handle: &tauri::AppHandle) {
-    use tauri::WindowEvent;
-    let Some(window) = handle.get_webview_window("main") else {
-        return;
-    };
-    let app = handle.clone();
-    window.on_window_event(move |event| {
-        if !matches!(event, WindowEvent::CloseRequested { .. }) {
-            return;
-        }
-        perform_clear_on_quit(&app);
     });
 }
 
