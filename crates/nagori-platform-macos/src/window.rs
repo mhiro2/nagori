@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::string::CFString;
 use nagori_core::{Result, SourceApp};
 use nagori_platform::{FrontmostApp, WindowBehavior};
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
@@ -66,6 +68,15 @@ impl WindowBehavior for MacosWindowBehavior {
             .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
         Ok(())
     }
+
+    async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+        // The AX round-trip can stall on a misbehaving frontmost process,
+        // and the call is synchronous, so route through the blocking pool
+        // for the same reason `frontmost_app` does.
+        tokio::task::spawn_blocking(frontmost_focused_is_secure_sync)
+            .await
+            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+    }
 }
 
 fn frontmost_app_sync() -> Option<FrontmostApp> {
@@ -94,4 +105,136 @@ fn activate_app_sync(bundle_id: &str) {
     };
     #[allow(deprecated)]
     let _ = app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+}
+
+/// Walk the system-wide Accessibility tree to learn whether the frontmost
+/// app's focused element is a secure text field. Returns `false` whenever
+/// the AX query fails for any reason — missing Accessibility permission,
+/// a non-AX-aware app in front, or a transient error — so a privacy fail
+/// degrades to "we don't know, allow capture, the `SensitivityClassifier`
+/// rules still apply downstream". Callers that want a hard guarantee must
+/// layer their own policy (e.g. the password-manager bundle id denylist
+/// already shipped via `SensitivityClassifier`).
+fn frontmost_focused_is_secure_sync() -> bool {
+    // Both the role and subrole forms of the constant resolve to the
+    // same string ("AXSecureTextField"); checking each separately
+    // covers apps that surface only one and keeps us forward-
+    // compatible with hosts that promote secure-field semantics to
+    // either slot.
+    const SECURE: &str = "AXSecureTextField";
+    // SAFETY: Each AX call below is documented thread-safe; the FFI
+    // signatures match Apple's headers, and every Create-rule pointer
+    // either flows into `wrap_under_create_rule` (which will release
+    // through `Drop`) or is released explicitly with `CFRelease` before
+    // we leave the unsafe block. We never deref a raw pointer past the
+    // point we release it.
+    unsafe {
+        let systemwide = ax_ffi::AXUIElementCreateSystemWide();
+        if systemwide.is_null() {
+            return false;
+        }
+        // Bound the per-element AX trip so an unresponsive focused app
+        // can't stall the capture loop's polling tick. Apple's docs note
+        // 6 s is the default; 0.25 s is more than 100x what a healthy
+        // app needs and small enough to absorb at our 500 ms cadence.
+        // Errors here are non-fatal — we still proceed with the (longer)
+        // default timeout.
+        let _ = ax_ffi::AXUIElementSetMessagingTimeout(systemwide, 0.25);
+
+        let Some(focused) = copy_element_attribute(systemwide, "AXFocusedUIElement") else {
+            CFRelease(systemwide.cast());
+            return false;
+        };
+        CFRelease(systemwide.cast());
+
+        let role = copy_string_attribute(focused, "AXRole");
+        let subrole = copy_string_attribute(focused, "AXSubrole");
+        CFRelease(focused.cast());
+
+        role.as_deref() == Some(SECURE) || subrole.as_deref() == Some(SECURE)
+    }
+}
+
+/// Copy a child `AXUIElementRef` attribute, transferring the +1 retain
+/// to the caller. The returned pointer must be released with
+/// `CFRelease` — we keep it raw rather than wrapping in `CFType`
+/// because `AXUIElementRef` is an opaque type that the `core-foundation`
+/// crate does not model.
+unsafe fn copy_element_attribute(
+    element: ax_ffi::AXUIElementRef,
+    name: &str,
+) -> Option<ax_ffi::AXUIElementRef> {
+    let attr = CFString::new(name);
+    let mut raw: ax_ffi::CFTypeRef = std::ptr::null();
+    // SAFETY: `attr` is alive for the call; `&mut raw` is a valid out-
+    // pointer for the +1-retained CF result.
+    let err = unsafe {
+        ax_ffi::AXUIElementCopyAttributeValue(
+            element,
+            attr.as_concrete_TypeRef().cast(),
+            &raw mut raw,
+        )
+    };
+    if err != ax_ffi::AX_ERROR_SUCCESS || raw.is_null() {
+        return None;
+    }
+    // The opaque AX type the AX framework returns is conceptually a
+    // mutable handle; cast away the const that CFTypeRef carries.
+    Some(raw.cast_mut())
+}
+
+/// Copy a string-valued AX attribute. The result is auto-released via
+/// `core_foundation::base::CFType`'s `Drop`, so callers don't need to
+/// remember to free it.
+unsafe fn copy_string_attribute(element: ax_ffi::AXUIElementRef, name: &str) -> Option<String> {
+    let attr = CFString::new(name);
+    let mut raw: ax_ffi::CFTypeRef = std::ptr::null();
+    let err = unsafe {
+        ax_ffi::AXUIElementCopyAttributeValue(
+            element,
+            attr.as_concrete_TypeRef().cast(),
+            &raw mut raw,
+        )
+    };
+    if err != ax_ffi::AX_ERROR_SUCCESS || raw.is_null() {
+        return None;
+    }
+    // Take ownership of the +1 retain so the value drops at the end of
+    // this scope no matter which return path runs.
+    let value = unsafe { CFType::wrap_under_create_rule(raw) };
+    value.downcast::<CFString>().map(|s| s.to_string())
+}
+
+#[cfg(target_os = "macos")]
+mod ax_ffi {
+    use core::ffi::{c_int, c_void};
+
+    pub type AXUIElementRef = *mut c_void;
+    pub type CFTypeRef = *const c_void;
+    pub type CFStringRef = *const c_void;
+    pub type AXError = c_int;
+
+    pub const AX_ERROR_SUCCESS: AXError = 0;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+        pub fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AXError;
+        pub fn AXUIElementSetMessagingTimeout(
+            element: AXUIElementRef,
+            timeout_in_seconds: f32,
+        ) -> AXError;
+    }
+}
+
+// `CFRelease` is declared inline rather than pulled from `core-foundation-sys`
+// to keep the explicit dependency surface to the higher-level
+// `core-foundation` crate already used above for safe CFType handling.
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const core::ffi::c_void);
 }

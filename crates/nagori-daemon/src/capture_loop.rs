@@ -220,6 +220,35 @@ where
             None
         };
 
+        // Suppress capture if the frontmost app's focused element is a
+        // secure text field (password input). Anchor `last_sequence` so
+        // a steady-state focus on the same field doesn't loop the AX
+        // query every poll for the same clip; subsequent ticks short-
+        // circuit on the sequence dedup until the user copies again.
+        // A platform error from `frontmost_focused_is_secure` is treated
+        // as `false` (allow capture) so a missing Accessibility grant or
+        // a transient FFI hiccup degrades open — the
+        // `SensitivityClassifier` secret detector and password-manager
+        // bundle denylist still run downstream as the second line of
+        // defence. We deliberately do *not* clear `force_content_check`
+        // here: the wake-gap one-shot was armed to defend against a
+        // lapped pasteboard `changeCount`, which only matters for the
+        // next *captured* clip. Leaving the flag set means that when the
+        // user moves out of the secure field, the very next tick still
+        // does the content-hash cross-check before trusting the dedup.
+        if let Some(window) = &self.window
+            && window.frontmost_focused_is_secure().await.unwrap_or(false)
+        {
+            info!("capture_skipped reason=secure_field");
+            let _ = self
+                .audit
+                .record("capture_skipped", None, Some("secure_field"))
+                .await;
+            self.last_sequence = Some(sequence);
+            self.pristine = false;
+            return Ok(None);
+        }
+
         let mut snapshot = self.reader.current_snapshot().await?;
         // Snapshot succeeded — only now is it safe to consume the wake-gap
         // flag and flip pristine.
@@ -637,6 +666,127 @@ mod tests {
         // persisted as Public and the test would observe a stored row.
         assert!(loop_.capture_once().await.unwrap().is_none());
         assert!(store.list_recent(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_once_skips_when_frontmost_focus_is_secure() {
+        // The AX-driven password-field guard must drop a clip before any
+        // body-level processing. Regression for the case where a user
+        // focuses a password input and the pasteboard happens to update
+        // (e.g. because the same app autofills) — we must not commit the
+        // value to history regardless of how the SensitivityClassifier
+        // would have tagged it on its own.
+        use async_trait::async_trait;
+        use nagori_core::SourceApp;
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        #[derive(Default)]
+        struct SecureFocus;
+
+        #[async_trait]
+        impl WindowBehavior for SecureFocus {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.example.notes".to_owned()),
+                        name: Some("Notes".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Ok(true)
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(SecureFocus));
+
+        clipboard
+            .write_text("hunter2")
+            .await
+            .expect("clipboard write");
+
+        // Suppressed at the secure-field gate before classification runs.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+
+        // Steady-state focus on the same field must not loop the AX query
+        // every poll: the second tick short-circuits on the dedup
+        // baseline anchored by the first call.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn capture_once_proceeds_when_secure_check_errors() {
+        // A platform error from the AX call must not stop normal capture.
+        // We degrade open so a missing Accessibility grant or an FFI
+        // hiccup doesn't silently disable the clipboard feature.
+        use async_trait::async_trait;
+        use nagori_core::{AppError, SourceApp};
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        #[derive(Default)]
+        struct ErroringSecure;
+
+        #[async_trait]
+        impl WindowBehavior for ErroringSecure {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.example.editor".to_owned()),
+                        name: Some("Editor".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Err(AppError::Platform("AX call failed".to_owned()))
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(ErroringSecure));
+
+        clipboard
+            .write_text("benign value")
+            .await
+            .expect("clipboard write");
+
+        let id = loop_
+            .capture_once()
+            .await
+            .unwrap()
+            .expect("AX error must fail open and capture proceeds");
+        assert!(store.get(id).await.unwrap().is_some());
     }
 
     #[tokio::test]

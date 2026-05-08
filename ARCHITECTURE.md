@@ -173,6 +173,9 @@ stay identical regardless of entry point.
 ```text
 ClipboardReader.current_sequence()         (cheap pre-check)
   → frontmost_app() snapshot               (before reading the body)
+  → frontmost_focused_is_secure()          (AX kAXSecureTextField guard;
+                                            true → audit + drop without
+                                            touching the body)
   → ClipboardReader.current_snapshot()     (full pasteboard read)
   → EntryFactory.from_snapshot()           (decode → ClipboardEntry +
                                             SHA-256 content hash +
@@ -229,6 +232,16 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   `capture_initial_clipboard_on_launch=false` also anchors the content
   hash so a post-wake resync without any user copy correctly recognises
   the unchanged pre-launch clipboard and does **not** promote it.
+- After frontmost is captured, the loop asks the platform whether the
+  frontmost app's currently-focused element is a secure text field
+  (`kAXSecureTextField` role/subrole). When true, the clip is dropped
+  before the body is even read so password-input keystrokes never reach
+  storage. The check fails open: a missing Accessibility grant or a
+  transient AX error is treated as "not secure", and the
+  `SensitivityClassifier` secret detector and password-manager bundle
+  denylist still run as the second line of defence. The macOS impl
+  bounds the per-element AX trip via `AXUIElementSetMessagingTimeout`
+  so an unresponsive focused process can't stall the polling tick.
 
 The pipeline is purely async over `tokio`; the macOS adapter polls
 NSPasteboard with backoff and reports a `ClipboardSequence` so the loop

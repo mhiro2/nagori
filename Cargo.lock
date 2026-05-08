@@ -2859,6 +2859,7 @@ version = "0.0.0"
 dependencies = [
  "arboard",
  "async-trait",
+ "core-foundation",
  "enigo",
  "nagori-core",
  "nagori-platform",

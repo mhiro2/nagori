@@ -20,4 +20,12 @@ pub trait WindowBehavior: Send + Sync {
     async fn activate_app(&self, _bundle_id: &str) -> Result<()> {
         Ok(())
     }
+    /// Reports whether the frontmost app's currently-focused UI element
+    /// is a secure text field (i.e. a password input). The capture loop
+    /// uses this signal to suppress the next clip before classification
+    /// so password keystrokes never reach history. macOS-only; other
+    /// platforms default to `Ok(false)` until per-OS support lands.
+    async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+        Ok(false)
+    }
 }
