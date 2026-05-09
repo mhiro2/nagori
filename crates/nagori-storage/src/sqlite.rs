@@ -1398,11 +1398,16 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
             )));
         }
         let tx = conn.transaction().map_err(|err| storage_err(&err))?;
-        tx.execute_batch(sql).map_err(|err| storage_err(&err))?;
-        // `PRAGMA user_version = ?` is parsed as a literal — the value
-        // must be embedded in the statement text, not bound. Inlining a
-        // server-controlled integer here is safe.
-        tx.execute_batch(&format!("PRAGMA user_version = {version};"))
+        // Concatenate the version bump onto the migration SQL so a
+        // single `execute_batch` runs both as one unit. This guarantees
+        // the version pragma can never execute without the preceding
+        // schema statements succeeding — even if a future refactor
+        // accidentally splits the transaction wrapper or skips the
+        // explicit `tx.commit` below. `PRAGMA user_version = ?` must be
+        // a literal (it can't be bound), and `version` comes from the
+        // hard-coded `MIGRATIONS` table, so inlining is safe.
+        let stamped = format!("{sql}\nPRAGMA user_version = {version};");
+        tx.execute_batch(&stamped)
             .map_err(|err| storage_err(&err))?;
         tx.commit().map_err(|err| storage_err(&err))?;
         last_applied = *version;
@@ -1729,6 +1734,38 @@ mod tests {
         assert!(fts_query(":*").is_empty());
         assert!(fts_query("\"\"").is_empty());
         assert!(fts_query("   ").is_empty());
+    }
+
+    #[test]
+    fn run_migrations_rolls_back_user_version_on_failure() {
+        // Arrange a version-3 migration whose SQL is intentionally
+        // invalid. Because the version stamp is concatenated *after*
+        // the schema body in a single `execute_batch`, SQLite must
+        // reject the whole batch and roll back the transaction — so
+        // `user_version` must stay at the last successfully applied
+        // version even though `MIGRATIONS` advertised a newer one.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let baseline: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(baseline, SCHEMA_VERSION);
+
+        let bad_version = SCHEMA_VERSION + 1;
+        let bad_migration = "CREATE TABLE valid (id INTEGER); NOT VALID SQL;";
+        let tx = conn.transaction().unwrap();
+        let stamped = format!("{bad_migration}\nPRAGMA user_version = {bad_version};");
+        let exec = tx.execute_batch(&stamped);
+        assert!(exec.is_err(), "bad migration must fail to execute");
+        drop(tx); // implicit rollback
+
+        let after: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after, baseline,
+            "user_version must not advance when migration SQL fails"
+        );
     }
 
     #[test]
