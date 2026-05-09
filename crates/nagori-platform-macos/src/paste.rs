@@ -38,6 +38,22 @@ impl PasteController for MacosPasteController {
 
 #[cfg(target_os = "macos")]
 fn synthesize_cmd_v() -> std::result::Result<(), String> {
+    // `kVK_ANSI_V` from `<HIToolbox/Events.h>` — the *physical* keycode for
+    // the V key on a US ANSI keyboard. Sent via `Key::Other` so enigo skips
+    // its Unicode→keycode lookup, which routes through
+    // `TSMGetInputSourceProperty`; on macOS 26+ that API trips
+    // `dispatch_assert_queue(main)` and aborts with SIGTRAP from any
+    // non-main thread, including the tokio blocking pool we run on.
+    //
+    // Layout caveat: macOS resolves ⌘-shortcuts via
+    // `charactersIgnoringModifiers`, and Dvorak-QWERTY⌘ swaps back to
+    // QWERTY while Command is held, so this keycode triggers Paste on the
+    // common QWERTY / JIS / AZERTY / ISO layouts as well as the
+    // Dvorak-QWERTY⌘ variant. A user on plain Dvorak whose physical V key
+    // produces a different character would not get Paste from this
+    // synthesised keystroke; that case currently has to fall back to
+    // manual ⌘V.
+    const KVK_ANSI_V: u32 = 0x09;
     let mut enigo = Enigo::new(&Settings::default()).map_err(|err| err.to_string())?;
     enigo
         .key(Key::Meta, Direction::Press)
@@ -45,7 +61,7 @@ fn synthesize_cmd_v() -> std::result::Result<(), String> {
     let release_meta = |enigo: &mut Enigo| {
         let _ = enigo.key(Key::Meta, Direction::Release);
     };
-    if let Err(err) = enigo.key(Key::Unicode('v'), Direction::Click) {
+    if let Err(err) = enigo.key(Key::Other(KVK_ANSI_V), Direction::Click) {
         release_meta(&mut enigo);
         return Err(err.to_string());
     }
