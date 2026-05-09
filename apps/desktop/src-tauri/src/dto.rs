@@ -5,7 +5,7 @@ use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
     Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode,
     SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity,
-    is_text_safe_for_default_output,
+    is_text_safe_for_default_output, safe_preview_for_dto,
 };
 use nagori_platform::{PermissionKind, PermissionState, PermissionStatus};
 use serde::{Deserialize, Serialize};
@@ -84,11 +84,12 @@ pub struct EntryDto {
 
 impl EntryDto {
     pub fn from_entry(entry: ClipboardEntry, include_text: bool) -> Self {
+        let preview = safe_preview_for_dto(&entry);
         Self {
             id: entry.id,
             kind: entry.content_kind().into(),
             text: include_text.then(|| entry.plain_text().unwrap_or_default().to_owned()),
-            preview: entry.search.preview,
+            preview,
             created_at: entry.metadata.created_at,
             updated_at: entry.metadata.updated_at,
             last_used_at: entry.metadata.last_used_at,
@@ -242,7 +243,7 @@ impl EntryPreviewDto {
 
         let sensitive = !is_text_safe_for_default_output(entry.sensitivity);
         let raw_text = if sensitive {
-            entry.search.preview.clone()
+            safe_preview_for_dto(entry)
         } else {
             entry.plain_text().unwrap_or_default().to_owned()
         };
@@ -776,16 +777,22 @@ mod tests {
     }
 
     #[test]
-    fn entry_preview_for_blocked_disables_full_content_and_keeps_preview() {
+    fn entry_preview_for_blocked_replaces_preview_with_placeholder() {
+        // The classifier never sets `redacted_preview` for Blocked, so the
+        // stored `search.preview` is still raw-derived. The DTO must
+        // substitute the placeholder rather than surfacing whatever was on
+        // the row, even when callers set it to a benign-looking string.
         let mut entry = text_entry("blocked clip");
-        entry.search.preview = "(blocked)".to_owned();
+        entry.search.preview = "raw secret value".to_owned();
         entry.sensitivity = Sensitivity::Blocked;
 
         let dto = EntryPreviewDto::from_entry(&entry);
         assert!(dto.metadata.sensitive);
         assert!(!dto.metadata.full_content_available);
         match dto.body {
-            PreviewBodyDto::Text { text } => assert_eq!(text, "(blocked)"),
+            PreviewBodyDto::Text { text } => {
+                assert_eq!(text, nagori_core::BLOCKED_PREVIEW_PLACEHOLDER);
+            }
             other => panic!("expected Text body, got {other:?}"),
         }
     }

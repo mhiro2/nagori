@@ -1,6 +1,6 @@
 use nagori_core::{
     AiActionId, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId, PasteFormat,
-    RankReason, SearchResult, Sensitivity,
+    RankReason, SearchResult, Sensitivity, safe_preview_for_dto,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -250,11 +250,12 @@ pub struct EntryDto {
 
 impl EntryDto {
     pub fn from_entry(entry: ClipboardEntry, include_text: bool) -> Self {
+        let preview = safe_preview_for_dto(&entry);
         Self {
             id: entry.id,
             kind: entry.content_kind(),
             text: include_text.then(|| entry.plain_text().unwrap_or_default().to_owned()),
-            preview: entry.search.preview,
+            preview,
             created_at: entry.metadata.created_at,
             updated_at: entry.metadata.updated_at,
             last_used_at: entry.metadata.last_used_at,

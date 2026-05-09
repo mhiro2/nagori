@@ -437,6 +437,34 @@ pub const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
     matches!(sensitivity, Sensitivity::Public | Sensitivity::Unknown)
 }
 
+/// Marker substituted for the stored preview when an entry's preview text
+/// cannot be trusted for default DTO/output paths.
+///
+/// `Private` and `Secret` rows already carry a redacted preview produced by
+/// the classifier, so they pass through unchanged. `Blocked` rows do not —
+/// the classifier never sets `redacted_preview` for them, and the daemon
+/// refuses to persist new ones, so any `Blocked` row encountered here is
+/// stale/imported and its `search.preview` is still raw text. Callers that
+/// want the raw value regardless must opt in via `include_text` on the
+/// caller side.
+pub const BLOCKED_PREVIEW_PLACEHOLDER: &str = "[blocked]";
+
+/// Pick the preview string to ship for `entry` on default DTO/output paths.
+///
+/// Returns the stored `entry.search.preview` for non-`Blocked` rows (where
+/// the classifier has already replaced the preview with a redacted version
+/// for `Private` / `Secret`). For `Blocked` rows the stored preview is
+/// raw-derived, so substitute [`BLOCKED_PREVIEW_PLACEHOLDER`] to keep the
+/// fail-closed contract that pairs with [`is_text_safe_for_default_output`].
+#[must_use]
+pub fn safe_preview_for_dto(entry: &ClipboardEntry) -> String {
+    if matches!(entry.sensitivity, Sensitivity::Blocked) {
+        BLOCKED_PREVIEW_PLACEHOLDER.to_owned()
+    } else {
+        entry.search.preview.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SensitivityReason {
     PasswordManagerSource,
@@ -699,5 +727,27 @@ mod tests {
         assert!(!is_text_safe_for_default_output(Sensitivity::Blocked));
         assert!(!is_text_safe_for_default_output(Sensitivity::Private));
         assert!(!is_text_safe_for_default_output(Sensitivity::Secret));
+    }
+
+    #[test]
+    fn safe_preview_for_dto_replaces_blocked_preview_only() {
+        // Public/Unknown previews are raw-derived but the sensitivity is
+        // safe, so they pass through. Private/Secret previews carry the
+        // classifier's redacted_preview already, so they pass through too.
+        // Blocked previews are still raw text (the classifier never sets
+        // redacted_preview for them) and must be replaced.
+        let mut entry = crate::EntryFactory::from_text("super secret value");
+        entry.search.preview = "super secret value".to_owned();
+
+        for safe in [Sensitivity::Public, Sensitivity::Unknown] {
+            entry.sensitivity = safe;
+            assert_eq!(safe_preview_for_dto(&entry), "super secret value");
+        }
+        for redacted in [Sensitivity::Private, Sensitivity::Secret] {
+            entry.sensitivity = redacted;
+            assert_eq!(safe_preview_for_dto(&entry), "super secret value");
+        }
+        entry.sensitivity = Sensitivity::Blocked;
+        assert_eq!(safe_preview_for_dto(&entry), BLOCKED_PREVIEW_PLACEHOLDER);
     }
 }
