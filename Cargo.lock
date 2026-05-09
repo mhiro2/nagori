@@ -2886,6 +2886,7 @@ version = "0.0.0"
 dependencies = [
  "nagori-core",
  "time",
+ "tracing",
 ]
 
 [[package]]

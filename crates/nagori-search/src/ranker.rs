@@ -1,5 +1,8 @@
-use nagori_core::{ClipboardEntry, ContentKind, RankReason, Ranker, RecentOrder, SearchResult};
+use nagori_core::{
+    ClipboardEntry, ContentKind, EntryId, RankReason, Ranker, RecentOrder, SearchResult,
+};
 use time::OffsetDateTime;
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct RankedCandidate {
@@ -60,6 +63,13 @@ pub fn rank_candidate(
         return Some(rank_recent(candidate.entry, recent_order));
     }
 
+    // Defend against NaN/Inf coming from the storage layer (e.g. an
+    // unexpectedly malformed bm25 row) so the final `score > 0.0` cull below
+    // does not silently drop otherwise valid candidates.
+    let fts_score = sanitize_signal(candidate.fts_score, "fts_score", candidate.entry.id);
+    let ngram_overlap =
+        sanitize_signal(candidate.ngram_overlap, "ngram_overlap", candidate.entry.id);
+
     let mut score = 0.0;
     let mut reasons = Vec::new();
     if text == query {
@@ -77,14 +87,14 @@ pub fn rank_candidate(
     // FTS5 bm25 is non-positive (0 == no match, negative == better match).
     // Raw values are typically small (e.g. -0.5 .. -5.0); scale so a clear
     // FTS hit reliably contributes meaningful score before length penalties.
-    if candidate.fts_score < 0.0 {
-        let magnitude = (-candidate.fts_score).clamp(0.0, 10.0);
+    if fts_score < 0.0 {
+        let magnitude = (-fts_score).clamp(0.0, 10.0);
         let contribution = (magnitude * 10.0).min(50.0);
         score += contribution;
         reasons.push(RankReason::FullTextMatch);
     }
-    if candidate.ngram_overlap > 0.0 {
-        score += (candidate.ngram_overlap * 40.0).min(40.0);
+    if ngram_overlap > 0.0 {
+        score += (ngram_overlap * 40.0).min(40.0);
         reasons.push(RankReason::NgramMatch);
     }
 
@@ -123,6 +133,27 @@ pub fn rank_candidate(
     }
 
     (score > 0.0).then(|| result(candidate.entry, score, reasons))
+}
+
+/// Replace NaN/Inf in upstream ranking signals with `0.0`.
+///
+/// `score > 0.0` returns `false` for NaN, so an unsanitized NaN propagating
+/// from a corrupt FTS row would silently drop a candidate that might still
+/// match on substring or pin signals. Logging at `debug!` keeps the cost
+/// negligible while leaving a trail for later diagnosis.
+fn sanitize_signal(value: f32, signal: &'static str, entry_id: EntryId) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        debug!(
+            target: "nagori::search::ranker",
+            entry_id = %entry_id,
+            signal,
+            value = ?value,
+            "non-finite ranking signal coerced to 0.0"
+        );
+        0.0
+    }
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -262,5 +293,21 @@ mod tests {
 
         assert!(result.score > 0.0);
         assert!(result.rank_reason.contains(&RankReason::PrefixMatch));
+    }
+
+    #[test]
+    fn non_finite_signals_do_not_drop_real_match() {
+        // NaN fts_score and ngram_overlap must be coerced to 0 so the
+        // substring match still survives the `score > 0.0` cull.
+        let mut cand = candidate("needle text");
+        cand.fts_score = f32::NAN;
+        cand.ngram_overlap = f32::INFINITY;
+
+        let result = rank_candidate("needle", cand, now(), RecentOrder::ByRecency)
+            .expect("substring match should survive non-finite ranking signals");
+        assert!(result.score.is_finite());
+        assert!(result.score > 0.0);
+        assert!(!result.rank_reason.contains(&RankReason::FullTextMatch));
+        assert!(!result.rank_reason.contains(&RankReason::NgramMatch));
     }
 }
