@@ -836,6 +836,26 @@ fn print_clear_result(deleted: usize, format: OutputFormat) {
     }
 }
 
+/// Replace the user's home prefix on `path` with `~` when rendering for
+/// human consumption. `nagori doctor` prints DB / socket / token paths
+/// to stdout, which routinely shows up in shared terminals, paired
+/// programming sessions, and screenshots posted to issue trackers — and
+/// the absolute path is just the username with extra steps. The JSON /
+/// JSONL paths still emit the full value untouched so automation can
+/// parse them without re-expanding `~`.
+fn shorten_home(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = path.strip_prefix(&home)
+    {
+        return if rel.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", rel.display())
+        };
+    }
+    path.display().to_string()
+}
+
 fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -843,9 +863,9 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
         }
         OutputFormat::Text => {
             println!("version\t{}", report.version);
-            println!("socket\t{}", report.socket_path);
+            println!("socket\t{}", shorten_home(Path::new(&report.socket_path)));
             if !report.db_path.is_empty() {
-                println!("db\t{}", report.db_path);
+                println!("db\t{}", shorten_home(Path::new(&report.db_path)));
             }
             println!("capture_enabled\t{}", report.capture_enabled);
             println!("auto_paste_enabled\t{}", report.auto_paste_enabled);
@@ -889,7 +909,7 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
         nagori_core::settings::AiProviderSetting::Remote { name } => format!("remote:{name}"),
     };
     println!("version\t{}", env!("CARGO_PKG_VERSION"));
-    println!("db\t{}", db_path.display());
+    println!("db\t{}", shorten_home(db_path));
     println!("capture_enabled\t{}", settings.capture_enabled);
     println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);
     println!("ai_enabled\t{}", settings.ai_enabled);
