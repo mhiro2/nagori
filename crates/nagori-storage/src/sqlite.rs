@@ -591,7 +591,9 @@ impl nagori_core::EntryRepository for SqliteStore {
                     "SELECT e.*, d.title, d.preview, d.normalized_text, d.language
                      FROM entries e
                      LEFT JOIN search_documents d ON d.entry_id = e.id
-                     WHERE e.deleted_at IS NULL AND e.pinned = 1
+                     WHERE e.deleted_at IS NULL
+                       AND e.pinned = 1
+                       AND e.sensitivity != 'blocked'
                      ORDER BY e.updated_at DESC",
                 )
                 .map_err(|err| storage_err(&err))?;
@@ -1780,6 +1782,26 @@ mod tests {
         let pinned = store.list_pinned().await.unwrap();
         assert_eq!(pinned.len(), 1);
         assert!(pinned[0].lifecycle.pinned);
+    }
+
+    #[tokio::test]
+    async fn list_pinned_excludes_blocked_rows() {
+        // The capture path refuses to persist `Blocked`, but stale rows
+        // from older daemons or hand-edited DBs can survive. Match
+        // `list_recent` / `search` and keep them out of default lists so
+        // the DTO layer never has to ship a raw-text preview from one.
+        let store = SqliteStore::open_memory().unwrap();
+        let pinned_public = insert_text(&store, "public pinned").await;
+        store.set_pinned(pinned_public, true).await.unwrap();
+        let mut blocked = EntryFactory::from_text("blocked pinned");
+        blocked.search.normalized_text = normalize_text(blocked.plain_text().unwrap());
+        blocked.sensitivity = Sensitivity::Blocked;
+        let blocked_id = store.insert(blocked).await.unwrap();
+        store.set_pinned(blocked_id, true).await.unwrap();
+
+        let pinned = store.list_pinned().await.unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, pinned_public);
     }
 
     #[tokio::test]
