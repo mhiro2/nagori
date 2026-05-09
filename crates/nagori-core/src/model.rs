@@ -323,12 +323,21 @@ impl SearchDocument {
     }
 }
 
+/// Build a whitespace-compacted preview of `text`, capped at `max_chars`.
+///
+/// When truncation occurs the trailing `…` is counted toward `max_chars`, so the
+/// returned string is always `<= max_chars` Unicode scalar values.
 pub fn make_preview(text: &str, max_chars: usize) -> String {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut preview = compact.chars().take(max_chars).collect::<String>();
-    if compact.chars().count() > max_chars {
-        preview.push('…');
+    if compact.chars().count() <= max_chars {
+        return compact;
     }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let take_n = max_chars - 1;
+    let mut preview: String = compact.chars().take(take_n).collect();
+    preview.push('…');
     preview
 }
 
@@ -564,6 +573,12 @@ mod tests {
     #[test]
     fn preview_compacts_whitespace_and_truncates_by_chars() {
         assert_eq!(make_preview("  one\n\n two\tthree  ", 100), "one two three");
-        assert_eq!(make_preview("日本語テキスト", 3), "日本語…");
+        // Ellipsis counts toward max_chars: total length is exactly max_chars.
+        assert_eq!(make_preview("日本語テキスト", 3), "日本…");
+        assert_eq!(make_preview("日本語テキスト", 3).chars().count(), 3);
+        // No truncation when text fits exactly.
+        assert_eq!(make_preview("abc", 3), "abc");
+        // max_chars == 0 cannot fit even an ellipsis, so return empty.
+        assert_eq!(make_preview("abc", 0), "");
     }
 }
