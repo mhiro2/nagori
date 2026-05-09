@@ -264,12 +264,18 @@ impl MacosClipboard {
 
 #[cfg(target_os = "macos")]
 fn pasteboard_sequence() -> ClipboardSequence {
-    let pb = NSPasteboard::generalPasteboard();
-    // NSInteger fits in i64 on every supported architecture; the change
-    // counter is monotonically increasing across the process lifetime so
-    // wraparound is theoretical.
-    let count = pb.changeCount() as i64;
-    ClipboardSequence::native(count)
+    // Drain any AppKit autoreleased temporaries (NSPasteboard return value,
+    // intermediate objects from `+generalPasteboard`) at the end of this call
+    // so the daemon's long-running blocking-pool thread does not accumulate
+    // them across thousands of polls.
+    objc2::rc::autoreleasepool(|_pool| {
+        let pb = NSPasteboard::generalPasteboard();
+        // NSInteger fits in i64 on every supported architecture; the change
+        // counter is monotonically increasing across the process lifetime so
+        // wraparound is theoretical.
+        let count = pb.changeCount() as i64;
+        ClipboardSequence::native(count)
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -279,67 +285,74 @@ fn pasteboard_sequence() -> ClipboardSequence {
 
 #[cfg(target_os = "macos")]
 fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
-    // SAFETY: the methods invoked below are FFI calls into AppKit. They are
-    // documented to return optional `NSString`/`NSData` values without side
-    // effects on the running process, and we never retain the returned
-    // pointers past the borrow returned by `Retained`.
-    unsafe {
-        let pb = NSPasteboard::generalPasteboard();
+    // Wrap the AppKit reads in an explicit autorelease pool. AppKit's
+    // `dataForType` / `stringForType` return autoreleased temporaries; the
+    // capture loop runs on a tokio blocking-pool thread that has no implicit
+    // pool of its own, so without this each poll would leak the returned
+    // NSData/NSString into a pool that never drains.
+    objc2::rc::autoreleasepool(|_pool| {
+        // SAFETY: the methods invoked below are FFI calls into AppKit. They are
+        // documented to return optional `NSString`/`NSData` values without side
+        // effects on the running process, and we never retain the returned
+        // pointers past the borrow returned by `Retained`.
+        unsafe {
+            let pb = NSPasteboard::generalPasteboard();
 
-        // File URLs come through per-pasteboard-item; the pasteboard-level
-        // accessors only return the first one.
-        if let Some(items) = pb.pasteboardItems() {
-            let mut paths = Vec::new();
-            for item in &items {
-                if let Some(string) = item.stringForType(NSPasteboardTypeFileURL) {
-                    let raw = string.to_string();
-                    if let Some(path) = file_url_to_path(&raw) {
-                        paths.push(path);
+            // File URLs come through per-pasteboard-item; the pasteboard-level
+            // accessors only return the first one.
+            if let Some(items) = pb.pasteboardItems() {
+                let mut paths = Vec::new();
+                for item in &items {
+                    if let Some(string) = item.stringForType(NSPasteboardTypeFileURL) {
+                        let raw = string.to_string();
+                        if let Some(path) = file_url_to_path(&raw) {
+                            paths.push(path);
+                        }
                     }
                 }
+                if !paths.is_empty() {
+                    out.push(ClipboardRepresentation {
+                        mime_type: "text/uri-list".to_owned(),
+                        data: ClipboardData::FilePaths(paths),
+                    });
+                }
             }
-            if !paths.is_empty() {
+
+            if let Some(html) = pb.stringForType(NSPasteboardTypeHTML) {
                 out.push(ClipboardRepresentation {
-                    mime_type: "text/uri-list".to_owned(),
-                    data: ClipboardData::FilePaths(paths),
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text(html.to_string()),
+                });
+            }
+
+            if let Some(rtf) = pb.stringForType(NSPasteboardTypeRTF) {
+                out.push(ClipboardRepresentation {
+                    mime_type: "application/rtf".to_owned(),
+                    data: ClipboardData::Text(rtf.to_string()),
+                });
+            }
+
+            // Prefer PNG when both PNG and TIFF are present — the bytes are
+            // smaller and every webview can render them directly. We still fall
+            // back to TIFF so screenshots from older macOS apps that only push
+            // TIFF make it into the history.
+            if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
+                && let Some(bytes) = ns_data_to_vec(&data)
+            {
+                out.push(ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(bytes),
+                });
+            } else if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
+                && let Some(bytes) = ns_data_to_vec(&data)
+            {
+                out.push(ClipboardRepresentation {
+                    mime_type: "image/tiff".to_owned(),
+                    data: ClipboardData::Bytes(bytes),
                 });
             }
         }
-
-        if let Some(html) = pb.stringForType(NSPasteboardTypeHTML) {
-            out.push(ClipboardRepresentation {
-                mime_type: "text/html".to_owned(),
-                data: ClipboardData::Text(html.to_string()),
-            });
-        }
-
-        if let Some(rtf) = pb.stringForType(NSPasteboardTypeRTF) {
-            out.push(ClipboardRepresentation {
-                mime_type: "application/rtf".to_owned(),
-                data: ClipboardData::Text(rtf.to_string()),
-            });
-        }
-
-        // Prefer PNG when both PNG and TIFF are present — the bytes are
-        // smaller and every webview can render them directly. We still fall
-        // back to TIFF so screenshots from older macOS apps that only push
-        // TIFF make it into the history.
-        if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
-            && let Some(bytes) = ns_data_to_vec(&data)
-        {
-            out.push(ClipboardRepresentation {
-                mime_type: "image/png".to_owned(),
-                data: ClipboardData::Bytes(bytes),
-            });
-        } else if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
-            && let Some(bytes) = ns_data_to_vec(&data)
-        {
-            out.push(ClipboardRepresentation {
-                mime_type: "image/tiff".to_owned(),
-                data: ClipboardData::Bytes(bytes),
-            });
-        }
-    }
+    });
 }
 
 /// Probe `NSPasteboard` for any single representation whose byte length
@@ -352,40 +365,45 @@ fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
 /// `length() > max_bytes` cannot reject a string that would actually fit.
 #[cfg(target_os = "macos")]
 fn oversized_payload(max_bytes: usize) -> Option<usize> {
-    // SAFETY: AppKit FFI on the shared pasteboard. All getters return
-    // optional retained references and we only read `.length()` on the
-    // returned objects, which has no observable side effects and does not
-    // require holding the pasteboard lock beyond the call itself.
-    unsafe {
-        let pb = NSPasteboard::generalPasteboard();
+    // Same rationale as `collect_macos_extras`: drain the AppKit
+    // autoreleased temporaries on every call so the blocking-pool thread
+    // does not retain pasteboard data past return.
+    objc2::rc::autoreleasepool(|_pool| {
+        // SAFETY: AppKit FFI on the shared pasteboard. All getters return
+        // optional retained references and we only read `.length()` on the
+        // returned objects, which has no observable side effects and does not
+        // require holding the pasteboard lock beyond the call itself.
+        unsafe {
+            let pb = NSPasteboard::generalPasteboard();
 
-        if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
-            && data.length() > max_bytes
-        {
-            return Some(data.length());
+            if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
+                && data.length() > max_bytes
+            {
+                return Some(data.length());
+            }
+            if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
+                && data.length() > max_bytes
+            {
+                return Some(data.length());
+            }
+            if let Some(string) = pb.stringForType(NSPasteboardTypeHTML)
+                && string.length() > max_bytes
+            {
+                return Some(string.length());
+            }
+            if let Some(string) = pb.stringForType(NSPasteboardTypeRTF)
+                && string.length() > max_bytes
+            {
+                return Some(string.length());
+            }
+            if let Some(string) = pb.stringForType(objc2_app_kit::NSPasteboardTypeString)
+                && string.length() > max_bytes
+            {
+                return Some(string.length());
+            }
         }
-        if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
-            && data.length() > max_bytes
-        {
-            return Some(data.length());
-        }
-        if let Some(string) = pb.stringForType(NSPasteboardTypeHTML)
-            && string.length() > max_bytes
-        {
-            return Some(string.length());
-        }
-        if let Some(string) = pb.stringForType(NSPasteboardTypeRTF)
-            && string.length() > max_bytes
-        {
-            return Some(string.length());
-        }
-        if let Some(string) = pb.stringForType(objc2_app_kit::NSPasteboardTypeString)
-            && string.length() > max_bytes
-        {
-            return Some(string.length());
-        }
-    }
-    None
+        None
+    })
 }
 
 #[cfg(target_os = "macos")]
