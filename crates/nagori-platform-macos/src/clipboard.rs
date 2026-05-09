@@ -288,7 +288,7 @@ fn pasteboard_sequence() -> ClipboardSequence {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn pasteboard_sequence() -> ClipboardSequence {
+const fn pasteboard_sequence() -> ClipboardSequence {
     ClipboardSequence::unsupported()
 }
 
