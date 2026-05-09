@@ -12,7 +12,10 @@ pub use errors::{AppError, Result};
 pub use factory::EntryFactory;
 pub use limits::{MAX_ENTRY_SIZE_BYTES, MAX_IPC_BYTES};
 pub use model::*;
-pub use policy::{SecretAction, SensitivityClassification, SensitivityClassifier};
+pub use policy::{
+    MAX_USER_REGEX_LEN, MAX_USER_REGEX_NESTING, SecretAction, SensitivityClassification,
+    SensitivityClassifier, compile_user_regex,
+};
 pub use repositories::{AuditLog, EntryRepository, SearchRepository, SettingsRepository};
 pub use services::{
     FtsCandidate, NgramCandidate, Ranker, SearchCandidateProvider, SearchPlan, SearchService,

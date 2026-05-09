@@ -1,11 +1,49 @@
 use std::sync::OnceLock;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::{
     AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, Result, Sensitivity,
     SensitivityReason, make_preview, normalize_text, settings::SecretHandling,
 };
+
+/// Hard upper bound on the source byte length of a single user-provided
+/// `regex_denylist` entry.
+///
+/// Anything longer is almost certainly an adversarial pattern crafted to
+/// defeat the compile-time `size_limit` guard or to encode catastrophic
+/// backtracking via `(.+)+`-shaped nesting. 256 bytes is roomy enough
+/// for the realistic redaction rules a human types ("INTERNAL-\d+", a
+/// tagged-token regex, …) while keeping the per-classifier compile
+/// budget bounded. The cap is on byte length (`str::len`) rather than
+/// `chars().count()`: the user-facing rejection message names "byte
+/// limit", and the underlying `RegexBuilder::size_limit` budget is
+/// itself byte-denominated.
+pub const MAX_USER_REGEX_LEN: usize = 256;
+
+/// Maximum nesting depth for parenthesised groups in a user regex.
+///
+/// Catastrophic backtracking patterns rely on stacking quantified groups
+/// like `(a+)+` or `((a*)*)*`; clamping the parser-visible nesting to
+/// three levels rules out the obvious shapes without preventing a user
+/// from writing `(?:foo|bar|baz)\d+`.
+pub const MAX_USER_REGEX_NESTING: usize = 3;
+
+/// Per-pattern compiled-NFA size limit, in bytes (`RegexBuilder::size_limit`).
+///
+/// The `regex` crate's default is 10 MiB; we trim to 256 KiB so a
+/// maliciously crafted alternation cannot inflate the daemon's working
+/// set just by being parsed into the NFA.
+const USER_REGEX_SIZE_LIMIT: usize = 256 * 1024;
+/// Per-pattern lazy-DFA cache limit, in bytes (`RegexBuilder::dfa_size_limit`).
+///
+/// The lazy DFA is built incrementally during matching from the NFA
+/// above; this cap bounds the working-set blow-up from a long subject
+/// string against a wide alternation. 1 MiB sits one order above the
+/// NFA cap because the DFA materialises subset-construction states on
+/// the fly and a tighter cap would force frequent cache flushes on
+/// realistic redaction rules. The `regex` crate's default is 2 MiB.
+const USER_REGEX_DFA_SIZE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SensitivityClassification {
@@ -45,9 +83,7 @@ impl SensitivityClassifier {
     pub fn try_new(settings: AppSettings) -> Result<Self> {
         let mut user_regexes = Vec::with_capacity(settings.regex_denylist.len());
         for pattern in &settings.regex_denylist {
-            let compiled = Regex::new(pattern).map_err(|err| {
-                AppError::Policy(format!("invalid regex_denylist entry {pattern:?}: {err}"))
-            })?;
+            let compiled = compile_user_regex(pattern)?;
             user_regexes.push(compiled);
         }
         Ok(Self {
@@ -203,6 +239,63 @@ impl SensitivityClassifier {
             }
         }
     }
+}
+
+/// Compile a user-provided `regex_denylist` pattern with the DoS-resistant
+/// limits applied.
+///
+/// The default `regex` crate compile is generous (10 MiB DFA, no
+/// source-length cap), so a hostile pattern can still gobble RAM or
+/// trigger near-pathological match times via `(.+)+`-shaped nesting. We
+/// cap the pattern source length, the parenthesis nesting (the lever
+/// that catastrophic-backtracking constructions rely on), and the
+/// compiled-state size so a misconfigured rule cannot wedge the daemon.
+pub fn compile_user_regex(pattern: &str) -> Result<Regex> {
+    if pattern.len() > MAX_USER_REGEX_LEN {
+        return Err(AppError::Policy(format!(
+            "regex_denylist entry exceeds {MAX_USER_REGEX_LEN}-byte limit",
+        )));
+    }
+    let nesting = max_paren_nesting(pattern);
+    if nesting > MAX_USER_REGEX_NESTING {
+        return Err(AppError::Policy(format!(
+            "regex_denylist entry has nesting depth {nesting} (limit {MAX_USER_REGEX_NESTING}); reduce parenthesised groups",
+        )));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(USER_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(USER_REGEX_DFA_SIZE_LIMIT)
+        .build()
+        .map_err(|err| AppError::Policy(format!("invalid regex_denylist entry {pattern:?}: {err}")))
+}
+
+/// Count the deepest unescaped parenthesis nesting in `pattern`. We only
+/// inspect ASCII bytes — the regex DSL's metacharacters are all 7-bit, so
+/// multi-byte UTF-8 inside a character class or literal cannot perturb
+/// the count.
+fn max_paren_nesting(pattern: &str) -> usize {
+    let mut depth: usize = 0;
+    let mut max_depth: usize = 0;
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                // Skip the escaped character so `\(` / `\)` don't perturb depth.
+                let _ = chars.next();
+            }
+            '(' => {
+                depth = depth.saturating_add(1);
+                if depth > max_depth {
+                    max_depth = depth;
+                }
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    max_depth
 }
 
 pub fn redact_text(text: &str) -> String {
@@ -1181,5 +1274,73 @@ mod tests {
         // Block returns Drop so the caller throws the entry away; body
         // must not be touched on the way out.
         assert_eq!(entry.plain_text(), Some(pan));
+    }
+
+    #[test]
+    fn user_regex_overlong_pattern_rejected() {
+        // A single overlong pattern is almost certainly an adversarial
+        // payload — the realistic redaction rules a human types fit well
+        // under the cap. The classifier must reject before the regex
+        // crate sees the source so a hostile pattern cannot consume the
+        // build budget.
+        let long = "a".repeat(MAX_USER_REGEX_LEN + 1);
+        let settings = AppSettings {
+            regex_denylist: vec![long],
+            ..AppSettings::default()
+        };
+        let err = SensitivityClassifier::try_new(settings).unwrap_err();
+        assert!(
+            matches!(err, AppError::Policy(ref msg) if msg.contains("byte limit")),
+            "expected length-limit Policy error, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn user_regex_deep_nesting_rejected() {
+        // Catastrophic-backtracking constructions like `((((a*)*)*)*)*`
+        // rely on stacked quantified groups. Capping the parser-visible
+        // nesting closes that door without preventing flat alternations
+        // a user might want to write.
+        let pattern = "(".to_owned()
+            + &"(".repeat(MAX_USER_REGEX_NESTING)
+            + "a"
+            + &")".repeat(MAX_USER_REGEX_NESTING)
+            + ")";
+        let settings = AppSettings {
+            regex_denylist: vec![pattern],
+            ..AppSettings::default()
+        };
+        let err = SensitivityClassifier::try_new(settings).unwrap_err();
+        assert!(
+            matches!(err, AppError::Policy(ref msg) if msg.contains("nesting depth")),
+            "expected nesting-limit Policy error, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn user_regex_escaped_parens_do_not_count_toward_nesting() {
+        // `\(` and `\)` are literal characters — they must not trip the
+        // nesting guard, otherwise users couldn't write a regex matching
+        // bracketed identifiers like `\(INTERNAL-\d+\)`.
+        let pattern = r"\(INTERNAL-\d+\)";
+        let settings = AppSettings {
+            regex_denylist: vec![pattern.to_owned()],
+            ..AppSettings::default()
+        };
+        SensitivityClassifier::try_new(settings).expect("escaped parens are not nesting");
+    }
+
+    #[test]
+    fn user_regex_compiles_within_budget() {
+        // Sanity check that realistic patterns still load — the guard is
+        // for adversarial input, not "anything with a quantifier".
+        let settings = AppSettings {
+            regex_denylist: vec![
+                r"INTERNAL-\d+".to_owned(),
+                r"(?i)acme[_-]?[a-z0-9]{8,}".to_owned(),
+            ],
+            ..AppSettings::default()
+        };
+        SensitivityClassifier::try_new(settings).expect("realistic patterns compile");
     }
 }

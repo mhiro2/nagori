@@ -12,6 +12,7 @@ use nagori_core::{
     EntryId, EntryLifecycle, EntryMetadata, FtsCandidate, HashAlgorithm, NgramCandidate,
     PayloadRef, RecentOrder, Result, SearchCandidateProvider, SearchDocument, SearchFilters,
     SearchQuery, SearchRepository, SearchResult, SearchService, Sensitivity, SourceApp,
+    compile_user_regex,
 };
 use nagori_search::{DefaultRanker, generate_ngrams, has_cjk, normalize_text};
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
@@ -1313,8 +1314,13 @@ impl nagori_core::SettingsRepository for SqliteStore {
     async fn save_settings(&self, settings: AppSettings) -> Result<()> {
         validate_settings(&settings)?;
         for pattern in &settings.regex_denylist {
-            regex::Regex::new(pattern).map_err(|err| {
-                AppError::InvalidInput(format!("invalid regex_denylist entry {pattern:?}: {err}"))
+            // `compile_user_regex` enforces the same DoS-resistant limits
+            // (max length / nesting depth / DFA size) the in-memory
+            // classifier applies, so a hostile pattern can't be persisted
+            // and then triggered when the daemon next refreshes settings.
+            compile_user_regex(pattern).map_err(|err| match err {
+                AppError::Policy(msg) => AppError::InvalidInput(msg),
+                other => other,
             })?;
         }
         self.run_blocking(move |store| {
