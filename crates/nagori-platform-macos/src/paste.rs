@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use nagori_core::{AppError, Result};
 use nagori_platform::{PasteController, PasteResult};
+#[cfg(target_os = "macos")]
+use tracing::warn;
 
 #[derive(Debug, Default)]
 pub struct MacosPasteController;
@@ -58,15 +60,39 @@ fn synthesize_cmd_v() -> std::result::Result<(), String> {
     enigo
         .key(Key::Meta, Direction::Press)
         .map_err(|err| err.to_string())?;
-    let release_meta = |enigo: &mut Enigo| {
-        let _ = enigo.key(Key::Meta, Direction::Release);
-    };
     if let Err(err) = enigo.key(Key::Other(KVK_ANSI_V), Direction::Click) {
-        release_meta(&mut enigo);
+        // The click failed; release Meta so the user is not left with a
+        // stuck modifier. A silent drop here previously meant a single
+        // failed paste could leave Cmd held until the next OS-level event.
+        let _ = release_meta_with_retry(&mut enigo);
         return Err(err.to_string());
     }
-    enigo
-        .key(Key::Meta, Direction::Release)
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    // The success path also has to release Meta — if this fails the user is
+    // just as stuck as on the click-error path, so retry once before
+    // surfacing the error.
+    release_meta_with_retry(&mut enigo)
+}
+
+/// Best-effort Meta release: try once, then retry once on failure. Logs both
+/// failures so a user reporting a stuck-Cmd UX bug has a breadcrumb. Returns
+/// the second attempt's result so callers on the success path can surface a
+/// release failure to the user instead of silently leaving ⌘ pressed.
+#[cfg(target_os = "macos")]
+fn release_meta_with_retry(enigo: &mut Enigo) -> std::result::Result<(), String> {
+    let Err(first) = enigo.key(Key::Meta, Direction::Release) else {
+        return Ok(());
+    };
+    warn!(
+        target: "nagori::platform::paste",
+        error = %first,
+        "Meta key release failed; retrying"
+    );
+    enigo.key(Key::Meta, Direction::Release).map_err(|second| {
+        warn!(
+            target: "nagori::platform::paste",
+            error = %second,
+            "Meta key release retry failed; ⌘ may remain virtually pressed"
+        );
+        second.to_string()
+    })
 }

@@ -13,6 +13,7 @@ nagori-core = { path = "../nagori-core" }
 nagori-platform = { path = "../nagori-platform" }
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
