@@ -256,16 +256,42 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
             | AppError::Ai(_) => 8,
         };
     }
-    let message = err.to_string().to_lowercase();
-    if message.contains("not found") {
-        4
-    } else if message.contains("policy") {
-        5
-    } else if message.contains("invalid") {
-        2
-    } else {
-        1
-    }
+    // No `AppError` reached us. The previous behaviour substring-matched
+    // the rendered message (`"not found"`, `"policy"`, `"invalid"`) for
+    // a best-effort classification, but that drifted as soon as anyhow
+    // contextualised the chain — `with_context("failed to open …")`
+    // hid `"NotFound"` underneath the wrapper, dumping us into the
+    // generic 1 bucket. Anything that hasn't already been promoted into
+    // `AppError` (IPC-level translations now go through
+    // `ipc_error_to_anyhow`) is by definition an internal failure: a
+    // serialiser bug, an unexpected IPC variant, missing config files,
+    // etc. Map those to 8 (internal error) so the exit code is stable
+    // regardless of how the message string evolves.
+    8
+}
+
+/// Translate an IPC-level error response into an `anyhow::Error` whose
+/// root cause is the structured `AppError`. Without this, the CLI's
+/// `exit_code_for` would only see the rendered `"<code>: <message>"`
+/// string and fall through to the internal-error bucket.
+fn ipc_error_to_anyhow(err: &nagori_ipc::IpcError) -> anyhow::Error {
+    let app = match err.code.as_str() {
+        "not_found" => AppError::NotFound,
+        "invalid_input" => AppError::InvalidInput(err.message.clone()),
+        "policy_error" => AppError::Policy(err.message.clone()),
+        "permission_error" => AppError::Permission(err.message.clone()),
+        "unsupported" => AppError::Unsupported(err.message.clone()),
+        "storage_error" => AppError::Storage(err.message.clone()),
+        "search_error" => AppError::Search(err.message.clone()),
+        "platform_error" => AppError::Platform(err.message.clone()),
+        "ai_error" => AppError::Ai(err.message.clone()),
+        // An unrecognised code is by definition something this CLI
+        // build doesn't know how to classify. Surface it as a generic
+        // internal error rather than guessing a bucket — an unknown
+        // code shouldn't quietly map to "not found".
+        _ => return anyhow!("{}: {}", err.code, err.message),
+    };
+    anyhow::Error::from(app)
 }
 
 fn init_tracing() {
@@ -1019,7 +1045,7 @@ const fn ai_action_id(action: &AiActionName) -> AiActionId {
 fn expect_entry(response: IpcResponse) -> Result<EntryDto> {
     match response {
         IpcResponse::Entry(entry) => Ok(entry),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1027,7 +1053,7 @@ fn expect_entry(response: IpcResponse) -> Result<EntryDto> {
 fn expect_entries(response: IpcResponse) -> Result<Vec<EntryDto>> {
     match response {
         IpcResponse::Entries(entries) => Ok(entries),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1035,7 +1061,7 @@ fn expect_entries(response: IpcResponse) -> Result<Vec<EntryDto>> {
 fn expect_search(response: IpcResponse) -> Result<SearchResponse> {
     match response {
         IpcResponse::Search(value) => Ok(value),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1043,7 +1069,7 @@ fn expect_search(response: IpcResponse) -> Result<SearchResponse> {
 fn expect_ai_output(response: IpcResponse) -> Result<AiOutputDto> {
     match response {
         IpcResponse::AiOutput(value) => Ok(value),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1051,7 +1077,7 @@ fn expect_ai_output(response: IpcResponse) -> Result<AiOutputDto> {
 fn expect_ack(response: IpcResponse) -> Result<()> {
     match response {
         IpcResponse::Ack => Ok(()),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1059,7 +1085,7 @@ fn expect_ack(response: IpcResponse) -> Result<()> {
 fn expect_cleared(response: IpcResponse) -> Result<ClearResponse> {
     match response {
         IpcResponse::Cleared(value) => Ok(value),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }
 }
@@ -1082,7 +1108,106 @@ fn clear_request_from_args(args: &ClearArgs) -> Result<ClearRequest> {
 fn expect_doctor(response: IpcResponse) -> Result<DoctorReport> {
     match response {
         IpcResponse::Doctor(value) => Ok(value),
-        IpcResponse::Error(err) => Err(anyhow!("{}: {}", err.code, err.message)),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_with_code(code: &str) -> nagori_ipc::IpcError {
+        nagori_ipc::IpcError {
+            code: code.to_owned(),
+            message: format!("test message for {code}"),
+            recoverable: false,
+        }
+    }
+
+    #[test]
+    fn exit_code_for_covers_every_apperror_variant() {
+        // Pin the contract: each `AppError` variant must map to a
+        // distinct exit code. Updating this table without updating the
+        // CLI shell wrappers (and vice versa) is the kind of drift the
+        // string-match fallback used to hide.
+        let table = [
+            (AppError::NotFound, 4),
+            (AppError::InvalidInput("x".into()), 2),
+            (AppError::Policy("x".into()), 5),
+            (AppError::Permission("x".into()), 6),
+            (AppError::Unsupported("x".into()), 7),
+            (AppError::Storage("x".into()), 8),
+            (AppError::Search("x".into()), 8),
+            (AppError::Platform("x".into()), 8),
+            (AppError::Ai("x".into()), 8),
+        ];
+        for (err, expected) in table {
+            let label = format!("{err:?}");
+            let wrapped = anyhow::Error::from(err);
+            assert_eq!(exit_code_for(&wrapped), expected, "variant {label}");
+        }
+    }
+
+    #[test]
+    fn exit_code_for_unknown_error_is_internal_not_one() {
+        // The previous implementation returned 1 for any anyhow error
+        // that didn't downcast. That collided with shell convention
+        // ("1 = generic failure") and made it impossible to tell a
+        // logic bug apart from a routine "no match" exit. Internal
+        // failures get 8, same bucket as unrecoverable AppError.
+        let bare = anyhow!("some opaque error");
+        assert_eq!(exit_code_for(&bare), 8);
+    }
+
+    #[test]
+    fn ipc_error_to_anyhow_round_trips_each_known_code() {
+        let cases = [
+            ("not_found", 4_u8),
+            ("invalid_input", 2),
+            ("policy_error", 5),
+            ("permission_error", 6),
+            ("unsupported", 7),
+            ("storage_error", 8),
+            ("search_error", 8),
+            ("platform_error", 8),
+            ("ai_error", 8),
+        ];
+        for (code, expected_exit) in cases {
+            let err = err_with_code(code);
+            let wrapped = ipc_error_to_anyhow(&err);
+            assert_eq!(
+                exit_code_for(&wrapped),
+                expected_exit,
+                "round-trip for code `{code}`",
+            );
+        }
+    }
+
+    #[test]
+    fn ipc_error_to_anyhow_preserves_original_message() {
+        // The structured `AppError` we synthesise must carry the
+        // message the daemon sent so the user-facing display still
+        // describes the actual failure (path, hint, etc.) and not just
+        // the bucket.
+        let err = err_with_code("policy_error");
+        let wrapped = ipc_error_to_anyhow(&err);
+        assert!(
+            wrapped
+                .to_string()
+                .contains("test message for policy_error"),
+            "rendered error must include daemon-supplied message, got: {wrapped}",
+        );
+    }
+
+    #[test]
+    fn ipc_error_to_anyhow_unknown_code_falls_through_to_internal() {
+        // An unknown code from a future daemon must not silently map
+        // to the wrong bucket — it ends up as a non-AppError anyhow,
+        // which `exit_code_for` classifies as 8 (internal).
+        let err = err_with_code("future_code_we_dont_know");
+        let wrapped = ipc_error_to_anyhow(&err);
+        assert!(wrapped.downcast_ref::<AppError>().is_none());
+        assert_eq!(exit_code_for(&wrapped), 8);
     }
 }
