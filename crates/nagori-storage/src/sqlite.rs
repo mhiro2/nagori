@@ -587,7 +587,7 @@ impl nagori_core::EntryRepository for SqliteStore {
         self.run_blocking(|store| {
             let conn = store.conn()?;
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT e.*, d.title, d.preview, d.normalized_text, d.language
                      FROM entries e
                      LEFT JOIN search_documents d ON d.entry_id = e.id
@@ -901,7 +901,7 @@ impl SearchCandidateProvider for SqliteStore {
                     extra = filter.sql,
                 )
             };
-            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
             let mut bound: Vec<&dyn ToSql> = Vec::new();
             if bounded {
                 bound.push(&scan_window);
@@ -949,7 +949,7 @@ impl SearchCandidateProvider for SqliteStore {
                  LIMIT ?",
                 extra = filter.sql,
             );
-            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
             let mut bound: Vec<&dyn ToSql> = vec![&fts];
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
@@ -1008,7 +1008,7 @@ impl SearchCandidateProvider for SqliteStore {
                  LIMIT ?",
                 extra = filter.sql,
             );
-            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
             let mut bound: Vec<&dyn ToSql> = query_grams.iter().map(|g| g as &dyn ToSql).collect();
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
@@ -1061,7 +1061,7 @@ fn fetch_recent_entries(
          LIMIT ?",
         extra = filter.sql,
     );
-    let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
     let mut bound: Vec<&dyn ToSql> = filter.params.iter().map(|p| &**p as &dyn ToSql).collect();
     bound.push(&limit);
     let rows = stmt
