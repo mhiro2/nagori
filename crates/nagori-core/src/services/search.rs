@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -175,6 +175,7 @@ where
         let filters = &query.filters;
 
         let mut entries: Vec<ClipboardEntry> = Vec::new();
+        let mut seen: HashSet<EntryId> = HashSet::new();
         let mut fts_scores: HashMap<EntryId, f32> = HashMap::new();
         let mut ngram_overlap: HashMap<EntryId, f32> = HashMap::new();
 
@@ -184,7 +185,7 @@ where
                 .recent_entries(filters, query.recent_order, candidate_limit)
                 .await?
             {
-                push_unique(&mut entries, entry);
+                push_unique(&mut entries, &mut seen, entry);
             }
         }
 
@@ -247,15 +248,15 @@ where
             tokio::try_join!(substring_fut, fts_fut, ngram_fut)?;
 
         for entry in substring_hits {
-            push_unique(&mut entries, entry);
+            push_unique(&mut entries, &mut seen, entry);
         }
         for hit in fts_hits {
             fts_scores.insert(hit.entry.id, hit.fts_score);
-            push_unique(&mut entries, hit.entry);
+            push_unique(&mut entries, &mut seen, hit.entry);
         }
         for hit in ngram_hits {
             ngram_overlap.insert(hit.entry.id, hit.ngram_overlap);
-            push_unique(&mut entries, hit.entry);
+            push_unique(&mut entries, &mut seen, hit.entry);
         }
 
         let mut results = self.rank_all(
@@ -304,8 +305,12 @@ where
     }
 }
 
-fn push_unique(entries: &mut Vec<ClipboardEntry>, entry: ClipboardEntry) {
-    if !entries.iter().any(|existing| existing.id == entry.id) {
+fn push_unique(
+    entries: &mut Vec<ClipboardEntry>,
+    seen: &mut HashSet<EntryId>,
+    entry: ClipboardEntry,
+) {
+    if seen.insert(entry.id) {
         entries.push(entry);
     }
 }
