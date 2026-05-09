@@ -6,12 +6,17 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
+use std::time::Duration;
+#[cfg(unix)]
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     sync::Semaphore,
+    task::JoinSet,
     time::timeout,
 };
+#[cfg(unix)]
+use tracing::warn;
 
 #[cfg(unix)]
 use crate::AuthToken;
@@ -109,6 +114,10 @@ pub async fn bind_unix(path: impl AsRef<Path>) -> Result<UnixListener> {
 /// dispatching the inner `IpcRequest`. Loops until the listener errors. Token
 /// validation runs in constant time (see `AuthToken::verify`) so the response
 /// time can't be used to brute the token byte-by-byte.
+///
+/// This entry point never returns under normal operation. Callers that need
+/// to drive a clean shutdown (drop the listener, then drain in-flight
+/// handlers, then abort) should use [`accept_loop_with_shutdown`] instead.
 #[cfg(unix)]
 pub async fn accept_loop<F, Fut>(
     listener: UnixListener,
@@ -119,82 +128,180 @@ where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
+    accept_loop_with_shutdown(
+        listener,
+        expected_token,
+        handler,
+        std::future::pending::<()>(),
+        Duration::from_secs(0),
+    )
+    .await
+}
+
+/// Three-stage graceful shutdown variant of [`accept_loop`].
+///
+/// 1. While `shutdown` is pending, accept connections normally and spawn
+///    each handler into a `JoinSet` so we can address them collectively.
+/// 2. When `shutdown` fires, the listener is dropped (no new connections)
+///    and we wait up to `drain_grace` for the spawned handlers to finish.
+///    In-flight transactions get a chance to commit instead of being
+///    half-applied.
+/// 3. Anything still running after `drain_grace` is aborted; any abort
+///    panics are observed via `JoinSet::join_next` so they don't leak.
+#[cfg(unix)]
+pub async fn accept_loop_with_shutdown<F, Fut, S>(
+    listener: UnixListener,
+    expected_token: AuthToken,
+    handler: F,
+    shutdown: S,
+    drain_grace: Duration,
+) -> Result<()>
+where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+    S: Future<Output = ()> + Send,
+{
     let handler = Arc::new(handler);
     let token = Arc::new(expected_token);
     let semaphore = Arc::new(Semaphore::new(32));
+    let mut tasks: JoinSet<()> = JoinSet::new();
 
-    loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
-        let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
-            AppError::Platform(format!("failed to acquire IPC connection permit: {err}"))
-        })?;
-        let handler = handler.clone();
-        let token = token.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let mut stream = stream;
-            // Bound the time we will hold a connection slot for a slow or
-            // stalled client. Without this, an idle peer that never writes a
-            // newline would pin one of the 32 semaphore permits forever.
-            let line = match timeout(READ_TIMEOUT, read_bounded_line(&mut stream)).await {
-                Ok(result) => result,
-                Err(_) => Err("IPC request timed out".to_owned()),
-            };
-            let response = match line {
-                Ok(line) => match serde_json::from_slice::<IpcEnvelope>(&line) {
-                    Ok(envelope) => {
-                        if token.verify(&envelope.token) {
-                            handler(envelope.request).await
-                        } else {
-                            IpcResponse::Error(crate::IpcError {
-                                code: "unauthorized".to_owned(),
-                                message: "invalid auth token".to_owned(),
-                                recoverable: false,
-                            })
-                        }
+    tokio::pin!(shutdown);
+    let accept_result = loop {
+        tokio::select! {
+            biased;
+            () = &mut shutdown => break Ok(()),
+            accept = listener.accept() => {
+                let (stream, _) = match accept {
+                    Ok(accepted) => accepted,
+                    Err(err) => break Err(AppError::Platform(err.to_string())),
+                };
+                // Race permit acquisition against shutdown. Without this
+                // arm, a saturated handler pool (32 in flight) would pin
+                // the loop on `acquire_owned().await` and we would not
+                // observe `shutdown` again until one of the in-flight
+                // handlers freed a permit — which, in a degenerate case
+                // where every handler is itself stuck on a slow DB write,
+                // means the listener is not dropped until `drain_grace`
+                // aborts those handlers. Selecting on shutdown here keeps
+                // shutdown observation latency independent of handler
+                // progress.
+                let permit = tokio::select! {
+                    biased;
+                    () = &mut shutdown => {
+                        // Refuse the just-accepted connection by dropping
+                        // its stream; the client sees EOF and we proceed
+                        // to drain stage on the next iteration.
+                        drop(stream);
+                        break Ok(());
                     }
-                    Err(err) => IpcResponse::Error(crate::IpcError {
-                        code: "invalid_request".to_owned(),
-                        message: err.to_string(),
-                        recoverable: true,
-                    }),
-                },
-                Err(err) => IpcResponse::Error(crate::IpcError {
-                    code: "invalid_request".to_owned(),
-                    message: err,
-                    recoverable: true,
-                }),
-            };
-            let payload = match serde_json::to_vec(&response) {
-                Ok(payload) if payload.len() < MAX_IPC_RESPONSE_BYTES => Some(payload),
-                Ok(payload) => {
-                    // The daemon already paid the allocation by the time we
-                    // get here, so this branch protects the *wire* and the
-                    // client's bounded reader — not daemon RSS. Replace with
-                    // a small error envelope so the caller sees a structured
-                    // rejection it can act on (retry with a tighter limit)
-                    // instead of timing out on a truncated half-JSON.
-                    let oversized = IpcResponse::Error(crate::IpcError {
-                        code: "response_too_large".to_owned(),
-                        message: format!(
-                            "response would be {} bytes, exceeds limit {}",
-                            payload.len(),
-                            MAX_IPC_RESPONSE_BYTES
-                        ),
-                        recoverable: false,
-                    });
-                    serde_json::to_vec(&oversized).ok()
-                }
-                Err(_) => None,
-            };
-            if let Some(payload) = payload {
-                let _ = stream.write_all(&payload).await;
-                let _ = stream.write_all(b"\n").await;
+                    permit = semaphore.clone().acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(err) => break Err(AppError::Platform(format!(
+                            "failed to acquire IPC connection permit: {err}"
+                        ))),
+                    },
+                };
+                let handler = handler.clone();
+                let token = token.clone();
+                tasks.spawn(handle_connection(stream, permit, handler, token));
             }
-        });
+            // Reap completed handlers so the `JoinSet` doesn't grow without
+            // bound for the lifetime of the daemon.
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    };
+
+    // Stage 1: drop the listener so no further `accept()` succeeds even
+    // for clients that beat the shutdown signal in.
+    drop(listener);
+
+    // Stage 2: wait up to `drain_grace` for in-flight handlers to commit.
+    if !tasks.is_empty() {
+        let drain = async { while tasks.join_next().await.is_some() {} };
+        if timeout(drain_grace, drain).await.is_err() {
+            // Stage 3: anything still running has had its grace period;
+            // abort and reap so the JoinSet drops cleanly.
+            warn!(
+                grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX),
+                "ipc_drain_timeout_aborting_inflight",
+            );
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
+    }
+
+    accept_result
+}
+
+#[cfg(unix)]
+async fn handle_connection<F, Fut>(
+    mut stream: tokio::net::UnixStream,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    handler: Arc<F>,
+    token: Arc<AuthToken>,
+) where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+{
+    let _permit = permit;
+    // Bound the time we will hold a connection slot for a slow or stalled
+    // client. Without this, an idle peer that never writes a newline would
+    // pin one of the 32 semaphore permits forever.
+    let line = match timeout(READ_TIMEOUT, read_bounded_line(&mut stream)).await {
+        Ok(result) => result,
+        Err(_) => Err("IPC request timed out".to_owned()),
+    };
+    let response = match line {
+        Ok(line) => match serde_json::from_slice::<IpcEnvelope>(&line) {
+            Ok(envelope) => {
+                if token.verify(&envelope.token) {
+                    handler(envelope.request).await
+                } else {
+                    IpcResponse::Error(crate::IpcError {
+                        code: "unauthorized".to_owned(),
+                        message: "invalid auth token".to_owned(),
+                        recoverable: false,
+                    })
+                }
+            }
+            Err(err) => IpcResponse::Error(crate::IpcError {
+                code: "invalid_request".to_owned(),
+                message: err.to_string(),
+                recoverable: true,
+            }),
+        },
+        Err(err) => IpcResponse::Error(crate::IpcError {
+            code: "invalid_request".to_owned(),
+            message: err,
+            recoverable: true,
+        }),
+    };
+    let payload = match serde_json::to_vec(&response) {
+        Ok(payload) if payload.len() < MAX_IPC_RESPONSE_BYTES => Some(payload),
+        Ok(payload) => {
+            // The daemon already paid the allocation by the time we get
+            // here, so this branch protects the *wire* and the client's
+            // bounded reader — not daemon RSS. Replace with a small error
+            // envelope so the caller sees a structured rejection it can
+            // act on (retry with a tighter limit) instead of timing out
+            // on a truncated half-JSON.
+            let oversized = IpcResponse::Error(crate::IpcError {
+                code: "response_too_large".to_owned(),
+                message: format!(
+                    "response would be {} bytes, exceeds limit {}",
+                    payload.len(),
+                    MAX_IPC_RESPONSE_BYTES
+                ),
+                recoverable: false,
+            });
+            serde_json::to_vec(&oversized).ok()
+        }
+        Err(_) => None,
+    };
+    if let Some(payload) = payload {
+        let _ = stream.write_all(&payload).await;
+        let _ = stream.write_all(b"\n").await;
     }
 }
 
@@ -477,6 +584,194 @@ mod tests {
         assert_eq!(entry.text.as_deref(), Some("ipc payload"));
         assert_eq!(entry.preview, "ipc payload");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_in_flight_handler_within_grace() {
+        // The graceful-shutdown contract: a request that started before
+        // shutdown was signalled gets to finish (and reach the client),
+        // provided it can complete within the grace period. Without this
+        // we'd leave half-applied DB transactions when the user hits
+        // Ctrl-C mid-request.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drain.sock");
+        let token = test_token();
+        let listener = bind_unix(&path).await.expect("bind");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_server = shutdown.clone();
+        let server_token = token.clone();
+        let server = tokio::spawn(async move {
+            accept_loop_with_shutdown(
+                listener,
+                server_token,
+                |_request| async move {
+                    // Outlast the `notify_waiters` below but stay well
+                    // inside the grace window so the drain can observe
+                    // the response landing.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    IpcResponse::Ack
+                },
+                async move { shutdown_for_server.notified().await },
+                Duration::from_secs(2),
+            )
+            .await
+        });
+
+        // Kick off a request as its own task so the connect + write
+        // actually run before we signal shutdown — `client.send` is a
+        // lazy future, so awaiting it after `notify_waiters` would race
+        // the listener drop.
+        let client = IpcClient::new(path.to_string_lossy().into_owned(), token);
+        let request = tokio::spawn(async move { client.send(IpcRequest::Health).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown.notify_waiters();
+
+        let response = tokio::time::timeout(Duration::from_secs(3), request)
+            .await
+            .expect("response should arrive within grace + slack")
+            .expect("request task should not panic")
+            .expect("client send should succeed");
+        assert!(matches!(response, IpcResponse::Ack));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server should finish within grace + slack")
+            .expect("server task should not panic");
+        assert!(
+            outcome.is_ok(),
+            "accept loop should exit cleanly: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_observed_promptly_when_permit_pool_is_saturated() {
+        // Regression: with all 32 handler permits taken and the 33rd
+        // connection blocked on `acquire_owned().await`, the accept
+        // loop must still observe `shutdown` and drop the listener —
+        // shutdown latency must be independent of handler progress.
+        // Before the fix, the loop was stuck on the inner permit
+        // acquisition and would not poll shutdown until a handler
+        // freed a permit (i.e. `drain_grace` aborted them).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("saturated.sock");
+        let token = test_token();
+        let listener = bind_unix(&path).await.expect("bind");
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let release_for_server = release.clone();
+        let started_for_server = started.clone();
+        let shutdown_for_server = shutdown.clone();
+        let server_token = token.clone();
+        // Pick a drain_grace that is loosely bounded but large enough
+        // that "shutdown observed within 500 ms" is a meaningful
+        // assertion: a regression would push the listener-drop out
+        // to drain_grace == 5 s.
+        let server = tokio::spawn(async move {
+            accept_loop_with_shutdown(
+                listener,
+                server_token,
+                move |_request| {
+                    let release = release_for_server.clone();
+                    let started = started_for_server.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        release.notified().await;
+                        IpcResponse::Ack
+                    }
+                },
+                async move { shutdown_for_server.notified().await },
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        // Saturate the 32-handler pool. We spawn each request as its
+        // own task so the connect + write actually run; the handlers
+        // then park on `release.notified()`.
+        let mut clients = Vec::with_capacity(32);
+        for _ in 0..32 {
+            let client_path = path.clone();
+            let client_token = token.clone();
+            clients.push(tokio::spawn(async move {
+                let client =
+                    IpcClient::new(client_path.to_string_lossy().to_string(), client_token);
+                client.send(IpcRequest::Health).await
+            }));
+        }
+        // Wait until all 32 handlers have started; bound the wait so a
+        // hung server doesn't hang the test.
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst) >= 32 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            32,
+            "all 32 handlers should be in flight before we issue the 33rd connection"
+        );
+
+        // Issue the 33rd connection. Its accept will succeed but the
+        // server's permit acquisition will block until shutdown wins.
+        let blocked_path = path.clone();
+        let blocked_token = token.clone();
+        let blocked = tokio::spawn(async move {
+            let client = IpcClient::new(blocked_path.to_string_lossy().to_string(), blocked_token);
+            client.send(IpcRequest::Health).await
+        });
+        // Give the server time to accept the 33rd and reach the
+        // permit-acquisition select arm.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let shutdown_at = std::time::Instant::now();
+        shutdown.notify_waiters();
+
+        // After shutdown the listener should be dropped quickly. We
+        // probe by attempting fresh connects; once the file is gone
+        // (`bind_unix` removes it before binding, but for shutdown we
+        // just drop the listener — so the inode lingers and connects
+        // get ECONNREFUSED) we know the server has reached at least
+        // stage 1 of the drain.
+        let mut listener_gone = false;
+        for _ in 0..50 {
+            if tokio::net::UnixStream::connect(&path).await.is_err() {
+                listener_gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let elapsed = shutdown_at.elapsed();
+        assert!(
+            listener_gone,
+            "listener should refuse new connections after shutdown",
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "shutdown should be observed within 500 ms even with saturated permits, took {elapsed:?}",
+        );
+
+        // Release the parked handlers so the drain stage can complete
+        // without paying drain_grace.
+        release.notify_waiters();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(7), server)
+            .await
+            .expect("server should finish after release")
+            .expect("server task should not panic");
+        assert!(
+            outcome.is_ok(),
+            "accept loop should exit cleanly: {outcome:?}",
+        );
+        for client in clients {
+            let _ = client.await;
+        }
+        let _ = blocked.await;
     }
 }
 

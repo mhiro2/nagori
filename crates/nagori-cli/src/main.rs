@@ -416,6 +416,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         token_path: nagori_ipc::default_token_path(),
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
         maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
+        ..DaemonConfig::default()
     };
 
     #[cfg(target_os = "macos")]

@@ -4,9 +4,11 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use nagori_core::AppError;
 use nagori_core::Result;
 #[cfg(unix)]
-use nagori_ipc::{AuthToken, accept_loop, bind_unix, default_token_path, write_token_file};
+use nagori_ipc::{
+    AuthToken, accept_loop_with_shutdown, bind_unix, default_token_path, write_token_file,
+};
 use nagori_platform::{ClipboardReader, WindowBehavior};
-use tokio::signal;
+use tokio::{signal, sync::Notify};
 use tracing::{info, warn};
 
 use crate::{CaptureLoop, MaintenanceService, NagoriRuntime};
@@ -17,6 +19,11 @@ pub struct DaemonConfig {
     pub token_path: PathBuf,
     pub capture_interval: Duration,
     pub maintenance_interval: Duration,
+    /// Maximum time to wait for in-flight IPC handlers to commit during
+    /// shutdown before they're aborted. Picked to be longer than the
+    /// slowest expected DB write (FTS index update on a large entry) but
+    /// short enough that `Ctrl-C` on a stuck daemon still returns quickly.
+    pub shutdown_grace: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -26,6 +33,7 @@ impl Default for DaemonConfig {
             token_path: default_token_path_local(),
             capture_interval: Duration::from_millis(500),
             maintenance_interval: Duration::from_mins(30),
+            shutdown_grace: Duration::from_secs(5),
         }
     }
 }
@@ -60,17 +68,25 @@ fn default_token_path_local() -> PathBuf {
 async fn spawn_ipc_server(
     runtime: NagoriRuntime,
     config: &DaemonConfig,
+    shutdown: Arc<Notify>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     #[cfg(unix)]
     {
         let listener = bind_unix(&config.socket_path).await?;
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
+        let grace = config.shutdown_grace;
         Ok(tokio::spawn(async move {
-            let result = accept_loop(listener, token, move |request| {
-                let runtime = runtime.clone();
-                async move { runtime.handle_ipc(request).await }
-            })
+            let result = accept_loop_with_shutdown(
+                listener,
+                token,
+                move |request| {
+                    let runtime = runtime.clone();
+                    async move { runtime.handle_ipc(request).await }
+                },
+                async move { shutdown.notified().await },
+                grace,
+            )
             .await;
             if let Err(err) = result {
                 warn!(error = %err, "ipc_server_terminated");
@@ -79,7 +95,7 @@ async fn spawn_ipc_server(
     }
     #[cfg(not(unix))]
     {
-        let _ = (runtime, config);
+        let _ = (runtime, config, shutdown);
         Err(AppError::Unsupported(
             "IPC requires a Unix-like platform".to_owned(),
         ))
@@ -160,7 +176,7 @@ where
     };
 
     let serve_handle = if runtime.current_settings().cli_ipc_enabled {
-        Some(spawn_ipc_server(runtime.clone(), &config).await?)
+        Some(spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await?)
     } else {
         info!("ipc_disabled_by_settings");
         None
@@ -179,21 +195,83 @@ where
     }
 
     info!("daemon_shutting_down");
-    capture_handle.abort();
-    maintenance_handle.abort();
-    if let Some(handle) = serve_handle {
-        handle.abort();
-    }
+    drain_workers(
+        serve_handle,
+        capture_handle,
+        maintenance_handle,
+        config.shutdown_grace,
+    )
+    .await;
+    cleanup_runtime_files(&config);
+    Ok(())
+}
 
-    if config.socket_path.exists() {
-        let _ = std::fs::remove_file(&config.socket_path);
+/// Three-stage graceful shutdown:
+///
+/// 1. `accept_loop_with_shutdown` already saw the shutdown notify and
+///    dropped the listener, so this `serve_handle` await is just waiting
+///    for the in-flight drain + abort cleanup. The +1 s slack covers the
+///    abort acks `JoinSet::join_next` has to drain after the timeout.
+/// 2. Capture + maintenance loops read the same notify and exit between
+///    ticks; we give them up to `grace` to finish the current iteration
+///    so a partway-through DB write commits instead of being abandoned.
+/// 3. Anything still running after `grace` is **explicitly** aborted via
+///    `handle.abort()` and we await the resulting `JoinError(cancelled)`
+///    so the task is fully cleaned up before we proceed to socket / token
+///    deletion. Dropping a `tokio::task::JoinHandle` only detaches it, so
+///    skipping the explicit abort would let capture / maintenance / IPC
+///    workers race the file removals below — the very class of bug the
+///    grace timeout is supposed to bound.
+async fn drain_workers(
+    serve_handle: Option<tokio::task::JoinHandle<()>>,
+    capture_handle: tokio::task::JoinHandle<()>,
+    maintenance_handle: tokio::task::JoinHandle<()>,
+    grace: Duration,
+) {
+    if let Some(handle) = serve_handle {
+        drain_one("ipc_serve", handle, grace + Duration::from_secs(1)).await;
+    }
+    tokio::join!(
+        drain_one("capture", capture_handle, grace),
+        drain_one("maintenance", maintenance_handle, grace),
+    );
+}
+
+/// Borrow-then-abort drain. We `&mut handle` so the timeout doesn't move
+/// the handle out of scope: on the timeout branch we still have it to
+/// call `abort()` on, then await again so the cancellation completes
+/// before we return.
+async fn drain_one(name: &'static str, mut handle: tokio::task::JoinHandle<()>, grace: Duration) {
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(error = %err, worker = name, "drain_join_failed"),
+        Err(_) => {
+            warn!(worker = name, "drain_timeout_aborting");
+            handle.abort();
+            // The post-abort await yields a `JoinError(cancelled)` on the
+            // common path; treat both Ok and Err as "task is done" and
+            // only log unexpected panics.
+            match handle.await {
+                Ok(()) => {}
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => warn!(error = %err, worker = name, "drain_abort_join_failed"),
+            }
+        }
+    }
+}
+
+fn cleanup_runtime_files(config: &DaemonConfig) {
+    if config.socket_path.exists()
+        && let Err(err) = std::fs::remove_file(&config.socket_path)
+    {
+        warn!(error = %err, path = %config.socket_path.display(), "socket_cleanup_failed");
     }
     // Remove the token file on shutdown so a CLI launched after the daemon
     // exits gets a clean "no daemon running" error instead of trying a
     // stale token against a fresh process.
-    if config.token_path.exists() {
-        let _ = std::fs::remove_file(&config.token_path);
+    if config.token_path.exists()
+        && let Err(err) = std::fs::remove_file(&config.token_path)
+    {
+        warn!(error = %err, path = %config.token_path.display(), "token_cleanup_failed");
     }
-
-    Ok(())
 }
