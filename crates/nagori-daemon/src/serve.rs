@@ -24,6 +24,12 @@ pub struct DaemonConfig {
     /// slowest expected DB write (FTS index update on a large entry) but
     /// short enough that `Ctrl-C` on a stuck daemon still returns quickly.
     pub shutdown_grace: Duration,
+    /// Whether the capture loop's "after N AX errors, treat focus as
+    /// secure" escalation is enabled. Production runs leave this `true`
+    /// (the safe default); only test harnesses that can't grant
+    /// Accessibility programmatically flip it to `false`. See
+    /// `CaptureLoop::without_secure_focus_fail_closed`.
+    pub secure_focus_fail_closed: bool,
 }
 
 impl Default for DaemonConfig {
@@ -34,6 +40,7 @@ impl Default for DaemonConfig {
             capture_interval: Duration::from_millis(500),
             maintenance_interval: Duration::from_mins(30),
             shutdown_grace: Duration::from_secs(5),
+            secure_focus_fail_closed: true,
         }
     }
 }
@@ -131,10 +138,14 @@ where
         let settings_rx = settings_rx.clone();
         let window = window.clone();
         let search_cache = runtime.search_cache_handle();
+        let secure_focus_fail_closed = config.secure_focus_fail_closed;
         tokio::spawn(async move {
             let settings = settings_rx.borrow().clone();
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_search_cache(search_cache);
+            if !secure_focus_fail_closed {
+                capture = capture.without_secure_focus_fail_closed();
+            }
             if let Some(w) = window {
                 capture = capture.with_window(w);
             }

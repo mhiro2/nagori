@@ -83,7 +83,13 @@ wait_for() {
 }
 
 step "start daemon"
-"${BIN}" \
+# A freshly built `target/release/nagori` does not have Accessibility
+# permission, so the AX-based "frontmost focus is a secure text field"
+# probe fails every tick. After three consecutive failures the capture
+# loop flips to fail-closed and silently drops user-issued pbcopy events,
+# breaking every test below the first one. Opt out for the harness; the
+# bundle-id override list still fires.
+NAGORI_DISABLE_SECURE_FOCUS_FAIL_CLOSED=1 "${BIN}" \
   --ipc "${SOCKET}" \
   --db "${DB}" \
   daemon run \

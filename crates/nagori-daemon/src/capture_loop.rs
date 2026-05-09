@@ -203,6 +203,18 @@ pub struct CaptureLoop<R, E, A> {
     /// detected wake gap to defend against a potentially lapped pasteboard
     /// `changeCount`.
     force_content_check: bool,
+    /// When `false`, sustained AX errors no longer flip the loop to
+    /// fail-closed: the loop keeps treating an AX-errored tick as
+    /// "unknown → not secure" indefinitely. Production runs leave this
+    /// `true` (the default) so that a revoked Accessibility grant or a
+    /// wedged AX subsystem can't silently let password keystrokes through
+    /// history. Test harnesses where Accessibility can't be granted
+    /// programmatically (notably `scripts/e2e-macos.sh` running against a
+    /// freshly built binary) flip it off so the rest of the capture
+    /// pipeline can be exercised end-to-end. The bundle-id override list
+    /// still fires regardless: those system password UIs are positively
+    /// identified, not assumed.
+    secure_focus_fail_closed_enabled: bool,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -228,7 +240,17 @@ where
             last_tick_at: None,
             last_content_hash: None,
             force_content_check: false,
+            secure_focus_fail_closed_enabled: true,
         }
+    }
+
+    /// Disable the AX-error fail-closed escalation. See the field doc on
+    /// `secure_focus_fail_closed_enabled` for the production vs. test
+    /// trade-off; the bundle-id override list still applies.
+    #[must_use]
+    pub const fn without_secure_focus_fail_closed(mut self) -> Self {
+        self.secure_focus_fail_closed_enabled = false;
+        self
     }
 
     /// Reset the dedup baseline so the next observed sequence is treated as
@@ -441,9 +463,10 @@ where
                 Err(err) => {
                     self.consecutive_secure_ax_failures =
                         self.consecutive_secure_ax_failures.saturating_add(1);
-                    if self.consecutive_secure_ax_failures >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD
-                        || bundle_override
-                    {
+                    let ax_threshold_tripped = self.secure_focus_fail_closed_enabled
+                        && self.consecutive_secure_ax_failures
+                            >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD;
+                    if ax_threshold_tripped || bundle_override {
                         warn!(
                             error = %err,
                             consecutive_failures = self.consecutive_secure_ax_failures,
@@ -1118,6 +1141,119 @@ mod tests {
             loop_.capture_once().await.unwrap().is_none(),
             "tick at/after threshold must fail closed"
         );
+    }
+
+    #[tokio::test]
+    async fn fail_closed_bypass_keeps_capturing_through_sustained_ax_errors() {
+        // Test harnesses that can't grant the daemon Accessibility (so AX
+        // queries fail every tick) need a way to exercise the rest of the
+        // capture pipeline. `without_secure_focus_fail_closed` flips off
+        // the threshold escalation; ticks past the threshold must still
+        // capture instead of being silently skipped.
+        use async_trait::async_trait;
+        use nagori_core::{AppError, SourceApp};
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        struct ErroringSecure;
+        #[async_trait]
+        impl WindowBehavior for ErroringSecure {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.example.editor".to_owned()),
+                        name: Some("Editor".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Err(AppError::Platform("AX wedged".to_owned()))
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(ErroringSecure))
+        .without_secure_focus_fail_closed();
+
+        // Push N > THRESHOLD distinct clips and assert every one of them
+        // lands. Without the bypass the third clip would be the first to
+        // fail closed; we add a comfortable margin so a future bump to
+        // THRESHOLD still exercises post-threshold behaviour.
+        let ticks = SECURE_FOCUS_FAIL_CLOSED_THRESHOLD + 3;
+        for n in 0..ticks {
+            clipboard
+                .write_text(&format!("clip-{n}"))
+                .await
+                .expect("clipboard write");
+            assert!(
+                loop_.capture_once().await.unwrap().is_some(),
+                "tick {n} must capture even past the AX-fail threshold",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_closed_bypass_still_honors_bundle_override() {
+        // The bypass turns off "after N AX errors, assume secure" because
+        // those failures are inferred. Bundle-id matches are positively
+        // identified system password UIs and must keep skipping captures
+        // even with the bypass on.
+        use async_trait::async_trait;
+        use nagori_core::{AppError, SourceApp};
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        struct AuthDialog;
+        #[async_trait]
+        impl WindowBehavior for AuthDialog {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.apple.SecurityAgent".to_owned()),
+                        name: Some("SecurityAgent".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Err(AppError::Platform("AX wedged".to_owned()))
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(AuthDialog))
+        .without_secure_focus_fail_closed();
+
+        clipboard.write_text("hunter2").await.expect("clipboard");
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

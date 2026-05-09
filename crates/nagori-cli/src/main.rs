@@ -228,6 +228,19 @@ async fn dispatch(cli: Cli) -> Result<()> {
     run_local_command(cli).await
 }
 
+/// Treat an env var as a boolean opt-in. Only an explicit truthy token
+/// (`1` / `true` / `yes` / `on`, case-insensitive) flips the flag on; anything
+/// else — unset, empty, `0`, `false`, `no`, garbage — keeps it off. Used for
+/// security-relaxation flags where silently honouring `=0` would be a footgun.
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 const fn is_write_command(cmd: &Command) -> bool {
     matches!(
         cmd,
@@ -437,11 +450,23 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         .with_context(|| format!("failed to open {}", db_path.display()))?;
 
     let socket_path = cli.ipc.clone().unwrap_or_else(default_socket_path);
+    // Test harnesses (notably scripts/e2e-macos.sh) cannot grant the daemon
+    // Accessibility permission programmatically, so AX queries fail every
+    // tick and the capture loop's "after N AX errors, treat focus as
+    // secure" escalation drops user-issued pbcopy events. Letting the
+    // harness opt out via env var keeps production safety intact (default
+    // remains fail-closed) while making the e2e pipeline exercisable.
+    //
+    // Only accept explicit truthy values: anything else — including the
+    // common footgun `=0`, `=false`, or `=no` — leaves fail-closed on. A
+    // security-relaxation flag should not be enabled by accident.
+    let secure_focus_fail_closed = !env_truthy("NAGORI_DISABLE_SECURE_FOCUS_FAIL_CLOSED");
     let config = DaemonConfig {
         socket_path,
         token_path: nagori_ipc::default_token_path(),
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
         maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
+        secure_focus_fail_closed,
         ..DaemonConfig::default()
     };
 

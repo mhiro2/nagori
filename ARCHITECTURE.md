@@ -236,12 +236,24 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   frontmost app's currently-focused element is a secure text field
   (`kAXSecureTextField` role/subrole). When true, the clip is dropped
   before the body is even read so password-input keystrokes never reach
-  storage. The check fails open: a missing Accessibility grant or a
-  transient AX error is treated as "not secure", and the
+  storage. A single AX error fails open (treated as "not secure") so a
+  transient FFI hiccup doesn't stall capture; sustained errors past
+  `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` flip to fail-closed (assume
+  secure, skip capture) on the assumption that a permanent outage means
+  Accessibility was revoked or the AX subsystem is wedged. A
+  `SECURE_FOCUS_BUNDLE_OVERRIDES` list also forces fail-closed when the
+  frontmost is a known system password UI (e.g. `com.apple.SecurityAgent`)
+  whose AX state is deliberately scrubbed. The
   `SensitivityClassifier` secret detector and password-manager bundle
   denylist still run as the second line of defence. The macOS impl
   bounds the per-element AX trip via `AXUIElementSetMessagingTimeout`
   so an unresponsive focused process can't stall the polling tick.
+  Test harnesses that can't grant Accessibility programmatically can
+  set `NAGORI_DISABLE_SECURE_FOCUS_FAIL_CLOSED=1` (the parser accepts
+  `1`/`true`/`yes`/`on`, case-insensitive) to keep the loop failing open
+  through sustained AX errors; the bundle-override list still applies.
+  Intended for `scripts/e2e-macos.sh`; production runs leave the default
+  fail-closed behaviour.
 
 The pipeline is purely async over `tokio`; the macOS adapter polls
 NSPasteboard with backoff and reports a `ClipboardSequence` so the loop
