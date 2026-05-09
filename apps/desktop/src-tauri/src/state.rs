@@ -1,7 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 #[cfg(target_os = "macos")]
 use std::{sync::Arc, time::Duration};
+
+#[cfg(not(target_os = "macos"))]
+use std::time::Duration;
+
+/// How long a "last pasted" entry id stays valid before it falls back to
+/// the recency head. Picked at 30 min so a short break between pastes
+/// (coffee, meeting) still threads back to the same clip, but a fresh
+/// session many hours later doesn't surface a context-mismatched paste
+/// from a different task.
+const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
 use nagori_ai::LocalAiProvider;
 #[cfg(target_os = "macos")]
@@ -30,22 +41,34 @@ pub struct AppState {
     /// box.
     #[cfg(target_os = "macos")]
     pub previous_frontmost: Arc<Mutex<Option<SourceApp>>>,
-    /// Most recently pasted entry id. Powers the "repaste last" secondary
-    /// hotkey so it targets the entry the user actually pasted instead of
-    /// whatever happens to top the recency list (a fresh capture from
-    /// elsewhere can otherwise hijack the slot between pastes).
-    pub last_pasted_id: Mutex<Option<EntryId>>,
+    /// Most recently pasted entry id, paired with the `Instant` it was
+    /// recorded. Powers the "repaste last" secondary hotkey so it
+    /// targets the entry the user actually pasted instead of whatever
+    /// happens to top the recency list (a fresh capture from elsewhere
+    /// can otherwise hijack the slot between pastes). The timestamp
+    /// drives TTL expiry — see `LAST_PASTED_TTL` — so a paste recorded
+    /// hours ago doesn't silently resurface in a new working context.
+    pub last_pasted_id: Mutex<Option<(EntryId, Instant)>>,
 }
 
 impl AppState {
     pub fn record_last_pasted(&self, id: EntryId) {
         if let Ok(mut slot) = self.last_pasted_id.lock() {
-            *slot = Some(id);
+            *slot = Some((id, Instant::now()));
         }
     }
 
     pub fn last_pasted(&self) -> Option<EntryId> {
-        self.last_pasted_id.lock().ok().and_then(|slot| *slot)
+        let mut slot = self.last_pasted_id.lock().ok()?;
+        let (id, recorded_at) = (*slot)?;
+        if recorded_at.elapsed() >= LAST_PASTED_TTL {
+            // Expired entries are cleared on read so a stale id can't be
+            // picked up by a later mutation path that compares against
+            // `slot.id` (e.g. `clear_last_pasted_if`).
+            *slot = None;
+            return None;
+        }
+        Some(id)
     }
 
     /// Clear the last-pasted slot if it currently holds `id`. Called after
@@ -54,7 +77,8 @@ impl AppState {
     /// than failing with `NotFound`.
     pub fn clear_last_pasted_if(&self, id: EntryId) {
         if let Ok(mut slot) = self.last_pasted_id.lock()
-            && *slot == Some(id)
+            && let Some((stored_id, _)) = *slot
+            && stored_id == id
         {
             *slot = None;
         }
