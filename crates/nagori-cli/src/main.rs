@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use nagori_ai::LocalAiProvider;
 use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
-    Sensitivity, SettingsRepository,
+    Sensitivity, SettingsRepository, is_text_safe_for_default_output,
 };
 #[cfg(target_os = "macos")]
 use nagori_daemon::run_daemon;
@@ -718,10 +718,6 @@ fn default_db_path() -> PathBuf {
 fn parse_id(value: &str) -> Result<EntryId> {
     EntryId::from_str(value)
         .map_err(|err| AppError::InvalidInput(format!("invalid entry id: {value}: {err}")).into())
-}
-
-const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
-    !matches!(sensitivity, Sensitivity::Private | Sensitivity::Secret)
 }
 
 fn print_entries(

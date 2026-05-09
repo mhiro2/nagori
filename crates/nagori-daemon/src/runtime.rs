@@ -4,7 +4,8 @@ use nagori_ai::{AiActionRegistry, AiProvider, MockAiProvider};
 use nagori_core::{
     AiActionId, AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory,
     EntryId, EntryRepository, PasteFormat, Result, SearchQuery, SearchResult, SecretAction,
-    Sensitivity, SensitivityClassifier, SettingsRepository, settings::AiProviderSetting,
+    Sensitivity, SensitivityClassifier, SettingsRepository, is_text_safe_for_default_output,
+    settings::AiProviderSetting,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -683,10 +684,6 @@ const fn error_code(err: &AppError) -> &'static str {
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
     }
-}
-
-const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
-    !matches!(sensitivity, Sensitivity::Private | Sensitivity::Secret)
 }
 
 /// Convert a `PasteResult` into an explicit success/failure.

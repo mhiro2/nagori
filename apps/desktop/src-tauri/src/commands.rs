@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use nagori_core::{AiActionId, AppError, EntryId, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity};
+use nagori_core::{
+    AiActionId, AppError, EntryId, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity,
+    is_text_safe_for_default_output,
+};
 use nagori_search::normalize_text;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -426,17 +429,6 @@ fn parse_entry_id(value: &str) -> Result<EntryId, CommandError> {
         .map_err(|err| CommandError::invalid_input(format!("invalid entry id: {err}")))
 }
 
-/// Whether an entry's raw text may ride along on the default DTO without
-/// the caller opting in to sensitive output. We accept the most permissive
-/// answer only for `Public` / `Unknown` — `Private` and `Secret` always
-/// drop to preview-only, and `Blocked` joins them defensively. The capture
-/// loop refuses to persist `Blocked` rows today, but a stale row from an
-/// older daemon, a future import path, or a corrupted DB could still surface
-/// here, so the helper fails closed rather than trusting the upstream gate.
-const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
-    matches!(sensitivity, Sensitivity::Public | Sensitivity::Unknown)
-}
-
 // Tauri injects `WebviewWindow` by value into command parameters, so the
 // pedantic `needless_pass_by_value` lint does not apply here.
 #[allow(clippy::needless_pass_by_value)]
@@ -555,22 +547,6 @@ mod helper_tests {
             "expected curated message, got {:?}",
             err.message,
         );
-    }
-
-    #[test]
-    fn is_text_safe_for_default_output_only_admits_public_and_unknown() {
-        // Mirrors the gate in `add_entry` / `save_ai_result` / `get_entry`:
-        // only Public / Unknown text is safe to ship verbatim. Private and
-        // Secret must drop back to preview-only on the default DTO, and
-        // Blocked is treated the same — a row that managed to bypass the
-        // capture-time block (stale DB, future import path) must not be
-        // allowed to surface its raw text just because callers usually
-        // never see one.
-        assert!(is_text_safe_for_default_output(Sensitivity::Public));
-        assert!(is_text_safe_for_default_output(Sensitivity::Unknown));
-        assert!(!is_text_safe_for_default_output(Sensitivity::Blocked));
-        assert!(!is_text_safe_for_default_output(Sensitivity::Private));
-        assert!(!is_text_safe_for_default_output(Sensitivity::Secret));
     }
 }
 

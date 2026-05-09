@@ -422,6 +422,21 @@ pub enum Sensitivity {
     Blocked,
 }
 
+/// Whether the entry's plain text is safe to ship in default DTOs/outputs.
+///
+/// Only `Public` / `Unknown` text is admitted verbatim. `Private` and
+/// `Secret` always drop to preview-only on the default path; `Blocked`
+/// joins them defensively — the capture loop refuses to persist `Blocked`
+/// rows today, but a stale row from an older daemon, a future import
+/// path, or a corrupted DB could still surface here, so the helper fails
+/// closed rather than trusting the upstream gate. Callers that want the
+/// raw text regardless must opt in (e.g. `--include-sensitive` on the CLI
+/// or the dedicated "show sensitive" UI affordance).
+#[must_use]
+pub const fn is_text_safe_for_default_output(sensitivity: Sensitivity) -> bool {
+    matches!(sensitivity, Sensitivity::Public | Sensitivity::Unknown)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SensitivityReason {
     PasswordManagerSource,
@@ -674,5 +689,14 @@ mod tests {
         assert_eq!(make_preview("abc", 3), "abc");
         // max_chars == 0 cannot fit even an ellipsis, so return empty.
         assert_eq!(make_preview("abc", 0), "");
+    }
+
+    #[test]
+    fn is_text_safe_for_default_output_only_admits_public_and_unknown() {
+        assert!(is_text_safe_for_default_output(Sensitivity::Public));
+        assert!(is_text_safe_for_default_output(Sensitivity::Unknown));
+        assert!(!is_text_safe_for_default_output(Sensitivity::Blocked));
+        assert!(!is_text_safe_for_default_output(Sensitivity::Private));
+        assert!(!is_text_safe_for_default_output(Sensitivity::Secret));
     }
 }
