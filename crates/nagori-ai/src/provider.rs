@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use nagori_core::{AiActionId, AiOutput, AppError, Result};
+use nagori_core::{AiActionId, AiOutput, Result};
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -18,8 +18,4 @@ impl AiProvider for MockAiProvider {
             warnings: Vec::new(),
         })
     }
-}
-
-pub fn remote_disabled() -> AppError {
-    AppError::Ai("remote AI provider is disabled by default".to_owned())
 }

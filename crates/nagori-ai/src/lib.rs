@@ -16,5 +16,5 @@ pub(crate) mod redaction;
 
 pub use actions::AiActionRegistry;
 pub use local::LocalAiProvider;
-pub use openai::RemoteAiProvider;
+pub use openai::StubOpenAiProvider;
 pub use provider::{AiProvider, MockAiProvider};
