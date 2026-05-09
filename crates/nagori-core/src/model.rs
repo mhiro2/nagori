@@ -164,15 +164,24 @@ impl CodeContent {
     }
 
     pub fn looks_like_code(text: &str) -> bool {
+        // Each keyword must be a whole token *followed by ASCII whitespace*
+        // so a URL path segment like `/function/docs` does not trip the
+        // heuristic — in real code these keywords are always followed by an
+        // identifier (`fn foo`, `class Foo`), never by `/` or `?`.
+        const KEYWORDS: &[&str] = &["fn", "function", "class", "package"];
         let trimmed = text.trim();
-        trimmed.contains('\n')
-            && (trimmed.contains("fn ")
-                || trimmed.contains("function ")
-                || trimmed.contains("=>")
-                || trimmed.contains("class ")
-                || trimmed.contains("package ")
-                || trimmed.contains("#include")
-                || trimmed.contains('{') && trimmed.contains('}'))
+        if !trimmed.contains('\n') {
+            return false;
+        }
+        if KEYWORDS
+            .iter()
+            .any(|kw| keyword_followed_by_whitespace(trimmed, kw))
+        {
+            return true;
+        }
+        trimmed.contains("=>")
+            || trimmed.contains("#include")
+            || (trimmed.contains('{') && trimmed.contains('}'))
     }
 }
 
@@ -321,6 +330,34 @@ impl SearchDocument {
             },
         }
     }
+}
+
+/// True iff `keyword` occurs in `text` with a non-word ASCII boundary on the
+/// left and ASCII whitespace immediately on the right. Used by the code
+/// heuristic so URL path segments like `/function/docs` and identifiers like
+/// `somefn` do not match `fn` / `function`.
+fn keyword_followed_by_whitespace(text: &str, keyword: &str) -> bool {
+    if keyword.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let kw_len = keyword.len();
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(keyword) {
+        let start = search_from + rel;
+        let end = start + kw_len;
+        let left_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        let right_ok = end < bytes.len() && bytes[end].is_ascii_whitespace();
+        if left_ok && right_ok {
+            return true;
+        }
+        search_from = start + 1;
+    }
+    false
+}
+
+const fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Build a whitespace-compacted preview of `text`, capped at `max_chars`.
@@ -549,6 +586,29 @@ mod tests {
             content.plain_text(),
             Some("fn main() {\n    println!(\"hi\");\n}")
         );
+    }
+
+    #[test]
+    fn plain_text_does_not_misclassify_keyword_as_code_substring() {
+        // "fn" / "function" appearing inside identifiers must not trigger the
+        // Code heuristic; word boundaries are required on both sides.
+        let mixed = "trailing somefn matter\nsecond line of prose";
+        let content = ClipboardContent::from_plain_text(mixed);
+        assert_eq!(content.kind(), ContentKind::Text);
+
+        let mixed2 = "the myfunction word\nanother prose line";
+        let content2 = ClipboardContent::from_plain_text(mixed2);
+        assert_eq!(content2.kind(), ContentKind::Text);
+
+        // URL path segments like /function/ have non-word boundaries on both
+        // sides but are not followed by whitespace, so they must not match.
+        let url_segment = "see notes here\ndocs at /function/index and /class/foo too";
+        let content3 = ClipboardContent::from_plain_text(url_segment);
+        assert_eq!(content3.kind(), ContentKind::Text);
+
+        // But a real keyword token still counts as code.
+        let real = ClipboardContent::from_plain_text("intro line\nfn helper() {}\n");
+        assert_eq!(real.kind(), ContentKind::Code);
     }
 
     #[test]
