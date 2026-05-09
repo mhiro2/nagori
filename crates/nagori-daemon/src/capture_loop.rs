@@ -310,7 +310,22 @@ where
             // not a sleep cycle.
             let gap = now.duration_since(prev).unwrap_or(Duration::ZERO);
             if gap >= RESYNC_GAP_THRESHOLD {
-                info!(gap_secs = gap.as_secs(), "capture_loop_resync_after_gap");
+                let gap_secs = gap.as_secs();
+                info!(gap_secs, "wake_gap_resync");
+                // Persist the resync in `audit_events` so a support
+                // investigation into "why did my clip not get captured
+                // after lunch" can correlate the missing entry with
+                // either a sleep cycle (legitimate) or an NTP forward
+                // jump (spurious force_content_check). Failure to log
+                // is non-fatal — the resync still proceeds.
+                let _ = self
+                    .audit
+                    .record(
+                        "wake_gap_resync",
+                        None,
+                        Some(&format!("gap_secs={gap_secs}")),
+                    )
+                    .await;
                 self.force_content_check = true;
             }
         }
