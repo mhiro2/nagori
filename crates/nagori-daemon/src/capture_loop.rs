@@ -11,12 +11,65 @@ use tracing::{info, warn};
 
 use crate::search_cache::{SharedSearchCache, lock_or_recover};
 
-/// Minimum gap between two consecutive `AppError::Platform` warnings out of
-/// the capture loop. The OS-level clipboard read can fail repeatedly (e.g.
-/// after a permission revocation) at the polling cadence, which would flood
-/// the log if we warned on every tick. One warn per minute is enough to make
-/// the failure visible without burying everything else.
-const PLATFORM_WARN_INTERVAL: Duration = Duration::from_mins(1);
+/// Minimum gap between two consecutive warnings of the same error kind.
+///
+/// The OS-level clipboard read can fail repeatedly (e.g. after a
+/// permission revocation) at the polling cadence, which would flood the
+/// log if we warned on every tick. One warn per minute is enough to
+/// make the failure visible without burying everything else. The
+/// suppression is now keyed on the error variant so a sudden second
+/// failure mode (e.g. AX permission drop on top of a pasteboard read
+/// failure) still surfaces immediately instead of being shadowed by an
+/// in-flight platform suppression.
+const ERROR_WARN_INTERVAL: Duration = Duration::from_mins(1);
+
+/// Number of consecutive `capture_once` failures after which the
+/// polling loop starts pacing itself with an exponential backoff.
+///
+/// Below this threshold a transient hiccup just retries on the next
+/// tick (the loop's normal cadence is short enough that one missed
+/// poll is invisible to the user). Above it we treat the failure as
+/// persistent — a permission revocation, a wedged `AppKit`, a corrupted
+/// DB write — and stretch the inter-tick wait to avoid flooding logs
+/// and burning CPU on something that isn't going to recover this
+/// second.
+const BACKOFF_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
+
+/// Cap for the exponential backoff applied to the capture loop's
+/// inter-tick sleep when failures persist.
+///
+/// 30 seconds keeps the loop responsive once the underlying problem
+/// (permission re-grant, transient FFI failure) clears, while still
+/// giving long-running outages enough headroom that the daemon isn't
+/// hammering the OS clipboard subsystem several times a second.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Discriminator for `note_capture_error` rate-limiting buckets.
+///
+/// Suppression is per-kind so a sudden second failure mode surfaces
+/// immediately even if the existing suppression interval for another
+/// kind hasn't elapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureErrorKind {
+    Platform,
+    Other,
+}
+
+impl CaptureErrorKind {
+    const fn from_error(err: &AppError) -> Self {
+        match err {
+            AppError::Platform(_) => Self::Platform,
+            _ => Self::Other,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::Other => "other",
+        }
+    }
+}
 
 /// Inter-tick wall-clock gap that we treat as "the host paused" (sleep,
 /// suspend, lid close, container freeze). On macOS the pasteboard
@@ -42,7 +95,23 @@ pub struct CaptureLoop<R, E, A> {
     settings: AppSettings,
     last_sequence: Option<ClipboardSequence>,
     window: Option<Arc<dyn WindowBehavior>>,
-    last_platform_warn_at: Option<Instant>,
+    /// Per-kind warn suppression. Earlier we kept a single
+    /// `last_platform_warn_at` and any non-platform error logged
+    /// unconditionally; the consequence was that two distinct platform
+    /// failures within the suppression window collapsed to one log line
+    /// and AX-permission losses on top of pasteboard outages were
+    /// effectively invisible.
+    last_warn_at: [Option<Instant>; 2],
+    /// Counter of suppressed warnings since the last emitted log line,
+    /// reset on every emit. Surfaced as a tracing field so suppressed
+    /// runs are still observable (the original cadence dropped them
+    /// silently).
+    suppressed_warns: [u32; 2],
+    /// Number of consecutive `capture_once` failures (any kind) that
+    /// we've observed. Drives the exponential backoff in
+    /// `run_polling[_with_settings]` and resets to zero on the next
+    /// successful tick.
+    consecutive_failures: u32,
     search_cache: Option<SharedSearchCache>,
     /// `true` until the loop has observed and acted on its first sequence.
     /// When `capture_initial_clipboard_on_launch` is `false`, the first
@@ -83,7 +152,9 @@ where
             settings,
             last_sequence: None,
             window: None,
-            last_platform_warn_at: None,
+            last_warn_at: [None, None],
+            suppressed_warns: [0, 0],
+            consecutive_failures: 0,
             search_cache: None,
             pristine: true,
             last_tick_at: None,
@@ -101,21 +172,52 @@ where
     }
 
     fn note_capture_error(&mut self, err: &AppError) {
-        if let AppError::Platform(_) = err {
-            // Rate-limit so an OS-level read failure (revoked pasteboard
-            // access, AppKit hiccup) gets one visible warn per minute
-            // instead of being swallowed entirely.
-            let now = Instant::now();
-            let should_warn = self
-                .last_platform_warn_at
-                .is_none_or(|prev| now.duration_since(prev) >= PLATFORM_WARN_INTERVAL);
-            if should_warn {
-                warn!(error = %err, "capture_failed_platform");
-                self.last_platform_warn_at = Some(now);
-            }
+        // Track persistent failure for the polling-loop backoff. Any
+        // tick that reaches `note_capture_error` has, by definition,
+        // failed; the counter is reset only on a successful
+        // `capture_once`.
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+
+        let kind = CaptureErrorKind::from_error(err);
+        let slot = kind as usize;
+        let now = Instant::now();
+        let should_warn = self.last_warn_at[slot]
+            .is_none_or(|prev| now.duration_since(prev) >= ERROR_WARN_INTERVAL);
+        if should_warn {
+            let suppressed = std::mem::take(&mut self.suppressed_warns[slot]);
+            warn!(
+                error = %err,
+                kind = kind.label(),
+                consecutive_failures = self.consecutive_failures,
+                suppressed_since_last_warn = suppressed,
+                "capture_failed",
+            );
+            self.last_warn_at[slot] = Some(now);
         } else {
-            warn!(error = %err, "capture_failed");
+            self.suppressed_warns[slot] = self.suppressed_warns[slot].saturating_add(1);
         }
+    }
+
+    const fn note_capture_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// Compute the inter-tick sleep applied after a failed
+    /// `capture_once`. Below `BACKOFF_AFTER_CONSECUTIVE_FAILURES` we
+    /// keep the user-configured cadence; above it we apply an
+    /// exponential backoff capped at `MAX_BACKOFF`.
+    fn backoff_for_failures(base: Duration, consecutive_failures: u32) -> Duration {
+        if consecutive_failures < BACKOFF_AFTER_CONSECUTIVE_FAILURES {
+            return base;
+        }
+        // `consecutive_failures` is at least the threshold here; the
+        // first overshoot doubles the base sleep, the next quadruples
+        // it, and so on, until the cap is reached.
+        let overshoot = consecutive_failures - BACKOFF_AFTER_CONSECUTIVE_FAILURES + 1;
+        let shift = overshoot.min(20); // 2^20 * base ≫ MAX_BACKOFF; clamp before the multiply.
+        let multiplier = 1u64 << shift;
+        let scaled = base.saturating_mul(u32::try_from(multiplier).unwrap_or(u32::MAX));
+        scaled.min(MAX_BACKOFF)
     }
 
     #[must_use]
@@ -389,11 +491,13 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
+            let sleep_for = Self::backoff_for_failures(interval, self.consecutive_failures);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
-                () = tokio::time::sleep(interval) => {
-                    if let Err(err) = self.capture_once().await {
-                        self.note_capture_error(&err);
+                () = tokio::time::sleep(sleep_for) => {
+                    match self.capture_once().await {
+                        Ok(_) => self.note_capture_success(),
+                        Err(err) => self.note_capture_error(&err),
                     }
                 }
             }
@@ -408,6 +512,7 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
+            let sleep_for = Self::backoff_for_failures(interval, self.consecutive_failures);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
                 changed = settings_rx.changed() => {
@@ -417,9 +522,10 @@ where
                     let next = settings_rx.borrow().clone();
                     self.update_settings(next);
                 }
-                () = tokio::time::sleep(interval) => {
-                    if let Err(err) = self.capture_once().await {
-                        self.note_capture_error(&err);
+                () = tokio::time::sleep(sleep_for) => {
+                    match self.capture_once().await {
+                        Ok(_) => self.note_capture_success(),
+                        Err(err) => self.note_capture_error(&err),
                     }
                 }
             }
@@ -1388,5 +1494,75 @@ mod tests {
 
         let entries = store.list_recent(10).await.unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    type Loop = CaptureLoop<Arc<MemoryClipboard>, SqliteStore, SqliteStore>;
+
+    #[test]
+    fn backoff_keeps_base_interval_below_threshold() {
+        // Below the threshold the loop must keep its configured cadence —
+        // a single transient hiccup should not stretch poll spacing or
+        // hide the next clip behind a several-second wait.
+        let base = Duration::from_millis(500);
+        for failures in 0..BACKOFF_AFTER_CONSECUTIVE_FAILURES {
+            assert_eq!(Loop::backoff_for_failures(base, failures), base);
+        }
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_then_caps() {
+        // Above the threshold the spacing doubles each consecutive
+        // failure (1× → 2× → 4× …) until MAX_BACKOFF clamps it. The cap
+        // matters: without it a sustained outage would push the next
+        // tick out by minutes.
+        let base = Duration::from_millis(500);
+        let first = Loop::backoff_for_failures(base, BACKOFF_AFTER_CONSECUTIVE_FAILURES);
+        assert_eq!(first, base * 2);
+        let second = Loop::backoff_for_failures(base, BACKOFF_AFTER_CONSECUTIVE_FAILURES + 1);
+        assert_eq!(second, base * 4);
+        let huge = Loop::backoff_for_failures(base, 1_000);
+        assert_eq!(huge, MAX_BACKOFF);
+    }
+
+    #[tokio::test]
+    async fn note_capture_error_resets_consecutive_failures_on_success() {
+        // The polling loop drives the backoff off `consecutive_failures`,
+        // which must reset on the next successful tick — otherwise a
+        // recovered daemon stays paced at MAX_BACKOFF forever.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = loop_for(clipboard, store, AppSettings::default());
+
+        loop_.note_capture_error(&AppError::Platform("simulated".to_owned()));
+        loop_.note_capture_error(&AppError::Platform("simulated".to_owned()));
+        assert_eq!(loop_.consecutive_failures, 2);
+        loop_.note_capture_success();
+        assert_eq!(loop_.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn note_capture_error_buckets_warns_per_kind() {
+        // Two distinct error kinds within the suppression window must
+        // each emit at least one warn — otherwise an in-flight platform
+        // suppression would shadow a sudden second failure mode (e.g.
+        // AX permission loss landing while pasteboard reads are still
+        // failing).
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = loop_for(clipboard, store, AppSettings::default());
+
+        loop_.note_capture_error(&AppError::Platform("first".to_owned()));
+        // Same kind: suppressed, but counter increments.
+        loop_.note_capture_error(&AppError::Platform("second".to_owned()));
+        let platform_slot = CaptureErrorKind::Platform as usize;
+        assert_eq!(loop_.suppressed_warns[platform_slot], 1);
+
+        // Different kind: emits its own warn line, independent of the
+        // platform suppression timer.
+        loop_.note_capture_error(&AppError::Policy("policy hit".to_owned()));
+        let other_slot = CaptureErrorKind::Other as usize;
+        // After emitting, suppressed counter is consumed back to 0.
+        assert_eq!(loop_.suppressed_warns[other_slot], 0);
+        assert!(loop_.last_warn_at[other_slot].is_some());
     }
 }
