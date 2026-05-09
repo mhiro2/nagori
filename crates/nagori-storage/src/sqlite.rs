@@ -1197,113 +1197,6 @@ fn clamp_read_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_READ_LIMIT)
 }
 
-/// Tauri global-shortcut format: zero or more modifiers, `+`-separated, then
-/// exactly one key segment. We can't fully verify the OS will accept the
-/// final binding (that depends on the Tauri parser at register time), but
-/// catching the obvious shape mistakes here means a typo'd hotkey from the
-/// settings UI never lands in storage and silently disables the feature
-/// after the next restart.
-fn validate_hotkey(raw: &str) -> Result<()> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not be empty".to_owned(),
-        ));
-    }
-    if trimmed != raw {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not have leading/trailing whitespace".to_owned(),
-        ));
-    }
-    let segments: Vec<&str> = trimmed.split('+').collect();
-    if segments.iter().any(|s| s.is_empty()) {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not contain empty `+` segments".to_owned(),
-        ));
-    }
-    let (key, mods) = segments.split_last().expect("non-empty after trim check");
-    let mut seen = std::collections::HashSet::new();
-    for m in mods {
-        let canonical = canonical_modifier(m).ok_or_else(|| {
-            AppError::InvalidInput(format!("global_hotkey: unknown modifier `{m}`"))
-        })?;
-        if !seen.insert(canonical) {
-            return Err(AppError::InvalidInput(format!(
-                "global_hotkey: duplicate modifier `{m}`"
-            )));
-        }
-    }
-    if canonical_modifier(key).is_some() {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must end with a non-modifier key".to_owned(),
-        ));
-    }
-    if !is_valid_hotkey_key(key) {
-        return Err(AppError::InvalidInput(format!(
-            "global_hotkey: invalid key `{key}`"
-        )));
-    }
-    Ok(())
-}
-
-fn canonical_modifier(token: &str) -> Option<&'static str> {
-    match token.to_ascii_lowercase().as_str() {
-        "cmd" | "command" | "super" | "meta" | "win" | "windows" => Some("super"),
-        "ctrl" | "control" => Some("ctrl"),
-        "cmdorctrl" | "commandorcontrol" => Some("cmdorctrl"),
-        "alt" | "option" | "opt" => Some("alt"),
-        "shift" => Some("shift"),
-        _ => None,
-    }
-}
-
-fn is_valid_hotkey_key(key: &str) -> bool {
-    // Single printable ASCII char (letter/digit/punct), or a named key from
-    // the known whitelist. This mirrors what `tauri-plugin-global-shortcut`
-    // accepts on macOS today; new tokens can be added here as needed.
-    if key.chars().count() == 1 {
-        let c = key.chars().next().expect("len-checked above");
-        return c.is_ascii_alphanumeric() || "`-=[]\\;',./".contains(c);
-    }
-    let upper = key.to_ascii_uppercase();
-    if upper.starts_with('F')
-        && upper.len() <= 3
-        && upper[1..].chars().all(|c| c.is_ascii_digit())
-        && let Ok(n) = upper[1..].parse::<u32>()
-    {
-        return (1..=24).contains(&n);
-    }
-    matches!(
-        upper.as_str(),
-        "SPACE"
-            | "ENTER"
-            | "RETURN"
-            | "ESC"
-            | "ESCAPE"
-            | "TAB"
-            | "BACKSPACE"
-            | "DELETE"
-            | "INSERT"
-            | "UP"
-            | "DOWN"
-            | "LEFT"
-            | "RIGHT"
-            | "HOME"
-            | "END"
-            | "PAGEUP"
-            | "PAGEDOWN"
-            | "CAPSLOCK"
-            | "NUMLOCK"
-            | "SCROLLLOCK"
-            | "PRINTSCREEN"
-    )
-}
-
-fn validate_settings(settings: &AppSettings) -> Result<()> {
-    validate_hotkey(&settings.global_hotkey)?;
-    settings.validate()
-}
-
 fn prune_deleted_search_rows(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     tx.execute(
         "DELETE FROM search_documents
@@ -1401,7 +1294,7 @@ impl nagori_core::SettingsRepository for SqliteStore {
     }
 
     async fn save_settings(&self, settings: AppSettings) -> Result<()> {
-        validate_settings(&settings)?;
+        settings.validate()?;
         for pattern in &settings.regex_denylist {
             // `compile_user_regex` enforces the same DoS-resistant limits
             // (max length / nesting depth / DFA size) the in-memory
@@ -1846,43 +1739,6 @@ mod tests {
             after, baseline,
             "user_version must not advance when migration SQL fails"
         );
-    }
-
-    #[test]
-    fn validate_hotkey_accepts_common_shapes() {
-        for ok in [
-            "CmdOrCtrl+Shift+V",
-            "Cmd+V",
-            "Ctrl+Alt+P",
-            "Shift+F12",
-            "Alt+Space",
-            "CmdOrCtrl+Enter",
-        ] {
-            validate_hotkey(ok).unwrap_or_else(|err| panic!("expected `{ok}` to validate: {err}"));
-        }
-    }
-
-    #[test]
-    fn validate_hotkey_rejects_bad_shapes() {
-        for bad in [
-            "",
-            "  ",
-            "Cmd",               // modifier only
-            "Cmd+",              // empty key
-            "+Cmd+V",            // empty leading segment
-            "Cmd++V",            // empty middle segment
-            "Cmd+Foo+V",         // unknown modifier
-            "Cmd+Shift+Shift+V", // duplicate modifier (after canonicalization)
-            "Cmd+F25",           // function key out of range
-            "Cmd+Hyperspace",    // unknown named key
-            " Cmd+V",            // leading whitespace
-            "Cmd+V ",            // trailing whitespace
-        ] {
-            assert!(
-                validate_hotkey(bad).is_err(),
-                "expected `{bad}` to be rejected"
-            );
-        }
     }
 
     #[tokio::test]
