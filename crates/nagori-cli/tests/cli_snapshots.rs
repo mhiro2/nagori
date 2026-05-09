@@ -153,6 +153,43 @@ fn get_unknown_id_exits_with_not_found_code() {
 }
 
 #[test]
+#[cfg(unix)]
+fn unwritable_db_path_exits_with_storage_code() {
+    // A regression guard for `exit_code_for`'s default arm. Earlier versions
+    // returned 1 for any error that wasn't an explicitly-listed AppError
+    // variant, conflating "transient internal failure" with shells' generic
+    // "command failed" code. Forcing a Storage error (parent dir cannot be
+    // created because /dev/null is a file, not a directory) confirms the
+    // AppError downcast still produces 8 and that no upstream layer rewraps
+    // the cause back into anyhow.
+    let mut cmd = Command::cargo_bin("nagori").expect("nagori binary");
+    let output = cmd
+        .arg("--db")
+        .arg("/dev/null/cannot-create/nagori.sqlite")
+        .arg("list")
+        .output()
+        .expect("invoke nagori");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(8), "storage → exit 8");
+}
+
+#[test]
+fn clear_invalid_older_than_days_exits_non_one() {
+    // The CLI must not return exit 1 for argument-parse failures — clap's
+    // default for `unexpected argument` is 2 (InvalidInput), which matches
+    // the AppError mapping. The test pins that contract so a future switch
+    // away from clap's default doesn't silently re-introduce a generic
+    // exit 1 for malformed flags.
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["clear", "--older-than-days", "not-a-number"])
+        .output()
+        .expect("invoke nagori");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2), "clap parse failure → exit 2");
+}
+
+#[test]
 fn add_then_get_text_round_trip_snapshot() {
     // Exercises the full add → get pipeline, redacting the entry id and
     // timestamps before the snapshot so the assertion is deterministic.
