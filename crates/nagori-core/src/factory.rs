@@ -177,15 +177,31 @@ fn representation_text(rep: &ClipboardRepresentation, mime_types: &[&str]) -> Op
 /// Tiny tag-stripper used as a last-resort fallback when the pasteboard
 /// only exposes HTML and no `text/plain`. It is intentionally lossy — full
 /// HTML rendering belongs in the `WebView`, not the capture path.
+///
+/// Tracks attribute quoting so a `>` inside `href="x>y"` does not prematurely
+/// close the tag.
 fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut quote: Option<char> = None;
     for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
+        if in_tag {
+            if let Some(q) = quote {
+                if ch == q {
+                    quote = None;
+                }
+            } else {
+                match ch {
+                    '"' | '\'' => quote = Some(ch),
+                    '>' => in_tag = false,
+                    _ => {}
+                }
+            }
+        } else if ch == '<' {
+            in_tag = true;
+            quote = None;
+        } else {
+            out.push(ch);
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -364,6 +380,17 @@ mod tests {
             }
             other => panic!("expected RichText, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_html_handles_angle_brackets_inside_attribute_quotes() {
+        // Regression: a naive in_tag toggle would close on the `>` in href="x>y",
+        // leaking attribute fragments into the plain text output.
+        let stripped = super::strip_html(r#"<a href="x>y">link</a> tail"#);
+        assert_eq!(stripped, "link tail");
+
+        let stripped = super::strip_html(r#"<img alt='a > b' src="t"/>caption"#);
+        assert_eq!(stripped, "caption");
     }
 
     #[test]
