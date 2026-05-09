@@ -284,6 +284,19 @@ where
     /// real time.
     #[allow(clippy::too_many_lines)]
     pub async fn capture_once_at(&mut self, now: SystemTime) -> Result<Option<EntryId>> {
+        // Snapshot settings at the start of the tick. Today the polling
+        // loop's `tokio::select!` already serialises `update_settings`
+        // and `capture_once`, so settings can't actually change between
+        // the `capture_enabled` check at the top and the secret-handling
+        // check at the bottom. But a future refactor that adds an extra
+        // `.await` boundary, or moves capture into its own task, would
+        // re-open that race — and the consequence is observably wrong:
+        // a tick could read the *new* `max_entry_size_bytes` for the
+        // pre-read cap and the *old* `capture_kinds` for the post-read
+        // filter, producing inconsistent admission decisions for one
+        // clip. Take one local clone and use it everywhere.
+        let settings = self.settings.clone();
+
         // Detect a host-paused gap (sleep / suspend / lid close). We do not
         // clear `last_sequence` here — clearing the baseline outright would
         // re-capture an unchanged pre-launch clipboard once
@@ -303,7 +316,7 @@ where
         }
         self.last_tick_at = Some(now);
 
-        if !self.settings.capture_enabled {
+        if !settings.capture_enabled {
             return Ok(None);
         }
 
@@ -336,7 +349,7 @@ where
         // last — only after the snapshot read succeeds — so a transient
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
-        if self.pristine && !self.settings.capture_initial_clipboard_on_launch {
+        if self.pristine && !settings.capture_initial_clipboard_on_launch {
             let snapshot = self.reader.current_snapshot().await?;
             self.last_sequence = Some(snapshot.sequence.clone());
             if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
@@ -421,7 +434,7 @@ where
 
         let mut snapshot = match self
             .reader
-            .current_snapshot_with_max(self.settings.max_entry_size_bytes)
+            .current_snapshot_with_max(settings.max_entry_size_bytes)
             .await?
         {
             CapturedSnapshot::Captured(snapshot) => snapshot,
@@ -473,7 +486,7 @@ where
             return Ok(None);
         }
         self.last_content_hash = Some(entry.metadata.content_hash.value.clone());
-        if !self.settings.capture_kinds.contains(&entry.content_kind()) {
+        if !settings.capture_kinds.contains(&entry.content_kind()) {
             info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
             let _ = self
                 .audit
@@ -492,7 +505,7 @@ where
         if payload_bytes == 0 {
             return Ok(None);
         }
-        if payload_bytes > self.settings.max_entry_size_bytes {
+        if payload_bytes > settings.max_entry_size_bytes {
             warn!(bytes = payload_bytes, "capture_skipped reason=oversized");
             let _ = self
                 .audit
@@ -503,7 +516,7 @@ where
         // Fail closed if the persisted regex_denylist contains an
         // uncompilable pattern — silently dropping it would let secret
         // matches the user explicitly asked us to redact slip into history.
-        let classifier = SensitivityClassifier::try_new(self.settings.clone())?;
+        let classifier = SensitivityClassifier::try_new(settings.clone())?;
         let classification = classifier.classify(&entry);
         entry.sensitivity = classification.sensitivity;
         if matches!(classification.sensitivity, Sensitivity::Blocked) {
@@ -522,7 +535,7 @@ where
             entry.search.preview = preview;
         }
         if matches!(
-            classifier.apply_secret_handling(&mut entry, self.settings.secret_handling),
+            classifier.apply_secret_handling(&mut entry, settings.secret_handling),
             SecretAction::Drop,
         ) {
             info!(reasons = ?classification.reasons, "secret_blocked");

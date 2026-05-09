@@ -87,6 +87,7 @@ impl ClipboardReader for MacosClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
         // Same locking discipline as `current_snapshot` — hold the arboard
         // mutex across both the AppKit size probe and the per-rep load so a
