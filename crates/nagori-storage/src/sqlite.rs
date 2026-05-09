@@ -1155,11 +1155,30 @@ pub fn ensure_private_directory(dir: &Path) -> Result<()> {
 }
 
 fn configure_connection(conn: &Connection) -> Result<()> {
+    // `temp_store = MEMORY` keeps SQLite scratch (sorter spill, transient
+    // indices) off the on-disk temp files that would otherwise land in
+    // `$TMPDIR` with default umask permissions — the DB file itself is
+    // chmod 0o600, but the temp sidecar isn't, so this prevents a
+    // narrow class of disclosure under multi-user macOS.
+    //
+    // `wal_autocheckpoint = 1000` (pages, ~4 MiB at the default 4 KiB
+    // page size) bounds WAL growth on a long-running daemon. Without it
+    // an idle writer can leave a multi-GiB WAL after a burst of
+    // captures, which surprises users inspecting the data dir.
+    //
+    // `mmap_size = 64 MiB` lets read-heavy paths (substring scan, FTS
+    // candidate fetch) skip the page-cache copy on macOS where mmap is
+    // cheap. 64 MiB is small enough that we don't fight other tenants
+    // for address space on 32-bit CI runners while still covering a
+    // typical ~50k-row history.
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;",
+         PRAGMA synchronous = NORMAL;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA wal_autocheckpoint = 1000;
+         PRAGMA mmap_size = 67108864;",
     )
     .map_err(|err| storage_err(&err))
 }
