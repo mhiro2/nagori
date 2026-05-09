@@ -49,24 +49,58 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Suppression is per-kind so a sudden second failure mode surfaces
 /// immediately even if the existing suppression interval for another
 /// kind hasn't elapsed.
+///
+/// We enumerate every `AppError` variant rather than collapsing the
+/// long tail into a generic `Other`: previously a `Storage` error and
+/// an `InvalidInput` error fell into the same suppression bucket, so a
+/// burst of one would shadow the other for a full `ERROR_WARN_INTERVAL`.
+/// Note that this only sub-divides errors *across* `AppError` variants;
+/// disambiguating *within* `Platform` (e.g. pasteboard vs. AX) would
+/// require structured context on the error itself, which would be a
+/// cross-crate refactor of the error type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureErrorKind {
+    Storage,
+    Search,
     Platform,
-    Other,
+    Permission,
+    Ai,
+    Policy,
+    NotFound,
+    InvalidInput,
+    Unsupported,
 }
 
 impl CaptureErrorKind {
+    /// Number of distinct buckets — used to size the per-kind warn
+    /// state arrays. Keep in sync with the variants above.
+    const COUNT: usize = 9;
+
     const fn from_error(err: &AppError) -> Self {
         match err {
+            AppError::Storage(_) => Self::Storage,
+            AppError::Search(_) => Self::Search,
             AppError::Platform(_) => Self::Platform,
-            _ => Self::Other,
+            AppError::Permission(_) => Self::Permission,
+            AppError::Ai(_) => Self::Ai,
+            AppError::Policy(_) => Self::Policy,
+            AppError::NotFound => Self::NotFound,
+            AppError::InvalidInput(_) => Self::InvalidInput,
+            AppError::Unsupported(_) => Self::Unsupported,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Storage => "storage",
+            Self::Search => "search",
             Self::Platform => "platform",
-            Self::Other => "other",
+            Self::Permission => "permission",
+            Self::Ai => "ai",
+            Self::Policy => "policy",
+            Self::NotFound => "not_found",
+            Self::InvalidInput => "invalid_input",
+            Self::Unsupported => "unsupported",
         }
     }
 }
@@ -128,12 +162,12 @@ pub struct CaptureLoop<R, E, A> {
     /// failures within the suppression window collapsed to one log line
     /// and AX-permission losses on top of pasteboard outages were
     /// effectively invisible.
-    last_warn_at: [Option<Instant>; 2],
+    last_warn_at: [Option<Instant>; CaptureErrorKind::COUNT],
     /// Counter of suppressed warnings since the last emitted log line,
     /// reset on every emit. Surfaced as a tracing field so suppressed
     /// runs are still observable (the original cadence dropped them
     /// silently).
-    suppressed_warns: [u32; 2],
+    suppressed_warns: [u32; CaptureErrorKind::COUNT],
     /// Number of consecutive `capture_once` failures (any kind) that
     /// we've observed. Drives the exponential backoff in
     /// `run_polling[_with_settings]` and resets to zero on the next
@@ -185,8 +219,8 @@ where
             settings,
             last_sequence: None,
             window: None,
-            last_warn_at: [None, None],
-            suppressed_warns: [0, 0],
+            last_warn_at: [None; CaptureErrorKind::COUNT],
+            suppressed_warns: [0; CaptureErrorKind::COUNT],
             consecutive_failures: 0,
             consecutive_secure_ax_failures: 0,
             search_cache: None,
@@ -1836,9 +1870,37 @@ mod tests {
         // Different kind: emits its own warn line, independent of the
         // platform suppression timer.
         loop_.note_capture_error(&AppError::Policy("policy hit".to_owned()));
-        let other_slot = CaptureErrorKind::Other as usize;
+        let policy_slot = CaptureErrorKind::Policy as usize;
         // After emitting, suppressed counter is consumed back to 0.
-        assert_eq!(loop_.suppressed_warns[other_slot], 0);
-        assert!(loop_.last_warn_at[other_slot].is_some());
+        assert_eq!(loop_.suppressed_warns[policy_slot], 0);
+        assert!(loop_.last_warn_at[policy_slot].is_some());
+    }
+
+    #[tokio::test]
+    async fn note_capture_error_distinguishes_storage_from_invalid_input() {
+        // Regression: previously a single `Other` slot held both
+        // `Storage` and `InvalidInput` (and every other non-Platform
+        // variant), so a burst of one would shadow the other for a full
+        // suppression window. Confirm each variant gets its own bucket.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = loop_for(clipboard, store, AppSettings::default());
+
+        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        let storage_slot = CaptureErrorKind::Storage as usize;
+        assert_eq!(loop_.suppressed_warns[storage_slot], 1);
+
+        loop_.note_capture_error(&AppError::InvalidInput("bad clip".to_owned()));
+        let invalid_slot = CaptureErrorKind::InvalidInput as usize;
+        // The invalid-input arm emits its own warn rather than being
+        // shadowed by the in-flight Storage suppression — so its
+        // last_warn_at is set and the suppressed counter starts from
+        // zero on the next collision.
+        assert!(loop_.last_warn_at[invalid_slot].is_some());
+        assert_eq!(loop_.suppressed_warns[invalid_slot], 0);
+        // The Storage suppression is independent and its in-flight
+        // suppressed counter is unaffected by the invalid-input emit.
+        assert_eq!(loop_.suppressed_warns[storage_slot], 1);
     }
 }
