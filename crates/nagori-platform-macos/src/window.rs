@@ -72,10 +72,22 @@ impl WindowBehavior for MacosWindowBehavior {
     async fn frontmost_focused_is_secure(&self) -> Result<bool> {
         // The AX round-trip can stall on a misbehaving frontmost process,
         // and the call is synchronous, so route through the blocking pool
-        // for the same reason `frontmost_app` does.
-        tokio::task::spawn_blocking(frontmost_focused_is_secure_sync)
+        // for the same reason `frontmost_app` does. The blocking helper
+        // returns `None` when the AX query itself failed (permission
+        // revoked, opaque element, transient FFI error). We surface that
+        // as `Err` so the capture loop's `consecutive_secure_ax_failures`
+        // counter increments and the fail-closed threshold can fire —
+        // before this fix, AX errors silently coerced to `Ok(false)` and
+        // the counter never advanced.
+        let outcome = tokio::task::spawn_blocking(frontmost_focused_is_secure_sync)
             .await
-            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
+        outcome.ok_or_else(|| {
+            nagori_core::AppError::Platform(
+                "AX query for focused-element role failed; treat as unknown for fail-closed"
+                    .to_owned(),
+            )
+        })
     }
 }
 
@@ -108,14 +120,23 @@ fn activate_app_sync(bundle_id: &str) {
 }
 
 /// Walk the system-wide Accessibility tree to learn whether the frontmost
-/// app's focused element is a secure text field. Returns `false` whenever
-/// the AX query fails for any reason — missing Accessibility permission,
-/// a non-AX-aware app in front, or a transient error — so a privacy fail
-/// degrades to "we don't know, allow capture, the `SensitivityClassifier`
-/// rules still apply downstream". Callers that want a hard guarantee must
-/// layer their own policy (e.g. the password-manager bundle id denylist
-/// already shipped via `SensitivityClassifier`).
-fn frontmost_focused_is_secure_sync() -> bool {
+/// app's focused element is a secure text field.
+///
+/// Tri-state semantics:
+///   * `Some(true)`  — AX confirmed the focused element is `AXSecureTextField`.
+///   * `Some(false)` — AX answered cleanly and the element is not secure.
+///   * `None`        — the AX query itself failed (missing Accessibility
+///     permission, system-wide handle null, focused-element fetch
+///     errored, role/subrole copy returned null). Callers must treat this
+///     as "unknown", not "definitely not secure", so the capture loop can
+///     fail closed after a sustained run of failures.
+///
+/// Earlier versions returned plain `bool` and collapsed every AX failure
+/// into `false`, which meant the `consecutive_secure_ax_failures` counter
+/// in the capture loop never advanced past zero — and therefore never
+/// crossed the fail-closed threshold even with Accessibility permission
+/// fully revoked.
+fn frontmost_focused_is_secure_sync() -> Option<bool> {
     // Both the role and subrole forms of the constant resolve to the
     // same string ("AXSecureTextField"); checking each separately
     // covers apps that surface only one and keeps us forward-
@@ -131,7 +152,7 @@ fn frontmost_focused_is_secure_sync() -> bool {
     unsafe {
         let systemwide = ax_ffi::AXUIElementCreateSystemWide();
         if systemwide.is_null() {
-            return false;
+            return None;
         }
         // Bound the per-element AX trip so an unresponsive focused app
         // can't stall the capture loop's polling tick. Apple's docs note
@@ -141,9 +162,13 @@ fn frontmost_focused_is_secure_sync() -> bool {
         // default timeout.
         let _ = ax_ffi::AXUIElementSetMessagingTimeout(systemwide, 0.25);
 
+        // `AXFocusedUIElement` is the AX-permission gate: if Accessibility
+        // is not granted, this fetch fails, and we want that to surface as
+        // an `Err` from the trait method so the capture-loop counter
+        // ticks. Returning `Some(false)` here would silently fail-open.
         let Some(focused) = copy_element_attribute(systemwide, "AXFocusedUIElement") else {
             CFRelease(systemwide.cast());
-            return false;
+            return None;
         };
         CFRelease(systemwide.cast());
 
@@ -151,7 +176,18 @@ fn frontmost_focused_is_secure_sync() -> bool {
         let subrole = copy_string_attribute(focused, "AXSubrole");
         CFRelease(focused.cast());
 
-        role.as_deref() == Some(SECURE) || subrole.as_deref() == Some(SECURE)
+        // If both attributes came back null the AX result is genuinely
+        // unknown: a non-AX-aware focused element, or a transient framework
+        // error. Treat that as "unknown" so the counter advances on
+        // sustained outages. Apps that intentionally don't expose either
+        // slot will still ship `Some(false)` after the role/subrole copy
+        // returns a non-secure value, which is the steady-state path.
+        match (role.as_deref(), subrole.as_deref()) {
+            (Some(role), Some(subrole)) => Some(role == SECURE || subrole == SECURE),
+            (Some(role), None) => Some(role == SECURE),
+            (None, Some(subrole)) => Some(subrole == SECURE),
+            (None, None) => None,
+        }
     }
 }
 

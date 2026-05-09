@@ -71,6 +71,33 @@ impl CaptureErrorKind {
     }
 }
 
+/// Number of consecutive `frontmost_focused_is_secure` failures after
+/// which we flip from fail-open (`unwrap_or(false)`) to fail-closed
+/// (treat focus as secure and skip capture).
+///
+/// One transient AX error is normal — accessibility queries can fail
+/// during app switches, sleep/wake transitions, or briefly after a
+/// permission grant. A sustained run of failures, however, means we've
+/// genuinely lost visibility into whether the user is typing into a
+/// password field, and the safer default is to refuse to capture rather
+/// than silently letting password keystrokes through. 3 picks up
+/// "permission revoked" / "AX subsystem stuck" without triggering on a
+/// single hiccup.
+const SECURE_FOCUS_FAIL_CLOSED_THRESHOLD: u32 = 3;
+
+/// Bundle identifiers of system password / authentication UIs.
+///
+/// These windows host secure text fields whose state isn't always
+/// reachable through the public AX API (the OS deliberately scrubs them
+/// to defeat keyloggers). Treating them as secure regardless of what
+/// `frontmost_focused_is_secure` returns means we don't have to trust
+/// AX visibility for the cases that matter most.
+const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
+    "com.apple.SecurityAgent",
+    "com.apple.LocalAuthentication.UIService",
+    "com.apple.loginwindow",
+];
+
 /// Inter-tick wall-clock gap that we treat as "the host paused" (sleep,
 /// suspend, lid close, container freeze). On macOS the pasteboard
 /// `changeCount` can lap silently across a sleep cycle, so a post-wake clip
@@ -112,6 +139,12 @@ pub struct CaptureLoop<R, E, A> {
     /// `run_polling[_with_settings]` and resets to zero on the next
     /// successful tick.
     consecutive_failures: u32,
+    /// Number of consecutive `frontmost_focused_is_secure` errors. Once
+    /// this crosses `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` the loop flips
+    /// to fail-closed (assume the focus is secure) so a sustained AX
+    /// outage can't silently let password keystrokes through. Reset on
+    /// the next successful AX query.
+    consecutive_secure_ax_failures: u32,
     search_cache: Option<SharedSearchCache>,
     /// `true` until the loop has observed and acted on its first sequence.
     /// When `capture_initial_clipboard_on_launch` is `false`, the first
@@ -155,6 +188,7 @@ where
             last_warn_at: [None, None],
             suppressed_warns: [0, 0],
             consecutive_failures: 0,
+            consecutive_secure_ax_failures: 0,
             search_cache: None,
             pristine: true,
             last_tick_at: None,
@@ -314,19 +348,53 @@ where
         // Run both AX queries concurrently — each spawns its own
         // system-wide AX walk via spawn_blocking, so the wall-clock
         // cost is parallel rather than additive on the per-tick hot
-        // path. A platform error from `frontmost_focused_is_secure`
-        // degrades to `false` (allow capture) so a missing
-        // Accessibility grant or transient FFI hiccup fails open; the
+        // path.
+        //
+        // A *single* error from `frontmost_focused_is_secure` degrades
+        // to `false` so a transient FFI hiccup or in-flight permission
+        // grant doesn't strand the capture loop; the
         // `SensitivityClassifier` secret detector and password-manager
         // bundle denylist still run downstream as the second line of
-        // defence.
+        // defence. But a *sustained* run of AX failures means we've
+        // genuinely lost visibility, and the safer default at that
+        // point is to fail closed and skip the next clip — see
+        // `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD`. Likewise, a frontmost
+        // bundle id matching `SECURE_FOCUS_BUNDLE_OVERRIDES` (system
+        // password UIs) forces secure regardless of the AX result, so
+        // we don't depend on AX accurately reporting on windows whose
+        // entire purpose is to defeat keyloggers.
         let (frontmost_source, secure_focus) = if let Some(window) = &self.window {
             let (front_res, secure_res) =
                 tokio::join!(window.frontmost_app(), window.frontmost_focused_is_secure(),);
-            (
-                front_res.ok().flatten().map(|front| front.source),
-                secure_res.unwrap_or(false),
-            )
+            let source = front_res.ok().flatten().map(|front| front.source);
+            let bundle_override = source
+                .as_ref()
+                .and_then(|src| src.bundle_id.as_deref())
+                .is_some_and(|bid| SECURE_FOCUS_BUNDLE_OVERRIDES.contains(&bid));
+            let secure_focus = match secure_res {
+                Ok(value) => {
+                    self.consecutive_secure_ax_failures = 0;
+                    value || bundle_override
+                }
+                Err(err) => {
+                    self.consecutive_secure_ax_failures =
+                        self.consecutive_secure_ax_failures.saturating_add(1);
+                    if self.consecutive_secure_ax_failures >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD
+                        || bundle_override
+                    {
+                        warn!(
+                            error = %err,
+                            consecutive_failures = self.consecutive_secure_ax_failures,
+                            bundle_override,
+                            "secure_focus_fail_closed",
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            (source, secure_focus)
         } else {
             (None, false)
         };
@@ -919,6 +987,186 @@ mod tests {
             .unwrap()
             .expect("AX error must fail open and capture proceeds");
         assert!(store.get(id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn sustained_secure_ax_errors_flip_to_fail_closed() {
+        // Below the threshold a single AX error fails open; once the
+        // counter crosses `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` we must
+        // refuse to capture even if the classifier *would* have allowed
+        // the clip. Otherwise a permanent AX outage (revoked grant,
+        // wedged AX subsystem) silently resumes flowing every keystroke
+        // through history.
+        use async_trait::async_trait;
+        use nagori_core::{AppError, SourceApp};
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        struct ErroringSecure;
+        #[async_trait]
+        impl WindowBehavior for ErroringSecure {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.example.editor".to_owned()),
+                        name: Some("Editor".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Err(AppError::Platform("AX wedged".to_owned()))
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(ErroringSecure));
+
+        // Drive one capture per distinct clip so we don't dedup on
+        // sequence. The first `THRESHOLD - 1` ticks fail open and
+        // capture; subsequent ticks fail closed and skip.
+        for n in 0..SECURE_FOCUS_FAIL_CLOSED_THRESHOLD - 1 {
+            clipboard
+                .write_text(&format!("clip-{n}"))
+                .await
+                .expect("clipboard write");
+            assert!(
+                loop_.capture_once().await.unwrap().is_some(),
+                "tick {n} below threshold must fail open"
+            );
+        }
+        clipboard
+            .write_text("after-threshold")
+            .await
+            .expect("clipboard write");
+        assert!(
+            loop_.capture_once().await.unwrap().is_none(),
+            "tick at/after threshold must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn secure_ax_failure_counter_resets_on_success() {
+        // Recovery path: once the AX subsystem starts answering again
+        // we must clear the counter, otherwise the loop would stay
+        // pinned at "fail closed" forever after one outage.
+        use async_trait::async_trait;
+        use nagori_core::{AppError, SourceApp};
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct FlakySecure {
+            calls: AtomicU32,
+        }
+        #[async_trait]
+        impl WindowBehavior for FlakySecure {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.example.editor".to_owned()),
+                        name: Some("Editor".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                let n = self.calls.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    Err(AppError::Platform("AX briefly down".to_owned()))
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(FlakySecure {
+            calls: AtomicU32::new(0),
+        }));
+
+        clipboard.write_text("a").await.expect("clipboard write");
+        assert!(loop_.capture_once().await.unwrap().is_some());
+        assert_eq!(loop_.consecutive_secure_ax_failures, 1);
+        clipboard.write_text("b").await.expect("clipboard write");
+        assert!(loop_.capture_once().await.unwrap().is_some());
+        assert_eq!(loop_.consecutive_secure_ax_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn secure_focus_bundle_override_forces_skip_even_when_ax_says_clear() {
+        // Some system password / authentication UIs deliberately scrub
+        // their AX state to defeat keyloggers, so `is_secure` will
+        // legitimately return `Ok(false)` even though the user is at a
+        // password prompt. The bundle-id override list must force a
+        // skip in that case.
+        use async_trait::async_trait;
+        use nagori_core::SourceApp;
+        use nagori_platform::{FrontmostApp, WindowBehavior};
+
+        struct AuthDialog;
+        #[async_trait]
+        impl WindowBehavior for AuthDialog {
+            async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+                Ok(Some(FrontmostApp {
+                    source: SourceApp {
+                        bundle_id: Some("com.apple.SecurityAgent".to_owned()),
+                        name: Some("SecurityAgent".to_owned()),
+                        executable_path: None,
+                    },
+                    window_title: None,
+                }))
+            }
+            async fn show_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn hide_palette(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ = CaptureLoop::new(
+            clipboard.clone(),
+            store.clone(),
+            store.clone(),
+            AppSettings::default(),
+        )
+        .with_window(Arc::new(AuthDialog));
+
+        clipboard.write_text("hunter2").await.expect("clipboard");
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
