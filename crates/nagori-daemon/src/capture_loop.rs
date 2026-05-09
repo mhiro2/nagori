@@ -1260,7 +1260,9 @@ mod tests {
         impl ClipboardReader for ImageReader {
             async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
                 Ok(ClipboardSnapshot {
-                    sequence: ClipboardSequence(ContentHash::sha256(&self.bytes).value),
+                    sequence: ClipboardSequence::content_hash(
+                        ContentHash::sha256(&self.bytes).value,
+                    ),
                     captured_at: OffsetDateTime::now_utc(),
                     source: None,
                     representations: vec![ClipboardRepresentation {
@@ -1274,7 +1276,9 @@ mod tests {
                 let mut guard = self.seq_called.lock().unwrap();
                 let _ = &*guard;
                 *guard = true;
-                Ok(ClipboardSequence(ContentHash::sha256(&self.bytes).value))
+                Ok(ClipboardSequence::content_hash(
+                    ContentHash::sha256(&self.bytes).value,
+                ))
             }
         }
 
@@ -1329,7 +1333,9 @@ mod tests {
         impl ClipboardReader for ImageReader {
             async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
                 Ok(ClipboardSnapshot {
-                    sequence: ClipboardSequence(ContentHash::sha256(&self.bytes).value),
+                    sequence: ClipboardSequence::content_hash(
+                        ContentHash::sha256(&self.bytes).value,
+                    ),
                     captured_at: OffsetDateTime::now_utc(),
                     source: None,
                     representations: vec![ClipboardRepresentation {
@@ -1343,7 +1349,9 @@ mod tests {
                 let mut guard = self.seq_called.lock().unwrap();
                 let _ = &*guard;
                 *guard = true;
-                Ok(ClipboardSequence(ContentHash::sha256(&self.bytes).value))
+                Ok(ClipboardSequence::content_hash(
+                    ContentHash::sha256(&self.bytes).value,
+                ))
             }
         }
 
@@ -1503,7 +1511,7 @@ mod tests {
         }
 
         let reader = StubReader {
-            sequence: ClipboardSequence("colliding-seq".to_owned()),
+            sequence: ClipboardSequence::content_hash("colliding-seq"),
             text: Mutex::new("pre-sleep clip".to_owned()),
         };
         let store = SqliteStore::open_memory().expect("memory store");
@@ -1640,7 +1648,9 @@ mod tests {
                     ));
                 }
                 Ok(ClipboardSnapshot {
-                    sequence: ClipboardSequence(ContentHash::sha256(self.text.as_bytes()).value),
+                    sequence: ClipboardSequence::content_hash(
+                        ContentHash::sha256(self.text.as_bytes()).value,
+                    ),
                     captured_at: OffsetDateTime::now_utc(),
                     source: None,
                     representations: vec![ClipboardRepresentation {
@@ -1650,7 +1660,7 @@ mod tests {
                 })
             }
             async fn current_sequence(&self) -> Result<ClipboardSequence> {
-                Ok(ClipboardSequence(
+                Ok(ClipboardSequence::content_hash(
                     ContentHash::sha256(self.text.as_bytes()).value,
                 ))
             }
@@ -1732,7 +1742,7 @@ mod tests {
         }
 
         let reader = ScriptedReader {
-            sequence: ClipboardSequence("colliding-seq".to_owned()),
+            sequence: ClipboardSequence::content_hash("colliding-seq"),
             text: Mutex::new("pre-sleep clip".to_owned()),
             snapshot_attempts: Mutex::new(0),
             fail_attempt: 2,

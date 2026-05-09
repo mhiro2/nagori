@@ -124,7 +124,7 @@ impl ClipboardReader for MemoryClipboard {
             .map_err(|err| lock_err(&err))?
             .clone()
             .unwrap_or_default();
-        let sequence = ClipboardSequence(ContentHash::sha256(text.as_bytes()).value);
+        let sequence = ClipboardSequence::content_hash(ContentHash::sha256(text.as_bytes()).value);
         Ok(ClipboardSnapshot {
             sequence,
             captured_at: OffsetDateTime::now_utc(),
@@ -143,7 +143,7 @@ impl ClipboardReader for MemoryClipboard {
             .map_err(|err| lock_err(&err))?
             .clone()
             .unwrap_or_default();
-        Ok(ClipboardSequence(
+        Ok(ClipboardSequence::content_hash(
             ContentHash::sha256(text.as_bytes()).value,
         ))
     }

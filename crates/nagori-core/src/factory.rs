@@ -222,7 +222,7 @@ mod tests {
             executable_path: None,
         };
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("1".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("1"),
             captured_at: OffsetDateTime::now_utc(),
             source: Some(source.clone()),
             representations: vec![ClipboardRepresentation {
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn snapshot_uses_file_paths_when_text_is_absent() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("2".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("2"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn snapshot_without_recognised_data_is_ignored() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("3".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("3"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -284,7 +284,7 @@ mod tests {
     fn snapshot_image_bytes_yields_image_content() {
         let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("3".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("3"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -315,7 +315,7 @@ mod tests {
         // `EntryMetadata` must inherit it instead of stamping `now_utc()`.
         let captured_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("4".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("4"),
             captured_at,
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn snapshot_with_html_paired_with_text_yields_richtext_with_markup() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("rt-1".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("rt-1"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn snapshot_html_only_strips_tags_for_plain_text() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("rt-2".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("rt-2"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn snapshot_file_paths_yields_file_list_content() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("fl-1".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("fl-1"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -426,7 +426,7 @@ mod tests {
         // non-empty html, otherwise the persisted entry has nothing to
         // search or preview.
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("rt-empty".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("rt-empty"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn snapshot_text_plain_with_charset_param_is_recognised() {
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("charset".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("charset"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -474,7 +474,7 @@ mod tests {
         // diverge from the document it indexes.
         let captured_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
         let snapshot = ClipboardSnapshot {
-            sequence: crate::ClipboardSequence("5".to_owned()),
+            sequence: crate::ClipboardSequence::content_hash("5"),
             captured_at,
             source: None,
             representations: vec![ClipboardRepresentation {

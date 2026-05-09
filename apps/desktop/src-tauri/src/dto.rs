@@ -734,7 +734,7 @@ mod tests {
 
     fn image_entry(bytes: Vec<u8>) -> nagori_core::ClipboardEntry {
         let snapshot = ClipboardSnapshot {
-            sequence: nagori_core::ClipboardSequence(
+            sequence: nagori_core::ClipboardSequence::content_hash(
                 nagori_core::ContentHash::sha256(&bytes).value,
             ),
             captured_at: OffsetDateTime::now_utc(),
@@ -944,7 +944,7 @@ mod tests {
         // URL-shaped clips should round-trip the parsed domain so the
         // frontend can render the badged preview without re-parsing.
         let snapshot = ClipboardSnapshot {
-            sequence: nagori_core::ClipboardSequence(
+            sequence: nagori_core::ClipboardSequence::content_hash(
                 nagori_core::ContentHash::sha256(b"https://example.com/foo").value,
             ),
             captured_at: OffsetDateTime::now_utc(),

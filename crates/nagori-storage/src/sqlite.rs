@@ -2385,7 +2385,7 @@ mod tests {
 
         let bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
         let snapshot = ClipboardSnapshot {
-            sequence: ClipboardSequence("img-1".to_owned()),
+            sequence: ClipboardSequence::content_hash("img-1"),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {

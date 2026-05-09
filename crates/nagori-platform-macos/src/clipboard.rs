@@ -265,13 +265,16 @@ impl MacosClipboard {
 #[cfg(target_os = "macos")]
 fn pasteboard_sequence() -> ClipboardSequence {
     let pb = NSPasteboard::generalPasteboard();
-    let count: isize = pb.changeCount();
-    ClipboardSequence(format!("nspb:{count}"))
+    // NSInteger fits in i64 on every supported architecture; the change
+    // counter is monotonically increasing across the process lifetime so
+    // wraparound is theoretical.
+    let count = pb.changeCount() as i64;
+    ClipboardSequence::native(count)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn pasteboard_sequence() -> ClipboardSequence {
-    ClipboardSequence("nspb:unsupported".to_owned())
+    ClipboardSequence::unsupported()
 }
 
 #[cfg(target_os = "macos")]

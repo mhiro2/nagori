@@ -33,8 +33,42 @@ impl std::str::FromStr for EntryId {
     }
 }
 
+/// Identifier used to detect clipboard changes between capture ticks.
+///
+/// Variants are explicitly typed so a native platform sequence number cannot
+/// be confused with a content-hash fallback that happens to share the same
+/// textual representation. Equality is by-variant: two `ContentHash` values
+/// with identical hex strings are equal, but `Native(5)` and
+/// `ContentHash("5")` are not.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ClipboardSequence(pub String);
+pub enum ClipboardSequence {
+    /// Native platform sequence (e.g. macOS `NSPasteboard` `changeCount`).
+    /// `i64` covers both 32- and 64-bit `NSInteger` ranges; wraparound is
+    /// far outside any realistic per-process lifetime.
+    Native(i64),
+    /// SHA-256 hex of the clipboard payload, used when the platform exposes
+    /// no native sequence counter.
+    ContentHash(String),
+    /// Sentinel for platforms that do not implement clipboard polling.
+    Unsupported,
+}
+
+impl ClipboardSequence {
+    /// Construct a `Native` sequence.
+    pub const fn native(count: i64) -> Self {
+        Self::Native(count)
+    }
+
+    /// Construct a `ContentHash` sequence from any string-like value.
+    pub fn content_hash(value: impl Into<String>) -> Self {
+        Self::ContentHash(value.into())
+    }
+
+    /// Construct an `Unsupported` sentinel.
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardEntry {
