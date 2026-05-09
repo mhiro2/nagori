@@ -571,6 +571,7 @@ pub struct AiAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum AiActionId {
     Summarize,
     Translate,

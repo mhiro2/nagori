@@ -6,8 +6,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Opt-in `clap::ValueEnum` impls on user-facing model enums (e.g. `AiActionId`)
+# so the CLI can take them as arguments without a parallel mirror enum. Off by
+# default to keep `clap` out of the daemon/desktop dependency graph.
+clap = ["dep:clap"]
+
 [dependencies]
 async-trait.workspace = true
+clap = { workspace = true, optional = true }
 hex.workspace = true
 regex.workspace = true
 serde.workspace = true

@@ -2761,6 +2761,7 @@ name = "nagori-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "clap",
  "hex",
  "regex",
  "serde",

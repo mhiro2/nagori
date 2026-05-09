@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use nagori_ai::LocalAiProvider;
 use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
@@ -123,20 +123,8 @@ struct ClearArgs {
 
 #[derive(Debug, Args)]
 struct AiArgs {
-    action: AiActionName,
+    action: AiActionId,
     id: String,
-}
-
-#[derive(Debug, Clone, ValueEnum)]
-enum AiActionName {
-    Summarize,
-    Translate,
-    FormatJson,
-    FormatMarkdown,
-    ExplainCode,
-    Rewrite,
-    ExtractTasks,
-    RedactSecrets,
 }
 
 #[derive(Debug, Args)]
@@ -410,7 +398,7 @@ async fn run_local_command(cli: Cli) -> Result<()> {
         Command::Ai(args) => {
             let runtime = build_headless_runtime(store.clone());
             let output = runtime
-                .run_ai_action(parse_id(&args.id)?, ai_action_id(&args.action))
+                .run_ai_action(parse_id(&args.id)?, args.action)
                 .await?;
             print_ai_output(&output.into(), format)?;
         }
@@ -605,7 +593,7 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
             let resp = client
                 .send(IpcRequest::RunAiAction(RunAiActionRequest {
                     id: parse_id(&args.id)?,
-                    action: ai_action_id(&args.action),
+                    action: args.action,
                 }))
                 .await?;
             print_ai_output(&expect_ai_output(resp)?, format)?;
@@ -1048,19 +1036,6 @@ fn print_status(db_path: &Path, settings: &AppSettings, format: OutputFormat) ->
         println!("ok\t{}", db_path.display());
     }
     Ok(())
-}
-
-const fn ai_action_id(action: &AiActionName) -> AiActionId {
-    match action {
-        AiActionName::Summarize => AiActionId::Summarize,
-        AiActionName::Translate => AiActionId::Translate,
-        AiActionName::FormatJson => AiActionId::FormatJson,
-        AiActionName::FormatMarkdown => AiActionId::FormatMarkdown,
-        AiActionName::ExplainCode => AiActionId::ExplainCode,
-        AiActionName::Rewrite => AiActionId::Rewrite,
-        AiActionName::ExtractTasks => AiActionId::ExtractTasks,
-        AiActionName::RedactSecrets => AiActionId::RedactSecrets,
-    }
 }
 
 fn expect_entry(response: IpcResponse) -> Result<EntryDto> {

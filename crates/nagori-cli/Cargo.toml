@@ -15,7 +15,7 @@ anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 nagori-ai = { path = "../nagori-ai" }
-nagori-core = { path = "../nagori-core" }
+nagori-core = { path = "../nagori-core", features = ["clap"] }
 nagori-daemon = { path = "../nagori-daemon" }
 nagori-ipc = { path = "../nagori-ipc" }
 nagori-platform = { path = "../nagori-platform" }
