@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use nagori_ai::LocalAiProvider;
 use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
-    SettingsRepository, is_text_safe_for_default_output,
+    SettingsRepository, is_text_safe_for_default_output, safe_preview_for_dto,
 };
 #[cfg(target_os = "macos")]
 use nagori_daemon::run_daemon;
@@ -732,12 +732,16 @@ fn print_entries(
         OutputFormat::Text => {
             for entry in entries {
                 let kind = entry.content_kind();
-                let text = if resolve(&entry) {
-                    entry.plain_text().unwrap_or_default()
+                if resolve(&entry) {
+                    println!(
+                        "{}\t{:?}\t{}",
+                        entry.id,
+                        kind,
+                        entry.plain_text().unwrap_or_default()
+                    );
                 } else {
-                    &entry.search.preview
-                };
-                println!("{}\t{:?}\t{}", entry.id, kind, text);
+                    println!("{}\t{:?}\t{}", entry.id, kind, safe_preview_for_dto(&entry));
+                }
             }
         }
     }
@@ -760,7 +764,9 @@ fn print_entry(entry: &ClipboardEntry, format: OutputFormat, include_text: bool)
             } else {
                 println!(
                     "{}\t{:?}\t{}",
-                    entry.id, entry.sensitivity, entry.search.preview
+                    entry.id,
+                    entry.sensitivity,
+                    safe_preview_for_dto(entry)
                 );
             }
         }
@@ -975,7 +981,7 @@ fn entry_json(entry: &ClipboardEntry, include_text: bool) -> Result<serde_json::
         "id": entry.id,
         "kind": entry.content_kind(),
         "text": text,
-        "preview": entry.search.preview,
+        "preview": safe_preview_for_dto(entry),
         "created_at": format_json_time(entry.metadata.created_at)?,
         "updated_at": format_json_time(entry.metadata.updated_at)?,
         "last_used_at": entry.metadata.last_used_at.map(format_json_time).transpose()?,
