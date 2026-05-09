@@ -268,6 +268,15 @@ impl SqliteStore {
         if max_entries == 0 {
             return Ok(0);
         }
+        // Settings already clamps to `MAX_RETENTION_COUNT` (1_000_000), but
+        // convert at the boundary so a future caller that bypasses settings
+        // (FFI, manual maintenance hook) gets a clean error instead of a
+        // silently truncated `OFFSET` from `as i64`.
+        let max_entries_i64 = i64::try_from(max_entries).map_err(|err| {
+            AppError::Storage(format!(
+                "history_retention_count {max_entries} exceeds i64 range: {err}"
+            ))
+        })?;
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
@@ -284,7 +293,7 @@ impl SqliteStore {
                        ORDER BY created_at DESC
                        LIMIT -1 OFFSET ?2
                    )",
-                    params![now, max_entries as i64],
+                    params![now, max_entries_i64],
                 )
                 .map_err(|err| storage_err(&err))?;
             if changed > 0 {
