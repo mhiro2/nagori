@@ -595,9 +595,25 @@ async fn build_image_response(
             );
         }
     };
+    let Some(safe_mime) = sanitise_image_mime(&mime) else {
+        tracing::warn!(mime = %mime, "image_scheme_blocked_mime");
+        return plain_response(
+            tauri::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "mime not allowed",
+        );
+    };
     tauri::http::Response::builder()
         .status(tauri::http::StatusCode::OK)
-        .header(tauri::http::header::CONTENT_TYPE, mime)
+        .header(tauri::http::header::CONTENT_TYPE, safe_mime)
+        // Force the browser to honour the Content-Type we set instead of
+        // sniffing the bytes. Without this, a `payload_mime` of
+        // `image/png` plus actual SVG/HTML bytes (corruption or future
+        // ingestion bug) could still be rendered as a script-bearing
+        // document by some engines.
+        .header(tauri::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        // Mark the response as inline-only so the byte stream can't be
+        // hijacked into a save / open dialog with a misleading filename.
+        .header(tauri::http::header::CONTENT_DISPOSITION, "inline")
         // Disallow embedding the bytes in any frame other than our own
         // webview, and prevent caching of clipboard imagery between
         // entries (the URL is keyed by entry id which we treat as the
@@ -610,6 +626,38 @@ async fn build_image_response(
                 .body(Vec::new())
                 .expect("status-only response")
         })
+}
+
+/// Allow-list of MIME types we'll serve over `nagori-image://`.
+///
+/// Restricted to raster formats whose decoders are well-tested in
+/// WebKit/WebView2 and which carry no scripting capability. SVG is
+/// deliberately excluded — it can host `<script>` and event handlers
+/// that would execute in the webview's privileged origin if served
+/// inline. Anything not on this list is replaced with a 415 response
+/// rather than silently downgraded to `application/octet-stream`,
+/// because a misclassified payload almost always indicates either
+/// corruption or an attempt to abuse the scheme as a generic file
+/// transport.
+const ALLOWED_IMAGE_MIME: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+];
+
+fn sanitise_image_mime(raw: &str) -> Option<&'static str> {
+    // Strip MIME parameters (`; charset=...`, `; profile=...`) and
+    // normalise case before comparison — the IANA registry says the
+    // type/subtype is case-insensitive, and downstream stores have
+    // historically rendered both `image/PNG` and `image/png`.
+    let bare = raw.split(';').next()?.trim().to_ascii_lowercase();
+    ALLOWED_IMAGE_MIME
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == bare)
 }
 
 fn parse_image_entry_id(path: &str) -> std::result::Result<EntryId, ()> {
@@ -759,7 +807,56 @@ mod image_scheme_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("no-store"),
         );
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+        );
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("inline"),
+        );
         assert_eq!(resp.body().as_slice(), TINY_PNG);
+    }
+
+    #[tokio::test]
+    async fn build_response_rejects_disallowed_mime_even_when_payload_decodes() {
+        // SVG, application/octet-stream, text/html etc. must be refused
+        // even if the bytes parse and the entry is otherwise public.
+        // Otherwise a misclassified entry could ship inline scriptable
+        // content into our privileged origin.
+        let runtime = build_runtime();
+        let mut entry = make_image_entry(Sensitivity::Public);
+        if let ClipboardContent::Image(img) = &mut entry.content {
+            img.mime_type = Some("image/svg+xml".to_owned());
+        }
+        let id = insert(&runtime, entry).await;
+
+        let resp = build_image_response(&runtime, &format!("/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(resp.body().as_slice(), b"mime not allowed");
+    }
+
+    #[test]
+    fn sanitise_image_mime_strips_parameters_and_lowercases() {
+        assert_eq!(sanitise_image_mime("image/png"), Some("image/png"));
+        assert_eq!(sanitise_image_mime("IMAGE/PNG"), Some("image/png"));
+        assert_eq!(
+            sanitise_image_mime("image/png; charset=utf-8"),
+            Some("image/png"),
+        );
+        assert_eq!(sanitise_image_mime("  image/jpeg  "), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn sanitise_image_mime_rejects_disallowed_types() {
+        assert_eq!(sanitise_image_mime("image/svg+xml"), None);
+        assert_eq!(sanitise_image_mime("text/html"), None);
+        assert_eq!(sanitise_image_mime("application/octet-stream"), None);
+        assert_eq!(sanitise_image_mime(""), None);
     }
 
     #[tokio::test]
