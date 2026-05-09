@@ -17,9 +17,13 @@ pub const DEFAULT_CACHE_CAPACITY: usize = 32;
 
 /// Composite key identifying a cacheable [`SearchQuery`].
 ///
-/// `SearchFilters` carries `Vec<ContentKind>` and a couple of timestamps that
-/// don't implement `Hash`, so the cache stays equality-based rather than
-/// hashing — fine for a sub-32-entry working set.
+/// All `SearchFilters` fields participate in the key via the derived
+/// `PartialEq` — including `pinned_only`, `source_app`, `created_after`,
+/// and `created_before` — so two palette searches that differ only in
+/// their date-range filter never collide on a single LRU slot. The
+/// cache stays equality-based rather than hashing because
+/// `OffsetDateTime` doesn't implement `Hash`; fine for a sub-32-entry
+/// working set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKey {
     pub normalized: String,
@@ -37,6 +41,13 @@ impl CacheKey {
         // they share a single cache slot — without this, cycling palette
         // filters in a different order would defeat the cache and double
         // the LRU's working set.
+        //
+        // Other filter fields (`pinned_only`, `source_app`,
+        // `created_after`, `created_before`) are *not* normalised because
+        // they're already canonical — the storage layer maps each
+        // distinct value to a distinct row set, so two cache entries
+        // that differ in any of those fields must remain distinct slots
+        // even if their `kinds` collapse to the same vector.
         let mut filters = query.filters.clone();
         filters.kinds.sort_unstable();
         filters.kinds.dedup();
@@ -351,6 +362,56 @@ mod tests {
             key_a.filters.kinds,
             vec![ContentKind::Text, ContentKind::Url]
         );
+    }
+
+    #[test]
+    fn from_query_keeps_date_range_filters_distinct() {
+        // Two palette searches that differ only in their `created_after`
+        // window must land in separate cache slots — otherwise yesterday's
+        // results would shadow today's once a user adjusted the date
+        // filter, and the cache would silently serve the wrong rows.
+        // Same logic for `created_before`, `pinned_only`, `source_app`.
+        use time::OffsetDateTime;
+
+        let earlier = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("ts");
+        let later = OffsetDateTime::from_unix_timestamp(1_700_086_400).expect("ts");
+        let query_a = SearchQuery {
+            filters: SearchFilters {
+                created_after: Some(earlier),
+                ..SearchFilters::default()
+            },
+            ..SearchQuery::new("", String::new(), 10)
+        };
+        let query_b = SearchQuery {
+            filters: SearchFilters {
+                created_after: Some(later),
+                ..SearchFilters::default()
+            },
+            ..SearchQuery::new("", String::new(), 10)
+        };
+        let query_c = SearchQuery {
+            filters: SearchFilters {
+                pinned_only: true,
+                ..SearchFilters::default()
+            },
+            ..SearchQuery::new("", String::new(), 10)
+        };
+        let query_d = SearchQuery {
+            filters: SearchFilters {
+                source_app: Some("com.apple.Safari".into()),
+                ..SearchFilters::default()
+            },
+            ..SearchQuery::new("", String::new(), 10)
+        };
+
+        let baseline = CacheKey::from_query(&SearchQuery::new("", String::new(), 10));
+        assert_ne!(CacheKey::from_query(&query_a), baseline);
+        assert_ne!(
+            CacheKey::from_query(&query_a),
+            CacheKey::from_query(&query_b)
+        );
+        assert_ne!(CacheKey::from_query(&query_c), baseline);
+        assert_ne!(CacheKey::from_query(&query_d), baseline);
     }
 
     #[test]
