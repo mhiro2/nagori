@@ -5,7 +5,7 @@ mod state;
 #[cfg(target_os = "macos")]
 mod tray;
 
-use nagori_core::{EntryId, Sensitivity};
+use nagori_core::{EntryId, is_text_safe_for_default_output};
 use nagori_daemon::NagoriRuntime;
 use state::AppState;
 use tauri::Manager;
@@ -584,10 +584,7 @@ async fn build_image_response(
             );
         }
     };
-    if matches!(
-        entry.sensitivity,
-        Sensitivity::Private | Sensitivity::Secret | Sensitivity::Blocked
-    ) {
+    if !is_text_safe_for_default_output(entry.sensitivity) {
         return plain_response(tauri::http::StatusCode::FORBIDDEN, "sensitivity withheld");
     }
     let (bytes, mime) = match runtime.get_payload(entry_id).await {

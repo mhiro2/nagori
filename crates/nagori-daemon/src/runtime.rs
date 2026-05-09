@@ -172,11 +172,8 @@ impl NagoriRuntime {
                 include_sensitive,
             }) => {
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
-                let include_text = include_sensitive
-                    || !matches!(
-                        entry.sensitivity,
-                        Sensitivity::Private | Sensitivity::Secret
-                    );
+                let include_text =
+                    include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
                 Ok(IpcResponse::Entry(EntryDto::from_entry(
                     entry,
                     include_text,
@@ -191,11 +188,8 @@ impl NagoriRuntime {
                     .await?
                     .into_iter()
                     .map(|entry| {
-                        let include_text = include_sensitive
-                            || !matches!(
-                                entry.sensitivity,
-                                Sensitivity::Private | Sensitivity::Secret
-                            );
+                        let include_text =
+                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
                         EntryDto::from_entry(entry, include_text)
                     })
                     .collect();
@@ -207,11 +201,8 @@ impl NagoriRuntime {
                     .await?
                     .into_iter()
                     .map(|entry| {
-                        let include_text = include_sensitive
-                            || !matches!(
-                                entry.sensitivity,
-                                Sensitivity::Private | Sensitivity::Secret
-                            );
+                        let include_text =
+                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
                         EntryDto::from_entry(entry, include_text)
                     })
                     .collect();

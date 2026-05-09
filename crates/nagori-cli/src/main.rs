@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use nagori_ai::LocalAiProvider;
 use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
-    Sensitivity, SettingsRepository, is_text_safe_for_default_output,
+    SettingsRepository, is_text_safe_for_default_output,
 };
 #[cfg(target_os = "macos")]
 use nagori_daemon::run_daemon;
@@ -340,11 +340,8 @@ async fn run_local_command(cli: Cli) -> Result<()> {
                 .get(id)
                 .await?
                 .ok_or_else(|| anyhow::Error::new(AppError::NotFound))?;
-            let include_text = args.include_sensitive
-                || !matches!(
-                    entry.sensitivity,
-                    Sensitivity::Private | Sensitivity::Secret
-                );
+            let include_text =
+                args.include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
             print_entry(&entry, format, include_text)?;
         }
         Command::Add(args) => {
@@ -714,11 +711,7 @@ fn print_entries(
     include_sensitive: bool,
 ) -> Result<()> {
     let resolve = |entry: &ClipboardEntry| -> bool {
-        include_sensitive
-            || !matches!(
-                entry.sensitivity,
-                Sensitivity::Private | Sensitivity::Secret
-            )
+        include_sensitive || is_text_safe_for_default_output(entry.sensitivity)
     };
     match format {
         OutputFormat::Json => {

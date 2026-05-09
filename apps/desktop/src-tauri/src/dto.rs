@@ -5,6 +5,7 @@ use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
     Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode,
     SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity,
+    is_text_safe_for_default_output,
 };
 use nagori_platform::{PermissionKind, PermissionState, PermissionStatus};
 use serde::{Deserialize, Serialize};
@@ -239,10 +240,7 @@ impl EntryPreviewDto {
     pub fn from_entry(entry: &ClipboardEntry) -> Self {
         const MAX_PREVIEW_BYTES: usize = 128 * 1024;
 
-        let sensitive = matches!(
-            entry.sensitivity,
-            Sensitivity::Private | Sensitivity::Secret | Sensitivity::Blocked
-        );
+        let sensitive = !is_text_safe_for_default_output(entry.sensitivity);
         let raw_text = if sensitive {
             entry.search.preview.clone()
         } else {
