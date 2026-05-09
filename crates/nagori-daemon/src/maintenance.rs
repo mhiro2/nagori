@@ -1,7 +1,7 @@
-use nagori_core::{AppSettings, Result};
+use nagori_core::{AppSettings, AuditLog, Result};
 use nagori_storage::SqliteStore;
 use time::{Duration, OffsetDateTime};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::search_cache::{SharedSearchCache, lock_or_recover};
 
@@ -74,15 +74,21 @@ impl MaintenanceService {
             .await?;
         if deleted_by_count > 0 {
             self.invalidate_cache();
+            self.record_retention_drop("retention_count", deleted_by_count, settings)
+                .await;
         }
         let deleted_by_age = self.enforce_retention_age(settings).await?;
         if deleted_by_age > 0 {
             self.invalidate_cache();
+            self.record_retention_drop("retention_age", deleted_by_age, settings)
+                .await;
         }
         let deleted_by_size = if let Some(max_total_bytes) = settings.max_total_bytes {
             let deleted = self.store.enforce_total_bytes(max_total_bytes).await?;
             if deleted > 0 {
                 self.invalidate_cache();
+                self.record_retention_drop("retention_size", deleted, settings)
+                    .await;
             }
             deleted
         } else {
@@ -108,6 +114,39 @@ impl MaintenanceService {
     fn invalidate_cache(&self) {
         if let Some(cache) = &self.search_cache {
             lock_or_recover(cache).invalidate();
+        }
+    }
+
+    /// Best-effort audit event for a retention sweep that actually dropped
+    /// rows. We deliberately log-and-swallow the error so a transient
+    /// failure to write the audit row never aborts the maintenance run that
+    /// already succeeded — the retention delete itself is the load-bearing
+    /// side effect; the audit row is observability for support / privacy
+    /// reviews. Without these events the only trace of an unexpectedly
+    /// large retention sweep was a single `info!(?report)` line that
+    /// disappears with log rotation.
+    async fn record_retention_drop(&self, kind: &str, deleted: usize, settings: &AppSettings) {
+        let detail = match kind {
+            "retention_count" => format!(
+                "deleted={deleted} cap={count}",
+                count = settings.history_retention_count
+            ),
+            "retention_age" => format!(
+                "deleted={deleted} days={days}",
+                days = settings
+                    .history_retention_days
+                    .map_or_else(|| "none".to_owned(), |d| d.to_string())
+            ),
+            "retention_size" => format!(
+                "deleted={deleted} cap_bytes={cap}",
+                cap = settings
+                    .max_total_bytes
+                    .map_or_else(|| "none".to_owned(), |b| b.to_string())
+            ),
+            _ => format!("deleted={deleted}"),
+        };
+        if let Err(err) = self.store.record(kind, None, Some(&detail)).await {
+            warn!(error = %err, kind, deleted, "audit_record_failed");
         }
     }
 
@@ -252,6 +291,56 @@ mod tests {
             cache.lock().unwrap().is_empty(),
             "maintenance must invalidate the cache to close the search/delete race",
         );
+    }
+
+    async fn count_audit_events(store: &SqliteStore, kind: &str) -> i64 {
+        store.audit_event_count(kind).await.expect("audit count")
+    }
+
+    #[tokio::test]
+    async fn run_records_retention_count_drop_in_audit_log() {
+        // Maintenance is the only writer of `retention_*` audit events, and
+        // they're the load-bearing breadcrumbs for "where did my history
+        // go?" support questions. Without the test, a refactor that
+        // inadvertently moved the audit call out of the if-block would
+        // ship green even though the audit table never gets a row.
+        let store = store_with_entries(3).await;
+        let service = MaintenanceService::new(store.clone());
+        let settings = AppSettings {
+            history_retention_count: 1,
+            ..AppSettings::default()
+        };
+
+        let report = service.run(&settings).await.expect("maintenance run");
+        assert!(report.deleted_by_count > 0);
+
+        assert_eq!(count_audit_events(&store, "retention_count").await, 1);
+        assert_eq!(count_audit_events(&store, "retention_age").await, 0);
+        assert_eq!(count_audit_events(&store, "retention_size").await, 0);
+    }
+
+    #[tokio::test]
+    async fn run_skips_audit_when_no_rows_were_dropped() {
+        // The audit row is supposed to be a notable signal — if it fired
+        // every tick of the maintenance loop, the table would flood and
+        // drown the genuine truncation events. Pin the contract that
+        // "no deletions ⇒ no audit row" so a future contributor adding an
+        // unconditional record() inside run_inner() gets a test failure.
+        let store = store_with_entries(1).await;
+        let service = MaintenanceService::new(store.clone());
+        let settings = AppSettings {
+            history_retention_count: 100,
+            history_retention_days: None,
+            ..AppSettings::default()
+        };
+
+        let report = service.run(&settings).await.expect("maintenance run");
+        assert_eq!(report.deleted_by_count, 0);
+        assert_eq!(report.deleted_by_age, 0);
+
+        assert_eq!(count_audit_events(&store, "retention_count").await, 0);
+        assert_eq!(count_audit_events(&store, "retention_age").await, 0);
+        assert_eq!(count_audit_events(&store, "retention_size").await, 0);
     }
 
     #[tokio::test]

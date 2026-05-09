@@ -14,7 +14,10 @@ use nagori_core::{
     SearchQuery, SearchRepository, SearchResult, SearchService, Sensitivity, SourceApp,
     compile_user_regex,
 };
-use nagori_search::{DefaultRanker, generate_ngrams, has_cjk, normalize_text};
+use nagori_search::{
+    DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
+    normalize_text,
+};
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -415,6 +418,27 @@ impl SqliteStore {
         })
         .await
     }
+
+    /// Count rows in `audit_events` matching `kind`. Exposed so adjacent
+    /// crates (the daemon's maintenance loop, the desktop diagnostics
+    /// surface) can assert "the right resource-limit breadcrumb was
+    /// written" without needing access to the connection pool. Hidden from
+    /// rustdoc because it has no usage outside of integration tests and
+    /// internal observability.
+    #[doc(hidden)]
+    pub async fn audit_event_count(&self, kind: &str) -> Result<i64> {
+        let kind = kind.to_owned();
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_kind = ?1",
+                params![kind],
+                |row| row.get(0),
+            )
+            .map_err(|err| storage_err(&err))
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -451,8 +475,24 @@ impl AuditLog for SqliteStore {
 #[async_trait]
 impl nagori_core::EntryRepository for SqliteStore {
     async fn insert(&self, entry: ClipboardEntry) -> Result<EntryId> {
-        self.run_blocking(move |store| insert_entry_blocking(&store, &entry))
-            .await
+        // Snapshot truncation state before moving the entry into the
+        // blocking closure so the audit row can be written from the async
+        // context (the in-transaction path can't reach `AuditLog::record`,
+        // which itself acquires a fresh connection).
+        let truncated = ngram_input_was_truncated(&entry.search.normalized_text);
+        let stored_id = self
+            .run_blocking(move |store| insert_entry_blocking(&store, &entry))
+            .await?;
+        if truncated {
+            let detail = format!("cap_chars={MAX_NGRAM_INPUT_CHARS}");
+            if let Err(err) = self
+                .record("ngram_truncated", Some(stored_id), Some(&detail))
+                .await
+            {
+                tracing::warn!(error = %err, "audit_record_failed");
+            }
+        }
+        Ok(stored_id)
     }
 
     async fn get(&self, id: EntryId) -> Result<Option<ClipboardEntry>> {
@@ -732,6 +772,17 @@ fn delete_search_rows(tx: &rusqlite::Transaction<'_>, entry_id: &str) -> Result<
 #[async_trait]
 impl SearchRepository for SqliteStore {
     async fn upsert_document(&self, doc: SearchDocument) -> Result<()> {
+        // Detect ngram truncation *before* moving `doc` into the blocking
+        // closure. The blocking section runs `generate_ngrams` and silently
+        // discards everything past `MAX_NGRAM_INPUT_CHARS`; if we did not
+        // record a breadcrumb here, a user whose paste is longer than the
+        // cap would notice "fuzzy search misses the tail of my entry" with
+        // no signal in the DB explaining why. Audit-event writes can't run
+        // inside the same transaction (we need a fresh connection), so we
+        // do them after the upsert commits and tolerate failures so a
+        // transient audit-write error never wedges indexing.
+        let truncated = ngram_input_was_truncated(&doc.normalized_text);
+        let entry_id = doc.entry_id;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
@@ -739,7 +790,17 @@ impl SearchRepository for SqliteStore {
             tx.commit().map_err(|err| storage_err(&err))?;
             Ok(())
         })
-        .await
+        .await?;
+        if truncated {
+            let detail = format!("cap_chars={MAX_NGRAM_INPUT_CHARS}");
+            if let Err(err) = self
+                .record("ngram_truncated", Some(entry_id), Some(&detail))
+                .await
+            {
+                tracing::warn!(error = %err, "audit_record_failed");
+            }
+        }
+        Ok(())
     }
 
     async fn delete_document(&self, entry_id: EntryId) -> Result<()> {
@@ -1921,6 +1982,37 @@ mod tests {
         let results = store.search(query).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content_kind, ContentKind::Url);
+    }
+
+    async fn audit_kind_count(store: &SqliteStore, kind: &str) -> i64 {
+        store.audit_event_count(kind).await.expect("audit count")
+    }
+
+    #[tokio::test]
+    async fn insert_records_ngram_truncated_when_input_exceeds_cap() {
+        // The ngram index silently caps at `MAX_NGRAM_INPUT_CHARS` so a paste
+        // larger than the cap loses fuzzy-search recall on its tail. The
+        // user-visible symptom — "search misses the bottom of my pasted
+        // doc" — was previously invisible at the DB layer; this audit event
+        // is the only artefact that survives log rotation and lets a future
+        // support investigation correlate "missing matches" with the
+        // specific entry that was truncated.
+        let store = SqliteStore::open_memory().unwrap();
+        let oversized: String = "a".repeat(MAX_NGRAM_INPUT_CHARS + 1);
+        let _ = insert_text(&store, &oversized).await;
+
+        assert_eq!(audit_kind_count(&store, "ngram_truncated").await, 1);
+    }
+
+    #[tokio::test]
+    async fn insert_skips_audit_when_input_fits_cap() {
+        // Negative case: an entry that fits inside the cap must not emit an
+        // audit row, otherwise the events table fills up with noise on
+        // every paste and obscures the genuine truncation signal.
+        let store = SqliteStore::open_memory().unwrap();
+        let _ = insert_text(&store, "a short paste").await;
+
+        assert_eq!(audit_kind_count(&store, "ngram_truncated").await, 0);
     }
 
     #[tokio::test]

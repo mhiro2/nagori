@@ -43,6 +43,24 @@ pub fn generate_ngrams(input: &str) -> Vec<String> {
     grams
 }
 
+/// Returns `true` if [`generate_ngrams`] would discard tail characters from
+/// `input` because the non-whitespace character count exceeds
+/// [`MAX_NGRAM_INPUT_CHARS`].
+///
+/// Callers that index user-supplied text can pair this with an audit-event
+/// write so a clipboard entry larger than the ngram budget leaves a
+/// breadcrumb explaining why fuzzy search misses bytes past the cap. The
+/// function short-circuits as soon as the cap is exceeded so it stays O(N)
+/// in the worst case but typically `O(MAX_NGRAM_INPUT_CHARS)`.
+#[must_use]
+pub fn ngram_input_was_truncated(input: &str) -> bool {
+    input
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .nth(MAX_NGRAM_INPUT_CHARS)
+        .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +83,29 @@ mod tests {
         // distinct grams: "aa" and "aaa". The point is just that we
         // didn't allocate proportional to the full input length.
         assert_eq!(grams, vec!["aa".to_owned(), "aaa".to_owned()]);
+    }
+
+    #[test]
+    fn truncation_detector_matches_generate_ngrams() {
+        // Whitespace doesn't count toward the cap (it's filtered before the
+        // `take`), so an input padded with spaces past the cap-byte budget
+        // must still be reported as "not truncated".
+        let padded: String = "a".repeat(MAX_NGRAM_INPUT_CHARS) + &" ".repeat(1024);
+        assert!(
+            !ngram_input_was_truncated(&padded),
+            "trailing whitespace must not flip the truncation flag",
+        );
+
+        let exactly_at_cap: String = "a".repeat(MAX_NGRAM_INPUT_CHARS);
+        assert!(
+            !ngram_input_was_truncated(&exactly_at_cap),
+            "exactly-at-cap input must not be flagged as truncated",
+        );
+
+        let over_cap: String = "a".repeat(MAX_NGRAM_INPUT_CHARS + 1);
+        assert!(
+            ngram_input_was_truncated(&over_cap),
+            "one char past the cap must flip the truncation flag",
+        );
     }
 }
