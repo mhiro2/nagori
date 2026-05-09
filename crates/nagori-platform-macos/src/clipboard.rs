@@ -16,6 +16,15 @@ use objc2_app_kit::{
 use objc2_foundation::NSData;
 use time::OffsetDateTime;
 
+/// macOS clipboard adapter.
+///
+/// The `Arc<Mutex<Clipboard>>` is **not** there for arboard's internal
+/// thread-safety alone — `Clipboard::get_text` / `set_text` already take
+/// `&mut self`, so exclusive access would be required regardless. The lock
+/// extends across `get_text` + `collect_macos_extras` (and the `dataForType`
+/// loads in `current_snapshot_with_max`) so a concurrent `write_image_bytes`
+/// cannot slip its `clearContents`/`setData` pair between the two and stitch
+/// a torn snapshot.
 pub struct MacosClipboard {
     clipboard: Arc<Mutex<Clipboard>>,
 }
