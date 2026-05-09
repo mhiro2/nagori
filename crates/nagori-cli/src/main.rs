@@ -862,6 +862,20 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                     permission.kind, permission.state, suffix
                 );
             }
+            let maintenance = &report.maintenance;
+            let state = if maintenance.degraded {
+                "degraded"
+            } else {
+                "ok"
+            };
+            let suffix = maintenance
+                .last_error
+                .as_deref()
+                .map_or_else(String::new, |msg| format!("\t{msg}"));
+            println!(
+                "maintenance\t{state}\tconsecutive_failures={}{suffix}",
+                maintenance.consecutive_failures
+            );
         }
     }
     Ok(())

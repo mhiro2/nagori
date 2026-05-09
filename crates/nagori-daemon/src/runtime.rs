@@ -23,6 +23,7 @@ use time::OffsetDateTime;
 use tokio::sync::{Notify, watch};
 use tracing::error;
 
+use crate::health::MaintenanceHealth;
 use crate::search_cache::{
     CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
 };
@@ -43,6 +44,10 @@ pub struct NagoriRuntime {
     /// round-trip on the empty-query (`Recent`) and short-prefix paths;
     /// any corpus mutation invalidates it via [`Self::invalidate_search_cache`].
     search_cache: SharedSearchCache,
+    /// Shared health snapshot of the background maintenance loop. The
+    /// loop writes from `serve.rs` after each iteration; the IPC
+    /// `Health` and `Doctor` handlers read it.
+    maintenance_health: MaintenanceHealth,
 }
 
 impl NagoriRuntime {
@@ -67,6 +72,14 @@ impl NagoriRuntime {
 
     pub fn shutdown_handle(&self) -> Arc<Notify> {
         self.shutdown.clone()
+    }
+
+    /// Shared handle to the maintenance loop's health snapshot. The
+    /// daemon's `serve.rs` calls `record_success` / `record_failure` on
+    /// each iteration so the IPC `Health` / `Doctor` handlers can report
+    /// degraded retention without round-tripping through the loop.
+    pub fn maintenance_health(&self) -> MaintenanceHealth {
+        self.maintenance_health.clone()
     }
 
     /// Shared handle to the recent-search cache so out-of-runtime mutators
@@ -255,10 +268,17 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Cleared(ClearResponse { deleted }))
             }
             IpcRequest::Doctor => Ok(IpcResponse::Doctor(self.build_doctor_report().await?)),
-            IpcRequest::Health => Ok(IpcResponse::Health(HealthResponse {
-                ok: true,
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            })),
+            IpcRequest::Health => {
+                let maintenance = self.maintenance_health.report();
+                // `ok` flips to false once retention is wedged so simple
+                // health probes (load balancers, oncall checks) light up
+                // without needing to inspect the nested struct.
+                Ok(IpcResponse::Health(HealthResponse {
+                    ok: !maintenance.degraded,
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    maintenance,
+                }))
+            }
             IpcRequest::Shutdown => {
                 self.shutdown.notify_waiters();
                 Ok(IpcResponse::Ack)
@@ -295,6 +315,7 @@ impl NagoriRuntime {
             local_only_mode: settings.local_only_mode,
             ai_provider: provider_label,
             permissions,
+            maintenance: self.maintenance_health.report(),
         })
     }
 
@@ -645,6 +666,7 @@ impl NagoriRuntimeBuilder {
             settings_rx,
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
+            maintenance_health: MaintenanceHealth::new(),
         }
     }
 }

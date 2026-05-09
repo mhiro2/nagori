@@ -150,6 +150,24 @@ pub struct DoctorReport {
     pub local_only_mode: bool,
     pub ai_provider: String,
     pub permissions: Vec<DoctorPermission>,
+    /// Health snapshot of the background maintenance loop. Surfaced here
+    /// so `nagori doctor` flags retention pauses without the operator
+    /// having to grep tracing logs.
+    #[serde(default)]
+    pub maintenance: MaintenanceHealthReport,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaintenanceHealthReport {
+    /// Consecutive failed runs of the maintenance loop. Resets to zero
+    /// on the next successful run.
+    pub consecutive_failures: u32,
+    /// `true` once `consecutive_failures` crosses the daemon's degraded
+    /// threshold; cleared on the next successful run.
+    pub degraded: bool,
+    /// Most recent failure message, if any. Kept stable across the
+    /// degraded window so doctor / health output is reproducible.
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +188,12 @@ pub struct IpcError {
 pub struct HealthResponse {
     pub ok: bool,
     pub version: String,
+    /// Health snapshot of the background maintenance loop. Cheap to
+    /// serialise even when nothing is wrong (default-zero), and gives
+    /// callers (`nagori doctor`, dashboards, oncall checks) a single
+    /// place to learn that retention has stopped advancing.
+    #[serde(default)]
+    pub maintenance: MaintenanceHealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

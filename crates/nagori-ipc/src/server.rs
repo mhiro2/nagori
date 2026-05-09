@@ -418,6 +418,7 @@ mod tests {
             IpcResponse::Health(HealthResponse {
                 ok: true,
                 version: "test-version".to_owned(),
+                maintenance: crate::MaintenanceHealthReport::default(),
             })
         })
         .await;

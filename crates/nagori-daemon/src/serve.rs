@@ -154,13 +154,21 @@ where
         let interval = config.maintenance_interval;
         let mut settings_rx = settings_rx.clone();
         let search_cache = runtime.search_cache_handle();
+        let health = runtime.maintenance_health();
         tokio::spawn(async move {
             let maintenance =
                 MaintenanceService::new(store.clone()).with_search_cache(search_cache);
             loop {
                 let settings = settings_rx.borrow().clone();
-                if let Err(err) = maintenance.run(&settings).await {
-                    warn!(error = %err, "maintenance_failed");
+                match maintenance.run(&settings).await {
+                    Ok(_) => health.record_success(),
+                    Err(err) => {
+                        // Record before logging so a concurrent
+                        // health-probe sees the latest counter even if
+                        // tracing back-pressure delays the warn line.
+                        health.record_failure(err.to_string());
+                        warn!(error = %err, "maintenance_failed");
+                    }
                 }
                 tokio::select! {
                     () = shutdown.notified() => return,
