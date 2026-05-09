@@ -541,13 +541,19 @@ fn check_image_request_preconditions(
             "webview not allowed",
         ));
     }
-    if !matches!(host.unwrap_or(""), "localhost" | "nagori-image.localhost") {
-        return Some(plain_response(
+    // Match `Some(...)` explicitly so a `None` host (request URL with no
+    // authority component, e.g. `nagori-image:///id`) is rejected by the
+    // catch-all arm rather than being coerced into the empty string and
+    // matched against the allow-list. The previous `unwrap_or("")` form
+    // kept the door open for a future allow-list entry to accidentally
+    // include `""` and silently let host-less requests through.
+    match host {
+        Some("localhost" | "nagori-image.localhost") => None,
+        _ => Some(plain_response(
             tauri::http::StatusCode::FORBIDDEN,
             "host not allowed",
-        ));
+        )),
     }
-    None
 }
 
 /// Stream raw image bytes for `nagori-image://<host>/<entry_id>` requests.
@@ -783,6 +789,20 @@ mod image_scheme_tests {
         // A relative URI with no authority slips through `Uri::host()` as
         // `None`; treat it the same as an unrecognised host.
         let resp = check_image_request_preconditions("main", None).expect("missing host blocked");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.body().as_slice(), b"host not allowed");
+    }
+
+    #[test]
+    fn preconditions_reject_empty_host_string() {
+        // Regression: the previous form `host.unwrap_or("")` collapsed both
+        // `None` and `Some("")` into the same empty-string sentinel, so a
+        // future allow-list edit accidentally including `""` would have
+        // silently let host-less requests through. The explicit `Some("…")`
+        // match arm rejects empty strings without relying on allow-list
+        // hygiene.
+        let resp =
+            check_image_request_preconditions("main", Some("")).expect("empty host string blocked");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(resp.body().as_slice(), b"host not allowed");
     }
