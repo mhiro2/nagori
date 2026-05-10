@@ -873,6 +873,30 @@ change.
   command shells out to `open(1)` with the
   `x-apple.systempreferences:` URL so the onboarding banner can take
   the user directly to the Accessibility pane.
+- **Updater (`tauri-plugin-updater`)** — registered only on macOS for
+  MVP. The plugin reads its endpoint and signing pubkey from
+  `tauri.conf.json` (`plugins.updater`); the endpoint resolves
+  `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`
+  via GitHub's "always points at the newest release asset" redirect, so
+  no manifest needs to be edited per release. `release.yaml` already
+  passes `includeUpdaterJson: true` to `tauri-action`, which emits the
+  signed `latest.json` next to the `.app.tar.gz` bundle. The
+  `commands::check_for_updates` Tauri command wraps `updater.check()`
+  and is surfaced as the "Check for updates now" button under
+  Settings → Advanced. `AppSettings.auto_update_check`, when enabled
+  (and `local_only_mode` is off), drives the one-shot startup probe in
+  `spawn_startup_update_probe`, which surfaces availability via an OS
+  notification (the same path used by capture/AI state changes); the
+  MVP surface is read-only (no `download_and_install`), so users
+  follow the GitHub release link to upgrade. `AppSettings.update_channel`
+  (currently fixed to `Stable`) is persisted so future Beta/Nightly
+  channels can land without a settings migration. The signing keypair
+  is generated once per release line via
+  `pnpm exec tauri signer generate`; the private half lives in the
+  GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` /
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the public half is committed
+  into `tauri.conf.json`. `release.yaml` fails fast when that pubkey
+  is empty so an unverifiable bundle never ships.
 
 ---
 
