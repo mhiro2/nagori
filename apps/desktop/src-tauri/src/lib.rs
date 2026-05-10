@@ -36,6 +36,13 @@ pub fn run() {
             // global `with_handler` here would additionally run the palette
             // toggle for *every* shortcut, hijacking secondary hotkeys.
             .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+            // Updater plugin reads `plugins.updater.endpoints` and the
+            // bundled signing pubkey from `tauri.conf.json`. The
+            // `commands::check_for_updates` command exposes a manual
+            // trigger; the startup probe in `spawn_settings_subscribers`
+            // honours `auto_update_check` and emits
+            // `nagori://update_available` for the frontend.
+            .plugin(tauri_plugin_updater::Builder::new().build())
     };
 
     builder
@@ -109,6 +116,7 @@ pub fn run() {
             commands::open_accessibility_settings,
             commands::toggle_palette,
             commands::hide_palette,
+            commands::check_for_updates,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
@@ -257,6 +265,16 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         // same accelerator).
         tray::set_visible(&app, current_show_in_menu_bar);
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
+
+        // Startup updater probe. Honours `auto_update_check` *and*
+        // `local_only_mode` so a user who has opted out of background
+        // network calls never sees a request. Emits
+        // `nagori://update_available` with `{version, currentVersion,
+        // releaseNotes}` when an update is found; failures are logged at
+        // warn so a transient network blip doesn't surface a banner.
+        if initial.auto_update_check && !initial.local_only_mode {
+            spawn_startup_update_probe(&app);
+        }
 
         while settings_rx.changed().await.is_ok() {
             let snapshot = settings_rx.borrow().clone();
@@ -478,6 +496,46 @@ fn sync_auto_launch(
         manager.disable()?;
     }
     Ok(())
+}
+
+/// Fire a one-shot background updater probe at launch and surface the
+/// result via an OS notification (consistent with how capture / AI
+/// transitions are signalled). The notification is best-effort —
+/// permission may be denied, and a transient network failure should not
+/// pop a scary banner. The download/install hand-off remains
+/// user-confirmed via the manual `commands::check_for_updates` trigger.
+#[cfg(target_os = "macos")]
+fn spawn_startup_update_probe(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(updater) => updater,
+            Err(err) => {
+                tracing::warn!(error = %err, "startup_update_probe_unavailable");
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Nagori update available")
+                    .body(format!(
+                        "Version {} is ready. Open Settings → Advanced → Updates to learn more.",
+                        update.version
+                    ))
+                    .show();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "startup_update_probe_failed");
+            }
+        }
+    });
 }
 
 /// Entry point for the `nagori-image://` async URI scheme.

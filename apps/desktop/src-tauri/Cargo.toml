@@ -38,6 +38,7 @@ tracing = { workspace = true }
 nagori-platform-macos = { path = "../../../crates/nagori-platform-macos" }
 tauri-plugin-autostart = { workspace = true }
 tauri-plugin-global-shortcut = { workspace = true }
+tauri-plugin-updater = { workspace = true }
 
 [lints]
 workspace = true

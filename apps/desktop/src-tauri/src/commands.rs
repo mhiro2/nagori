@@ -566,3 +566,53 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
     Ok(EntryDto::from_entry(entry, include_text))
 }
+
+/// Manual "Check for updates now" probe surfaced in Settings → Advanced.
+///
+/// Returns the discovered release version when an update is available,
+/// `None` when the bundled build is already current, and a friendly
+/// error otherwise (network down, signature mismatch, malformed
+/// updater JSON). MVP behaviour is read-only — we expose the
+/// *availability* and the frontend renders the GitHub release link;
+/// `download_and_install` is intentionally not wired up yet, so we
+/// never silently install.
+#[tauri::command]
+#[cfg(target_os = "macos")]
+pub async fn check_for_updates(app: AppHandle) -> CommandResult<Option<UpdateInfoDto>> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app
+        .updater()
+        .map_err(|err| CommandError::internal(format!("updater unavailable: {err}")))?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateInfoDto {
+            version: update.version.clone(),
+            current_version: update.current_version.clone(),
+            release_notes: update.body,
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(CommandError::internal(format!(
+            "update check failed: {err}"
+        ))),
+    }
+}
+
+/// Non-macOS stub so the frontend can call the command unconditionally.
+/// We only ship the updater plugin on macOS for MVP, so other platforms
+/// surface a recoverable "unsupported" error instead of crashing the
+/// command pipeline.
+#[tauri::command]
+#[cfg(not(target_os = "macos"))]
+pub async fn check_for_updates(_app: AppHandle) -> CommandResult<Option<UpdateInfoDto>> {
+    Err(CommandError::unsupported(
+        "auto-update is only available on macOS",
+    ))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfoDto {
+    pub version: String,
+    pub current_version: String,
+    pub release_notes: Option<String>,
+}
