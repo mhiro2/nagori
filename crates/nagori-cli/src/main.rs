@@ -897,6 +897,14 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
         }
         OutputFormat::Text => {
             println!("version\t{}", report.version);
+            let latest = report.latest_version.as_deref().unwrap_or("(unknown)");
+            println!("version_latest\t{latest}");
+            let channel = if report.update_channel.is_empty() {
+                "stable"
+            } else {
+                report.update_channel.as_str()
+            };
+            println!("update_channel\t{channel}");
             println!("socket\t{}", shorten_home(Path::new(&report.socket_path)));
             if !report.db_path.is_empty() {
                 println!("db\t{}", shorten_home(Path::new(&report.db_path)));
@@ -943,6 +951,8 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
         nagori_core::settings::AiProviderSetting::Remote { name } => format!("remote:{name}"),
     };
     println!("version\t{}", env!("CARGO_PKG_VERSION"));
+    println!("version_latest\t(unknown)");
+    println!("update_channel\t{}", settings.update_channel.as_str());
     println!("db\t{}", shorten_home(db_path));
     println!("capture_enabled\t{}", settings.capture_enabled);
     println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);

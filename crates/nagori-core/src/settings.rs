@@ -94,6 +94,16 @@ pub struct AppSettings {
     /// previous behaviour of capturing the existing clipboard contents.
     #[serde(default = "default_capture_initial_clipboard_on_launch")]
     pub capture_initial_clipboard_on_launch: bool,
+    /// Whether the desktop shell probes the updater endpoint at startup to
+    /// surface a "new version available" notification. Disabling this leaves
+    /// the manual "Check for updates now" button as the only path.
+    #[serde(default = "default_auto_update_check")]
+    pub auto_update_check: bool,
+    /// Release channel the updater JSON is fetched from. Only `stable` is
+    /// currently shipped; the field is persisted so future channels can be
+    /// added without breaking the on-disk shape.
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +137,30 @@ pub enum Appearance {
     Dark,
     #[default]
     System,
+}
+
+/// Updater release channel.
+///
+/// Persisted in `AppSettings.update_channel` so the frontend can show the
+/// active channel and so tests pin the wire format — the only variant
+/// today is `Stable`, but keeping this an enum lets future `Beta` /
+/// `Nightly` rollouts land without a settings migration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+}
+
+impl UpdateChannel {
+    /// Stable wire-format token, used by the CLI doctor output and the
+    /// frontend label rendering. Matches the serde rename above.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+        }
+    }
 }
 
 /// Identifier for a user-rebindable in-palette action.
@@ -382,6 +416,8 @@ impl Default for AppSettings {
             show_in_menu_bar: default_show_in_menu_bar(),
             clear_on_quit: false,
             capture_initial_clipboard_on_launch: default_capture_initial_clipboard_on_launch(),
+            auto_update_check: default_auto_update_check(),
+            update_channel: UpdateChannel::default(),
         }
     }
 }
@@ -399,6 +435,10 @@ pub const fn default_show_in_menu_bar() -> bool {
 }
 
 pub const fn default_capture_initial_clipboard_on_launch() -> bool {
+    true
+}
+
+pub const fn default_auto_update_check() -> bool {
     true
 }
 

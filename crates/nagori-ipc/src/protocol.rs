@@ -155,6 +155,15 @@ pub struct DoctorReport {
     /// having to grep tracing logs.
     #[serde(default)]
     pub maintenance: MaintenanceHealthReport,
+    /// Active update channel (e.g. `"stable"`).
+    #[serde(default)]
+    pub update_channel: String,
+    /// Latest released version discovered by the daemon, if a probe
+    /// against the GitHub Releases API succeeded. `None` when the probe
+    /// is disabled (offline mode), times out, or fails — `nagori doctor`
+    /// surfaces that as "(unknown)".
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

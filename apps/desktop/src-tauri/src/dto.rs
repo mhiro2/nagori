@@ -4,7 +4,7 @@ use nagori_core::settings::AiProviderSetting;
 use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
     Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode,
-    SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity,
+    SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity, UpdateChannel,
     is_text_safe_for_default_output, safe_preview_for_dto,
 };
 use nagori_platform::{PermissionKind, PermissionState, PermissionStatus};
@@ -582,6 +582,34 @@ impl Default for AppearanceDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannelDto {
+    Stable,
+}
+
+impl From<UpdateChannel> for UpdateChannelDto {
+    fn from(value: UpdateChannel) -> Self {
+        match value {
+            UpdateChannel::Stable => Self::Stable,
+        }
+    }
+}
+
+impl From<UpdateChannelDto> for UpdateChannel {
+    fn from(value: UpdateChannelDto) -> Self {
+        match value {
+            UpdateChannelDto::Stable => Self::Stable,
+        }
+    }
+}
+
+impl Default for UpdateChannelDto {
+    fn default() -> Self {
+        UpdateChannel::default().into()
+    }
+}
+
 impl From<SecretHandlingDto> for SecretHandling {
     fn from(value: SecretHandlingDto) -> Self {
         match value {
@@ -636,6 +664,10 @@ pub struct AppSettingsDto {
     pub clear_on_quit: bool,
     #[serde(default = "nagori_core::settings::default_capture_initial_clipboard_on_launch")]
     pub capture_initial_clipboard_on_launch: bool,
+    #[serde(default = "nagori_core::settings::default_auto_update_check")]
+    pub auto_update_check: bool,
+    #[serde(default)]
+    pub update_channel: UpdateChannelDto,
 }
 
 impl Default for SecretHandlingDto {
@@ -676,6 +708,8 @@ impl From<AppSettings> for AppSettingsDto {
             show_in_menu_bar: value.show_in_menu_bar,
             clear_on_quit: value.clear_on_quit,
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
+            auto_update_check: value.auto_update_check,
+            update_channel: value.update_channel.into(),
         }
     }
 }
@@ -712,6 +746,8 @@ impl From<AppSettingsDto> for AppSettings {
             show_in_menu_bar: value.show_in_menu_bar,
             clear_on_quit: value.clear_on_quit,
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
+            auto_update_check: value.auto_update_check,
+            update_channel: value.update_channel.into(),
         }
     }
 }
@@ -721,6 +757,7 @@ mod tests {
     use nagori_core::{
         AppSettings, Appearance, ClipboardData, ClipboardRepresentation, ClipboardSnapshot,
         ContentKind, EntryFactory, PasteFormat, RecentOrder, SecretHandling, Sensitivity,
+        UpdateChannel,
     };
     use serde_json::json;
     use time::OffsetDateTime;
@@ -879,6 +916,8 @@ mod tests {
             show_in_menu_bar: false,
             clear_on_quit: true,
             capture_initial_clipboard_on_launch: false,
+            auto_update_check: false,
+            update_channel: UpdateChannel::Stable,
         };
 
         let dto: AppSettingsDto = original.clone().into();
@@ -927,6 +966,8 @@ mod tests {
         assert!(!restored.show_in_menu_bar);
         assert!(restored.clear_on_quit);
         assert!(!restored.capture_initial_clipboard_on_launch);
+        assert!(!restored.auto_update_check);
+        assert!(matches!(restored.update_channel, UpdateChannel::Stable));
     }
 
     #[test]

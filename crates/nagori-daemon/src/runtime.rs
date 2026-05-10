@@ -297,6 +297,21 @@ impl NagoriRuntime {
             AiProviderSetting::Local => "local".to_owned(),
             AiProviderSetting::Remote { name } => format!("remote:{name}"),
         };
+        // Probe the GitHub Releases API for the latest tag so `nagori
+        // doctor` can show whether an update is available. Best-effort:
+        // the probe is gated on macOS (the only target where the
+        // updater plugin actually runs in MVP) and skipped when the
+        // user has either disabled background update checks or opted
+        // into `local_only_mode`. The call is capped by a short
+        // timeout, and any error (offline, rate-limited, malformed
+        // payload) collapses to `None` so doctor still completes.
+        let latest_version =
+            if cfg!(target_os = "macos") && settings.auto_update_check && !settings.local_only_mode
+            {
+                fetch_latest_release_version().await
+            } else {
+                None
+            };
         Ok(DoctorReport {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             db_path: String::new(),
@@ -308,6 +323,8 @@ impl NagoriRuntime {
             ai_provider: provider_label,
             permissions,
             maintenance: self.maintenance_health.report(),
+            update_channel: settings.update_channel.as_str().to_owned(),
+            latest_version,
         })
     }
 
@@ -693,6 +710,37 @@ fn ensure_pasted(result: nagori_platform::PasteResult) -> Result<()> {
             "auto-paste did not run; OS paste controller reported pasted=false".to_owned()
         })))
     }
+}
+
+/// Best-effort lookup of the latest released `nagori` tag on GitHub.
+///
+/// The doctor handler calls this to surface "you're behind" without
+/// shelling out to the desktop updater. Strict timeout, no retries:
+/// if GitHub is unreachable, rate-limiting us, or returns an
+/// unexpected payload, we return `None` and doctor renders
+/// "(unknown)" rather than failing the whole report.
+async fn fetch_latest_release_version() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Release {
+        tag_name: String,
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("nagori/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let release: Release = client
+        .get("https://api.github.com/repos/mhiro2/nagori/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(release.tag_name.trim_start_matches('v').to_owned())
 }
 
 #[cfg(test)]
