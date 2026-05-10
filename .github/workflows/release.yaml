@@ -57,6 +57,29 @@ jobs:
           CARGO_VERSION="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name=="nagori-desktop") | .version')"
           test "${TAG_VERSION}" = "${CARGO_VERSION}"
+      - name: Verify updater pubkey is configured
+        # `tauri-plugin-updater` rejects every payload when the bundled
+        # `pubkey` is empty, which would silently break in-app upgrades.
+        # Fail the release tag instead of shipping an unverifiable bundle.
+        # Strip whitespace and refuse common placeholders before
+        # checking length — a config like `pubkey: " "` or
+        # `pubkey: "TODO"` would otherwise sneak past a bare `-z` test.
+        run: |
+          RAW="$(jq -r '.plugins.updater.pubkey // ""' apps/desktop/src-tauri/tauri.conf.json)"
+          PUBKEY="$(printf '%s' "${RAW}" | tr -d '[:space:]')"
+          case "${PUBKEY}" in
+            ""|TODO|FIXME|REPLACE_ME|REPLACE-ME)
+              echo "::error::plugins.updater.pubkey is empty or a placeholder (\"${PUBKEY}\") in tauri.conf.json — generate a key with 'pnpm exec tauri signer generate' and commit the public key. See docs/release.md."
+              exit 1
+              ;;
+          esac
+          # Tauri's signer prints minisign-style base64 pubkeys (~84
+          # chars). Anything shorter than 32 chars is almost certainly
+          # truncated or a stub.
+          if [ "${#PUBKEY}" -lt 32 ]; then
+            echo "::error::plugins.updater.pubkey looks too short (${#PUBKEY} chars after trimming) — verify you copied the full base64 string from 'pnpm exec tauri signer generate'."
+            exit 1
+          fi
       - name: Install pnpm
         uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6.0.4
         with:
