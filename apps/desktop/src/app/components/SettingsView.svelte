@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { describeError } from "../lib/errors";
-  import { getSettings, updateSettings } from "../lib/commands";
+  import { checkForUpdates, getSettings, updateSettings } from "../lib/commands";
   import { SUPPORTED_LOCALES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
   import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
@@ -113,6 +113,45 @@
   // hotkey at startup or after a save — surfaces the conflict to the user
   // rather than letting the feature silently break.
   let hotkeyError: string | undefined = $state(undefined);
+
+  let updateChecking = $state(false);
+  let updateStatus: string | undefined = $state(undefined);
+  let updateStatusKind: "info" | "error" = $state("info");
+  // Populated when `runUpdateCheck` finds a newer release. The MVP
+  // surface is read-only — instead of wiring `download_and_install`
+  // we send the user to the published release so they can download
+  // the bundle themselves and verify Apple's signature dialog.
+  let updateReleaseUrl: string | undefined = $state(undefined);
+
+  // The updater plugin is registered only on macOS (see lib.rs); on
+  // other platforms the command returns `unsupported`, so the whole
+  // fieldset is hidden rather than rendering controls that would no-op
+  // or throw.
+  const isMacOs =
+    typeof navigator !== "undefined" && /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
+
+  const runUpdateCheck = async (): Promise<void> => {
+    if (updateChecking) return;
+    updateChecking = true;
+    updateStatus = undefined;
+    updateReleaseUrl = undefined;
+    try {
+      const info = await checkForUpdates();
+      updateStatusKind = "info";
+      if (info) {
+        updateStatus = t.settings.updates.available.replace("{version}", info.version);
+        // Always-current redirect — never needs to be edited per release.
+        updateReleaseUrl = `https://github.com/mhiro2/nagori/releases/tag/v${info.version}`;
+      } else {
+        updateStatus = t.settings.updates.upToDate;
+      }
+    } catch (err) {
+      updateStatusKind = "error";
+      updateStatus = describeError(err);
+    } finally {
+      updateChecking = false;
+    }
+  };
 
   const t = $derived.by(() => {
     void i18nState.locale;
@@ -544,6 +583,42 @@
           />
         </label>
       </fieldset>
+      {#if isMacOs}
+        <fieldset>
+          <legend>{t.settings.updates.legend}</legend>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.autoUpdateCheck}
+              disabled={settings.localOnlyMode}
+            />
+            {t.settings.updates.autoCheck}
+          </label>
+          <p class="help">
+            {settings.localOnlyMode
+              ? t.settings.updates.autoCheckLocalOnly
+              : t.settings.updates.autoCheckHelp}
+          </p>
+          <p class="help">
+            {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
+          </p>
+          <div class="actions">
+            <button type="button" disabled={updateChecking} onclick={runUpdateCheck}>
+              {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
+            </button>
+          </div>
+          {#if updateStatus}
+            <p class="status" class:error={updateStatusKind === "error"}>
+              {updateStatus}
+              {#if updateReleaseUrl}
+                <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
+                  {t.settings.updates.viewRelease}
+                </a>
+              {/if}
+            </p>
+          {/if}
+        </fieldset>
+      {/if}
     {/if}
 
       <div class="actions">

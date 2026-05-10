@@ -218,6 +218,20 @@ export const ko: Messages = {
         'clear-history': '고정되지 않은 기록 삭제',
       },
     },
+    updates: {
+      legend: '업데이트',
+      autoCheck: '자동으로 업데이트 확인',
+      autoCheckHelp:
+        '릴리스 피드를 주기적으로 확인하고 새 빌드가 있을 때 배너를 표시합니다. 확인 없이 설치되지는 않습니다.',
+      autoCheckLocalOnly:
+        '로컬 전용 모드가 켜져 있는 동안에는 비활성화됩니다. 개인정보 보호 → 로컬 전용 모드를 끄면 업데이트 확인이 허용됩니다.',
+      channel: '채널',
+      checkNow: '지금 업데이트 확인',
+      checking: '확인 중…',
+      upToDate: '최신 릴리스를 사용 중입니다.',
+      available: '업데이트 사용 가능: {version}',
+      viewRelease: '릴리스 보기',
+    },
   },
   keybindings: {
     selectNext: '다음 결과',

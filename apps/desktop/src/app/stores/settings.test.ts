@@ -51,6 +51,8 @@ const baseSettings = (): AppSettings => ({
   showInMenuBar: true,
   clearOnQuit: false,
   captureInitialClipboardOnLaunch: true,
+  autoUpdateCheck: true,
+  updateChannel: 'stable',
 });
 
 const accessibilityPerm = (state: PermissionStatus['state']): PermissionStatus => ({

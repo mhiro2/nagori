@@ -200,6 +200,18 @@ export type Messages = {
         'clear-history': string;
       };
     };
+    updates: {
+      legend: string;
+      autoCheck: string;
+      autoCheckHelp: string;
+      autoCheckLocalOnly: string;
+      channel: string;
+      checkNow: string;
+      checking: string;
+      upToDate: string;
+      available: string;
+      viewRelease: string;
+    };
   };
   keybindings: {
     selectNext: string;
@@ -464,6 +476,20 @@ export const en: Messages = {
         'repaste-last': 'Repaste most recent entry',
         'clear-history': 'Clear non-pinned history',
       },
+    },
+    updates: {
+      legend: 'Updates',
+      autoCheck: 'Check for updates automatically',
+      autoCheckHelp:
+        'Probe the release feed periodically and surface a banner when a new build is available. The download is never installed without your confirmation.',
+      autoCheckLocalOnly:
+        'Disabled while Local-only mode is on. Turn that off (Privacy → Local-only mode) to allow update checks.',
+      channel: 'Channel',
+      checkNow: 'Check for updates now',
+      checking: 'Checking…',
+      upToDate: 'You are running the latest release.',
+      available: 'Update available: {version}',
+      viewRelease: 'View release',
     },
   },
   keybindings: {

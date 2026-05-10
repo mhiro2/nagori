@@ -214,6 +214,19 @@ export const zhHans: Messages = {
         'clear-history': '清除未固定历史',
       },
     },
+    updates: {
+      legend: '更新',
+      autoCheck: '自动检查更新',
+      autoCheckHelp: '定期检查发布源，发现新版本时提示。未经确认不会自动安装。',
+      autoCheckLocalOnly:
+        '本地专用模式开启时此项被禁用。前往 隐私 → 本地专用模式 关闭后才能检查更新。',
+      channel: '通道',
+      checkNow: '立即检查更新',
+      checking: '检查中…',
+      upToDate: '已是最新版本。',
+      available: '有可用更新：{version}',
+      viewRelease: '查看版本',
+    },
   },
   keybindings: {
     selectNext: '下一个结果',

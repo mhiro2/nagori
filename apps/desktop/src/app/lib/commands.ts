@@ -12,6 +12,7 @@ import type {
   PermissionStatus,
   SearchRequest,
   SearchResponse,
+  UpdateInfo,
 } from './types';
 
 export const searchClipboard = (request: SearchRequest): Promise<SearchResponse> =>
@@ -78,3 +79,5 @@ export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
 export const saveAiResult = (text: string): Promise<EntryDto> => invoke('save_ai_result', { text });
 
 export const openAccessibilitySettings = (): Promise<void> => invoke('open_accessibility_settings');
+
+export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');

@@ -57,6 +57,8 @@ const baseSettings = (): AppSettings => ({
   showInMenuBar: true,
   clearOnQuit: false,
   captureInitialClipboardOnLaunch: true,
+  autoUpdateCheck: true,
+  updateChannel: 'stable',
 });
 
 beforeEach(() => {

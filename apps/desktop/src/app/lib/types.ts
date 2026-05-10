@@ -128,6 +128,7 @@ export type SecretHandling = 'block' | 'store_redacted' | 'store_full';
 export type PasteFormat = 'preserve' | 'plain_text';
 export type RecentOrder = 'by_recency' | 'by_use_count' | 'pinned_first_then_recency';
 export type Appearance = 'light' | 'dark' | 'system';
+export type UpdateChannel = 'stable';
 
 export type PaletteHotkeyAction =
   | 'pin'
@@ -169,6 +170,14 @@ export type AppSettings = {
   showInMenuBar: boolean;
   clearOnQuit: boolean;
   captureInitialClipboardOnLaunch: boolean;
+  autoUpdateCheck: boolean;
+  updateChannel: UpdateChannel;
+};
+
+export type UpdateInfo = {
+  version: string;
+  currentVersion: string;
+  releaseNotes?: string | null;
 };
 
 export type PermissionKind =

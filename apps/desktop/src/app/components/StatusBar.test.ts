@@ -45,6 +45,8 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   showInMenuBar: true,
   clearOnQuit: false,
   captureInitialClipboardOnLaunch: true,
+  autoUpdateCheck: true,
+  updateChannel: 'stable',
   ...overrides,
 });
 

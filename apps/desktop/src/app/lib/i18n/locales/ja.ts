@@ -220,6 +220,20 @@ export const ja: Messages = {
         'clear-history': 'ピン留め以外の履歴を削除',
       },
     },
+    updates: {
+      legend: 'アップデート',
+      autoCheck: '自動でアップデートを確認',
+      autoCheckHelp:
+        'リリースフィードを定期的に確認し、新しいビルドが見つかったら通知します。確認なしにインストールはされません。',
+      autoCheckLocalOnly:
+        'ローカル専用モードが有効な間は無効です。プライバシー → ローカル専用モードをオフにすると更新チェックが許可されます。',
+      channel: 'チャネル',
+      checkNow: '今すぐ確認',
+      checking: '確認中…',
+      upToDate: '最新バージョンを使用しています。',
+      available: '新しいバージョンがあります: {version}',
+      viewRelease: 'リリースを表示',
+    },
   },
   keybindings: {
     selectNext: '次の候補へ',
