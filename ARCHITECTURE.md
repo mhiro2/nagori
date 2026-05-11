@@ -92,10 +92,10 @@ domain code. This leads to four design rules:
 | `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker, semantic search hooks |
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
-| `nagori-platform-windows` | Windows adapter — stub today (every method returns `Unsupported`); shape preserved for future port |
+| `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + `CF_HDROP` file lists), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
 | `nagori-platform-linux` | Linux adapter — stub today (every method returns `Unsupported`); shape preserved for future port |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
-| `nagori-ipc` | Newline-delimited JSON over Unix domain sockets, auth-token handshake, request/response DTOs |
+| `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
 | `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime` |
@@ -137,7 +137,7 @@ apps/desktop (Tauri)
                            · maintenance
 
 nagori-cli (`--ipc` / `--auto-ipc`)
-  └─ IpcClient ──► Unix socket ──► IpcRequest / IpcEnvelope
+  └─ IpcClient ──► Unix socket / named pipe ──► IpcRequest / IpcEnvelope
                                        │
 nagori-cli `daemon run`                ▼
   └─ run_daemon ──► accept_loop ──► NagoriRuntime.handle_ipc
@@ -152,11 +152,12 @@ Two execution modes:
   start the capture loop and settings fan-out.
 - **Out-of-process (daemon + CLI)** — `nagori daemon run` calls
   `nagori-daemon::serve::run_daemon`, which spawns the same kind of
-  background tasks plus the Unix-socket accept loop, then dispatches
-  every request through `NagoriRuntime::handle_ipc`. CLI calls with
-  `--ipc <socket>` / `--auto-ipc` route through that socket; `--db
-  <path>` is a read/write fallback that bypasses the daemon and is
-  documented as **repair / offline mode** in
+  background tasks plus an IPC accept loop (Unix-domain socket on
+  macOS / Linux, named pipe on Windows), then dispatches every request
+  through `NagoriRuntime::handle_ipc`. CLI calls with
+  `--ipc <endpoint>` / `--auto-ipc` route through that transport;
+  `--db <path>` is a read/write fallback that bypasses the daemon and
+  is documented as **repair / offline mode** in
   [`docs/cli.md`](./docs/cli.md).
 
 The two surfaces speak different DTOs on purpose: the daemon serves
@@ -538,11 +539,22 @@ Implementations:
   Accessibility, frontmost-app metadata via the running-application
   list, and `open(1)` shelling for the `x-apple.systempreferences:`
   deep link.
-- **Windows** (`nagori-platform-windows`) and **Linux**
-  (`nagori-platform-linux`) — present as crates but every trait method
-  currently returns the `Unsupported` error. Nagori is macOS-only at
-  this time; these crates exist so cross-platform porting work can land
-  incrementally without disturbing the trait surface.
+- **Windows** (`nagori-platform-windows`) — daemon adapters are wired
+  on top of `windows-sys` 0.59. The capture loop reads
+  `GetClipboardSequenceNumber` plus arboard text (with a `CF_HDROP`
+  file-list pass for file copies); auto-paste synthesises Ctrl+V via
+  `SendInput`; frontmost-app metadata is collected through
+  `GetForegroundWindow` + `QueryFullProcessImageNameW`. Global hotkey
+  registration is intentionally delegated to the Tauri shell's
+  `global-shortcut` plugin (same MVP arrangement as macOS), so the
+  daemon-side `HotkeyManager` reports `Unsupported`. Windows has no
+  TCC-style user permissions for clipboard / synthetic input, so the
+  `PermissionChecker` reports `Granted` for those kinds and
+  `Unsupported` for `InputMonitoring`, `Notifications`, and
+  `AutoLaunch` (managed elsewhere).
+- **Linux** (`nagori-platform-linux`) — present as a crate but every
+  trait method currently returns the `Unsupported` error. Linux porting
+  can land incrementally without disturbing the trait surface.
 
 **Permission model.** The platform layer exposes:
 
@@ -565,12 +577,41 @@ permission so the user can fix it.
 
 ## 11. IPC boundary
 
-**Transport.** Newline-delimited JSON over Unix domain sockets. The
-client writes one `IpcEnvelope { token, request: IpcRequest }` line
-and reads one `IpcResponse` line. Default socket lives at
-`~/Library/Application Support/nagori/nagori.sock`; an auth-token file
-sits next to it as `nagori.token` with `0600` permissions, and the
-server rejects envelopes whose token does not match.
+**Transport.** Newline-delimited JSON over a per-platform stream
+transport: Unix-domain sockets on macOS / Linux, Win32 named pipes on
+Windows. The client writes one `IpcEnvelope { token, request:
+IpcRequest }` line and reads one `IpcResponse` line. Defaults:
+
+- **Unix.** Socket at
+  `~/Library/Application Support/nagori/nagori.sock` (macOS) or the
+  equivalent XDG location on Linux. The bind sets a tight umask so the
+  socket inode is born `0o600`.
+- **Windows.** Named pipe `\\.\pipe\nagori`. The first instance is
+  bound synchronously during daemon startup with
+  `ServerOptions::first_pipe_instance(true)` so a second daemon trying
+  to publish the same name fails the launch (rather than only logging a
+  warn line from a background task). The accept loop then chains fresh
+  `NamedPipeServer` instances after each connect, mirroring the Unix
+  `accept` semantics. The pipe is created with the default named-pipe
+  security descriptor inherited from the daemon process — there is no
+  custom DACL yet, so authentication relies on the sibling token file
+  rather than on ACL filtering at the pipe level.
+
+An auth-token file sits in the same directory as the IPC endpoint:
+`nagori.token` next to the socket on Unix (`0600` mode set explicitly
+during write), and under `dirs::data_local_dir()/nagori/` on Windows
+(default NTFS permissions inherited from `fs::write`; no custom DACL).
+When the user passes `--ipc <custom>` to either the daemon or the CLI,
+both sides derive the token filename from the endpoint. On Unix the
+derivation reuses the socket stem (e.g. `dev.token` for `…/dev.sock`).
+On Windows the default pipe `\\.\pipe\nagori` keeps the historic
+`nagori.token` filename; every other pipe is written as
+`<sanitised>-<8 hex>.token` where the suffix is the first eight hex
+characters of `SHA-256(pipe name)` — without it, two pipe names whose
+sanitised tail collides (e.g. `\\.\pipe\a:b` and `\\.\pipe\a?b` both
+sanitise to `a_b`) would race for the same token file. The server
+rejects envelopes whose token does not match via constant-time
+comparison.
 
 **Request / response types** (`nagori-ipc::protocol`):
 
@@ -960,8 +1001,16 @@ under 80 ms for 100k text entries on a developer machine.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.
-- **IPC** — Unix-domain socket plus auth token file (`0600`); no TCP
-  listener.
+- **IPC** — Unix-domain socket (macOS / Linux, `0600` mode) or Win32
+  named pipe (Windows, default named-pipe security descriptor, no
+  custom DACL — `reject_remote_clients(true)` blocks UNC peers but a
+  local user can still open the pipe). Authentication therefore relies
+  on a per-launch token file (`0600` on Unix; default NTFS permissions
+  inherited from `%LOCALAPPDATA%\nagori\` on Windows). Tight read
+  timeouts on the unauthenticated handshake (`FIRST_READ_TIMEOUT` 1 s,
+  `READ_TIMEOUT` 3 s) cap slow-loris pressure on the 32 connection
+  permits; no TCP listener. Token verification uses constant-time
+  comparison.
 - **CLI** — `--include-sensitive` is required to print secret bodies;
   default `--json` output redacts them. Mutating commands have stable
   exit codes so agents fail loudly.

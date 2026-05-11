@@ -1,17 +1,23 @@
 # `nagori` CLI
 
 The CLI is a single binary, `nagori`, that can either talk directly to the
-SQLite database or to a running daemon over a Unix socket.
+SQLite database or to a running daemon over its IPC endpoint (Unix-domain
+socket on macOS / Linux, Win32 named pipe on Windows).
 
 ## Modes
 
-| Mode        | When to use                                                  | Flag             |
-|-------------|--------------------------------------------------------------|------------------|
-| Direct DB   | Default. Opens `~/Library/Application Support/nagori/nagori.sqlite` |  *(none)*        |
-| Auto IPC    | Try the daemon socket; fall back to direct DB if unreachable | `--auto-ipc`     |
-| Forced IPC  | Always go through the daemon; error if the socket is missing | `--ipc <path>`   |
+| Mode        | When to use                                                  | Flag                |
+|-------------|--------------------------------------------------------------|---------------------|
+| Direct DB   | Default. Opens the local SQLite history file                 |  *(none)*           |
+| Auto IPC    | Try the daemon endpoint; fall back to direct DB if unreachable | `--auto-ipc`      |
+| Forced IPC  | Always go through the daemon; error if the endpoint is missing | `--ipc <endpoint>` |
 
-The default socket lives at `~/Library/Application Support/nagori/nagori.sock`.
+Defaults:
+
+* **macOS** — DB at `~/Library/Application Support/nagori/nagori.sqlite`,
+  socket at `~/Library/Application Support/nagori/nagori.sock`.
+* **Windows** — DB under `%LOCALAPPDATA%\nagori\nagori.sqlite`, named pipe
+  at `\\.\pipe\nagori`. Pass `--ipc \\.\pipe\<name>` to override.
 
 ## Output formats
 
@@ -57,7 +63,8 @@ Mutate metadata. `delete` is soft (sets `deleted_at`).
 ### `nagori copy <id>` / `nagori paste <id>`
 
 `copy` writes to the system clipboard. `paste` additionally synthesises
-Cmd+V into the frontmost app (macOS only).
+the platform paste shortcut into the frontmost app — Cmd+V on macOS
+(via `CGEventPost`) or Ctrl+V on Windows (via `SendInput`).
 
 ### `nagori clear [--older-than-days N]`
 
@@ -73,21 +80,24 @@ action is `redact-secrets`; `Private` entries are redacted before being sent.
 
 ### `nagori doctor`
 
-Print database/socket paths, capture and AI flags, and macOS permission
-status.
+Print database / IPC paths, capture and AI flags, and per-platform
+permission status (TCC kinds on macOS; Clipboard / Accessibility =
+`Granted` and the rest = `Unsupported` on Windows).
 
 ### `nagori daemon run [--capture-interval-ms N] [--maintenance-interval-min N]`
 
 Boot the daemon. Holds the SQLite handle, runs the capture loop, and serves
-the Unix socket.
+the IPC endpoint (Unix socket on macOS / Linux, named pipe on Windows).
+Available on macOS and Windows; other platforms exit with
+"daemon run is only available on macOS and Windows in this build".
 
 ### `nagori daemon stop`
 
-Send a shutdown request via IPC. Requires `--ipc <socket>`.
+Send a shutdown request via IPC. Requires `--ipc <endpoint>`.
 
 ### `nagori daemon status`
 
-Print socket and DB metadata without contacting a daemon.
+Print IPC endpoint and DB metadata without contacting a daemon.
 
 ## Exit codes
 
