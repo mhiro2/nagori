@@ -12,7 +12,7 @@ use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
     SettingsRepository, is_text_safe_for_default_output, safe_preview_for_dto,
 };
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_daemon::run_daemon;
 use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path};
 use nagori_ipc::{
@@ -25,8 +25,12 @@ use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_platform::PermissionChecker;
+#[cfg(target_os = "linux")]
+use nagori_platform_linux::{
+    LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxWindowBehavior,
+};
 #[cfg(target_os = "macos")]
 use nagori_platform_macos::{
     MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
@@ -500,10 +504,25 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         run_daemon(runtime, clipboard, config, Some(window)).await?;
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let clipboard = Arc::new(LinuxClipboard::new()?);
+        let window: Arc<dyn nagori_platform::WindowBehavior> = Arc::new(LinuxWindowBehavior::new());
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(LinuxPermissionChecker);
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(clipboard.clone())
+            .paste(Arc::new(LinuxPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .socket_path(config.socket_path.clone())
+            .build();
+        run_daemon(runtime, clipboard, config, Some(window)).await?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (store, config);
-        anyhow::bail!("daemon run is only available on macOS and Windows in this build")
+        anyhow::bail!("daemon run is only available on macOS, Windows, and Linux in this build")
     }
 }
 
@@ -668,9 +687,9 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
 }
 
 // On platforms without a native adapter the body never returns Err, but
-// the macOS / Windows paths need `?`.
+// the macOS / Windows / Linux paths need `?`.
 #[cfg_attr(
-    not(any(target_os = "macos", target_os = "windows")),
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
     allow(clippy::unnecessary_wraps)
 )]
 fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
@@ -696,7 +715,18 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
             .permissions(permissions)
             .build())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let clipboard = Arc::new(LinuxClipboard::new()?);
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(LinuxPermissionChecker);
+        Ok(NagoriRuntime::builder(store)
+            .clipboard(clipboard)
+            .paste(Arc::new(LinuxPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .build())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Ok(NagoriRuntime::builder(store)
             .ai(Arc::new(LocalAiProvider::default()))
@@ -1028,6 +1058,22 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let checker = WindowsPermissionChecker;
+        if let Ok(statuses) = checker.check().await {
+            for status in statuses {
+                let suffix = status
+                    .message
+                    .as_deref()
+                    .map_or_else(String::new, |msg| format!("\t{msg}"));
+                println!(
+                    "permission\t{:?}\t{:?}{}",
+                    status.kind, status.state, suffix
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let checker = LinuxPermissionChecker;
         if let Ok(statuses) = checker.check().await {
             for status in statuses {
                 let suffix = status

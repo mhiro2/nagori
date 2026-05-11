@@ -93,7 +93,7 @@ domain code. This leads to four design rules:
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + `CF_HDROP` file lists), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Linux adapter — stub today (every method returns `Unsupported`); shape preserved for future port |
+| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback), `wtype` Ctrl+V auto-paste, frontmost-app and hotkey registration unsupported in the current build (the Tauri desktop shell does not register the global-shortcut plugin on Linux yet) |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
@@ -552,9 +552,51 @@ Implementations:
   `PermissionChecker` reports `Granted` for those kinds and
   `Unsupported` for `InputMonitoring`, `Notifications`, and
   `AutoLaunch` (managed elsewhere).
-- **Linux** (`nagori-platform-linux`) — present as a crate but every
-  trait method currently returns the `Unsupported` error. Linux porting
-  can land incrementally without disturbing the trait surface.
+- **Linux** (`nagori-platform-linux`) — Wayland-only, wired for the
+  daemon (`nagori daemon run` and `nagori-cli` in-process mode). The
+  clipboard adapter talks directly to `wl-clipboard-rs` over the
+  `wlr_data_control` / `ext_data_control` protocols; arboard is
+  deliberately not used because its Linux backend silently falls back
+  to X11 when the Wayland feature is missing or initialisation fails.
+  Construction probes the data-control globals eagerly via
+  `paste::get_mime_types` and refuses to start if neither protocol is
+  exposed or no Wayland connection is reachable; `WAYLAND_DISPLAY` is
+  the supported signalling channel because `wayland-client` consumes
+  the inherited `WAYLAND_SOCKET` fd on first connect (the eager probe
+  would burn it before the capture loop could reuse it). There is no
+  X11 code path inside this crate. Because Wayland exposes no
+  equivalent of `GetClipboardSequenceNumber`, `current_sequence()`
+  streams the text body through SHA-256 every poll; the source app
+  participates in each transfer per the data-control protocol, so the
+  capture interval (`AppSettings::poll_interval_ms`) directly trades
+  off responsiveness against source-app wakeups. Auto-paste shells out
+  to `wtype -M ctrl v -m ctrl`, which drives `zwp_virtual_keyboard_v1`;
+  if the binary is missing or the compositor refuses the protocol the
+  controller returns an error — the same shape as macOS when
+  Accessibility is revoked. The clipboard write in `paste_entry` runs
+  *before* the keystroke synthesis, so the entry is on the system
+  clipboard regardless of the paste result and the user can complete
+  the paste manually. `WindowBehavior::frontmost_app()` returns
+  `Ok(None)` because Wayland has no portable frontmost-app query (the
+  closest extensions — `zwlr_foreign_toplevel_management_v1`,
+  `ext_foreign_toplevel_list_v1` — are compositor-specific). Hotkey
+  registration on the daemon side is `Unsupported`. The Tauri desktop
+  shell does **not** wire the Linux adapter — it falls through the
+  non-macOS branch of `AppState::build`, which constructs a
+  `MemoryClipboard` + `NoopPasteController` runtime with no capture
+  loop, no auto-paste, and no IPC client; operators interact with the
+  daemon through `nagori daemon run` plus the CLI subcommands. Wiring
+  the desktop palette over IPC, registering `tauri-plugin-global-shortcut`,
+  and surfacing the tray on Linux are all follow-up tasks that mirror
+  the existing macOS path in §16.
+  `PermissionChecker`
+  reports `Granted` / `Denied` for `Clipboard` (probing the same
+  `wl-clipboard-rs` entry point the capture loop uses) and
+  `Accessibility` (probing `wtype --help` on PATH), and `Unsupported`
+  for `InputMonitoring`, `Notifications`, and `AutoLaunch`. GNOME
+  Wayland does not currently expose either data-control protocol; the
+  error message points users at Sway, KDE Plasma 5.27+, Hyprland, or
+  river.
 
 **Permission model.** The platform layer exposes:
 

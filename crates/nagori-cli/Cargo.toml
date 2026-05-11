@@ -33,6 +33,9 @@ nagori-platform-macos = { path = "../nagori-platform-macos" }
 [target.'cfg(target_os = "windows")'.dependencies]
 nagori-platform-windows = { path = "../nagori-platform-windows" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nagori-platform-linux = { path = "../nagori-platform-linux" }
+
 [dev-dependencies]
 assert_cmd = "2"
 insta = { version = "1", features = ["json"] }
