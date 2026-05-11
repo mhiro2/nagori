@@ -80,9 +80,9 @@ pub struct ListRecentRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListPinnedRequest {
     /// Whether to include the raw text body for `Private`/`Secret` entries.
-    /// Defaults to `false` so a daemon written against an older client that
-    /// sent the unit-variant `ListPinned` keeps the previous "preview only"
-    /// behaviour after upgrade.
+    /// Defaults to `false` so a client that omits the field still gets the
+    /// safe "preview only" behaviour — matching the default `ListRecent`
+    /// treatment of sensitive payloads.
     #[serde(default)]
     pub include_sensitive: bool,
 }

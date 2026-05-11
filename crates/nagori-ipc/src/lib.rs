@@ -6,8 +6,12 @@ pub mod token;
 pub use client::IpcClient;
 pub use protocol::*;
 pub use server::serve_unix;
+#[cfg(windows)]
+pub use server::{DEFAULT_PIPE_NAME, accept_loop_pipe_with_shutdown, bind_pipe, serve_pipe};
 #[cfg(unix)]
 pub use server::{accept_loop, accept_loop_with_shutdown, bind_unix};
-pub use token::{AuthToken, default_token_path, read_token_file, write_token_file};
+pub use token::{
+    AuthToken, default_token_path, read_token_file, token_path_for_endpoint, write_token_file,
+};
 
 pub use nagori_core::MAX_IPC_BYTES;

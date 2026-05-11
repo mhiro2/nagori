@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use nagori_core::{AppError, Result};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::{AuthToken, IpcEnvelope, IpcRequest, IpcResponse};
@@ -13,6 +13,14 @@ const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
 /// answers) would pin the CLI forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Windows named-pipe servers signal "all instances busy" with
+/// `ERROR_PIPE_BUSY` (231). Treat it as transient and back off briefly
+/// before retrying within the connect budget.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+#[cfg(windows)]
+const PIPE_BUSY_RETRY: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct IpcClient {
@@ -49,7 +57,7 @@ impl IpcClient {
         self
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub async fn send(&self, request: IpcRequest) -> Result<IpcResponse> {
         match timeout(self.request_timeout, self.send_inner(request)).await {
             Ok(result) => result,
@@ -63,7 +71,7 @@ impl IpcClient {
     #[cfg(unix)]
     async fn send_inner(&self, request: IpcRequest) -> Result<IpcResponse> {
         let connect_fut = tokio::net::UnixStream::connect(&self.path);
-        let mut stream = match timeout(self.connect_timeout, connect_fut).await {
+        let stream = match timeout(self.connect_timeout, connect_fut).await {
             Ok(Ok(stream)) => stream,
             Ok(Err(err)) => return Err(AppError::Platform(err.to_string())),
             Err(_) => {
@@ -73,29 +81,90 @@ impl IpcClient {
                 )));
             }
         };
-        let envelope = IpcEnvelope {
-            token: self.token.as_str().to_owned(),
-            request,
-        };
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|err| AppError::InvalidInput(err.to_string()))?;
-        stream
-            .write_all(&payload)
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
-        stream
-            .write_all(b"\n")
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
-        let response = read_bounded_line(&mut stream).await?;
-        serde_json::from_slice(&response).map_err(|err| AppError::Platform(err.to_string()))
+        exchange_envelope(stream, &self.token, request).await
     }
 
-    #[cfg(not(unix))]
+    #[cfg(all(windows, not(unix)))]
+    async fn send_inner(&self, request: IpcRequest) -> Result<IpcResponse> {
+        let stream = match timeout(self.connect_timeout, open_pipe_client(&self.path)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => return Err(AppError::Platform(err.to_string())),
+            Err(_) => {
+                return Err(AppError::Platform(format!(
+                    "IPC connect timed out after {:?}",
+                    self.connect_timeout
+                )));
+            }
+        };
+        exchange_envelope(stream, &self.token, request).await
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub async fn send(&self, _request: IpcRequest) -> Result<IpcResponse> {
         Err(AppError::Unsupported(
             "IPC client is not implemented on this platform".to_owned(),
         ))
+    }
+}
+
+/// Common write-envelope-then-read-line helper used by every transport. The
+/// stream type is the only thing that varies between unix-socket and
+/// named-pipe paths, so isolating the wire-format work here keeps the
+/// envelope shape, length-prefix, and bounded reader identical across
+/// platforms (any divergence would be a wire-compat bug).
+#[cfg(any(unix, windows))]
+async fn exchange_envelope<S>(
+    mut stream: S,
+    token: &AuthToken,
+    request: IpcRequest,
+) -> Result<IpcResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let envelope = IpcEnvelope {
+        token: token.as_str().to_owned(),
+        request,
+    };
+    let payload =
+        serde_json::to_vec(&envelope).map_err(|err| AppError::InvalidInput(err.to_string()))?;
+    stream
+        .write_all(&payload)
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?;
+    stream
+        .write_all(b"\n")
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?;
+    // Flush so the daemon sees the request promptly on transports (named
+    // pipes) that buffer until shutdown; on unix sockets this is a cheap
+    // no-op.
+    stream
+        .flush()
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?;
+    let response = read_bounded_line(&mut stream).await?;
+    serde_json::from_slice(&response).map_err(|err| AppError::Platform(err.to_string()))
+}
+
+/// Open a Windows named-pipe client, retrying briefly on `ERROR_PIPE_BUSY`.
+/// The server can only hold a single connected instance at a time per
+/// `NamedPipeServer` handle; if the daemon's accept loop is between
+/// `connect()` returning and re-creating the next instance, we transiently
+/// see `ERROR_PIPE_BUSY` and just retry within the caller's connect budget.
+#[cfg(windows)]
+async fn open_pipe_client(
+    path: &str,
+) -> std::result::Result<tokio::net::windows::named_pipe::NamedPipeClient, std::io::Error> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    loop {
+        match ClientOptions::new().open(path) {
+            Ok(client) => return Ok(client),
+            Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(PIPE_BUSY_RETRY).await;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 

@@ -3,26 +3,27 @@ use std::{future::Future, path::Path};
 use nagori_core::{AppError, Result};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::Arc;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 #[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(any(unix, windows))]
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixListener,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Semaphore,
     task::JoinSet,
     time::timeout,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use tracing::warn;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::AuthToken;
 use crate::{IpcEnvelope, IpcRequest, IpcResponse};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
 
 /// Cap each daemon -> client response at the same byte budget the client
@@ -35,11 +36,26 @@ const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
 /// truncated half-JSON, and (b) we drop the oversized payload immediately
 /// in favour of a small structured rejection so the connection can be
 /// reused instead of stalling until timeout.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
 
-#[cfg(unix)]
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Hard ceiling on how long a single connection can block before the
+/// envelope is fully read. CLI clients send one short JSON line and
+/// disconnect, so a few seconds is plenty of slack for the slowest
+/// realistic local round-trip. Kept tight because on Windows the named
+/// pipe uses the default DACL — any local user can open a connection
+/// and would otherwise park one of the 32 permits for the full window
+/// without ever sending a byte, starving the legitimate CLI.
+#[cfg(any(unix, windows))]
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Sub-budget for the first read. If the peer hasn't sent any bytes
+/// within this window we drop the connection immediately. Caps the
+/// silent-peer slow-loris cost at roughly one second per parked permit,
+/// while still letting a slightly stalled writer (e.g. the CLI flushing
+/// stdin) complete the envelope under `READ_TIMEOUT`.
+#[cfg(any(unix, windows))]
+const FIRST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// RAII guard for the process umask. Restoring on drop is critical because
 /// `umask(2)` is process-global; if we tightened it during `bind` and then
@@ -234,13 +250,17 @@ where
     accept_result
 }
 
-#[cfg(unix)]
-async fn handle_connection<F, Fut>(
-    mut stream: tokio::net::UnixStream,
+/// Bounded-read + auth-check + write-back driver shared by every
+/// transport. Generic over `AsyncRead + AsyncWrite` so the Unix-socket and
+/// Windows named-pipe servers reuse the exact same envelope handling.
+#[cfg(any(unix, windows))]
+async fn handle_connection<S, F, Fut>(
+    mut stream: S,
     permit: tokio::sync::OwnedSemaphorePermit,
     handler: Arc<F>,
     token: Arc<AuthToken>,
 ) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
@@ -302,6 +322,9 @@ async fn handle_connection<F, Fut>(
     if let Some(payload) = payload {
         let _ = stream.write_all(&payload).await;
         let _ = stream.write_all(b"\n").await;
+        // Best-effort flush so the client receives the response promptly
+        // even on transports (named pipes) that buffer until shutdown.
+        let _ = stream.flush().await;
     }
 }
 
@@ -315,17 +338,31 @@ where
     accept_loop(listener, token, handler).await
 }
 
-#[cfg(unix)]
-async fn read_bounded_line(
-    stream: &mut tokio::net::UnixStream,
-) -> std::result::Result<Vec<u8>, String> {
+#[cfg(any(unix, windows))]
+async fn read_bounded_line<R>(stream: &mut R) -> std::result::Result<Vec<u8>, String>
+where
+    R: AsyncRead + Unpin,
+{
     let mut line = Vec::new();
     let mut chunk = [0_u8; 4096];
+    let mut first_read = true;
     loop {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|err| err.to_string())?;
+        // The first read gets a tight budget so a connecting peer that
+        // never writes anything (slow-loris) cannot hold a permit for
+        // the full `READ_TIMEOUT`; subsequent reads inherit the
+        // surrounding `READ_TIMEOUT` set in `handle_connection`.
+        let read = if first_read {
+            match timeout(FIRST_READ_TIMEOUT, stream.read(&mut chunk)).await {
+                Ok(result) => result.map_err(|err| err.to_string())?,
+                Err(_) => return Err("IPC peer sent no data".to_owned()),
+            }
+        } else {
+            stream
+                .read(&mut chunk)
+                .await
+                .map_err(|err| err.to_string())?
+        };
+        first_read = false;
         if read == 0 {
             break;
         }
@@ -342,6 +379,169 @@ async fn read_bounded_line(
         line.extend_from_slice(&chunk[..read]);
     }
     Ok(line)
+}
+
+// ---------------------------------------------------------------------------
+// Windows named-pipe transport.
+// ---------------------------------------------------------------------------
+
+/// Default named-pipe name used by the Windows daemon.
+///
+/// Auth is enforced via the sibling token file rather than a custom DACL: the
+/// pipe is created with the default named-pipe security descriptor inherited
+/// from the daemon process, so any local caller who can also read the
+/// `%LOCALAPPDATA%\nagori\nagori.token` file (written by the daemon under a
+/// per-user roaming-equivalent directory) can authenticate. A future
+/// hardening pass can attach an explicit `SECURITY_ATTRIBUTES` to restrict
+/// the pipe to the current SID.
+#[cfg(windows)]
+pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\nagori";
+
+/// Build the `ServerOptions` baseline used for every `NamedPipeServer`
+/// instance the daemon creates — first or chained. Centralised so the
+/// remote-client rejection (the only piece of `DoS` mitigation that lives
+/// in `ServerOptions` itself) can't be accidentally dropped on the
+/// chained-instance path. Slow-loris pressure from *local* peers is
+/// bounded by `FIRST_READ_TIMEOUT` / `READ_TIMEOUT` in
+/// `handle_connection`, not by anything here.
+#[cfg(windows)]
+fn pipe_server_options() -> tokio::net::windows::named_pipe::ServerOptions {
+    let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
+    // `reject_remote_clients(true)` closes the UNC-path surface: without
+    // it, a domain-joined peer could open `\\<host>\pipe\nagori` over
+    // SMB and park a connection slot until the timeout elapses. Local
+    // callers (which the default pipe DACL still admits) are bounded by
+    // the read timeouts above instead.
+    opts.reject_remote_clients(true);
+    opts
+}
+
+/// Create the first instance of `pipe_name` synchronously.
+///
+/// Separated from `accept_loop_pipe_with_shutdown` so the daemon can fail
+/// startup (rather than logging a warning from inside a spawned task) when
+/// another process already publishes the same pipe name. The first instance
+/// must carry `first_pipe_instance(true)` so the create errors out instead
+/// of silently chaining onto somebody else's pipe.
+#[cfg(windows)]
+pub fn bind_pipe(pipe_name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    pipe_server_options()
+        .first_pipe_instance(true)
+        .create(pipe_name)
+        .map_err(|err| AppError::Platform(err.to_string()))
+}
+
+/// Three-stage graceful shutdown variant of the named-pipe accept loop,
+/// modelled after [`accept_loop_with_shutdown`].
+///
+/// Named pipes do not have a separate `listen` / `accept` split: each
+/// `NamedPipeServer` instance accepts at most one connection. Callers
+/// pass in the already-bound first instance (see [`bind_pipe`]); the loop
+/// allocates each subsequent instance after a successful connect so the
+/// series stays continuous.
+#[cfg(windows)]
+pub async fn accept_loop_pipe_with_shutdown<F, Fut, S>(
+    pipe_name: &str,
+    first_instance: tokio::net::windows::named_pipe::NamedPipeServer,
+    expected_token: AuthToken,
+    handler: F,
+    shutdown: S,
+    drain_grace: Duration,
+) -> Result<()>
+where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+    S: Future<Output = ()> + Send,
+{
+    let handler = Arc::new(handler);
+    let token = Arc::new(expected_token);
+    let semaphore = Arc::new(Semaphore::new(32));
+    let mut tasks: JoinSet<()> = JoinSet::new();
+
+    // We hold the in-flight "next" instance behind `Option` so the
+    // borrow checker accepts the move-then-replace pattern inside the
+    // loop: on a successful connect we `take()` the connected handle
+    // and immediately install the next one; on shutdown the remaining
+    // `Some` is dropped to refuse further clients.
+    let mut server = Some(first_instance);
+
+    tokio::pin!(shutdown);
+    let accept_result = loop {
+        let current = server
+            .as_mut()
+            .expect("server slot is repopulated after every accept");
+        tokio::select! {
+            biased;
+            () = &mut shutdown => break Ok(()),
+            result = current.connect() => {
+                if let Err(err) = result {
+                    break Err(AppError::Platform(err.to_string()));
+                }
+                // Move the now-connected handle out and immediately
+                // create the next listener so we keep accepting while
+                // the worker runs.
+                let connected = server.take().expect("connect resolved on an owned instance");
+                // Every chained instance reuses the same baseline so the
+                // remote-rejection bit can't drift between instances.
+                server = match pipe_server_options().create(pipe_name) {
+                    Ok(next) => Some(next),
+                    Err(err) => break Err(AppError::Platform(err.to_string())),
+                };
+                let permit = tokio::select! {
+                    biased;
+                    () = &mut shutdown => {
+                        drop(connected);
+                        break Ok(());
+                    }
+                    permit = semaphore.clone().acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(err) => break Err(AppError::Platform(format!(
+                            "failed to acquire IPC connection permit: {err}"
+                        ))),
+                    },
+                };
+                let handler = handler.clone();
+                let token = token.clone();
+                tasks.spawn(handle_connection(connected, permit, handler, token));
+            }
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    };
+
+    // Drop the unconnected server (if any is still pending) so no
+    // further clients can attach to this name.
+    drop(server);
+
+    if !tasks.is_empty() {
+        let drain = async { while tasks.join_next().await.is_some() {} };
+        if timeout(drain_grace, drain).await.is_err() {
+            warn!(
+                grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX),
+                "ipc_drain_timeout_aborting_inflight",
+            );
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
+    }
+    accept_result
+}
+
+#[cfg(windows)]
+pub async fn serve_pipe<F, Fut>(pipe_name: &str, token: AuthToken, handler: F) -> Result<()>
+where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+{
+    let first = bind_pipe(pipe_name)?;
+    accept_loop_pipe_with_shutdown(
+        pipe_name,
+        first,
+        token,
+        handler,
+        std::future::pending::<()>(),
+        Duration::from_secs(0),
+    )
+    .await
 }
 
 #[cfg(all(test, unix))]
@@ -776,7 +976,7 @@ mod tests {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub async fn serve_unix<F, Fut>(
     _path: impl AsRef<Path>,
     _token: crate::AuthToken,
@@ -787,6 +987,71 @@ where
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
     Err(AppError::Unsupported(
-        "Unix socket IPC server is not available on this platform".to_owned(),
+        "IPC server is not available on this platform".to_owned(),
     ))
+}
+
+#[cfg(all(windows, not(unix)))]
+pub async fn serve_unix<F, Fut>(
+    _path: impl AsRef<Path>,
+    _token: crate::AuthToken,
+    _handler: F,
+) -> Result<()>
+where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+{
+    Err(AppError::Unsupported(
+        "Unix socket IPC is not available on Windows; use serve_pipe".to_owned(),
+    ))
+}
+
+#[cfg(all(test, windows))]
+mod tests_windows {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{HealthResponse, IpcClient};
+
+    fn test_token() -> AuthToken {
+        AuthToken::generate().expect("token should generate")
+    }
+
+    fn unique_pipe_name(suffix: &str) -> String {
+        format!(r"\\.\pipe\nagori-test-{}-{suffix}", std::process::id())
+    }
+
+    #[tokio::test]
+    async fn round_trip_health_over_named_pipe() {
+        let pipe = unique_pipe_name("health");
+        let token = test_token();
+        let server_pipe = pipe.clone();
+        let server_token = token.clone();
+        let server = tokio::spawn(async move {
+            let _ = serve_pipe(&server_pipe, server_token, |request| async move {
+                assert!(matches!(request, IpcRequest::Health));
+                IpcResponse::Health(HealthResponse {
+                    ok: true,
+                    version: "pipe-test".to_owned(),
+                    maintenance: crate::MaintenanceHealthReport::default(),
+                })
+            })
+            .await;
+        });
+
+        // Give the server a beat to create its first pipe instance.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = IpcClient::new(pipe, token);
+        let response = client
+            .send(IpcRequest::Health)
+            .await
+            .expect("health round-trip over pipe");
+        let IpcResponse::Health(health) = response else {
+            panic!("expected health response, got {response:?}");
+        };
+        assert!(health.ok);
+        assert_eq!(health.version, "pipe-test");
+        server.abort();
+    }
 }
