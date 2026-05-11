@@ -586,6 +586,13 @@ impl nagori_core::EntryRepository for SqliteStore {
     async fn list_pinned(&self) -> Result<Vec<ClipboardEntry>> {
         self.run_blocking(|store| {
             let conn = store.conn()?;
+            // Hard `LIMIT` so a token-authed local client (or the daemon's
+            // own UI) can never trigger an unbounded DB scan / `Vec`
+            // allocation / JSON serialisation just by pinning more rows
+            // than `MAX_READ_LIMIT`. The IPC response cap in `server.rs`
+            // runs *after* serialisation, so without a SQL-side limit the
+            // daemon would still pay the full allocation cost before
+            // rejecting the response.
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT e.*, d.title, d.preview, d.normalized_text, d.language
@@ -594,11 +601,12 @@ impl nagori_core::EntryRepository for SqliteStore {
                      WHERE e.deleted_at IS NULL
                        AND e.pinned = 1
                        AND e.sensitivity != 'blocked'
-                     ORDER BY e.updated_at DESC",
+                     ORDER BY e.updated_at DESC
+                     LIMIT ?1",
                 )
                 .map_err(|err| storage_err(&err))?;
             let entries = stmt
-                .query_map([], row_to_entry)
+                .query_map([MAX_READ_LIMIT as i64], row_to_entry)
                 .map_err(|err| storage_err(&err))?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|err| storage_err(&err))?;
@@ -1332,7 +1340,7 @@ impl nagori_core::SettingsRepository for SqliteStore {
 /// performs the alter step. `run_migrations` plays each pending migration
 /// in its own transaction and bumps `user_version` so partial application
 /// can never leave the DB at a half-migrated state.
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 /// Highest schema version supported by this binary. A DB whose
 /// `user_version` already exceeds this is from a newer build and we refuse
@@ -1482,6 +1490,18 @@ CREATE INDEX IF NOT EXISTS idx_entries_recent_live
     ON entries(pinned DESC, created_at DESC)
     WHERE deleted_at IS NULL AND sensitivity != 'blocked';
 
+-- Partial index dedicated to `list_pinned`, which orders by
+-- `updated_at DESC` rather than `created_at DESC` (pinned rows are
+-- often pin-toggled or relabelled long after creation, so `updated_at`
+-- is the order the UI actually wants). Without this, the planner has
+-- to load every pinned row and sort it; with the index it walks the
+-- partial index forward and stops after `LIMIT`. The predicate keeps
+-- the index small — typically a handful of rows — and excludes
+-- blocked / soft-deleted history we never query in this branch.
+CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
+    ON entries(updated_at DESC)
+    WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
+
 CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry
     ON ngrams(gram, entry_id);
 ";
@@ -1503,6 +1523,17 @@ CREATE INDEX IF NOT EXISTS idx_entries_recent_live
 
 CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry
     ON ngrams(gram, entry_id);
+";
+
+/// Backfill the `list_pinned`-ordered index for pre-v3 databases. Same
+/// reasoning as `SCHEMA_V2`: the index is shipped inline in `SCHEMA_V1`
+/// for fresh installs, but existing databases at `user_version = 2` need
+/// an explicit migration step because the runner only re-runs scripts
+/// whose `target_version` is strictly greater.
+const SCHEMA_V3: &str = r"
+CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
+    ON entries(updated_at DESC)
+    WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
 ";
 
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
