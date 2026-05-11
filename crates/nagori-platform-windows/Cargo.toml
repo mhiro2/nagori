@@ -7,7 +7,27 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arboard.workspace = true
+async-trait.workspace = true
 nagori-core = { path = "../nagori-core" }
+nagori-platform = { path = "../nagori-platform" }
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+]
 
 [lints]
 workspace = true
