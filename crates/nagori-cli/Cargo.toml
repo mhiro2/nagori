@@ -30,6 +30,9 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 nagori-platform-macos = { path = "../nagori-platform-macos" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+nagori-platform-windows = { path = "../nagori-platform-windows" }
+
 [dev-dependencies]
 assert_cmd = "2"
 insta = { version = "1", features = ["json"] }

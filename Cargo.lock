@@ -2836,6 +2836,7 @@ dependencies = [
  "nagori-ipc",
  "nagori-platform",
  "nagori-platform-macos",
+ "nagori-platform-windows",
  "nagori-search",
  "nagori-storage",
  "predicates",
@@ -2974,7 +2975,14 @@ dependencies = [
 name = "nagori-platform-windows"
 version = "0.0.0"
 dependencies = [
+ "arboard",
+ "async-trait",
  "nagori-core",
+ "nagori-platform",
+ "time",
+ "tokio",
+ "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

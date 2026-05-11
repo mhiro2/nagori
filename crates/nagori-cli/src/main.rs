@@ -12,7 +12,7 @@ use nagori_core::{
     AiActionId, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository, SearchQuery,
     SettingsRepository, is_text_safe_for_default_output, safe_preview_for_dto,
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use nagori_daemon::run_daemon;
 use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path};
 use nagori_ipc::{
@@ -25,11 +25,15 @@ use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use nagori_platform::PermissionChecker;
 #[cfg(target_os = "macos")]
 use nagori_platform_macos::{
     MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
+};
+#[cfg(target_os = "windows")]
+use nagori_platform_windows::{
+    WindowsClipboard, WindowsPasteController, WindowsPermissionChecker, WindowsWindowBehavior,
 };
 
 #[derive(Debug, Parser)]
@@ -183,7 +187,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         // "read straight from disk" UX for casual queries.
         if writes || cli.auto_ipc {
             let candidate = default_socket_path();
-            if let Ok(token) = nagori_ipc::read_token_file(&nagori_ipc::default_token_path())
+            if let Ok(token) =
+                nagori_ipc::read_token_file(&nagori_ipc::token_path_for_endpoint(&candidate))
                 && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
                     .send(IpcRequest::Health)
                     .await
@@ -417,8 +422,12 @@ async fn run_local_command(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-// On non-macOS the body short-circuits via `bail!`, so no `.await` runs.
-#[cfg_attr(not(target_os = "macos"), allow(clippy::unused_async))]
+// On platforms without a native adapter the body short-circuits via
+// `bail!`, so no `.await` runs.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    allow(clippy::unused_async)
+)]
 async fn run_daemon_command(cli: Cli) -> Result<()> {
     let Command::Daemon(DaemonArgs {
         command: DaemonCommand::Run(args),
@@ -446,9 +455,14 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
     // common footgun `=0`, `=false`, or `=no` — leaves fail-closed on. A
     // security-relaxation flag should not be enabled by accident.
     let secure_focus_fail_closed = !env_truthy("NAGORI_DISABLE_SECURE_FOCUS_FAIL_CLOSED");
+    // Pair the token file with the IPC endpoint so a daemon launched with
+    // `--ipc <custom>` doesn't trample the default daemon's token file
+    // (and vice versa). The CLI's `run_ipc_command` mirrors this derivation
+    // so client and daemon agree on the path.
+    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
     let config = DaemonConfig {
         socket_path,
-        token_path: nagori_ipc::default_token_path(),
+        token_path,
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
         maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
         secure_focus_fail_closed,
@@ -470,16 +484,37 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         run_daemon(runtime, clipboard, config, Some(window)).await?;
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let clipboard = Arc::new(WindowsClipboard::new()?);
+        let window: Arc<dyn nagori_platform::WindowBehavior> =
+            Arc::new(WindowsWindowBehavior::new());
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(WindowsPermissionChecker);
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(clipboard.clone())
+            .paste(Arc::new(WindowsPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .socket_path(config.socket_path.clone())
+            .build();
+        run_daemon(runtime, clipboard, config, Some(window)).await?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (store, config);
-        anyhow::bail!("daemon run is only available on macOS in this build")
+        anyhow::bail!("daemon run is only available on macOS and Windows in this build")
     }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
-    let token_path = nagori_ipc::default_token_path();
+    // Derive the token path from the IPC endpoint so a CLI run with
+    // `--ipc <custom>` reads the same file the matching daemon wrote.
+    // Without this, a custom-endpoint daemon would still write the
+    // default `nagori.token` and trample the token of any default-endpoint
+    // daemon also running on this machine.
+    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
     let token = nagori_ipc::read_token_file(&token_path).map_err(|err| {
         anyhow!(
             "failed to read IPC auth token from {}: {err}. Is the daemon running?",
@@ -632,8 +667,12 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-// On non-macOS the body never returns Err, but the macOS path needs `?`.
-#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
+// On platforms without a native adapter the body never returns Err, but
+// the macOS / Windows paths need `?`.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    allow(clippy::unnecessary_wraps)
+)]
 fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
     #[cfg(target_os = "macos")]
     {
@@ -646,7 +685,18 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
             .permissions(permissions)
             .build())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let clipboard = Arc::new(WindowsClipboard::new()?);
+        let permissions: Arc<dyn PermissionChecker> = Arc::new(WindowsPermissionChecker);
+        Ok(NagoriRuntime::builder(store)
+            .clipboard(clipboard)
+            .paste(Arc::new(WindowsPasteController))
+            .ai(Arc::new(LocalAiProvider::default()))
+            .permissions(permissions)
+            .build())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(NagoriRuntime::builder(store)
             .ai(Arc::new(LocalAiProvider::default()))
@@ -962,6 +1012,22 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let checker = MacosPermissionChecker;
+        if let Ok(statuses) = checker.check().await {
+            for status in statuses {
+                let suffix = status
+                    .message
+                    .as_deref()
+                    .map_or_else(String::new, |msg| format!("\t{msg}"));
+                println!(
+                    "permission\t{:?}\t{:?}{}",
+                    status.kind, status.state, suffix
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let checker = WindowsPermissionChecker;
         if let Ok(statuses) = checker.check().await {
             for status in statuses {
                 let suffix = status

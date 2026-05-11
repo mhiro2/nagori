@@ -1,8 +1,10 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use nagori_core::AppError;
 use nagori_core::Result;
+#[cfg(windows)]
+use nagori_ipc::{AuthToken, accept_loop_pipe_with_shutdown, bind_pipe, write_token_file};
 #[cfg(unix)]
 use nagori_ipc::{
     AuthToken, accept_loop_with_shutdown, bind_unix, default_token_path, write_token_file,
@@ -15,6 +17,10 @@ use crate::{CaptureLoop, MaintenanceService, NagoriRuntime};
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
+    /// On Unix this is a filesystem path for the Unix-domain socket. On
+    /// Windows it is the named-pipe name (e.g. `\\.\pipe\nagori`) packed in
+    /// a `PathBuf` so existing call-sites that store the IPC endpoint keep
+    /// working without a platform-conditional type.
     pub socket_path: PathBuf,
     pub token_path: PathBuf,
     pub capture_interval: Duration,
@@ -45,11 +51,22 @@ impl Default for DaemonConfig {
     }
 }
 
+#[cfg(unix)]
 pub fn default_socket_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nagori")
         .join("nagori.sock")
+}
+
+#[cfg(windows)]
+pub fn default_socket_path() -> PathBuf {
+    PathBuf::from(nagori_ipc::DEFAULT_PIPE_NAME)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn default_socket_path() -> PathBuf {
+    PathBuf::from("nagori.sock")
 }
 
 #[cfg(unix)]
@@ -100,11 +117,43 @@ async fn spawn_ipc_server(
             }
         }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Bind the first pipe instance synchronously so a collision with an
+        // already-running daemon (or any other process holding the same
+        // pipe name) propagates out of `run_daemon` startup. If we deferred
+        // the bind into `tokio::spawn`, the failure would only surface as a
+        // warn line from the spawned task while the daemon kept running —
+        // and we'd have already written a token file that no one is
+        // serving.
+        let pipe_name = config.socket_path.to_string_lossy().into_owned();
+        let first_instance = bind_pipe(&pipe_name)?;
+        let token = AuthToken::generate()?;
+        write_token_file(&config.token_path, &token)?;
+        let grace = config.shutdown_grace;
+        Ok(tokio::spawn(async move {
+            let result = accept_loop_pipe_with_shutdown(
+                &pipe_name,
+                first_instance,
+                token,
+                move |request| {
+                    let runtime = runtime.clone();
+                    async move { runtime.handle_ipc(request).await }
+                },
+                async move { shutdown.notified().await },
+                grace,
+            )
+            .await;
+            if let Err(err) = result {
+                warn!(error = %err, "ipc_server_terminated");
+            }
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (runtime, config, shutdown);
         Err(AppError::Unsupported(
-            "IPC requires a Unix-like platform".to_owned(),
+            "IPC requires a Unix-like or Windows platform".to_owned(),
         ))
     }
 }
@@ -127,7 +176,17 @@ where
     runtime.refresh_settings_from_store().await?;
     let settings_rx = runtime.settings_subscribe();
 
+    // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
+    // not a filesystem path. Only ensure the parent directory exists when
+    // we actually need a filesystem-resident IPC endpoint.
+    #[cfg(unix)]
     if let Some(parent) = config.socket_path.parent() {
+        nagori_storage::ensure_private_directory(parent)?;
+    }
+    // The token file is always filesystem-backed (Windows daemon writes to
+    // `%LOCALAPPDATA%\nagori\nagori.token`), so ensure that directory exists
+    // on every platform.
+    if let Some(parent) = config.token_path.parent() {
         nagori_storage::ensure_private_directory(parent)?;
     }
 
@@ -280,6 +339,10 @@ async fn drain_one(name: &'static str, mut handle: tokio::task::JoinHandle<()>, 
 }
 
 fn cleanup_runtime_files(config: &DaemonConfig) {
+    // On Windows `socket_path` is a pipe name and `exists()` will report
+    // false (the pipe namespace isn't a filesystem); the check + remove
+    // become harmless no-ops. On Unix this unlinks the lingering socket
+    // inode (we held the listener open until shutdown).
     if config.socket_path.exists()
         && let Err(err) = std::fs::remove_file(&config.socket_path)
     {
