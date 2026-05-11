@@ -7,7 +7,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 nagori-core = { path = "../nagori-core" }
+nagori-platform = { path = "../nagori-platform" }
+time.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hex.workspace = true
+sha2.workspace = true
+wl-clipboard-rs = "0.9"
 
 [lints]
 workspace = true
