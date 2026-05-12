@@ -6,7 +6,7 @@ use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
     ClipboardSequence, ClipboardSnapshot, Result,
 };
-use nagori_platform::{ClipboardReader, ClipboardWriter};
+use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 use time::OffsetDateTime;
 
 /// Windows clipboard adapter.
@@ -51,49 +51,9 @@ impl ClipboardReader for WindowsClipboard {
         // process is steadily flooding the clipboard.
         let clipboard = self.clipboard.clone();
         tokio::task::spawn_blocking(move || -> Result<ClipboardSnapshot> {
-            const MAX_RETRIES: usize = 3;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                let before = native_sequence_number();
-                let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-                let plain = match guard.get_text() {
-                    Ok(text) => Some(text),
-                    Err(arboard::Error::ContentNotAvailable) => None,
-                    Err(err) => return Err(platform_err(&err)),
-                };
-                // Drop the arboard guard before the second Win32 read so
-                // we don't hold it across the CF_HDROP OpenClipboard
-                // call; the sequence-stability check is what protects
-                // us against a write landing in between.
-                drop(guard);
-
-                let mut representations = Vec::new();
-
-                #[cfg(windows)]
-                if let Some(files) = win::read_file_list() {
-                    representations.push(ClipboardRepresentation {
-                        mime_type: "text/uri-list".to_owned(),
-                        data: ClipboardData::FilePaths(files),
-                    });
-                }
-
-                if let Some(text) = plain {
-                    representations.push(ClipboardRepresentation {
-                        mime_type: "text/plain".to_owned(),
-                        data: ClipboardData::Text(text),
-                    });
-                }
-
-                let after = native_sequence_number();
-                if before == after || attempt >= MAX_RETRIES {
-                    return Ok(ClipboardSnapshot {
-                        sequence: ClipboardSequence::native(i64::from(after)),
-                        captured_at: OffsetDateTime::now_utc(),
-                        source: None,
-                        representations,
-                    });
-                }
+            match capture_snapshot(&clipboard, None)? {
+                CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
+                CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
             }
         })
         .await
@@ -109,6 +69,13 @@ impl ClipboardReader for WindowsClipboard {
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))
+    }
+
+    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
+        let clipboard = self.clipboard.clone();
+        tokio::task::spawn_blocking(move || capture_snapshot(&clipboard, Some(max_bytes)))
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
     }
 }
 
@@ -152,6 +119,91 @@ impl ClipboardWriter for WindowsClipboard {
     }
 }
 
+fn capture_snapshot(
+    clipboard: &Mutex<Clipboard>,
+    max_bytes: Option<usize>,
+) -> Result<CapturedSnapshot> {
+    const MAX_RETRIES: usize = 3;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let before = native_sequence_number();
+        if let Some(limit) = max_bytes {
+            #[cfg(windows)]
+            if let Some(observed) = win::oversized_payload(limit) {
+                return Ok(CapturedSnapshot::Oversized {
+                    sequence: ClipboardSequence::native(i64::from(native_sequence_number())),
+                    observed_bytes: observed,
+                    limit,
+                });
+            }
+            #[cfg(not(windows))]
+            let _ = limit;
+        }
+
+        let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+        let plain = match guard.get_text() {
+            Ok(text) => Some(text),
+            Err(arboard::Error::ContentNotAvailable) => None,
+            Err(err) => return Err(platform_err(&err)),
+        };
+        // Drop the arboard guard before the second Win32 read so we don't hold
+        // it across the CF_HDROP OpenClipboard call; the sequence-stability
+        // check is what protects us against a write landing in between.
+        drop(guard);
+
+        let mut representations = Vec::new();
+
+        #[cfg(windows)]
+        if let Some(files) = win::read_file_list() {
+            representations.push(ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(files),
+            });
+        }
+
+        if let Some(text) = plain {
+            representations.push(ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text(text),
+            });
+        }
+
+        let after = native_sequence_number();
+        if before == after || attempt >= MAX_RETRIES {
+            let snapshot = ClipboardSnapshot {
+                sequence: ClipboardSequence::native(i64::from(after)),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations,
+            };
+            if let Some(limit) = max_bytes {
+                let observed_bytes = total_payload_bytes(&snapshot);
+                if observed_bytes > limit {
+                    return Ok(CapturedSnapshot::Oversized {
+                        sequence: snapshot.sequence,
+                        observed_bytes,
+                        limit,
+                    });
+                }
+            }
+            return Ok(CapturedSnapshot::Captured(snapshot));
+        }
+    }
+}
+
+fn total_payload_bytes(snapshot: &ClipboardSnapshot) -> usize {
+    snapshot
+        .representations
+        .iter()
+        .map(|rep| match &rep.data {
+            ClipboardData::Text(text) => text.len(),
+            ClipboardData::Bytes(bytes) => bytes.len(),
+            ClipboardData::FilePaths(paths) => paths.iter().map(String::len).sum(),
+        })
+        .sum()
+}
+
 #[cfg(windows)]
 fn native_sequence_number() -> u32 {
     // SAFETY: GetClipboardSequenceNumber takes no arguments and is
@@ -174,11 +226,13 @@ const fn native_sequence_number() -> u32 {
 mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
+    use std::{char, mem, slice};
 
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     };
-    use windows_sys::Win32::System::Ole::CF_HDROP;
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
     use windows_sys::Win32::UI::Shell::DragQueryFileW;
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
@@ -218,6 +272,69 @@ mod win {
                 CloseClipboard();
             }
         }
+    }
+
+    pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
+        // SAFETY: every successful `OpenClipboard` is paired with the
+        // `ClipboardGuard` drop path. `GetClipboardData` handles are borrowed
+        // from the OS-owned clipboard and are only inspected while the
+        // clipboard remains open.
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return None;
+            }
+            let _guard = ClipboardGuard;
+            let mut observed = 0_usize;
+            if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0
+                && let Some(text_bytes) = unicode_text_utf8_len()
+            {
+                observed = observed.saturating_add(text_bytes);
+                if observed > max_bytes {
+                    return Some(observed);
+                }
+            }
+            if IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
+                && let Some(file_list_bytes) = global_data_size(u32::from(CF_HDROP))
+            {
+                observed = observed.saturating_add(file_list_bytes);
+                if observed > max_bytes {
+                    return Some(observed);
+                }
+            }
+            None
+        }
+    }
+
+    unsafe fn global_data_size(format: u32) -> Option<usize> {
+        let handle = unsafe { GetClipboardData(format) };
+        if handle.is_null() {
+            return None;
+        }
+        let bytes = unsafe { GlobalSize(handle) };
+        (bytes > 0).then_some(bytes)
+    }
+
+    unsafe fn unicode_text_utf8_len() -> Option<usize> {
+        let handle = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
+        if handle.is_null() {
+            return None;
+        }
+        let bytes = unsafe { GlobalSize(handle) };
+        if bytes < mem::size_of::<u16>() {
+            return Some(0);
+        }
+        let locked = unsafe { GlobalLock(handle) };
+        if locked.is_null() {
+            return None;
+        }
+        let units = bytes / mem::size_of::<u16>();
+        let wide = unsafe { slice::from_raw_parts(locked.cast::<u16>(), units) };
+        let text_units = wide.iter().position(|unit| *unit == 0).unwrap_or(units);
+        let utf8_len = char::decode_utf16(wide[..text_units].iter().copied())
+            .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8())
+            .sum();
+        let _ = unsafe { GlobalUnlock(handle) };
+        Some(utf8_len)
     }
 
     /// Read the `CF_HDROP` representation from the system clipboard, if
