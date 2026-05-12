@@ -400,7 +400,10 @@ where
         // This lets the password-manager / app-denylist rules in
         // `SensitivityClassifier` actually fire for things like 1Password
         // ⌘C → ⌘Tab → paste flows.
-        let sequence = self.reader.current_sequence().await?;
+        let sequence = self
+            .reader
+            .current_sequence_with_max(settings.max_entry_size_bytes)
+            .await?;
         // Peek without consuming. We only clear `force_content_check` after
         // the body read succeeds — otherwise a transient `current_snapshot`
         // failure between the gap-detection tick and the actual recheck

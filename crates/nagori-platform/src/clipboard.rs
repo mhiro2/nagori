@@ -29,6 +29,13 @@ pub trait ClipboardReader: Send + Sync {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot>;
     async fn current_sequence(&self) -> Result<ClipboardSequence>;
 
+    /// Like [`Self::current_sequence`], but allows platforms that must read
+    /// clipboard bytes to use the same pre-read ceiling as
+    /// [`Self::current_snapshot_with_max`].
+    async fn current_sequence_with_max(&self, _max_bytes: usize) -> Result<ClipboardSequence> {
+        self.current_sequence().await
+    }
+
     /// Like [`Self::current_snapshot`] but rejects payloads larger than
     /// `max_bytes` *before* materialising them into a Rust `Vec<u8>` /
     /// `String` whenever the platform exposes a cheap byte-length probe.
@@ -78,6 +85,10 @@ impl<T: ClipboardReader + ?Sized> ClipboardReader for Arc<T> {
 
     async fn current_sequence(&self) -> Result<ClipboardSequence> {
         (**self).current_sequence().await
+    }
+
+    async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
+        (**self).current_sequence_with_max(max_bytes).await
     }
 
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {

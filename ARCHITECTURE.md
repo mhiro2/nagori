@@ -172,12 +172,16 @@ stay identical regardless of entry point.
 ## 4. Capture pipeline
 
 ```text
-ClipboardReader.current_sequence()         (cheap pre-check)
+ClipboardReader.current_sequence_with_max()
+                                            (cheap pre-check; byte-read
+                                             adapters receive the entry cap)
   → frontmost_app() snapshot               (before reading the body)
   → frontmost_focused_is_secure()          (AX kAXSecureTextField guard;
                                             true → audit + drop without
                                             touching the body)
-  → ClipboardReader.current_snapshot()     (full pasteboard read)
+  → ClipboardReader.current_snapshot_with_max()
+                                            (pre-read size guard where
+                                             platform supports it)
   → EntryFactory.from_snapshot()           (decode → ClipboardEntry +
                                             SHA-256 content hash +
                                             search document)
@@ -525,7 +529,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 
 | Trait | Purpose |
 |-------|---------|
-| `ClipboardReader` | `current_snapshot()`, `current_sequence()` for the capture loop |
+| `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
 | `ClipboardWriter` | Restore an entry to the OS clipboard |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
@@ -566,10 +570,13 @@ Implementations:
   would burn it before the capture loop could reuse it). There is no
   X11 code path inside this crate. Because Wayland exposes no
   equivalent of `GetClipboardSequenceNumber`, `current_sequence()`
-  streams the text body through SHA-256 every poll; the source app
-  participates in each transfer per the data-control protocol, so the
-  capture interval (`AppSettings::poll_interval_ms`) directly trades
-  off responsiveness against source-app wakeups. Auto-paste shells out
+  streams the text body through SHA-256 every poll up to the configured
+  byte ceiling; oversized transfers close the pipe immediately and use
+  a ceiling/prefix-keyed sentinel sequence so the owner cannot hold a
+  blocking worker by streaming past the limit. The source app participates in
+  each transfer per the data-control protocol, so the capture interval
+  (`AppSettings::poll_interval_ms`) directly trades off responsiveness
+  against source-app wakeups. Auto-paste shells out
   to `wtype -M ctrl v -m ctrl`, which drives `zwp_virtual_keyboard_v1`;
   if the binary is missing or the compositor refuses the protocol the
   controller returns an error — the same shape as macOS when

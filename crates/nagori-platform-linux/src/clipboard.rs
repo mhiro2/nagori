@@ -129,20 +129,26 @@ impl ClipboardReader for LinuxClipboard {
         // serial, but `wl-clipboard-rs` does not surface it. Stream the
         // body through SHA-256 with a small buffer so that even
         // multi-megabyte clipboards do not pin memory in the daemon
-        // address space. The cost is O(N) I/O per poll for clips of
-        // size N — accepted because the alternative (hashing a prefix)
-        // would let edits past the prefix slip through `last_sequence`
-        // dedup. Clips above `INTERNAL_BODY_CEILING_BYTES` fall back
-        // to a length-keyed sentinel so we still bound CPU on the
-        // pathological case; `current_snapshot_with_max` uses the same
-        // ceiling and sentinel, so anchored sequences match.
+        // address space. Clips above `INTERNAL_BODY_CEILING_BYTES`
+        // fall back to a ceiling/prefix-keyed sentinel and close the pipe
+        // immediately so a malicious owner cannot keep a blocking
+        // worker occupied by streaming forever.
         #[cfg(target_os = "linux")]
         {
-            // Pass `0` as the buffer cap so the pipe is hashed without
-            // being materialised — `pipe_read_pass` only buffers bytes
-            // while observed_total ≤ buffer_cap, so a cap of 0 means
-            // "stream through the hasher only".
             let read = pipe_read_pass_no_buffer(INTERNAL_BODY_CEILING_BYTES).await?;
+            Ok(ClipboardSequence::content_hash(read.sequence))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported_off_target())
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
+        #[cfg(target_os = "linux")]
+        {
+            let read = pipe_read_pass_no_buffer(max_bytes).await?;
             Ok(ClipboardSequence::content_hash(read.sequence))
         }
         #[cfg(not(target_os = "linux"))]
@@ -155,13 +161,10 @@ impl ClipboardReader for LinuxClipboard {
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
         // The capture loop's hot path. The pipe-read pass buffers up
         // to `max_bytes` so a malicious or runaway source app cannot
-        // make the daemon allocate gigabytes; bytes beyond `max_bytes`
-        // are streamed through the hasher and dropped. The sequence
-        // returned is the SHA-256 of the *full* body (or the same
-        // length-keyed sentinel `current_sequence` uses for clips
-        // above the internal ceiling), so anchoring `last_sequence`
-        // with an Oversized variant still dedups against the next
-        // poll's `current_sequence` call for an unchanged clip.
+        // make the daemon allocate gigabytes. Once the stream crosses
+        // the configured cap, we close the read end and return an
+        // Oversized variant instead of draining the owner-controlled
+        // pipe to EOF.
         #[cfg(target_os = "linux")]
         {
             let read = pipe_read_pass(max_bytes).await?;
@@ -250,18 +253,16 @@ impl ClipboardWriter for LinuxClipboard {
 
 /// Result of one bounded pass over the data-control pipe.
 ///
-/// `sequence` is the SHA-256 of the full body when
-/// `observed_total <= INTERNAL_BODY_CEILING_BYTES`, or a length-keyed
-/// sentinel (`"oversized:<observed_total>"`) above the ceiling. Both
-/// callers (`current_snapshot_with_max` and `current_sequence`) use the
-/// same ceiling so an unchanged oversized clip yields identical
-/// sequences on repeat polls — that is what makes `last_sequence` dedup
-/// work without the daemon re-logging the clip every tick.
+/// `sequence` is the SHA-256 of the body when it fits within the caller's
+/// read ceiling, or a ceiling/prefix-keyed sentinel above it. The
+/// oversized sentinel intentionally does not include the full body length
+/// because the reader closes the pipe as soon as the ceiling is crossed.
 ///
-/// `buffered` is `Some(bytes)` iff `observed_total <= buffer_cap`. Pass
-/// a `buffer_cap` of `None` (via `pipe_read_pass_no_buffer`) when the
-/// caller only needs the sequence — the helper then skips the
-/// allocation and just streams bytes through the hasher.
+/// `buffered` is `Some(bytes)` iff the stream reaches EOF before both
+/// `buffer_cap` and the read ceiling. Pass a `buffer_cap` of `None` (via
+/// `pipe_read_pass_no_buffer`) when the caller only needs the sequence —
+/// the helper then skips the allocation and just streams bytes through the
+/// hasher.
 #[cfg(target_os = "linux")]
 struct PipePass {
     buffered: Option<Vec<u8>>,
@@ -274,16 +275,19 @@ const PIPE_CHUNK: usize = 8 * 1024;
 
 #[cfg(target_os = "linux")]
 async fn pipe_read_pass(buffer_cap: usize) -> Result<PipePass> {
-    pipe_read_pass_internal(Some(buffer_cap)).await
+    pipe_read_pass_internal(Some(buffer_cap), buffer_cap).await
 }
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_pass_no_buffer(_ceiling: usize) -> Result<PipePass> {
-    pipe_read_pass_internal(None).await
+async fn pipe_read_pass_no_buffer(ceiling: usize) -> Result<PipePass> {
+    pipe_read_pass_internal(None, ceiling).await
 }
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_pass_internal(buffer_cap: Option<usize>) -> Result<PipePass> {
+async fn pipe_read_pass_internal(
+    buffer_cap: Option<usize>,
+    read_ceiling: usize,
+) -> Result<PipePass> {
     tokio::task::spawn_blocking(move || -> Result<PipePass> {
         let mut pipe = match paste::get_contents(
             ClipboardType::Regular,
@@ -309,61 +313,144 @@ async fn pipe_read_pass_internal(buffer_cap: Option<usize>) -> Result<PipePass> 
                 )));
             }
         };
-        let mut buffer: Option<Vec<u8>> = buffer_cap.map(|_| Vec::new());
-        let mut hasher = Sha256::new();
-        let mut hash_active = true;
-        let mut chunk = [0u8; PIPE_CHUNK];
-        let mut observed: usize = 0;
-        loop {
-            let n = pipe.read(&mut chunk).map_err(|err| {
-                AppError::Platform(format!("reading clipboard pipe failed: {err}"))
-            })?;
-            if n == 0 {
-                break;
-            }
-            observed = observed.saturating_add(n);
-
-            // Drop the buffer the moment we exceed `buffer_cap`. The
-            // capture loop will see `buffered: None` and surface an
-            // Oversized variant; we keep reading so the source app
-            // does not stall mid-write and so observed_total reports
-            // the real body length.
-            if let (Some(cap), Some(buf)) = (buffer_cap, buffer.as_mut()) {
-                if observed > cap {
-                    buffer = None;
-                } else {
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-            }
-
-            // Stop hashing past the ceiling so a pathologically large
-            // clip cannot tie up CPU on every poll. Above the ceiling
-            // we emit the length-keyed sentinel instead, which still
-            // dedups a stable oversized clip by its byte count.
-            if hash_active {
-                if observed > INTERNAL_BODY_CEILING_BYTES {
-                    hash_active = false;
-                } else {
-                    hasher.update(&chunk[..n]);
-                }
-            }
-        }
-        let sequence = if observed > INTERNAL_BODY_CEILING_BYTES {
-            format!("oversized:{observed}")
-        } else {
-            hex::encode(hasher.finalize())
-        };
-        Ok(PipePass {
-            buffered: buffer,
-            observed_total: observed,
-            sequence,
-        })
+        read_pipe_contents(&mut pipe, buffer_cap, read_ceiling)
     })
     .await
     .map_err(|err| AppError::Platform(err.to_string()))?
 }
 
+#[cfg(target_os = "linux")]
+fn read_pipe_contents(
+    pipe: &mut impl Read,
+    buffer_cap: Option<usize>,
+    read_ceiling: usize,
+) -> Result<PipePass> {
+    let mut buffer: Option<Vec<u8>> = buffer_cap.map(|_| Vec::new());
+    let mut hasher = Sha256::new();
+    let mut chunk = [0u8; PIPE_CHUNK];
+    let mut observed: usize = 0;
+    loop {
+        let n = pipe
+            .read(&mut chunk)
+            .map_err(|err| AppError::Platform(format!("reading clipboard pipe failed: {err}")))?;
+        if n == 0 {
+            break;
+        }
+        let previous = observed;
+        observed = observed.saturating_add(n);
+
+        // Drop the buffer the moment we exceed `buffer_cap`. The
+        // capture loop will see `buffered: None` and surface an
+        // Oversized variant.
+        if let (Some(cap), Some(buf)) = (buffer_cap, buffer.as_mut()) {
+            if observed > cap {
+                buffer = None;
+            } else {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        if observed > read_ceiling {
+            let prefix_remaining = read_ceiling.saturating_sub(previous).min(n);
+            if prefix_remaining > 0 {
+                hasher.update(&chunk[..prefix_remaining]);
+            }
+            let prefix_hash = hex::encode(hasher.finalize());
+            return Ok(PipePass {
+                buffered: None,
+                observed_total: observed,
+                sequence: oversized_sequence(read_ceiling, &prefix_hash),
+            });
+        }
+
+        hasher.update(&chunk[..n]);
+    }
+    Ok(PipePass {
+        buffered: buffer,
+        observed_total: observed,
+        sequence: hex::encode(hasher.finalize()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn oversized_sequence(read_ceiling: usize, prefix_hash: &str) -> String {
+    format!("oversized-over:{read_ceiling}:{prefix_hash}")
+}
+
 #[cfg(not(target_os = "linux"))]
 fn unsupported_off_target() -> AppError {
     AppError::Unsupported("LinuxClipboard is only available on Linux targets".to_owned())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::io::{self, Read};
+
+    use sha2::{Digest, Sha256};
+
+    use super::{PIPE_CHUNK, oversized_sequence, read_pipe_contents};
+
+    struct CountingChunks {
+        chunk: Vec<u8>,
+        remaining_reads: usize,
+        reads: usize,
+    }
+
+    impl CountingChunks {
+        fn new(chunk_len: usize, remaining_reads: usize) -> Self {
+            Self {
+                chunk: vec![b'x'; chunk_len],
+                remaining_reads,
+                reads: 0,
+            }
+        }
+    }
+
+    impl Read for CountingChunks {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if self.remaining_reads == 0 {
+                return Ok(0);
+            }
+            self.remaining_reads -= 1;
+            let n = self.chunk.len().min(out.len());
+            out[..n].copy_from_slice(&self.chunk[..n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_pipe_contents_closes_at_configured_ceiling() {
+        let mut reader = CountingChunks::new(PIPE_CHUNK, 8);
+        let pass = read_pipe_contents(&mut reader, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
+
+        assert_eq!(reader.reads, 2);
+        assert_eq!(pass.buffered, None);
+        assert_eq!(pass.observed_total, PIPE_CHUNK * 2);
+        let expected_prefix = hex::encode(Sha256::digest([b'x'; PIPE_CHUNK]));
+        assert_eq!(
+            pass.sequence,
+            oversized_sequence(PIPE_CHUNK, &expected_prefix)
+        );
+    }
+
+    #[test]
+    fn read_pipe_contents_buffers_within_ceiling() {
+        let mut reader = io::Cursor::new(b"clipboard".to_vec());
+        let pass = read_pipe_contents(&mut reader, Some(64), 64).unwrap();
+
+        assert_eq!(pass.buffered.as_deref(), Some(&b"clipboard"[..]));
+        assert_eq!(pass.observed_total, b"clipboard".len());
+    }
+
+    #[test]
+    fn read_pipe_contents_uses_prefix_hash_for_oversized_sequence() {
+        let mut first = io::Cursor::new([b'a'; PIPE_CHUNK + 1]);
+        let mut second = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
+
+        let first = read_pipe_contents(&mut first, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
+        let second = read_pipe_contents(&mut second, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
+
+        assert_ne!(first.sequence, second.sequence);
+    }
 }
