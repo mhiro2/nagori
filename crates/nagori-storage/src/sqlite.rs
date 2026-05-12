@@ -1097,11 +1097,7 @@ fn harden_db_file_permissions(path: &Path) -> Result<()> {
     let mode = || std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, mode()).map_err(|err| storage_err_io(&err))?;
     // WAL/SHM sidecars are created by SQLite under the process umask once
-    // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist;
-    // the ones SQLite creates after this call are still racy in principle,
-    // but the parent directory is already `0o700` (`ensure_private_directory`)
-    // so the only attacker reachable inside the window is another process
-    // running as the same user.
+    // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist.
     for suffix in ["-wal", "-shm"] {
         let mut sibling = path.as_os_str().to_owned();
         sibling.push(suffix);
@@ -1149,17 +1145,70 @@ fn storage_err_io(err: &std::io::Error) -> AppError {
     AppError::Storage(err.to_string())
 }
 
-/// Create `dir` with `0o700` perms on Unix so the parent isn't world-traversable.
+/// Create missing directory components with `0o700` perms on Unix.
 ///
-/// Used for the clipboard DB and IPC socket directories. Idempotent — if the
-/// directory already exists, the mode is reset to `0o700`.
+/// Existing directories are only validated and are never chmodded. This keeps
+/// custom paths under shared parents such as `/tmp` from mutating permissions
+/// outside Nagori's ownership.
 pub fn ensure_private_directory(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).map_err(|err| AppError::Storage(err.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|err| AppError::Storage(err.to_string()))?;
+    ensure_private_directory_inner(dir).map_err(|err| AppError::Storage(err.to_string()))
+}
+
+#[cfg(unix)]
+fn ensure_private_directory_inner(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if let Some(existing) = existing_path_metadata(dir)? {
+        return validate_existing_directory(dir, &existing);
+    }
+    if let Some(parent) = dir.parent() {
+        ensure_private_directory_inner(parent)?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(dir)?;
+            validate_existing_directory(dir, &metadata)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_private_directory_inner(dir: &Path) -> std::io::Result<()> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+fn existing_path_metadata(dir: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(unix)]
+fn validate_existing_directory(dir: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(format!(
+            "{} is a symlink",
+            dir.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
     }
     Ok(())
 }
@@ -1740,6 +1789,50 @@ mod tests {
         assert!(fts_query(":*").is_empty());
         assert!(fts_query("\"\"").is_empty());
         assert!(fts_query("   ").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_does_not_chmod_existing_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        ensure_private_directory(&shared).unwrap();
+
+        let mode = std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_creates_missing_leaf_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let leaf = temp.path().join("nagori").join("ipc");
+
+        ensure_private_directory(&leaf).unwrap();
+
+        let mode = std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_rejects_symlinked_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = ensure_private_directory(&link).unwrap_err();
+
+        assert!(err.to_string().contains("is a symlink"));
     }
 
     #[test]
