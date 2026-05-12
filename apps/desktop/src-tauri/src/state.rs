@@ -34,6 +34,8 @@ pub struct AppState {
     pub runtime: NagoriRuntime,
     #[cfg(target_os = "macos")]
     pub window: Arc<dyn WindowBehavior>,
+    #[cfg(target_os = "macos")]
+    background_tasks: Mutex<Option<BackgroundTasks>>,
     /// Frontmost app captured the last time the palette was opened.
     /// Used by `paste_entry` to re-focus the user's prior app before
     /// synthesising ⌘V — without it, the keystroke lands on the
@@ -49,6 +51,12 @@ pub struct AppState {
     /// drives TTL expiry — see `LAST_PASTED_TTL` — so a paste recorded
     /// hours ago doesn't silently resurface in a new working context.
     pub last_pasted_id: Mutex<Option<(EntryId, Instant)>>,
+}
+
+#[cfg(target_os = "macos")]
+struct BackgroundTasks {
+    capture: tauri::async_runtime::JoinHandle<()>,
+    maintenance: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl AppState {
@@ -176,10 +184,16 @@ impl AppState {
     /// loop. Call once after `manage(state)` so a Tokio runtime is available.
     #[cfg(target_os = "macos")]
     pub fn spawn_background_tasks(&self) {
+        let mut tasks_slot = self.background_tasks_slot();
+        if tasks_slot.is_some() {
+            tracing::warn!("background_tasks_already_started");
+            return;
+        }
+
         let runtime = self.runtime.clone();
         let window = self.window.clone();
         let search_cache = self.runtime.search_cache_handle();
-        tauri::async_runtime::spawn(async move {
+        let capture = tauri::async_runtime::spawn(async move {
             // Fail closed: refuse to start the capture loop if the persisted
             // settings cannot be loaded — running with `Default` would drop
             // the user's denylist / regex_denylist / secret_handling and
@@ -215,7 +229,7 @@ impl AppState {
         });
 
         let runtime = self.runtime.clone();
-        tauri::async_runtime::spawn(async move {
+        let maintenance = tauri::async_runtime::spawn(async move {
             let store = runtime.store().clone();
             let mut settings_rx = runtime.settings_subscribe();
             let mut shutdown = runtime.shutdown_handle();
@@ -233,6 +247,33 @@ impl AppState {
                 }
             }
         });
+
+        *tasks_slot = Some(BackgroundTasks {
+            capture,
+            maintenance,
+        });
+    }
+
+    /// Cancel, drain, and abort the in-process capture and maintenance
+    /// workers. Safe to call more than once; only the first call owns the
+    /// task handles.
+    #[cfg(target_os = "macos")]
+    pub async fn shutdown_background_tasks(&self, grace: Duration) {
+        self.runtime.shutdown_handle().cancel();
+        let Some(tasks) = self.background_tasks_slot().take() else {
+            return;
+        };
+        tokio::join!(
+            drain_background_task("capture", tasks.capture, grace),
+            drain_background_task("maintenance", tasks.maintenance, grace),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn background_tasks_slot(&self) -> std::sync::MutexGuard<'_, Option<BackgroundTasks>> {
+        self.background_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[cfg(target_os = "macos")]
@@ -248,6 +289,7 @@ impl AppState {
         Ok(Self {
             runtime,
             window,
+            background_tasks: Mutex::new(None),
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
         })
@@ -263,6 +305,71 @@ impl AppState {
             runtime,
             last_pasted_id: Mutex::new(None),
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn drain_background_task(
+    name: &'static str,
+    mut handle: tauri::async_runtime::JoinHandle<()>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::warn!(error = %err, worker = name, "background_task_join_failed"),
+        Err(_) => {
+            tracing::warn!(worker = name, "background_task_drain_timeout_aborting");
+            handle.abort();
+            match handle.await {
+                Ok(()) => {}
+                Err(tauri::Error::JoinError(err)) if err.is_cancelled() => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        worker = name,
+                        "background_task_abort_join_failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::{
+        future,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use super::*;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_background_task_aborts_after_timeout() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_dropped = dropped.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            let _guard = DropFlag(task_dropped);
+            started_tx.send(()).expect("start signal should send");
+            future::pending::<()>().await;
+        });
+
+        started_rx.await.expect("task should start");
+        drain_background_task("test", handle, Duration::from_millis(10)).await;
+
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }
 

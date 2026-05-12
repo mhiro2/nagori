@@ -61,9 +61,9 @@ pub fn run() {
                     return Err(Box::new(err));
                 }
             };
-            #[cfg(target_os = "macos")]
-            state.spawn_background_tasks();
             app.manage(state);
+            #[cfg(target_os = "macos")]
+            app.state::<AppState>().spawn_background_tasks();
 
             #[cfg(target_os = "macos")]
             {
@@ -139,13 +139,15 @@ pub fn run() {
         });
 }
 
-/// One-shot guard so multiple `RunEvent::ExitRequested` deliveries (or any
-/// future caller of [`perform_clear_on_quit`]) cannot trigger the soft-delete
-/// twice on the same shutdown — a second pass would race the tokio runtime
+/// One-shot guard so multiple `RunEvent::ExitRequested` deliveries cannot
+/// run shutdown cleanup twice. A second pass would race the tokio runtime
 /// teardown that the first pass started.
 #[cfg(target_os = "macos")]
-static CLEAR_ON_QUIT_FIRED: std::sync::atomic::AtomicBool =
+static EXIT_CLEANUP_FIRED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+const BACKGROUND_TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// macOS-only run-event hook. `RunEvent::ExitRequested` fires for tray
 /// "Quit", `Cmd+Q`, and dock-menu Quit, all of which actually tear the
@@ -160,35 +162,34 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
         return;
     }
-    perform_clear_on_quit(handle);
+    perform_exit_cleanup(handle);
 }
 
-/// Block the tauri runtime briefly so the soft-delete completes before it
-/// destroys the tokio runtime. The 1 s ceiling keeps a wedged DB from
-/// freezing the quit path indefinitely; this is acceptable here because
-/// `RunEvent::ExitRequested` is the documented place to do pre-shutdown
-/// work and the user has already asked us to exit. The [`CLEAR_ON_QUIT_FIRED`]
-/// guard makes the call idempotent so a re-entrant `ExitRequested` cannot
-/// race a half-completed clear.
+/// Block the tauri runtime briefly so background workers and optional
+/// soft-delete complete before it destroys the tokio runtime. The
+/// background drain mirrors daemon shutdown; the clear-on-quit ceiling keeps
+/// a wedged DB from freezing the quit path indefinitely.
 #[cfg(target_os = "macos")]
-fn perform_clear_on_quit(handle: &tauri::AppHandle) {
+fn perform_exit_cleanup(handle: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
-    if CLEAR_ON_QUIT_FIRED.swap(true, Ordering::SeqCst) {
+    if EXIT_CLEANUP_FIRED.swap(true, Ordering::SeqCst) {
         return;
     }
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
     let runtime = state.runtime.clone();
-    if !runtime.current_settings().clear_on_quit {
-        return;
-    }
-    let _ = tauri::async_runtime::block_on(async move {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            runtime.clear_non_pinned(),
-        )
-        .await
+    tauri::async_runtime::block_on(async move {
+        state
+            .shutdown_background_tasks(BACKGROUND_TASK_SHUTDOWN_GRACE)
+            .await;
+        if runtime.current_settings().clear_on_quit {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                runtime.clear_non_pinned(),
+            )
+            .await;
+        }
     });
 }
 
