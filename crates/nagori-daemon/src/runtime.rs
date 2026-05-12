@@ -21,7 +21,7 @@ use nagori_platform::{
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::OffsetDateTime;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tracing::error;
 
 use crate::health::MaintenanceHealth;
@@ -37,7 +37,8 @@ pub struct NagoriRuntime {
     ai: Arc<dyn AiProvider>,
     ai_registry: Arc<AiActionRegistry>,
     permissions: Option<Arc<dyn PermissionChecker>>,
-    shutdown: Arc<Notify>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
     settings_tx: watch::Sender<AppSettings>,
     settings_rx: watch::Receiver<AppSettings>,
     socket_path: Arc<std::path::PathBuf>,
@@ -71,8 +72,11 @@ impl NagoriRuntime {
         &self.store
     }
 
-    pub fn shutdown_handle(&self) -> Arc<Notify> {
-        self.shutdown.clone()
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            tx: self.shutdown_tx.clone(),
+            rx: self.shutdown_rx.clone(),
+        }
     }
 
     /// Shared handle to the maintenance loop's health snapshot. The
@@ -272,7 +276,7 @@ impl NagoriRuntime {
                 }))
             }
             IpcRequest::Shutdown => {
-                self.shutdown.notify_waiters();
+                self.shutdown_handle().cancel();
                 Ok(IpcResponse::Ack)
             }
         }
@@ -661,6 +665,7 @@ impl NagoriRuntimeBuilder {
 
     pub fn build(self) -> NagoriRuntime {
         let (settings_tx, settings_rx) = watch::channel(AppSettings::default());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         NagoriRuntime {
             store: self.store,
             clipboard: self
@@ -670,12 +675,39 @@ impl NagoriRuntimeBuilder {
             ai: self.ai.unwrap_or_else(|| Arc::new(MockAiProvider)),
             ai_registry: Arc::new(AiActionRegistry::default()),
             permissions: self.permissions,
-            shutdown: Arc::new(Notify::new()),
+            shutdown_tx,
+            shutdown_rx,
             settings_tx,
             settings_rx,
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ShutdownHandle {
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
+}
+
+impl ShutdownHandle {
+    pub fn cancel(&self) {
+        let _ = self.tx.send_replace(true);
+    }
+
+    pub async fn cancelled(&mut self) {
+        if *self.rx.borrow_and_update() {
+            return;
+        }
+        loop {
+            if self.rx.changed().await.is_err() {
+                return;
+            }
+            if *self.rx.borrow_and_update() {
+                return;
+            }
         }
     }
 }
@@ -798,6 +830,26 @@ mod tests {
             .paste(paste)
             .build();
         (runtime, clipboard)
+    }
+
+    #[tokio::test]
+    async fn shutdown_ipc_is_observed_after_worker_starts_waiting() {
+        let (runtime, _) = runtime_with_memory_clipboard();
+        let mut shutdown = runtime.shutdown_handle();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            release_rx.await.expect("worker release should be sent");
+            shutdown.cancelled().await;
+        });
+
+        let response = runtime.handle_ipc(IpcRequest::Shutdown).await;
+        assert!(matches!(response, IpcResponse::Ack));
+
+        release_tx.send(()).expect("worker should still be alive");
+        tokio::time::timeout(std::time::Duration::from_millis(100), worker)
+            .await
+            .expect("shutdown should remain visible after the IPC request")
+            .expect("worker should not panic");
     }
 
     #[tokio::test]

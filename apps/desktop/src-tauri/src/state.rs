@@ -200,8 +200,8 @@ impl AppState {
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_window(window)
                 .with_search_cache(search_cache);
-            let shutdown = runtime.shutdown_handle();
-            let shutdown_signal = async move { shutdown.notified().await };
+            let mut shutdown = runtime.shutdown_handle();
+            let shutdown_signal = async move { shutdown.cancelled().await };
             if let Err(err) = capture
                 .run_polling_with_settings(
                     Duration::from_millis(500),
@@ -218,7 +218,7 @@ impl AppState {
         tauri::async_runtime::spawn(async move {
             let store = runtime.store().clone();
             let mut settings_rx = runtime.settings_subscribe();
-            let shutdown = runtime.shutdown_handle();
+            let mut shutdown = runtime.shutdown_handle();
             let maintenance =
                 MaintenanceService::new(store).with_search_cache(runtime.search_cache_handle());
             loop {
@@ -227,7 +227,7 @@ impl AppState {
                     tracing::warn!(error = %err, "maintenance_failed");
                 }
                 tokio::select! {
-                    () = shutdown.notified() => return,
+                    () = shutdown.cancelled() => return,
                     _ = settings_rx.changed() => {},
                     () = tokio::time::sleep(Duration::from_mins(30)) => {},
                 }

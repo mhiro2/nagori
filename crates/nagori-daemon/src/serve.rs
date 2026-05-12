@@ -10,10 +10,10 @@ use nagori_ipc::{
     AuthToken, accept_loop_with_shutdown, bind_unix, default_token_path, write_token_file,
 };
 use nagori_platform::{ClipboardReader, WindowBehavior};
-use tokio::{signal, sync::Notify};
+use tokio::signal;
 use tracing::{info, warn};
 
-use crate::{CaptureLoop, MaintenanceService, NagoriRuntime};
+use crate::{CaptureLoop, MaintenanceService, NagoriRuntime, ShutdownHandle};
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -92,7 +92,7 @@ fn default_token_path_local() -> PathBuf {
 async fn spawn_ipc_server(
     runtime: NagoriRuntime,
     config: &DaemonConfig,
-    shutdown: Arc<Notify>,
+    shutdown: ShutdownHandle,
 ) -> Result<tokio::task::JoinHandle<()>> {
     #[cfg(unix)]
     {
@@ -101,6 +101,7 @@ async fn spawn_ipc_server(
         write_token_file(&config.token_path, &token)?;
         let grace = config.shutdown_grace;
         Ok(tokio::spawn(async move {
+            let mut shutdown = shutdown;
             let result = accept_loop_with_shutdown(
                 listener,
                 token,
@@ -108,7 +109,7 @@ async fn spawn_ipc_server(
                     let runtime = runtime.clone();
                     async move { runtime.handle_ipc(request).await }
                 },
-                async move { shutdown.notified().await },
+                async move { shutdown.cancelled().await },
                 grace,
             )
             .await;
@@ -132,6 +133,7 @@ async fn spawn_ipc_server(
         write_token_file(&config.token_path, &token)?;
         let grace = config.shutdown_grace;
         Ok(tokio::spawn(async move {
+            let mut shutdown = shutdown;
             let result = accept_loop_pipe_with_shutdown(
                 &pipe_name,
                 first_instance,
@@ -140,7 +142,7 @@ async fn spawn_ipc_server(
                     let runtime = runtime.clone();
                     async move { runtime.handle_ipc(request).await }
                 },
-                async move { shutdown.notified().await },
+                async move { shutdown.cancelled().await },
                 grace,
             )
             .await;
@@ -192,7 +194,7 @@ where
 
     let capture_handle = {
         let store = store.clone();
-        let shutdown = shutdown.clone();
+        let mut shutdown = shutdown.clone();
         let interval = config.capture_interval;
         let settings_rx = settings_rx.clone();
         let window = window.clone();
@@ -208,7 +210,7 @@ where
             if let Some(w) = window {
                 capture = capture.with_window(w);
             }
-            let shutdown_signal = async move { shutdown.notified().await };
+            let shutdown_signal = async move { shutdown.cancelled().await };
             if let Err(err) = capture
                 .run_polling_with_settings(interval, settings_rx, shutdown_signal)
                 .await
@@ -220,7 +222,7 @@ where
 
     let maintenance_handle = {
         let store = store.clone();
-        let shutdown = shutdown.clone();
+        let mut shutdown = shutdown.clone();
         let interval = config.maintenance_interval;
         let mut settings_rx = settings_rx.clone();
         let search_cache = runtime.search_cache_handle();
@@ -241,7 +243,7 @@ where
                     }
                 }
                 tokio::select! {
-                    () = shutdown.notified() => return,
+                    () = shutdown.cancelled() => return,
                     changed = settings_rx.changed() => {
                         if changed.is_err() {
                             return;
@@ -262,13 +264,14 @@ where
 
     info!(socket = %config.socket_path.display(), "daemon_started");
 
+    let mut shutdown_wait = shutdown.clone();
     tokio::select! {
-        () = shutdown.notified() => {},
+        () = shutdown_wait.cancelled() => {},
         result = signal::ctrl_c() => {
             if let Err(err) = result {
                 warn!(error = %err, "ctrl_c_failed");
             }
-            shutdown.notify_waiters();
+            shutdown.cancel();
         }
     }
 

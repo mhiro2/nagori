@@ -8,7 +8,7 @@ pub mod serve;
 pub use capture_loop::CaptureLoop;
 pub use health::{MAINTENANCE_DEGRADED_THRESHOLD, MaintenanceHealth};
 pub use maintenance::{MaintenanceReport, MaintenanceService};
-pub use runtime::{NagoriRuntime, NagoriRuntimeBuilder};
+pub use runtime::{NagoriRuntime, NagoriRuntimeBuilder, ShutdownHandle};
 pub use search_cache::{
     CACHEABLE_QUERY_LEN, CacheKey, CacheLookup, DEFAULT_CACHE_CAPACITY, RecentSearchCache,
     SharedSearchCache, new_shared_cache,
