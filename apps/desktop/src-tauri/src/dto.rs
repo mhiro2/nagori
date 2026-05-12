@@ -433,6 +433,8 @@ impl From<AiProviderSettingDto> for AiProviderSetting {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LocaleDto {
+    #[serde(rename = "system")]
+    System,
     #[serde(rename = "en")]
     En,
     #[serde(rename = "ja")]
@@ -441,15 +443,28 @@ pub enum LocaleDto {
     Ko,
     #[serde(rename = "zh-Hans")]
     ZhHans,
+    #[serde(rename = "zh-Hant")]
+    ZhHant,
+    #[serde(rename = "de")]
+    De,
+    #[serde(rename = "fr")]
+    Fr,
+    #[serde(rename = "es")]
+    Es,
 }
 
 impl From<Locale> for LocaleDto {
     fn from(value: Locale) -> Self {
         match value {
+            Locale::System => Self::System,
             Locale::En => Self::En,
             Locale::Ja => Self::Ja,
             Locale::Ko => Self::Ko,
             Locale::ZhHans => Self::ZhHans,
+            Locale::ZhHant => Self::ZhHant,
+            Locale::De => Self::De,
+            Locale::Fr => Self::Fr,
+            Locale::Es => Self::Es,
         }
     }
 }
@@ -457,10 +472,15 @@ impl From<Locale> for LocaleDto {
 impl From<LocaleDto> for Locale {
     fn from(value: LocaleDto) -> Self {
         match value {
+            LocaleDto::System => Self::System,
             LocaleDto::En => Self::En,
             LocaleDto::Ja => Self::Ja,
             LocaleDto::Ko => Self::Ko,
             LocaleDto::ZhHans => Self::ZhHans,
+            LocaleDto::ZhHant => Self::ZhHant,
+            LocaleDto::De => Self::De,
+            LocaleDto::Fr => Self::Fr,
+            LocaleDto::Es => Self::Es,
         }
     }
 }
@@ -979,10 +999,36 @@ mod tests {
         let json = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(json["secretHandling"], json!("store_redacted"));
         assert_eq!(json["aiProvider"], json!("none"));
-        assert_eq!(json["locale"], json!("en"));
+        assert_eq!(json["locale"], json!("system"));
         assert_eq!(json["pasteFormatDefault"], json!("preserve"));
         assert_eq!(json["recentOrder"], json!("by_recency"));
         assert_eq!(json["appearance"], json!("system"));
+    }
+
+    #[test]
+    fn locale_dto_wire_tag_is_stable_for_every_variant() {
+        // The frontend parses the locale tag verbatim — a typo in a serde
+        // rename would silently drop a locale even though the type-level
+        // `From` arms still match. Pin the wire format for every variant.
+        let cases: &[(nagori_core::Locale, &str)] = &[
+            (nagori_core::Locale::System, "system"),
+            (nagori_core::Locale::En, "en"),
+            (nagori_core::Locale::Ja, "ja"),
+            (nagori_core::Locale::Ko, "ko"),
+            (nagori_core::Locale::ZhHans, "zh-Hans"),
+            (nagori_core::Locale::ZhHant, "zh-Hant"),
+            (nagori_core::Locale::De, "de"),
+            (nagori_core::Locale::Fr, "fr"),
+            (nagori_core::Locale::Es, "es"),
+        ];
+        for (locale, expected) in cases {
+            let dto: LocaleDto = (*locale).into();
+            let serialized = serde_json::to_value(dto).expect("serialize");
+            assert_eq!(serialized, json!(expected), "wire tag for {locale:?}");
+            let parsed: LocaleDto = serde_json::from_value(json!(expected)).expect("deserialize");
+            let round_tripped: nagori_core::Locale = parsed.into();
+            assert_eq!(round_tripped, *locale, "round-trip for {locale:?}");
+        }
     }
 
     #[test]

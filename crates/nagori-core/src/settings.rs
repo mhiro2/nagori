@@ -219,12 +219,21 @@ pub enum SecretHandling {
 /// User-facing language for the desktop UI. Backend log/audit messages and
 /// the CLI surface are English-only; this only affects the `WebView` strings.
 ///
-/// Wire format uses BCP-47-ish tags: `en`, `ja`, `ko`, `zh-Hans`. The casing of
-/// `zh-Hans` is preserved because it is the canonical script subtag and the
-/// frontend negotiation maps any `zh-*` regional preference onto it.
+/// Wire format uses BCP-47-ish tags plus the special sentinel `system`. The
+/// casing of `zh-Hans` / `zh-Hant` is preserved because the script subtag is
+/// the canonical disambiguator for Simplified vs. Traditional Chinese, and
+/// the frontend negotiation routes any `zh-*` regional preference onto one of
+/// those two based on the `Hant` script.
+///
+/// `System` is the default. It is the persisted *preference*, not a
+/// dictionary key — the frontend resolves it to a concrete locale on each
+/// load by reading the OS / `WebView` language preferences, so changing the
+/// OS language follows through to the UI without touching settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Locale {
     #[default]
+    #[serde(rename = "system")]
+    System,
     #[serde(rename = "en")]
     En,
     #[serde(rename = "ja")]
@@ -233,6 +242,14 @@ pub enum Locale {
     Ko,
     #[serde(rename = "zh-Hans")]
     ZhHans,
+    #[serde(rename = "zh-Hant")]
+    ZhHant,
+    #[serde(rename = "de")]
+    De,
+    #[serde(rename = "fr")]
+    Fr,
+    #[serde(rename = "es")]
+    Es,
 }
 
 impl AppSettings {
