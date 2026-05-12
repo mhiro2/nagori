@@ -10,7 +10,7 @@ use nagori_ipc::{
     AuthToken, accept_loop_with_shutdown, bind_unix, default_token_path, write_token_file,
 };
 use nagori_platform::{ClipboardReader, WindowBehavior};
-use tokio::signal;
+use tokio::{signal, sync::watch};
 use tracing::{info, warn};
 
 use crate::{CaptureLoop, MaintenanceService, NagoriRuntime, ShutdownHandle};
@@ -93,15 +93,17 @@ async fn spawn_ipc_server(
     runtime: NagoriRuntime,
     config: &DaemonConfig,
     shutdown: ShutdownHandle,
-) -> Result<tokio::task::JoinHandle<()>> {
+) -> Result<IpcServerTask> {
+    let (stop_tx, stop_rx) = watch::channel(false);
     #[cfg(unix)]
     {
         let listener = bind_unix(&config.socket_path).await?;
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
         let grace = config.shutdown_grace;
-        Ok(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
+            let mut stop_rx = stop_rx;
             let result = accept_loop_with_shutdown(
                 listener,
                 token,
@@ -109,14 +111,20 @@ async fn spawn_ipc_server(
                     let runtime = runtime.clone();
                     async move { runtime.handle_ipc(request).await }
                 },
-                async move { shutdown.cancelled().await },
+                async move {
+                    tokio::select! {
+                        () = shutdown.cancelled() => {},
+                        () = ipc_stop_requested(&mut stop_rx) => {},
+                    }
+                },
                 grace,
             )
             .await;
             if let Err(err) = result {
                 warn!(error = %err, "ipc_server_terminated");
             }
-        }))
+        });
+        Ok(IpcServerTask { handle, stop_tx })
     }
     #[cfg(windows)]
     {
@@ -132,8 +140,9 @@ async fn spawn_ipc_server(
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
         let grace = config.shutdown_grace;
-        Ok(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
+            let mut stop_rx = stop_rx;
             let result = accept_loop_pipe_with_shutdown(
                 &pipe_name,
                 first_instance,
@@ -142,22 +151,137 @@ async fn spawn_ipc_server(
                     let runtime = runtime.clone();
                     async move { runtime.handle_ipc(request).await }
                 },
-                async move { shutdown.cancelled().await },
+                async move {
+                    tokio::select! {
+                        () = shutdown.cancelled() => {},
+                        () = ipc_stop_requested(&mut stop_rx) => {},
+                    }
+                },
                 grace,
             )
             .await;
             if let Err(err) = result {
                 warn!(error = %err, "ipc_server_terminated");
             }
-        }))
+        });
+        Ok(IpcServerTask { handle, stop_tx })
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (runtime, config, shutdown);
+        let _ = (runtime, config, shutdown, stop_tx, stop_rx);
         Err(AppError::Unsupported(
             "IPC requires a Unix-like or Windows platform".to_owned(),
         ))
     }
+}
+
+struct IpcServerTask {
+    handle: tokio::task::JoinHandle<()>,
+    stop_tx: watch::Sender<bool>,
+}
+
+impl IpcServerTask {
+    fn request_stop(&self) {
+        let _ = self.stop_tx.send_replace(true);
+    }
+}
+
+async fn ipc_stop_requested(stop_rx: &mut watch::Receiver<bool>) {
+    if *stop_rx.borrow_and_update() {
+        return;
+    }
+    loop {
+        if stop_rx.changed().await.is_err() {
+            return;
+        }
+        if *stop_rx.borrow_and_update() {
+            return;
+        }
+    }
+}
+
+async fn supervise_ipc_server(
+    runtime: NagoriRuntime,
+    config: DaemonConfig,
+    mut settings_rx: watch::Receiver<nagori_core::AppSettings>,
+    mut shutdown: ShutdownHandle,
+    mut server: Option<IpcServerTask>,
+) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => {
+                if let Some(server) = server.take() {
+                    stop_ipc_server(server, &config).await;
+                }
+                return;
+            }
+            changed = settings_rx.changed() => {
+                if changed.is_err() {
+                    if let Some(server) = server.take() {
+                        stop_ipc_server(server, &config).await;
+                    }
+                    return;
+                }
+                let enabled = settings_rx.borrow().cli_ipc_enabled;
+                match (enabled, server.is_some()) {
+                    (true, false) => match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
+                        Ok(next) => {
+                            info!(socket = %config.socket_path.display(), "ipc_server_started");
+                            server = Some(next);
+                        }
+                        Err(err) => warn!(error = %err, "ipc_server_start_failed"),
+                    },
+                    (false, true) => {
+                        info!("ipc_disabled_by_settings");
+                        if let Some(current) = server.take() {
+                            stop_ipc_server(current, &config).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn stop_ipc_server(server: IpcServerTask, config: &DaemonConfig) {
+    server.request_stop();
+    drain_one(
+        "ipc_serve",
+        server.handle,
+        config.shutdown_grace + Duration::from_secs(1),
+    )
+    .await;
+    cleanup_runtime_files(config);
+}
+
+fn spawn_ipc_supervisor(
+    runtime: NagoriRuntime,
+    config: DaemonConfig,
+    settings_rx: watch::Receiver<nagori_core::AppSettings>,
+    shutdown: ShutdownHandle,
+    initial_server: Option<IpcServerTask>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        supervise_ipc_server(runtime, config, settings_rx, shutdown, initial_server).await;
+    })
+}
+
+fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
+    // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
+    // not a filesystem path. Only ensure the parent directory exists when
+    // we actually need a filesystem-resident IPC endpoint.
+    #[cfg(unix)]
+    if let Some(parent) = config.socket_path.parent() {
+        nagori_storage::ensure_private_directory(parent)?;
+    }
+    // The token file is always filesystem-backed (Windows daemon writes to
+    // `%LOCALAPPDATA%\nagori\nagori.token`), so ensure that directory exists
+    // on every platform.
+    if let Some(parent) = config.token_path.parent() {
+        nagori_storage::ensure_private_directory(parent)?;
+    }
+    Ok(())
 }
 
 pub async fn run_daemon<R>(
@@ -177,20 +301,7 @@ where
     // re-enable a more permissive policy.
     runtime.refresh_settings_from_store().await?;
     let settings_rx = runtime.settings_subscribe();
-
-    // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
-    // not a filesystem path. Only ensure the parent directory exists when
-    // we actually need a filesystem-resident IPC endpoint.
-    #[cfg(unix)]
-    if let Some(parent) = config.socket_path.parent() {
-        nagori_storage::ensure_private_directory(parent)?;
-    }
-    // The token file is always filesystem-backed (Windows daemon writes to
-    // `%LOCALAPPDATA%\nagori\nagori.token`), so ensure that directory exists
-    // on every platform.
-    if let Some(parent) = config.token_path.parent() {
-        nagori_storage::ensure_private_directory(parent)?;
-    }
+    ensure_ipc_runtime_dirs(&config)?;
 
     let capture_handle = {
         let store = store.clone();
@@ -255,12 +366,19 @@ where
         })
     };
 
-    let serve_handle = if runtime.current_settings().cli_ipc_enabled {
+    let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
         Some(spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await?)
     } else {
         info!("ipc_disabled_by_settings");
         None
     };
+    let serve_handle = spawn_ipc_supervisor(
+        runtime.clone(),
+        config.clone(),
+        settings_rx.clone(),
+        shutdown.clone(),
+        initial_ipc_server,
+    );
 
     info!(socket = %config.socket_path.display(), "daemon_started");
 
@@ -289,10 +407,10 @@ where
 
 /// Three-stage graceful shutdown:
 ///
-/// 1. `accept_loop_with_shutdown` already saw the shutdown notify and
-///    dropped the listener, so this `serve_handle` await is just waiting
-///    for the in-flight drain + abort cleanup. The +1 s slack covers the
-///    abort acks `JoinSet::join_next` has to drain after the timeout.
+/// 1. The IPC supervisor observes the shutdown notify, asks the accept
+///    loop to stop, and waits for its in-flight drain + abort cleanup.
+///    The outer +2 s slack keeps the supervisor alive long enough to
+///    finish the inner +1 s IPC-server drain and remove runtime files.
 /// 2. Capture + maintenance loops read the same notify and exit between
 ///    ticks; we give them up to `grace` to finish the current iteration
 ///    so a partway-through DB write commits instead of being abandoned.
@@ -304,14 +422,17 @@ where
 ///    workers race the file removals below — the very class of bug the
 ///    grace timeout is supposed to bound.
 async fn drain_workers(
-    serve_handle: Option<tokio::task::JoinHandle<()>>,
+    serve_handle: tokio::task::JoinHandle<()>,
     capture_handle: tokio::task::JoinHandle<()>,
     maintenance_handle: tokio::task::JoinHandle<()>,
     grace: Duration,
 ) {
-    if let Some(handle) = serve_handle {
-        drain_one("ipc_serve", handle, grace + Duration::from_secs(1)).await;
-    }
+    drain_one(
+        "ipc_supervisor",
+        serve_handle,
+        grace + Duration::from_secs(2),
+    )
+    .await;
     tokio::join!(
         drain_one("capture", capture_handle, grace),
         drain_one("maintenance", maintenance_handle, grace),
@@ -358,5 +479,91 @@ fn cleanup_runtime_files(config: &DaemonConfig) {
         && let Err(err) = std::fs::remove_file(&config.token_path)
     {
         warn!(error = %err, path = %config.token_path.display(), "token_cleanup_failed");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use nagori_core::AppSettings;
+    use nagori_ipc::{IpcClient, IpcRequest, IpcResponse};
+    use nagori_storage::SqliteStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn settings_change_stops_existing_ipc_server() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = DaemonConfig {
+            socket_path: temp.path().join("nagori.sock"),
+            token_path: temp.path().join("nagori.token"),
+            shutdown_grace: Duration::from_millis(50),
+            ..DaemonConfig::default()
+        };
+        let runtime = NagoriRuntime::new(SqliteStore::open_memory().expect("memory store"));
+        let settings_rx = runtime.settings_subscribe();
+        let shutdown = runtime.shutdown_handle();
+        let initial_server = spawn_ipc_server(runtime.clone(), &config, shutdown.clone())
+            .await
+            .expect("IPC server should start");
+        let supervisor = tokio::spawn(supervise_ipc_server(
+            runtime.clone(),
+            config.clone(),
+            settings_rx,
+            shutdown.clone(),
+            Some(initial_server),
+        ));
+        let token = nagori_ipc::read_token_file(&config.token_path).expect("token file");
+        let client = IpcClient::new(config.socket_path.to_string_lossy().into_owned(), token)
+            .with_connect_timeout(Duration::from_millis(100))
+            .with_request_timeout(Duration::from_secs(1));
+
+        let health = client
+            .send(IpcRequest::Health)
+            .await
+            .expect("health before disable");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        runtime
+            .save_settings(AppSettings {
+                cli_ipc_enabled: false,
+                ..AppSettings::default()
+            })
+            .await
+            .expect("save settings");
+        wait_until(Duration::from_secs(1), || !config.socket_path.exists())
+            .await
+            .expect("socket should be removed after disable");
+        assert!(
+            !config.token_path.exists(),
+            "token file should be removed after disable",
+        );
+
+        let err = client
+            .send(IpcRequest::Health)
+            .await
+            .expect_err("disabled IPC should refuse new connections");
+        assert!(matches!(err, nagori_core::AppError::Platform(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
+    }
+
+    async fn wait_until(
+        timeout: Duration,
+        mut predicate: impl FnMut() -> bool,
+    ) -> std::result::Result<(), ()> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(())
     }
 }

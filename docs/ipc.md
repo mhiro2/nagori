@@ -104,6 +104,11 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 `recoverable=false` is set for `not_found`, `policy_error`, `unauthorized`,
 and `response_too_large`; everything else is treated as transient by the CLI.
 
+When `cli_ipc_enabled` is switched off, the daemon drains the active IPC
+server and removes the socket/token files. While disabled, only `Health`,
+`Doctor`, and `Shutdown` are accepted by the runtime; other requests return
+`permission_error` if they reach an already-authenticated in-flight handler.
+
 ## Example session
 
 Each connection carries exactly one request and one response — the

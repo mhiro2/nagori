@@ -161,6 +161,11 @@ impl NagoriRuntime {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_ipc_result(&self, request: IpcRequest) -> Result<IpcResponse> {
+        if !self.current_settings().cli_ipc_enabled && !is_ipc_control_request(&request) {
+            return Err(AppError::Permission(
+                "CLI IPC is disabled in settings".to_owned(),
+            ));
+        }
         match request {
             IpcRequest::Search(SearchRequest { query, limit }) => {
                 let results = self
@@ -712,6 +717,13 @@ impl ShutdownHandle {
     }
 }
 
+const fn is_ipc_control_request(request: &IpcRequest) -> bool {
+    matches!(
+        request,
+        IpcRequest::Doctor | IpcRequest::Health | IpcRequest::Shutdown
+    )
+}
+
 const fn error_code(err: &AppError) -> &'static str {
     match err {
         AppError::Storage(_) => "storage_error",
@@ -1074,6 +1086,34 @@ mod tests {
             .await
             .expect("settings should persist");
         assert_eq!(persisted, settings);
+    }
+
+    #[tokio::test]
+    async fn disabled_cli_ipc_rejects_non_control_requests() {
+        let (runtime, _) = runtime_with_memory_clipboard();
+        runtime
+            .save_settings(AppSettings {
+                cli_ipc_enabled: false,
+                ..AppSettings::default()
+            })
+            .await
+            .expect("save settings");
+
+        let rejected = runtime
+            .handle_ipc(IpcRequest::AddEntry(AddEntryRequest {
+                text: "blocked".to_owned(),
+            }))
+            .await;
+        let IpcResponse::Error(err) = rejected else {
+            panic!("expected disabled IPC to reject writes");
+        };
+        assert_eq!(err.code, "permission_error");
+
+        let health = runtime.handle_ipc(IpcRequest::Health).await;
+        assert!(
+            matches!(health, IpcResponse::Health(_)),
+            "health must remain available while IPC is disabled",
+        );
     }
 
     #[tokio::test]

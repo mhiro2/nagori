@@ -655,6 +655,14 @@ sanitise to `a_b`) would race for the same token file. The server
 rejects envelopes whose token does not match via constant-time
 comparison.
 
+`cli_ipc_enabled` is enforced live, not only at daemon startup. The
+daemon supervises the IPC server from the settings watch channel: enabling
+the toggle binds the endpoint and writes a fresh token, while disabling it
+drains the accept loop and removes the socket/token files. The runtime
+also rejects non-control IPC requests while the toggle is off; `Health`,
+`Doctor`, and `Shutdown` remain available to support diagnostics and
+orderly exit.
+
 **Request / response types** (`nagori-ipc::protocol`):
 
 ```rust
