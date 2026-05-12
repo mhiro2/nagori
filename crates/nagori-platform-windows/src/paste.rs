@@ -40,6 +40,7 @@ impl PasteController for WindowsPasteController {
 
 #[cfg(windows)]
 fn synthesize_ctrl_v() -> std::result::Result<(), String> {
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VK_CONTROL,
@@ -86,12 +87,31 @@ fn synthesize_ctrl_v() -> std::result::Result<(), String> {
     if sent as usize == inputs.len() {
         Ok(())
     } else {
-        // `GetLastError` would tell us why some events were rejected
-        // (commonly `ERROR_ACCESS_DENIED` when the target is elevated),
-        // but the daemon's error model only carries a `String` here.
+        let last_error = unsafe { GetLastError() };
+        release_ctrl_v(input_size, key_input);
         Err(format!(
-            "SendInput injected {sent} of {} events",
+            "SendInput injected {sent} of {} events; GetLastError={last_error}",
             inputs.len()
         ))
     }
+}
+
+#[cfg(windows)]
+fn release_ctrl_v(
+    input_size: i32,
+    key_input: impl Fn(
+        u16,
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+    ) -> windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT,
+) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, SendInput, VK_CONTROL};
+
+    const VK_V: u16 = b'V' as u16;
+    let releases = [
+        key_input(VK_V, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let release_count = u32::try_from(releases.len()).expect("INPUT batch length fits in u32");
+    // SAFETY: `releases` is a fixed-size array of valid key-up INPUT values.
+    let _ = unsafe { SendInput(release_count, releases.as_ptr(), input_size) };
 }
