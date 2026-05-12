@@ -9,12 +9,15 @@ use nagori_core::{
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardType, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
-    NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeTIFF,
+    NSPasteboard, NSPasteboardItem, NSPasteboardType, NSPasteboardTypeFileURL,
+    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeTIFF,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::NSData;
+use objc2_foundation::{NSArray, NSData};
 use time::OffsetDateTime;
+
+#[cfg(target_os = "macos")]
+const MAX_FILE_URL_ITEMS: usize = 4096;
 
 /// macOS clipboard adapter.
 ///
@@ -64,7 +67,7 @@ impl ClipboardReader for MacosClipboard {
             let mut representations = Vec::new();
 
             #[cfg(target_os = "macos")]
-            collect_macos_extras(&mut representations);
+            let _ = collect_macos_extras(&mut representations, None);
 
             if let Some(text) = plain {
                 representations.push(ClipboardRepresentation {
@@ -110,15 +113,12 @@ impl ClipboardReader for MacosClipboard {
             // already paged into our address space, but skipping `to_vec()`
             // still avoids the second copy into a Rust `Vec<u8>` and lets
             // NSData drop on scope exit, freeing both copies promptly.
-            // NSString's `length()` is in UTF-16 code units; UTF-8 byte
-            // length is always >= UTF-16 unit count, so `length() >
-            // max_bytes` is a sound (one-sided) reject gate — it never
-            // false-rejects a string that would have fit. The converse
-            // does *not* hold: a string with `length() <= max_bytes` can
-            // still exceed `max_bytes` after UTF-8 encoding (e.g. CJK at
-            // ~3 bytes/codepoint vs. 2 bytes/UTF-16 unit). Phase 1 is
-            // therefore a cheap pre-filter for the obvious outliers, not
-            // a precise admission check.
+            // NSString::len() reports UTF-8 bytes without materialising a
+            // Rust String. Phase 1 is still only an admission pre-filter:
+            // it catches oversized single reps and file URL aggregates
+            // before we allocate Rust payload buffers, while the capture
+            // loop's post-load check remains authoritative for the final
+            // ClipboardEntry payload.
             #[cfg(target_os = "macos")]
             if let Some(observed) = oversized_payload(max_bytes) {
                 drop(guard);
@@ -146,7 +146,14 @@ impl ClipboardReader for MacosClipboard {
             let mut representations = Vec::new();
 
             #[cfg(target_os = "macos")]
-            collect_macos_extras(&mut representations);
+            if let Some(observed) = collect_macos_extras(&mut representations, Some(max_bytes)) {
+                drop(guard);
+                return Ok(CapturedSnapshot::Oversized {
+                    sequence: pasteboard_sequence(),
+                    observed_bytes: observed,
+                    limit: max_bytes,
+                });
+            }
 
             if let Some(text) = plain {
                 representations.push(ClipboardRepresentation {
@@ -293,7 +300,10 @@ const fn pasteboard_sequence() -> ClipboardSequence {
 }
 
 #[cfg(target_os = "macos")]
-fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
+fn collect_macos_extras(
+    out: &mut Vec<ClipboardRepresentation>,
+    max_file_url_bytes: Option<usize>,
+) -> Option<usize> {
     // Wrap the AppKit reads in an explicit autorelease pool. AppKit's
     // `dataForType` / `stringForType` return autoreleased temporaries; the
     // capture loop runs on a tokio blocking-pool thread that has no implicit
@@ -310,15 +320,10 @@ fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
             // File URLs come through per-pasteboard-item; the pasteboard-level
             // accessors only return the first one.
             if let Some(items) = pb.pasteboardItems() {
-                let mut paths = Vec::new();
-                for item in &items {
-                    if let Some(string) = item.stringForType(NSPasteboardTypeFileURL) {
-                        let raw = string.to_string();
-                        if let Some(path) = file_url_to_path(&raw) {
-                            paths.push(path);
-                        }
-                    }
-                }
+                let paths = match collect_file_url_paths(&items, max_file_url_bytes) {
+                    FileUrlPaths::Captured(paths) => paths,
+                    FileUrlPaths::Oversized(observed) => return Some(observed),
+                };
                 if !paths.is_empty() {
                     out.push(ClipboardRepresentation {
                         mime_type: "text/uri-list".to_owned(),
@@ -361,17 +366,59 @@ fn collect_macos_extras(out: &mut Vec<ClipboardRepresentation>) {
                 });
             }
         }
-    });
+        None
+    })
+}
+
+#[cfg(target_os = "macos")]
+enum FileUrlPaths {
+    Captured(Vec<String>),
+    Oversized(usize),
+}
+
+#[cfg(target_os = "macos")]
+fn collect_file_url_paths(
+    items: &NSArray<NSPasteboardItem>,
+    max_bytes: Option<usize>,
+) -> FileUrlPaths {
+    let mut paths = Vec::new();
+    let mut observed_bytes = 0_usize;
+    let mut file_url_count = 0_usize;
+
+    for item in items {
+        // SAFETY: `NSPasteboardTypeFileURL` is a static AppKit pasteboard type
+        // constant with framework lifetime.
+        let Some(string) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else {
+            continue;
+        };
+        file_url_count = file_url_count.saturating_add(1);
+        observed_bytes = observed_bytes.saturating_add(string.len());
+
+        if let Some(limit) = max_bytes {
+            if file_url_count > MAX_FILE_URL_ITEMS {
+                return FileUrlPaths::Oversized(observed_bytes.max(limit_exceeded_bytes(limit)));
+            }
+            if observed_bytes > limit {
+                return FileUrlPaths::Oversized(observed_bytes);
+            }
+        }
+
+        let raw = string.to_string();
+        if let Some(path) = file_url_to_path(&raw) {
+            paths.push(path);
+        }
+    }
+
+    FileUrlPaths::Captured(paths)
 }
 
 /// Probe `NSPasteboard` for any single representation whose byte length
 /// exceeds `max_bytes`, returning the observed length on first hit.
 ///
 /// `NSData::length` is constant-time and avoids the `to_vec()` copy that
-/// `ns_data_to_vec` would otherwise perform. `NSString::length` returns
-/// UTF-16 code units; UTF-8 byte length is always >= UTF-16 unit count
-/// (every non-empty UTF-16 unit maps to >= 1 UTF-8 byte), so comparing
-/// `length() > max_bytes` cannot reject a string that would actually fit.
+/// `ns_data_to_vec` would otherwise perform. `NSString::len` reports exact
+/// UTF-8 byte length without materialising a Rust `String`, so text and file
+/// URL probes can be compared directly against `max_bytes`.
 #[cfg(target_os = "macos")]
 fn oversized_payload(max_bytes: usize) -> Option<usize> {
     // Same rationale as `collect_macos_extras`: drain the AppKit
@@ -379,12 +426,17 @@ fn oversized_payload(max_bytes: usize) -> Option<usize> {
     // does not retain pasteboard data past return.
     objc2::rc::autoreleasepool(|_pool| {
         // SAFETY: AppKit FFI on the shared pasteboard. All getters return
-        // optional retained references and we only read `.length()` on the
-        // returned objects, which has no observable side effects and does not
-        // require holding the pasteboard lock beyond the call itself.
+        // optional retained references and we only read lengths on the
+        // returned objects, which has no observable side effects and does
+        // not require holding the pasteboard lock beyond the call itself.
         unsafe {
             let pb = NSPasteboard::generalPasteboard();
 
+            if let Some(items) = pb.pasteboardItems()
+                && let Some(observed) = oversized_file_urls(&items, max_bytes)
+            {
+                return Some(observed);
+            }
             if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
                 && data.length() > max_bytes
             {
@@ -396,23 +448,53 @@ fn oversized_payload(max_bytes: usize) -> Option<usize> {
                 return Some(data.length());
             }
             if let Some(string) = pb.stringForType(NSPasteboardTypeHTML)
-                && string.length() > max_bytes
+                && string.len() > max_bytes
             {
-                return Some(string.length());
+                return Some(string.len());
             }
             if let Some(string) = pb.stringForType(NSPasteboardTypeRTF)
-                && string.length() > max_bytes
+                && string.len() > max_bytes
             {
-                return Some(string.length());
+                return Some(string.len());
             }
             if let Some(string) = pb.stringForType(objc2_app_kit::NSPasteboardTypeString)
-                && string.length() > max_bytes
+                && string.len() > max_bytes
             {
-                return Some(string.length());
+                return Some(string.len());
             }
         }
         None
     })
+}
+
+#[cfg(target_os = "macos")]
+fn oversized_file_urls(items: &NSArray<NSPasteboardItem>, max_bytes: usize) -> Option<usize> {
+    let mut observed_bytes = 0_usize;
+    let mut file_url_count = 0_usize;
+
+    for item in items {
+        // SAFETY: `NSPasteboardTypeFileURL` is a static AppKit pasteboard type
+        // constant with framework lifetime.
+        let Some(string) = item.stringForType(unsafe { NSPasteboardTypeFileURL }) else {
+            continue;
+        };
+        file_url_count = file_url_count.saturating_add(1);
+        observed_bytes = observed_bytes.saturating_add(string.len());
+
+        if file_url_count > MAX_FILE_URL_ITEMS {
+            return Some(observed_bytes.max(limit_exceeded_bytes(max_bytes)));
+        }
+        if observed_bytes > max_bytes {
+            return Some(observed_bytes);
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+const fn limit_exceeded_bytes(limit: usize) -> usize {
+    limit.saturating_add(1)
 }
 
 #[cfg(target_os = "macos")]
@@ -448,6 +530,7 @@ fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
 mod tests {
     use super::*;
     use nagori_core::{EntryFactory, ImageContent, PayloadRef};
+    use objc2_foundation::{NSArray, NSString};
 
     /// Smallest valid 1x1 transparent PNG; same fixture used by the
     /// `scripts/e2e-macos.sh` capture step.
@@ -490,6 +573,21 @@ mod tests {
         )
     }
 
+    fn file_url_items(urls: &[String]) -> objc2::rc::Retained<NSArray<NSPasteboardItem>> {
+        let items = urls
+            .iter()
+            .map(|url| {
+                let item = NSPasteboardItem::new();
+                let value = NSString::from_str(url);
+                // SAFETY: `NSPasteboardTypeFileURL` is a static AppKit
+                // pasteboard type constant with framework lifetime.
+                assert!(item.setString_forType(&value, unsafe { NSPasteboardTypeFileURL }));
+                item
+            })
+            .collect::<Vec<_>>();
+        NSArray::from_retained_slice(&items)
+    }
+
     fn snapshot_bytes(snapshot: &ClipboardSnapshot, mime: &str) -> Option<Vec<u8>> {
         snapshot
             .representations
@@ -520,7 +618,15 @@ mod tests {
     /// thread pool race them on the singleton `NSPasteboard`.
     #[tokio::test]
     async fn write_entry_round_trips_image_and_text() {
-        let clipboard = MacosClipboard::new().expect("init MacosClipboard");
+        let clipboard = match MacosClipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(AppError::Platform(message))
+                if message.contains("selected clipboard is not supported") =>
+            {
+                return;
+            }
+            Err(err) => panic!("init MacosClipboard: {err:?}"),
+        };
 
         let png_entry = image_entry(TINY_PNG.to_vec(), "image/png");
         clipboard
@@ -584,5 +690,61 @@ mod tests {
             matches!(err, AppError::Unsupported(_)),
             "expected AppError::Unsupported for image/webp, got {err:?}"
         );
+    }
+
+    #[test]
+    fn file_url_paths_are_captured_under_limits() {
+        let urls = vec!["file:///tmp/nagori%20one".to_owned()];
+        let items = file_url_items(&urls);
+
+        let FileUrlPaths::Captured(paths) = collect_file_url_paths(&items, Some(1024)) else {
+            panic!("file URL under the byte and count limits must be captured");
+        };
+
+        assert_eq!(paths, vec!["/tmp/nagori one"]);
+        assert_eq!(oversized_file_urls(&items, 1024), None);
+    }
+
+    #[test]
+    fn file_url_probe_rejects_total_utf8_bytes_before_path_allocation() {
+        let urls = vec![
+            "file:///tmp/nagori-alpha".to_owned(),
+            "file:///tmp/nagori-beta".to_owned(),
+        ];
+        let items = file_url_items(&urls);
+        let limit = urls[0].len();
+
+        let Some(observed) = oversized_file_urls(&items, limit) else {
+            panic!("aggregate file URL bytes above the limit must be oversized");
+        };
+        assert!(observed > limit);
+
+        let FileUrlPaths::Oversized(collected_observed) =
+            collect_file_url_paths(&items, Some(limit))
+        else {
+            panic!("bounded file URL collection must stop before building a full path list");
+        };
+        assert_eq!(collected_observed, observed);
+    }
+
+    #[test]
+    fn file_url_probe_rejects_too_many_items() {
+        let urls = (0..=MAX_FILE_URL_ITEMS)
+            .map(|index| format!("file:///tmp/nagori-{index}"))
+            .collect::<Vec<_>>();
+        let items = file_url_items(&urls);
+        let limit = 1024 * 1024;
+
+        let Some(observed) = oversized_file_urls(&items, limit) else {
+            panic!("file URL count above the item limit must be oversized");
+        };
+        assert!(observed > limit);
+
+        let FileUrlPaths::Oversized(collected_observed) =
+            collect_file_url_paths(&items, Some(limit))
+        else {
+            panic!("bounded file URL collection must reject excessive item counts");
+        };
+        assert_eq!(collected_observed, observed);
     }
 }
