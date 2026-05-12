@@ -266,10 +266,15 @@ export const ja: Messages = {
     unsupported: 'このプラットフォームでは未対応です。',
   },
   locales: {
+    system: 'システム（OS に追従）',
     en: 'English',
     ja: '日本語',
     ko: '한국어',
     'zh-Hans': '简体中文',
+    'zh-Hant': '繁體中文',
+    de: 'Deutsch',
+    fr: 'Français',
+    es: 'Español',
   },
   toasts: {
     autoPasteFailedTitle: '自動ペーストに失敗しました',

@@ -244,10 +244,15 @@ export type Messages = {
     unsupported: string;
   };
   locales: {
+    system: string;
     en: string;
     ja: string;
     ko: string;
     'zh-Hans': string;
+    'zh-Hant': string;
+    de: string;
+    fr: string;
+    es: string;
   };
   toasts: {
     autoPasteFailedTitle: string;
@@ -523,10 +528,15 @@ export const en: Messages = {
     unsupported: 'Unsupported on this platform.',
   },
   locales: {
+    system: 'System (follow OS)',
     en: 'English',
     ja: '日本語',
     ko: '한국어',
     'zh-Hans': '简体中文',
+    'zh-Hant': '繁體中文',
+    de: 'Deutsch',
+    fr: 'Français',
+    es: 'Español',
   },
   toasts: {
     autoPasteFailedTitle: 'Auto-paste failed',

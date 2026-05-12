@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_LOCALE,
+  DEFAULT_PREFERENCE,
+  LOCALE_PREFERENCES,
   SUPPORTED_LOCALES,
   dateLocaleTag,
   detectInitialLocale,
@@ -16,38 +18,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-});
-
-describe('setLocale', () => {
-  it('updates i18nState and reflects on document.documentElement.lang', () => {
-    setLocale('ja');
-    expect(i18nState.locale).toBe('ja');
-    expect(document.documentElement.lang).toBe('ja');
-  });
-
-  it('switches active dictionary returned by messages()', () => {
-    setLocale('ko');
-    expect(messages()).toBe(messages());
-    // The Korean dictionary differs from the English one for at least one
-    // user-visible string; that's enough to confirm we picked the right map.
-    setLocale('en');
-    const enTitle = messages().settings.title;
-    setLocale('ko');
-    expect(messages().settings.title).not.toBe(enTitle);
-  });
-});
-
-describe('dateLocaleTag', () => {
-  it('returns the BCP-47 tag for the active locale', () => {
-    setLocale('en');
-    expect(dateLocaleTag()).toBe('en-US');
-    setLocale('ja');
-    expect(dateLocaleTag()).toBe('ja-JP');
-    setLocale('ko');
-    expect(dateLocaleTag()).toBe('ko-KR');
-    setLocale('zh-Hans');
-    expect(dateLocaleTag()).toBe('zh-CN');
-  });
 });
 
 // navigator.languages is read-only in jsdom but `defineProperty` lets us
@@ -66,6 +36,62 @@ const stubLanguage = (lang: string): void => {
   });
 };
 
+describe('setLocale', () => {
+  it('updates i18nState and reflects on document.documentElement.lang', () => {
+    setLocale('ja');
+    expect(i18nState.locale).toBe('ja');
+    expect(i18nState.preference).toBe('ja');
+    expect(document.documentElement.lang).toBe('ja');
+  });
+
+  it('switches active dictionary returned by messages()', () => {
+    setLocale('ko');
+    expect(messages()).toBe(messages());
+    // The Korean dictionary differs from the English one for at least one
+    // user-visible string; that's enough to confirm we picked the right map.
+    setLocale('en');
+    const enTitle = messages().settings.title;
+    setLocale('ko');
+    expect(messages().settings.title).not.toBe(enTitle);
+  });
+
+  it('resolves the system preference via navigator.languages', () => {
+    stubLanguages(['de-DE']);
+    setLocale('system');
+    expect(i18nState.preference).toBe('system');
+    expect(i18nState.locale).toBe('de');
+    expect(document.documentElement.lang).toBe('de');
+  });
+
+  it('falls back to the default locale when system negotiation finds no match', () => {
+    stubLanguages(['xx-YY']);
+    setLocale('system');
+    expect(i18nState.preference).toBe('system');
+    expect(i18nState.locale).toBe(DEFAULT_LOCALE);
+  });
+});
+
+describe('dateLocaleTag', () => {
+  it('returns the BCP-47 tag for the active locale', () => {
+    setLocale('en');
+    expect(dateLocaleTag()).toBe('en-US');
+    setLocale('ja');
+    expect(dateLocaleTag()).toBe('ja-JP');
+    setLocale('ko');
+    expect(dateLocaleTag()).toBe('ko-KR');
+    setLocale('zh-Hans');
+    expect(dateLocaleTag()).toBe('zh-CN');
+    setLocale('zh-Hant');
+    expect(dateLocaleTag()).toBe('zh-TW');
+    setLocale('de');
+    expect(dateLocaleTag()).toBe('de-DE');
+    setLocale('fr');
+    expect(dateLocaleTag()).toBe('fr-FR');
+    setLocale('es');
+    expect(dateLocaleTag()).toBe('es-ES');
+  });
+});
+
 describe('detectInitialLocale', () => {
   it('matches en-* family to en', () => {
     stubLanguages(['en-GB', 'en-US']);
@@ -82,17 +108,39 @@ describe('detectInitialLocale', () => {
     expect(detectInitialLocale()).toBe('ko');
   });
 
-  it('folds zh-* (Hans, Hant, plain) to zh-Hans', () => {
+  it('matches de-* / fr-* / es-* to their language tag', () => {
+    stubLanguages(['de-AT']);
+    expect(detectInitialLocale()).toBe('de');
+    stubLanguages(['fr-CA']);
+    expect(detectInitialLocale()).toBe('fr');
+    stubLanguages(['es-MX']);
+    expect(detectInitialLocale()).toBe('es');
+  });
+
+  it('routes zh-Hant / zh-TW / zh-HK / zh-MO to zh-Hant', () => {
+    stubLanguages(['zh-Hant-TW']);
+    expect(detectInitialLocale()).toBe('zh-Hant');
+    stubLanguages(['zh-TW']);
+    expect(detectInitialLocale()).toBe('zh-Hant');
+    stubLanguages(['zh-HK']);
+    expect(detectInitialLocale()).toBe('zh-Hant');
+    stubLanguages(['zh-MO']);
+    expect(detectInitialLocale()).toBe('zh-Hant');
+  });
+
+  it('routes other zh-* (plain, Hans, CN, SG) to zh-Hans', () => {
     stubLanguages(['zh-CN']);
     expect(detectInitialLocale()).toBe('zh-Hans');
-    stubLanguages(['zh-Hant-TW']);
+    stubLanguages(['zh-Hans-CN']);
     expect(detectInitialLocale()).toBe('zh-Hans');
     stubLanguages(['zh']);
+    expect(detectInitialLocale()).toBe('zh-Hans');
+    stubLanguages(['zh-SG']);
     expect(detectInitialLocale()).toBe('zh-Hans');
   });
 
   it('skips unknown candidates and tries the next preference', () => {
-    stubLanguages(['de-DE', 'ja-JP', 'en-US']);
+    stubLanguages(['xx-YY', 'ja-JP', 'en-US']);
     expect(detectInitialLocale()).toBe('ja');
   });
 
@@ -103,13 +151,27 @@ describe('detectInitialLocale', () => {
   });
 
   it('returns the default locale when no preference matches', () => {
-    stubLanguages(['fr-FR', 'de-DE']);
+    stubLanguages(['xx-YY', 'yy-ZZ']);
     expect(detectInitialLocale()).toBe(DEFAULT_LOCALE);
   });
 });
 
-describe('SUPPORTED_LOCALES', () => {
-  it('lists the four locales we ship', () => {
-    expect(SUPPORTED_LOCALES.toSorted()).toEqual(['en', 'ja', 'ko', 'zh-Hans']);
+describe('SUPPORTED_LOCALES / LOCALE_PREFERENCES', () => {
+  it('lists every concrete dictionary we ship', () => {
+    expect(SUPPORTED_LOCALES.toSorted()).toEqual([
+      'de',
+      'en',
+      'es',
+      'fr',
+      'ja',
+      'ko',
+      'zh-Hans',
+      'zh-Hant',
+    ]);
+  });
+
+  it('exposes `system` as the first persistable preference', () => {
+    expect(LOCALE_PREFERENCES[0]).toBe('system');
+    expect(LOCALE_PREFERENCES).toContain(DEFAULT_PREFERENCE);
   });
 });

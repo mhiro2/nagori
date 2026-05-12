@@ -244,4 +244,44 @@ describe('SettingsView', () => {
       expect(container.textContent).toMatch(/パレット|戻る/);
     });
   });
+
+  it("round-trips the 'system' locale preference and renders the OS-resolved language", async () => {
+    vi.mocked(updateSettings).mockResolvedValue();
+    vi.mocked(getSettings).mockResolvedValue({ ...baseSettings(), locale: 'system' });
+    // Stub navigator.languages so setLocale('system') resolves to de.
+    const originalLanguages = Object.getOwnPropertyDescriptor(window.navigator, 'languages');
+    Object.defineProperty(window.navigator, 'languages', {
+      value: ['de-DE'],
+      configurable: true,
+    });
+
+    try {
+      const { findByText, container } = render(SettingsView);
+
+      // The Save button renders the German label, proving setLocale('system')
+      // routed through navigator.languages to the de dictionary.
+      expect(await findByText('Speichern')).toBeTruthy();
+
+      // The dropdown keeps the 'system' preference selected rather than
+      // collapsing into the concrete resolved locale.
+      const localeSelect = Array.from(container.querySelectorAll('select')).find((candidate) =>
+        Array.from(candidate.options).some((option) => option.value === 'system'),
+      );
+      expect(localeSelect).toBeTruthy();
+      expect(localeSelect?.value).toBe('system');
+
+      const form = container.querySelector('form');
+      expect(form).toBeTruthy();
+      await fireEvent.submit(form as HTMLFormElement);
+      await waitFor(() => {
+        expect(updateSettings).toHaveBeenCalled();
+      });
+      const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+      expect(sent?.locale).toBe('system');
+    } finally {
+      if (originalLanguages) {
+        Object.defineProperty(window.navigator, 'languages', originalLanguages);
+      }
+    }
+  });
 });

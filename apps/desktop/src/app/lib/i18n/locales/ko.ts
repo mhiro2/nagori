@@ -264,10 +264,15 @@ export const ko: Messages = {
     unsupported: '이 플랫폼에서는 지원되지 않습니다.',
   },
   locales: {
+    system: '시스템 (OS 따름)',
     en: 'English',
     ja: '日本語',
     ko: '한국어',
     'zh-Hans': '简体中文',
+    'zh-Hant': '繁體中文',
+    de: 'Deutsch',
+    fr: 'Français',
+    es: 'Español',
   },
   toasts: {
     autoPasteFailedTitle: '자동 붙여넣기에 실패했습니다',

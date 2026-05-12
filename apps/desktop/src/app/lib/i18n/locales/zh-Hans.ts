@@ -259,10 +259,15 @@ export const zhHans: Messages = {
     unsupported: '当前平台不支持。',
   },
   locales: {
+    system: '系统（跟随操作系统）',
     en: 'English',
     ja: '日本語',
     ko: '한국어',
     'zh-Hans': '简体中文',
+    'zh-Hant': '繁體中文',
+    de: 'Deutsch',
+    fr: 'Français',
+    es: 'Español',
   },
   toasts: {
     autoPasteFailedTitle: '自动粘贴失败',

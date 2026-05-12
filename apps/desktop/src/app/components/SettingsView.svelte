@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { describeError } from "../lib/errors";
   import { checkForUpdates, getSettings, updateSettings } from "../lib/commands";
-  import { SUPPORTED_LOCALES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
+  import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
   import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
   import {
@@ -348,7 +348,7 @@
             bind:value={settings.locale}
             onchange={(e) => onLocaleChange((e.target as HTMLSelectElement).value as LocaleSetting)}
           >
-            {#each SUPPORTED_LOCALES as code (code)}
+            {#each LOCALE_PREFERENCES as code (code)}
               <option value={code}>{t.locales[code]}</option>
             {/each}
           </select>

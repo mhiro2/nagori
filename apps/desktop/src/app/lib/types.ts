@@ -119,7 +119,14 @@ export type SearchResponse = {
 
 export type AiProviderSetting = 'none' | 'local' | { remote: { name: string } };
 
-export type LocaleSetting = 'en' | 'ja' | 'ko' | 'zh-Hans';
+// Concrete UI locales that have a translation dictionary on disk.
+export type Locale = 'en' | 'ja' | 'ko' | 'zh-Hans' | 'zh-Hant' | 'de' | 'fr' | 'es';
+
+// What the persisted setting can hold. `'system'` is a sentinel — the
+// frontend resolves it to one of the concrete locales above by negotiating
+// the OS / WebView language preferences on each load, so toggling the OS
+// language follows through without touching settings.
+export type LocaleSetting = Locale | 'system';
 
 // Wire format mirrors `SecretHandlingDto` (snake_case via serde) — the
 // camelCase rename on the parent struct only affects field names, not enum

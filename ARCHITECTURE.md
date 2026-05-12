@@ -869,11 +869,12 @@ consumer) maps those to human-readable strings per locale.
 
 **Frontend module.** `apps/desktop/src/app/lib/i18n/`
 
-- `index.svelte.ts` — reactive locale store, `messages()`, `setLocale`,
-  `detectInitialLocale`, locale negotiation.
-- `locales/{en,ja,ko,zh-Hans}.ts` — English is the source of truth and
-  defines the `Messages` interface; every other locale must satisfy it
-  structurally.
+- `index.svelte.ts` — reactive locale store (`preference` + resolved
+  `locale`), `messages()`, `setLocale`, `detectInitialLocale` /
+  `detectSystemLocale`, locale negotiation.
+- `locales/{en,ja,ko,zh-Hans,zh-Hant,de,fr,es}.ts` — English is the
+  source of truth and defines the `Messages` interface; every other
+  locale must satisfy it structurally.
 
 Rules:
 
@@ -886,30 +887,44 @@ Rules:
   derived from the active locale (`en-US`, `ja-JP`, …).
 
 **Persistence.** `AppSettings` carries a `Locale` enum
-(`En` / `Ja` / `Ko` / `ZhHans`) serialized as a BCP-47-ish tag
-(`"en"` / `"ja"` / `"ko"` / `"zh-Hans"`) and an `Appearance` enum
-(`Light` / `Dark` / `System`). The casing of `zh-Hans` is preserved
-because it is the canonical script subtag and the frontend negotiation
-maps any `zh-*` regional preference onto it. `Appearance::System`
-is the only mode that consults `prefers-color-scheme`; explicit light
-or dark sets `<html data-theme>` directly.
+(`System` / `En` / `Ja` / `Ko` / `ZhHans` / `ZhHant` / `De` / `Fr` /
+`Es`) serialized as a BCP-47-ish tag (`"system"` / `"en"` / `"ja"` /
+`"ko"` / `"zh-Hans"` / `"zh-Hant"` / `"de"` / `"fr"` / `"es"`) and an
+`Appearance` enum (`Light` / `Dark` / `System`). The casing of
+`zh-Hans` / `zh-Hant` is preserved because the script subtag is the
+canonical disambiguator for Simplified vs. Traditional Chinese.
+`Locale::System` is the **default**: it is a persisted *preference*,
+not a dictionary key — the frontend resolves it to a concrete locale
+on every load by re-reading the OS / WebView language preferences, so
+changing the OS language follows through without touching settings.
+`Appearance::System` is the only mode that consults
+`prefers-color-scheme`; explicit light or dark sets `<html data-theme>`
+directly.
 
-**Negotiation.** First launch with no saved preference: read
-`navigator.languages`, strip region, lowercase, first match in
-`SUPPORTED_LOCALES` wins, otherwise default to `en`.
-`document.documentElement.lang` is updated whenever `setLocale` is
-called so WebView accessibility / spellcheck behave correctly.
+**Negotiation.** Whenever the resolved locale is needed (`'system'`
+preference or first paint with no settings yet), read
+`navigator.languages`, strip region, lowercase, and pick the first
+match in `SUPPORTED_LOCALES`. `zh-*` splits on the script subtag —
+`zh-Hant` and the region-only Traditional tags (`zh-TW`, `zh-HK`,
+`zh-MO`) route to Traditional; every other `zh-*` (including bare
+`zh`) routes to Simplified. Unmatched preferences fall through to
+`en`. `document.documentElement.lang` is updated whenever `setLocale`
+is called so WebView accessibility / spellcheck behave correctly.
 
 **Adding a locale.**
 
 1. Add `apps/desktop/src/app/lib/i18n/locales/<tag>.ts` typed
    `Messages`.
-2. Add the tag to `SUPPORTED_LOCALES` and `MESSAGES` in
-   `index.svelte.ts`.
+2. Add the tag to `SUPPORTED_LOCALES`, `MESSAGES`, and `DATE_TAGS` in
+   `index.svelte.ts`; extend `negotiateOne` so OS-derived BCP-47
+   variants route to it.
 3. Add `Locale::<Tag>` in `nagori-core/src/settings.rs` and to
-   `LocaleDto` in the Tauri DTO module.
-4. Add the human-readable name under `locales.<tag>` in every existing
+   `LocaleDto` (both `From` arms) in the Tauri DTO module.
+4. Extend the `Messages.locales` type (in `en.ts`) and add the
+   human-readable name under `locales.<tag>` in every existing
    dictionary so the picker can render it.
+5. Add the new tag to `LocaleSetting` in
+   `apps/desktop/src/app/lib/types.ts`.
 
 CLI output, tracing events, and IPC / command error codes stay English
 on purpose: agents and shell scripts are the primary consumers of
