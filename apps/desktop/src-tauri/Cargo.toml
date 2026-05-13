@@ -27,8 +27,11 @@ dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
+tauri-plugin-autostart = { workspace = true }
+tauri-plugin-global-shortcut = { workspace = true }
 tauri-plugin-log = { workspace = true }
 tauri-plugin-notification = { workspace = true }
+tauri-plugin-updater = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
@@ -36,9 +39,6 @@ tracing = { workspace = true }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 nagori-platform-macos = { path = "../../../crates/nagori-platform-macos" }
-tauri-plugin-autostart = { workspace = true }
-tauri-plugin-global-shortcut = { workspace = true }
-tauri-plugin-updater = { workspace = true }
 
 [target."cfg(target_os = \"windows\")".dependencies]
 nagori-platform-windows = { path = "../../../crates/nagori-platform-windows" }

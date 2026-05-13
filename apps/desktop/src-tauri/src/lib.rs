@@ -5,45 +5,41 @@ mod state;
 #[cfg(target_os = "macos")]
 mod tray;
 
-use nagori_core::{EntryId, is_text_safe_for_default_output};
+use nagori_core::{EntryId, SecondaryHotkeyAction, is_text_safe_for_default_output};
 use nagori_daemon::NagoriRuntime;
 use state::AppState;
 use tauri::Manager;
-
-#[cfg(target_os = "macos")]
-use nagori_core::SecondaryHotkeyAction;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
+        // Per-shortcut handlers attach in `spawn_settings_subscribers`
+        // (primary palette toggle and `register_secondary_hotkeys`) so
+        // each accelerator only fires its own callback. Registering a
+        // global `with_handler` here would additionally run the palette
+        // toggle for *every* shortcut, hijacking secondary hotkeys.
+        // The plugin uses `RegisterHotKey` on Windows and the X11
+        // `XGrabKey` backend on Linux (via the upstream `global-hotkey`
+        // crate). There is no XDG global-shortcut portal path in the
+        // current upstream, so Wayland-only sessions register against
+        // XWayland if present and fail outright otherwise. Failed
+        // registrations surface via `nagori://hotkey_register_failed`
+        // so the UI can prompt the user to fall back to the in-app
+        // open button rather than leaving the feature silently
+        // disabled.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(autostart_plugin())
+        // Updater plugin reads `plugins.updater.endpoints` and the
+        // bundled signing pubkey from `tauri.conf.json`. The plugin
+        // itself is registered on every OS so `app.updater()` is wired
+        // for diagnostics; whether a release artifact actually exists
+        // for the current target is captured by `updater_release_target()`
+        // and gates both the startup probe and the manual
+        // `commands::check_for_updates` trigger.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("nagori-image", dispatch_image_request);
-
-    #[cfg(target_os = "macos")]
-    let builder = {
-        // launch-at-login. The plugin no-ops on platforms it does not
-        // support, so we only register on macOS for MVP.
-        use tauri_plugin_autostart::MacosLauncher;
-        builder
-            .plugin(tauri_plugin_autostart::init(
-                MacosLauncher::LaunchAgent,
-                None,
-            ))
-            // Per-shortcut handlers attach in `spawn_settings_subscribers`
-            // (primary palette toggle and `register_secondary_hotkeys`) so
-            // each accelerator only fires its own callback. Registering a
-            // global `with_handler` here would additionally run the palette
-            // toggle for *every* shortcut, hijacking secondary hotkeys.
-            .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-            // Updater plugin reads `plugins.updater.endpoints` and the
-            // bundled signing pubkey from `tauri.conf.json`. The
-            // `commands::check_for_updates` command exposes a manual
-            // trigger; the startup probe in `spawn_settings_subscribers`
-            // honours `auto_update_check` and emits
-            // `nagori://update_available` for the frontend.
-            .plugin(tauri_plugin_updater::Builder::new().build())
-    };
 
     builder
         .setup(|app| {
@@ -69,13 +65,11 @@ pub fn run() {
                 tray::install(app.handle())?;
             }
 
-            #[cfg(target_os = "macos")]
             spawn_settings_subscribers(app.handle());
 
             // Surface a "ready" notification once everything is wired
             // up. The notification plugin no-ops if the user has not
             // granted permission yet, so this is best-effort.
-            #[cfg(target_os = "macos")]
             {
                 use tauri_plugin_notification::NotificationExt;
                 let _ = app
@@ -128,35 +122,49 @@ pub fn run() {
             std::process::exit(1);
         })
         .run(|app_handle, event| {
-            #[cfg(target_os = "macos")]
             on_run_event(app_handle, &event);
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = app_handle;
-                let _ = event;
-            }
         });
+}
+
+/// Build the autostart plugin with the launcher backend appropriate for
+/// the current OS. macOS uses a `LaunchAgent` (the plugin generates a
+/// `~/Library/LaunchAgents/<bundle>.plist`); Windows writes a registry
+/// key under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; Linux
+/// drops a `~/.config/autostart/<bundle>.desktop` file. The plugin
+/// internally dispatches on OS, but it requires the `MacosLauncher`
+/// argument regardless of the target so the surrounding wiring stays
+/// uniform — passing `LaunchAgent` is the documented default and is
+/// ignored on Windows/Linux builds.
+fn autostart_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_autostart::MacosLauncher;
+    tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
+}
+
+/// Whether the current target ships an updater feed. If we don't publish
+/// an artifact for this OS yet (Windows / Linux MVP), the startup probe
+/// and the manual command short-circuit instead of pinging the macOS
+/// endpoint and rendering a "no installer available" download link.
+const fn updater_release_target() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// One-shot guard so multiple `RunEvent::ExitRequested` deliveries cannot
 /// run shutdown cleanup twice. A second pass would race the tokio runtime
 /// teardown that the first pass started.
-#[cfg(target_os = "macos")]
 static EXIT_CLEANUP_FIRED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-#[cfg(target_os = "macos")]
 const BACKGROUND_TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// macOS-only run-event hook. `RunEvent::ExitRequested` fires for tray
-/// "Quit", `Cmd+Q`, and dock-menu Quit, all of which actually tear the
-/// process down — so it's the single right place to honour
+/// Cross-platform run-event hook. `RunEvent::ExitRequested` fires for
+/// tray "Quit", Cmd/Ctrl+Q, and dock/menu Quit, all of which actually
+/// tear the process down — so it's the single right place to honour
 /// `clear_on_quit`. We deliberately do **not** wire a parallel
-/// `WindowEvent::CloseRequested` handler: on macOS, closing the main
-/// window only hides it, and previously the close hook ran the soft-delete
-/// via `block_on` on the UI thread, freezing the user's desktop for up to
-/// the 1 s timeout while purging history they never asked to lose.
-#[cfg(target_os = "macos")]
+/// `WindowEvent::CloseRequested` handler: closing the main window only
+/// hides it on every OS, and previously the close hook ran the
+/// soft-delete via `block_on` on the UI thread, freezing the user's
+/// desktop for up to the 1 s timeout while purging history they never
+/// asked to lose.
 fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
         return;
@@ -168,7 +176,6 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
 /// soft-delete complete before it destroys the tokio runtime. The
 /// background drain mirrors daemon shutdown; the clear-on-quit ceiling keeps
 /// a wedged DB from freezing the quit path indefinitely.
-#[cfg(target_os = "macos")]
 fn perform_exit_cleanup(handle: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if EXIT_CLEANUP_FIRED.swap(true, Ordering::SeqCst) {
@@ -202,7 +209,6 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
 ///   * notify the user once when capture is paused / resumed,
 ///   * notify the user when the AI provider transitions into `enabled` so
 ///     they realise remote calls may now happen.
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)]
 fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
     use nagori_core::SettingsRepository;
@@ -262,17 +268,24 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         // failure leaves the prior accelerator out of `current_secondary`
         // so later reconciles won't try to unregister something we never
         // registered (which would tear down a sibling action sharing the
-        // same accelerator).
+        // same accelerator). Tray reconciliation is macOS-only for MVP —
+        // Phase 4 lifts it to all OS — so the call stays cfg-gated.
+        #[cfg(target_os = "macos")]
         tray::set_visible(&app, current_show_in_menu_bar);
+        #[cfg(not(target_os = "macos"))]
+        let _ = current_show_in_menu_bar;
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
-        // Startup updater probe. Honours `auto_update_check` *and*
-        // `local_only_mode` so a user who has opted out of background
-        // network calls never sees a request. Emits
-        // `nagori://update_available` with `{version, currentVersion,
-        // releaseNotes}` when an update is found; failures are logged at
-        // warn so a transient network blip doesn't surface a banner.
-        if initial.auto_update_check && !initial.local_only_mode {
+        // Startup updater probe. Honours `auto_update_check`,
+        // `local_only_mode`, *and* whether the current target actually
+        // has a release artifact (Windows / Linux MVP do not) — a user
+        // who has opted out of background network calls never sees a
+        // request, and we don't ping the macOS feed from a binary that
+        // can't install its result. Emits `nagori://update_available`
+        // with `{version, currentVersion, releaseNotes}` when an update
+        // is found; failures are logged at warn so a transient network
+        // blip doesn't surface a banner.
+        if updater_release_target() && initial.auto_update_check && !initial.local_only_mode {
             spawn_startup_update_probe(&app);
         }
 
@@ -338,6 +351,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 
             if snapshot.show_in_menu_bar != current_show_in_menu_bar {
                 current_show_in_menu_bar = snapshot.show_in_menu_bar;
+                #[cfg(target_os = "macos")]
                 tray::set_visible(&app, current_show_in_menu_bar);
             }
 
@@ -350,7 +364,9 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             }
 
             // Refresh the tray menu so the "Pause Capture" / "Resume
-            // Capture" label tracks the current state.
+            // Capture" label tracks the current state. macOS-only until
+            // Phase 4 lifts the tray module to all OS.
+            #[cfg(target_os = "macos")]
             tray::refresh(&app, current_capture);
         }
     });
@@ -360,8 +376,12 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 /// `on_shortcut` rather than the plugin-level `with_handler` so the toggle
 /// only fires when the user presses *this* accelerator — secondary hotkeys
 /// (registered with their own handlers) would otherwise also trigger the
-/// palette toggle because `with_handler` runs for every shortcut.
-#[cfg(target_os = "macos")]
+/// palette toggle because `with_handler` runs for every shortcut. On
+/// Linux, the upstream `global-hotkey` backend is X11-only, so a Wayland
+/// session without `XWayland` — or any compositor where `XGrabKey` is
+/// rejected — fails this call; the caller surfaces that to the UI via
+/// `nagori://hotkey_register_failed` so users can fall back to the
+/// in-app open button.
 fn register_primary_hotkey(
     app: &tauri::AppHandle,
     accelerator: &str,
@@ -383,7 +403,6 @@ fn register_primary_hotkey(
 /// into the next reconcile (otherwise a later reconcile would unregister an
 /// accelerator we never managed to bind in the first place, taking down a
 /// sibling action that happened to share it).
-#[cfg(target_os = "macos")]
 fn register_secondary_hotkeys(
     app: &tauri::AppHandle,
     previous: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
@@ -442,7 +461,6 @@ fn register_secondary_hotkeys(
     active
 }
 
-#[cfg(target_os = "macos")]
 fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyAction) {
     use tauri::Emitter;
     use tauri_plugin_notification::NotificationExt;
@@ -483,7 +501,6 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
     });
 }
 
-#[cfg(target_os = "macos")]
 fn sync_auto_launch(
     app: &tauri::AppHandle,
     enabled: bool,
@@ -504,7 +521,6 @@ fn sync_auto_launch(
 /// permission may be denied, and a transient network failure should not
 /// pop a scary banner. The download/install hand-off remains
 /// user-confirmed via the manual `commands::check_for_updates` trigger.
-#[cfg(target_os = "macos")]
 fn spawn_startup_update_probe(app: &tauri::AppHandle) {
     use tauri_plugin_notification::NotificationExt;
     use tauri_plugin_updater::UpdaterExt;
@@ -745,7 +761,6 @@ fn plain_response(
         .expect("static plain response always builds")
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;

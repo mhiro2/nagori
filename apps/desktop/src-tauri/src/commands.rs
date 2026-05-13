@@ -605,9 +605,19 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
 /// `download_and_install` is intentionally not wired up yet, so we
 /// never silently install.
 #[tauri::command]
-#[cfg(target_os = "macos")]
 pub async fn check_for_updates(app: AppHandle) -> CommandResult<Option<UpdateInfoDto>> {
     use tauri_plugin_updater::UpdaterExt;
+
+    // The plugin is registered on every OS so `app.updater()` is wired
+    // for diagnostics, but we only publish release artefacts for macOS
+    // today. Short-circuit on platforms without a release feed so the
+    // user gets a clear "unsupported" surface instead of an empty
+    // result or an opaque manifest-fetch error.
+    if !cfg!(target_os = "macos") {
+        return Err(CommandError::unsupported(
+            "auto-update is only available on macOS",
+        ));
+    }
 
     let updater = app
         .updater()
@@ -623,18 +633,6 @@ pub async fn check_for_updates(app: AppHandle) -> CommandResult<Option<UpdateInf
             "update check failed: {err}"
         ))),
     }
-}
-
-/// Non-macOS stub so the frontend can call the command unconditionally.
-/// We only ship the updater plugin on macOS for MVP, so other platforms
-/// surface a recoverable "unsupported" error instead of crashing the
-/// command pipeline.
-#[tauri::command]
-#[cfg(not(target_os = "macos"))]
-pub async fn check_for_updates(_app: AppHandle) -> CommandResult<Option<UpdateInfoDto>> {
-    Err(CommandError::unsupported(
-        "auto-update is only available on macOS",
-    ))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
