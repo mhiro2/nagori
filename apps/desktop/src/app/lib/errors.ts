@@ -26,7 +26,13 @@ export const describeError = (err: unknown): string => {
       case 'invalid_input':
         return t.invalidInput;
       case 'unsupported':
-        return t.unsupported;
+        // Prefer the backend-curated message (e.g. "auto-update is only
+        // available on macOS", "Linux Wayland has no Accessibility settings
+        // pane …") — the generic translation is the fallback when the
+        // backend didn't supply one.
+        return hasStringField(err, 'message') && err.message.length > 0
+          ? err.message
+          : t.unsupported;
       default:
         return fallback;
     }

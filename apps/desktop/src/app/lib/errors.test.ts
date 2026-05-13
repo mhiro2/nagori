@@ -21,7 +21,6 @@ describe('describeError', () => {
     ['policy_error', () => t().policy],
     ['not_found', () => t().notFound],
     ['invalid_input', () => t().invalidInput],
-    ['unsupported', () => t().unsupported],
   ];
 
   for (const [code, expected] of codes) {
@@ -29,6 +28,20 @@ describe('describeError', () => {
       expect(describeError({ code, message: 'raw' })).toBe(expected());
     });
   }
+
+  // `unsupported` deliberately prefers the backend-curated message (e.g.
+  // "auto-update is only available on macOS", "Linux Wayland has no
+  // Accessibility settings pane …") because the generic translation
+  // loses the *why*. The localized label is the fallback when no
+  // curated message is available.
+  it('prefers the backend message for the unsupported code', () => {
+    expect(describeError({ code: 'unsupported', message: 'macOS only' })).toBe('macOS only');
+  });
+
+  it('falls back to the localized label for unsupported when message is missing', () => {
+    expect(describeError({ code: 'unsupported' })).toBe(t().unsupported);
+    expect(describeError({ code: 'unsupported', message: '' })).toBe(t().unsupported);
+  });
 
   it('falls back to the raw message for unrecognised codes', () => {
     expect(describeError({ code: 'something_else', message: 'fallback msg' })).toBe('fallback msg');
