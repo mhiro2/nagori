@@ -98,26 +98,39 @@ pub async fn paste_entry(
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
     // Self-paste guard: hide the palette and re-activate the user's previous
-    // frontmost app *before* we send ⌘V. Without this, the synthesised
-    // keystroke lands on Nagori's webview because its window still owns
-    // focus, and we paste straight into our own search field.
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(target) = window.app_handle().get_webview_window("main") {
-            let _ = target.hide();
-        }
-        if let Some(prev) = state.take_previous_frontmost()
-            && let Some(bundle_id) = prev.bundle_id.as_deref()
-        {
-            let _ = state.window.activate_app(bundle_id).await;
-        }
-        // Give AppKit a tick to re-focus the target app. 60ms is the
-        // empirical sweet spot reported by the Maccy / Paste community —
-        // anything <30ms races against the focus restoration.
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    // frontmost app *before* we send the paste keystroke. Without this the
+    // synthesised keystroke lands on Nagori's webview because its window
+    // still owns focus, and we paste straight into our own search field.
+    //
+    // On Linux Wayland `previous_frontmost` is always `None` (the compositor
+    // refuses to expose a portable foreground-surface query), so we hide
+    // our window and let `wtype` target whatever the compositor considers
+    // focused afterwards. On Windows we capture the executable_path for
+    // diagnostics but have no `bundle_id`-equivalent to re-activate
+    // against in the current `WindowBehavior` API: the capture is wired
+    // for future use, but actual restoration via `SetForegroundWindow`
+    // requires a richer snapshot (HWND) and is deferred to Phase 3 with
+    // the rest of the Windows platform impl. Today we rely on the OS to
+    // hand foreground back when the palette hides — `SendInput` then
+    // targets that window, with the caveats noted below.
+    if let Some(target) = window.app_handle().get_webview_window("main") {
+        let _ = target.hide();
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
+    if let Some(prev) = state.take_previous_frontmost()
+        && let Some(bundle_id) = prev.bundle_id.as_deref()
+    {
+        let _ = state.window.activate_app(bundle_id).await;
+    }
+    // Give AppKit a tick to re-focus the target app. 60ms is the
+    // empirical sweet spot reported by the Maccy / Paste community —
+    // anything <30ms races against the focus restoration. Skipped on
+    // Windows / Linux for now: Windows has no `activate_app` step
+    // (HWND-based restore is Phase 3 work), and Linux Wayland relies
+    // on the compositor's own focus handoff. Both can still race —
+    // `paste_entry_from_palette` absorbs it via `paste_delay_ms`, but
+    // this single-shot path has no equivalent knob yet.
+    #[cfg(target_os = "macos")]
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     state
         .runtime
         .paste_entry(entry_id, format.map(Into::into))
@@ -129,20 +142,14 @@ pub async fn paste_entry(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn open_palette(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    #[cfg(target_os = "macos")]
     state.remember_previous_frontmost();
-    #[cfg(not(target_os = "macos"))]
-    let _ = state;
     show_main_palette(&app)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn close_palette(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    #[cfg(target_os = "macos")]
     state.clear_previous_frontmost();
-    #[cfg(not(target_os = "macos"))]
-    let _ = state;
     hide_main_palette(&app)
 }
 
@@ -157,7 +164,6 @@ pub async fn paste_entry_from_palette(
     let settings = match state.runtime.get_settings().await {
         Ok(s) => s,
         Err(err) => {
-            #[cfg(target_os = "macos")]
             state.clear_previous_frontmost();
             return Err(err.into());
         }
@@ -176,26 +182,30 @@ pub async fn paste_entry_from_palette(
     // succeeded, and the palette UI can show "copied, but auto-paste status
     // unknown" with the recoverable error.
     if !settings.auto_paste_enabled {
-        #[cfg(target_os = "macos")]
         state.clear_previous_frontmost();
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
+    // Re-focus the previously frontmost app before synthesising the paste
+    // keystroke. macOS uses `activate_app(bundle_id)`; Windows captures the
+    // foreground window but exposes no `bundle_id`, so `activate_app` is
+    // skipped and the OS-level foreground handoff (triggered when the
+    // palette window hid above) is what hands focus back — explicit
+    // HWND-based `SetForegroundWindow` is Phase 3 work. Linux Wayland
+    // records `None` for `previous_frontmost` entirely, so `wtype`
+    // targets whatever the compositor now considers focused.
+    if let Some(prev) = state.take_previous_frontmost()
+        && let Some(bundle_id) = prev.bundle_id.as_deref()
+        && let Err(err) = state.window.activate_app(bundle_id).await
     {
-        if let Some(prev) = state.take_previous_frontmost()
-            && let Some(bundle_id) = prev.bundle_id.as_deref()
-            && let Err(err) = state.window.activate_app(bundle_id).await
-        {
-            // Surface restore failure to the UI: the entry was copied but
-            // we never refocused the originating app, so the synthesised
-            // ⌘V would land in nagori itself. Returning an error lets the
-            // palette toast tell the user "copied, please paste manually".
-            tracing::warn!(error = %err, "palette_previous_app_restore_failed");
-            return Err(CommandError::internal(format!(
-                "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"
-            )));
-        }
+        // Surface restore failure to the UI: the entry was copied but we
+        // never refocused the originating app, so the synthesised paste
+        // would land in nagori itself. Returning an error lets the
+        // palette toast tell the user "copied, please paste manually".
+        tracing::warn!(error = %err, "palette_previous_app_restore_failed");
+        return Err(CommandError::internal(format!(
+            "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"
+        )));
     }
 
     // Defensive clamp at the use site: `save_settings` already rejects values
@@ -227,7 +237,6 @@ pub async fn copy_entry_from_palette(
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&entry_id)?;
     state.runtime.copy_entry(entry_id).await?;
-    #[cfg(target_os = "macos")]
     state.clear_previous_frontmost();
     hide_main_palette(&app)?;
     Ok(())
@@ -439,23 +448,23 @@ pub fn toggle_palette(state: State<'_, AppState>, window: WebviewWindow) -> Comm
         return Ok(());
     };
     if target.is_visible().unwrap_or(false) {
-        #[cfg(target_os = "macos")]
         state.clear_previous_frontmost();
         hide_main_palette(app)
     } else {
         // Capture frontmost before we steal focus — see
         // `AppState::remember_previous_frontmost`.
-        #[cfg(target_os = "macos")]
         state.remember_previous_frontmost();
-        #[cfg(not(target_os = "macos"))]
-        let _ = state;
         show_main_palette(app)
     }
 }
 
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
-pub fn hide_palette(window: WebviewWindow) -> CommandResult<()> {
+pub fn hide_palette(window: WebviewWindow, state: State<'_, AppState>) -> CommandResult<()> {
+    // Mirror `close_palette` / `toggle_palette`: dropping the palette also
+    // discards the captured frontmost snapshot so a later open re-captures
+    // from scratch rather than restoring stale focus.
+    state.clear_previous_frontmost();
     let app = window.app_handle();
     hide_main_palette(app)
 }
@@ -515,7 +524,36 @@ pub async fn open_accessibility_settings() -> CommandResult<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows has no TCC-style privacy gate for `SendInput`, so there is no
+/// settings pane to deep-link into. Surface a curated message instead of
+/// a generic "unsupported" code so the UI can explain that auto-paste
+/// works out-of-the-box and direct the user to UAC integrity-level
+/// troubleshooting when paste silently fails.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub async fn open_accessibility_settings() -> CommandResult<()> {
+    Err(CommandError::unsupported(
+        "Windows has no Accessibility-style permission for auto-paste; if SendInput is dropped, \
+         check whether the target window belongs to an elevated process.",
+    ))
+}
+
+/// Linux Wayland gates auto-paste behind the compositor's
+/// `zwp_virtual_keyboard_v1` protocol plus the `wtype` CLI, neither of
+/// which lives in a Settings pane. Surface a curated message so the UI
+/// can explain the dependency rather than emit a bare "unsupported"
+/// code.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub async fn open_accessibility_settings() -> CommandResult<()> {
+    Err(CommandError::unsupported(
+        "Linux Wayland has no Accessibility settings pane for auto-paste. Auto-paste requires \
+         the `wtype` CLI and a compositor that exposes the virtual-keyboard protocol \
+         (e.g. sway, Hyprland, KDE).",
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[tauri::command]
 pub async fn open_accessibility_settings() -> CommandResult<()> {
     Err(CommandError::unsupported("open_accessibility_settings"))

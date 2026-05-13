@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
 use nagori_ai::LocalAiProvider;
-#[cfg(target_os = "macos")]
-use nagori_core::SourceApp;
-use nagori_core::{AppError, EntryId, Result};
+use nagori_core::{AppError, EntryId, Result, SourceApp};
 use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime};
 use nagori_storage::SqliteStore;
 
@@ -46,8 +44,13 @@ pub struct AppState {
     /// Used by `paste_entry` to re-focus the user's prior app before
     /// synthesising ⌘V — without it, the keystroke lands on the
     /// (still-focused) Nagori webview and we paste into our own search
-    /// box.
-    #[cfg(target_os = "macos")]
+    /// box. On Linux Wayland the snapshot is always `None` (the
+    /// compositor refuses to expose a portable frontmost-app query), so
+    /// the palette skips the refocus step and relies on `wtype` to
+    /// target whatever the compositor considers focused after our window
+    /// hides. On Windows we capture `executable_path` / window title but
+    /// have no `bundle_id`, so `activate_app` is a no-op there too —
+    /// hiding our window lets the OS restore the previous foreground.
     pub previous_frontmost: Arc<Mutex<Option<SourceApp>>>,
     /// Most recently pasted entry id, paired with the `Instant` it was
     /// recorded. Powers the "repaste last" secondary hotkey so it
@@ -130,14 +133,15 @@ impl AppState {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl AppState {
     /// Snapshot the current frontmost app and store it as the "previous
     /// frontmost" — call this immediately *before* showing the palette so
     /// the snapshot reflects the source the user copied from / wants to
-    /// paste back into.
+    /// paste back into. macOS uses `AppKit`, Windows uses
+    /// `GetForegroundWindow`, Linux Wayland records `None` because the
+    /// compositor does not expose a portable foreground-surface query.
     pub fn remember_previous_frontmost(&self) {
-        let snapshot = MacosWindowBehavior::frontmost_app_blocking().map(|front| front.source);
+        let snapshot = capture_frontmost_blocking();
         if let Ok(mut slot) = self.previous_frontmost.lock() {
             *slot = snapshot;
         }
@@ -154,6 +158,27 @@ impl AppState {
         if let Ok(mut slot) = self.previous_frontmost.lock() {
             *slot = None;
         }
+    }
+}
+
+/// Cross-platform synchronous frontmost-app probe used to seed
+/// `previous_frontmost`. The helper avoids dragging a `tokio` runtime
+/// into Tauri command callbacks (some are sync, e.g. `open_palette`) by
+/// going through each platform crate's `_blocking` accessor. Linux
+/// Wayland has no portable equivalent, so the helper returns `None`
+/// without erroring — see `LinuxWindowBehavior` for the trade-off.
+fn capture_frontmost_blocking() -> Option<SourceApp> {
+    #[cfg(target_os = "macos")]
+    {
+        MacosWindowBehavior::frontmost_app_blocking().map(|front| front.source)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        WindowsWindowBehavior::frontmost_app_blocking().map(|front| front.source)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
     }
 }
 
@@ -300,6 +325,7 @@ impl AppState {
             window,
             capture_reader: clipboard,
             background_tasks: Mutex::new(None),
+            previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
         })
     }
@@ -325,6 +351,7 @@ impl AppState {
             window,
             capture_reader: clipboard,
             background_tasks: Mutex::new(None),
+            previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
         })
     }
