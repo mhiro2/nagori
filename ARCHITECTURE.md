@@ -98,7 +98,7 @@ domain code. This leads to four design rules:
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
-| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime` |
+| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` wires the platform adapters (`MacosClipboard`/`WindowsClipboard`/`LinuxClipboard` etc.) per `cfg(target_os)`; on Linux a missing `wl_data_control` protocol fails startup with a Wayland-specific hint rather than silently using a no-op adapter. Per-OS capabilities (tray menu, secure-input detection, global-shortcut registration) are still gated to macOS pending Phase 2–5 of the cross-platform roadmap. |
 
 Repository layout (abbreviated):
 
@@ -588,14 +588,15 @@ Implementations:
   closest extensions — `zwlr_foreign_toplevel_management_v1`,
   `ext_foreign_toplevel_list_v1` — are compositor-specific). Hotkey
   registration on the daemon side is `Unsupported`. The Tauri desktop
-  shell does **not** wire the Linux adapter — it falls through the
-  non-macOS branch of `AppState::build`, which constructs a
-  `MemoryClipboard` + `NoopPasteController` runtime with no capture
-  loop, no auto-paste, and no IPC client; operators interact with the
-  daemon through `nagori daemon run` plus the CLI subcommands. Wiring
-  the desktop palette over IPC, registering `tauri-plugin-global-shortcut`,
-  and surfacing the tray on Linux are all follow-up tasks that mirror
-  the existing macOS path in §16.
+  shell now wires the same `LinuxClipboard` + `LinuxPasteController` +
+  `LinuxPermissionChecker` adapters through `AppState::build` and runs
+  the in-process capture loop against them; a missing `wl_data_control`
+  protocol surfaces at startup as an `AppError::Platform` with an
+  explicit Wayland/X11 hint instead of silently degrading to a no-op
+  runtime. Tray menu, global-shortcut registration, and the rest of the
+  Tauri plugin surface remain macOS-only pending the 1.5 roadmap
+  Phases 2–5; operators on Linux can still rely on `nagori daemon run`
+  plus the CLI subcommands while those gaps are filled.
   `PermissionChecker`
   reports `Granted` / `Denied` for `Clipboard` (probing the same
   `wl-clipboard-rs` entry point the capture loop uses) and

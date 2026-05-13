@@ -40,5 +40,11 @@ tauri-plugin-autostart = { workspace = true }
 tauri-plugin-global-shortcut = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 
+[target."cfg(target_os = \"windows\")".dependencies]
+nagori-platform-windows = { path = "../../../crates/nagori-platform-windows" }
+
+[target."cfg(target_os = \"linux\")".dependencies]
+nagori-platform-linux = { path = "../../../crates/nagori-platform-linux" }
+
 [lints]
 workspace = true

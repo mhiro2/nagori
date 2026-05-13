@@ -62,7 +62,6 @@ pub fn run() {
                 }
             };
             app.manage(state);
-            #[cfg(target_os = "macos")]
             app.state::<AppState>().spawn_background_tasks();
 
             #[cfg(target_os = "macos")]
