@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use nagori_core::Result;
 #[cfg(windows)]
 use nagori_core::SourceApp;
-use nagori_platform::{FrontmostApp, WindowBehavior};
+use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
 
 /// Windows frontmost-app probe.
 ///
@@ -35,6 +35,18 @@ impl WindowsWindowBehavior {
     pub fn frontmost_app_blocking() -> Option<FrontmostApp> {
         frontmost_app_sync()
     }
+
+    /// Capture a [`RestoreTarget`] snapshot at palette-open time. Unlike
+    /// `frontmost_app_blocking`, this also stamps the HWND into
+    /// `native_handle` so `activate_restore_target` can later call
+    /// `SetForegroundWindow` against the *original* window — necessary
+    /// because Windows has no bundle id and several top-level windows in
+    /// the same executable would otherwise be indistinguishable.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn capture_restore_target_blocking() -> Option<RestoreTarget> {
+        capture_restore_target_sync()
+    }
 }
 
 #[async_trait]
@@ -50,6 +62,16 @@ impl WindowBehavior for WindowsWindowBehavior {
     }
 
     async fn hide_palette(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn activate_restore_target(&self, target: &RestoreTarget) -> Result<()> {
+        let Some(handle) = target.native_handle else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || activate_hwnd_sync(handle))
+            .await
+            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
         Ok(())
     }
 }
@@ -96,6 +118,96 @@ fn frontmost_app_sync() -> Option<FrontmostApp> {
 const fn frontmost_app_sync() -> Option<FrontmostApp> {
     None
 }
+
+#[cfg(windows)]
+fn capture_restore_target_sync() -> Option<RestoreTarget> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    // SAFETY: GetForegroundWindow has no parameters and returns a HWND;
+    // GetWindowThreadProcessId writes the owning PID through the out
+    // pointer to our stack-owned `u32`.
+    let (hwnd, executable_path, window_title) = unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        if GetWindowThreadProcessId(hwnd, &raw mut pid) == 0 {
+            return None;
+        }
+        (
+            hwnd,
+            query_process_image_path(pid),
+            query_window_title(hwnd),
+        )
+    };
+
+    let name = executable_path.as_deref().and_then(|p| {
+        std::path::Path::new(p)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned)
+    });
+
+    // HWND is a pointer-sized opaque on both 32- and 64-bit Windows. We
+    // round-trip via `usize` so the cast is exact regardless of pointer
+    // width — `as u64` of a *mut c_void on 32-bit silently sign-extends
+    // a hostile signed cast under `clippy::ptr_as_ptr`.
+    #[allow(clippy::cast_possible_truncation)] // hwnd fits in usize by definition
+    let native_handle = Some(hwnd as usize as u64);
+    let _ = window_title;
+
+    Some(RestoreTarget {
+        source: SourceApp {
+            bundle_id: None,
+            name,
+            executable_path,
+        },
+        native_handle,
+    })
+}
+
+#[cfg(not(windows))]
+const fn capture_restore_target_sync() -> Option<RestoreTarget> {
+    None
+}
+
+#[cfg(windows)]
+fn activate_hwnd_sync(handle: u64) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+
+    // SAFETY: round-trip via usize keeps the conversion lossless on
+    // both pointer widths; `IsWindow` validates the handle before we
+    // touch the window so a stale snapshot (target app closed between
+    // palette open and paste) cannot crash. `SetForegroundWindow` is
+    // a best-effort hint — Windows can deny the focus change (foreground
+    // lock, UAC integrity gap) but never crashes the caller.
+    unsafe {
+        let hwnd = handle as usize as HWND;
+        if hwnd.is_null() || IsWindow(hwnd) == 0 {
+            return;
+        }
+        // Minimised windows refuse `SetForegroundWindow`; restore first
+        // so the user's paste actually lands somewhere visible. We check
+        // `IsIconic` (not `IsWindowVisible`) because the Win32 visibility
+        // bit stays set while a window is minimised — only `IsIconic`
+        // reliably distinguishes the minimised state. The `ShowWindow`
+        // return value is the *previous* visibility; we don't care about
+        // it, we just need to undo the minimise.
+        if IsIconic(hwnd) != 0 {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+const fn activate_hwnd_sync(_handle: u64) {}
 
 #[cfg(windows)]
 unsafe fn query_process_image_path(pid: u32) -> Option<String> {

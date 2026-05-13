@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::CFString;
 use nagori_core::{Result, SourceApp};
-use nagori_platform::{FrontmostApp, WindowBehavior};
+use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
 
@@ -37,6 +37,20 @@ impl MacosWindowBehavior {
     #[must_use]
     pub fn frontmost_app_blocking() -> Option<FrontmostApp> {
         frontmost_app_sync()
+    }
+
+    /// Capture a [`RestoreTarget`] at palette-open time. On macOS the
+    /// restore handle is always the bundle id carried by `SourceApp`, so
+    /// `native_handle` stays `None` and the cross-platform default impl
+    /// of `activate_restore_target` (which dispatches on `bundle_id`)
+    /// does the right thing. We still ship the helper so callers in the
+    /// desktop shell can stay platform-agnostic.
+    #[must_use]
+    pub fn capture_restore_target_blocking() -> Option<RestoreTarget> {
+        frontmost_app_sync().map(|front| RestoreTarget {
+            source: front.source,
+            native_handle: None,
+        })
     }
 }
 

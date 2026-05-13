@@ -8,4 +8,4 @@ pub use clipboard::{CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryCl
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
 pub use paste::{NoopPasteController, PasteController, PasteResult};
 pub use permissions::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
-pub use window::{FrontmostApp, WindowBehavior};
+pub use window::{FrontmostApp, RestoreTarget, WindowBehavior};
