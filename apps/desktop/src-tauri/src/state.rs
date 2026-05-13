@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
 use nagori_ai::LocalAiProvider;
-use nagori_core::{AppError, EntryId, Result, SourceApp};
+use nagori_core::{AppError, EntryId, Result};
 use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime};
 use nagori_storage::SqliteStore;
 
-use nagori_platform::{ClipboardReader, WindowBehavior};
+use nagori_platform::{ClipboardReader, RestoreTarget, WindowBehavior};
 #[cfg(target_os = "linux")]
 use nagori_platform_linux::{
     LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxWindowBehavior,
@@ -48,10 +48,10 @@ pub struct AppState {
     /// compositor refuses to expose a portable frontmost-app query), so
     /// the palette skips the refocus step and relies on `wtype` to
     /// target whatever the compositor considers focused after our window
-    /// hides. On Windows we capture `executable_path` / window title but
-    /// have no `bundle_id`, so `activate_app` is a no-op there too —
-    /// hiding our window lets the OS restore the previous foreground.
-    pub previous_frontmost: Arc<Mutex<Option<SourceApp>>>,
+    /// hides. On Windows the snapshot now carries the foreground HWND
+    /// in `native_handle`, so `activate_restore_target` can re-foreground
+    /// the original window via `SetForegroundWindow`.
+    pub previous_frontmost: Arc<Mutex<Option<RestoreTarget>>>,
     /// Most recently pasted entry id, paired with the `Instant` it was
     /// recorded. Powers the "repaste last" secondary hotkey so it
     /// targets the entry the user actually pasted instead of whatever
@@ -138,16 +138,18 @@ impl AppState {
     /// frontmost" — call this immediately *before* showing the palette so
     /// the snapshot reflects the source the user copied from / wants to
     /// paste back into. macOS uses `AppKit`, Windows uses
-    /// `GetForegroundWindow`, Linux Wayland records `None` because the
+    /// `GetForegroundWindow` (and stamps the HWND into `native_handle`
+    /// so `SetForegroundWindow` can re-foreground the *original* window
+    /// at paste time), Linux Wayland records `None` because the
     /// compositor does not expose a portable foreground-surface query.
     pub fn remember_previous_frontmost(&self) {
-        let snapshot = capture_frontmost_blocking();
+        let snapshot = capture_restore_target_blocking();
         if let Ok(mut slot) = self.previous_frontmost.lock() {
             *slot = snapshot;
         }
     }
 
-    pub fn take_previous_frontmost(&self) -> Option<SourceApp> {
+    pub fn take_previous_frontmost(&self) -> Option<RestoreTarget> {
         self.previous_frontmost
             .lock()
             .ok()
@@ -161,20 +163,20 @@ impl AppState {
     }
 }
 
-/// Cross-platform synchronous frontmost-app probe used to seed
+/// Cross-platform synchronous restore-target probe used to seed
 /// `previous_frontmost`. The helper avoids dragging a `tokio` runtime
 /// into Tauri command callbacks (some are sync, e.g. `open_palette`) by
 /// going through each platform crate's `_blocking` accessor. Linux
 /// Wayland has no portable equivalent, so the helper returns `None`
 /// without erroring — see `LinuxWindowBehavior` for the trade-off.
-fn capture_frontmost_blocking() -> Option<SourceApp> {
+fn capture_restore_target_blocking() -> Option<RestoreTarget> {
     #[cfg(target_os = "macos")]
     {
-        MacosWindowBehavior::frontmost_app_blocking().map(|front| front.source)
+        MacosWindowBehavior::capture_restore_target_blocking()
     }
     #[cfg(target_os = "windows")]
     {
-        WindowsWindowBehavior::frontmost_app_blocking().map(|front| front.source)
+        WindowsWindowBehavior::capture_restore_target_blocking()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

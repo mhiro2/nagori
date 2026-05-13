@@ -105,31 +105,24 @@ pub async fn paste_entry(
     // On Linux Wayland `previous_frontmost` is always `None` (the compositor
     // refuses to expose a portable foreground-surface query), so we hide
     // our window and let `wtype` target whatever the compositor considers
-    // focused afterwards. On Windows we capture the executable_path for
-    // diagnostics but have no `bundle_id`-equivalent to re-activate
-    // against in the current `WindowBehavior` API: the capture is wired
-    // for future use, but actual restoration via `SetForegroundWindow`
-    // requires a richer snapshot (HWND) and is deferred to Phase 3 with
-    // the rest of the Windows platform impl. Today we rely on the OS to
-    // hand foreground back when the palette hides — `SendInput` then
-    // targets that window, with the caveats noted below.
+    // focused afterwards. On Windows the snapshot now carries the HWND in
+    // `native_handle`, so `activate_restore_target` re-foregrounds the
+    // exact window the user came from via `SetForegroundWindow` instead
+    // of relying on the OS to guess.
     if let Some(target) = window.app_handle().get_webview_window("main") {
         let _ = target.hide();
     }
-    if let Some(prev) = state.take_previous_frontmost()
-        && let Some(bundle_id) = prev.bundle_id.as_deref()
-    {
-        let _ = state.window.activate_app(bundle_id).await;
+    if let Some(prev) = state.take_previous_frontmost() {
+        let _ = state.window.activate_restore_target(&prev).await;
     }
-    // Give AppKit a tick to re-focus the target app. 60ms is the
-    // empirical sweet spot reported by the Maccy / Paste community —
-    // anything <30ms races against the focus restoration. Skipped on
-    // Windows / Linux for now: Windows has no `activate_app` step
-    // (HWND-based restore is Phase 3 work), and Linux Wayland relies
-    // on the compositor's own focus handoff. Both can still race —
-    // `paste_entry_from_palette` absorbs it via `paste_delay_ms`, but
-    // this single-shot path has no equivalent knob yet.
-    #[cfg(target_os = "macos")]
+    // Give the OS a tick to re-focus the target app before we send the
+    // synthesised paste. 60ms is the empirical sweet spot reported by
+    // the Maccy / Paste community on macOS; on Windows the same value
+    // covers the SetForegroundWindow → IME settle path without making
+    // the keystroke feel laggy. Linux Wayland still skips: `wtype`
+    // targets whatever the compositor considers focused at send time
+    // and the compositor's focus handoff is already synchronous.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     state
         .runtime
@@ -187,16 +180,13 @@ pub async fn paste_entry_from_palette(
     }
 
     // Re-focus the previously frontmost app before synthesising the paste
-    // keystroke. macOS uses `activate_app(bundle_id)`; Windows captures the
-    // foreground window but exposes no `bundle_id`, so `activate_app` is
-    // skipped and the OS-level foreground handoff (triggered when the
-    // palette window hid above) is what hands focus back — explicit
-    // HWND-based `SetForegroundWindow` is Phase 3 work. Linux Wayland
-    // records `None` for `previous_frontmost` entirely, so `wtype`
-    // targets whatever the compositor now considers focused.
+    // keystroke. macOS dispatches via `bundle_id`; Windows now uses the
+    // HWND captured in `native_handle` to call `SetForegroundWindow`
+    // directly. Linux Wayland records `None` for `previous_frontmost`
+    // entirely, so the call is a no-op and `wtype` targets whatever the
+    // compositor considers focused.
     if let Some(prev) = state.take_previous_frontmost()
-        && let Some(bundle_id) = prev.bundle_id.as_deref()
-        && let Err(err) = state.window.activate_app(bundle_id).await
+        && let Err(err) = state.window.activate_restore_target(&prev).await
     {
         // Surface restore failure to the UI: the entry was copied but we
         // never refocused the originating app, so the synthesised paste
