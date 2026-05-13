@@ -983,10 +983,14 @@ change.
   `ClearHistory` deletes every non-pinned row. Conflicts surface via
   the same `nagori://hotkey_register_failed` event used by the primary
   hotkey.
-- **Clear-on-quit** — when `AppSettings.clear_on_quit` is true, the
-  main window's `WindowEvent::CloseRequested` handler synchronously
-  deletes non-pinned entries before tear-down. Pinned entries are
-  always preserved.
+- **Clear-on-quit** — when `AppSettings.clear_on_quit` is true,
+  `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
+  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries before
+  the tokio runtime tears down. Pinned entries are always preserved.
+  `WindowEvent::CloseRequested` is *not* a delete trigger: the same
+  handler intercepts it on every OS, calls `prevent_close` and hides the
+  main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the
+  webview handle a later palette toggle relies on) alive.
 - **Notifications (`tauri-plugin-notification`)** — one-shot "ready"
   alert after setup, plus state-change toasts when `capture_enabled` or
   `ai_enabled` flip. Auto-paste failures (e.g. revoked Accessibility)

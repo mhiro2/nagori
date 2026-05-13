@@ -73,8 +73,12 @@ pub fn run() {
             spawn_settings_subscribers(app.handle());
 
             // Surface a "ready" notification once everything is wired
-            // up. The notification plugin no-ops if the user has not
-            // granted permission yet, so this is best-effort.
+            // up. Runs on every OS: macOS routes through `UNUserNotificationCenter`,
+            // Windows through the Toast Notifications COM API, and Linux
+            // through `org.freedesktop.Notifications` (libnotify). The
+            // notification plugin no-ops if the user has not granted
+            // permission yet (or, on Linux, if no notification daemon is
+            // running), so this is best-effort and never blocks startup.
             {
                 use tauri_plugin_notification::NotificationExt;
                 let _ = app
@@ -161,20 +165,43 @@ static EXIT_CLEANUP_FIRED: std::sync::atomic::AtomicBool =
 
 const BACKGROUND_TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Cross-platform run-event hook. `RunEvent::ExitRequested` fires for
-/// tray "Quit", Cmd/Ctrl+Q, and dock/menu Quit, all of which actually
-/// tear the process down — so it's the single right place to honour
-/// `clear_on_quit`. We deliberately do **not** wire a parallel
-/// `WindowEvent::CloseRequested` handler: closing the main window only
-/// hides it on every OS, and previously the close hook ran the
-/// soft-delete via `block_on` on the UI thread, freezing the user's
-/// desktop for up to the 1 s timeout while purging history they never
-/// asked to lose.
+/// Cross-platform run-event hook. Handles two distinct shutdown surfaces:
+///
+/// * `RunEvent::ExitRequested` fires for tray "Quit", `Cmd`/`Ctrl+Q`, and
+///   dock/menu Quit — all of which actually tear the process down — so
+///   it's the single right place to honour `clear_on_quit`.
+/// * `WindowEvent::CloseRequested` on the main window is intercepted and
+///   converted into a hide. Without this, pressing `Cmd+W` on macOS or
+///   `Alt+F4` on Windows/Linux would destroy the (sole) webview window —
+///   the next palette toggle would then resolve `get_webview_window("main")`
+///   to `None` and silently no-op. We deliberately do **not** trigger any
+///   soft-delete here: a previous version ran `clear_on_quit` from this
+///   hook via `block_on` on the UI thread, freezing the user's desktop
+///   for up to a second every time they closed the palette. Hiding is
+///   strictly synchronous and safe to run inline.
 fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
-    if !matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-        return;
+    match event {
+        tauri::RunEvent::ExitRequested { .. } => perform_exit_cleanup(handle),
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            // Prevent destruction so the webview handle stays alive for
+            // the next palette toggle. Hiding mirrors what
+            // `hide_main_palette` does, and clearing the captured
+            // frontmost matches the `close_palette` / `hide_palette`
+            // command paths so a later open re-snapshots cleanly.
+            api.prevent_close();
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.clear_previous_frontmost();
+            }
+        }
+        _ => {}
     }
-    perform_exit_cleanup(handle);
 }
 
 /// Block the tauri runtime briefly so background workers and optional
