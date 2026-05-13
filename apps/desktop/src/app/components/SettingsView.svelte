@@ -123,10 +123,12 @@
   // the bundle themselves and verify Apple's signature dialog.
   let updateReleaseUrl: string | undefined = $state(undefined);
 
-  // The updater plugin is registered only on macOS (see lib.rs); on
-  // other platforms the command returns `unsupported`, so the whole
-  // fieldset is hidden rather than rendering controls that would no-op
-  // or throw.
+  // The updater plugin is wired on every OS, but for MVP we only
+  // publish signed release bundles for macOS (see
+  // `updater_release_target` in lib.rs). On other platforms the
+  // backend short-circuits with `Unsupported`, so the whole fieldset
+  // is hidden rather than rendering controls that would only ever
+  // error.
   const isMacOs =
     typeof navigator !== "undefined" && /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
 

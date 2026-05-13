@@ -184,10 +184,11 @@ export const ja: Messages = {
     integration: {
       legend: 'OS 連携',
       autoLaunch: 'ログイン時に自動起動',
-      autoLaunchHelp: 'launchd の LaunchAgent を登録してログイン時に Nagori を起動します。',
-      menuBar: 'メニューバーに表示',
+      autoLaunchHelp:
+        'OS の自動起動機能 (macOS: LaunchAgent / Windows: Run レジストリ / Linux: XDG autostart) を使ってログイン時に Nagori を起動します。',
+      menuBar: 'トレイアイコンを表示',
       menuBarHelp:
-        'macOS のメニューバーに Nagori のトレイアイコンを表示します。バックグラウンド常駐のみで使う場合は無効にできます。',
+        'Nagori のトレイアイコンを表示します (macOS: メニューバー / Windows: 通知領域 / Linux: ステータスインジケーター)。バックグラウンド常駐のみで使う場合は無効にできます。',
       clearOnQuit: '終了時にピン留め以外を削除',
       clearOnQuitHelp:
         'アプリ終了時にピン留めしていない履歴をすべて削除します。ピン留めした項目は残ります。',

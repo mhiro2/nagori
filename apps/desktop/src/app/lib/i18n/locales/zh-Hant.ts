@@ -181,9 +181,11 @@ export const zhHant: Messages = {
     integration: {
       legend: '系統整合',
       autoLaunch: '登入時自動啟動',
-      autoLaunchHelp: '註冊 launchd LaunchAgent，在登入時啟動 Nagori。',
-      menuBar: '在選單列顯示',
-      menuBarHelp: '在 macOS 選單列顯示 Nagori 的常駐圖示。若僅需背景執行可關閉。',
+      autoLaunchHelp:
+        '透過系統原生機制（macOS：LaunchAgent / Windows：Run 登錄機碼 / Linux：XDG 自動啟動）在登入時啟動 Nagori。',
+      menuBar: '顯示常駐圖示',
+      menuBarHelp:
+        '在系統列顯示 Nagori 圖示（macOS：選單列 / Windows：通知區域 / Linux：狀態列）。若僅需背景執行可關閉。',
       clearOnQuit: '結束時清除未釘選的歷史',
       clearOnQuitHelp: '結束應用程式時清除所有未釘選的項目。釘選的項目會保留。',
     },

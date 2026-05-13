@@ -93,12 +93,12 @@ domain code. This leads to four design rules:
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + `CF_HDROP` file lists), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback), `wtype` Ctrl+V auto-paste, frontmost-app and hotkey registration unsupported in the current build (the Tauri desktop shell does not register the global-shortcut plugin on Linux yet) |
+| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback), `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
-| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` wires the platform adapters (`MacosClipboard`/`WindowsClipboard`/`LinuxClipboard` etc.) per `cfg(target_os)`; on Linux a missing `wl_data_control` protocol fails startup with a Wayland-specific hint rather than silently using a no-op adapter. Per-OS capabilities (tray menu, secure-input detection, global-shortcut registration) are still gated to macOS pending Phase 2–5 of the cross-platform roadmap. |
+| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` wires the platform adapters (`MacosClipboard`/`WindowsClipboard`/`LinuxClipboard` etc.) per `cfg(target_os)`; on Linux a missing `wl_data_control` protocol fails startup with a Wayland-specific hint rather than silently using a no-op adapter. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
 
 Repository layout (abbreviated):
 
@@ -593,10 +593,13 @@ Implementations:
   the in-process capture loop against them; a missing `wl_data_control`
   protocol surfaces at startup as an `AppError::Platform` with an
   explicit Wayland/X11 hint instead of silently degrading to a no-op
-  runtime. Tray menu, global-shortcut registration, and the rest of the
-  Tauri plugin surface remain macOS-only pending the 1.5 roadmap
-  Phases 2–5; operators on Linux can still rely on `nagori daemon run`
-  plus the CLI subcommands while those gaps are filled.
+  runtime. The Tauri plugin surface — tray (via the StatusNotifierItem /
+  `libayatana-appindicator` shipped in the deb dependency list),
+  autostart (`~/.config/autostart/<bundle>.desktop`), global-shortcut
+  registration, and updater — is wired on every OS; the global-shortcut
+  backend is X11-only upstream, so pure Wayland sessions surface
+  `nagori://hotkey_register_failed` and the UI falls back to the in-app
+  open button.
   `PermissionChecker`
   reports `Granted` / `Denied` for `Clipboard` (probing the same
   `wl-clipboard-rs` entry point the capture loop uses) and
@@ -956,17 +959,24 @@ Wired in `apps/desktop/src-tauri/src/lib.rs`, all reacting to a single
 `tokio::sync::watch` channel that broadcasts every `AppSettings`
 change.
 
-- **Tray (`tauri::tray::TrayIcon`)** — menu-bar icon with *Show
-  Palette*, *Pause Capture* / *Resume Capture* (label tracks
-  `capture_enabled`), *Settings…*, *Quit Nagori*. The settings entry
-  emits the Tauri event `nagori://navigate` with payload `"settings"`;
-  the frontend listens via `@tauri-apps/api/event` and switches its
-  route. Visibility is gated by `AppSettings.show_in_menu_bar`; toggling
-  the setting installs or removes the tray icon at runtime.
-- **Auto-launch (`tauri-plugin-autostart`)** — registers a
-  `MacosLauncher::LaunchAgent` on demand. The settings subscriber keeps
-  the LaunchAgent in sync with `AppSettings.auto_launch`; toggling the
-  checkbox enables / disables the agent without a relaunch.
+- **Tray (`tauri::tray::TrayIcon`)** — system tray icon (macOS menu
+  bar, Windows notification area, Linux StatusNotifierItem /
+  `libayatana-appindicator`) with *Show Palette*, *Pause Capture* /
+  *Resume Capture* (label tracks `capture_enabled`), *Settings…*,
+  *Quit Nagori*. The settings entry emits the Tauri event
+  `nagori://navigate` with payload `"settings"`; the frontend listens
+  via `@tauri-apps/api/event` and switches its route. Visibility is
+  gated by `AppSettings.show_in_menu_bar`; toggling the setting hides
+  or re-shows the tray icon at runtime. Install failures on Linux
+  sessions without `StatusNotifierItem` support are logged and the rest
+  of the app stays usable through the in-window controls.
+- **Auto-launch (`tauri-plugin-autostart`)** — wires the platform-native
+  launcher: a `LaunchAgent` plist under `~/Library/LaunchAgents` on
+  macOS, an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  registry entry on Windows, and a `~/.config/autostart/<bundle>.desktop`
+  file on Linux. The settings subscriber keeps the launcher in sync
+  with `AppSettings.auto_launch`; toggling the checkbox enables /
+  disables the entry without a relaunch.
 - **Secondary hotkeys** — `AppSettings.secondary_hotkeys`
   (`SecondaryHotkeyAction → accelerator`) is reconciled by the same
   watch channel. `RepasteLast` re-pastes the most recent entry;
@@ -987,8 +997,13 @@ change.
   command shells out to `open(1)` with the
   `x-apple.systempreferences:` URL so the onboarding banner can take
   the user directly to the Accessibility pane.
-- **Updater (`tauri-plugin-updater`)** — registered only on macOS for
-  MVP. The plugin reads its endpoint and signing pubkey from
+- **Updater (`tauri-plugin-updater`)** — registered on every OS so
+  `app.updater()` is always wired; for MVP we only publish signed
+  release bundles for macOS, so the startup probe gates on
+  `updater_release_target()` and `commands::check_for_updates` returns
+  `Unsupported` off macOS, with the Settings → Advanced fieldset
+  hidden on those platforms. The plugin reads its endpoint and signing
+  pubkey from
   `tauri.conf.json` (`plugins.updater`); the endpoint resolves
   `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`
   via GitHub's "always points at the newest release asset" redirect, so

@@ -190,10 +190,11 @@ export const fr: Messages = {
     integration: {
       legend: 'Intégration OS',
       autoLaunch: 'Lancer à la connexion',
-      autoLaunchHelp: 'Enregistre un LaunchAgent launchd pour que Nagori démarre à la connexion.',
-      menuBar: 'Afficher dans la barre des menus',
+      autoLaunchHelp:
+        'Démarre Nagori à la connexion via le mécanisme natif du système (LaunchAgent sur macOS, clé Run du registre sur Windows, autostart XDG sur Linux).',
+      menuBar: 'Afficher l’icône dans la barre d’état',
       menuBarHelp:
-        'Affiche l’icône de Nagori dans la barre des menus macOS. Désactivez pour une exécution entièrement en arrière-plan.',
+        'Affiche l’icône de Nagori dans la barre d’état système (macOS : barre des menus, Windows : zone de notification, Linux : indicateur d’état). Désactivez pour une exécution entièrement en arrière-plan.',
       clearOnQuit: 'Effacer l’historique non épinglé à la fermeture',
       clearOnQuitHelp:
         'À la fermeture de l’application, toutes les entrées non épinglées sont supprimées. Les épinglées sont conservées.',

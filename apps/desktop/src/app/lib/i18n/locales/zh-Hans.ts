@@ -181,9 +181,11 @@ export const zhHans: Messages = {
     integration: {
       legend: '系统集成',
       autoLaunch: '登录时自动启动',
-      autoLaunchHelp: '注册 launchd LaunchAgent 在登录时启动 Nagori。',
-      menuBar: '在菜单栏显示',
-      menuBarHelp: '在 macOS 菜单栏显示 Nagori 的托盘图标。如果只想后台运行，可以关闭。',
+      autoLaunchHelp:
+        '通过系统原生机制（macOS: LaunchAgent / Windows: Run 注册表项 / Linux: XDG 自启动）在登录时启动 Nagori。',
+      menuBar: '显示托盘图标',
+      menuBarHelp:
+        '在系统托盘显示 Nagori 图标（macOS: 菜单栏 / Windows: 通知区域 / Linux: 状态指示器）。如果只想后台运行，可以关闭。',
       clearOnQuit: '退出时清除未固定历史',
       clearOnQuitHelp: '退出应用时清除所有未固定的条目。固定的条目会保留。',
     },

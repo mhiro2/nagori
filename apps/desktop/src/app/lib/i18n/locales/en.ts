@@ -446,10 +446,11 @@ export const en: Messages = {
     integration: {
       legend: 'OS integration',
       autoLaunch: 'Launch at login',
-      autoLaunchHelp: 'Register a launchd LaunchAgent so Nagori starts on login.',
-      menuBar: 'Show in menu bar',
+      autoLaunchHelp:
+        'Start Nagori at login using the OS-native launcher (macOS LaunchAgent, Windows Run registry key, Linux XDG autostart).',
+      menuBar: 'Show tray icon',
       menuBarHelp:
-        'Display the Nagori tray icon in the macOS menu bar. Disable for a fully background experience.',
+        'Display the Nagori tray icon in the system tray (macOS menu bar, Windows notification area, Linux status indicator). Disable for a fully background experience.',
       clearOnQuit: 'Clear non-pinned history on quit',
       clearOnQuitHelp:
         'When the app exits, all non-pinned entries are removed. Pinned entries are preserved.',

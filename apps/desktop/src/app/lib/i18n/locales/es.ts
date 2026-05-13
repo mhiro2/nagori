@@ -193,10 +193,10 @@ export const es: Messages = {
       legend: 'Integración con el SO',
       autoLaunch: 'Iniciar al iniciar sesión',
       autoLaunchHelp:
-        'Registra un LaunchAgent de launchd para que Nagori se inicie al iniciar sesión.',
-      menuBar: 'Mostrar en la barra de menús',
+        'Inicia Nagori al iniciar sesión utilizando el mecanismo nativo del sistema (LaunchAgent en macOS, clave Run del registro en Windows, autoarranque XDG en Linux).',
+      menuBar: 'Mostrar icono en la bandeja',
       menuBarHelp:
-        'Muestra el icono de bandeja de Nagori en la barra de menús de macOS. Desactívalo para una experiencia totalmente en segundo plano.',
+        'Muestra el icono de bandeja de Nagori (macOS: barra de menús, Windows: área de notificación, Linux: indicador de estado). Desactívalo para una experiencia totalmente en segundo plano.',
       clearOnQuit: 'Borrar historial no fijado al salir',
       clearOnQuitHelp:
         'Al salir de la aplicación se eliminan todas las entradas no fijadas. Las entradas fijadas se conservan.',

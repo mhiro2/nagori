@@ -183,10 +183,11 @@ export const ko: Messages = {
     integration: {
       legend: 'OS 통합',
       autoLaunch: '로그인 시 자동 실행',
-      autoLaunchHelp: 'launchd LaunchAgent를 등록해 로그인 시 Nagori를 시작합니다.',
-      menuBar: '메뉴 막대에 표시',
+      autoLaunchHelp:
+        '운영체제 기본 기능(macOS: LaunchAgent / Windows: Run 레지스트리 / Linux: XDG 자동 시작)을 통해 로그인 시 Nagori를 실행합니다.',
+      menuBar: '트레이 아이콘 표시',
       menuBarHelp:
-        'macOS 메뉴 막대에 Nagori 트레이 아이콘을 표시합니다. 백그라운드 전용으로 사용하려면 비활성화하세요.',
+        '시스템 트레이에 Nagori 아이콘을 표시합니다 (macOS: 메뉴 막대 / Windows: 알림 영역 / Linux: 상태 표시기). 백그라운드 전용으로 사용하려면 비활성화하세요.',
       clearOnQuit: '종료 시 고정되지 않은 기록 삭제',
       clearOnQuitHelp:
         '앱이 종료될 때 고정되지 않은 모든 항목을 제거합니다. 고정된 항목은 보존됩니다.',

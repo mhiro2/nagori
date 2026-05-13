@@ -53,9 +53,12 @@ pub struct AppSettings {
     pub locale: Locale,
     pub recent_order: RecentOrder,
     pub appearance: Appearance,
-    /// macOS launch-at-login. Surfaced through `tauri-plugin-autostart`
-    /// when the desktop app starts. Defaults to `false` so existing
-    /// installations stay opt-in.
+    /// Launch Nagori automatically when the user signs in. Surfaced
+    /// through `tauri-plugin-autostart`, which writes a macOS
+    /// `LaunchAgent` plist, a Windows `HKCU\…\Run` registry entry, or a
+    /// Linux `~/.config/autostart/<bundle>.desktop` file depending on
+    /// the OS. Defaults to `false` so existing installations stay
+    /// opt-in.
     pub auto_launch: bool,
     /// What the capture pipeline does when an entry classifies as
     /// `Sensitivity::Secret` (api keys, JWTs, private keys, etc). Defaults to
@@ -80,8 +83,12 @@ pub struct AppSettings {
     /// palette becomes single-column for higher information density.
     #[serde(default = "default_show_preview_pane")]
     pub show_preview_pane: bool,
-    /// Whether the menu-bar tray icon is visible. When `false` the user
-    /// reaches Nagori only through the global hotkey / CLI.
+    /// Whether the system tray icon is visible — the macOS menu bar
+    /// entry, the Windows notification-area icon, or the Linux
+    /// `StatusNotifierItem` / app-indicator. When `false` the user
+    /// reaches Nagori only through the global hotkey / CLI. The field
+    /// name predates Windows / Linux support and is kept for settings
+    /// persistence compatibility.
     #[serde(default = "default_show_in_menu_bar")]
     pub show_in_menu_bar: bool,
     /// When `true`, all non-pinned entries are cleared during app shutdown.

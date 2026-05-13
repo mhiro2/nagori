@@ -2,7 +2,6 @@ mod commands;
 mod dto;
 mod error;
 mod state;
-#[cfg(target_os = "macos")]
 mod tray;
 
 use nagori_core::{EntryId, SecondaryHotkeyAction, is_text_safe_for_default_output};
@@ -60,9 +59,15 @@ pub fn run() {
             app.manage(state);
             app.state::<AppState>().spawn_background_tasks();
 
-            #[cfg(target_os = "macos")]
-            {
-                tray::install(app.handle())?;
+            // Tray icon is installed on every platform. macOS exposes it in
+            // the menu bar, Windows in the system notification area, and
+            // Linux through StatusNotifierItem / `libayatana-appindicator`.
+            // The menu items themselves (Show Palette / Pause Capture /
+            // Settings / Quit) are platform-agnostic. If creation fails
+            // (e.g. Linux session without StatusNotifierItem support) we
+            // log and continue so the rest of the app stays usable.
+            if let Err(err) = tray::install(app.handle()) {
+                tracing::warn!(error = %err, "tray_install_failed");
             }
 
             spawn_settings_subscribers(app.handle());
@@ -204,8 +209,9 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
 ///   * keep launch-at-login in sync with `AppSettings.auto_launch`,
 ///   * keep secondary global shortcuts in sync with
 ///     `AppSettings.secondary_hotkeys`,
-///   * keep the menu-bar tray icon visible/hidden per
-///     `AppSettings.show_in_menu_bar`,
+///   * keep the system tray icon visible/hidden per
+///     `AppSettings.show_in_menu_bar` (the macOS menu bar / Windows
+///     notification area / Linux `StatusNotifierItem` entry),
 ///   * notify the user once when capture is paused / resumed,
 ///   * notify the user when the AI provider transitions into `enabled` so
 ///     they realise remote calls may now happen.
@@ -268,12 +274,10 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         // failure leaves the prior accelerator out of `current_secondary`
         // so later reconciles won't try to unregister something we never
         // registered (which would tear down a sibling action sharing the
-        // same accelerator). Tray reconciliation is macOS-only for MVP —
-        // Phase 4 lifts it to all OS — so the call stays cfg-gated.
-        #[cfg(target_os = "macos")]
+        // same accelerator). Tray reconciliation runs on every OS; the
+        // underlying `set_visible` is a no-op when the tray failed to
+        // install (e.g. an unsupported Linux session).
         tray::set_visible(&app, current_show_in_menu_bar);
-        #[cfg(not(target_os = "macos"))]
-        let _ = current_show_in_menu_bar;
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
         // Startup updater probe. Honours `auto_update_check`,
@@ -351,7 +355,6 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 
             if snapshot.show_in_menu_bar != current_show_in_menu_bar {
                 current_show_in_menu_bar = snapshot.show_in_menu_bar;
-                #[cfg(target_os = "macos")]
                 tray::set_visible(&app, current_show_in_menu_bar);
             }
 
@@ -364,9 +367,9 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             }
 
             // Refresh the tray menu so the "Pause Capture" / "Resume
-            // Capture" label tracks the current state. macOS-only until
-            // Phase 4 lifts the tray module to all OS.
-            #[cfg(target_os = "macos")]
+            // Capture" label tracks the current state. Runs on every OS so
+            // Windows / Linux trays stay in sync with the persisted
+            // capture flag.
             tray::refresh(&app, current_capture);
         }
     });

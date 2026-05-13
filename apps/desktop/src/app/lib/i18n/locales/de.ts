@@ -190,10 +190,11 @@ export const de: Messages = {
     integration: {
       legend: 'OS-Integration',
       autoLaunch: 'Bei Anmeldung starten',
-      autoLaunchHelp: 'Registriert einen launchd-LaunchAgent, damit Nagori beim Login startet.',
-      menuBar: 'In der Menüleiste anzeigen',
+      autoLaunchHelp:
+        'Startet Nagori bei der Anmeldung über das OS-eigene Verfahren (macOS LaunchAgent, Windows Run-Registry-Eintrag, Linux XDG-Autostart).',
+      menuBar: 'Tray-Symbol anzeigen',
       menuBarHelp:
-        'Zeigt das Nagori-Tray-Symbol in der macOS-Menüleiste. Deaktivieren für reinen Hintergrundbetrieb.',
+        'Zeigt das Nagori-Tray-Symbol im System-Tray an (macOS: Menüleiste, Windows: Infobereich, Linux: Statusanzeige). Deaktivieren für reinen Hintergrundbetrieb.',
       clearOnQuit: 'Nicht angeheftete Einträge beim Beenden löschen',
       clearOnQuitHelp:
         'Beim Beenden werden alle nicht angehefteten Einträge entfernt. Angeheftete Einträge bleiben erhalten.',

@@ -1,9 +1,17 @@
-//! Menu-bar tray icon for the desktop shell.
+//! System tray icon for the desktop shell.
 //!
 //! The tray exposes the same actions a power user would otherwise reach
 //! through the global hotkey or a CLI invocation: show the palette, pause
 //! or resume capture, open settings, and quit. We rebuild the menu when
 //! capture state changes so the toggle label tracks reality.
+//!
+//! The same module powers the macOS menu bar item, the Windows system
+//! notification area icon, and the Linux `StatusNotifierItem` /
+//! app-indicator entry. Tauri 2's `TrayIconBuilder` is cross-platform, so
+//! this file contains no per-OS code paths; environments without
+//! `StatusNotifierItem` support (some minimal Linux DEs) simply fail at
+//! `install()` time, which the caller logs and degrades to in-app
+//! controls.
 
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -56,14 +64,23 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    let _tray: TrayIcon = TrayIconBuilder::with_id(TRAY_ID)
+    // Tauri loads the bundle icon from `tauri.conf.json`'s `bundle.icon`
+    // list as the default window icon, which we reuse here. macOS would
+    // render the tray entry from `title` alone, but Windows' notification
+    // area and Linux' `StatusNotifierItem` need an actual image — without
+    // it the icon is invisible (or a placeholder), so we set it on every
+    // platform.
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .title("Nagori")
         .tooltip("Nagori clipboard history")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| handle_menu_event(app, &event))
-        .on_tray_icon_event(handle_tray_icon_event)
-        .build(app)?;
+        .on_tray_icon_event(handle_tray_icon_event);
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    let _tray: TrayIcon = builder.build(app)?;
 
     app.manage(Mutex::new(TrayHandles {
         capture_item: toggle_capture_item,
@@ -99,8 +116,10 @@ pub fn refresh(app: &AppHandle, capture_enabled: bool) {
     handles.set_capture_label(capture_enabled);
 }
 
-/// Toggle whether the tray icon is currently shown in the menu bar. Idempotent:
-/// calling repeatedly with the same `visible` is a no-op.
+/// Toggle whether the tray icon is currently shown in the OS tray
+/// surface (macOS menu bar, Windows notification area, Linux
+/// `StatusNotifierItem`). Idempotent: calling repeatedly with the same
+/// `visible` is a no-op.
 pub fn set_visible(app: &AppHandle, visible: bool) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
