@@ -56,8 +56,33 @@ pub trait WindowBehavior: Send + Sync {
     /// Reports whether the frontmost app's currently-focused UI element
     /// is a secure text field (i.e. a password input). The capture loop
     /// uses this signal to suppress the next clip before classification
-    /// so password keystrokes never reach history. macOS-only; other
-    /// platforms default to `Ok(false)` until per-OS support lands.
+    /// so password keystrokes never reach history.
+    ///
+    /// **Capability: macOS-only in the current implementation.** macOS
+    /// exposes the answer through the Accessibility API's
+    /// `kAXSecureTextField` role, and the macOS adapter overrides this
+    /// default with a real probe. Windows has UI Automation
+    /// (`IUIAutomation::GetFocusedElement` + `IsPasswordProperty`) that
+    /// could in principle answer the same question, but the current
+    /// Win32-based `WindowsWindowBehavior` does not consume it; until
+    /// that lands, the capability is effectively unavailable. Linux
+    /// Wayland goes further and structurally withholds per-surface focus
+    /// from non-compositor clients, so an equivalent probe has no
+    /// portable path at all.
+    ///
+    /// On non-macOS targets the capture loop therefore falls back to
+    /// downstream defences: the `SensitivityClassifier` content detectors
+    /// (PEM blocks, JWTs), the user-configurable secret regex denylist,
+    /// and — *on Windows only* — the password-manager source-app
+    /// denylist driven by `frontmost_app()`. The denylist is not
+    /// available on Linux Wayland because `LinuxWindowBehavior` returns
+    /// `Ok(None)` from `frontmost_app()`, so Linux relies solely on the
+    /// content-level guards.
+    ///
+    /// Returning `Ok(false)` rather than `Err(Unsupported)` is
+    /// intentional: the capture loop's "fail-closed when AX errors
+    /// persist" path is macOS-specific and a platform that never had AX
+    /// should not trip it.
     async fn frontmost_focused_is_secure(&self) -> Result<bool> {
         Ok(false)
     }

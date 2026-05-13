@@ -14,11 +14,19 @@ use nagori_platform::{FrontmostApp, WindowBehavior};
 /// the capture loop already handles a missing frontmost on macOS when
 /// AX is revoked.
 ///
-/// `frontmost_focused_is_secure` keeps the trait default (`Ok(false)`):
-/// Wayland has no equivalent of `kAXSecureTextField`, so the
-/// password-input guard relies on the `SensitivityClassifier` detectors
-/// (PEM blocks, password-manager source apps) rather than a structural
-/// AX probe.
+/// `frontmost_focused_is_secure` keeps the trait default (`Ok(false)`) —
+/// see the doc on `WindowBehavior::frontmost_focused_is_secure` for the
+/// cross-platform capability story. In short: this capability is
+/// **unavailable on Linux Wayland**. The compositor refuses to expose
+/// per-surface focus to non-compositor clients, so structural password-
+/// field detection is impossible from a regular session client.
+/// The password-manager *source-app* denylist used by macOS / Windows
+/// is also unavailable here because `frontmost_app()` returns `Ok(None)`
+/// — there is no portable foreground-app probe on Wayland either.
+/// The password-input guard therefore relies entirely on the
+/// `SensitivityClassifier` content detectors (PEM blocks, JWTs), the
+/// user-configurable secret regex denylist, and the secret-redaction
+/// policy rather than any structural or source-app probe.
 #[derive(Debug, Default)]
 pub struct LinuxWindowBehavior;
 

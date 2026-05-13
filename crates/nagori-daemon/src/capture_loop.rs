@@ -133,20 +133,31 @@ const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
 ];
 
 /// Inter-tick wall-clock gap that we treat as "the host paused" (sleep,
-/// suspend, lid close, container freeze). On macOS the pasteboard
-/// `changeCount` can lap silently across a sleep cycle, so a post-wake clip
-/// whose sequence happens to collide with the pre-sleep value would be
-/// skipped as a duplicate. Above this gap we cross-check the next read
-/// against the last captured content hash before trusting the sequence
-/// dedup. We deliberately use `SystemTime` (wall clock) rather than
-/// `Instant`: Rust's `Instant` on Darwin is `CLOCK_UPTIME_RAW` and does
-/// **not** advance while the system is asleep, so a monotonic-clock
-/// heuristic would never see a sleep gap on the very platform we care
-/// about. `SystemTime` jitters under NTP and is theoretically vulnerable
-/// to manual clock changes, but the false-positive cost is just one
-/// extra body read and content-hash comparison. The 30-second threshold
-/// sits well above any normal scheduling jitter at the default 500 ms
-/// cadence (60x headroom) yet small enough to catch even short naps.
+/// suspend, lid close, container freeze).
+///
+/// **Capability: macOS-specific defence; harmless on Windows/Linux.** On
+/// macOS the pasteboard `changeCount` can lap silently across a sleep
+/// cycle, so a post-wake clip whose sequence happens to collide with the
+/// pre-sleep value would be skipped as a duplicate — the resync forces a
+/// content-hash recheck above the threshold to defeat that lap. Windows'
+/// `GetClipboardSequenceNumber` is a 32-bit monotonic counter that does
+/// not lap across sleep, and Linux's content-hash sequence is the SHA-256
+/// of the body itself (impossible to "lap" without an actual content
+/// collision), so the resync logic is structurally a no-op on those
+/// platforms: the next tick's sequence either matches `last_sequence`
+/// (genuine duplicate) or differs (genuine new content). Forcing one
+/// extra body read on those platforms after a 30 s gap costs nothing in
+/// the steady state.
+///
+/// We deliberately use `SystemTime` (wall clock) rather than `Instant`:
+/// Rust's `Instant` on Darwin is `CLOCK_UPTIME_RAW` and does **not**
+/// advance while the system is asleep, so a monotonic-clock heuristic
+/// would never see a sleep gap on the very platform we care about.
+/// `SystemTime` jitters under NTP and is theoretically vulnerable to
+/// manual clock changes, but the false-positive cost is just one extra
+/// body read and content-hash comparison. The 30-second threshold sits
+/// well above any normal scheduling jitter at the default 500 ms cadence
+/// (60x headroom) yet small enough to catch even short naps.
 const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
 
 pub struct CaptureLoop<R, E, A> {

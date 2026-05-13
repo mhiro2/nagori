@@ -12,6 +12,17 @@ use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
 /// window title used for source-attribution displays. Mirrors the macOS
 /// adapter's contract: returns `Ok(None)` on failure rather than `Err`,
 /// so the capture loop can proceed without source metadata.
+///
+/// `frontmost_focused_is_secure` keeps the trait default (`Ok(false)`) —
+/// see the doc on `WindowBehavior::frontmost_focused_is_secure`. The
+/// current Win32-based adapter does **not** wire a secure-text probe:
+/// Win32 alone does not surface another process's focused control's
+/// secure flag (we'd need to walk across a security boundary), and we
+/// have not adopted the UI Automation alternative
+/// (`IUIAutomation::GetFocusedElement` + `IsPasswordProperty`) yet.
+/// Until that lands, the password-input guard relies on the
+/// `SensitivityClassifier` content detectors (PEM blocks, JWTs) and the
+/// password-manager source-app denylist seeded by `frontmost_app()`.
 #[derive(Debug, Default)]
 pub struct WindowsWindowBehavior;
 
