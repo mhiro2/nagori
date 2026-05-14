@@ -9,7 +9,7 @@ catalogs:
     vite: 8.0.10
   tauri:
     "@tauri-apps/api": 2.11.0
-    "@tauri-apps/cli": 2.11.0
+    "@tauri-apps/cli": 2.11.1
   testing:
     "@testing-library/jest-dom": 6.9.1
     "@testing-library/svelte": 5.3.1
