@@ -169,19 +169,19 @@ impl AppState {
 /// going through each platform crate's `_blocking` accessor. Linux
 /// Wayland has no portable equivalent, so the helper returns `None`
 /// without erroring — see `LinuxWindowBehavior` for the trade-off.
+#[cfg(target_os = "macos")]
 fn capture_restore_target_blocking() -> Option<RestoreTarget> {
-    #[cfg(target_os = "macos")]
-    {
-        MacosWindowBehavior::capture_restore_target_blocking()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        WindowsWindowBehavior::capture_restore_target_blocking()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        None
-    }
+    MacosWindowBehavior::capture_restore_target_blocking()
+}
+
+#[cfg(target_os = "windows")]
+fn capture_restore_target_blocking() -> Option<RestoreTarget> {
+    WindowsWindowBehavior::capture_restore_target_blocking()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const fn capture_restore_target_blocking() -> Option<RestoreTarget> {
+    None
 }
 
 impl AppState {
@@ -340,7 +340,8 @@ impl AppState {
         // this wrapper the setup error reads as a bare `AppError::Platform(…)`
         // and the user has no way to tell whether it's a transient failure or
         // an architectural constraint of their desktop environment.
-        let clipboard = Arc::new(LinuxClipboard::new().map_err(annotate_linux_clipboard_error)?);
+        let clipboard =
+            Arc::new(LinuxClipboard::new().map_err(|err| annotate_linux_clipboard_error(&err))?);
         let window: Arc<dyn WindowBehavior> = Arc::new(LinuxWindowBehavior::new());
         let runtime = NagoriRuntime::builder(store)
             .clipboard(clipboard.clone())
@@ -369,7 +370,7 @@ impl AppState {
 }
 
 #[cfg(target_os = "linux")]
-fn annotate_linux_clipboard_error(err: AppError) -> AppError {
+fn annotate_linux_clipboard_error(err: &AppError) -> AppError {
     AppError::Platform(format!(
         "could not initialise the Linux clipboard adapter: {err}. \
          Nagori requires a Wayland session whose compositor supports the \
