@@ -22,6 +22,15 @@ env:
 jobs:
   bundle:
     name: Bundle (${{ matrix.target }})
+    # Platform policy (see README → "Platform support" and ARCHITECTURE
+    # updater notes): macOS arm64/x86_64 are the primary signed targets
+    # and the only ones with an in-app update feed. Linux x86_64 is
+    # built as an experimental tarball — present on the GitHub release
+    # page but the runtime gates `check_for_updates` so users upgrade
+    # manually. Windows is intentionally absent: there is no signing
+    # / installer infrastructure yet, so the README directs Windows
+    # users to build from source. Add a `windows-latest` entry once a
+    # code-signing cert and an installer (NSIS/MSI) design are in place.
     strategy:
       fail-fast: false
       matrix:

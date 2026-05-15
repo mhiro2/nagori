@@ -1002,11 +1002,15 @@ change.
   `x-apple.systempreferences:` URL so the onboarding banner can take
   the user directly to the Accessibility pane.
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
-  `app.updater()` is always wired; for MVP we only publish signed
-  release bundles for macOS, so the startup probe gates on
-  `updater_release_target()` and `commands::check_for_updates` returns
-  `Unsupported` off macOS, with the Settings → Advanced fieldset
-  hidden on those platforms. The plugin reads its endpoint and signing
+  `app.updater()` is always wired. `release.yaml` builds bundles for
+  macOS (arm64 + x86_64) and Linux x86_64, but the auto-update feed
+  (`latest.json` + `download_and_install`) is wired only for macOS:
+  the startup probe gates on `updater_release_target()` and
+  `commands::check_for_updates` returns `Unsupported` off macOS, with
+  the Settings → Advanced fieldset hidden on those platforms. Linux
+  users still get tarball artefacts on the GitHub release page but
+  upgrade by re-downloading; Windows has no release artefact yet and
+  must be built from source. The plugin reads its endpoint and signing
   pubkey from
   `tauri.conf.json` (`plugins.updater`); the endpoint resolves
   `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`

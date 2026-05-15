@@ -123,9 +123,10 @@
   // the bundle themselves and verify Apple's signature dialog.
   let updateReleaseUrl: string | undefined = $state(undefined);
 
-  // The updater plugin is wired on every OS, but for MVP we only
-  // publish signed release bundles for macOS (see
-  // `updater_release_target` in lib.rs). On other platforms the
+  // The updater plugin is wired on every OS, but only macOS has a
+  // signed `latest.json` feed (Linux ships tarballs without an in-app
+  // feed, Windows has no release artefact). See
+  // `updater_release_target` in lib.rs. On non-macOS platforms the
   // backend short-circuits with `Unsupported`, so the whole fieldset
   // is hidden rather than rendering controls that would only ever
   // error.

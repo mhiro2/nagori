@@ -149,10 +149,13 @@ fn autostart_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
 }
 
-/// Whether the current target ships an updater feed. If we don't publish
-/// an artifact for this OS yet (Windows / Linux MVP), the startup probe
-/// and the manual command short-circuit instead of pinging the macOS
-/// endpoint and rendering a "no installer available" download link.
+/// Whether the current target ships an updater feed. `release.yaml`
+/// produces macOS `arm64` / `x86_64` and Linux `x86_64` bundles, but
+/// the signed `latest.json` feed is wired only for macOS — Linux
+/// users upgrade by re-downloading the tarball, and Windows has no
+/// release artefact at all. The startup probe and the manual command
+/// short-circuit on non-macOS targets so we don't ping the macOS feed
+/// from a binary that can't install its result.
 const fn updater_release_target() -> bool {
     cfg!(target_os = "macos")
 }
@@ -309,13 +312,15 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 
         // Startup updater probe. Honours `auto_update_check`,
         // `local_only_mode`, *and* whether the current target actually
-        // has a release artifact (Windows / Linux MVP do not) — a user
-        // who has opted out of background network calls never sees a
-        // request, and we don't ping the macOS feed from a binary that
-        // can't install its result. Emits `nagori://update_available`
-        // with `{version, currentVersion, releaseNotes}` when an update
-        // is found; failures are logged at warn so a transient network
-        // blip doesn't surface a banner.
+        // has an update feed (`updater_release_target()` — macOS only;
+        // Linux ships tarballs without an in-app feed, Windows has no
+        // release artefact). A user who has opted out of background
+        // network calls never sees a request, and we don't ping the
+        // macOS feed from a binary that can't install its result.
+        // Emits `nagori://update_available` with `{version,
+        // currentVersion, releaseNotes}` when an update is found;
+        // failures are logged at warn so a transient network blip
+        // doesn't surface a banner.
         if updater_release_target() && initial.auto_update_check && !initial.local_only_mode {
             spawn_startup_update_probe(&app);
         }

@@ -609,10 +609,11 @@ pub async fn check_for_updates(app: AppHandle) -> CommandResult<Option<UpdateInf
     use tauri_plugin_updater::UpdaterExt;
 
     // The plugin is registered on every OS so `app.updater()` is wired
-    // for diagnostics, but we only publish release artefacts for macOS
-    // today. Short-circuit on platforms without a release feed so the
-    // user gets a clear "unsupported" surface instead of an empty
-    // result or an opaque manifest-fetch error.
+    // for diagnostics, but only macOS has a signed `latest.json` feed
+    // today (Linux ships tarballs without an in-app feed, Windows has
+    // no release artefact). Short-circuit on platforms without a feed
+    // so the user gets a clear "unsupported" surface instead of an
+    // empty result or an opaque manifest-fetch error.
     if !cfg!(target_os = "macos") {
         return Err(CommandError::unsupported(
             "auto-update is only available on macOS",
