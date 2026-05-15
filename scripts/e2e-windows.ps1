@@ -166,7 +166,16 @@ try {
     Wait-For 'daemon health' { Invoke-CliSilent @('daemon', 'status'); $true }
 
     Step 'capture: Set-Clipboard -> daemon -> nagori list'
-    $marker = "nagori e2e marker $((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')) $((Get-Random))$((Get-Random))"
+    # `Get-Random` returns an Int32, so `$((Get-Random))$((Get-Random))` can
+    # produce a 13-20 digit run with no separator. The sensitivity classifier's
+    # credit-card detector matches `\b\d(?:[ -]?\d){12,18}\b` and Luhn-validates
+    # the hit; ~10% of uniform integers pass Luhn, which is what was making the
+    # marker flake as `Secret` (the entry was redacted to `[REDACTED]` so the
+    # captured-text comparison below never matched). Joining the two halves with
+    # a non-`[ -]` character keeps each run under 13 digits, so neither half can
+    # reach the detector's lower bound. The bash e2es escape this by accident
+    # because `$RANDOM` is capped at 5 digits each.
+    $marker = "nagori e2e marker $((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')) $((Get-Random))_$((Get-Random))"
     Set-Clipboard -Value $marker
 
     # Capture loop polls every 200ms; give it a generous budget under CI load.
@@ -270,7 +279,10 @@ try {
     }
 
     Step 'multi-copy ordering newest-first'
-    $orderSuffix = "$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))-$((Get-Random))$((Get-Random))"
+    # Same digit-run hazard as the capture marker above - separate the two
+    # `Get-Random` halves so the credit-card detector cannot Luhn the suffix
+    # into a `Secret` classification.
+    $orderSuffix = "$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))-$((Get-Random))_$((Get-Random))"
     $markerA = "nagori e2e order A $orderSuffix"
     $markerB = "nagori e2e order B $orderSuffix"
     $markerC = "nagori e2e order C $orderSuffix"
