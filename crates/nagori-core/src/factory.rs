@@ -1075,9 +1075,10 @@ mod tests {
 
     #[test]
     fn representation_set_hash_diverges_from_content_hash_when_alternatives_present() {
-        // Single-rep entries inherit content_hash for the set hash so the
-        // schema's NOT NULL stays satisfied. With alternatives the set must
-        // hash a wider surface, and the two columns are expected to diverge.
+        // Snapshot-derived entries always emit a canonical set hash; the
+        // role/mime/ordinal/sha256(payload) encoding means a multi-rep set
+        // fingerprints a wider surface than the primary body alone, and the
+        // two columns are expected to diverge.
         let snapshot = ClipboardSnapshot {
             sequence: crate::ClipboardSequence::content_hash("hash-diverge"),
             captured_at: OffsetDateTime::now_utc(),
