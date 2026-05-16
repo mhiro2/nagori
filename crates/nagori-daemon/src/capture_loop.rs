@@ -1558,6 +1558,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_once_skips_oversized_rich_text_primary() {
+        // RichText's primary stores HTML/RTF markup, so a short plain-text
+        // sibling with a large markup body has to be rejected by the size
+        // guard. Pre-fix, the guard inspected `plain_text().len()` which
+        // sees the trimmed plain-text projection, so a multi-KB markup body
+        // slipped past a small `max_entry_size_bytes` budget.
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct RichTextReader {
+            html: String,
+            plain: String,
+            seq_called: Mutex<bool>,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for RichTextReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                Ok(ClipboardSnapshot {
+                    sequence: ClipboardSequence::content_hash(
+                        ContentHash::sha256(self.html.as_bytes()).value,
+                    ),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: vec![
+                        ClipboardRepresentation {
+                            mime_type: "text/html".to_owned(),
+                            data: ClipboardData::Text(self.html.clone()),
+                        },
+                        ClipboardRepresentation {
+                            mime_type: "text/plain".to_owned(),
+                            data: ClipboardData::Text(self.plain.clone()),
+                        },
+                    ],
+                })
+            }
+
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                let mut guard = self.seq_called.lock().unwrap();
+                *guard = true;
+                Ok(ClipboardSequence::content_hash(
+                    ContentHash::sha256(self.html.as_bytes()).value,
+                ))
+            }
+        }
+
+        let html = format!("<p>{}</p>", "x".repeat(2048));
+        let reader = RichTextReader {
+            html,
+            plain: "ok".to_owned(),
+            seq_called: Mutex::new(false),
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            max_entry_size_bytes: 64,
+            ..AppSettings::default()
+        };
+        let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
+
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn capture_once_invalidates_attached_search_cache() {
         // The runtime serves repeat empty-query searches from
         // `RecentSearchCache`, but a successful capture must drop those
