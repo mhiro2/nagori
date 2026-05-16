@@ -82,7 +82,24 @@ fn pick_content(representations: &[ClipboardRepresentation]) -> Option<Clipboard
 
     if let Some((mime, bytes)) = representations.iter().find_map(|rep| match &rep.data {
         ClipboardData::Bytes(bytes) if !bytes.is_empty() && rep.mime_type.starts_with("image/") => {
-            Some((rep.mime_type.clone(), bytes.clone()))
+            // External producers freely label arbitrary bytes as
+            // `image/*`. Reject representations whose magic number
+            // disagrees with the declared MIME so a sibling text/HTML
+            // rep can still produce an entry; an image-only snapshot
+            // with bogus bytes drops out entirely.
+            if crate::image_signature::matches_declared_mime(&rep.mime_type, bytes) {
+                Some((rep.mime_type.clone(), bytes.clone()))
+            } else {
+                let detected = crate::image_signature::detect(bytes)
+                    .map(crate::image_signature::ImageFormat::mime_type);
+                tracing::warn!(
+                    declared_mime = %rep.mime_type,
+                    detected_mime = ?detected,
+                    byte_count = bytes.len(),
+                    "image_signature_mismatch_dropped"
+                );
+                None
+            }
         }
         _ => None,
     }) {
@@ -278,6 +295,84 @@ mod tests {
         };
 
         assert!(EntryFactory::from_snapshot(snapshot).is_none());
+    }
+
+    #[test]
+    fn snapshot_image_with_mismatched_signature_falls_through_to_text() {
+        // Producer labelled HTML bytes as `image/png`. The factory must
+        // reject the image representation but still build an entry from
+        // the sibling text/plain rep so a single misclassified payload
+        // doesn't shadow legitimate clipboard content.
+        let html_bytes = b"<!doctype html><html><body>oops</body></html>".to_vec();
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("img-mismatch-text"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(html_bytes),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("fallback".to_owned()),
+                },
+            ],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot)
+            .expect("text fallback should still build an entry");
+        match entry.content {
+            crate::ClipboardContent::Text(text) => assert_eq!(text.text, "fallback"),
+            other => panic!("expected Text fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_image_only_with_invalid_signature_is_dropped() {
+        // No sibling representation, so an image rep that fails the
+        // magic-number check leaves the snapshot with nothing to
+        // persist. The whole snapshot must be discarded rather than
+        // saved as an empty / unsafe entry.
+        let html_bytes = b"<!doctype html>nope".to_vec();
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("img-mismatch-only"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(html_bytes),
+            }],
+        };
+
+        assert!(EntryFactory::from_snapshot(snapshot).is_none());
+    }
+
+    #[test]
+    fn snapshot_jpeg_signature_is_accepted() {
+        // The factory's existing PNG test covers RFC 2083's magic; this
+        // one locks down that JPEG (FF D8 FF…) also flows through the
+        // signature gate so we don't regress one allow-listed format
+        // while polishing another.
+        let jpeg_bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("jpeg-ok"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/jpeg".to_owned(),
+                data: ClipboardData::Bytes(jpeg_bytes.clone()),
+            }],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).expect("jpeg should build entry");
+        match entry.content {
+            crate::ClipboardContent::Image(img) => {
+                assert_eq!(img.mime_type.as_deref(), Some("image/jpeg"));
+                assert_eq!(img.byte_count, jpeg_bytes.len());
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
     }
 
     #[test]

@@ -21,6 +21,10 @@ serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+# Capture-time validation (e.g. image magic-number checks) logs
+# structured rejections so failures stay visible without polluting the
+# pure validation modules with print statements.
+tracing.workspace = true
 # `tokio::try_join!` is a runtime-agnostic macro. We need it to fan the
 # substring/FTS/ngram candidate fetches out concurrently inside
 # `SearchService::search`; the `macros` feature is the smallest surface

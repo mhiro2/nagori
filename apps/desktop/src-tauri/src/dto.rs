@@ -982,7 +982,12 @@ mod tests {
 
     #[test]
     fn entry_preview_for_image_returns_image_body_with_byte_count() {
-        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
+        // The PNG magic prefix is required: `EntryFactory::from_snapshot`
+        // drops image representations whose bytes don't match the
+        // declared MIME, so a fake byte string would be rejected by the
+        // capture-time signature gate before this test could observe a
+        // preview.
+        let bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xCA, 0xFE];
         let entry = image_entry(bytes.clone());
 
         let dto = EntryPreviewDto::from_entry(&entry);
