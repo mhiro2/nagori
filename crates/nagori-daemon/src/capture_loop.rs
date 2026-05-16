@@ -4,6 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
     EntryRepository, Result, SecretAction, Sensitivity, SensitivityClassifier,
+    factory::compute_representation_set_hash,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
 use tokio::sync::watch;
@@ -637,6 +638,31 @@ where
                 )
                 .await;
             return Ok(None);
+        }
+
+        // A Secret entry may have been kept (StoreFull) or had its primary
+        // body rewritten in place (StoreRedacted). Either way the original
+        // HTML / RTF / plain alternatives `from_snapshot` collected still
+        // hold the raw secret — persisting them would defeat redaction and
+        // recreate the leak. Drop the side reps and align the set hash with
+        // the primary's content hash so the storage layer falls back to its
+        // primary-only insert path.
+        if matches!(entry.sensitivity, Sensitivity::Secret)
+            && !entry.pending_representations.is_empty()
+        {
+            entry.pending_representations.clear();
+            entry.metadata.representation_set_hash = Some(entry.metadata.content_hash.clone());
+        }
+
+        // Enforce the user's `max_entry_size_bytes` budget across the full
+        // representation set, not just the primary. The pre-classify guard
+        // above already rejected entries whose primary exceeds the cap, so
+        // here we only have to trim alternatives; when anything is dropped
+        // the set hash has to be recomputed so dedupe matches what storage
+        // actually wrote.
+        if entry.trim_alternatives_to_budget(settings.max_entry_size_bytes) {
+            let new_hash = compute_representation_set_hash(&entry.pending_representations);
+            entry.metadata.representation_set_hash = Some(new_hash);
         }
 
         // Invalidate before *and* after the insert. Without the pre-call,
