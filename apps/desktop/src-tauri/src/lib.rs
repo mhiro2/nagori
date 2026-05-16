@@ -115,6 +115,7 @@ pub fn run() {
             commands::update_settings,
             commands::set_capture_enabled,
             commands::get_permissions,
+            commands::get_capabilities,
             commands::open_accessibility_settings,
             commands::toggle_palette,
             commands::hide_palette,

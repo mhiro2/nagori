@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { describeError } from "../lib/errors";
-  import { checkForUpdates, getSettings, updateSettings } from "../lib/commands";
+  import { checkForUpdates, getCapabilities, getSettings, updateSettings } from "../lib/commands";
   import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
   import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
@@ -10,10 +10,12 @@
     type AiProviderSetting,
     type Appearance,
     type AppSettings,
+    type Capability,
     type ContentKind,
     type LocaleSetting,
     type PaletteHotkeyAction,
     type PasteFormat,
+    type PlatformCapabilities,
     type RecentOrder,
     type SecondaryHotkeyAction,
     type SecretHandling,
@@ -103,6 +105,10 @@
   // `get_settings` resolves. In a plain browser (`vite dev`) the call fails
   // and we surface a hint instead of mirroring defaults on the frontend.
   let settings: AppSettings | null = $state(null);
+  // Static OS capability matrix surfaced read-only in the Advanced tab.
+  // Best-effort: failure to load is silently ignored — the section
+  // hides rather than spamming the user with a non-actionable error.
+  let capabilities: PlatformCapabilities | null = $state(null);
   let activeTab: Tab = $state("general");
   let loading = $state(false);
   let saving = $state(false);
@@ -178,7 +184,67 @@
         loading = false;
       }
     })();
+    void (async () => {
+      try {
+        capabilities = await getCapabilities();
+      } catch {
+        // Diagnostic-only surface; ignore failures.
+      }
+    })();
   });
+
+  type CapabilityRow = {
+    label: string;
+    capability: Capability;
+  };
+
+  const capabilityRows = $derived.by<CapabilityRow[]>(() => {
+    if (!capabilities) return [];
+    return [
+      { label: "Capture text", capability: capabilities.captureText },
+      { label: "Capture image", capability: capabilities.captureImage },
+      { label: "Capture files", capability: capabilities.captureFiles },
+      { label: "Write text", capability: capabilities.writeText },
+      { label: "Write image", capability: capabilities.writeImage },
+      { label: "Auto-paste", capability: capabilities.autoPaste },
+      { label: "Global hotkey", capability: capabilities.globalHotkey },
+      { label: "Frontmost app", capability: capabilities.frontmostApp },
+      { label: "Permissions UI", capability: capabilities.permissionsUi },
+      { label: "Update check", capability: capabilities.updateCheck },
+    ];
+  });
+
+  const capabilityStatusLabel = (capability: Capability): string => {
+    switch (capability.status) {
+      case "available":
+        return "Available";
+      case "unsupported":
+        return "Unsupported";
+      case "requiresPermission":
+        return "Permission";
+      case "requiresExternalTool":
+        return "External tool";
+      case "experimental":
+        return "Experimental";
+    }
+  };
+
+  const capabilityDetail = (capability: Capability): string => {
+    switch (capability.status) {
+      case "available":
+        return "";
+      case "unsupported":
+        return capability.reason;
+      case "requiresPermission":
+        return `${capability.permission} — ${capability.message}`;
+      case "requiresExternalTool":
+        return capability.installHint
+          ? `${capability.tool} (${capability.installHint})`
+          : capability.tool;
+      case "experimental":
+        return capability.message;
+    }
+  };
 
   const save = async (): Promise<void> => {
     if (!isTauri() || !settings) return;
@@ -586,6 +652,45 @@
           />
         </label>
       </fieldset>
+      {#if capabilities}
+        <fieldset>
+          <legend>Platform capabilities</legend>
+          <p class="help">
+            What this OS build can do, independent of the live permission state.
+            Use the Privacy/Permissions section above to grant access for items
+            marked “Permission”.
+          </p>
+          <div class="capability-meta">
+            <span><strong>Platform:</strong> {capabilities.platform}</span>
+            <span><strong>Tier:</strong> {capabilities.tier}</span>
+          </div>
+          <table class="capability-table">
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col">Status</th>
+                <th scope="col">Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each capabilityRows as row (row.label)}
+                <tr>
+                  <th scope="row" class="capability-label">{row.label}</th>
+                  <td>
+                    <span
+                      class="capability-status"
+                      data-status={row.capability.status}
+                    >
+                      {capabilityStatusLabel(row.capability)}
+                    </span>
+                  </td>
+                  <td class="capability-detail">{capabilityDetail(row.capability)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </fieldset>
+      {/if}
       {#if isMacOs}
         <fieldset>
           <legend>{t.settings.updates.legend}</legend>
@@ -796,6 +901,69 @@
   }
   .hint {
     color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+  .capability-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    font-size: 0.8125rem;
+  }
+  .capability-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.8125rem;
+  }
+  .capability-table th,
+  .capability-table td {
+    padding: 0.25rem 0.6rem 0.25rem 0;
+    text-align: left;
+    font-weight: normal;
+    vertical-align: baseline;
+  }
+  .capability-table thead th {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  }
+  .capability-table tbody th {
+    font-weight: 500;
+  }
+  .capability-label {
+    color: var(--fg, #f5f5f5);
+  }
+  .capability-status {
+    justify-self: start;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted, rgba(255, 255, 255, 0.7));
+  }
+  .capability-status[data-status="available"] {
+    color: #4ade80;
+    border-color: rgba(74, 222, 128, 0.4);
+    background: rgba(74, 222, 128, 0.08);
+  }
+  .capability-status[data-status="unsupported"] {
+    color: var(--danger, #f87171);
+    border-color: rgba(248, 113, 113, 0.4);
+    background: rgba(248, 113, 113, 0.08);
+  }
+  .capability-status[data-status="requiresPermission"],
+  .capability-status[data-status="requiresExternalTool"],
+  .capability-status[data-status="experimental"] {
+    color: var(--warning, #f59e0b);
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .capability-detail {
+    color: var(--muted, rgba(255, 255, 255, 0.6));
     font-size: 0.75rem;
   }
 </style>

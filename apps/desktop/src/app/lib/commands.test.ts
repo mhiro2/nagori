@@ -198,6 +198,12 @@ describe('command wrappers', () => {
       args: undefined,
     },
     {
+      name: 'getCapabilities',
+      run: () => commands.getCapabilities(),
+      cmd: 'get_capabilities',
+      args: undefined,
+    },
+    {
       name: 'setCaptureEnabled',
       run: () => commands.setCaptureEnabled(false),
       cmd: 'set_capture_enabled',

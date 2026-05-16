@@ -202,6 +202,32 @@ export type PermissionStatus = {
   message?: string;
 };
 
+export type Platform = 'macos' | 'windows' | 'linuxWayland' | 'unsupported';
+
+export type SupportTier = 'supported' | 'experimental' | 'unsupported';
+
+export type Capability =
+  | { status: 'available' }
+  | { status: 'unsupported'; reason: string }
+  | { status: 'requiresPermission'; permission: PermissionKind; message: string }
+  | { status: 'requiresExternalTool'; tool: string; installHint?: string }
+  | { status: 'experimental'; message: string };
+
+export type PlatformCapabilities = {
+  platform: Platform;
+  tier: SupportTier;
+  captureText: Capability;
+  captureImage: Capability;
+  captureFiles: Capability;
+  writeText: Capability;
+  writeImage: Capability;
+  autoPaste: Capability;
+  globalHotkey: Capability;
+  frontmostApp: Capability;
+  permissionsUi: Capability;
+  updateCheck: Capability;
+};
+
 export type CommandError = {
   code: string;
   message: string;

@@ -10,6 +10,7 @@ import type {
   EntryPreviewDto,
   PasteFormat,
   PermissionStatus,
+  PlatformCapabilities,
   SearchRequest,
   SearchResponse,
   UpdateInfo,
@@ -72,6 +73,8 @@ export const togglePalette = (): Promise<void> => invoke('toggle_palette');
 export const hidePalette = (): Promise<void> => invoke('hide_palette');
 
 export const getPermissions = (): Promise<PermissionStatus[]> => invoke('get_permissions');
+
+export const getCapabilities = (): Promise<PlatformCapabilities> => invoke('get_capabilities');
 
 export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
   invoke('set_capture_enabled', { enabled });

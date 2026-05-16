@@ -9,7 +9,8 @@ use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use crate::dto::{
     AiActionResultDto, AppSettingsDto, EntryDto, EntryPreviewDto, PasteFormatDto,
-    PermissionStatusDto, SearchRequestDto, SearchResponseDto, SearchResultDto,
+    PermissionStatusDto, PlatformCapabilitiesDto, SearchRequestDto, SearchResponseDto,
+    SearchResultDto,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -487,6 +488,18 @@ pub async fn get_permissions(
 ) -> CommandResult<Vec<PermissionStatusDto>> {
     let statuses = state.runtime.permission_check().await?;
     Ok(statuses.into_iter().map(Into::into).collect())
+}
+
+/// Static, OS-level capability matrix wired in at runtime startup. Surfaced
+/// to the frontend so the Settings → Status view can render "what could
+/// work on this OS" alongside the dynamic `get_permissions` snapshot of
+/// what currently *does* work. The runtime caches the matrix so this is a
+/// cheap clone — safe to call on every Settings open.
+#[tauri::command]
+pub async fn get_capabilities(
+    state: State<'_, AppState>,
+) -> CommandResult<PlatformCapabilitiesDto> {
+    Ok(state.runtime.capabilities().into())
 }
 
 /// Toggle `capture_enabled` without round-tripping the entire settings
