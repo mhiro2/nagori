@@ -229,7 +229,14 @@ impl ClipboardWriter for MacosClipboard {
         entry: &ClipboardEntry,
         representations: &[StoredClipboardRepresentation],
     ) -> Result<()> {
-        if representations.is_empty() {
+        // Pre-scan before touching the pasteboard so an entry whose stored
+        // representations all sit outside the macOS publisher's MIME table
+        // (file URLs today, or images saved as `image/jpeg` / `image/gif`)
+        // falls back to `write_entry` instead of leaving the user with a
+        // cleared pasteboard and a copy error. Doing the scan up here keeps
+        // the responsibility on the adapter that knows its own mapping
+        // table; the daemon stays oblivious to which MIMEs are publishable.
+        if representations.is_empty() || !has_publishable_representation(representations) {
             return self.write_entry(entry).await;
         }
         self.publish_representations(representations.to_vec()).await
@@ -314,13 +321,40 @@ impl MacosClipboard {
                     pb.clearContents();
                     let mut published = 0_usize;
                     for rep in &representations {
-                        if publish_one_representation(&pb, rep) {
-                            published = published.saturating_add(1);
+                        match publish_one_representation(&pb, rep) {
+                            PublishOutcome::Published => {
+                                published = published.saturating_add(1);
+                            }
+                            PublishOutcome::Skipped => {}
+                            PublishOutcome::Failed => {
+                                // AppKit accepted the mapping but
+                                // `setString` / `setData` returned NO — keep
+                                // going so the rest of the rep set still
+                                // lands on the pasteboard, but surface the
+                                // failure at warn so a primary HTML / image
+                                // drop is visible in logs instead of being
+                                // hidden behind the surviving plain
+                                // fallback.
+                                tracing::warn!(
+                                    mime = %rep.mime_type,
+                                    role = ?rep.role,
+                                    ordinal = rep.ordinal,
+                                    "NSPasteboard rejected setString/setData for stored representation",
+                                );
+                            }
                         }
                     }
                     if published == 0 {
+                        // Pre-scan in `write_representations` rules this out
+                        // in normal use; the only way to reach it now is if
+                        // every mapped rep above hit `Failed`. The pasteboard
+                        // is already empty — surface the platform error so
+                        // the daemon's `copy_entry_with_format` propagates
+                        // it instead of silently leaving the user with no
+                        // clipboard contents.
                         return Err(AppError::Platform(
-                            "no stored representation matched a NSPasteboard type".to_owned(),
+                            "NSPasteboard rejected every mapped representation"
+                                .to_owned(),
                         ));
                     }
                     Ok(())
@@ -343,20 +377,61 @@ impl MacosClipboard {
     }
 }
 
+/// Result of attempting to publish one stored representation.
+///
+/// `Skipped` and `Failed` are kept distinct so the caller can warn about a
+/// MIME we promised to publish but `AppKit` rejected, without spamming a warn
+/// every time a `text/uri-list` rep flows through (we know we can't publish
+/// those — that is a `Skipped`, not a bug).
+#[cfg(target_os = "macos")]
+enum PublishOutcome {
+    /// Mapped to a known `NSPasteboardType` and `AppKit` accepted the bytes.
+    Published,
+    /// No `NSPasteboardType` mapping; nothing was attempted on `AppKit`.
+    Skipped,
+    /// Mapped to a known `NSPasteboardType` but `setString` / `setData`
+    /// returned `NO` — exceptional, the caller surfaces it at warn.
+    Failed,
+}
+
+/// True when at least one rep has a known `NSPasteboardType` mapping.
+///
+/// Used as a pre-scan before `clearContents()` so an entry whose stored
+/// reps are *all* outside the macOS publisher's MIME table (file URLs,
+/// `image/jpeg`, etc.) falls back through `write_entry` instead of clearing
+/// the pasteboard and erroring after the fact.
+#[cfg(target_os = "macos")]
+fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
+    reps.iter().any(|rep| {
+        matches!(
+            (rep.mime_type.as_str(), &rep.data),
+            (
+                "text/plain" | "text/html" | "application/rtf",
+                RepresentationDataRef::InlineText(_)
+            ) | (
+                "image/png" | "image/tiff",
+                RepresentationDataRef::DatabaseBlob(_)
+            )
+        )
+    })
+}
+
 /// Publish a single stored representation onto the shared `NSPasteboard`.
 ///
-/// Returns `true` when the rep mapped to a known `AppKit` pasteboard type and
-/// the underlying `setString`/`setData` call returned `YES`. Anything else
-/// (unmapped MIME, image rep that the storage layer hydrated as inline text,
-/// `text/uri-list` which would require its own `NSPasteboardItem` array) is
-/// skipped with a `tracing::debug!` so the caller can still publish the rest
-/// of the set without blocking copy-back on a single unsupported type.
+/// The MIME → `NSPasteboardType` table is intentionally small: plain text,
+/// HTML, RTF, PNG, and TIFF. Other reps that the capture pipeline persists
+/// (`text/uri-list` file lists, `image/jpeg` / `image/gif` / `image/webp`)
+/// are returned as [`PublishOutcome::Skipped`] — file URLs would require a
+/// separate `NSPasteboardItem` array, and the non-PNG/TIFF image types do
+/// not have a stable `NSPasteboardType` constant. The pre-scan in
+/// [`has_publishable_representation`] keeps copy-back of an all-skipped set
+/// from clearing the pasteboard.
 #[cfg(target_os = "macos")]
 unsafe fn publish_one_representation(
     pb: &NSPasteboard,
     rep: &StoredClipboardRepresentation,
-) -> bool {
-    match (rep.mime_type.as_str(), &rep.data) {
+) -> PublishOutcome {
+    let accepted = match (rep.mime_type.as_str(), &rep.data) {
         ("text/plain", RepresentationDataRef::InlineText(text)) => {
             let value = NSString::from_str(text);
             // SAFETY: `pb` is the shared general pasteboard already cleared by
@@ -388,8 +463,13 @@ unsafe fn publish_one_representation(
                 ordinal = rep.ordinal,
                 "skipping representation without a NSPasteboard mapping",
             );
-            false
+            return PublishOutcome::Skipped;
         }
+    };
+    if accepted {
+        PublishOutcome::Published
+    } else {
+        PublishOutcome::Failed
     }
 }
 
@@ -898,6 +978,50 @@ mod tests {
         assert_eq!(
             fallback_back, "write_representations empty-fallback delegates to write_entry",
             "empty rep list should publish entry plain text via write_entry",
+        );
+
+        // A rep set whose MIMEs are all outside the NSPasteboard publisher's
+        // table (file URLs, image/jpeg, etc.) must fall back to write_entry
+        // *before* `clearContents()` runs — otherwise an all-unsupported set
+        // would leave the user's clipboard empty and the copy command would
+        // surface a platform error.
+        let only_unsupported_entry = EntryFactory::from_text(
+            "write_representations falls back to write_entry when no rep is publishable",
+        );
+        let unsupported_reps = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/uri-list".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::FilePaths(vec!["/tmp/nagori-fallback".to_owned()]),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "image/jpeg".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::DatabaseBlob(vec![0xFF, 0xD8, 0xFF, 0xE0]),
+            },
+        ];
+        clipboard
+            .write_representations(&only_unsupported_entry, &unsupported_reps)
+            .await
+            .expect("all-skipped rep set must fall back to write_entry, not error");
+        let snapshot = clipboard
+            .current_snapshot()
+            .await
+            .expect("snapshot after all-skipped fallback");
+        let fallback_back = snapshot
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::Text(t) if rep.mime_type == "text/plain" => Some(t.clone()),
+                _ => None,
+            })
+            .expect("text/plain missing after all-skipped fallback");
+        assert_eq!(
+            fallback_back,
+            "write_representations falls back to write_entry when no rep is publishable",
+            "all-skipped rep set should publish entry plain text via write_entry",
         );
     }
 

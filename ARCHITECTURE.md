@@ -579,7 +579,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer every captured MIME on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -726,15 +726,25 @@ unavailable" toast.
 
 **Preserve copy-back hydration.** `ClipboardWriter::write_representations`
 takes the stored representation set for the entry being re-copied and
-publishes every supported MIME in one pasteboard transaction. The macOS
-adapter (`clipboard_multi_representation_write = Available`) clears
-`NSPasteboard` once and replays each rep through `setString:forType:` or
-`setData:forType:` so a downstream paste target sees the same HTML /
-RTF / plain-text / image bytes the source originally advertised, while
-the rest of the trait surface keeps its primary-only contract. Adapters
+replays the reps whose MIME has a known `NSPasteboardType` mapping in
+one pasteboard transaction. The macOS adapter
+(`clipboard_multi_representation_write = Available`) publishes the
+intersection of {`text/plain`, `text/html`, `application/rtf`,
+`image/png`, `image/tiff`} with the stored set through
+`setString:forType:` / `setData:forType:`, so a downstream paste target
+that asks for HTML / RTF / a plain fallback or a PNG/TIFF still gets
+the bytes the source originally advertised. Other persisted MIMEs
+(`text/uri-list` file lists, `image/jpeg` / `image/gif` / `image/webp`)
+are recorded in the entry's representation rows but are not re-published
+today — `NSPasteboardItem` plumbing for file URLs and stable
+`NSPasteboardType` constants for the alternate image formats are still
+TODO. To avoid clearing the pasteboard for nothing, the macOS adapter
+pre-scans the rep set: when every entry falls outside the publishable
+table the call falls back to `write_entry`, restoring the primary
+content rather than leaving the user with an empty pasteboard. Adapters
 whose capability is `Unsupported` (Windows, Linux Wayland today) inherit
 the default impl that delegates back to `write_entry`, so Preserve still
-publishes the primary content there — just without the full MIME set.
+publishes the primary content there — just without the rich-MIME set.
 The daemon-side wiring lives in `NagoriRuntime::copy_entry_with_format`:
 the Preserve branch reads the persisted rows via
 `EntryRepository::list_representations` and only falls back to
