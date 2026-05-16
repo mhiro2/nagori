@@ -84,12 +84,33 @@ pub enum Capability {
 }
 
 impl Capability {
-    /// True if the UI should treat the feature as usable. Both
-    /// `Available` and `Experimental` qualify — the user can still
-    /// drive the feature, the latter just warrants a warning badge.
+    /// True when the UI may surface the feature *without first asking
+    /// the user to do something*.
+    ///
+    /// `Available` and `Experimental` qualify (the latter just
+    /// warrants a warning badge). `RequiresPermission` and
+    /// `RequiresExternalTool` both return `false` even though the
+    /// feature may flip to usable after the user grants the
+    /// permission or installs the tool — the capability layer is
+    /// intentionally static and the live state lives in
+    /// `PermissionChecker` / the auto-paste path. Pair this with the
+    /// live probe before deciding whether to render the feature as
+    /// ready, or use [`Self::is_supported_by_platform`] when you only
+    /// want to know whether the OS could ever do it.
     #[must_use]
     pub const fn is_usable(&self) -> bool {
         matches!(self, Self::Available | Self::Experimental { .. })
+    }
+
+    /// True when the running OS could exercise this feature at all,
+    /// given any required permission or external tool. Only
+    /// `Unsupported` returns `false`. Useful for hiding feature rows
+    /// that can never work on this OS — distinct from
+    /// [`Self::is_usable`], which also returns `false` while a
+    /// permission grant or tool install is still pending.
+    #[must_use]
+    pub const fn is_supported_by_platform(&self) -> bool {
+        !matches!(self, Self::Unsupported { .. })
     }
 }
 
@@ -109,6 +130,12 @@ pub struct PlatformCapabilities {
     /// Image clipboard capture (PNG / TIFF / `CF_DIB`). macOS only at
     /// the moment.
     pub capture_image: Capability,
+    /// File-list clipboard capture (`CF_HDROP` on Windows, file URLs
+    /// on macOS). Surfaced separately from `capture_text` because the
+    /// README support matrix lists "Text + files" as a distinct
+    /// Windows capability — collapsing it into `capture_text` would
+    /// erase information consumers actually want to render.
+    pub capture_files: Capability,
     /// Writing text back to the clipboard.
     pub write_text: Capability,
     /// Writing images back to the clipboard. macOS only.
@@ -126,6 +153,37 @@ pub struct PlatformCapabilities {
     pub permissions_ui: Capability,
     /// Whether the bundled updater probe is wired on this platform.
     pub update_check: Capability,
+}
+
+/// Capability report for targets nagori does not build for.
+///
+/// Defined here (rather than behind a `cfg(not(any(target_os = ...)))`
+/// guard) so the `nagori-platform-native` aggregator can call it from
+/// the same arm shape it uses for the supported targets. Every row is
+/// `Unsupported` and the tier is also `Unsupported`, matching what the
+/// runtime does on those hosts (`build_native_runtime` returns
+/// `AppError::Unsupported`).
+#[must_use]
+pub fn unsupported_capabilities() -> PlatformCapabilities {
+    const REASON: &str = "nagori does not build for this target; only \
+         macOS, Windows, and Linux Wayland are supported.";
+    let unsupported = || Capability::Unsupported {
+        reason: REASON.to_owned(),
+    };
+    PlatformCapabilities {
+        platform: Platform::Unsupported,
+        tier: SupportTier::Unsupported,
+        capture_text: unsupported(),
+        capture_image: unsupported(),
+        capture_files: unsupported(),
+        write_text: unsupported(),
+        write_image: unsupported(),
+        auto_paste: unsupported(),
+        global_hotkey: unsupported(),
+        frontmost_app: unsupported(),
+        permissions_ui: unsupported(),
+        update_check: unsupported(),
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +214,55 @@ mod tests {
             }
             .is_usable()
         );
+    }
+
+    #[test]
+    fn unsupported_capabilities_marks_every_row_unsupported() {
+        let caps = unsupported_capabilities();
+        assert_eq!(caps.platform, Platform::Unsupported);
+        assert_eq!(caps.tier, SupportTier::Unsupported);
+        for cap in [
+            &caps.capture_text,
+            &caps.capture_image,
+            &caps.capture_files,
+            &caps.write_text,
+            &caps.write_image,
+            &caps.auto_paste,
+            &caps.global_hotkey,
+            &caps.frontmost_app,
+            &caps.permissions_ui,
+            &caps.update_check,
+        ] {
+            assert!(!cap.is_usable());
+            assert!(!cap.is_supported_by_platform());
+            assert!(matches!(cap, Capability::Unsupported { .. }));
+        }
+    }
+
+    #[test]
+    fn is_supported_by_platform_distinguishes_unsupported_from_setup_required() {
+        assert!(Capability::Available.is_supported_by_platform());
+        assert!(
+            Capability::Experimental {
+                message: "x".into()
+            }
+            .is_supported_by_platform()
+        );
+        assert!(
+            Capability::RequiresPermission {
+                permission: PermissionKind::Accessibility,
+                message: "x".into()
+            }
+            .is_supported_by_platform()
+        );
+        assert!(
+            Capability::RequiresExternalTool {
+                tool: "wtype".into(),
+                install_hint: None
+            }
+            .is_supported_by_platform()
+        );
+        assert!(!Capability::Unsupported { reason: "x".into() }.is_supported_by_platform());
     }
 
     #[test]

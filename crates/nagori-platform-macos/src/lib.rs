@@ -3,6 +3,7 @@
 // `unsafe` even with the safe wrappers, so override the workspace lint here.
 #![allow(unsafe_code)]
 
+mod capability;
 mod clipboard;
 mod hotkey;
 mod paste;
@@ -10,6 +11,7 @@ mod permissions;
 #[cfg(target_os = "macos")]
 mod window;
 
+pub use capability::report_capabilities;
 pub use clipboard::MacosClipboard;
 pub use hotkey::MacosHotkeyManager;
 pub use paste::MacosPasteController;

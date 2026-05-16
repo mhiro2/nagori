@@ -21,7 +21,7 @@ use nagori_ai::{AiProvider, LocalAiProvider};
 use nagori_core::AppError;
 use nagori_core::Result;
 use nagori_daemon::NagoriRuntime;
-use nagori_platform::{ClipboardReader, WindowBehavior};
+use nagori_platform::{ClipboardReader, PlatformCapabilities, WindowBehavior};
 use nagori_storage::SqliteStore;
 
 /// Outputs of [`build_native_runtime`]: the runtime itself plus the
@@ -65,6 +65,38 @@ pub fn build_native_runtime(
     options: NativeRuntimeOptions,
 ) -> Result<NativeRuntimeParts> {
     build_native_runtime_inner(store, options)
+}
+
+/// Report the host adapter's capability matrix.
+///
+/// Dispatches to the per-OS `report_capabilities` using the same
+/// `cfg(target_os)` arms as [`build_native_runtime`] so the capability
+/// view and the wired adapters can never disagree about which OS the
+/// runtime is running on. Unsupported targets fall back to
+/// [`nagori_platform::unsupported_capabilities`].
+#[must_use]
+pub fn capabilities() -> PlatformCapabilities {
+    capabilities_inner()
+}
+
+#[cfg(target_os = "macos")]
+fn capabilities_inner() -> PlatformCapabilities {
+    nagori_platform_macos::report_capabilities()
+}
+
+#[cfg(target_os = "windows")]
+fn capabilities_inner() -> PlatformCapabilities {
+    nagori_platform_windows::report_capabilities()
+}
+
+#[cfg(target_os = "linux")]
+fn capabilities_inner() -> PlatformCapabilities {
+    nagori_platform_linux::report_capabilities()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn capabilities_inner() -> PlatformCapabilities {
+    nagori_platform::unsupported_capabilities()
 }
 
 #[cfg(target_os = "macos")]
@@ -211,6 +243,35 @@ fn annotate_linux_clipboard_error(err: AppError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nagori_platform::{Platform, SupportTier};
+
+    #[test]
+    fn capabilities_match_host_target() {
+        let caps = capabilities();
+        // The cfg arms below must stay in lockstep with the
+        // `capabilities_inner` arms above — if a new supported target
+        // is added there, it must show up here too.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(caps.platform, Platform::MacOS);
+            assert_eq!(caps.tier, SupportTier::Supported);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(caps.platform, Platform::Windows);
+            assert_eq!(caps.tier, SupportTier::Experimental);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(caps.platform, Platform::LinuxWayland);
+            assert_eq!(caps.tier, SupportTier::Experimental);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            assert_eq!(caps.platform, Platform::Unsupported);
+            assert_eq!(caps.tier, SupportTier::Unsupported);
+        }
+    }
 
     #[test]
     fn options_default_is_empty() {

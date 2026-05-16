@@ -4,12 +4,14 @@
 // here exactly as it is for the macOS adapter.
 #![allow(unsafe_code)]
 
+mod capability;
 mod clipboard;
 mod hotkey;
 mod paste;
 mod permissions;
 mod window;
 
+pub use capability::report_capabilities;
 pub use clipboard::WindowsClipboard;
 pub use hotkey::WindowsHotkeyManager;
 pub use paste::WindowsPasteController;

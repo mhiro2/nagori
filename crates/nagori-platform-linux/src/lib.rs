@@ -11,12 +11,14 @@
 //! macOS / Windows still succeeds; non-Linux targets get inert stubs
 //! that return `Unsupported`.
 
+mod capability;
 mod clipboard;
 mod hotkey;
 mod paste;
 mod permissions;
 mod window;
 
+pub use capability::report_capabilities;
 pub use clipboard::LinuxClipboard;
 pub use hotkey::LinuxHotkeyManager;
 pub use paste::LinuxPasteController;
