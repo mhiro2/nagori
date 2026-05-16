@@ -9,6 +9,7 @@ members = [
   "crates/nagori-platform",
   "crates/nagori-platform-linux",
   "crates/nagori-platform-macos",
+  "crates/nagori-platform-native",
   "crates/nagori-platform-windows",
   "crates/nagori-search",
   "crates/nagori-storage",

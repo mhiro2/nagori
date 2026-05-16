@@ -1,32 +1,17 @@
 [package]
-name = "nagori-cli"
+name = "nagori-platform-native"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "nagori"
-path = "src/main.rs"
-
 [dependencies]
-anyhow.workspace = true
-clap.workspace = true
-dirs.workspace = true
 nagori-ai = { path = "../nagori-ai" }
-nagori-core = { path = "../nagori-core", features = ["clap"] }
+nagori-core = { path = "../nagori-core" }
 nagori-daemon = { path = "../nagori-daemon" }
-nagori-ipc = { path = "../nagori-ipc" }
 nagori-platform = { path = "../nagori-platform" }
-nagori-platform-native = { path = "../nagori-platform-native" }
-nagori-search = { path = "../nagori-search" }
 nagori-storage = { path = "../nagori-storage" }
-serde_json.workspace = true
-time.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nagori-platform-macos = { path = "../nagori-platform-macos" }
@@ -36,13 +21,6 @@ nagori-platform-windows = { path = "../nagori-platform-windows" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nagori-platform-linux = { path = "../nagori-platform-linux" }
-
-[dev-dependencies]
-assert_cmd = "2"
-insta = { version = "1", features = ["json"] }
-predicates = "3"
-regex.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

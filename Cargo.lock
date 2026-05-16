@@ -2849,6 +2849,7 @@ dependencies = [
  "nagori-platform",
  "nagori-platform-linux",
  "nagori-platform-macos",
+ "nagori-platform-native",
  "nagori-platform-windows",
  "nagori-search",
  "nagori-storage",
@@ -2914,6 +2915,7 @@ dependencies = [
  "nagori-platform",
  "nagori-platform-linux",
  "nagori-platform-macos",
+ "nagori-platform-native",
  "nagori-platform-windows",
  "nagori-search",
  "nagori-storage",
@@ -2993,6 +2995,20 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "nagori-platform-native"
+version = "0.0.0"
+dependencies = [
+ "nagori-ai",
+ "nagori-core",
+ "nagori-daemon",
+ "nagori-platform",
+ "nagori-platform-linux",
+ "nagori-platform-macos",
+ "nagori-platform-windows",
+ "nagori-storage",
 ]
 
 [[package]]

@@ -22,6 +22,7 @@ use nagori_ipc::{
     RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
 };
 use nagori_platform::{MemoryClipboard, NoopPasteController};
+use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -29,17 +30,11 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_platform::PermissionChecker;
 #[cfg(target_os = "linux")]
-use nagori_platform_linux::{
-    LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxWindowBehavior,
-};
+use nagori_platform_linux::LinuxPermissionChecker;
 #[cfg(target_os = "macos")]
-use nagori_platform_macos::{
-    MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
-};
+use nagori_platform_macos::MacosPermissionChecker;
 #[cfg(target_os = "windows")]
-use nagori_platform_windows::{
-    WindowsClipboard, WindowsPasteController, WindowsPermissionChecker, WindowsWindowBehavior,
-};
+use nagori_platform_windows::WindowsPermissionChecker;
 
 #[derive(Debug, Parser)]
 #[command(name = "nagori")]
@@ -476,50 +471,22 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         ..DaemonConfig::default()
     };
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
-        let clipboard = Arc::new(MacosClipboard::new()?);
-        let window: Arc<dyn nagori_platform::WindowBehavior> = Arc::new(MacosWindowBehavior::new());
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(MacosPermissionChecker);
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(MacosPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .socket_path(config.socket_path.clone())
-            .build()?;
-        run_daemon(runtime, clipboard, config, Some(window)).await?;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let clipboard = Arc::new(WindowsClipboard::new()?);
-        let window: Arc<dyn nagori_platform::WindowBehavior> =
-            Arc::new(WindowsWindowBehavior::new());
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(WindowsPermissionChecker);
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(WindowsPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .socket_path(config.socket_path.clone())
-            .build()?;
-        run_daemon(runtime, clipboard, config, Some(window)).await?;
-        Ok(())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let clipboard = Arc::new(LinuxClipboard::new()?);
-        let window: Arc<dyn nagori_platform::WindowBehavior> = Arc::new(LinuxWindowBehavior::new());
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(LinuxPermissionChecker);
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(LinuxPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .socket_path(config.socket_path.clone())
-            .build()?;
-        run_daemon(runtime, clipboard, config, Some(window)).await?;
+        let parts = build_native_runtime(
+            store,
+            NativeRuntimeOptions {
+                socket_path: Some(config.socket_path.clone()),
+                ai: None,
+            },
+        )?;
+        run_daemon(
+            parts.runtime,
+            parts.clipboard_reader,
+            config,
+            Some(parts.window),
+        )
+        .await?;
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -690,47 +657,7 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
 }
 
 fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
-    #[cfg(target_os = "macos")]
-    {
-        let clipboard = Arc::new(MacosClipboard::new()?);
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(MacosPermissionChecker);
-        Ok(NagoriRuntime::builder(store)
-            .clipboard(clipboard)
-            .paste(Arc::new(MacosPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .build()?)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let clipboard = Arc::new(WindowsClipboard::new()?);
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(WindowsPermissionChecker);
-        Ok(NagoriRuntime::builder(store)
-            .clipboard(clipboard)
-            .paste(Arc::new(WindowsPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .build()?)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let clipboard = Arc::new(LinuxClipboard::new()?);
-        let permissions: Arc<dyn PermissionChecker> = Arc::new(LinuxPermissionChecker);
-        Ok(NagoriRuntime::builder(store)
-            .clipboard(clipboard)
-            .paste(Arc::new(LinuxPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(permissions)
-            .build()?)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        let _ = store;
-        Err(AppError::Unsupported(
-            "copy/paste runtime is only available on macOS, Windows, and Linux".to_owned(),
-        )
-        .into())
-    }
+    Ok(build_native_runtime(store, NativeRuntimeOptions::default())?.runtime)
 }
 
 /// Build a runtime for CLI commands that don't touch the OS clipboard.

@@ -9,24 +9,16 @@ use std::time::{Duration, Instant};
 /// from a different task.
 const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
-use nagori_ai::LocalAiProvider;
 use nagori_core::{AppError, EntryId, Result};
 use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime};
+use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
 use nagori_platform::{ClipboardReader, RestoreTarget, WindowBehavior};
-#[cfg(target_os = "linux")]
-use nagori_platform_linux::{
-    LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxWindowBehavior,
-};
 #[cfg(target_os = "macos")]
-use nagori_platform_macos::{
-    MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
-};
+use nagori_platform_macos::MacosWindowBehavior;
 #[cfg(target_os = "windows")]
-use nagori_platform_windows::{
-    WindowsClipboard, WindowsPasteController, WindowsPermissionChecker, WindowsWindowBehavior,
-};
+use nagori_platform_windows::WindowsWindowBehavior;
 
 pub struct AppState {
     pub runtime: NagoriRuntime,
@@ -292,92 +284,17 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[cfg(target_os = "macos")]
     fn build(store: SqliteStore) -> Result<Self> {
-        let clipboard = Arc::new(MacosClipboard::new()?);
-        let window: Arc<dyn WindowBehavior> = Arc::new(MacosWindowBehavior::new());
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(MacosPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(Arc::new(MacosPermissionChecker))
-            .build()?;
+        let parts = build_native_runtime(store, NativeRuntimeOptions::default())?;
         Ok(Self {
-            runtime,
-            window,
-            capture_reader: clipboard,
+            runtime: parts.runtime,
+            window: parts.window,
+            capture_reader: parts.clipboard_reader,
             background_tasks: Mutex::new(None),
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
         })
     }
-
-    #[cfg(target_os = "windows")]
-    fn build(store: SqliteStore) -> Result<Self> {
-        let clipboard = Arc::new(WindowsClipboard::new()?);
-        let window: Arc<dyn WindowBehavior> = Arc::new(WindowsWindowBehavior::new());
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(WindowsPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(Arc::new(WindowsPermissionChecker))
-            .build()?;
-        Ok(Self {
-            runtime,
-            window,
-            capture_reader: clipboard,
-            background_tasks: Mutex::new(None),
-            previous_frontmost: Arc::new(Mutex::new(None)),
-            last_pasted_id: Mutex::new(None),
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn build(store: SqliteStore) -> Result<Self> {
-        // Surface a Wayland-specific hint when the platform crate refuses to
-        // initialise — the typical cause is a compositor without the
-        // `wl_data_control` protocol or a session that's still on X11. Without
-        // this wrapper the setup error reads as a bare `AppError::Platform(…)`
-        // and the user has no way to tell whether it's a transient failure or
-        // an architectural constraint of their desktop environment.
-        let clipboard =
-            Arc::new(LinuxClipboard::new().map_err(|err| annotate_linux_clipboard_error(&err))?);
-        let window: Arc<dyn WindowBehavior> = Arc::new(LinuxWindowBehavior::new());
-        let runtime = NagoriRuntime::builder(store)
-            .clipboard(clipboard.clone())
-            .paste(Arc::new(LinuxPasteController))
-            .ai(Arc::new(LocalAiProvider::default()))
-            .permissions(Arc::new(LinuxPermissionChecker))
-            .build()?;
-        Ok(Self {
-            runtime,
-            window,
-            capture_reader: clipboard,
-            background_tasks: Mutex::new(None),
-            previous_frontmost: Arc::new(Mutex::new(None)),
-            last_pasted_id: Mutex::new(None),
-        })
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    fn build(_store: SqliteStore) -> Result<Self> {
-        Err(AppError::Unsupported(
-            "Nagori desktop is supported on macOS, Windows, and Linux only. \
-             Build for a supported target or use the CLI."
-                .to_owned(),
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn annotate_linux_clipboard_error(err: &AppError) -> AppError {
-    AppError::Platform(format!(
-        "could not initialise the Linux clipboard adapter: {err}. \
-         Nagori requires a Wayland session whose compositor supports the \
-         `wl_data_control` protocol (wlroots-based compositors such as \
-         sway/Hyprland qualify; GNOME Wayland currently does not). \
-         X11 is not supported."
-    ))
 }
 
 async fn drain_background_task(

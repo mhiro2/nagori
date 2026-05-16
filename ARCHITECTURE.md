@@ -79,7 +79,8 @@ domain code. This leads to four design rules:
 │                  │ │ nagori-search    │ │ nagori-platform- │
 │                  │ │                  │ │   {macos,        │
 │                  │ │                  │ │    windows,      │
-│                  │ │                  │ │    linux}        │
+│                  │ │                  │ │    linux,        │
+│                  │ │                  │ │    native}       │
 │                  │ │                  │ │ nagori-ai        │
 │                  │ │                  │ │ nagori-ipc       │
 └──────────────────┘ └──────────────────┘ └──────────────────┘
@@ -94,11 +95,12 @@ domain code. This leads to four design rules:
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + `CF_HDROP` file lists), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback), `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
+| `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
-| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` wires the platform adapters (`MacosClipboard`/`WindowsClipboard`/`LinuxClipboard` etc.) per `cfg(target_os)`; on Linux a missing `wl_data_control` protocol fails startup with a Wayland-specific hint rather than silently using a no-op adapter. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
+| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-`wl_data_control` hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
 
 Repository layout (abbreviated):
 
@@ -109,6 +111,7 @@ crates/
   nagori-core/ nagori-storage/ nagori-search/
   nagori-platform/ nagori-platform-macos/
   nagori-platform-windows/ nagori-platform-linux/
+  nagori-platform-native/
   nagori-ai/ nagori-ipc/ nagori-daemon/ nagori-cli/
 docs/                       # CLI / IPC / permissions / release notes
 ```

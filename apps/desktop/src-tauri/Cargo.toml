@@ -21,6 +21,7 @@ nagori-core = { path = "../../../crates/nagori-core" }
 nagori-daemon = { path = "../../../crates/nagori-daemon" }
 nagori-ipc = { path = "../../../crates/nagori-ipc" }
 nagori-platform = { path = "../../../crates/nagori-platform" }
+nagori-platform-native = { path = "../../../crates/nagori-platform-native" }
 nagori-search = { path = "../../../crates/nagori-search" }
 nagori-storage = { path = "../../../crates/nagori-storage" }
 dirs = { workspace = true }
