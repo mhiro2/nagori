@@ -1142,6 +1142,20 @@ under 80 ms for 100k text entries on a developer machine.
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret
   imagery never reaches the WebView.
+- **Image payload validation** — external clipboard producers freely
+  label arbitrary bytes as `image/*`, so the workspace treats every
+  raster payload as untrusted. `nagori_core::image_signature::detect`
+  is the single source of truth for the supported set (PNG, JPEG, GIF,
+  WebP, BMP, TIFF); SVG is deliberately excluded because it can host
+  script. The factory consults the detector at *capture time* and
+  drops representations whose magic number disagrees with the declared
+  MIME, falling through to sibling text/HTML reps when present; the
+  Tauri scheme handler runs the same check at *serve time* before the
+  bytes reach the WebView, returning 415 on mismatch. Combined with
+  `X-Content-Type-Options: nosniff` this gives three independent gates
+  against a payload like an HTML body mislabelled as `image/png`.
+  Rejections are logged with declared MIME, detected MIME, and byte
+  count; raw bytes are never written to the log.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.
