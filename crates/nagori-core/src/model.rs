@@ -78,6 +78,15 @@ pub struct ClipboardEntry {
     pub search: SearchDocument,
     pub sensitivity: Sensitivity,
     pub lifecycle: EntryLifecycle,
+    /// Validated representations the storage layer should persist alongside
+    /// the primary `content`. Populated by [`crate::EntryFactory`] from a
+    /// `ClipboardSnapshot` and drained by the storage layer's insert path —
+    /// `#[serde(skip)]` so the JSON envelope on disk never grows by the
+    /// alternative payloads and the field is always empty after a round-trip
+    /// through `EntryRepository::get`. Mirrors the lifetime contract that
+    /// `ImageContent::pending_bytes` already uses for primary image bytes.
+    #[serde(skip)]
+    pub pending_representations: Vec<StoredClipboardRepresentation>,
 }
 
 impl ClipboardEntry {
@@ -87,6 +96,47 @@ impl ClipboardEntry {
 
     pub fn plain_text(&self) -> Option<&str> {
         self.content.plain_text()
+    }
+
+    /// Trim `pending_representations` from the tail until total
+    /// `byte_count` fits inside `max_total_bytes`.
+    ///
+    /// The primary representation is never trimmed — callers gate "primary
+    /// alone is oversized" upstream (see capture\_loop's `payload_bytes`
+    /// check) and drop the whole entry instead. Returns whether any
+    /// representation was removed; when something was trimmed the caller is
+    /// responsible for recomputing `metadata.representation_set_hash`.
+    pub fn trim_alternatives_to_budget(&mut self, max_total_bytes: usize) -> bool {
+        if self.pending_representations.is_empty() {
+            return false;
+        }
+        let mut total: usize = 0;
+        for rep in &self.pending_representations {
+            total = total.saturating_add(rep.byte_count());
+        }
+        if total <= max_total_bytes {
+            return false;
+        }
+        let original_len = self.pending_representations.len();
+        // Walk from the tail; alternatives carry the largest ordinals so
+        // dropping them first preserves the role ordering established by
+        // the factory. Primary always sits at ordinal 0, so the loop guard
+        // stops before removing it.
+        while self.pending_representations.len() > 1 && total > max_total_bytes {
+            let dropped = self
+                .pending_representations
+                .pop()
+                .expect("len > 1 above guarantees Some");
+            total = total.saturating_sub(dropped.byte_count());
+            tracing::debug!(
+                role = dropped.role.as_str(),
+                mime_type = %dropped.mime_type,
+                ordinal = dropped.ordinal,
+                byte_count = dropped.byte_count(),
+                "representation_dropped_for_budget"
+            );
+        }
+        self.pending_representations.len() != original_len
     }
 }
 
@@ -518,6 +568,81 @@ pub enum ClipboardData {
     FilePaths(Vec<String>),
 }
 
+/// One validated, allowlisted representation extracted from a
+/// `ClipboardSnapshot`.
+///
+/// Captures everything the storage layer needs to persist a row into
+/// `entry_representations` (role + ordinal + mime + payload) while keeping
+/// the IPC / DTO surface untouched — the value lives only in memory between
+/// [`crate::EntryFactory`] and the insert path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredClipboardRepresentation {
+    pub role: RepresentationRole,
+    pub mime_type: String,
+    pub ordinal: u32,
+    pub data: RepresentationDataRef,
+}
+
+impl StoredClipboardRepresentation {
+    #[must_use]
+    pub fn byte_count(&self) -> usize {
+        match &self.data {
+            RepresentationDataRef::InlineText(text) => text.len(),
+            RepresentationDataRef::DatabaseBlob(bytes) => bytes.len(),
+            RepresentationDataRef::FilePaths(paths) => {
+                // Stored as a newline-joined list in `text_content`; size
+                // the row by the joined byte length so the retention budget
+                // matches what physically lands in SQLite.
+                let mut total: usize = 0;
+                for (idx, path) in paths.iter().enumerate() {
+                    if idx > 0 {
+                        total = total.saturating_add(1);
+                    }
+                    total = total.saturating_add(path.len());
+                }
+                total
+            }
+        }
+    }
+}
+
+/// Role of a stored representation inside an entry's representation set.
+///
+/// Maps 1:1 to the `entry_representations.role` SQL column. The variant
+/// order also encodes the persisted ordinal ranking: primary < plain
+/// fallback < alternatives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepresentationRole {
+    Primary,
+    PlainFallback,
+    Alternative,
+}
+
+impl RepresentationRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::PlainFallback => "plain_fallback",
+            Self::Alternative => "alternative",
+        }
+    }
+}
+
+/// Payload kept on a [`StoredClipboardRepresentation`].
+///
+/// Text-shaped reps (plain, html, rtf, file paths) land in
+/// `entry_representations.text_content`; image bytes land in
+/// `entry_representations.payload_blob`. The `ContentAddressedFile`
+/// [`PayloadRef`] variant is reserved for a later phase and is not emitted
+/// by the capture pipeline today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepresentationDataRef {
+    InlineText(String),
+    DatabaseBlob(Vec<u8>),
+    FilePaths(Vec<String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub raw: String,
@@ -739,6 +864,107 @@ mod tests {
         assert!(!is_text_safe_for_default_output(Sensitivity::Blocked));
         assert!(!is_text_safe_for_default_output(Sensitivity::Private));
         assert!(!is_text_safe_for_default_output(Sensitivity::Secret));
+    }
+
+    #[test]
+    fn representation_role_str_matches_db_values() {
+        // `entry_representations.role` is a SQL string column; the
+        // factory and storage layer agree on these literal values, so a
+        // typo in either side would silently scramble role queries.
+        assert_eq!(RepresentationRole::Primary.as_str(), "primary");
+        assert_eq!(RepresentationRole::PlainFallback.as_str(), "plain_fallback");
+        assert_eq!(RepresentationRole::Alternative.as_str(), "alternative");
+    }
+
+    #[test]
+    fn stored_representation_byte_count_matches_persisted_shape() {
+        let text = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/plain".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("hello".to_owned()),
+        };
+        assert_eq!(text.byte_count(), 5);
+
+        let blob = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "image/png".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::DatabaseBlob(vec![0, 1, 2, 3]),
+        };
+        assert_eq!(blob.byte_count(), 4);
+
+        // Newline-joined storage form: 3 + 1 + 3 = 7 bytes.
+        let paths = StoredClipboardRepresentation {
+            role: RepresentationRole::Alternative,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 2,
+            data: RepresentationDataRef::FilePaths(vec!["one".to_owned(), "two".to_owned()]),
+        };
+        assert_eq!(paths.byte_count(), 7);
+    }
+
+    #[test]
+    fn trim_alternatives_drops_tail_until_budget_fits() {
+        let mut entry = crate::EntryFactory::from_text("primary");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("primary".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText("a".repeat(100)),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/rtf".to_owned(),
+                ordinal: 2,
+                data: RepresentationDataRef::InlineText("b".repeat(50)),
+            },
+        ];
+        // 7 + 100 + 50 = 157. Budget 60 → drop tail (50) → still 107 →
+        // drop next (100) → 7 ≤ 60, stop. Primary always survives.
+        let changed = entry.trim_alternatives_to_budget(60);
+        assert!(changed);
+        assert_eq!(entry.pending_representations.len(), 1);
+        assert_eq!(
+            entry.pending_representations[0].role,
+            RepresentationRole::Primary
+        );
+    }
+
+    #[test]
+    fn trim_alternatives_is_noop_when_budget_fits() {
+        let mut entry = crate::EntryFactory::from_text("primary");
+        entry.pending_representations = vec![StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/plain".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("primary".to_owned()),
+        }];
+        assert!(!entry.trim_alternatives_to_budget(1_000_000));
+        assert_eq!(entry.pending_representations.len(), 1);
+    }
+
+    #[test]
+    fn trim_alternatives_never_drops_primary_even_if_oversized() {
+        // A primary larger than the budget shouldn't be removed here —
+        // the capture loop drops the whole entry upstream, but this
+        // helper must keep primary so a misuse can't silently lose it.
+        let mut entry = crate::EntryFactory::from_text("primary");
+        entry.pending_representations = vec![StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/plain".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("a".repeat(1000)),
+        }];
+        let _ = entry.trim_alternatives_to_budget(10);
+        assert_eq!(entry.pending_representations.len(), 1);
     }
 
     #[test]

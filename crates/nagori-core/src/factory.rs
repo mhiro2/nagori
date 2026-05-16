@@ -57,6 +57,12 @@ impl EntryFactory {
             search,
             sensitivity: crate::Sensitivity::Unknown,
             lifecycle: EntryLifecycle::default(),
+            // `from_text` and the snapshot-less synthesis paths build a
+            // single primary representation, so the persisted-rep list
+            // starts empty and the storage layer falls back to deriving
+            // the primary row from `content`. The snapshot path overrides
+            // this in `from_snapshot` below.
+            pending_representations: Vec::new(),
         }
     }
 }

@@ -1882,6 +1882,10 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
             deleted_at: parse_opt_time(row.get("deleted_at")?)?,
             expires_at: parse_opt_time(row.get("expires_at")?)?,
         },
+        // `pending_representations` lives in `entry_representations` after
+        // insert and is `#[serde(skip)]` on the model — round-tripping
+        // through the DB never repopulates it.
+        pending_representations: Vec::new(),
     })
 }
 
