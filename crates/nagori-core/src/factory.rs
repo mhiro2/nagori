@@ -1,9 +1,12 @@
+use std::fmt::Write as _;
+
 use time::OffsetDateTime;
 
 use crate::{
     ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation, ClipboardSnapshot,
     ContentHash, EntryId, EntryLifecycle, EntryMetadata, FileListContent, ImageContent, PayloadRef,
-    RichTextContent, RichTextMarkup, SearchDocument, normalize_text,
+    RepresentationDataRef, RepresentationRole, RichTextContent, RichTextMarkup, SearchDocument,
+    StoredClipboardRepresentation, normalize_text,
 };
 
 #[derive(Debug, Clone)]
@@ -15,12 +18,18 @@ impl EntryFactory {
     }
 
     pub fn from_snapshot(snapshot: ClipboardSnapshot) -> Option<ClipboardEntry> {
-        let content = pick_content(&snapshot.representations)?;
-        Some(Self::from_content(
-            content,
-            snapshot.source,
-            Some(snapshot.captured_at),
-        ))
+        // Run every snapshot rep through the allowlist + magic-number gate,
+        // pick the richest survivor as primary, and persist the remainder as
+        // plain_fallback / alternatives so copy-back can re-publish each
+        // flavour the source advertised.
+        let normalized = normalize_representations(&snapshot.representations);
+        let (content, primary_idx, has_plain_fallback) = pick_primary(&normalized)?;
+        let mut entry = Self::from_content(content, snapshot.source, Some(snapshot.captured_at));
+        let stored = build_stored_set(&normalized, primary_idx, has_plain_fallback);
+        let set_hash = compute_representation_set_hash(&stored);
+        entry.metadata.representation_set_hash = Some(set_hash);
+        entry.pending_representations = stored;
+        Some(entry)
     }
 
     pub fn from_content(
@@ -67,37 +76,94 @@ impl EntryFactory {
     }
 }
 
-/// Choose the richest content representation from a clipboard snapshot.
+/// A snapshot representation reduced to its canonical, persist-ready form.
 ///
-/// Priority is: file URLs (`FileList`) → image bytes (`Image`) → HTML/RTF
-/// paired with plain text (`RichText`) → plain text (`Text`/`Url`/`Code`
-/// via `from_plain_text`) → HTML or RTF without paired plain text
-/// (`RichText` with stripped/echoed body). When nothing usable is present
-/// the snapshot is dropped.
-fn pick_content(representations: &[ClipboardRepresentation]) -> Option<ClipboardContent> {
-    if let Some(paths) = representations.iter().find_map(|rep| match &rep.data {
-        ClipboardData::FilePaths(paths) if !paths.is_empty() => Some(paths.clone()),
-        _ => None,
-    }) {
-        let display_text = paths.join("\n");
-        return Some(ClipboardContent::FileList(FileListContent {
-            paths,
-            display_text,
-        }));
-    }
+/// `normalize_representations` walks the snapshot in order and only filters,
+/// so the index into the returned `Vec<NormalizedRep>` already preserves
+/// occurrence order — there is no need to carry the original snapshot index
+/// alongside.
+#[derive(Debug, Clone)]
+struct NormalizedRep {
+    payload: NormalizedPayload,
+}
 
-    if let Some((mime, bytes)) = representations.iter().find_map(|rep| match &rep.data {
-        ClipboardData::Bytes(bytes)
-            if !bytes.is_empty() && starts_with_image_prefix(&rep.mime_type) =>
-        {
-            // External producers freely label arbitrary bytes as
-            // `image/*`. Reject representations whose magic number
-            // disagrees with the declared MIME so a sibling text/HTML
-            // rep can still produce an entry; an image-only snapshot
-            // with bogus bytes drops out entirely.
-            if crate::image_signature::matches_declared_mime(&rep.mime_type, bytes) {
-                Some((rep.mime_type.clone(), bytes.clone()))
-            } else {
+#[derive(Debug, Clone)]
+enum NormalizedPayload {
+    /// `text/plain`, `text/html`, `text/rtf`, `application/rtf` — already
+    /// trimmed-non-empty and canonicalised to the IANA form even when the
+    /// source rep used an Apple UTI alias.
+    Text {
+        canonical_mime: &'static str,
+        text: String,
+    },
+    /// Magic-number-verified image bytes. `mime` is the canonical lowercase
+    /// IANA form so dedupe and copy-back never disagree on case.
+    Image { mime: String, bytes: Vec<u8> },
+    /// Non-empty file-URL list. The stored row keeps the original mime so a
+    /// future copy-back path can re-publish it under the same UTI / IANA
+    /// flavour the source advertised.
+    FilePaths { mime: String, paths: Vec<String> },
+}
+
+/// Walk the snapshot's representations once and drop everything that fails
+/// the allowlist + magic-number + non-empty checks. Logs every drop at
+/// `debug!` so packet-level diagnosis is possible without surfacing raw
+/// payload bytes.
+fn normalize_representations(reps: &[ClipboardRepresentation]) -> Vec<NormalizedRep> {
+    let mut out = Vec::with_capacity(reps.len());
+    for rep in reps {
+        let bare = bare_mime(&rep.mime_type);
+        if let Some(canonical) = canonical_text_mime(bare) {
+            let text = match &rep.data {
+                ClipboardData::Text(t) => t.clone(),
+                ClipboardData::Bytes(b) => {
+                    if let Ok(s) = std::str::from_utf8(b) {
+                        s.to_owned()
+                    } else {
+                        tracing::debug!(
+                            mime_type = %rep.mime_type,
+                            byte_count = b.len(),
+                            "representation_dropped reason=non_utf8_text"
+                        );
+                        continue;
+                    }
+                }
+                ClipboardData::FilePaths(_) => {
+                    tracing::debug!(
+                        mime_type = %rep.mime_type,
+                        "representation_dropped reason=text_mime_carried_file_paths"
+                    );
+                    continue;
+                }
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            out.push(NormalizedRep {
+                payload: NormalizedPayload::Text {
+                    canonical_mime: canonical,
+                    text,
+                },
+            });
+            continue;
+        }
+
+        if starts_with_image_prefix(&rep.mime_type) {
+            let ClipboardData::Bytes(bytes) = &rep.data else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            if !is_allowlisted_image_mime(bare) {
+                tracing::debug!(
+                    mime_type = %rep.mime_type,
+                    byte_count = bytes.len(),
+                    "representation_dropped reason=image_mime_not_allowlisted"
+                );
+                continue;
+            }
+            if !crate::image_signature::matches_declared_mime(&rep.mime_type, bytes) {
                 let detected = crate::image_signature::detect(bytes)
                     .map(crate::image_signature::ImageFormat::mime_type);
                 tracing::warn!(
@@ -106,77 +172,323 @@ fn pick_content(representations: &[ClipboardRepresentation]) -> Option<Clipboard
                     byte_count = bytes.len(),
                     "image_signature_mismatch_dropped"
                 );
-                None
+                continue;
             }
+            out.push(NormalizedRep {
+                payload: NormalizedPayload::Image {
+                    mime: bare.to_ascii_lowercase(),
+                    bytes: bytes.clone(),
+                },
+            });
+            continue;
         }
-        _ => None,
-    }) {
-        let byte_count = bytes.len();
-        return Some(ClipboardContent::Image(ImageContent {
+
+        if let ClipboardData::FilePaths(paths) = &rep.data {
+            if paths.is_empty() {
+                continue;
+            }
+            out.push(NormalizedRep {
+                payload: NormalizedPayload::FilePaths {
+                    mime: rep.mime_type.clone(),
+                    paths: paths.clone(),
+                },
+            });
+            continue;
+        }
+
+        tracing::debug!(
+            mime_type = %rep.mime_type,
+            "representation_dropped reason=mime_not_allowlisted"
+        );
+    }
+    out
+}
+
+/// Choose the richest representation as primary, matching the legacy
+/// priority used by `pick_content`: file URLs → magic-matched image bytes →
+/// rich text paired with plain text → plain text → markup-only rich text.
+///
+/// Returns the constructed [`ClipboardContent`], the index of the primary
+/// inside `normalized`, and whether a sibling `text/plain` rep should be
+/// labelled `plain_fallback` (only when the primary is a paired `RichText`).
+fn pick_primary(normalized: &[NormalizedRep]) -> Option<(ClipboardContent, usize, bool)> {
+    if let Some(picked) = pick_file_list_primary(normalized) {
+        return Some(picked);
+    }
+    if let Some(picked) = pick_image_primary(normalized) {
+        return Some(picked);
+    }
+
+    let plain_idx = find_text_idx(normalized, "text/plain");
+    let html_idx = find_text_idx(normalized, "text/html");
+    let rtf_idx = find_rtf_idx(normalized);
+
+    if let Some(pi) = plain_idx {
+        let plain_text = text_at(normalized, pi);
+        if let Some(hi) = html_idx {
+            return Some((
+                build_rich_text(plain_text, text_at(normalized, hi), RichTextMarkup::Html),
+                hi,
+                true,
+            ));
+        }
+        if let Some(ri) = rtf_idx {
+            return Some((
+                build_rich_text(plain_text, text_at(normalized, ri), RichTextMarkup::Rtf),
+                ri,
+                true,
+            ));
+        }
+        return Some((ClipboardContent::from_plain_text(plain_text), pi, false));
+    }
+
+    if let Some(hi) = html_idx {
+        let markup = text_at(normalized, hi);
+        let stripped = strip_html(&markup);
+        return Some((
+            build_rich_text(stripped, markup, RichTextMarkup::Html),
+            hi,
+            false,
+        ));
+    }
+    if let Some(ri) = rtf_idx {
+        let markup = text_at(normalized, ri);
+        return Some((
+            build_rich_text(markup.clone(), markup, RichTextMarkup::Rtf),
+            ri,
+            false,
+        ));
+    }
+
+    None
+}
+
+fn pick_file_list_primary(normalized: &[NormalizedRep]) -> Option<(ClipboardContent, usize, bool)> {
+    let (idx, paths) = normalized
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| match &n.payload {
+            NormalizedPayload::FilePaths { paths, .. } => Some((i, paths.clone())),
+            _ => None,
+        })?;
+    let display_text = paths.join("\n");
+    Some((
+        ClipboardContent::FileList(FileListContent {
+            paths,
+            display_text,
+        }),
+        idx,
+        false,
+    ))
+}
+
+fn pick_image_primary(normalized: &[NormalizedRep]) -> Option<(ClipboardContent, usize, bool)> {
+    let (idx, mime, bytes) = normalized
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| match &n.payload {
+            NormalizedPayload::Image { mime, bytes } => Some((i, mime.clone(), bytes.clone())),
+            _ => None,
+        })?;
+    let byte_count = bytes.len();
+    Some((
+        ClipboardContent::Image(ImageContent {
             payload_ref: PayloadRef::DatabaseBlob(String::new()),
             width: None,
             height: None,
             byte_count,
             mime_type: Some(mime),
             pending_bytes: Some(bytes),
-        }));
+        }),
+        idx,
+        false,
+    ))
+}
+
+const fn build_rich_text(
+    plain_text: String,
+    markup: String,
+    kind: RichTextMarkup,
+) -> ClipboardContent {
+    ClipboardContent::RichText(RichTextContent {
+        plain_text,
+        payload_ref: PayloadRef::InlineText,
+        markup: Some(markup),
+        markup_kind: Some(kind),
+    })
+}
+
+fn find_text_idx(normalized: &[NormalizedRep], mime: &str) -> Option<usize> {
+    normalized.iter().position(|n| {
+        matches!(&n.payload, NormalizedPayload::Text { canonical_mime, .. } if *canonical_mime == mime)
+    })
+}
+
+fn find_rtf_idx(normalized: &[NormalizedRep]) -> Option<usize> {
+    normalized.iter().position(|n| {
+        matches!(
+            &n.payload,
+            NormalizedPayload::Text { canonical_mime, .. }
+                if *canonical_mime == "text/rtf" || *canonical_mime == "application/rtf"
+        )
+    })
+}
+
+fn text_at(normalized: &[NormalizedRep], idx: usize) -> String {
+    match &normalized[idx].payload {
+        NormalizedPayload::Text { text, .. } => text.clone(),
+        _ => panic!("expected text normalized payload at index {idx}"),
+    }
+}
+
+/// Assemble the persisted representation set in role-major order
+/// (`primary` → `plain_fallback` → `alternative`). Within each role bucket
+/// the snapshot's original index is preserved so a multi-alternative entry
+/// keeps the same ranking copy-back would otherwise reconstruct.
+fn build_stored_set(
+    normalized: &[NormalizedRep],
+    primary_idx: usize,
+    has_plain_fallback: bool,
+) -> Vec<StoredClipboardRepresentation> {
+    let mut out = Vec::with_capacity(normalized.len());
+    let mut consumed = vec![false; normalized.len()];
+    out.push(stored_from(
+        &normalized[primary_idx],
+        RepresentationRole::Primary,
+        0,
+    ));
+    consumed[primary_idx] = true;
+
+    let mut ordinal: u32 = 1;
+    if has_plain_fallback
+        && let Some(pi) = find_text_idx(normalized, "text/plain")
+        && !consumed[pi]
+    {
+        out.push(stored_from(
+            &normalized[pi],
+            RepresentationRole::PlainFallback,
+            ordinal,
+        ));
+        consumed[pi] = true;
+        ordinal = ordinal.saturating_add(1);
     }
 
-    // Skip empty bodies so an empty `text/plain` rep doesn't shadow a
-    // non-empty `text/html`/`rtf` sibling. Real apps (Notes, Mail) sometimes
-    // publish both with the plain side empty when the source is markup-only.
-    let plain = representations
-        .iter()
-        .find_map(|rep| representation_text(rep, &["text/plain", "public.utf8-plain-text"]))
-        .filter(|s| !s.trim().is_empty());
-    let html = representations
-        .iter()
-        .find_map(|rep| representation_text(rep, &["text/html", "public.html"]))
-        .filter(|s| !s.trim().is_empty());
-    let rtf = representations
-        .iter()
-        .find_map(|rep| representation_text(rep, &["application/rtf", "text/rtf", "public.rtf"]))
-        .filter(|s| !s.trim().is_empty());
-
-    if let Some(plain_text) = plain {
-        if let Some(markup) = html.clone() {
-            return Some(ClipboardContent::RichText(RichTextContent {
-                plain_text,
-                payload_ref: PayloadRef::InlineText,
-                markup: Some(markup),
-                markup_kind: Some(RichTextMarkup::Html),
-            }));
+    for (idx, rep) in normalized.iter().enumerate() {
+        if consumed[idx] {
+            continue;
         }
-        if let Some(markup) = rtf.clone() {
-            return Some(ClipboardContent::RichText(RichTextContent {
-                plain_text,
-                payload_ref: PayloadRef::InlineText,
-                markup: Some(markup),
-                markup_kind: Some(RichTextMarkup::Rtf),
-            }));
+        out.push(stored_from(rep, RepresentationRole::Alternative, ordinal));
+        ordinal = ordinal.saturating_add(1);
+    }
+    out
+}
+
+fn stored_from(
+    n: &NormalizedRep,
+    role: RepresentationRole,
+    ordinal: u32,
+) -> StoredClipboardRepresentation {
+    match &n.payload {
+        NormalizedPayload::Text {
+            canonical_mime,
+            text,
+        } => StoredClipboardRepresentation {
+            role,
+            mime_type: (*canonical_mime).to_owned(),
+            ordinal,
+            data: RepresentationDataRef::InlineText(text.clone()),
+        },
+        NormalizedPayload::Image { mime, bytes } => StoredClipboardRepresentation {
+            role,
+            mime_type: mime.clone(),
+            ordinal,
+            data: RepresentationDataRef::DatabaseBlob(bytes.clone()),
+        },
+        NormalizedPayload::FilePaths { mime, paths } => StoredClipboardRepresentation {
+            role,
+            mime_type: mime.clone(),
+            ordinal,
+            data: RepresentationDataRef::FilePaths(paths.clone()),
+        },
+    }
+}
+
+/// SHA-256 over the canonical encoding of every persisted representation.
+///
+/// Encodes each rep as `role|mime|ordinal|sha256(payload_bytes)` and joins
+/// with newlines after sorting by (role, ordinal, mime). The hash diverges
+/// from `content_hash` once an entry carries alternatives or a plain
+/// fallback, giving dedupe a way to recognise "same representation set" vs
+/// "same primary body". `representation_set_hash` is recomputed by the
+/// budget-trim path if any rep is dropped so the hash stays in sync with
+/// what storage actually wrote.
+#[must_use]
+pub fn compute_representation_set_hash(reps: &[StoredClipboardRepresentation]) -> ContentHash {
+    let mut sorted: Vec<&StoredClipboardRepresentation> = reps.iter().collect();
+    sorted.sort_by(|a, b| {
+        (a.role as u8, a.ordinal, a.mime_type.as_str()).cmp(&(
+            b.role as u8,
+            b.ordinal,
+            b.mime_type.as_str(),
+        ))
+    });
+    let mut buf = String::new();
+    for (i, r) in sorted.iter().enumerate() {
+        if i > 0 {
+            buf.push('\n');
         }
-        return Some(ClipboardContent::from_plain_text(plain_text));
+        let payload_hash = match &r.data {
+            RepresentationDataRef::InlineText(text) => ContentHash::sha256(text.as_bytes()),
+            RepresentationDataRef::DatabaseBlob(bytes) => ContentHash::sha256(bytes),
+            RepresentationDataRef::FilePaths(paths) => {
+                ContentHash::sha256(paths.join("\n").as_bytes())
+            }
+        };
+        // `write!` to a String is infallible — drop the Result on purpose.
+        let _ = write!(
+            &mut buf,
+            "{}|{}|{}|{}",
+            r.role.as_str(),
+            r.mime_type,
+            r.ordinal,
+            payload_hash.value
+        );
     }
+    ContentHash::sha256(buf.as_bytes())
+}
 
-    if let Some(markup) = html {
-        let stripped = strip_html(&markup);
-        return Some(ClipboardContent::RichText(RichTextContent {
-            plain_text: stripped,
-            payload_ref: PayloadRef::InlineText,
-            markup: Some(markup),
-            markup_kind: Some(RichTextMarkup::Html),
-        }));
-    }
-    if let Some(markup) = rtf {
-        return Some(ClipboardContent::RichText(RichTextContent {
-            plain_text: markup.clone(),
-            payload_ref: PayloadRef::InlineText,
-            markup: Some(markup),
-            markup_kind: Some(RichTextMarkup::Rtf),
-        }));
-    }
+/// Bare mime type ("text/plain") stripped of any parameter list. Used as
+/// the matching key against the allowlist so `text/plain;charset=utf-8`
+/// doesn't get classified differently from the parameter-less form.
+fn bare_mime(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
+}
 
-    None
+/// Map a bare mime / Apple UTI to its canonical IANA form when allowlisted.
+/// Returning `Some` is sufficient for the rep to enter the text family.
+const fn canonical_text_mime(bare: &str) -> Option<&'static str> {
+    if bare.eq_ignore_ascii_case("text/plain")
+        || bare.eq_ignore_ascii_case("public.utf8-plain-text")
+    {
+        Some("text/plain")
+    } else if bare.eq_ignore_ascii_case("text/html") || bare.eq_ignore_ascii_case("public.html") {
+        Some("text/html")
+    } else if bare.eq_ignore_ascii_case("application/rtf")
+        || bare.eq_ignore_ascii_case("public.rtf")
+    {
+        Some("application/rtf")
+    } else if bare.eq_ignore_ascii_case("text/rtf") {
+        Some("text/rtf")
+    } else {
+        None
+    }
+}
+
+fn is_allowlisted_image_mime(bare: &str) -> bool {
+    matches!(
+        bare.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 /// Case-insensitive `image/...` prefix check.
@@ -189,26 +501,6 @@ fn pick_content(representations: &[ClipboardRepresentation]) -> Option<Clipboard
 fn starts_with_image_prefix(mime: &str) -> bool {
     mime.get(..6)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
-}
-
-fn representation_text(rep: &ClipboardRepresentation, mime_types: &[&str]) -> Option<String> {
-    // Match the bare mime ("text/plain") even when the rep declares a
-    // suffix like "text/plain;charset=utf-8" — the parameter list doesn't
-    // change which content branch we belong in.
-    let bare = rep
-        .mime_type
-        .split(';')
-        .next()
-        .unwrap_or(&rep.mime_type)
-        .trim();
-    if !mime_types.iter().any(|m| bare.eq_ignore_ascii_case(m)) {
-        return None;
-    }
-    match &rep.data {
-        ClipboardData::Text(text) => Some(text.clone()),
-        ClipboardData::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(ToOwned::to_owned),
-        ClipboardData::FilePaths(_) => None,
-    }
 }
 
 /// Tiny tag-stripper used as a last-resort fallback when the pasteboard
@@ -624,5 +916,189 @@ mod tests {
             EntryFactory::from_snapshot(snapshot).expect("text snapshot should build entry");
 
         assert_eq!(entry.search.normalized_text, "abc 123");
+    }
+
+    #[test]
+    fn snapshot_with_html_plain_rtf_assigns_roles_in_priority_order() {
+        // HTML+plain pair wins primary (RichText), the sibling plain rep
+        // becomes plain_fallback (so a paste-as-plain path has it ready),
+        // and the leftover RTF rep is an alternative — exactly the layering
+        // the multi-rep store needs to round-trip back to the OS clipboard.
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("multi-rt"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hello</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hello".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "application/rtf".to_owned(),
+                    data: ClipboardData::Text("{\\rtf1 hello}".to_owned()),
+                },
+            ],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).expect("entry should build");
+        let reps = &entry.pending_representations;
+        assert_eq!(reps.len(), 3);
+
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "text/html");
+        assert_eq!(reps[0].ordinal, 0);
+
+        assert_eq!(reps[1].role, RepresentationRole::PlainFallback);
+        assert_eq!(reps[1].mime_type, "text/plain");
+        assert_eq!(reps[1].ordinal, 1);
+
+        assert_eq!(reps[2].role, RepresentationRole::Alternative);
+        assert_eq!(reps[2].mime_type, "application/rtf");
+        assert_eq!(reps[2].ordinal, 2);
+    }
+
+    #[test]
+    fn snapshot_with_image_plus_html_keeps_html_as_alternative() {
+        // Image wins primary because it's the richest format the user
+        // copied. The accompanying HTML rep (often a screenshot's alt-text
+        // or surrounding markup) should survive as an alternative so the
+        // dataset still carries the textual context — without it, full-text
+        // search would lose the only searchable companion.
+        let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13];
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("img-html"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(png_bytes.clone()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>caption</p>".to_owned()),
+                },
+            ],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).expect("entry should build");
+        assert!(matches!(entry.content, crate::ClipboardContent::Image(_)));
+
+        let reps = &entry.pending_representations;
+        assert_eq!(reps.len(), 2);
+
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "image/png");
+        match &reps[0].data {
+            RepresentationDataRef::DatabaseBlob(bytes) => assert_eq!(bytes, &png_bytes),
+            other => panic!("primary should carry image bytes, got {other:?}"),
+        }
+
+        assert_eq!(reps[1].role, RepresentationRole::Alternative);
+        assert_eq!(reps[1].mime_type, "text/html");
+    }
+
+    #[test]
+    fn snapshot_image_mismatch_drops_image_rep_while_text_persists() {
+        // The signature-gate test above checks that the primary content
+        // falls through to text; this one locks in that the bad image rep
+        // doesn't leak into `pending_representations` either. A failed
+        // magic-number check has to remove the rep from every downstream
+        // path or storage will write bytes the daemon already rejected.
+        let html_disguised_as_png = b"<!doctype html>oops".to_vec();
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("img-drop-rep"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(html_disguised_as_png),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("alt".to_owned()),
+                },
+            ],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).expect("entry should build");
+        let reps = &entry.pending_representations;
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "text/plain");
+        assert!(
+            !reps.iter().any(|r| r.mime_type == "image/png"),
+            "image rep with bad magic must not be persisted"
+        );
+    }
+
+    #[test]
+    fn representation_set_hash_is_stable_across_equivalent_snapshots() {
+        // Two snapshots whose reps differ only by `captured_at` must produce
+        // the same `representation_set_hash` so dedupe can recognise "user
+        // copied the same thing twice" rather than treating every paste as
+        // a brand-new entry.
+        let build = |captured_at: OffsetDateTime| ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("hash-stable"),
+            captured_at,
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>x</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("x".to_owned()),
+                },
+            ],
+        };
+
+        let a = EntryFactory::from_snapshot(build(
+            OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+        ))
+        .unwrap();
+        let b = EntryFactory::from_snapshot(build(
+            OffsetDateTime::from_unix_timestamp(1_700_000_999).unwrap(),
+        ))
+        .unwrap();
+
+        let ha = a.metadata.representation_set_hash.expect("hash present");
+        let hb = b.metadata.representation_set_hash.expect("hash present");
+        assert_eq!(ha.value, hb.value);
+    }
+
+    #[test]
+    fn representation_set_hash_diverges_from_content_hash_when_alternatives_present() {
+        // Single-rep entries inherit content_hash for the set hash so the
+        // schema's NOT NULL stays satisfied. With alternatives the set must
+        // hash a wider surface, and the two columns are expected to diverge.
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("hash-diverge"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hi</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hi".to_owned()),
+                },
+            ],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).unwrap();
+        let set_hash = entry
+            .metadata
+            .representation_set_hash
+            .expect("multi-rep entry must carry a representation_set_hash");
+        assert_ne!(set_hash.value, entry.metadata.content_hash.value);
     }
 }
