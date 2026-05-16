@@ -399,8 +399,11 @@ enum PublishOutcome {
 /// Used as a pre-scan before `clearContents()` so an entry whose stored
 /// reps are *all* outside the macOS publisher's MIME table (file URLs,
 /// `image/jpeg`, etc.) falls back through `write_entry` instead of clearing
-/// the pasteboard and erroring after the fact.
-#[cfg(target_os = "macos")]
+/// the pasteboard and erroring after the fact. The body only inspects MIME
+/// strings and `RepresentationDataRef` variants from `nagori-core`, so it
+/// stays `cfg`-free even though its only caller is the macOS impl — the
+/// crate is a workspace member built on every host and the helper has to
+/// resolve on non-mac targets too.
 fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
     reps.iter().any(|rep| {
         matches!(

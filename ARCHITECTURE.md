@@ -740,8 +740,13 @@ today — `NSPasteboardItem` plumbing for file URLs and stable
 `NSPasteboardType` constants for the alternate image formats are still
 TODO. To avoid clearing the pasteboard for nothing, the macOS adapter
 pre-scans the rep set: when every entry falls outside the publishable
-table the call falls back to `write_entry`, restoring the primary
-content rather than leaving the user with an empty pasteboard. Adapters
+table the call falls back to `write_entry` *before* `clearContents()`
+runs, so the existing primary-only path either restores the entry (text
+and PNG/TIFF images) or surfaces the same `AppError::Unsupported` it
+would have raised on a direct `write_entry` call (e.g. `image/jpeg`
+primary). Either way the previous pasteboard contents survive instead
+of being wiped out for a publish attempt that was going to error
+anyway. Adapters
 whose capability is `Unsupported` (Windows, Linux Wayland today) inherit
 the default impl that delegates back to `write_entry`, so Preserve still
 publishes the primary content there — just without the rich-MIME set.
