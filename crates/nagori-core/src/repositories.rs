@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::{AppSettings, ClipboardEntry, EntryId, EntryMetadata, Result, SearchDocument};
+use crate::{
+    AppSettings, ClipboardEntry, EntryId, EntryMetadata, Result, SearchDocument,
+    StoredClipboardRepresentation,
+};
 
 #[async_trait]
 pub trait EntryRepository: Send + Sync {
@@ -10,6 +13,16 @@ pub trait EntryRepository: Send + Sync {
     async fn mark_deleted(&self, id: EntryId) -> Result<()>;
     async fn list_recent(&self, limit: usize) -> Result<Vec<ClipboardEntry>>;
     async fn list_pinned(&self) -> Result<Vec<ClipboardEntry>>;
+
+    /// Return every stored representation for `id`, ordered for replay by
+    /// role precedence (`primary` → `plain_fallback` → `alternative`) and
+    /// then by ordinal ascending. Returns an empty vector when the entry
+    /// has no representation rows (synthesised entries, Secret rows whose
+    /// representations were dropped before insert) or when the entry has
+    /// been soft-deleted. Used by the copy-back path under
+    /// `PasteFormat::Preserve` to re-publish every captured representation.
+    async fn list_representations(&self, id: EntryId)
+    -> Result<Vec<StoredClipboardRepresentation>>;
 }
 
 #[async_trait]

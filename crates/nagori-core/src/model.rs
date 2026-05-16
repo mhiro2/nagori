@@ -627,6 +627,19 @@ impl RepresentationRole {
             Self::Alternative => "alternative",
         }
     }
+
+    /// Parse the SQL `entry_representations.role` string back into the
+    /// runtime enum. Returns `None` for any other value so callers can
+    /// surface a clear storage error instead of silently dropping a row.
+    #[must_use]
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "primary" => Some(Self::Primary),
+            "plain_fallback" => Some(Self::PlainFallback),
+            "alternative" => Some(Self::Alternative),
+            _ => None,
+        }
+    }
 }
 
 /// Payload kept on a [`StoredClipboardRepresentation`].

@@ -10,9 +10,10 @@ use async_trait::async_trait;
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, ContentHash, ContentKind,
     EntryId, EntryLifecycle, EntryMetadata, FtsCandidate, HashAlgorithm, NgramCandidate,
-    PayloadRef, RecentOrder, RepresentationDataRef, Result, SearchCandidateProvider,
-    SearchDocument, SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
-    Sensitivity, SourceApp, StoredClipboardRepresentation, compile_user_regex,
+    PayloadRef, RecentOrder, RepresentationDataRef, RepresentationRole, Result,
+    SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
+    SearchResult, SearchService, Sensitivity, SourceApp, StoredClipboardRepresentation,
+    compile_user_regex,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
@@ -642,6 +643,89 @@ impl nagori_core::EntryRepository for SqliteStore {
             Ok(entries)
         })
         .await
+    }
+
+    async fn list_representations(
+        &self,
+        id: EntryId,
+    ) -> Result<Vec<StoredClipboardRepresentation>> {
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            // Role precedence keeps the replay order stable even if a future
+            // schema relaxes the per-role ordinal monotonicity invariant.
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT r.role, r.mime_type, r.ordinal, r.text_content, r.payload_blob
+                     FROM entry_representations r
+                     JOIN entries e ON e.id = r.entry_id
+                     WHERE e.id = ?1 AND e.deleted_at IS NULL
+                     ORDER BY
+                         CASE r.role
+                             WHEN 'primary' THEN 0
+                             WHEN 'plain_fallback' THEN 1
+                             WHEN 'alternative' THEN 2
+                             ELSE 3
+                         END,
+                         r.ordinal ASC",
+                )
+                .map_err(|err| storage_err(&err))?;
+            let rows = stmt
+                .query_map(params![id.to_string()], |row| {
+                    let role: String = row.get(0)?;
+                    let mime: String = row.get(1)?;
+                    let ordinal: i64 = row.get(2)?;
+                    let text: Option<String> = row.get(3)?;
+                    let blob: Option<Vec<u8>> = row.get(4)?;
+                    Ok((role, mime, ordinal, text, blob))
+                })
+                .map_err(|err| storage_err(&err))?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (role_str, mime, ordinal, text, blob) = row.map_err(|err| storage_err(&err))?;
+                let role = RepresentationRole::from_db_str(&role_str).ok_or_else(|| {
+                    AppError::Storage(format!("unknown representation role: {role_str}"))
+                })?;
+                let ordinal = u32::try_from(ordinal).map_err(|err| {
+                    AppError::Storage(format!("representation ordinal out of range: {err}"))
+                })?;
+                let data = decode_representation_payload(&mime, text, blob)?;
+                out.push(StoredClipboardRepresentation {
+                    role,
+                    mime_type: mime,
+                    ordinal,
+                    data,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+}
+
+/// Map a representation row's `(mime, text_content, payload_blob)` triple
+/// back to the in-memory [`RepresentationDataRef`] shape produced by the
+/// capture pipeline. The schema CHECK enforces that exactly one of
+/// `text_content` / `payload_blob` is set, and the MIME tells us whether
+/// a text row was originally a `FilePaths` list (`text/uri-list`) or a
+/// plain/HTML/RTF inline text payload.
+fn decode_representation_payload(
+    mime: &str,
+    text: Option<String>,
+    blob: Option<Vec<u8>>,
+) -> Result<RepresentationDataRef> {
+    match (text, blob) {
+        (Some(text), None) => {
+            if mime.eq_ignore_ascii_case("text/uri-list") {
+                let paths = text.split('\n').map(ToOwned::to_owned).collect();
+                Ok(RepresentationDataRef::FilePaths(paths))
+            } else {
+                Ok(RepresentationDataRef::InlineText(text))
+            }
+        }
+        (None, Some(bytes)) => Ok(RepresentationDataRef::DatabaseBlob(bytes)),
+        (Some(_), Some(_)) | (None, None) => Err(AppError::Storage(
+            "entry_representations row violated text_content/payload_blob CHECK".to_owned(),
+        )),
     }
 }
 
@@ -2854,6 +2938,159 @@ mod tests {
         assert_eq!(rows[2].1, "application/rtf");
         assert_eq!(rows[2].2, 2);
         assert_eq!(rows[2].3.as_deref(), Some("{\\rtf1 hi}"));
+    }
+
+    #[tokio::test]
+    async fn list_representations_round_trips_role_ordinal_and_payload() {
+        // Copy-back hydrates `PasteFormat::Preserve` clips through this read
+        // API. Inserting an HTML+plain+RTF snapshot, then reading every row
+        // back must return them in role-major (primary → plain_fallback →
+        // alternative) order with payload, mime, and ordinal preserved so
+        // the platform writer can republish the same multi-rep clip.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("list-rep-round-trip"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hi</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hi".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "application/rtf".to_owned(),
+                    data: ClipboardData::Text("{\\rtf1 hi}".to_owned()),
+                },
+            ],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store.insert(entry).await.unwrap();
+
+        let reps = store.list_representations(id).await.unwrap();
+        assert_eq!(reps.len(), 3);
+
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "text/html");
+        assert_eq!(reps[0].ordinal, 0);
+        assert!(matches!(
+            &reps[0].data,
+            RepresentationDataRef::InlineText(text) if text == "<p>hi</p>"
+        ));
+
+        assert_eq!(reps[1].role, RepresentationRole::PlainFallback);
+        assert_eq!(reps[1].mime_type, "text/plain");
+        assert_eq!(reps[1].ordinal, 1);
+        assert!(matches!(
+            &reps[1].data,
+            RepresentationDataRef::InlineText(text) if text == "hi"
+        ));
+
+        assert_eq!(reps[2].role, RepresentationRole::Alternative);
+        assert_eq!(reps[2].mime_type, "application/rtf");
+        assert_eq!(reps[2].ordinal, 2);
+        assert!(matches!(
+            &reps[2].data,
+            RepresentationDataRef::InlineText(text) if text == "{\\rtf1 hi}"
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_representations_returns_image_blob() {
+        // Image bytes are persisted in `payload_blob`; the read path must
+        // surface them as `RepresentationDataRef::DatabaseBlob` so the
+        // platform writer can hand the raw bytes back to NSPasteboard
+        // without a UTF-8 round-trip through `text_content`.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 1, 2, 3];
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("list-rep-image"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(png_bytes.clone()),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store.insert(entry).await.unwrap();
+
+        let reps = store.list_representations(id).await.unwrap();
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "image/png");
+        match &reps[0].data {
+            RepresentationDataRef::DatabaseBlob(bytes) => assert_eq!(bytes, &png_bytes),
+            other => panic!("expected DatabaseBlob, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_representations_decodes_file_paths_from_text_uri_list() {
+        // File lists are persisted as a newline-joined string under the
+        // `text/uri-list` mime; the read path must split them back into a
+        // `RepresentationDataRef::FilePaths` vector so the platform writer
+        // can republish each path as a separate `NSPasteboardTypeFileURL`.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("list-rep-files"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(vec![
+                    "/tmp/a.txt".to_owned(),
+                    "/tmp/b.txt".to_owned(),
+                ]),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store.insert(entry).await.unwrap();
+
+        let reps = store.list_representations(id).await.unwrap();
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].role, RepresentationRole::Primary);
+        assert_eq!(reps[0].mime_type, "text/uri-list");
+        match &reps[0].data {
+            RepresentationDataRef::FilePaths(paths) => {
+                assert_eq!(
+                    paths,
+                    &vec!["/tmp/a.txt".to_owned(), "/tmp/b.txt".to_owned()]
+                );
+            }
+            other => panic!("expected FilePaths, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_representations_returns_empty_for_unknown_id() {
+        let store = SqliteStore::open_memory().unwrap();
+        let reps = store.list_representations(EntryId::new()).await.unwrap();
+        assert!(reps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_representations_skips_soft_deleted_entries() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "soft delete me").await;
+        store.mark_deleted(id).await.unwrap();
+        let reps = store.list_representations(id).await.unwrap();
+        assert!(reps.is_empty());
     }
 
     #[tokio::test]
