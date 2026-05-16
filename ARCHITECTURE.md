@@ -284,8 +284,9 @@ Types live in `nagori-core` (`model.rs`, `settings.rs`, `policy.rs`,
   derived metadata (counts, normalized URL, language hint).
 - `ImageContent` carries a `PayloadRef` plus optional in-memory
   `pending_bytes` that flow from capture → factory → storage; after
-  insertion the bytes live in `entries.payload_blob` and the field is
-  always `None` post-deserialisation.
+  insertion the bytes live in `entry_representations.payload_blob` (the
+  `role = 'primary'` row owned by the entry) and the field is always
+  `None` post-deserialisation.
 - `RichTextContent` keeps `plain_text` (for FTS / ngrams) and an optional
   `markup` payload tagged `Html` or `Rtf` for preview rendering.
 - `FileListContent` flattens `NSPasteboardTypeFileURL` URLs into POSIX
@@ -297,7 +298,12 @@ Types live in `nagori-core` (`model.rs`, `settings.rs`, `policy.rs`,
 can be plugged in without changing the entry model.
 
 **`EntryMetadata`** — timestamps, source app (`bundle_id`, `name`,
-`executable_path`), use count, `ContentHash` (SHA-256 — used for dedup).
+`executable_path`), use count, `ContentHash` (SHA-256 — used for dedup),
+and `representation_set_hash`. The latter is currently identical to
+`content_hash` (one canonical primary representation per entry); the
+field exists so the capture pipeline can later store multiple
+representations per entry and dedup on their joint hash without changing
+the storage schema again.
 
 **`SearchDocument`** — title, preview, `normalized_text`, tokens,
 language. Indexed by both FTS5 and the ngram table.
@@ -383,21 +389,29 @@ are forward-only; downgrades are not supported.
 
 | Table | Purpose |
 |-------|---------|
-| `entries` | Full entry rows. Image bytes live inline in `payload_blob` / `payload_mime`. |
+| `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column identifies the joint hash of the entry's representations so duplicate sets can be deduped without re-reading the children. |
+| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime` / `payload_ref`, and a denormalised `byte_count` used by the retention budget. Today every entry has a single `role = 'primary'` row; the table is the seam for multi-representation entries (e.g. RTF + plain-text fallback) without another schema migration. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. |
 | `search_fts` | FTS5 virtual table over `title` / `preview` / `normalized_text` (`unicode61`). |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. |
 | `settings` | Key/value persistence for `AppSettings`. |
 | `audit_events` | Capture / policy events (block, redact, etc.). Never stores raw clipboard content. |
 
-**Image bytes** stay inline because typical clipboard images are sub-MiB
-and SQLite handles that size cheaply; flowing them through a
-content-addressed file store was not worth the extra failure modes for
-the size class. The frontend streams them lazily via the
-`nagori-image://` Tauri custom URI scheme so the WebView fetches
-`nagori-image://localhost/<entry_id>` like any other `<img src>`. The
-handler returns 403 for `Sensitivity::Private | Secret | Blocked` so
-secret imagery never reaches the WebView.
+**Image bytes** stay inline (in the primary `entry_representations` row)
+because typical clipboard images are sub-MiB and SQLite handles that
+size cheaply; flowing them through a content-addressed file store was
+not worth the extra failure modes for the size class. The frontend
+streams them lazily via the `nagori-image://` Tauri custom URI scheme so
+the WebView fetches `nagori-image://localhost/<entry_id>` like any other
+`<img src>`. The handler returns 403 for
+`Sensitivity::Private | Secret | Blocked` so secret imagery never
+reaches the WebView.
+
+**Retention budget.** `enforce_total_bytes` sums every live representation's
+`byte_count` (joined to `entries` so soft-deleted rows do not consume
+budget) and evicts oldest-first when the budget is exceeded. Eviction
+soft-deletes the parent `entries` row; the cascade on
+`entry_representations` only runs on hard-delete via `purge_expired`.
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**
