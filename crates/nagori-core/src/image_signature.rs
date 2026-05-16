@@ -47,6 +47,21 @@ impl ImageFormat {
     }
 }
 
+/// Every MIME the workspace knows how to validate.
+///
+/// Listed in the same lowercase form `sanitise_image_mime` returns,
+/// and exported so the desktop scheme handler's allow-list can be
+/// cross-checked at compile/test time instead of drifting out of sync
+/// with the detector.
+pub const SUPPORTED_IMAGE_MIMES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+];
+
 /// Identify an image format from its leading bytes.
 ///
 /// Returns `None` when the buffer is too short to contain any known

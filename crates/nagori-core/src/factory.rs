@@ -81,7 +81,9 @@ fn pick_content(representations: &[ClipboardRepresentation]) -> Option<Clipboard
     }
 
     if let Some((mime, bytes)) = representations.iter().find_map(|rep| match &rep.data {
-        ClipboardData::Bytes(bytes) if !bytes.is_empty() && rep.mime_type.starts_with("image/") => {
+        ClipboardData::Bytes(bytes)
+            if !bytes.is_empty() && starts_with_image_prefix(&rep.mime_type) =>
+        {
             // External producers freely label arbitrary bytes as
             // `image/*`. Reject representations whose magic number
             // disagrees with the declared MIME so a sibling text/HTML
@@ -169,6 +171,18 @@ fn pick_content(representations: &[ClipboardRepresentation]) -> Option<Clipboard
     }
 
     None
+}
+
+/// Case-insensitive `image/...` prefix check.
+///
+/// IANA says the type/subtype is case-insensitive, and producers in
+/// the wild (some browsers, old screenshot tools) do publish
+/// `IMAGE/PNG`. The capture branch uses a plain `starts_with` for
+/// speed but routes the comparison through this helper so it matches
+/// the case-insensitive semantics of `image_signature::matches_declared_mime`.
+fn starts_with_image_prefix(mime: &str) -> bool {
+    mime.get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
 }
 
 fn representation_text(rep: &ClipboardRepresentation, mime_types: &[&str]) -> Option<String> {
@@ -346,6 +360,28 @@ mod tests {
         };
 
         assert!(EntryFactory::from_snapshot(snapshot).is_none());
+    }
+
+    #[test]
+    fn snapshot_image_mime_prefix_matches_case_insensitively() {
+        // IANA says the type/subtype is case-insensitive; some
+        // screenshot producers publish `IMAGE/PNG`. The factory must
+        // route those reps through the image branch (and therefore the
+        // signature gate) instead of letting them fall through to text.
+        let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13];
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("img-case"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "IMAGE/PNG".to_owned(),
+                data: ClipboardData::Bytes(png_bytes),
+            }],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot)
+            .expect("upper-case mime should still build entry");
+        assert!(matches!(entry.content, crate::ClipboardContent::Image(_)));
     }
 
     #[test]

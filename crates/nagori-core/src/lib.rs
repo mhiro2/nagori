@@ -11,7 +11,9 @@ pub mod text;
 
 pub use errors::{AppError, Result};
 pub use factory::EntryFactory;
-pub use image_signature::{ImageFormat, detect as detect_image_signature, matches_declared_mime};
+pub use image_signature::{
+    ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,
+};
 pub use limits::{MAX_ENTRY_SIZE_BYTES, MAX_IPC_BYTES};
 pub use model::*;
 pub use policy::{

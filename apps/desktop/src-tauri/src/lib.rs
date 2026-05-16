@@ -725,7 +725,7 @@ async fn build_image_response(
         let detected =
             nagori_core::detect_image_signature(&bytes).map(nagori_core::ImageFormat::mime_type);
         tracing::warn!(
-            mime = %safe_mime,
+            declared_mime = %safe_mime,
             detected_mime = ?detected,
             byte_count = bytes.len(),
             "image_scheme_signature_mismatch"
@@ -1052,10 +1052,13 @@ mod image_scheme_tests {
     }
 
     #[tokio::test]
-    async fn build_response_accepts_valid_jpeg_payload() {
+    async fn build_response_accepts_jpeg_signature() {
         // Positive control for the JPEG branch — without this, a future
         // refactor that tightened the gate too far would only fail one
         // of the negative tests and leave PNG-only coverage in place.
+        // The fixture is a valid JPEG *signature* (FF D8 FF E0 + JFIF
+        // marker) but not a decodable frame; we're testing the gate,
+        // not the WebKit JPEG decoder.
         let runtime = build_runtime();
         let entry = make_image_entry_with(Sensitivity::Public, "image/jpeg", TINY_JPEG.to_vec());
         let id = insert(&runtime, entry).await;
@@ -1072,10 +1075,12 @@ mod image_scheme_tests {
     }
 
     #[tokio::test]
-    async fn build_response_accepts_valid_webp_payload() {
+    async fn build_response_accepts_webp_signature() {
         // WebP is the only allow-listed format that depends on an
         // offset comparison rather than a flat prefix; cover it
         // explicitly so a regression to a `starts_with` check is caught.
+        // As with the JPEG test, the fixture exercises the signature
+        // gate — it is not a decodable VP8 frame.
         let runtime = build_runtime();
         let entry = make_image_entry_with(Sensitivity::Public, "image/webp", TINY_WEBP.to_vec());
         let id = insert(&runtime, entry).await;
@@ -1089,6 +1094,20 @@ mod image_scheme_tests {
             Some("image/webp"),
         );
         assert_eq!(resp.body().as_slice(), TINY_WEBP);
+    }
+
+    #[test]
+    fn allow_list_matches_core_signature_set() {
+        // The desktop allow-list and the core detector's supported set
+        // must agree, otherwise a payload could pass `sanitise_image_mime`
+        // and then trip the magic-number gate (or vice versa) for no
+        // good reason. Lock equality here so future drift trips a test
+        // instead of shipping silently.
+        let mut allow: Vec<&str> = ALLOWED_IMAGE_MIME.to_vec();
+        allow.sort_unstable();
+        let mut core: Vec<&str> = nagori_core::SUPPORTED_IMAGE_MIMES.to_vec();
+        core.sort_unstable();
+        assert_eq!(allow, core);
     }
 
     #[test]
