@@ -313,10 +313,12 @@ and `representation_set_hash`. The set hash is SHA-256 over a canonical
 encoding of every persisted representation
 (`role|mime|ordinal|sha256(payload)` rows, joined with newlines after
 sorting), so dedup can recognise "same representation set" separately
-from "same primary body". For single-representation entries (CLI
-`add_text`, synthesised rows, Secret entries whose alternatives were
-scrubbed during classification) the column reuses `content_hash`; once
-alternatives or a plain fallback are present it diverges.
+from "same primary body". Snapshot-derived entries always carry a
+canonical set hash computed by `factory::compute_representation_set_hash`,
+even for a single-representation set. Synthesised rows that never built a
+representation set (CLI `add_text`, post-classification Secret entries
+whose alternatives were cleared) fall back to mirroring `content_hash`
+so the column stays populated.
 
 **`pending_representations`** (`Vec<StoredClipboardRepresentation>`) —
 an in-memory-only field on `ClipboardEntry` (`#[serde(skip)]`) that

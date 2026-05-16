@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
     EntryRepository, Result, SecretAction, Sensitivity, SensitivityClassifier,
-    factory::compute_representation_set_hash,
+    StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
 use tokio::sync::watch;
@@ -584,13 +584,20 @@ where
                 .await;
             return Ok(None);
         }
-        // Image entries don't carry plain text, so size them by their byte
-        // payload instead — otherwise the empty-text guard below silently
-        // dropped every image snapshot and the README's image-capture promise
-        // never reached storage.
+        // Size each entry by the bytes that will actually land in storage,
+        // not the plain-text projection. RichText's primary is HTML/RTF
+        // markup, so a large markup body with short plain text used to slip
+        // past this guard and write an oversized primary representation
+        // row. Image entries don't carry plain text either, so size them by
+        // the captured byte payload. Synthesised entries that never built a
+        // representation set (CLI `add_text`, post-secret-clear rows) keep
+        // the legacy plain-text length so existing oversize semantics hold.
         let payload_bytes = match &entry.content {
             ClipboardContent::Image(img) => img.byte_count,
-            _ => entry.plain_text().map_or(0, str::len),
+            _ => entry.pending_representations.first().map_or_else(
+                || entry.plain_text().map_or(0, str::len),
+                StoredClipboardRepresentation::byte_count,
+            ),
         };
         if payload_bytes == 0 {
             return Ok(None);

@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use regex::{Regex, RegexBuilder};
 
 use crate::{
-    AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, Result, Sensitivity,
-    SensitivityReason, make_preview, normalize_text, settings::SecretHandling,
+    AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, RepresentationDataRef,
+    Result, Sensitivity, SensitivityReason, make_preview, normalize_text, settings::SecretHandling,
 };
 
 /// Hard upper bound on the source byte length of a single user-provided
@@ -127,20 +127,21 @@ impl SensitivityClassifier {
             }
         }
 
-        if contains_private_key(text) {
-            reasons.push(SensitivityReason::PrivateKeyPattern);
-        }
-        if contains_api_key(text) {
-            reasons.push(SensitivityReason::ApiKeyPattern);
-        }
-        if contains_credit_card(text) {
-            reasons.push(SensitivityReason::CreditCardPattern);
-        }
-        if is_probable_otp(text) {
-            reasons.push(SensitivityReason::OneTimePasswordPattern);
-        }
-        if self.user_regexes.iter().any(|regex| regex.is_match(text)) {
-            reasons.push(SensitivityReason::UserRegex);
+        // Scan every text-shaped representation, not just the primary's
+        // plain projection. The capture pipeline persists HTML/RTF/plain
+        // fallbacks verbatim, so a secret hiding inside a markup
+        // alternative would otherwise be classified Public (primary plain
+        // is innocuous) and land in `entry_representations` unredacted.
+        // The detector union still lets the daemon's Secret-clear pass
+        // scrub the alternatives before insert.
+        self.scan_text_for_patterns(text, &mut reasons);
+        for rep in &entry.pending_representations {
+            if let RepresentationDataRef::InlineText(rep_text) = &rep.data {
+                if rep_text.as_str() == text {
+                    continue;
+                }
+                self.scan_text_for_patterns(rep_text, &mut reasons);
+            }
         }
 
         let sensitivity = if reasons.iter().any(|reason| {
@@ -185,6 +186,33 @@ impl SensitivityClassifier {
             redacted_preview: matches!(sensitivity, Sensitivity::Private | Sensitivity::Secret)
                 .then(|| make_preview(&self.redact(text), 180)),
             reasons,
+        }
+    }
+
+    /// Run every built-in detector and the compiled user regex set against
+    /// `text`, appending any matches to `reasons` without duplicates. Used
+    /// by `classify` to fold each representation's content into a single
+    /// sensitivity verdict.
+    fn scan_text_for_patterns(&self, text: &str, reasons: &mut Vec<SensitivityReason>) {
+        let push_once = |reason: SensitivityReason, reasons: &mut Vec<SensitivityReason>| {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        };
+        if contains_private_key(text) {
+            push_once(SensitivityReason::PrivateKeyPattern, reasons);
+        }
+        if contains_api_key(text) {
+            push_once(SensitivityReason::ApiKeyPattern, reasons);
+        }
+        if contains_credit_card(text) {
+            push_once(SensitivityReason::CreditCardPattern, reasons);
+        }
+        if is_probable_otp(text) {
+            push_once(SensitivityReason::OneTimePasswordPattern, reasons);
+        }
+        if self.user_regexes.iter().any(|regex| regex.is_match(text)) {
+            push_once(SensitivityReason::UserRegex, reasons);
         }
     }
 
@@ -441,6 +469,45 @@ mod tests {
         let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
         let result = classifier.classify(&entry);
         assert_eq!(result.sensitivity, Sensitivity::Secret);
+    }
+
+    #[test]
+    fn classifier_detects_secret_inside_alternative_representation() {
+        // Phase 2 widens what reaches storage: a snapshot's HTML / RTF
+        // alternatives land in entry_representations alongside the primary.
+        // If the classifier only inspected the primary's plain projection,
+        // a secret hiding inside the HTML alternative would slip through
+        // as Public and persist unredacted. Cover both the detection (must
+        // be flagged Secret) and the downstream guarantee that the daemon
+        // can then scrub alternatives by checking entry.sensitivity.
+        use crate::{RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation};
+
+        let mut entry = EntryFactory::from_text("safe-looking note");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("safe-looking note".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(
+                    "<p>token = ghp_abcdefghijklmnopqrstuvwxyz123456</p>".to_owned(),
+                ),
+            },
+        ];
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        let result = classifier.classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Secret);
+        assert!(
+            result.reasons.contains(&SensitivityReason::ApiKeyPattern),
+            "alternative-rep API key must surface in reasons: {:?}",
+            result.reasons
+        );
     }
 
     #[test]
