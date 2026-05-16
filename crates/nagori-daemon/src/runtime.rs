@@ -435,7 +435,25 @@ impl NagoriRuntime {
             }
         }
         match format {
-            PasteFormat::Preserve => self.clipboard.write_entry(&entry).await?,
+            PasteFormat::Preserve => {
+                // Re-offer every stored representation so a receiver that
+                // understands HTML / RTF / image bytes can pick the richest
+                // representation the source originally advertised, while a
+                // plain-text target still finds the matching `text/plain`
+                // fallback. Platforms whose
+                // `clipboard_multi_representation_write` capability is
+                // `Unsupported` inherit the trait's default impl, which
+                // delegates to `write_entry`, so this code path stays
+                // primary-only on Windows / Wayland today.
+                let representations = self.store.list_representations(id).await?;
+                if representations.is_empty() {
+                    self.clipboard.write_entry(&entry).await?;
+                } else {
+                    self.clipboard
+                        .write_representations(&entry, &representations)
+                        .await?;
+                }
+            }
             PasteFormat::PlainText => self.clipboard.write_plain(&entry).await?,
         }
         // The ranker scores by `metadata.use_count` (see nagori-search), so
@@ -1055,6 +1073,115 @@ mod tests {
             .expect("entry should exist");
         assert_eq!(entry.metadata.use_count, 1);
         assert!(entry.metadata.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn copy_entry_preserve_hydrates_stored_representations() {
+        // Entries captured via the snapshot path persist every preserved
+        // representation. Preserve copy-back must replay the whole set
+        // through `write_representations` so a multi-rep-aware adapter can
+        // re-offer the same MIME variants the source advertised. Use a
+        // recording writer to lock the dispatch order: empty rep set →
+        // `write_entry`; populated set → `write_representations`.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash, EntryFactory, RepresentationRole, StoredClipboardRepresentation,
+        };
+        use time::OffsetDateTime;
+
+        #[derive(Default)]
+        struct RecordingWriter {
+            entry_calls: tokio::sync::Mutex<Vec<EntryId>>,
+            rep_calls: tokio::sync::Mutex<Vec<(EntryId, Vec<StoredClipboardRepresentation>)>>,
+        }
+
+        #[async_trait]
+        impl ClipboardWriter for RecordingWriter {
+            async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()> {
+                self.entry_calls.lock().await.push(entry.id);
+                Ok(())
+            }
+
+            async fn write_plain(&self, _entry: &ClipboardEntry) -> Result<()> {
+                Ok(())
+            }
+
+            async fn write_text(&self, _text: &str) -> Result<()> {
+                Ok(())
+            }
+
+            async fn write_representations(
+                &self,
+                entry: &ClipboardEntry,
+                representations: &[StoredClipboardRepresentation],
+            ) -> Result<()> {
+                self.rep_calls
+                    .lock()
+                    .await
+                    .push((entry.id, representations.to_vec()));
+                Ok(())
+            }
+        }
+
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash(
+                ContentHash::sha256(b"preserve-hydration").value,
+            ),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text(
+                        "<p>preserve hydration <strong>html</strong></p>".to_owned(),
+                    ),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("preserve hydration plain".to_owned()),
+                },
+            ],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot)
+            .expect("snapshot should yield an entry with stored representations");
+        assert!(
+            !entry.pending_representations.is_empty(),
+            "fixture must produce a multi-rep entry",
+        );
+
+        let writer = Arc::new(RecordingWriter::default());
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(writer.clone() as Arc<dyn ClipboardWriter>)
+            .build_for_test();
+        let id = runtime
+            .store()
+            .insert(entry)
+            .await
+            .expect("insert snapshot-derived entry");
+
+        runtime.copy_entry(id).await.expect("preserve copy");
+
+        let entry_calls = writer.entry_calls.lock().await.clone();
+        let rep_calls = writer.rep_calls.lock().await.clone();
+        assert!(
+            entry_calls.is_empty(),
+            "Preserve must route through write_representations, not write_entry; saw {entry_calls:?}",
+        );
+        assert_eq!(rep_calls.len(), 1, "expected exactly one rep-set write");
+        let (called_id, reps) = &rep_calls[0];
+        assert_eq!(*called_id, id);
+        assert!(
+            reps.iter()
+                .any(|rep| rep.role == RepresentationRole::Primary && rep.mime_type == "text/html"),
+            "stored rep set must include the HTML primary, got {reps:?}",
+        );
+        assert!(
+            reps.iter()
+                .any(|rep| rep.role == RepresentationRole::PlainFallback
+                    && rep.mime_type == "text/plain"),
+            "stored rep set must include the plain fallback, got {reps:?}",
+        );
     }
 
     #[tokio::test]
