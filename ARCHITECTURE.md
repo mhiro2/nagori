@@ -579,7 +579,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer every captured MIME on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -684,7 +684,9 @@ struct PlatformCapabilities {
     platform: Platform, tier: SupportTier,
     capture_text: Capability, capture_image: Capability,
     capture_files: Capability, write_text: Capability,
-    write_image: Capability, auto_paste: Capability,
+    write_image: Capability,
+    clipboard_multi_representation_write: Capability,
+    auto_paste: Capability,
     global_hotkey: Capability, frontmost_app: Capability,
     permissions_ui: Capability, update_check: Capability,
 }
@@ -714,11 +716,32 @@ matrix on the `NagoriRuntime`. The result is exposed on three surfaces:
 
 The desktop shell additionally exposes the matrix as a `get_capabilities`
 Tauri command, rendered read-only under Settings → Advanced. Wayland
-`frontmost_app`, Windows `update_check`, and Linux Wayland `auto_paste`
-without `wtype` are the canonical examples of where capability state
-diverges from permission state — the UI can render an actionable hint
-("install `wtype`", "switch to a wlroots compositor") instead of a
-generic "feature unavailable" toast.
+`frontmost_app`, Windows `update_check`, Linux Wayland `auto_paste`
+without `wtype`, and Windows / Linux `clipboard_multi_representation_write`
+are the canonical examples of where capability state diverges from
+permission state — the UI can render an actionable hint ("install
+`wtype`", "switch to a wlroots compositor", "rich-text copy-back will
+publish plain text only on this OS") instead of a generic "feature
+unavailable" toast.
+
+**Preserve copy-back hydration.** `ClipboardWriter::write_representations`
+takes the stored representation set for the entry being re-copied and
+publishes every supported MIME in one pasteboard transaction. The macOS
+adapter (`clipboard_multi_representation_write = Available`) clears
+`NSPasteboard` once and replays each rep through `setString:forType:` or
+`setData:forType:` so a downstream paste target sees the same HTML /
+RTF / plain-text / image bytes the source originally advertised, while
+the rest of the trait surface keeps its primary-only contract. Adapters
+whose capability is `Unsupported` (Windows, Linux Wayland today) inherit
+the default impl that delegates back to `write_entry`, so Preserve still
+publishes the primary content there — just without the full MIME set.
+The daemon-side wiring lives in `NagoriRuntime::copy_entry_with_format`:
+the Preserve branch reads the persisted rows via
+`EntryRepository::list_representations` and only falls back to
+`write_entry` when the entry has no stored set (older history or
+`add_text`-style synthesised rows). PlainText copy-back keeps its
+existing `write_plain` path so plain-text-only targets always get the
+plain fallback the capture pipeline normalised on insert.
 
 ---
 
