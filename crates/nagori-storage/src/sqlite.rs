@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, ContentHash, ContentKind,
     EntryId, EntryLifecycle, EntryMetadata, FtsCandidate, HashAlgorithm, NgramCandidate,
-    PayloadRef, RecentOrder, Result, SearchCandidateProvider, SearchDocument, SearchFilters,
-    SearchQuery, SearchRepository, SearchResult, SearchService, Sensitivity, SourceApp,
-    compile_user_regex,
+    PayloadRef, RecentOrder, RepresentationDataRef, Result, SearchCandidateProvider,
+    SearchDocument, SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
+    Sensitivity, SourceApp, StoredClipboardRepresentation, compile_user_regex,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
@@ -760,16 +760,27 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             ],
         )
         .map_err(|err| storage_err(&err))?;
-        // Phase 1 stores a single `role = 'primary'` representation per
-        // entry; a later phase widens this to the full preserved set from
-        // `ClipboardSnapshot.representations`. Skipping when there is no
-        // payload (e.g. an Unknown entry whose plain_text is None or an
-        // image without preserved bytes) matches the previous behaviour of
-        // `get_payload` returning `None` for those rows.
-        if let Some(payload) = primary_payload.as_ref() {
-            insert_primary_representation(&tx, &requested_id.to_string(), payload, &created_at)?;
+        // When the capture pipeline filled `pending_representations` (the
+        // snapshot path), persist every preserved rep so copy-back can
+        // re-publish whatever flavour the source advertised. Otherwise fall
+        // back to the legacy primary-only path used by CLI `add_text`,
+        // synthesised entries, and post-classification Secret entries
+        // (where the daemon clears the rep set to keep alternatives from
+        // leaking around redaction).
+        let entry_id_str = requested_id.to_string();
+        if entry.pending_representations.is_empty() {
+            if let Some(payload) = primary_payload.as_ref() {
+                insert_primary_representation(&tx, &entry_id_str, payload, &created_at)?;
+            }
+        } else {
+            insert_pending_representations(
+                &tx,
+                &entry_id_str,
+                &entry.pending_representations,
+                &created_at,
+            )?;
         }
-        requested_id.to_string()
+        entry_id_str
     };
     let stored_id =
         EntryId::from_str(&stored_id_str).map_err(|err| AppError::Storage(err.to_string()))?;
@@ -834,6 +845,96 @@ fn insert_primary_representation(
                 ],
             )
             .map_err(|err| storage_err(&err))?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_pending_representations(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    reps: &[StoredClipboardRepresentation],
+    created_at: &str,
+) -> Result<()> {
+    for rep in reps {
+        let role = rep.role.as_str();
+        let representation_id = format!("{entry_id}#{role}-{}", rep.ordinal);
+        let ordinal = i64::from(rep.ordinal);
+        let byte_count = i64::try_from(rep.byte_count()).map_err(|err| {
+            AppError::Storage(format!("representation byte count overflowed i64: {err}"))
+        })?;
+        match &rep.data {
+            RepresentationDataRef::InlineText(text) => {
+                tx.execute(
+                    "INSERT INTO entry_representations (
+                        id, entry_id, role, mime_type, platform_format, ordinal,
+                        text_content, payload_blob, payload_ref, payload_mime,
+                        byte_count, created_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5,
+                             ?6, NULL, NULL, NULL, ?7, ?8)",
+                    params![
+                        representation_id,
+                        entry_id,
+                        role,
+                        rep.mime_type,
+                        ordinal,
+                        text,
+                        byte_count,
+                        created_at,
+                    ],
+                )
+                .map_err(|err| storage_err(&err))?;
+            }
+            RepresentationDataRef::DatabaseBlob(bytes) => {
+                tx.execute(
+                    "INSERT INTO entry_representations (
+                        id, entry_id, role, mime_type, platform_format, ordinal,
+                        text_content, payload_blob, payload_ref, payload_mime,
+                        byte_count, created_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5,
+                             NULL, ?6, NULL, ?4, ?7, ?8)",
+                    params![
+                        representation_id,
+                        entry_id,
+                        role,
+                        rep.mime_type,
+                        ordinal,
+                        bytes,
+                        byte_count,
+                        created_at,
+                    ],
+                )
+                .map_err(|err| storage_err(&err))?;
+            }
+            RepresentationDataRef::FilePaths(paths) => {
+                // Encode as a newline-joined list under text_content so the
+                // schema's "exactly one of text_content / payload_blob" CHECK
+                // is satisfied. `byte_count` (from `rep.byte_count()`) already
+                // counts the joined form, keeping retention math honest.
+                let joined = paths.join("\n");
+                tx.execute(
+                    "INSERT INTO entry_representations (
+                        id, entry_id, role, mime_type, platform_format, ordinal,
+                        text_content, payload_blob, payload_ref, payload_mime,
+                        byte_count, created_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5,
+                             ?6, NULL, NULL, NULL, ?7, ?8)",
+                    params![
+                        representation_id,
+                        entry_id,
+                        role,
+                        rep.mime_type,
+                        ordinal,
+                        joined,
+                        byte_count,
+                        created_at,
+                    ],
+                )
+                .map_err(|err| storage_err(&err))?;
+            }
         }
     }
     Ok(())
@@ -2685,6 +2786,131 @@ mod tests {
             }
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn snapshot_multi_rep_writes_one_row_per_representation() {
+        // HTML + plain + RTF snapshot must produce three persisted rows so
+        // a later copy-back path can re-publish whichever flavour the user
+        // (or the receiving app) asks for. Without this, the multi-rep
+        // promise collapses back to primary-only and pasting into a
+        // markup-aware target loses the rich formatting the source offered.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("multi-rep-store"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hi</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hi".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "application/rtf".to_owned(),
+                    data: ClipboardData::Text("{\\rtf1 hi}".to_owned()),
+                },
+            ],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store.insert(entry).await.unwrap();
+
+        let conn = store.conn().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, mime_type, ordinal, text_content
+                 FROM entry_representations
+                 WHERE entry_id = ?1
+                 ORDER BY ordinal ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([id.to_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, "primary");
+        assert_eq!(rows[0].1, "text/html");
+        assert_eq!(rows[0].2, 0);
+        assert_eq!(rows[0].3.as_deref(), Some("<p>hi</p>"));
+
+        assert_eq!(rows[1].0, "plain_fallback");
+        assert_eq!(rows[1].1, "text/plain");
+        assert_eq!(rows[1].2, 1);
+        assert_eq!(rows[1].3.as_deref(), Some("hi"));
+
+        assert_eq!(rows[2].0, "alternative");
+        assert_eq!(rows[2].1, "application/rtf");
+        assert_eq!(rows[2].2, 2);
+        assert_eq!(rows[2].3.as_deref(), Some("{\\rtf1 hi}"));
+    }
+
+    #[tokio::test]
+    async fn trim_alternatives_drops_oversized_alts_before_insert() {
+        // Mirror the capture pipeline's budget enforcement at the storage
+        // boundary: feed an entry whose primary fits but whose alternatives
+        // would blow past `max_total_bytes`, trim it, and confirm the only
+        // rows that land in SQLite are the ones that survived the trim. The
+        // recomputed `representation_set_hash` keeps dedupe honest about
+        // what storage actually wrote.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            factory::compute_representation_set_hash,
+        };
+
+        let big_rtf = "{\\rtf1 ".to_owned() + &"a".repeat(2048) + "}";
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("trim-test"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hi</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hi".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "application/rtf".to_owned(),
+                    data: ClipboardData::Text(big_rtf),
+                },
+            ],
+        };
+        let mut entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let trimmed = entry.trim_alternatives_to_budget(64);
+        assert!(trimmed, "RTF alternative should be trimmed");
+        entry.metadata.representation_set_hash = Some(compute_representation_set_hash(
+            &entry.pending_representations,
+        ));
+
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store.insert(entry).await.unwrap();
+
+        let conn = store.conn().unwrap();
+        let mime_types: Vec<String> = conn
+            .prepare(
+                "SELECT mime_type FROM entry_representations
+                 WHERE entry_id = ?1 ORDER BY ordinal ASC",
+            )
+            .unwrap()
+            .query_map([id.to_string()], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(mime_types, vec!["text/html", "text/plain"]);
     }
 
     #[tokio::test]
