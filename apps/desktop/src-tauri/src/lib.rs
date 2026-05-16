@@ -715,6 +715,26 @@ async fn build_image_response(
             "mime not allowed",
         );
     };
+    // Second line of defence: even though the capture-time factory
+    // already rejects payloads whose bytes contradict the declared
+    // MIME, payloads from older entries (pre-validation), DB
+    // corruption, or a future ingestion bug could still slip through.
+    // The signature gate here is O(constant) and lets us return 415
+    // before the WebView ever sees the bytes.
+    if !nagori_core::matches_declared_mime(safe_mime, &bytes) {
+        let detected =
+            nagori_core::detect_image_signature(&bytes).map(nagori_core::ImageFormat::mime_type);
+        tracing::warn!(
+            mime = %safe_mime,
+            detected_mime = ?detected,
+            byte_count = bytes.len(),
+            "image_scheme_signature_mismatch"
+        );
+        return plain_response(
+            tauri::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "signature mismatch",
+        );
+    }
     tauri::http::Response::builder()
         .status(tauri::http::StatusCode::OK)
         .header(tauri::http::header::CONTENT_TYPE, safe_mime)
@@ -839,19 +859,51 @@ mod image_scheme_tests {
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
+    // Minimal WebP container: "RIFF<size>WEBPVP8 ..." with a stub VP8
+    // chunk. Enough for the magic-number gate; not a decodable frame.
+    const TINY_WEBP: &[u8] = b"RIFF\x14\x00\x00\x00WEBPVP8 \x08\x00\x00\x00stub";
+
+    // HTML payload deliberately mislabelled as `image/png` to drive the
+    // serve-time magic-number check. The capture-time factory would
+    // reject this, but DB rows from older builds or future corruption
+    // could still surface bytes like this.
+    const HTML_LOOKING_PAYLOAD: &[u8] = b"<!doctype html><html><body>oops</body></html>";
+
+    // Three bytes that look like a JPEG SOI but are immediately
+    // truncated. `detect()` only needs `FF D8 FF` so the *signature*
+    // matches; we use this for the "valid JPEG signature" round-trip,
+    // and pair it with a separate "broken JPEG" fixture below.
+    const TINY_JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+
+    // Bytes that look like JPEG to a human but lack the `FF D8 FF`
+    // marker — the detector must refuse to confirm the format.
+    const BROKEN_JPEG: &[u8] = &[0xFF, 0xD8, 0x00, 0x10, 0x42, 0x42];
+
     fn build_runtime() -> NagoriRuntime {
         let store = SqliteStore::open_memory().expect("memory store");
         NagoriRuntime::builder(store).build_for_test()
     }
 
     fn make_image_entry(sensitivity: Sensitivity) -> ClipboardEntry {
+        make_image_entry_with(sensitivity, "image/png", TINY_PNG.to_vec())
+    }
+
+    /// Lower-level constructor that bypasses `EntryFactory::from_snapshot`
+    /// so we can stash arbitrary `(mime, bytes)` pairs in the store —
+    /// otherwise the capture-time signature gate would reject any
+    /// fixture meant to exercise the serve-time gate.
+    fn make_image_entry_with(
+        sensitivity: Sensitivity,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> ClipboardEntry {
         let content = ClipboardContent::Image(ImageContent {
             payload_ref: PayloadRef::DatabaseBlob(String::new()),
             width: Some(1),
             height: Some(1),
-            byte_count: TINY_PNG.len(),
-            mime_type: Some("image/png".to_owned()),
-            pending_bytes: Some(TINY_PNG.to_vec()),
+            byte_count: bytes.len(),
+            mime_type: Some(mime.to_owned()),
+            pending_bytes: Some(bytes),
         });
         let mut entry = EntryFactory::from_content(content, None, None);
         entry.sensitivity = sensitivity;
@@ -964,6 +1016,79 @@ mod image_scheme_tests {
         let resp = build_image_response(&runtime, &format!("/{id}")).await;
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(resp.body().as_slice(), b"mime not allowed");
+    }
+
+    #[tokio::test]
+    async fn build_response_rejects_png_mime_with_html_body() {
+        // Defence-in-depth: capture-time validation already rejects
+        // this, but pre-validation rows or corruption could still place
+        // an HTML payload behind an `image/png` row. The serve path
+        // must short-circuit with 415 before the WebView sees it.
+        let runtime = build_runtime();
+        let entry = make_image_entry_with(
+            Sensitivity::Public,
+            "image/png",
+            HTML_LOOKING_PAYLOAD.to_vec(),
+        );
+        let id = insert(&runtime, entry).await;
+
+        let resp = build_image_response(&runtime, &format!("/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(resp.body().as_slice(), b"signature mismatch");
+    }
+
+    #[tokio::test]
+    async fn build_response_rejects_jpeg_mime_with_broken_bytes() {
+        // The signature only matches `FF D8 FF`; truncated bytes that
+        // start `FF D8 00 …` look JPEG-ish to a human but must not pass
+        // the gate. This mirrors a corrupt screenshot scenario.
+        let runtime = build_runtime();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/jpeg", BROKEN_JPEG.to_vec());
+        let id = insert(&runtime, entry).await;
+
+        let resp = build_image_response(&runtime, &format!("/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(resp.body().as_slice(), b"signature mismatch");
+    }
+
+    #[tokio::test]
+    async fn build_response_accepts_valid_jpeg_payload() {
+        // Positive control for the JPEG branch — without this, a future
+        // refactor that tightened the gate too far would only fail one
+        // of the negative tests and leave PNG-only coverage in place.
+        let runtime = build_runtime();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/jpeg", TINY_JPEG.to_vec());
+        let id = insert(&runtime, entry).await;
+
+        let resp = build_image_response(&runtime, &format!("/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/jpeg"),
+        );
+        assert_eq!(resp.body().as_slice(), TINY_JPEG);
+    }
+
+    #[tokio::test]
+    async fn build_response_accepts_valid_webp_payload() {
+        // WebP is the only allow-listed format that depends on an
+        // offset comparison rather than a flat prefix; cover it
+        // explicitly so a regression to a `starts_with` check is caught.
+        let runtime = build_runtime();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/webp", TINY_WEBP.to_vec());
+        let id = insert(&runtime, entry).await;
+
+        let resp = build_image_response(&runtime, &format!("/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/webp"),
+        );
+        assert_eq!(resp.body().as_slice(), TINY_WEBP);
     }
 
     #[test]
