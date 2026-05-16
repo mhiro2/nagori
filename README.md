@@ -48,6 +48,50 @@ Known limitations:
 - `WindowBehavior::frontmost_app()` returns `None` because Wayland has
   no portable API to identify the frontmost client.
 
+#### Linux troubleshooting
+
+Run these checks before filing an issue — most "capture doesn't work"
+reports trace back to one of them.
+
+- **Verify the session is Wayland.** Nagori needs to reach a Wayland
+  compositor, so `$WAYLAND_DISPLAY` must be non-empty and refer to a
+  live socket. `$XDG_SESSION_TYPE` is usually `wayland` on graphical
+  logins but can be empty or unexpected under nested / headless
+  compositors — treat `$WAYLAND_DISPLAY` as the authoritative signal.
+  If you are stuck on X11, switch to a Wayland session at login.
+- **Verify the compositor exposes a `data_control` manager.** Inspect
+  the compositor's advertised globals with `wayland-info` (from the
+  `wayland-utils` package) and look for either
+  `zwlr_data_control_manager_v1` (wlroots) or
+  `ext_data_control_manager_v1` (ext). If neither is listed, the
+  compositor lacks the required protocol and Nagori cannot capture
+  the clipboard. Known-good: sway, Hyprland, river, other
+  wlroots-based compositors, KDE Plasma 5.27+. Known-bad: GNOME
+  Wayland.
+- **Verify `wtype` is installed.** `wtype --help` should print usage.
+  On Debian/Ubuntu install with `apt install wtype`; on Arch
+  `pacman -S wtype`. Nagori's doctor probe uses this same call to
+  decide whether to mark Accessibility as Granted.
+- **Verify auto-paste actually works.** `wtype` additionally needs
+  the compositor to expose `zwp_virtual_keyboard_manager_v1` (the
+  global from which `zwp_virtual_keyboard_v1` objects are created).
+  Confirm by focusing a text field and running `wtype test` — if it
+  prints `Compositor does not support the virtual keyboard
+  protocol`, auto-paste will fail at runtime even though the binary
+  is installed. Without `wtype`, or when the virtual-keyboard
+  protocol is missing, Enter in the palette copies the entry to the
+  clipboard but does not paste into the previous window.
+- **In-app global shortcuts don't register.**
+  `tauri-plugin-global-shortcut` is X11-only upstream; on pure
+  Wayland sessions `register_primary_hotkey` fails and the desktop
+  shell emits `nagori://hotkey_register_failed` so the Settings page
+  can prompt the user to pick a different binding (no
+  silent-disable, no retry loop). There is no in-app workaround
+  today — use the tray icon to toggle the palette. (Compositor-level
+  keybindings such as sway/Hyprland bindings cannot reach the
+  running Nagori process either, since Nagori does not yet expose a
+  CLI/IPC entry point for palette toggle.)
+
 ### Windows notes
 
 Windows builds target x86_64 and use Win32 clipboard APIs
