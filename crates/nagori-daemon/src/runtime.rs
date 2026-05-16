@@ -16,7 +16,7 @@ use nagori_ipc::{
 };
 use nagori_platform::{
     ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionChecker,
-    PermissionStatus,
+    PermissionStatus, PlatformCapabilities, unsupported_capabilities,
 };
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
@@ -50,6 +50,12 @@ pub struct NagoriRuntime {
     /// loop writes from `serve.rs` after each iteration; the IPC
     /// `Health` and `Doctor` handlers read it.
     maintenance_health: MaintenanceHealth,
+    /// Static report of what the host adapter can do. Populated by the
+    /// caller (typically `nagori-platform-native::build_native_runtime`)
+    /// so the daemon doesn't have to take a dep on the per-OS crates;
+    /// the IPC `Capabilities` handler clones it on demand. Wrapped in
+    /// `Arc` to keep `NagoriRuntime: Clone` cheap.
+    capabilities: Arc<PlatformCapabilities>,
 }
 
 impl NagoriRuntime {
@@ -61,6 +67,7 @@ impl NagoriRuntime {
             ai: None,
             permissions: None,
             socket_path: None,
+            capabilities: None,
         }
     }
 
@@ -81,6 +88,17 @@ impl NagoriRuntime {
     /// degraded retention without round-tripping through the loop.
     pub fn maintenance_health(&self) -> MaintenanceHealth {
         self.maintenance_health.clone()
+    }
+
+    /// Snapshot of the host adapter's capability matrix.
+    ///
+    /// Returned by clone (a `PlatformCapabilities` is a flat data
+    /// struct, not an `Arc`-shared handle) so the IPC dispatcher and
+    /// any in-process caller see the same static report regardless of
+    /// how the runtime was constructed.
+    #[must_use]
+    pub fn capabilities(&self) -> PlatformCapabilities {
+        (*self.capabilities).clone()
     }
 
     /// Shared handle to the recent-search cache so out-of-runtime mutators
@@ -268,6 +286,9 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Cleared(ClearResponse { deleted }))
             }
             IpcRequest::Doctor => Ok(IpcResponse::Doctor(self.build_doctor_report().await?)),
+            IpcRequest::Capabilities => {
+                Ok(IpcResponse::Capabilities(Box::new(self.capabilities())))
+            }
             IpcRequest::Health => {
                 let maintenance = self.maintenance_health.report();
                 // `ok` flips to false once retention is wedged so simple
@@ -634,6 +655,7 @@ pub struct NagoriRuntimeBuilder {
     ai: Option<Arc<dyn AiProvider>>,
     permissions: Option<Arc<dyn PermissionChecker>>,
     socket_path: Option<std::path::PathBuf>,
+    capabilities: Option<PlatformCapabilities>,
 }
 
 impl NagoriRuntimeBuilder {
@@ -664,6 +686,19 @@ impl NagoriRuntimeBuilder {
     #[must_use]
     pub fn socket_path(mut self, path: std::path::PathBuf) -> Self {
         self.socket_path = Some(path);
+        self
+    }
+
+    /// Set the host adapter's capability report.
+    ///
+    /// `nagori-platform-native::build_native_runtime` populates this
+    /// with `nagori_platform_native::capabilities()` so the runtime
+    /// and the IPC `Capabilities` handler return the same static
+    /// matrix. Daemon-internal tests fall back to
+    /// `nagori_platform::unsupported_capabilities()`.
+    #[must_use]
+    pub fn capabilities(mut self, capabilities: PlatformCapabilities) -> Self {
+        self.capabilities = Some(capabilities);
         self
     }
 
@@ -721,6 +756,13 @@ impl NagoriRuntimeBuilder {
     ) -> NagoriRuntime {
         let (settings_tx, settings_rx) = watch::channel(AppSettings::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Headless callers (the CLI's `add` / `ai` paths, in-process
+        // tests) never expose IPC, so the capability report is never
+        // queried — default to `unsupported_capabilities()` rather than
+        // forcing those sites to wire a value they don't need.
+        // Production paths flow through `nagori-platform-native::
+        // build_native_runtime`, which sets the host's real report.
+        let capabilities = Arc::new(self.capabilities.unwrap_or_else(unsupported_capabilities));
         NagoriRuntime {
             store: self.store,
             clipboard,
@@ -735,6 +777,7 @@ impl NagoriRuntimeBuilder {
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
+            capabilities,
         }
     }
 }
@@ -768,7 +811,7 @@ impl ShutdownHandle {
 const fn is_ipc_control_request(request: &IpcRequest) -> bool {
     matches!(
         request,
-        IpcRequest::Doctor | IpcRequest::Health | IpcRequest::Shutdown
+        IpcRequest::Doctor | IpcRequest::Health | IpcRequest::Capabilities | IpcRequest::Shutdown
     )
 }
 
@@ -1163,6 +1206,51 @@ mod tests {
             matches!(health, IpcResponse::Health(_)),
             "health must remain available while IPC is disabled",
         );
+
+        // Capabilities is read-only and treated as a control request,
+        // so it must also bypass the cli_ipc_enabled gate. Otherwise
+        // a user disabling CLI IPC would also blind the doctor / UI
+        // to the OS capability matrix.
+        let capabilities = runtime.handle_ipc(IpcRequest::Capabilities).await;
+        assert!(
+            matches!(capabilities, IpcResponse::Capabilities(_)),
+            "capabilities must remain available while IPC is disabled",
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_handler_returns_builder_value() {
+        // Builder-supplied capabilities must round-trip through the
+        // dispatcher — that's the contract the desktop + CLI rely on,
+        // so they can render exactly what the daemon was started with
+        // rather than reprobing the OS in two places.
+        use nagori_platform::{Capability, Platform, SupportTier};
+
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let expected = PlatformCapabilities {
+            platform: Platform::MacOS,
+            tier: SupportTier::Supported,
+            capture_text: Capability::Available,
+            capture_image: Capability::Available,
+            capture_files: Capability::Available,
+            write_text: Capability::Available,
+            write_image: Capability::Available,
+            auto_paste: Capability::Available,
+            global_hotkey: Capability::Available,
+            frontmost_app: Capability::Available,
+            permissions_ui: Capability::Available,
+            update_check: Capability::Available,
+        };
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .capabilities(expected.clone())
+            .build_for_test();
+
+        let response = runtime.handle_ipc(IpcRequest::Capabilities).await;
+        let IpcResponse::Capabilities(actual) = response else {
+            panic!("expected Capabilities response");
+        };
+        assert_eq!(*actual, expected);
     }
 
     #[tokio::test]

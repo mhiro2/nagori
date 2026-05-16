@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 nagori-core = { path = "../nagori-core" }
+nagori-platform = { path = "../nagori-platform" }
 dirs.workspace = true
 getrandom = "0.4"
 hex.workspace = true

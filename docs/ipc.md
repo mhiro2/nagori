@@ -66,6 +66,7 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 { "Clear":          { "older_than_days": 30 } }
 "Doctor"
 "Health"
+"Capabilities"
 "Shutdown"
 ```
 
@@ -78,8 +79,9 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 { "Settings": { /* AppSettings */ } }
 { "AiOutput": { /* AiOutputDto */ } }
 { "Cleared":  { "deleted": 12 } }
-{ "Doctor":   { /* DoctorReport */ } }
-{ "Health":   { "ok": true, "version": "0.0.0" } }
+{ "Doctor":       { /* DoctorReport */ } }
+{ "Health":       { "ok": true, "version": "0.0.0" } }
+{ "Capabilities": { /* PlatformCapabilities */ } }
 "Ack"
 { "Error":    { "code": "not_found", "message": "...", "recoverable": false } }
 ```
@@ -108,8 +110,9 @@ everything else is treated as transient by the CLI.
 
 When `cli_ipc_enabled` is switched off, the daemon drains the active IPC
 server and removes the socket/token files. While disabled, only `Health`,
-`Doctor`, and `Shutdown` are accepted by the runtime; other requests return
-`permission_error` if they reach an already-authenticated in-flight handler.
+`Doctor`, `Capabilities`, and `Shutdown` are accepted by the runtime; other
+requests return `permission_error` if they reach an already-authenticated
+in-flight handler.
 
 ## Example session
 

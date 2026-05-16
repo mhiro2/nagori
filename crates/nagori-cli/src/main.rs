@@ -21,7 +21,7 @@ use nagori_ipc::{
     IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest, PinEntryRequest,
     RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
 };
-use nagori_platform::{MemoryClipboard, NoopPasteController};
+use nagori_platform::{Capability, MemoryClipboard, NoopPasteController, PlatformCapabilities};
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
@@ -74,6 +74,11 @@ enum Command {
     Clear(ClearArgs),
     Ai(AiArgs),
     Doctor,
+    /// Print the host adapter's capability matrix (clipboard / paste /
+    /// hotkey / etc.) — what nagori can do on this OS *given the right
+    /// permissions and tools*. Pair with `nagori doctor` to see the
+    /// live permission/tool state.
+    Capabilities,
     Daemon(DaemonArgs),
 }
 
@@ -318,6 +323,16 @@ fn init_tracing() {
 // The CLI dispatcher intentionally mirrors the subcommand enum one-to-one.
 #[allow(clippy::too_many_lines)]
 async fn run_local_command(cli: Cli) -> Result<()> {
+    let format = OutputFormat::from(cli.json, cli.jsonl);
+
+    // `Capabilities` is a static OS probe — short-circuit before we
+    // touch the DB so users can inspect the host matrix on machines
+    // where the SQLite path is misconfigured or unreadable.
+    if matches!(cli.command, Command::Capabilities) {
+        print_capabilities(&nagori_platform_native::capabilities(), format)?;
+        return Ok(());
+    }
+
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
     if let Some(parent) = db_path.parent() {
         nagori_storage::ensure_private_directory(parent)
@@ -325,7 +340,6 @@ async fn run_local_command(cli: Cli) -> Result<()> {
     }
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
-    let format = OutputFormat::from(cli.json, cli.jsonl);
 
     match cli.command {
         Command::List(args) => {
@@ -409,6 +423,7 @@ async fn run_local_command(cli: Cli) -> Result<()> {
         Command::Doctor => {
             print_local_doctor(&db_path, &store).await?;
         }
+        Command::Capabilities => unreachable!("handled before DB open"),
         Command::Daemon(args) => match args.command {
             DaemonCommand::Status => {
                 let settings = store.get_settings().await?;
@@ -627,6 +642,10 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
         Command::Doctor => {
             let resp = client.send(IpcRequest::Doctor).await?;
             print_doctor_report(&expect_doctor(resp)?, format)?;
+        }
+        Command::Capabilities => {
+            let resp = client.send(IpcRequest::Capabilities).await?;
+            print_capabilities(&expect_capabilities(resp)?, format)?;
         }
         Command::Daemon(args) => match args.command {
             DaemonCommand::Status => {
@@ -961,6 +980,61 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
     Ok(())
 }
 
+fn print_capabilities(caps: &PlatformCapabilities, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(caps)?);
+        }
+        OutputFormat::Jsonl => {
+            // `--jsonl` is contractually one record per line (see
+            // docs/cli.md). A capability report is a single record, so
+            // emit one compact line — never a multi-line pretty dump,
+            // which would break line-oriented consumers.
+            println!("{}", serde_json::to_string(caps)?);
+        }
+        OutputFormat::Text => {
+            // Tab-separated to match `nagori doctor`. Every row has the
+            // form `<field>\t<status>[\tdetail…]`; downstream scripts
+            // can split on the first tab and not lose extra detail.
+            println!("platform\t{:?}", caps.platform);
+            println!("tier\t{:?}", caps.tier);
+            print_capability_row("capture_text", &caps.capture_text);
+            print_capability_row("capture_image", &caps.capture_image);
+            print_capability_row("capture_files", &caps.capture_files);
+            print_capability_row("write_text", &caps.write_text);
+            print_capability_row("write_image", &caps.write_image);
+            print_capability_row("auto_paste", &caps.auto_paste);
+            print_capability_row("global_hotkey", &caps.global_hotkey);
+            print_capability_row("frontmost_app", &caps.frontmost_app);
+            print_capability_row("permissions_ui", &caps.permissions_ui);
+            print_capability_row("update_check", &caps.update_check);
+        }
+    }
+    Ok(())
+}
+
+fn print_capability_row(field: &str, cap: &Capability) {
+    match cap {
+        Capability::Available => println!("{field}\tavailable"),
+        Capability::Experimental { message } => {
+            println!("{field}\texperimental\t{message}");
+        }
+        Capability::Unsupported { reason } => {
+            println!("{field}\tunsupported\t{reason}");
+        }
+        Capability::RequiresPermission {
+            permission,
+            message,
+        } => {
+            println!("{field}\trequires_permission\t{permission:?}\t{message}");
+        }
+        Capability::RequiresExternalTool { tool, install_hint } => {
+            let hint = install_hint.as_deref().unwrap_or("");
+            println!("{field}\trequires_external_tool\t{tool}\t{hint}");
+        }
+    }
+}
+
 async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     let settings = store.get_settings().await?;
     let provider_label = match &settings.ai_provider {
@@ -1163,6 +1237,14 @@ fn clear_request_from_args(args: &ClearArgs) -> Result<ClearRequest> {
 fn expect_doctor(response: IpcResponse) -> Result<DoctorReport> {
     match response {
         IpcResponse::Doctor(value) => Ok(value),
+        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
+        _ => Err(anyhow!("unexpected ipc response")),
+    }
+}
+
+fn expect_capabilities(response: IpcResponse) -> Result<PlatformCapabilities> {
+    match response {
+        IpcResponse::Capabilities(value) => Ok(*value),
         IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
         _ => Err(anyhow!("unexpected ipc response")),
     }

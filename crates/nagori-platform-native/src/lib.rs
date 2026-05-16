@@ -212,7 +212,8 @@ where
         .clipboard(clipboard)
         .paste(paste)
         .ai(ai)
-        .permissions(permissions);
+        .permissions(permissions)
+        .capabilities(capabilities());
     if let Some(socket_path) = options.socket_path {
         builder = builder.socket_path(socket_path);
     }

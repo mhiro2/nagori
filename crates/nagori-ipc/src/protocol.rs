@@ -2,6 +2,7 @@ use nagori_core::{
     AiActionId, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId, PasteFormat,
     RankReason, SearchResult, Sensitivity, safe_preview_for_dto,
 };
+use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -36,6 +37,11 @@ pub enum IpcRequest {
     Clear(ClearRequest),
     Doctor,
     Health,
+    /// Static report of what the host adapter can do (clipboard /
+    /// paste / hotkey / etc.). Read-only and cheap to answer; the
+    /// daemon's dispatcher treats it as a control request, so CLI
+    /// callers can probe it even when `cli_ipc_enabled` is false.
+    Capabilities,
     Shutdown,
 }
 
@@ -48,6 +54,7 @@ pub enum IpcResponse {
     AiOutput(AiOutputDto),
     Cleared(ClearResponse),
     Doctor(DoctorReport),
+    Capabilities(Box<PlatformCapabilities>),
     Ack,
     Error(IpcError),
     Health(HealthResponse),

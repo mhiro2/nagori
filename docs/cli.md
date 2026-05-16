@@ -84,6 +84,21 @@ Print database / IPC paths, capture and AI flags, and per-platform
 permission status (TCC kinds on macOS; Clipboard / Accessibility =
 `Granted` and the rest = `Unsupported` on Windows).
 
+### `nagori capabilities`
+
+Print the host adapter's static capability matrix — what nagori can
+do on this OS given the right permissions and tools — for each of
+clipboard capture / copy-back / auto-paste / global hotkey /
+frontmost-app / permission UI / updater. Rows use one of `available`,
+`experimental`, `unsupported`, `requires_permission`, or
+`requires_external_tool`; pair with `nagori doctor` to see the live
+permission and tool state.
+
+Works against a running daemon when `--ipc <endpoint>` is set (the
+daemon returns the same matrix as a local probe, since the report is
+static and wired in at startup), and falls back to a local probe
+otherwise.
+
 ### `nagori daemon run [--capture-interval-ms N] [--maintenance-interval-min N]`
 
 Boot the daemon. Holds the SQLite handle, runs the capture loop, and serves

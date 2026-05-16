@@ -674,8 +674,8 @@ daemon supervises the IPC server from the settings watch channel: enabling
 the toggle binds the endpoint and writes a fresh token, while disabling it
 drains the accept loop and removes the socket/token files. The runtime
 also rejects non-control IPC requests while the toggle is off; `Health`,
-`Doctor`, and `Shutdown` remain available to support diagnostics and
-orderly exit.
+`Doctor`, `Capabilities`, and `Shutdown` remain available to support
+diagnostics and orderly exit.
 
 **Request / response types** (`nagori-ipc::protocol`):
 
@@ -686,13 +686,13 @@ enum IpcRequest {
     DeleteEntry, PinEntry, Clear,
     RunAiAction,
     GetSettings, UpdateSettings,
-    Doctor, Health, Shutdown,
+    Doctor, Health, Capabilities, Shutdown,
 }
 
 enum IpcResponse {
     Search, Entry, Entries,
     AiOutput, Cleared,
-    Doctor, Health,
+    Doctor, Health, Capabilities,
     Ack, Error,
 }
 ```

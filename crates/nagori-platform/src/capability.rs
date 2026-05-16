@@ -26,6 +26,11 @@ use crate::permissions::PermissionKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
+    // The default snake_case derive would rename `MacOS` to `mac_o_s`.
+    // Override explicitly so the IPC / CLI JSON shape stays the natural
+    // `"macos"`, which is the contract we want pinned now that
+    // `PlatformCapabilities` is a public surface.
+    #[serde(rename = "macos")]
     MacOS,
     Windows,
     LinuxWayland,
@@ -263,6 +268,27 @@ mod tests {
             .is_supported_by_platform()
         );
         assert!(!Capability::Unsupported { reason: "x".into() }.is_supported_by_platform());
+    }
+
+    #[test]
+    fn platform_serialises_with_natural_names() {
+        // Lock in the public JSON contract surfaced over IPC and the
+        // `nagori capabilities` CLI. Without the explicit `rename`
+        // override the snake_case derive would emit `"mac_o_s"`.
+        let cases = [
+            (Platform::MacOS, "\"macos\""),
+            (Platform::Windows, "\"windows\""),
+            (Platform::LinuxWayland, "\"linux_wayland\""),
+            (Platform::Unsupported, "\"unsupported\""),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_str::<Platform>(expected).unwrap(),
+                value,
+                "round-trip {expected}"
+            );
+        }
     }
 
     #[test]
