@@ -312,11 +312,17 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            // Budget the retained representation payload only — the
+            // `content_json` envelope is bookkeeping, not user content, and
+            // for text-shaped entries the same text already appears in
+            // `entry_representations.text_content`. Counting both would
+            // double-charge text rows and trigger over-eager eviction.
             let total_i64: i64 = tx
                 .query_row(
-                    "SELECT COALESCE(SUM(LENGTH(content_json) + COALESCE(LENGTH(payload_blob), 0)), 0)
-                     FROM entries
-                     WHERE deleted_at IS NULL",
+                    "SELECT COALESCE(SUM(r.byte_count), 0)
+                     FROM entry_representations r
+                     JOIN entries e ON e.id = r.entry_id
+                     WHERE e.deleted_at IS NULL",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -332,7 +338,13 @@ impl SqliteStore {
             let candidates = {
                 let mut stmt = tx
                     .prepare(
-                        "SELECT id, LENGTH(content_json) + COALESCE(LENGTH(payload_blob), 0) AS entry_bytes
+                        "SELECT id,
+                                COALESCE(
+                                    (SELECT SUM(byte_count)
+                                     FROM entry_representations
+                                     WHERE entry_id = entries.id),
+                                    0
+                                ) AS entry_bytes
                          FROM entries
                          WHERE deleted_at IS NULL AND pinned = 0
                          ORDER BY created_at ASC, entry_bytes DESC",
@@ -386,15 +398,26 @@ impl SqliteStore {
         .await
     }
 
-    /// Returns the inline payload blob and its mime type for an entry, or
-    /// `None` if the row carries no blob (e.g. text/url entries) or has been
-    /// soft-deleted.
+    /// Returns the primary representation's payload bytes and recorded MIME
+    /// for an entry, or `None` if no representation row carries inline bytes
+    /// (e.g. text-shaped entries) or the entry has been soft-deleted.
+    ///
+    /// Image bytes live in `entry_representations.payload_blob`; the preview
+    /// scheme reads them here. Text-shaped entries deliberately return `None`
+    /// because they have no byte payload distinct from the inline text.
     pub async fn get_payload(&self, id: EntryId) -> Result<Option<(Vec<u8>, String)>> {
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             conn.query_row(
-                "SELECT payload_blob, payload_mime FROM entries
-                 WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT r.payload_blob, r.payload_mime
+                 FROM entry_representations r
+                 JOIN entries e ON e.id = r.entry_id
+                 WHERE e.id = ?1
+                   AND e.deleted_at IS NULL
+                   AND r.role = 'primary'
+                   AND r.payload_blob IS NOT NULL
+                 ORDER BY r.ordinal
+                 LIMIT 1",
                 params![id.to_string()],
                 |row| {
                     let blob: Option<Vec<u8>> = row.get(0)?;
@@ -514,13 +537,18 @@ impl nagori_core::EntryRepository for SqliteStore {
 
     async fn update_metadata(&self, id: EntryId, metadata: EntryMetadata) -> Result<()> {
         self.run_blocking(move |store| {
+            let representation_set_hash = metadata.representation_set_hash.as_ref().map_or_else(
+                || metadata.content_hash.value.clone(),
+                |hash| hash.value.clone(),
+            );
             let changed = {
                 let conn = store.conn()?;
                 conn.execute(
                     "UPDATE entries
                      SET source_app_name = ?1, source_bundle_id = ?2, source_executable_path = ?3,
-                         content_hash = ?4, use_count = ?5, updated_at = ?6, last_used_at = ?7
-                     WHERE id = ?8 AND deleted_at IS NULL",
+                         content_hash = ?4, representation_set_hash = ?5,
+                         use_count = ?6, updated_at = ?7, last_used_at = ?8
+                     WHERE id = ?9 AND deleted_at IS NULL",
                     params![
                         metadata.source.as_ref().and_then(|s| s.name.as_deref()),
                         metadata
@@ -532,6 +560,7 @@ impl nagori_core::EntryRepository for SqliteStore {
                             .as_ref()
                             .and_then(|s| s.executable_path.as_deref()),
                         metadata.content_hash.value,
+                        representation_set_hash,
                         metadata.use_count,
                         format_time(metadata.updated_at)?,
                         format_opt_time(metadata.last_used_at)?,
@@ -616,18 +645,27 @@ impl nagori_core::EntryRepository for SqliteStore {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<EntryId> {
     let requested_id = entry.id;
     let content_hash = entry.metadata.content_hash.value.clone();
+    let representation_set_hash = entry
+        .metadata
+        .representation_set_hash
+        .as_ref()
+        .map_or_else(|| content_hash.clone(), |hash| hash.value.clone());
     let updated_at = format_time(entry.metadata.updated_at)?;
+    let created_at = format_time(entry.metadata.created_at)?;
     let mut doc = entry.search.clone();
-    // Extract image bytes before serialising. `pending_bytes` is `#[serde(skip)]`
-    // so the JSON body never grows by the blob size — the blob lives in
-    // `entries.payload_blob` and is fetched lazily by the preview command.
-    let (content_for_storage, payload_blob, payload_mime) = match &entry.content {
+    // Extract image bytes before serialising. `pending_bytes` is
+    // `#[serde(skip)]` so the JSON body never grows by the blob size —
+    // image bytes live in `entry_representations.payload_blob` and are
+    // fetched lazily by the preview command. For non-image entries the
+    // representation row carries the plain text in `text_content`.
+    let (content_for_storage, primary_payload) = match &entry.content {
         ClipboardContent::Image(img) => {
-            let mime = img.mime_type.clone();
             let bytes = img.pending_bytes.clone();
+            let mime = img.mime_type.clone();
             let mut stripped = img.clone();
             stripped.pending_bytes = None;
             stripped.payload_ref = if bytes.is_some() {
@@ -635,9 +673,20 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             } else {
                 stripped.payload_ref.clone()
             };
-            (ClipboardContent::Image(stripped), bytes, mime)
+            let payload = bytes.map(|bytes| PrimaryPayload::Bytes {
+                mime: mime
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                bytes,
+            });
+            (ClipboardContent::Image(stripped), payload)
         }
-        other => (other.clone(), None, None),
+        other => (
+            other.clone(),
+            other
+                .plain_text()
+                .map(|text| PrimaryPayload::Text(text.to_owned())),
+        ),
     };
     let mut conn = store.conn()?;
     let tx = conn.transaction().map_err(|err| storage_err(&err))?;
@@ -668,11 +717,15 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         tx.execute(
             "INSERT INTO entries (
                 id, content_kind, text_content, content_json, source_app_name,
-                source_bundle_id, source_executable_path, content_hash, sensitivity,
-                pinned, archived, use_count, created_at, updated_at, last_used_at,
-                expires_at, deleted_at, payload_blob, payload_mime
+                source_bundle_id, source_executable_path, content_hash,
+                representation_set_hash, sensitivity, pinned, archived,
+                use_count, created_at, updated_at, last_used_at, expires_at,
+                deleted_at
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18
+             )",
             params![
                 requested_id.to_string(),
                 kind_to_str(entry.content_kind()),
@@ -694,20 +747,28 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
                     .as_ref()
                     .and_then(|s| s.executable_path.as_deref()),
                 content_hash,
+                representation_set_hash,
                 sensitivity_to_str(entry.sensitivity),
                 bool_int(entry.lifecycle.pinned),
                 bool_int(entry.lifecycle.archived),
                 entry.metadata.use_count,
-                format_time(entry.metadata.created_at)?,
+                created_at,
                 updated_at,
                 format_opt_time(entry.metadata.last_used_at)?,
                 format_opt_time(entry.lifecycle.expires_at)?,
                 format_opt_time(entry.lifecycle.deleted_at)?,
-                payload_blob,
-                payload_mime,
             ],
         )
         .map_err(|err| storage_err(&err))?;
+        // Phase 1 stores a single `role = 'primary'` representation per
+        // entry; a later phase widens this to the full preserved set from
+        // `ClipboardSnapshot.representations`. Skipping when there is no
+        // payload (e.g. an Unknown entry whose plain_text is None or an
+        // image without preserved bytes) matches the previous behaviour of
+        // `get_payload` returning `None` for those rows.
+        if let Some(payload) = primary_payload.as_ref() {
+            insert_primary_representation(&tx, &requested_id.to_string(), payload, &created_at)?;
+        }
         requested_id.to_string()
     };
     let stored_id =
@@ -718,6 +779,64 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     upsert_document_blocking(&tx, &doc)?;
     tx.commit().map_err(|err| storage_err(&err))?;
     Ok(stored_id)
+}
+
+enum PrimaryPayload {
+    Text(String),
+    Bytes { mime: String, bytes: Vec<u8> },
+}
+
+fn insert_primary_representation(
+    tx: &rusqlite::Transaction<'_>,
+    entry_id: &str,
+    payload: &PrimaryPayload,
+    created_at: &str,
+) -> Result<()> {
+    let representation_id = format!("{entry_id}#primary");
+    match payload {
+        PrimaryPayload::Text(text) => {
+            let byte_count = i64::try_from(text.len()).map_err(|err| {
+                AppError::Storage(format!(
+                    "representation text byte count overflowed i64: {err}"
+                ))
+            })?;
+            tx.execute(
+                "INSERT INTO entry_representations (
+                    id, entry_id, role, mime_type, platform_format, ordinal,
+                    text_content, payload_blob, payload_ref, payload_mime,
+                    byte_count, created_at
+                 )
+                 VALUES (?1, ?2, 'primary', 'text/plain', NULL, 0,
+                         ?3, NULL, NULL, NULL, ?4, ?5)",
+                params![representation_id, entry_id, text, byte_count, created_at],
+            )
+            .map_err(|err| storage_err(&err))?;
+        }
+        PrimaryPayload::Bytes { mime, bytes } => {
+            let byte_count = i64::try_from(bytes.len()).map_err(|err| {
+                AppError::Storage(format!("representation byte count overflowed i64: {err}"))
+            })?;
+            tx.execute(
+                "INSERT INTO entry_representations (
+                    id, entry_id, role, mime_type, platform_format, ordinal,
+                    text_content, payload_blob, payload_ref, payload_mime,
+                    byte_count, created_at
+                 )
+                 VALUES (?1, ?2, 'primary', ?3, NULL, 0,
+                         NULL, ?4, NULL, ?3, ?5, ?6)",
+                params![
+                    representation_id,
+                    entry_id,
+                    mime,
+                    bytes,
+                    byte_count,
+                    created_at
+                ],
+            )
+            .map_err(|err| storage_err(&err))?;
+        }
+    }
+    Ok(())
 }
 
 fn upsert_document_blocking(tx: &rusqlite::Transaction<'_>, doc: &SearchDocument) -> Result<()> {
@@ -1389,7 +1508,12 @@ impl nagori_core::SettingsRepository for SqliteStore {
 /// performs the alter step. `run_migrations` plays each pending migration
 /// in its own transaction and bumps `user_version` so partial application
 /// can never leave the DB at a half-migrated state.
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, SCHEMA_V1),
+    (2, SCHEMA_V2),
+    (3, SCHEMA_V3),
+    (4, SCHEMA_V4),
+];
 
 /// Highest schema version supported by this binary. A DB whose
 /// `user_version` already exceeds this is from a newer build and we refuse
@@ -1585,6 +1709,119 @@ CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
     WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
 ";
 
+/// Break payload ownership out of `entries` into a dedicated
+/// `entry_representations` table.
+///
+/// `entries` previously owned the image bytes (`payload_blob`/`payload_mime`)
+/// and a `payload_ref` that was never written. That shape can only hold one
+/// representation per clipboard event, so a copy that exposed both `text/html`
+/// and `text/plain` (or RTF + plain text, image + file URL, …) lost everything
+/// except the factory's primary pick. Moving payloads to a dependent table
+/// lets a later phase stash every preserved representation under a single
+/// entry without churning `entries` again.
+///
+/// The migration:
+/// 1. Creates `entry_representations` with the same column shape the runtime
+///    write path will use (text payloads in `text_content`, byte payloads in
+///    `payload_blob` with a recorded `payload_mime`).
+/// 2. Adds `entries.representation_set_hash NOT NULL` — used by copy-back in a
+///    later phase to detect representation drift. Phase 1 just backfills it
+///    from `content_hash`, so dedupe stays a primary-content concept until
+///    the multi-rep capture path lands.
+/// 3. Lifts each existing entry's primary payload into a single
+///    `role = 'primary'` representation row: image bytes from the legacy
+///    `payload_blob`/`payload_mime` columns; text-shaped entries from the
+///    pre-extracted `text_content` column. Image rows with no preserved
+///    bytes (pre-validation imports, deleted blobs) produce zero rows,
+///    matching the previous behaviour of `get_payload`.
+/// 4. Drops `entries.payload_blob`, `entries.payload_mime`, and the unused
+///    `entries.payload_ref` so the schema can only express the new model.
+const SCHEMA_V4: &str = r"
+CREATE TABLE IF NOT EXISTS entry_representations (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    platform_format TEXT,
+    ordinal INTEGER NOT NULL,
+    text_content TEXT,
+    payload_blob BLOB,
+    payload_ref TEXT,
+    payload_mime TEXT,
+    byte_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    -- Phase 1 invariant: a representation row carries exactly one of
+    -- text_content or payload_blob (never both, never neither). The
+    -- capture pipeline will lean on this to reason about which preview
+    -- path applies without re-inspecting the bytes.
+    CHECK (
+        (text_content IS NOT NULL AND payload_blob IS NULL)
+     OR (text_content IS NULL AND payload_blob IS NOT NULL)
+    ),
+    -- One row per (entry, role, ordinal). The seam for multi-rep entries
+    -- ranks fallbacks by ordinal within a role; collisions would make
+    -- ordering ambiguous.
+    UNIQUE (entry_id, role, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_representations_entry
+    ON entry_representations(entry_id, ordinal);
+
+ALTER TABLE entries ADD COLUMN representation_set_hash TEXT NOT NULL DEFAULT '';
+
+INSERT INTO entry_representations (
+    id, entry_id, role, mime_type, platform_format, ordinal,
+    text_content, payload_blob, payload_ref, payload_mime,
+    byte_count, created_at
+)
+SELECT
+    id || '#primary',
+    id,
+    'primary',
+    COALESCE(payload_mime, 'application/octet-stream'),
+    NULL,
+    0,
+    NULL,
+    payload_blob,
+    NULL,
+    payload_mime,
+    LENGTH(payload_blob),
+    created_at
+FROM entries
+WHERE content_kind = 'image' AND payload_blob IS NOT NULL;
+
+-- Only migrate non-image rows that actually carry inline text. This
+-- mirrors the insert path's guard: entries without a primary payload
+-- (e.g. Unknown rows whose `plain_text` is None) do not get a primary
+-- representation row.
+INSERT INTO entry_representations (
+    id, entry_id, role, mime_type, platform_format, ordinal,
+    text_content, payload_blob, payload_ref, payload_mime,
+    byte_count, created_at
+)
+SELECT
+    id || '#primary',
+    id,
+    'primary',
+    'text/plain',
+    NULL,
+    0,
+    text_content,
+    NULL,
+    NULL,
+    NULL,
+    LENGTH(text_content),
+    created_at
+FROM entries
+WHERE content_kind != 'image' AND text_content IS NOT NULL;
+
+UPDATE entries SET representation_set_hash = content_hash;
+
+ALTER TABLE entries DROP COLUMN payload_blob;
+ALTER TABLE entries DROP COLUMN payload_mime;
+ALTER TABLE entries DROP COLUMN payload_ref;
+";
+
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
     let id = EntryId::from_str(&row.get::<_, String>("id")?)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
@@ -1595,6 +1832,13 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         algorithm: HashAlgorithm::Sha256,
         value: row.get("content_hash")?,
     };
+    let representation_set_hash = row
+        .get::<_, Option<String>>("representation_set_hash")?
+        .filter(|value| !value.is_empty())
+        .map(|value| ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            value,
+        });
     let source = {
         let name: Option<String> = row.get("source_app_name")?;
         let bundle_id: Option<String> = row.get("source_bundle_id")?;
@@ -1612,6 +1856,7 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         use_count: row.get::<_, u32>("use_count")?,
         source,
         content_hash: hash,
+        representation_set_hash,
     };
     let search = SearchDocument {
         entry_id: id,
@@ -2426,7 +2671,7 @@ mod tests {
 
         // The deserialised entry must keep its mime type and byte count, and
         // `pending_bytes` must be `None` after the round-trip — the bytes now
-        // live in `entries.payload_blob`, not inside `content_json`.
+        // live in `entry_representations.payload_blob`, not inside `content_json`.
         let fetched = stored.get(id).await.unwrap().expect("row exists");
         match &fetched.content {
             ClipboardContent::Image(img) => {
@@ -2451,5 +2696,303 @@ mod tests {
             let count: i64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
             assert_eq!(count, 1, "{table} should only hold one row per live entry");
         }
+    }
+
+    /// Apply only the migrations up to and including `up_to_version` so the
+    /// later assertions can stage v3-shaped rows before the v4 migration
+    /// rewires payload ownership.
+    fn run_migrations_through(conn: &mut Connection, up_to_version: i64) -> Result<()> {
+        let current: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|err| storage_err(&err))?;
+        let mut last_applied = current;
+        for (version, sql) in MIGRATIONS {
+            if *version <= current || *version > up_to_version {
+                continue;
+            }
+            assert_eq!(
+                *version,
+                last_applied + 1,
+                "test helper assumes contiguous migration ordering"
+            );
+            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let stamped = format!("{sql}\nPRAGMA user_version = {version};");
+            tx.execute_batch(&stamped)
+                .map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(|err| storage_err(&err))?;
+            last_applied = *version;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_v4_moves_image_payload_to_entry_representations() {
+        // Stage a v3 image entry whose bytes live in the legacy
+        // `entries.payload_blob` column, then run the v4 migration and
+        // assert the bytes have moved to a `role = 'primary'`
+        // representation row while the old columns disappear.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_through(&mut conn, 3).unwrap();
+
+        let bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
+        let entry_id = "11111111-1111-4111-8111-111111111111";
+        let now = "2020-01-01T00:00:00Z";
+        conn.execute(
+            "INSERT INTO entries (
+                id, content_kind, text_content, content_json,
+                content_hash, sensitivity, pinned, archived, use_count,
+                created_at, updated_at,
+                payload_blob, payload_mime
+             )
+             VALUES (?1, 'image', NULL, '{\"Image\":{}}', 'hash-img',
+                     'public', 0, 0, 0, ?2, ?2, ?3, 'image/png')",
+            params![entry_id, now, &bytes],
+        )
+        .unwrap();
+
+        run_migrations_through(&mut conn, 4).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        #[allow(clippy::type_complexity)]
+        let (rep_id, role, mime_type, payload_mime, blob, text, byte_count, ordinal): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<Vec<u8>>,
+            Option<String>,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT id, role, mime_type, payload_mime, payload_blob,
+                        text_content, byte_count, ordinal
+                 FROM entry_representations
+                 WHERE entry_id = ?1",
+                params![entry_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(rep_id, format!("{entry_id}#primary"));
+        assert_eq!(role, "primary");
+        assert_eq!(mime_type, "image/png");
+        assert_eq!(payload_mime.as_deref(), Some("image/png"));
+        assert_eq!(blob.as_deref(), Some(bytes.as_slice()));
+        assert!(text.is_none());
+        assert_eq!(byte_count, bytes.len() as i64);
+        assert_eq!(ordinal, 0);
+
+        // Old payload columns are gone; the new hash column carries the
+        // primary content hash for Phase 1.
+        let (set_hash,): (String,) = conn
+            .query_row(
+                "SELECT representation_set_hash FROM entries WHERE id = ?1",
+                params![entry_id],
+                |row| Ok((row.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(set_hash, "hash-img");
+
+        for column in ["payload_blob", "payload_mime", "payload_ref"] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('entries')
+                        WHERE name = ?1
+                    )",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!present, "entries.{column} must be dropped by v4");
+        }
+    }
+
+    #[test]
+    fn schema_v4_moves_text_entries_to_representation_row() {
+        // A v3 text-shaped entry stored `text_content` directly on
+        // `entries`. The v4 migration must surface that into a
+        // `role = 'primary', mime_type = 'text/plain'` representation row
+        // so copy-back can later re-publish it without re-parsing
+        // `content_json`.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations_through(&mut conn, 3).unwrap();
+
+        let entry_id = "22222222-2222-4222-8222-222222222222";
+        let plain = "hello clipboard";
+        let now = "2020-01-02T00:00:00Z";
+        conn.execute(
+            "INSERT INTO entries (
+                id, content_kind, text_content, content_json,
+                content_hash, sensitivity, pinned, archived, use_count,
+                created_at, updated_at
+             )
+             VALUES (?1, 'text', ?2, ?3, 'hash-text',
+                     'public', 0, 0, 0, ?4, ?4)",
+            params![entry_id, plain, format!("{{\"text\":\"{plain}\"}}"), now],
+        )
+        .unwrap();
+
+        run_migrations_through(&mut conn, 4).unwrap();
+
+        let (role, mime, text, blob, byte_count): (
+            String,
+            String,
+            Option<String>,
+            Option<Vec<u8>>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT role, mime_type, text_content, payload_blob, byte_count
+                 FROM entry_representations
+                 WHERE entry_id = ?1",
+                params![entry_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(role, "primary");
+        assert_eq!(mime, "text/plain");
+        assert_eq!(text.as_deref(), Some(plain));
+        assert!(blob.is_none());
+        assert_eq!(byte_count, plain.len() as i64);
+    }
+
+    #[test]
+    fn schema_v4_fresh_db_has_new_shape_and_no_rows() {
+        // Fresh installs play every migration in order. The end state must
+        // match what an upgraded DB looks like: `entry_representations`
+        // exists, `entries.representation_set_hash` exists, and the legacy
+        // payload columns are gone. No data should appear out of nowhere.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let rep_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_representations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rep_count, 0);
+
+        let has_set_hash: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('entries')
+                    WHERE name = 'representation_set_hash'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_set_hash);
+
+        let has_payload_blob: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('entries')
+                    WHERE name = 'payload_blob'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!has_payload_blob);
+    }
+
+    #[tokio::test]
+    async fn enforce_total_bytes_includes_representation_payload() {
+        // The retention budget must count every preserved representation
+        // byte, not just the JSON envelope — otherwise a stream of large
+        // images appears free and the policy never triggers eviction.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let store = SqliteStore::open_memory().unwrap();
+
+        let big_image_bytes = {
+            let mut bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+            bytes.resize(8 * 1024, 0xAB);
+            bytes
+        };
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("big-image"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(big_image_bytes.clone()),
+            }],
+        };
+        let image_entry =
+            EntryFactory::from_snapshot(snapshot).expect("png snapshot should build entry");
+        let image_id = store.insert(image_entry).await.unwrap();
+        let _ = insert_text(&store, "small").await;
+
+        // 1 KiB budget is well below the image's 8 KiB body, so the image
+        // row should be evicted while the text-shaped row survives.
+        let deleted = store.enforce_total_bytes(1024).await.unwrap();
+        assert!(deleted >= 1, "image row should be soft-deleted");
+        let fetched = store.get(image_id).await.unwrap();
+        assert!(
+            fetched.is_none(),
+            "image row should be soft-deleted by byte budget"
+        );
+
+        let entry_payload = store.get_payload(image_id).await.unwrap();
+        assert!(entry_payload.is_none());
+        // After eviction the live representation count drops to the
+        // surviving text entry's single row.
+        let live_rep_count: i64 = {
+            let conn = store.conn().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM entry_representations r
+                 JOIN entries e ON e.id = r.entry_id
+                 WHERE e.deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            live_rep_count, 1,
+            "only the surviving text row's representation should remain live"
+        );
+        let _ = big_image_bytes;
+    }
+
+    #[tokio::test]
+    async fn get_payload_returns_none_for_text_entries() {
+        // Text-shaped entries store their primary representation as inline
+        // text, with no `payload_blob`. The preview path must therefore
+        // return `None` for them so callers don't try to render the
+        // representation row's `NULL` blob as image bytes.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "just text").await;
+
+        let payload = store.get_payload(id).await.unwrap();
+        assert!(payload.is_none());
     }
 }

@@ -422,8 +422,8 @@ impl NagoriRuntime {
                 "blocked entries cannot be copied".to_owned(),
             ));
         }
-        // Image content survives capture as a `payload_blob` row plus an
-        // `ImageContent` whose `pending_bytes` is dropped on deserialise, so
+        // Image bytes survive capture in an `entry_representations` row
+        // whose `ImageContent.pending_bytes` is dropped on deserialise, so
         // hydrate the bytes before the platform writer needs them.
         if let ClipboardContent::Image(image) = &mut entry.content
             && image.pending_bytes.is_none()

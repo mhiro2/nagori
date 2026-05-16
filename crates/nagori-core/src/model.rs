@@ -284,6 +284,17 @@ pub struct EntryMetadata {
     pub use_count: u32,
     pub source: Option<SourceApp>,
     pub content_hash: ContentHash,
+    /// SHA-256 over the set of preserved representations that copy-back
+    /// would re-publish. While the capture pipeline only carries a single
+    /// `role = 'primary'` representation per entry this stays equal to
+    /// `content_hash`; once the snapshot's alternative representations
+    /// (HTML + plain, RTF + plain, image + file URL, …) start flowing to
+    /// storage the value diverges so dedupe can choose between "same
+    /// primary content" and "same representation set". `#[serde(default)]`
+    /// keeps older serialised entries readable without a migration of the
+    /// JSON payload.
+    #[serde(default)]
+    pub representation_set_hash: Option<ContentHash>,
 }
 
 impl EntryMetadata {
@@ -295,6 +306,7 @@ impl EntryMetadata {
             last_used_at: None,
             use_count: 0,
             source,
+            representation_set_hash: Some(content_hash.clone()),
             content_hash,
         }
     }
