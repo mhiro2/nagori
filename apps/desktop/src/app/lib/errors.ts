@@ -33,6 +33,8 @@ export const describeError = (err: unknown): string => {
         return hasStringField(err, 'message') && err.message.length > 0
           ? err.message
           : t.unsupported;
+      case 'configuration_error':
+        return t.configuration;
       default:
         return fallback;
     }

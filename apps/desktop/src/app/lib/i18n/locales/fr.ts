@@ -272,6 +272,8 @@ export const fr: Messages = {
     notFound: 'Introuvable.',
     invalidInput: 'Entrée invalide.',
     unsupported: 'Non pris en charge sur cette plateforme.',
+    configuration:
+      'Erreur de configuration. Il s’agit d’un défaut de build — veuillez le signaler.',
   },
   locales: {
     system: 'Système (suivre l’OS)',

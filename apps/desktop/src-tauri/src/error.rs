@@ -46,7 +46,10 @@ impl From<AppError> for CommandError {
         // here matches the existing frontend behaviour while protecting
         // against raw error strings hitting the UI through that fallback.
         tracing::warn!(error = %err, "command_error");
-        let recoverable = !matches!(err, AppError::NotFound | AppError::Policy(_));
+        let recoverable = !matches!(
+            err,
+            AppError::NotFound | AppError::Policy(_) | AppError::Configuration(_)
+        );
         Self {
             code: error_code(&err).to_owned(),
             message: user_message(&err),
@@ -66,6 +69,7 @@ const fn error_code(err: &AppError) -> &'static str {
         AppError::NotFound => "not_found",
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
+        AppError::Configuration(_) => "configuration_error",
     }
 }
 
@@ -83,6 +87,12 @@ fn user_message(err: &AppError) -> String {
         AppError::Ai(_) => "AI action failed.".to_owned(),
         AppError::Policy(_) => "Action blocked by policy.".to_owned(),
         AppError::NotFound => "Not found.".to_owned(),
+        // Configuration errors mean the desktop was built with a
+        // platform-adapter wiring gap (clipboard / paste left unset on a
+        // production path). The detail isn't actionable for the user —
+        // they hit a build defect — so collapse to a generic message and
+        // let the warn! log carry the structured cause for triage.
+        AppError::Configuration(_) => "Configuration error.".to_owned(),
         // Permission/InvalidInput/Unsupported messages are already
         // user-curated (permission hints, hotkey-format errors, etc.) so
         // forwarding them gives the user actionable feedback without

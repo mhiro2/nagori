@@ -53,10 +53,6 @@ pub struct NagoriRuntime {
 }
 
 impl NagoriRuntime {
-    pub fn new(store: SqliteStore) -> Self {
-        Self::builder(store).build()
-    }
-
     pub fn builder(store: SqliteStore) -> NagoriRuntimeBuilder {
         NagoriRuntimeBuilder {
             store,
@@ -154,7 +150,10 @@ impl NagoriRuntime {
             Err(err) => IpcResponse::Error(IpcError {
                 code: error_code(&err).to_owned(),
                 message: err.to_string(),
-                recoverable: !matches!(err, AppError::NotFound | AppError::Policy(_)),
+                recoverable: !matches!(
+                    err,
+                    AppError::NotFound | AppError::Policy(_) | AppError::Configuration(_)
+                ),
             }),
         }
     }
@@ -668,15 +667,64 @@ impl NagoriRuntimeBuilder {
         self
     }
 
-    pub fn build(self) -> NagoriRuntime {
+    /// Build a production runtime.
+    ///
+    /// Requires `clipboard` and `paste` adapters — those are platform
+    /// integrations whose absence would make the app silently inert
+    /// (capture never fires, `paste_frontmost` always no-ops). Missing
+    /// either returns `AppError::Configuration` so wiring drift surfaces
+    /// at startup instead of as mysterious runtime behaviour.
+    ///
+    /// `ai`, `permissions`, and `socket_path` remain optional: AI falls
+    /// back to a mock provider, permissions are genuinely platform-
+    /// optional, and an empty socket path is meaningful for daemons that
+    /// only serve in-process callers.
+    ///
+    /// Tests that need a runtime without real adapters should call
+    /// [`Self::build_for_test`].
+    pub fn build(mut self) -> std::result::Result<NagoriRuntime, AppError> {
+        let clipboard = self.clipboard.take().ok_or_else(|| {
+            AppError::Configuration(
+                "clipboard adapter is required in production runtime".to_owned(),
+            )
+        })?;
+        let paste = self.paste.take().ok_or_else(|| {
+            AppError::Configuration("paste controller is required in production runtime".to_owned())
+        })?;
+        Ok(self.assemble(clipboard, paste))
+    }
+
+    /// Build a runtime suitable for tests, supplying dummy adapters
+    /// (`MemoryClipboard`, `NoopPasteController`, `MockAiProvider`)
+    /// for anything the caller did not set explicitly.
+    ///
+    /// Production code must use [`Self::build`] so that adapter wiring
+    /// gaps surface as `AppError::Configuration` instead of silently
+    /// substituting in-memory stubs.
+    #[must_use]
+    pub fn build_for_test(mut self) -> NagoriRuntime {
+        let clipboard = self
+            .clipboard
+            .take()
+            .unwrap_or_else(|| Arc::new(MemoryClipboard::new()));
+        let paste = self
+            .paste
+            .take()
+            .unwrap_or_else(|| Arc::new(NoopPasteController));
+        self.assemble(clipboard, paste)
+    }
+
+    fn assemble(
+        self,
+        clipboard: Arc<dyn ClipboardWriter>,
+        paste: Arc<dyn PasteController>,
+    ) -> NagoriRuntime {
         let (settings_tx, settings_rx) = watch::channel(AppSettings::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         NagoriRuntime {
             store: self.store,
-            clipboard: self
-                .clipboard
-                .unwrap_or_else(|| Arc::new(MemoryClipboard::new())),
-            paste: self.paste.unwrap_or_else(|| Arc::new(NoopPasteController)),
+            clipboard,
+            paste,
             ai: self.ai.unwrap_or_else(|| Arc::new(MockAiProvider)),
             ai_registry: Arc::new(AiActionRegistry::default()),
             permissions: self.permissions,
@@ -735,6 +783,7 @@ const fn error_code(err: &AppError) -> &'static str {
         AppError::NotFound => "not_found",
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
+        AppError::Configuration(_) => "configuration_error",
     }
 }
 
@@ -806,7 +855,7 @@ mod tests {
         let clipboard = Arc::new(MemoryClipboard::new());
         let runtime = NagoriRuntime::builder(store)
             .clipboard(clipboard.clone())
-            .build();
+            .build_for_test();
         (runtime, clipboard)
     }
 
@@ -840,7 +889,7 @@ mod tests {
         let runtime = NagoriRuntime::builder(store)
             .clipboard(clipboard.clone())
             .paste(paste)
-            .build();
+            .build_for_test();
         (runtime, clipboard)
     }
 
@@ -1277,6 +1326,42 @@ mod tests {
         assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
     }
 
+    #[test]
+    fn builder_build_errors_when_clipboard_missing() {
+        // `build()` is the production entry point: a missing clipboard
+        // adapter means the runtime would silently fall back to an
+        // in-memory stub and the app would come up with capture
+        // forever-disabled. Pin the contract that this returns
+        // `AppError::Configuration` instead, so wiring drift is caught
+        // at startup rather than as "clipboard quietly stopped working".
+        let store = SqliteStore::open_memory().expect("memory store");
+        let result = NagoriRuntime::builder(store)
+            .paste(Arc::new(nagori_platform::NoopPasteController))
+            .build();
+        match result {
+            Err(AppError::Configuration(ref msg)) if msg.contains("clipboard") => {}
+            Err(err) => panic!("expected Configuration(clipboard), got {err:?}"),
+            Ok(_) => panic!("expected error, builder accepted missing clipboard"),
+        }
+    }
+
+    #[test]
+    fn builder_build_errors_when_paste_missing() {
+        // Symmetrically, a missing paste controller means
+        // `paste_frontmost` would always be a no-op success on platforms
+        // that forgot to wire their adapter. Surface this as
+        // `AppError::Configuration` at build time.
+        let store = SqliteStore::open_memory().expect("memory store");
+        let result = NagoriRuntime::builder(store)
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .build();
+        match result {
+            Err(AppError::Configuration(ref msg)) if msg.contains("paste") => {}
+            Err(err) => panic!("expected Configuration(paste), got {err:?}"),
+            Ok(_) => panic!("expected error, builder accepted missing paste controller"),
+        }
+    }
+
     #[tokio::test]
     async fn paste_frontmost_returns_error_when_controller_reports_pasted_false() {
         // The default `NoopPasteController` returns `PasteResult{pasted: false,
@@ -1286,7 +1371,7 @@ mod tests {
         // runtime must promote `pasted=false` to a Platform error so the UI
         // can warn the user instead of pretending to paste.
         let store = SqliteStore::open_memory().expect("memory store");
-        let runtime = NagoriRuntime::builder(store).build();
+        let runtime = NagoriRuntime::builder(store).build_for_test();
         let err = runtime
             .paste_frontmost()
             .await

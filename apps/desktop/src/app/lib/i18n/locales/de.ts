@@ -273,6 +273,7 @@ export const de: Messages = {
     notFound: 'Nicht gefunden.',
     invalidInput: 'Ungültige Eingabe.',
     unsupported: 'Auf dieser Plattform nicht unterstützt.',
+    configuration: 'Konfigurationsfehler. Dies ist ein Build-Defekt — bitte melden.',
   },
   locales: {
     system: 'System (Betriebssystem folgen)',

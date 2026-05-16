@@ -97,12 +97,14 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 | `not_found`          | Entry id missing or already deleted                                                              |
 | `invalid_input`      | Malformed JSON, bad UUID, conflicting flags                                                      |
 | `unsupported`        | Feature not available on this platform                                                           |
+| `configuration_error`| Runtime built with a missing critical adapter — a build defect, not a user-recoverable failure   |
 | `unauthorized`       | Envelope's `token` field did not match the daemon's `nagori.token`                               |
 | `invalid_request`    | Transport-level rejection: timed-out read, request exceeded `MAX_IPC_BYTES`, or unparseable JSON |
 | `response_too_large` | Handler produced a response exceeding `MAX_IPC_BYTES` after serialisation                        |
 
-`recoverable=false` is set for `not_found`, `policy_error`, `unauthorized`,
-and `response_too_large`; everything else is treated as transient by the CLI.
+`recoverable=false` is set for `not_found`, `policy_error`,
+`configuration_error`, `unauthorized`, and `response_too_large`;
+everything else is treated as transient by the CLI.
 
 When `cli_ipc_enabled` is switched off, the daemon drains the active IPC
 server and removes the socket/token files. While disabled, only `Health`,

@@ -265,6 +265,7 @@ export const ja: Messages = {
     notFound: '対象が見つかりません。',
     invalidInput: '入力内容が無効です。',
     unsupported: 'このプラットフォームでは未対応です。',
+    configuration: '設定エラー（ビルド側の不具合）です。Issue として報告してください。',
   },
   locales: {
     system: 'システム（OS に追従）',

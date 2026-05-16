@@ -242,6 +242,7 @@ export type Messages = {
     notFound: string;
     invalidInput: string;
     unsupported: string;
+    configuration: string;
   };
   locales: {
     system: string;
@@ -527,6 +528,7 @@ export const en: Messages = {
     notFound: 'Not found.',
     invalidInput: 'Invalid input.',
     unsupported: 'Unsupported on this platform.',
+    configuration: 'Configuration error. This is a build defect — please report it.',
   },
   locales: {
     system: 'System (follow OS)',

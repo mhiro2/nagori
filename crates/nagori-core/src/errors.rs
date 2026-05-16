@@ -22,4 +22,6 @@ pub enum AppError {
     InvalidInput(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    #[error("configuration error: {0}")]
+    Configuration(String),
 }

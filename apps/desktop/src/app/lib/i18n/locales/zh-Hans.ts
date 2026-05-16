@@ -259,6 +259,7 @@ export const zhHans: Messages = {
     notFound: '未找到。',
     invalidInput: '输入无效。',
     unsupported: '当前平台不支持。',
+    configuration: '配置错误。这是构建缺陷，请提交问题报告。',
   },
   locales: {
     system: '系统（跟随操作系统）',

@@ -21,6 +21,7 @@ use nagori_ipc::{
     IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest, PinEntryRequest,
     RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
 };
+use nagori_platform::{MemoryClipboard, NoopPasteController};
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -263,7 +264,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
             AppError::Storage(_)
             | AppError::Search(_)
             | AppError::Platform(_)
-            | AppError::Ai(_) => 8,
+            | AppError::Ai(_)
+            | AppError::Configuration(_) => 8,
         };
     }
     // No `AppError` reached us. The previous behaviour substring-matched
@@ -295,6 +297,7 @@ fn ipc_error_to_anyhow(err: &nagori_ipc::IpcError) -> anyhow::Error {
         "search_error" => AppError::Search(err.message.clone()),
         "platform_error" => AppError::Platform(err.message.clone()),
         "ai_error" => AppError::Ai(err.message.clone()),
+        "configuration_error" => AppError::Configuration(err.message.clone()),
         // An unrecognised code is by definition something this CLI
         // build doesn't know how to classify. Surface it as a generic
         // internal error rather than guessing a bucket — an unknown
@@ -355,7 +358,7 @@ async fn run_local_command(cli: Cli) -> Result<()> {
         }
         Command::Add(args) => {
             let text = read_text(args)?;
-            let runtime = build_headless_runtime(store.clone());
+            let runtime = build_headless_runtime(store.clone())?;
             let id = runtime.add_text(text).await?;
             let entry = store
                 .get(id)
@@ -402,7 +405,7 @@ async fn run_local_command(cli: Cli) -> Result<()> {
             print_clear_result(deleted, format);
         }
         Command::Ai(args) => {
-            let runtime = build_headless_runtime(store.clone());
+            let runtime = build_headless_runtime(store.clone())?;
             let output = runtime
                 .run_ai_action(parse_id(&args.id)?, args.action)
                 .await?;
@@ -484,7 +487,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
             .socket_path(config.socket_path.clone())
-            .build();
+            .build()?;
         run_daemon(runtime, clipboard, config, Some(window)).await?;
         Ok(())
     }
@@ -500,7 +503,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
             .socket_path(config.socket_path.clone())
-            .build();
+            .build()?;
         run_daemon(runtime, clipboard, config, Some(window)).await?;
         Ok(())
     }
@@ -515,7 +518,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
             .socket_path(config.socket_path.clone())
-            .build();
+            .build()?;
         run_daemon(runtime, clipboard, config, Some(window)).await?;
         Ok(())
     }
@@ -686,12 +689,6 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-// On platforms without a native adapter the body never returns Err, but
-// the macOS / Windows / Linux paths need `?`.
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
-    allow(clippy::unnecessary_wraps)
-)]
 fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
     #[cfg(target_os = "macos")]
     {
@@ -702,7 +699,7 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
             .paste(Arc::new(MacosPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
-            .build())
+            .build()?)
     }
     #[cfg(target_os = "windows")]
     {
@@ -713,7 +710,7 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
             .paste(Arc::new(WindowsPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
-            .build())
+            .build()?)
     }
     #[cfg(target_os = "linux")]
     {
@@ -724,20 +721,34 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
             .paste(Arc::new(LinuxPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(permissions)
-            .build())
+            .build()?)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Ok(NagoriRuntime::builder(store)
-            .ai(Arc::new(LocalAiProvider::default()))
-            .build())
+        let _ = store;
+        Err(AppError::Unsupported(
+            "copy/paste runtime is only available on macOS, Windows, and Linux".to_owned(),
+        )
+        .into())
     }
 }
 
-fn build_headless_runtime(store: SqliteStore) -> NagoriRuntime {
-    NagoriRuntime::builder(store)
+/// Build a runtime for CLI commands that don't touch the OS clipboard.
+///
+/// `add` and `ai` operate on the store and AI provider only; they never
+/// invoke `ClipboardWriter::set_*` or `PasteController::paste_frontmost`.
+/// Wire explicit `MemoryClipboard` / `NoopPasteController` so the builder
+/// never sees missing adapters — the safety check in
+/// `NagoriRuntimeBuilder::build` stays meaningful for paths that *do*
+/// need real clipboard integration. The function still propagates a
+/// `Result` so a future required adapter surfaces here as a user-facing
+/// CLI error instead of a panic.
+fn build_headless_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
+    Ok(NagoriRuntime::builder(store)
+        .clipboard(Arc::new(MemoryClipboard::new()))
+        .paste(Arc::new(NoopPasteController))
         .ai(Arc::new(LocalAiProvider::default()))
-        .build()
+        .build()?)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1258,6 +1269,7 @@ mod tests {
             (AppError::Search("x".into()), 8),
             (AppError::Platform("x".into()), 8),
             (AppError::Ai("x".into()), 8),
+            (AppError::Configuration("x".into()), 8),
         ];
         for (err, expected) in table {
             let label = format!("{err:?}");
@@ -1289,6 +1301,7 @@ mod tests {
             ("search_error", 8),
             ("platform_error", 8),
             ("ai_error", 8),
+            ("configuration_error", 8),
         ];
         for (code, expected_exit) in cases {
             let err = err_with_code(code);

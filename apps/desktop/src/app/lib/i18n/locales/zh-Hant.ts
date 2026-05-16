@@ -259,6 +259,7 @@ export const zhHant: Messages = {
     notFound: '找不到。',
     invalidInput: '輸入無效。',
     unsupported: '目前的平台不支援。',
+    configuration: '設定錯誤。這是建置缺陷，請提交問題回報。',
   },
   locales: {
     system: '系統（跟隨作業系統）',

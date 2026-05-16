@@ -274,6 +274,7 @@ export const es: Messages = {
     notFound: 'No encontrado.',
     invalidInput: 'Entrada no válida.',
     unsupported: 'No compatible con esta plataforma.',
+    configuration: 'Error de configuración. Es un defecto de compilación — por favor, repórtalo.',
   },
   locales: {
     system: 'Sistema (seguir el SO)',

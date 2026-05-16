@@ -501,7 +501,8 @@ mod tests {
             shutdown_grace: Duration::from_millis(50),
             ..DaemonConfig::default()
         };
-        let runtime = NagoriRuntime::new(SqliteStore::open_memory().expect("memory store"));
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
         let settings_rx = runtime.settings_subscribe();
         let shutdown = runtime.shutdown_handle();
         let initial_server = spawn_ipc_server(runtime.clone(), &config, shutdown.clone())

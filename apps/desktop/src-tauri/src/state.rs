@@ -301,7 +301,7 @@ impl AppState {
             .paste(Arc::new(MacosPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(Arc::new(MacosPermissionChecker))
-            .build();
+            .build()?;
         Ok(Self {
             runtime,
             window,
@@ -321,7 +321,7 @@ impl AppState {
             .paste(Arc::new(WindowsPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(Arc::new(WindowsPermissionChecker))
-            .build();
+            .build()?;
         Ok(Self {
             runtime,
             window,
@@ -348,7 +348,7 @@ impl AppState {
             .paste(Arc::new(LinuxPasteController))
             .ai(Arc::new(LocalAiProvider::default()))
             .permissions(Arc::new(LinuxPermissionChecker))
-            .build();
+            .build()?;
         Ok(Self {
             runtime,
             window,

@@ -21,6 +21,7 @@ describe('describeError', () => {
     ['policy_error', () => t().policy],
     ['not_found', () => t().notFound],
     ['invalid_input', () => t().invalidInput],
+    ['configuration_error', () => t().configuration],
   ];
 
   for (const [code, expected] of codes) {

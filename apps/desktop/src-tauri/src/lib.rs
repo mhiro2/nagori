@@ -840,7 +840,7 @@ mod image_scheme_tests {
 
     fn build_runtime() -> NagoriRuntime {
         let store = SqliteStore::open_memory().expect("memory store");
-        NagoriRuntime::builder(store).build()
+        NagoriRuntime::builder(store).build_for_test()
     }
 
     fn make_image_entry(sensitivity: Sensitivity) -> ClipboardEntry {

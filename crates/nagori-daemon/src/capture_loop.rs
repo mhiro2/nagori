@@ -69,12 +69,13 @@ enum CaptureErrorKind {
     NotFound,
     InvalidInput,
     Unsupported,
+    Configuration,
 }
 
 impl CaptureErrorKind {
     /// Number of distinct buckets — used to size the per-kind warn
     /// state arrays. Keep in sync with the variants above.
-    const COUNT: usize = 9;
+    const COUNT: usize = 10;
 
     const fn from_error(err: &AppError) -> Self {
         match err {
@@ -87,6 +88,7 @@ impl CaptureErrorKind {
             AppError::NotFound => Self::NotFound,
             AppError::InvalidInput(_) => Self::InvalidInput,
             AppError::Unsupported(_) => Self::Unsupported,
+            AppError::Configuration(_) => Self::Configuration,
         }
     }
 
@@ -101,6 +103,7 @@ impl CaptureErrorKind {
             Self::NotFound => "not_found",
             Self::InvalidInput => "invalid_input",
             Self::Unsupported => "unsupported",
+            Self::Configuration => "configuration",
         }
     }
 }

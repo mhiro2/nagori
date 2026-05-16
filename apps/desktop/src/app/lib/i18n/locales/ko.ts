@@ -263,6 +263,7 @@ export const ko: Messages = {
     notFound: '찾을 수 없습니다.',
     invalidInput: '입력이 올바르지 않습니다.',
     unsupported: '이 플랫폼에서는 지원되지 않습니다.',
+    configuration: '구성 오류입니다. 빌드 결함이므로 이슈로 보고해 주세요.',
   },
   locales: {
     system: '시스템 (OS 따름)',
