@@ -1,5 +1,6 @@
 pub mod errors;
 pub mod factory;
+pub mod image_signature;
 pub mod limits;
 pub mod model;
 pub mod policy;
@@ -10,6 +11,7 @@ pub mod text;
 
 pub use errors::{AppError, Result};
 pub use factory::EntryFactory;
+pub use image_signature::{ImageFormat, detect as detect_image_signature, matches_declared_mime};
 pub use limits::{MAX_ENTRY_SIZE_BYTES, MAX_IPC_BYTES};
 pub use model::*;
 pub use policy::{
