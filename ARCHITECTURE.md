@@ -187,9 +187,11 @@ ClipboardReader.current_sequence_with_max()
                                              platform supports it)
   → EntryFactory.from_snapshot()           (decode → ClipboardEntry +
                                             SHA-256 content hash +
-                                            search document)
+                                            search document +
+                                            pending_representations for
+                                            every validated rep)
   → kind guard  (settings.capture_kinds)
-  → size guard  (settings.max_entry_size_bytes)
+  → primary-size guard (settings.max_entry_size_bytes)
   → SensitivityClassifier.classify()       (built-in detectors +
                                             app_denylist + user regexes)
         ├─ Blocked → audit + drop
@@ -198,6 +200,14 @@ ClipboardReader.current_sequence_with_max()
         ├─ Block         → audit + drop
         ├─ StoreRedacted → rewrite body / hash / FTS / ngrams
         └─ StoreFull     → keep raw bytes
+  → Secret? clear pending_representations   (alternatives still hold the
+                                             raw secret — drop them and
+                                             reset representation_set_hash
+                                             to mirror content_hash)
+  → trim_alternatives_to_budget             (enforce
+                                             max_entry_size_bytes over the
+                                             full rep set; recompute
+                                             representation_set_hash)
   → search-cache invalidate (pre)
   → EntryRepository.insert()               (single SQLite tx writes
                                             entries + search_documents
@@ -299,11 +309,29 @@ can be plugged in without changing the entry model.
 
 **`EntryMetadata`** — timestamps, source app (`bundle_id`, `name`,
 `executable_path`), use count, `ContentHash` (SHA-256 — used for dedup),
-and `representation_set_hash`. The latter is currently identical to
-`content_hash` (one canonical primary representation per entry); the
-field exists so the capture pipeline can later store multiple
-representations per entry and dedup on their joint hash without changing
-the storage schema again.
+and `representation_set_hash`. The set hash is SHA-256 over a canonical
+encoding of every persisted representation
+(`role|mime|ordinal|sha256(payload)` rows, joined with newlines after
+sorting), so dedup can recognise "same representation set" separately
+from "same primary body". For single-representation entries (CLI
+`add_text`, synthesised rows, Secret entries whose alternatives were
+scrubbed during classification) the column reuses `content_hash`; once
+alternatives or a plain fallback are present it diverges.
+
+**`pending_representations`** (`Vec<StoredClipboardRepresentation>`) —
+an in-memory-only field on `ClipboardEntry` (`#[serde(skip)]`) that
+carries every allowlisted, magic-number-validated, non-empty
+representation a snapshot produced. The factory fills it in
+`EntryFactory::from_snapshot`; the storage layer drains it into
+`entry_representations`; the field is always empty after a database
+round-trip (the persisted rows are the source of truth). Each entry
+records a `role` (`Primary` / `PlainFallback` / `Alternative`), a
+canonical `mime_type`, an `ordinal`, and a typed `data` (`InlineText`,
+`DatabaseBlob`, or `FilePaths`). The capture pipeline runs
+`ClipboardEntry::trim_alternatives_to_budget` so the user's
+`max_entry_size_bytes` covers the full set; the primary is preserved
+even if oversized — that case is rejected upstream by the
+`payload_bytes` guard before classification.
 
 **`SearchDocument`** — title, preview, `normalized_text`, tokens,
 language. Indexed by both FTS5 and the ngram table.
@@ -390,7 +418,7 @@ are forward-only; downgrades are not supported.
 | Table | Purpose |
 |-------|---------|
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column identifies the joint hash of the entry's representations so duplicate sets can be deduped without re-reading the children. |
-| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime` / `payload_ref`, and a denormalised `byte_count` used by the retention budget. Today every entry has a single `role = 'primary'` row; the table is the seam for multi-representation entries (e.g. RTF + plain-text fallback) without another schema migration. |
+| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime` / `payload_ref`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. |
 | `search_fts` | FTS5 virtual table over `title` / `preview` / `normalized_text` (`unicode61`). |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. |
