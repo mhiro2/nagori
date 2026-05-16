@@ -2959,6 +2959,7 @@ dependencies = [
  "async-trait",
  "nagori-core",
  "serde",
+ "serde_json",
  "time",
  "tokio",
 ]
