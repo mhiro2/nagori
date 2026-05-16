@@ -4,16 +4,18 @@ use arboard::Clipboard;
 use async_trait::async_trait;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, Result,
+    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
+    StoredClipboardRepresentation,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardItem, NSPasteboardType, NSPasteboardTypeFileURL,
-    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeTIFF,
+    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSData};
+use objc2_foundation::{NSArray, NSData, NSString};
 use time::OffsetDateTime;
 
 #[cfg(target_os = "macos")]
@@ -221,6 +223,17 @@ impl ClipboardWriter for MacosClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
+
+    async fn write_representations(
+        &self,
+        entry: &ClipboardEntry,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Result<()> {
+        if representations.is_empty() {
+            return self.write_entry(entry).await;
+        }
+        self.publish_representations(representations.to_vec()).await
+    }
 }
 
 impl MacosClipboard {
@@ -275,6 +288,108 @@ impl MacosClipboard {
         Err(AppError::Unsupported(
             "image clipboard writes are macOS-only".to_owned(),
         ))
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn publish_representations(
+        &self,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<()> {
+        let clipboard = self.clipboard.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            // Hold the arboard mutex across the whole clearContents + setData
+            // batch so a concurrent reader cannot observe a partial state with
+            // the primary published but the plain fallback still missing.
+            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            objc2::rc::autoreleasepool(|_pool| -> Result<()> {
+                // SAFETY: AppKit FFI on the shared `NSPasteboard`. The pasteboard
+                // type constants are `'static` extern symbols owned by AppKit, and
+                // every `NSString`/`NSData` we hand off is freshly retained on the
+                // ObjC heap so it does not depend on any Rust lifetime once the
+                // call returns. `clearContents` plus the per-type set calls happen
+                // under the arboard mutex above, so no concurrent writer can race
+                // a torn batch between them.
+                unsafe {
+                    let pb = NSPasteboard::generalPasteboard();
+                    pb.clearContents();
+                    let mut published = 0_usize;
+                    for rep in &representations {
+                        if publish_one_representation(&pb, rep) {
+                            published = published.saturating_add(1);
+                        }
+                    }
+                    if published == 0 {
+                        return Err(AppError::Platform(
+                            "no stored representation matched a NSPasteboard type".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                }
+            })
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unused_async)]
+    async fn publish_representations(
+        &self,
+        _representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<()> {
+        Err(AppError::Unsupported(
+            "multi-representation clipboard writes are macOS-only".to_owned(),
+        ))
+    }
+}
+
+/// Publish a single stored representation onto the shared `NSPasteboard`.
+///
+/// Returns `true` when the rep mapped to a known `AppKit` pasteboard type and
+/// the underlying `setString`/`setData` call returned `YES`. Anything else
+/// (unmapped MIME, image rep that the storage layer hydrated as inline text,
+/// `text/uri-list` which would require its own `NSPasteboardItem` array) is
+/// skipped with a `tracing::debug!` so the caller can still publish the rest
+/// of the set without blocking copy-back on a single unsupported type.
+#[cfg(target_os = "macos")]
+unsafe fn publish_one_representation(
+    pb: &NSPasteboard,
+    rep: &StoredClipboardRepresentation,
+) -> bool {
+    match (rep.mime_type.as_str(), &rep.data) {
+        ("text/plain", RepresentationDataRef::InlineText(text)) => {
+            let value = NSString::from_str(text);
+            // SAFETY: `pb` is the shared general pasteboard already cleared by
+            // the caller, `value` is a freshly retained NSString that AppKit
+            // copies, and `NSPasteboardTypeString` is a static framework
+            // constant.
+            unsafe { pb.setString_forType(&value, NSPasteboardTypeString) }
+        }
+        ("text/html", RepresentationDataRef::InlineText(text)) => {
+            let value = NSString::from_str(text);
+            unsafe { pb.setString_forType(&value, NSPasteboardTypeHTML) }
+        }
+        ("application/rtf", RepresentationDataRef::InlineText(text)) => {
+            let value = NSString::from_str(text);
+            unsafe { pb.setString_forType(&value, NSPasteboardTypeRTF) }
+        }
+        ("image/png", RepresentationDataRef::DatabaseBlob(bytes)) => {
+            let data = NSData::with_bytes(bytes);
+            unsafe { pb.setData_forType(Some(&data), NSPasteboardTypePNG) }
+        }
+        ("image/tiff", RepresentationDataRef::DatabaseBlob(bytes)) => {
+            let data = NSData::with_bytes(bytes);
+            unsafe { pb.setData_forType(Some(&data), NSPasteboardTypeTIFF) }
+        }
+        (mime, _) => {
+            tracing::debug!(
+                mime = %mime,
+                role = ?rep.role,
+                ordinal = rep.ordinal,
+                "skipping representation without a NSPasteboard mapping",
+            );
+            false
+        }
     }
 }
 
@@ -457,7 +572,7 @@ fn oversized_payload(max_bytes: usize) -> Option<usize> {
             {
                 return Some(string.len());
             }
-            if let Some(string) = pb.stringForType(objc2_app_kit::NSPasteboardTypeString)
+            if let Some(string) = pb.stringForType(NSPasteboardTypeString)
                 && string.len() > max_bytes
             {
                 return Some(string.len());
@@ -529,8 +644,10 @@ fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
 #[cfg(target_os = "macos")]
 mod tests {
     use super::*;
-    use nagori_core::{EntryFactory, ImageContent, PayloadRef};
-    use objc2_foundation::{NSArray, NSString};
+    use nagori_core::{
+        EntryFactory, ImageContent, PayloadRef, RepresentationRole, StoredClipboardRepresentation,
+    };
+    use objc2_foundation::NSArray;
 
     /// Smallest valid 1x1 transparent PNG; same fixture used by the
     /// `scripts/e2e-macos.sh` capture step.
@@ -612,11 +729,12 @@ mod tests {
         }
     }
 
-    /// Cover PNG / TIFF / text / unsupported-mime cases in one test so
-    /// they share a single serialized run against the system pasteboard.
-    /// Splitting them into separate `#[tokio::test]`s would let cargo's
-    /// thread pool race them on the singleton `NSPasteboard`.
+    /// Cover PNG / TIFF / text / unsupported-mime / multi-rep cases in one
+    /// test so they share a single serialized run against the system
+    /// pasteboard. Splitting them into separate `#[tokio::test]`s would let
+    /// cargo's thread pool race them on the singleton `NSPasteboard`.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn write_entry_round_trips_image_and_text() {
         let clipboard = match MacosClipboard::new() {
             Ok(clipboard) => clipboard,
@@ -689,6 +807,97 @@ mod tests {
         assert!(
             matches!(err, AppError::Unsupported(_)),
             "expected AppError::Unsupported for image/webp, got {err:?}"
+        );
+
+        // Preserve copy-back: a rich-text entry should land HTML + plain
+        // fallback + RTF on the pasteboard in a single atomic batch so a
+        // downstream paste target can pick the richest representation the
+        // source originally offered.
+        let host_entry =
+            EntryFactory::from_text("write_representations rich-text round-trip plain body");
+        let reps = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/html".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText(
+                    "<p>write_representations rich-text round-trip <strong>html</strong></p>"
+                        .to_owned(),
+                ),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::PlainFallback,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(
+                    "write_representations rich-text round-trip plain body".to_owned(),
+                ),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "application/rtf".to_owned(),
+                ordinal: 2,
+                data: RepresentationDataRef::InlineText("{\\rtf1\\ansi rich body}".to_owned()),
+            },
+        ];
+        clipboard
+            .write_representations(&host_entry, &reps)
+            .await
+            .expect("write_representations multi-rep batch");
+        let snapshot = clipboard
+            .current_snapshot()
+            .await
+            .expect("snapshot after multi-rep write");
+        let html_back = snapshot
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::Text(t) if rep.mime_type == "text/html" => Some(t.clone()),
+                _ => None,
+            })
+            .expect("text/html missing from snapshot after multi-rep write");
+        assert!(
+            html_back.contains("<strong>html</strong>"),
+            "expected HTML rep to survive the multi-rep write, got {html_back:?}"
+        );
+        let plain_back = snapshot
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::Text(t) if rep.mime_type == "text/plain" => Some(t.clone()),
+                _ => None,
+            })
+            .expect("text/plain missing from snapshot after multi-rep write");
+        assert_eq!(
+            plain_back, "write_representations rich-text round-trip plain body",
+            "plain fallback must be published alongside the HTML primary",
+        );
+
+        // Empty representation set must fall back to write_entry semantics so
+        // a caller that hands in an unhydrated list still publishes the
+        // primary content rather than silently leaving the pasteboard empty.
+        let fallback_entry = EntryFactory::from_text(
+            "write_representations empty-fallback delegates to write_entry",
+        );
+        clipboard
+            .write_representations(&fallback_entry, &[])
+            .await
+            .expect("empty representations must fall back to write_entry");
+        let snapshot = clipboard
+            .current_snapshot()
+            .await
+            .expect("snapshot after empty-fallback write");
+        let fallback_back = snapshot
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::Text(t) if rep.mime_type == "text/plain" => Some(t.clone()),
+                _ => None,
+            })
+            .expect("text/plain missing after empty-fallback write");
+        assert_eq!(
+            fallback_back, "write_representations empty-fallback delegates to write_entry",
+            "empty rep list should publish entry plain text via write_entry",
         );
     }
 
