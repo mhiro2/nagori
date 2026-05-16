@@ -23,6 +23,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
         capture_files: Capability::Available,
         write_text: Capability::Available,
         write_image: Capability::Available,
+        // NSPasteboard's `clearContents` + `setData:forType:` lets
+        // `MacosClipboard::write_representations` republish every
+        // captured representation in one transaction, so a Preserve
+        // copy-back can hand the receiver the same MIME set the source
+        // advertised.
+        clipboard_multi_representation_write: Capability::Available,
         auto_paste: Capability::RequiresPermission {
             permission: PermissionKind::Accessibility,
             message: "auto-paste requires the Accessibility permission. Open \
@@ -57,6 +63,7 @@ mod tests {
             &caps.capture_files,
             &caps.write_text,
             &caps.write_image,
+            &caps.clipboard_multi_representation_write,
             &caps.global_hotkey,
             &caps.frontmost_app,
             &caps.permissions_ui,

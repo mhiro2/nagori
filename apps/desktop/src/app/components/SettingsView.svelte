@@ -206,6 +206,10 @@
       { label: "Capture files", capability: capabilities.captureFiles },
       { label: "Write text", capability: capabilities.writeText },
       { label: "Write image", capability: capabilities.writeImage },
+      {
+        label: "Multi-representation copy-back",
+        capability: capabilities.clipboardMultiRepresentationWrite,
+      },
       { label: "Auto-paste", capability: capabilities.autoPaste },
       { label: "Global hotkey", capability: capabilities.globalHotkey },
       { label: "Frontmost app", capability: capabilities.frontmostApp },

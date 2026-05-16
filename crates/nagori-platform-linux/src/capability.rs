@@ -44,6 +44,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
                  from macOS sessions cannot be written back."
                 .to_owned(),
         },
+        clipboard_multi_representation_write: Capability::Unsupported {
+            reason: "wl-clipboard-rs publishes a single MIME per offer; \
+                 Wayland copy-back falls back to the primary representation \
+                 via write_text and cannot re-publish HTML/RTF alongside it."
+                .to_owned(),
+        },
         auto_paste: Capability::RequiresExternalTool {
             tool: "wtype".to_owned(),
             install_hint: Some(
@@ -118,6 +124,7 @@ mod tests {
             &caps.capture_image,
             &caps.capture_files,
             &caps.write_image,
+            &caps.clipboard_multi_representation_write,
             &caps.global_hotkey,
             &caps.frontmost_app,
             &caps.permissions_ui,

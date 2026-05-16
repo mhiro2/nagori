@@ -29,6 +29,13 @@ pub fn report_capabilities() -> PlatformCapabilities {
                  to Unsupported on copy-back."
                 .to_owned(),
         },
+        clipboard_multi_representation_write: Capability::Unsupported {
+            reason: "Windows copy-back is primary-only on this adapter; \
+                 SetClipboardData with multiple CF_* formats in one \
+                 transaction is not wired yet, so Preserve falls back to \
+                 the single-format write_text path."
+                .to_owned(),
+        },
         auto_paste: Capability::Available,
         global_hotkey: Capability::Available,
         frontmost_app: Capability::Available,
@@ -75,6 +82,7 @@ mod tests {
         for cap in [
             &caps.capture_image,
             &caps.write_image,
+            &caps.clipboard_multi_representation_write,
             &caps.permissions_ui,
             &caps.update_check,
         ] {

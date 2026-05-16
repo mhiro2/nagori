@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nagori_core::{
     AppError, ClipboardData, ClipboardEntry, ClipboardRepresentation, ClipboardSequence,
-    ClipboardSnapshot, ContentHash, Result,
+    ClipboardSnapshot, ContentHash, Result, StoredClipboardRepresentation,
 };
 use time::OffsetDateTime;
 
@@ -75,6 +75,26 @@ pub trait ClipboardWriter: Send + Sync {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()>;
     async fn write_plain(&self, entry: &ClipboardEntry) -> Result<()>;
     async fn write_text(&self, text: &str) -> Result<()>;
+
+    /// Publish every stored representation for `entry` in a single
+    /// pasteboard transaction.
+    ///
+    /// Used by `PasteFormat::Preserve` copy-back so a receiver that
+    /// understands HTML / RTF / image bytes can pick the richest
+    /// representation the source originally offered, while a plain-text
+    /// target still finds the matching `text/plain` fallback. Platforms
+    /// whose `clipboard_multi_representation_write` capability is
+    /// `Unsupported` (Windows / Linux Wayland today) inherit the default
+    /// implementation that delegates back to `write_entry`, preserving
+    /// the primary-only contract every adapter already honours.
+    async fn write_representations(
+        &self,
+        entry: &ClipboardEntry,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Result<()> {
+        let _ = representations;
+        self.write_entry(entry).await
+    }
 }
 
 #[async_trait]
@@ -108,6 +128,14 @@ impl<T: ClipboardWriter + ?Sized> ClipboardWriter for Arc<T> {
 
     async fn write_text(&self, text: &str) -> Result<()> {
         (**self).write_text(text).await
+    }
+
+    async fn write_representations(
+        &self,
+        entry: &ClipboardEntry,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Result<()> {
+        (**self).write_representations(entry, representations).await
     }
 }
 
@@ -181,4 +209,45 @@ impl ClipboardWriter for MemoryClipboard {
 
 fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
     AppError::Platform(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use nagori_core::{
+        EntryFactory, RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn write_representations_default_falls_back_to_write_entry() {
+        // Platforms without `clipboard_multi_representation_write` keep the
+        // default impl, which has to publish the entry's primary text
+        // through `write_entry`. `MemoryClipboard` inherits that path —
+        // exercising it locks the contract that the daemon's Preserve
+        // copy-back stays functional on Windows / Wayland even when
+        // multi-rep publishing is not available.
+        let clipboard = MemoryClipboard::new();
+        let entry = EntryFactory::from_text("primary body");
+        let reps = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/html".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("<p>primary body</p>".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::PlainFallback,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText("primary body".to_owned()),
+            },
+        ];
+
+        clipboard
+            .write_representations(&entry, &reps)
+            .await
+            .expect("default fallback must succeed for text entries");
+        assert_eq!(clipboard.current_text().as_deref(), Some("primary body"));
+    }
 }

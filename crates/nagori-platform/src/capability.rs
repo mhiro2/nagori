@@ -145,6 +145,13 @@ pub struct PlatformCapabilities {
     pub write_text: Capability,
     /// Writing images back to the clipboard. macOS only.
     pub write_image: Capability,
+    /// Publishing every captured representation (primary, plain
+    /// fallback, and alternatives) in a single pasteboard transaction
+    /// so a `PasteFormat::Preserve` copy-back can re-offer the same
+    /// MIME set the source advertised. macOS exposes this through
+    /// `NSPasteboard`'s `setData:forType:` API; Windows and Wayland
+    /// fall back to the primary-only `write_text` / `write_image` path.
+    pub clipboard_multi_representation_write: Capability,
     /// Synthesising Ctrl/Cmd+V into the previous frontmost surface.
     pub auto_paste: Capability,
     /// Registering an in-app global hotkey via
@@ -183,6 +190,7 @@ pub fn unsupported_capabilities() -> PlatformCapabilities {
         capture_files: unsupported(),
         write_text: unsupported(),
         write_image: unsupported(),
+        clipboard_multi_representation_write: unsupported(),
         auto_paste: unsupported(),
         global_hotkey: unsupported(),
         frontmost_app: unsupported(),
@@ -232,6 +240,7 @@ mod tests {
             &caps.capture_files,
             &caps.write_text,
             &caps.write_image,
+            &caps.clipboard_multi_representation_write,
             &caps.auto_paste,
             &caps.global_hotkey,
             &caps.frontmost_app,

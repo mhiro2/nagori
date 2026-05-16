@@ -1235,6 +1235,7 @@ mod tests {
             capture_files: Capability::Available,
             write_text: Capability::Available,
             write_image: Capability::Available,
+            clipboard_multi_representation_write: Capability::Available,
             auto_paste: Capability::Available,
             global_hotkey: Capability::Available,
             frontmost_app: Capability::Available,

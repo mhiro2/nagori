@@ -221,6 +221,7 @@ export type PlatformCapabilities = {
   captureFiles: Capability;
   writeText: Capability;
   writeImage: Capability;
+  clipboardMultiRepresentationWrite: Capability;
   autoPaste: Capability;
   globalHotkey: Capability;
   frontmostApp: Capability;
