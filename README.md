@@ -31,6 +31,13 @@ every OS, but the runtime gates it to macOS and the MVP surface is
 read-only: users still upgrade by following the GitHub release link
 rather than an in-app `download_and_install` flow.
 
+For the authoritative answer for this OS build, query the runtime
+itself: `nagori capabilities` prints the matrix on the CLI (add
+`--json` for machine-readable output), and the desktop shell mirrors
+it under Settings → Advanced → Platform capabilities. Capabilities
+answer "could this OS ever do X" — pair them with `nagori doctor` /
+the Permissions panel for "does it work right now".
+
 ### Linux requirements
 
 Linux support targets Wayland compositors that expose

@@ -629,6 +629,51 @@ both fall back to **copy-only** behaviour (palette `Enter` and
 The onboarding banner and `nagori doctor` surface the missing
 permission so the user can fix it.
 
+**Capability model.** Permissions answer "does this work right now";
+capabilities answer "could this OS ever do it". The two are intentionally
+separate surfaces:
+
+```rust
+struct PlatformCapabilities {
+    platform: Platform, tier: SupportTier,
+    capture_text: Capability, capture_image: Capability,
+    capture_files: Capability, write_text: Capability,
+    write_image: Capability, auto_paste: Capability,
+    global_hotkey: Capability, frontmost_app: Capability,
+    permissions_ui: Capability, update_check: Capability,
+}
+
+enum Capability {
+    Available,
+    Unsupported { reason: String },
+    RequiresPermission { permission: PermissionKind, message: String },
+    RequiresExternalTool { tool: String, install_hint: Option<String> },
+    Experimental { message: String },
+}
+```
+
+`nagori_platform_native::capabilities()` aggregates per-OS reporters
+(`nagori_platform_{macos,windows,linux}`) at build time and caches the
+matrix on the `NagoriRuntime`. The result is exposed on three surfaces:
+
+- `runtime.capabilities()` — in-process access for the daemon and the
+  Tauri shell.
+- IPC `IpcRequest::Capabilities` → `IpcResponse::Capabilities(Box<…>)`
+  — a control request that bypasses the `cli_ipc_enabled` gate so
+  external diagnostics work even when scripted access is off.
+- CLI `nagori capabilities` — in the default local path (no `--ipc` /
+  `--auto-ipc`) the command short-circuits before the local DB open,
+  so the probe still answers on machines with a misconfigured SQLite
+  path. Honours `--json` / `--jsonl`.
+
+The desktop shell additionally exposes the matrix as a `get_capabilities`
+Tauri command, rendered read-only under Settings → Advanced. Wayland
+`frontmost_app`, Windows `update_check`, and Linux Wayland `auto_paste`
+without `wtype` are the canonical examples of where capability state
+diverges from permission state — the UI can render an actionable hint
+("install `wtype`", "switch to a wlroots compositor") instead of a
+generic "feature unavailable" toast.
+
 ---
 
 ## 11. IPC boundary
