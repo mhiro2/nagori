@@ -14,6 +14,8 @@ vi.mock('../lib/tauri', () => ({
 vi.mock('../lib/commands', () => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
+  getCapabilities: vi.fn(),
+  checkForUpdates: vi.fn(),
 }));
 
 // `onMount` reaches into `@tauri-apps/api/event` to subscribe to hotkey
@@ -22,9 +24,9 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-import { getSettings, updateSettings } from '../lib/commands';
+import { getCapabilities, getSettings, updateSettings } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
-import type { AppSettings } from '../lib/types';
+import type { AppSettings, PlatformCapabilities } from '../lib/types';
 import SettingsView from './SettingsView.svelte';
 
 const baseSettings = (): AppSettings => ({
@@ -61,10 +63,102 @@ const baseSettings = (): AppSettings => ({
   updateChannel: 'stable',
 });
 
+// Capability fixtures mirror what `nagori-platform-{macos,windows,linux}`
+// emit from their `capabilities()` adapter. They're not aiming for an
+// exhaustive enumeration — just the shape of each status variant so the
+// Advanced tab's row + badge renderer is locked down per platform. If
+// the backend matrix shifts (e.g. Linux gains in-process global hotkey
+// support), bump the fixture and the test will catch any UI drift.
+const macosCapabilities = (): PlatformCapabilities => ({
+  platform: 'macos',
+  tier: 'supported',
+  captureText: { status: 'available' },
+  captureImage: { status: 'available' },
+  captureFiles: { status: 'available' },
+  writeText: { status: 'available' },
+  writeImage: { status: 'available' },
+  clipboardMultiRepresentationWrite: { status: 'available' },
+  autoPaste: {
+    status: 'requiresPermission',
+    permission: 'accessibility',
+    message: 'Grant Accessibility access in System Settings.',
+  },
+  globalHotkey: { status: 'available' },
+  frontmostApp: { status: 'available' },
+  permissionsUi: { status: 'available' },
+  updateCheck: { status: 'available' },
+});
+
+const windowsCapabilities = (): PlatformCapabilities => ({
+  platform: 'windows',
+  tier: 'experimental',
+  captureText: { status: 'available' },
+  captureImage: { status: 'available' },
+  captureFiles: { status: 'available' },
+  writeText: { status: 'available' },
+  writeImage: { status: 'available' },
+  // Windows publishes CF_UNICODETEXT + CF_HTML + RTF + CF_DIBV5 + the
+  // registered "PNG" companion + CF_HDROP in one transaction (see
+  // `crates/nagori-platform-windows/src/capability.rs`), so Preserve
+  // copy-back keeps every captured representation alive — multi-rep is
+  // Available, not Unsupported.
+  clipboardMultiRepresentationWrite: { status: 'available' },
+  autoPaste: { status: 'available' },
+  globalHotkey: { status: 'available' },
+  frontmostApp: { status: 'available' },
+  permissionsUi: {
+    status: 'unsupported',
+    reason:
+      'Windows does not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
+  },
+  updateCheck: {
+    status: 'unsupported',
+    reason: 'no signed Windows release bundle is produced yet, so the updater feed is macOS-only.',
+  },
+});
+
+const linuxWaylandCapabilities = (): PlatformCapabilities => ({
+  platform: 'linuxWayland',
+  tier: 'experimental',
+  captureText: { status: 'available' },
+  captureImage: { status: 'available' },
+  captureFiles: { status: 'available' },
+  writeText: { status: 'available' },
+  writeImage: { status: 'available' },
+  clipboardMultiRepresentationWrite: { status: 'available' },
+  autoPaste: {
+    status: 'requiresExternalTool',
+    tool: 'wtype',
+    installHint: 'apt install wtype',
+  },
+  globalHotkey: {
+    status: 'unsupported',
+    reason: 'tauri-plugin-global-shortcut is X11-only; pure Wayland sessions fail to register.',
+  },
+  frontmostApp: {
+    status: 'unsupported',
+    reason: 'Wayland refuses to expose a portable foreground-surface query.',
+  },
+  permissionsUi: {
+    status: 'unsupported',
+    reason:
+      'Wayland sessions do not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
+  },
+  updateCheck: {
+    status: 'unsupported',
+    reason:
+      'no Linux updater feed is published; the tarball ships without in-app update notifications.',
+  },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(getSettings).mockResolvedValue(baseSettings());
+  // Default capabilities response so the existing test suite — which
+  // already exercises the Advanced tab — has a deterministic stub. The
+  // platform-specific tests below override this per-case.
+  vi.mocked(getCapabilities).mockResolvedValue(macosCapabilities());
 });
 
 afterEach(cleanup);
@@ -283,5 +377,164 @@ describe('SettingsView', () => {
         Object.defineProperty(window.navigator, 'languages', originalLanguages);
       }
     }
+  });
+});
+
+// Each row label rendered by `capabilityRows` in SettingsView.svelte.
+// Order matters for the readout assertion: rows are rendered in this
+// order and the test pairs them positionally with the per-platform
+// expectations below.
+const CAPABILITY_LABELS = [
+  'Capture text',
+  'Capture image',
+  'Capture files',
+  'Write text',
+  'Write image',
+  'Multi-representation copy-back',
+  'Auto-paste',
+  'Global hotkey',
+  'Frontmost app',
+  'Permissions UI',
+  'Update check',
+] as const;
+
+// Status badge labels emitted by `capabilityStatusLabel`. Locks the
+// human-readable mapping so a refactor to the enum surface can't
+// silently change what shows up in the table.
+const STATUS_BADGE = {
+  available: 'Available',
+  unsupported: 'Unsupported',
+  requiresPermission: 'Permission',
+  requiresExternalTool: 'External tool',
+  experimental: 'Experimental',
+} as const;
+
+const readCapabilityTable = (
+  container: HTMLElement,
+): {
+  platform: string;
+  tier: string;
+  rows: { label: string; status: string; detail: string }[];
+} => {
+  const meta = container.querySelector('.capability-meta');
+  const platform =
+    meta?.querySelector('span:nth-of-type(1)')?.textContent?.replace('Platform:', '').trim() ?? '';
+  const tier =
+    meta?.querySelector('span:nth-of-type(2)')?.textContent?.replace('Tier:', '').trim() ?? '';
+  const rows = Array.from(container.querySelectorAll('.capability-table tbody tr')).map((row) => ({
+    label: row.querySelector('.capability-label')?.textContent?.trim() ?? '',
+    status: row.querySelector('.capability-status')?.textContent?.trim() ?? '',
+    detail: row.querySelector('.capability-detail')?.textContent?.trim() ?? '',
+  }));
+  return { platform, tier, rows };
+};
+
+describe('SettingsView Advanced tab — capability table', () => {
+  const openAdvancedTab = async (capabilities: PlatformCapabilities) => {
+    vi.mocked(getCapabilities).mockResolvedValue(capabilities);
+    const view = render(SettingsView);
+    const advanced = await view.findByRole('tab', { name: 'Advanced' });
+    await fireEvent.click(advanced);
+    // Wait for the capability table to mount — `getCapabilities` is
+    // resolved off the main render path, so the fieldset only appears
+    // once the promise settles.
+    await view.findByText('Platform capabilities');
+    return view;
+  };
+
+  it('renders macOS capabilities — every cap available except Accessibility-gated auto-paste', async () => {
+    const { container } = await openAdvancedTab(macosCapabilities());
+    const table = readCapabilityTable(container);
+
+    expect(table.platform).toBe('macos');
+    expect(table.tier).toBe('supported');
+    expect(table.rows.map((r) => r.label)).toEqual([...CAPABILITY_LABELS]);
+
+    // Auto-paste is the only Permission-gated cap on macOS — surfaced
+    // so onboarding can prompt the user to grant Accessibility.
+    const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
+    expect(autoPaste?.status).toBe(STATUS_BADGE.requiresPermission);
+    expect(autoPaste?.detail).toContain('accessibility');
+    expect(autoPaste?.detail).toContain('Grant Accessibility access');
+
+    // Every other cap should be `Available`.
+    const others = table.rows.filter((r) => r.label !== 'Auto-paste');
+    for (const row of others) {
+      expect(row.status, `${row.label} should be Available on macOS`).toBe(STATUS_BADGE.available);
+    }
+  });
+
+  it('renders Windows capabilities — permissions UI / updates Unsupported', async () => {
+    const { container } = await openAdvancedTab(windowsCapabilities());
+    const table = readCapabilityTable(container);
+
+    expect(table.platform).toBe('windows');
+    expect(table.tier).toBe('experimental');
+
+    const expectedStatus: Record<string, string> = {
+      'Capture text': STATUS_BADGE.available,
+      'Capture image': STATUS_BADGE.available,
+      'Capture files': STATUS_BADGE.available,
+      'Write text': STATUS_BADGE.available,
+      'Write image': STATUS_BADGE.available,
+      'Multi-representation copy-back': STATUS_BADGE.available,
+      'Auto-paste': STATUS_BADGE.available,
+      'Global hotkey': STATUS_BADGE.available,
+      'Frontmost app': STATUS_BADGE.available,
+      'Permissions UI': STATUS_BADGE.unsupported,
+      'Update check': STATUS_BADGE.unsupported,
+    };
+    for (const row of table.rows) {
+      expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
+    }
+
+    // The unsupported reasons should surface as detail text — the
+    // onboarding UI reads these to explain why a feature is greyed out.
+    const permissions = table.rows.find((r) => r.label === 'Permissions UI');
+    expect(permissions?.detail).toContain('permission UI');
+    const updateCheck = table.rows.find((r) => r.label === 'Update check');
+    expect(updateCheck?.detail).toContain('signed Windows release bundle');
+  });
+
+  it('renders Linux Wayland capabilities — wtype external tool + global hotkey unsupported', async () => {
+    const { container } = await openAdvancedTab(linuxWaylandCapabilities());
+    const table = readCapabilityTable(container);
+
+    expect(table.platform).toBe('linuxWayland');
+    expect(table.tier).toBe('experimental');
+
+    const expectedStatus: Record<string, string> = {
+      'Capture text': STATUS_BADGE.available,
+      'Capture image': STATUS_BADGE.available,
+      'Capture files': STATUS_BADGE.available,
+      'Write text': STATUS_BADGE.available,
+      'Write image': STATUS_BADGE.available,
+      'Multi-representation copy-back': STATUS_BADGE.available,
+      'Auto-paste': STATUS_BADGE.requiresExternalTool,
+      'Global hotkey': STATUS_BADGE.unsupported,
+      'Frontmost app': STATUS_BADGE.unsupported,
+      'Permissions UI': STATUS_BADGE.unsupported,
+      'Update check': STATUS_BADGE.unsupported,
+    };
+    for (const row of table.rows) {
+      expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
+    }
+
+    // Auto-paste detail must surface both the tool name and the
+    // install hint so the user knows what to apt-install.
+    const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
+    expect(autoPaste?.detail).toContain('wtype');
+    expect(autoPaste?.detail).toContain('apt install wtype');
+
+    // Global hotkey explanation covers the X11-only upstream constraint
+    // that motivates the README's Linux footnote.
+    const globalHotkey = table.rows.find((r) => r.label === 'Global hotkey');
+    expect(globalHotkey?.detail).toContain('X11-only');
+
+    // Update check stays Unsupported until the release workflow publishes
+    // a Linux updater feed — backend reason words it as "no Linux updater
+    // feed is published".
+    const updateCheck = table.rows.find((r) => r.label === 'Update check');
+    expect(updateCheck?.detail).toContain('no Linux updater feed is published');
   });
 });
