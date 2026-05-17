@@ -8,6 +8,8 @@ use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
+use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use time::OffsetDateTime;
@@ -27,6 +29,37 @@ use wl_clipboard_rs::{
 /// would put the daemon at risk on a 32-bit Linux host.
 #[cfg(target_os = "linux")]
 const INTERNAL_BODY_CEILING_BYTES: usize = 256 * 1024 * 1024;
+
+/// Image MIME types we will capture, in priority order. Mirrors the
+/// `nagori-core` factory's `is_allowlisted_image_mime` allowlist
+/// (PNG / JPEG / GIF / WebP / TIFF) — capturing a MIME the factory
+/// would later drop wastes the publisher's send and the pipe read for
+/// nothing, so the two lists must stay in lockstep. The lookup order
+/// is also "first-match wins" so the storage layer sees one canonical
+/// image rep per snapshot, matching the Windows adapter's
+/// "publish image/png" behaviour.
+#[cfg(target_os = "linux")]
+const IMAGE_MIME_PRIORITY: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/tiff",
+];
+
+/// Plain-text MIME types `paste::MimeType::Text` cycles through when
+/// it falls back. Mirrors the wl-clipboard-rs internal predicate so we
+/// can probe "is text present at all" against the offer set up front
+/// instead of always paying for an extra `get_contents` round-trip on
+/// pristine sessions.
+#[cfg(target_os = "linux")]
+const TEXT_MIME_HINTS: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "STRING",
+    "TEXT",
+];
 
 /// Linux (Wayland) clipboard adapter.
 ///
@@ -97,21 +130,10 @@ impl ClipboardReader for LinuxClipboard {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
         #[cfg(target_os = "linux")]
         {
-            let read = pipe_read_pass(INTERNAL_BODY_CEILING_BYTES).await?;
-            let sequence = ClipboardSequence::content_hash(read.sequence);
-            let text = read
-                .buffered
-                .map(|bytes| String::from_utf8(bytes).unwrap_or_default())
-                .unwrap_or_default();
-            let mut representations = Vec::new();
-            if !text.is_empty() {
-                representations.push(ClipboardRepresentation {
-                    mime_type: "text/plain".to_owned(),
-                    data: ClipboardData::Text(text),
-                });
-            }
+            let pass = pipe_read_multi_pass(Some(INTERNAL_BODY_CEILING_BYTES)).await?;
+            let representations = pass.representations.unwrap_or_default();
             Ok(ClipboardSnapshot {
-                sequence,
+                sequence: ClipboardSequence::content_hash(pass.sequence),
                 captured_at: OffsetDateTime::now_utc(),
                 source: None,
                 representations,
@@ -135,8 +157,8 @@ impl ClipboardReader for LinuxClipboard {
         // worker occupied by streaming forever.
         #[cfg(target_os = "linux")]
         {
-            let read = pipe_read_pass_no_buffer(INTERNAL_BODY_CEILING_BYTES).await?;
-            Ok(ClipboardSequence::content_hash(read.sequence))
+            let pass = pipe_read_multi_pass_no_buffer(INTERNAL_BODY_CEILING_BYTES).await?;
+            Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -148,8 +170,8 @@ impl ClipboardReader for LinuxClipboard {
     async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
         #[cfg(target_os = "linux")]
         {
-            let read = pipe_read_pass_no_buffer(max_bytes).await?;
-            Ok(ClipboardSequence::content_hash(read.sequence))
+            let pass = pipe_read_multi_pass_no_buffer(max_bytes).await?;
+            Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -167,28 +189,18 @@ impl ClipboardReader for LinuxClipboard {
         // pipe to EOF.
         #[cfg(target_os = "linux")]
         {
-            let read = pipe_read_pass(max_bytes).await?;
-            let sequence = ClipboardSequence::content_hash(read.sequence);
-            match read.buffered {
-                Some(bytes) => {
-                    let text = String::from_utf8(bytes).unwrap_or_default();
-                    let mut representations = Vec::new();
-                    if !text.is_empty() {
-                        representations.push(ClipboardRepresentation {
-                            mime_type: "text/plain".to_owned(),
-                            data: ClipboardData::Text(text),
-                        });
-                    }
-                    Ok(CapturedSnapshot::Captured(ClipboardSnapshot {
-                        sequence,
-                        captured_at: OffsetDateTime::now_utc(),
-                        source: None,
-                        representations,
-                    }))
-                }
+            let pass = pipe_read_multi_pass(Some(max_bytes)).await?;
+            let sequence = ClipboardSequence::content_hash(pass.sequence);
+            match pass.representations {
+                Some(representations) => Ok(CapturedSnapshot::Captured(ClipboardSnapshot {
+                    sequence,
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations,
+                })),
                 None => Ok(CapturedSnapshot::Oversized {
                     sequence,
-                    observed_bytes: read.observed_total,
+                    observed_bytes: pass.observed_total,
                     limit: max_bytes,
                 }),
             }
@@ -203,10 +215,21 @@ impl ClipboardReader for LinuxClipboard {
 #[async_trait]
 impl ClipboardWriter for LinuxClipboard {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()> {
-        if let ClipboardContent::Image(_) = &entry.content {
-            return Err(AppError::Unsupported(
-                "image clipboard writes are not implemented on Linux yet".to_owned(),
-            ));
+        if let ClipboardContent::Image(image) = &entry.content {
+            #[cfg(target_os = "linux")]
+            {
+                let bytes = image.pending_bytes.clone().ok_or_else(|| {
+                    AppError::Platform(
+                        "image payload bytes were not loaded before clipboard write".to_owned(),
+                    )
+                })?;
+                return self.write_image_bytes(bytes).await;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = image;
+                return Err(unsupported_off_target());
+            }
         }
         let Some(text) = entry.plain_text() else {
             return Err(AppError::Unsupported(
@@ -251,21 +274,66 @@ impl ClipboardWriter for LinuxClipboard {
     }
 }
 
-/// Result of one bounded pass over the data-control pipe.
-///
-/// `sequence` is the SHA-256 of the body when it fits within the caller's
-/// read ceiling, or a ceiling/prefix-keyed sentinel above it. The
-/// oversized sentinel intentionally does not include the full body length
-/// because the reader closes the pipe as soon as the ceiling is crossed.
-///
-/// `buffered` is `Some(bytes)` iff the stream reaches EOF before both
-/// `buffer_cap` and the read ceiling. Pass a `buffer_cap` of `None` (via
-/// `pipe_read_pass_no_buffer`) when the caller only needs the sequence —
-/// the helper then skips the allocation and just streams bytes through the
-/// hasher.
 #[cfg(target_os = "linux")]
-struct PipePass {
-    buffered: Option<Vec<u8>>,
+impl LinuxClipboard {
+    async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
+        // Detect the MIME from the byte magic before handing the buffer
+        // to `wl-clipboard-rs`. We cannot use `CopyMimeType::Autodetect`
+        // — that codepath shells out to `xdg-mime` which is not always
+        // installed on minimal Wayland sessions. Doing the probe here
+        // also lets us refuse formats the storage pipeline never
+        // produces (e.g. ICO), so we get a clear error rather than a
+        // silent mismatch on copy-back.
+        let mime = guess_image_mime(&bytes)?;
+        let boxed = bytes.into_boxed_slice();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            copy::copy(
+                Options::new(),
+                Source::Bytes(boxed),
+                CopyMimeType::Specific(mime.to_owned()),
+            )
+            .map_err(|err| AppError::Platform(format!("wl-clipboard image copy failed: {err}")))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn guess_image_mime(bytes: &[u8]) -> Result<&'static str> {
+    let format = image::guess_format(bytes)
+        .map_err(|err| AppError::Platform(format!("image format detection failed: {err}")))?;
+    match format {
+        image::ImageFormat::Png => Ok("image/png"),
+        image::ImageFormat::Jpeg => Ok("image/jpeg"),
+        image::ImageFormat::Gif => Ok("image/gif"),
+        image::ImageFormat::WebP => Ok("image/webp"),
+        image::ImageFormat::Tiff => Ok("image/tiff"),
+        // BMP (and friends) are not in the factory's image allowlist, so
+        // copy-back would publish bytes the daemon could never re-capture
+        // cleanly. Refuse instead of silently mismatching.
+        other => Err(AppError::Unsupported(format!(
+            "image format {other:?} is not supported for Wayland copy-back"
+        ))),
+    }
+}
+
+/// Result of one multi-MIME pass over the Wayland clipboard.
+///
+/// `representations` is `Some(reps)` when the total payload fits within
+/// the buffer cap (or there was no cap). When the total exceeds the
+/// cap or the hard read ceiling, we drop the buffered bytes and return
+/// `None` — the caller surfaces this as a `CapturedSnapshot::Oversized`
+/// without leaking attacker-controlled allocations into the snapshot.
+///
+/// `sequence` is the hex SHA-256 of the concatenated rep bodies (in
+/// the canonical priority order — image → uri-list → text). When the
+/// read ceiling is crossed mid-stream we instead emit
+/// `oversized-over:<ceiling>:<prefix-hash>` so two distinct oversized
+/// clips with different prefixes still produce different sequences.
+#[cfg(target_os = "linux")]
+struct MultiPipePass {
+    representations: Option<Vec<ClipboardRepresentation>>,
     observed_total: usize,
     sequence: String,
 }
@@ -274,102 +342,298 @@ struct PipePass {
 const PIPE_CHUNK: usize = 8 * 1024;
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_pass(buffer_cap: usize) -> Result<PipePass> {
-    pipe_read_pass_internal(Some(buffer_cap), buffer_cap).await
+async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass> {
+    // When the caller asks for buffering, the buffer cap also doubles as
+    // the read ceiling — there is no benefit to streaming past the cap
+    // since we cannot surface those bytes anyway, and reading them only
+    // gives a malicious publisher more time to occupy the blocking worker.
+    let read_ceiling = buffer_cap.unwrap_or(INTERNAL_BODY_CEILING_BYTES);
+    pipe_read_multi_pass_internal(buffer_cap, read_ceiling).await
 }
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_pass_no_buffer(ceiling: usize) -> Result<PipePass> {
-    pipe_read_pass_internal(None, ceiling).await
+async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipePass> {
+    pipe_read_multi_pass_internal(None, read_ceiling).await
 }
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_pass_internal(
+async fn pipe_read_multi_pass_internal(
     buffer_cap: Option<usize>,
     read_ceiling: usize,
-) -> Result<PipePass> {
-    tokio::task::spawn_blocking(move || -> Result<PipePass> {
-        let mut pipe = match paste::get_contents(
-            ClipboardType::Regular,
-            Seat::Unspecified,
-            PasteMimeType::Text,
-        ) {
-            Ok((pipe, _mime)) => pipe,
-            // Empty selection / no seats / no text mime → treat as
-            // empty so the capture loop's body-empty short-circuit
-            // kicks in without logging an error every poll.
-            Err(
-                paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType,
-            ) => {
-                return Ok(PipePass {
-                    buffered: buffer_cap.map(|_| Vec::new()),
+) -> Result<MultiPipePass> {
+    tokio::task::spawn_blocking(move || -> Result<MultiPipePass> {
+        let available = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+            Ok(set) => set,
+            // Empty selection / no seats → treat as empty so the
+            // capture loop's body-empty short-circuit kicks in without
+            // logging an error every poll.
+            Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => {
+                return Ok(MultiPipePass {
+                    representations: buffer_cap.map(|_| Vec::new()),
                     observed_total: 0,
                     sequence: hex::encode(Sha256::new().finalize()),
                 });
             }
             Err(err) => {
                 return Err(AppError::Platform(format!(
-                    "wl-clipboard paste failed: {err}"
+                    "wl-clipboard mime enumeration failed: {err}"
                 )));
             }
         };
-        read_pipe_contents(&mut pipe, buffer_cap, read_ceiling)
+
+        let mut state = MultiReadState::new(buffer_cap, read_ceiling);
+        let mut representations: Vec<ClipboardRepresentation> = Vec::new();
+
+        if let Some(image_mime) = pick_image_mime(&available)
+            && !state.aborted()
+            && let Some(body) = read_specific_mime(&image_mime, &mut state)?
+        {
+            representations.push(ClipboardRepresentation {
+                mime_type: image_mime,
+                data: ClipboardData::Bytes(body),
+            });
+        }
+
+        if available.contains("text/uri-list")
+            && !state.aborted()
+            && let Some(body) = read_specific_mime("text/uri-list", &mut state)?
+            && let Some(paths) = parse_uri_list(&body)
+        {
+            representations.push(ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(paths),
+            });
+        }
+
+        if available
+            .iter()
+            .any(|m| TEXT_MIME_HINTS.contains(&m.as_str()))
+            && !state.aborted()
+            && let Some(body) = read_text(&mut state)?
+        {
+            let text = String::from_utf8(body).unwrap_or_default();
+            if !text.is_empty() {
+                representations.push(ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text(text),
+                });
+            }
+        }
+
+        let observed_total = state.observed_total;
+        let dropped = state.buffer_overflow || state.ceiling_hit;
+        let sequence = state.finalize_sequence();
+
+        Ok(MultiPipePass {
+            representations: if dropped { None } else { Some(representations) },
+            observed_total,
+            sequence,
+        })
     })
     .await
     .map_err(|err| AppError::Platform(err.to_string()))?
 }
 
 #[cfg(target_os = "linux")]
-fn read_pipe_contents(
-    pipe: &mut impl Read,
+fn pick_image_mime(available: &HashSet<String>) -> Option<String> {
+    IMAGE_MIME_PRIORITY
+        .iter()
+        .find(|&&mime| available.contains(mime))
+        .map(|&mime| mime.to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn read_specific_mime(mime: &str, state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
+    match paste::get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        PasteMimeType::Specific(mime),
+    ) {
+        Ok((mut pipe, _mime)) => {
+            state.begin_rep(mime);
+            state.read_pipe(&mut pipe)
+        }
+        // `NoMimeType` races with a publisher that retracted between the
+        // initial enumeration and the specific request — treat as absent.
+        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType) => {
+            Ok(None)
+        }
+        Err(err) => Err(AppError::Platform(format!(
+            "wl-clipboard paste {mime} failed: {err}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
+    // `MimeType::Text` cycles through the documented text MIME variants
+    // so we do not have to second-guess which one a given source app
+    // chose. If none match the offer (rare but possible: STRING-only X11
+    // bridge), `NoMimeType` surfaces and we return None silently.
+    match paste::get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        PasteMimeType::Text,
+    ) {
+        Ok((mut pipe, _mime)) => {
+            state.begin_rep("text/plain");
+            state.read_pipe(&mut pipe)
+        }
+        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType) => {
+            Ok(None)
+        }
+        Err(err) => Err(AppError::Platform(format!(
+            "wl-clipboard paste text failed: {err}"
+        ))),
+    }
+}
+
+/// Parse a `text/uri-list` payload into raw filesystem paths.
+///
+/// Per RFC 2483 each line is a URI separated by CRLF; lines starting
+/// with `#` are comments. We only surface `file://` URIs because the
+/// rest of the pipeline models file lists as filesystem paths
+/// (`ClipboardData::FilePaths`). URI decoding goes through the `url`
+/// crate so percent-escaped paths (`file:///tmp/with%20space`) round-
+/// trip correctly into the user-visible path.
+#[cfg(target_os = "linux")]
+fn parse_uri_list(bytes: &[u8]) -> Option<Vec<String>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Ok(parsed) = url::Url::parse(trimmed) else {
+            continue;
+        };
+        if parsed.scheme() != "file" {
+            continue;
+        }
+        let Ok(path) = parsed.to_file_path() else {
+            continue;
+        };
+        if let Some(s) = path.to_str() {
+            paths.push(s.to_owned());
+        }
+    }
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+#[cfg(target_os = "linux")]
+struct MultiReadState {
+    hasher: Sha256,
+    observed_total: usize,
     buffer_cap: Option<usize>,
     read_ceiling: usize,
-) -> Result<PipePass> {
-    let mut buffer: Option<Vec<u8>> = buffer_cap.map(|_| Vec::new());
-    let mut hasher = Sha256::new();
-    let mut chunk = [0u8; PIPE_CHUNK];
-    let mut observed: usize = 0;
-    loop {
-        let n = pipe
-            .read(&mut chunk)
-            .map_err(|err| AppError::Platform(format!("reading clipboard pipe failed: {err}")))?;
-        if n == 0 {
-            break;
-        }
-        let previous = observed;
-        observed = observed.saturating_add(n);
+    /// Sticky once total payload exceeds `buffer_cap`; subsequent rep
+    /// reads still hash bytes (so the sequence is content-stable) but
+    /// drop the buffered Vec.
+    buffer_overflow: bool,
+    /// Sticky once total payload exceeds `read_ceiling`; once set,
+    /// further reads short-circuit so a malicious owner cannot pin the
+    /// blocking worker by feeding bytes indefinitely.
+    ceiling_hit: bool,
+}
 
-        // Drop the buffer the moment we exceed `buffer_cap`. The
-        // capture loop will see `buffered: None` and surface an
-        // Oversized variant.
-        if let (Some(cap), Some(buf)) = (buffer_cap, buffer.as_mut()) {
-            if observed > cap {
+#[cfg(target_os = "linux")]
+impl MultiReadState {
+    fn new(buffer_cap: Option<usize>, read_ceiling: usize) -> Self {
+        Self {
+            hasher: Sha256::new(),
+            observed_total: 0,
+            buffer_cap,
+            read_ceiling,
+            buffer_overflow: false,
+            ceiling_hit: false,
+        }
+    }
+
+    const fn aborted(&self) -> bool {
+        self.ceiling_hit
+    }
+
+    /// Mix a rep boundary header (`b"\0<mime>\0"`) into the hasher.
+    ///
+    /// Without a boundary the multi-rep sequence is ambiguous: two
+    /// different layouts whose concatenated bodies happen to coincide
+    /// would hash the same and the capture loop would skip the change.
+    /// A short framing prefix is enough to make the hash a function of
+    /// the rep layout, not just the byte stream. We only count the
+    /// hashed-but-unbuffered framing bytes against the read ceiling
+    /// (not against the soft `buffer_cap`) — those bytes never end up
+    /// in a stored representation so they should not push the snapshot
+    /// over the user's `max_entry_size_bytes` budget.
+    fn begin_rep(&mut self, mime: &str) {
+        if self.ceiling_hit {
+            return;
+        }
+        // NUL is forbidden in MIME types so the framing is unambiguous.
+        self.hasher.update(b"\0");
+        self.hasher.update(mime.as_bytes());
+        self.hasher.update(b"\0");
+    }
+
+    fn read_pipe(&mut self, pipe: &mut impl Read) -> Result<Option<Vec<u8>>> {
+        // If we already crossed the ceiling for an earlier rep, do not
+        // open this one — the sequence is already locked to the oversized
+        // sentinel and additional bytes would be wasted work.
+        if self.ceiling_hit {
+            return Ok(None);
+        }
+        // Allocate the per-rep buffer up front when the caller asked for
+        // buffering AND we have not yet exceeded the cumulative cap.
+        let mut buffer: Option<Vec<u8>> = if self.buffer_overflow {
+            None
+        } else {
+            self.buffer_cap.map(|_| Vec::new())
+        };
+        let mut chunk = [0u8; PIPE_CHUNK];
+        loop {
+            let n = pipe.read(&mut chunk).map_err(|err| {
+                AppError::Platform(format!("reading clipboard pipe failed: {err}"))
+            })?;
+            if n == 0 {
+                break;
+            }
+            let previous = self.observed_total;
+            self.observed_total = self.observed_total.saturating_add(n);
+
+            // Ceiling check is the hard limit — hash whatever prefix
+            // still fits, mark sticky, and bail.
+            if self.observed_total > self.read_ceiling {
+                let prefix_remaining = self.read_ceiling.saturating_sub(previous).min(n);
+                if prefix_remaining > 0 {
+                    self.hasher.update(&chunk[..prefix_remaining]);
+                }
+                self.ceiling_hit = true;
+                return Ok(None);
+            }
+            self.hasher.update(&chunk[..n]);
+
+            // Buffer check is the soft cap. We keep hashing past it so
+            // a change to any rep bumps the sequence, but the bytes are
+            // dropped from memory.
+            if let Some(cap) = self.buffer_cap
+                && self.observed_total > cap
+            {
+                self.buffer_overflow = true;
                 buffer = None;
-            } else {
+            } else if let Some(buf) = buffer.as_mut() {
                 buf.extend_from_slice(&chunk[..n]);
             }
         }
-
-        if observed > read_ceiling {
-            let prefix_remaining = read_ceiling.saturating_sub(previous).min(n);
-            if prefix_remaining > 0 {
-                hasher.update(&chunk[..prefix_remaining]);
-            }
-            let prefix_hash = hex::encode(hasher.finalize());
-            return Ok(PipePass {
-                buffered: None,
-                observed_total: observed,
-                sequence: oversized_sequence(read_ceiling, &prefix_hash),
-            });
-        }
-
-        hasher.update(&chunk[..n]);
+        Ok(if self.buffer_overflow { None } else { buffer })
     }
-    Ok(PipePass {
-        buffered: buffer,
-        observed_total: observed,
-        sequence: hex::encode(hasher.finalize()),
-    })
+
+    fn finalize_sequence(self) -> String {
+        if self.ceiling_hit {
+            oversized_sequence(self.read_ceiling, &hex::encode(self.hasher.finalize()))
+        } else {
+            hex::encode(self.hasher.finalize())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -388,7 +652,10 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
-    use super::{PIPE_CHUNK, oversized_sequence, read_pipe_contents};
+    use super::{
+        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, oversized_sequence, parse_uri_list,
+        pick_image_mime,
+    };
 
     struct CountingChunks {
         chunk: Vec<u8>,
@@ -420,37 +687,139 @@ mod tests {
     }
 
     #[test]
-    fn read_pipe_contents_closes_at_configured_ceiling() {
+    fn read_pipe_closes_at_configured_ceiling() {
         let mut reader = CountingChunks::new(PIPE_CHUNK, 8);
-        let pass = read_pipe_contents(&mut reader, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let body = state.read_pipe(&mut reader).unwrap();
 
         assert_eq!(reader.reads, 2);
-        assert_eq!(pass.buffered, None);
-        assert_eq!(pass.observed_total, PIPE_CHUNK * 2);
+        assert!(body.is_none());
+        assert!(state.aborted());
+        assert_eq!(state.observed_total, PIPE_CHUNK * 2);
+
         let expected_prefix = hex::encode(Sha256::digest([b'x'; PIPE_CHUNK]));
         assert_eq!(
-            pass.sequence,
+            state.finalize_sequence(),
             oversized_sequence(PIPE_CHUNK, &expected_prefix)
         );
     }
 
     #[test]
-    fn read_pipe_contents_buffers_within_ceiling() {
+    fn read_pipe_buffers_within_ceiling() {
         let mut reader = io::Cursor::new(b"clipboard".to_vec());
-        let pass = read_pipe_contents(&mut reader, Some(64), 64).unwrap();
+        let mut state = MultiReadState::new(Some(64), 64);
+        let body = state.read_pipe(&mut reader).unwrap();
 
-        assert_eq!(pass.buffered.as_deref(), Some(&b"clipboard"[..]));
-        assert_eq!(pass.observed_total, b"clipboard".len());
+        assert_eq!(body.as_deref(), Some(&b"clipboard"[..]));
+        assert_eq!(state.observed_total, b"clipboard".len());
+        assert!(!state.aborted());
     }
 
     #[test]
-    fn read_pipe_contents_uses_prefix_hash_for_oversized_sequence() {
+    fn read_pipe_uses_prefix_hash_for_oversized_sequence() {
+        let mut first_reader = io::Cursor::new([b'a'; PIPE_CHUNK + 1]);
+        let mut second_reader = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
+
+        let mut s1 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let _ = s1.read_pipe(&mut first_reader).unwrap();
+        let mut s2 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let _ = s2.read_pipe(&mut second_reader).unwrap();
+
+        assert_ne!(s1.finalize_sequence(), s2.finalize_sequence());
+    }
+
+    #[test]
+    fn read_pipe_keeps_hashing_after_buffer_overflow() {
+        // Total observed exceeds the soft buffer cap but stays under the
+        // hard ceiling. The buffered Vec should drop yet the hasher must
+        // continue so a downstream rep change still bumps the sequence.
         let mut first = io::Cursor::new([b'a'; PIPE_CHUNK + 1]);
         let mut second = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
 
-        let first = read_pipe_contents(&mut first, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
-        let second = read_pipe_contents(&mut second, Some(PIPE_CHUNK), PIPE_CHUNK).unwrap();
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK * 8);
+        let first_body = state.read_pipe(&mut first).unwrap();
+        // First rep exceeds the cap → its buffer dropped.
+        assert!(first_body.is_none());
+        assert!(state.buffer_overflow);
+        assert!(!state.ceiling_hit);
 
-        assert_ne!(first.sequence, second.sequence);
+        // Second rep is still hashed even though buffer is sticky-off.
+        let prior = state.observed_total;
+        let second_body = state.read_pipe(&mut second).unwrap();
+        assert!(second_body.is_none());
+        assert!(state.observed_total > prior);
+    }
+
+    #[test]
+    fn begin_rep_disambiguates_rep_layout() {
+        // Two clips with the same total bytes but different per-rep
+        // boundaries must hash differently. Without `begin_rep` the two
+        // sequences would collide.
+        let mut s_two = MultiReadState::new(Some(64), 64);
+        s_two.begin_rep("image/png");
+        let _ = s_two
+            .read_pipe(&mut io::Cursor::new(b"AB".to_vec()))
+            .unwrap();
+        s_two.begin_rep("text/plain");
+        let _ = s_two
+            .read_pipe(&mut io::Cursor::new(b"CD".to_vec()))
+            .unwrap();
+
+        let mut s_one = MultiReadState::new(Some(64), 64);
+        s_one.begin_rep("text/plain");
+        let _ = s_one
+            .read_pipe(&mut io::Cursor::new(b"ABCD".to_vec()))
+            .unwrap();
+
+        assert_ne!(s_two.finalize_sequence(), s_one.finalize_sequence());
+    }
+
+    #[test]
+    fn pick_image_mime_honours_priority() {
+        let mut set = std::collections::HashSet::new();
+        set.insert("image/jpeg".to_owned());
+        set.insert("image/png".to_owned());
+        // PNG wins because it sits earlier in `IMAGE_MIME_PRIORITY`,
+        // independent of HashSet iteration order.
+        assert_eq!(pick_image_mime(&set), Some("image/png".to_owned()));
+        // And the priority list ordering matches the macOS adapter's
+        // canonical-image preference (PNG first).
+        assert_eq!(IMAGE_MIME_PRIORITY.first(), Some(&"image/png"));
+    }
+
+    #[test]
+    fn pick_image_mime_returns_none_when_no_image_offer() {
+        let set: std::collections::HashSet<String> =
+            ["text/plain".to_owned(), "text/uri-list".to_owned()]
+                .into_iter()
+                .collect();
+        assert_eq!(pick_image_mime(&set), None);
+    }
+
+    #[test]
+    fn parse_uri_list_decodes_percent_escapes() {
+        let body = b"file:///tmp/nagori%20alpha\r\nfile:///tmp/nagori-beta\r\n";
+        let paths = parse_uri_list(body).expect("two paths");
+        assert_eq!(
+            paths,
+            vec![
+                "/tmp/nagori alpha".to_owned(),
+                "/tmp/nagori-beta".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_uri_list_skips_comments_and_non_file_schemes() {
+        let body = b"# selection\r\nhttps://example.test/page\r\nfile:///tmp/nagori-only\r\n\r\n";
+        let paths = parse_uri_list(body).expect("only the file:// row survives");
+        assert_eq!(paths, vec!["/tmp/nagori-only".to_owned()]);
+    }
+
+    #[test]
+    fn parse_uri_list_returns_none_when_empty() {
+        assert!(parse_uri_list(b"").is_none());
+        assert!(parse_uri_list(b"# only comments\n").is_none());
+        assert!(parse_uri_list(b"https://example.test/no-files\n").is_none());
     }
 }

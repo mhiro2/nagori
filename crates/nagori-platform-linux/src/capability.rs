@@ -1,12 +1,13 @@
 //! Static capability report for the Linux Wayland host adapter.
 //!
-//! Linux Wayland is experimental: text capture and copy-back work on
-//! compositors that expose `wlr_data_control` / `ext_data_control`,
-//! auto-paste is conditional on the external `wtype` binary, and
-//! global hotkeys / frontmost-app probing have no portable Wayland
-//! API and are surfaced as `Unsupported`. The permission UI is a
-//! no-op probe (no TCC-style gate on Wayland) and the release feed
-//! does not ship an updater channel for the Linux tarball.
+//! Linux Wayland is experimental: text / image / file-list capture and
+//! text + image copy-back work on compositors that expose
+//! `wlr_data_control` / `ext_data_control`, auto-paste is conditional
+//! on the external `wtype` binary, and global hotkeys / frontmost-app
+//! probing have no portable Wayland API and are surfaced as
+//! `Unsupported`. The permission UI is a no-op probe (no TCC-style
+//! gate on Wayland) and the release feed does not ship an updater
+//! channel for the Linux tarball.
 //!
 //! Scope: this report describes the **Wayland** Linux target nagori
 //! builds for. X11 sessions and Wayland compositors without a
@@ -27,23 +28,10 @@ pub fn report_capabilities() -> PlatformCapabilities {
         platform: Platform::LinuxWayland,
         tier: SupportTier::Experimental,
         capture_text: Capability::Available,
-        capture_image: Capability::Unsupported {
-            reason: "Linux Wayland clipboard capture is text-only; image \
-                 payloads are not implemented yet."
-                .to_owned(),
-        },
-        capture_files: Capability::Unsupported {
-            reason: "Linux Wayland clipboard capture is text-only; file-list \
-                 payloads are not modelled (no `text/uri-list` integration \
-                 yet)."
-                .to_owned(),
-        },
+        capture_image: Capability::Available,
+        capture_files: Capability::Available,
         write_text: Capability::Available,
-        write_image: Capability::Unsupported {
-            reason: "Linux Wayland copy-back is text-only; image entries \
-                 from macOS sessions cannot be written back."
-                .to_owned(),
-        },
+        write_image: Capability::Available,
         clipboard_multi_representation_write: Capability::Unsupported {
             reason: "wl-clipboard-rs publishes a single MIME per offer; \
                  Wayland copy-back falls back to the primary representation \
@@ -118,12 +106,17 @@ mod tests {
     }
 
     #[test]
-    fn image_hotkey_frontmost_and_updater_are_not_usable() {
+    fn image_and_file_capture_rows_are_usable() {
+        let caps = report_capabilities();
+        assert!(caps.capture_image.is_usable());
+        assert!(caps.capture_files.is_usable());
+        assert!(caps.write_image.is_usable());
+    }
+
+    #[test]
+    fn multi_rep_hotkey_frontmost_and_updater_are_not_usable() {
         let caps = report_capabilities();
         for cap in [
-            &caps.capture_image,
-            &caps.capture_files,
-            &caps.write_image,
             &caps.clipboard_multi_representation_write,
             &caps.global_hotkey,
             &caps.frontmost_app,

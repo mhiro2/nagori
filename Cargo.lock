@@ -3003,12 +3003,14 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "hex",
+ "image",
  "nagori-core",
  "nagori-platform",
  "sha2 0.11.0",
  "time",
  "tokio",
  "tracing",
+ "url",
  "wl-clipboard-rs",
 ]
 

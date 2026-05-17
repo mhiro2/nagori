@@ -93,8 +93,8 @@ domain code. This leads to four design rules:
 | `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker, semantic search hooks |
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
-| `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + `CF_HDROP` file lists), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback), `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
+| `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image copy-back via arboard (PNG re-encoded back to RGBA bitmap on write), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
+| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image copy-back (`image::guess_format` → `copy::MimeType::Specific`), `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
@@ -617,11 +617,22 @@ Implementations:
   the supported signalling channel because `wayland-client` consumes
   the inherited `WAYLAND_SOCKET` fd on first connect (the eager probe
   would burn it before the capture loop could reuse it). There is no
-  X11 code path inside this crate. Because Wayland exposes no
-  equivalent of `GetClipboardSequenceNumber`, `current_sequence()`
-  streams the text body through SHA-256 every poll up to the configured
-  byte ceiling; oversized transfers close the pipe immediately and use
-  a ceiling/prefix-keyed sentinel sequence so the owner cannot hold a
+  X11 code path inside this crate. The capture path enumerates the
+  offer's MIME types via `paste::get_mime_types` and reads each
+  representation it cares about (image PNG/JPEG/GIF/WebP/TIFF in that
+  priority order — mirroring the `nagori-core` factory allowlist —
+  `text/uri-list` file lists, and text via the wl-clipboard-rs text
+  fallback) through a shared SHA-256 hasher with per-rep MIME framing
+  so the resulting sequence is unambiguous about the rep layout, not
+  just the concatenated bodies. The cumulative hash also fixes the
+  per-rep race window. Copy-back publishes the matching MIME via
+  `copy::MimeType::Specific` (selected with `image::guess_format` so the
+  offer label matches the bytes) for image rows and falls back to the
+  text rep otherwise. Because Wayland exposes no equivalent of
+  `GetClipboardSequenceNumber`, `current_sequence()` reuses the same
+  multi-rep streaming hasher up to the configured byte ceiling;
+  oversized transfers close the pipe immediately and use a
+  ceiling/prefix-keyed sentinel sequence so the owner cannot hold a
   blocking worker by streaming past the limit. The source app participates in
   each transfer per the data-control protocol, so the capture interval
   (`AppSettings::poll_interval_ms`) directly trades off responsiveness

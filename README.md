@@ -12,24 +12,21 @@ touch relevant paths (and on every push to `main`), and Linux Wayland
 runs on a nightly schedule. Desktop UI flows, auto-paste, and
 global-shortcut registration are not yet exercised by automated tests
 off macOS, and several integrations remain incomplete (Windows release
-bundles, image capture and copy-back outside macOS, update checks
-outside macOS, GNOME Wayland, X11).
+bundles, update checks outside macOS, GNOME Wayland, X11).
 
-| Platform               | Desktop app  | CLI daemon   | Capture       | Copy back   | Auto-paste        | Release bundle                       |
-| ---------------------- | ------------ | ------------ | ------------- | ----------- | ----------------- | ------------------------------------ |
-| macOS (arm64 / x86_64) | Supported    | Supported    | Supported     | Supported   | Supported         | Yes (`.app`, update notifications)   |
-| Windows (x86_64)       | Experimental | Experimental | Text + files  | Text only   | Supported         | None — build from source             |
-| Linux Wayland (x86_64) | Experimental | Experimental | Text only     | Text only   | Requires `wtype`  | Yes (tarball, no update notifications) |
-| Linux X11              | Unsupported  | Unsupported  | Unsupported   | Unsupported | Unsupported       | n/a                                  |
+| Platform               | Desktop app  | CLI daemon   | Capture                | Copy back              | Auto-paste        | Release bundle                       |
+| ---------------------- | ------------ | ------------ | ---------------------- | ---------------------- | ----------------- | ------------------------------------ |
+| macOS (arm64 / x86_64) | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (`.app`, update notifications)   |
+| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image           | Supported         | None — build from source             |
+| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image           | Requires `wtype`  | Yes (tarball, no update notifications) |
+| Linux X11              | Unsupported  | Unsupported  | Unsupported            | Unsupported            | Unsupported       | n/a                                  |
 
 macOS-only capabilities: secure-input detection, sleep/wake
-`changeCount` resynchronisation, image clipboard capture and writes
-(Windows and Linux fall back to text — and on Windows, file lists —
-and return `Unsupported` when copying an image entry back), and the
-bundled update-check probe. The Tauri updater plugin is registered on
-every OS, but the runtime gates it to macOS and the MVP surface is
-read-only: users still upgrade by following the GitHub release link
-rather than an in-app `download_and_install` flow.
+`changeCount` resynchronisation, and the bundled update-check probe.
+The Tauri updater plugin is registered on every OS, but the runtime
+gates it to macOS and the MVP surface is read-only: users still
+upgrade by following the GitHub release link rather than an in-app
+`download_and_install` flow.
 
 For the authoritative answer for this OS build, query the runtime
 itself: `nagori capabilities` prints the matrix on the CLI (add
