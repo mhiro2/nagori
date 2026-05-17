@@ -231,6 +231,28 @@ try {
         throw "Get-Clipboard did not return the marker after copy`n  expected: $marker`n  actual:   $pasted"
     }
 
+    Step 'paste: nagori paste -> clipboard rewritten + SendInput exits cleanly'
+    # `nagori paste` does two things in sequence (see daemon::runtime::paste_entry):
+    # writes the entry to the OS clipboard, then synthesises Ctrl+V via the
+    # platform PasteController. On Windows that is `WindowsPasteController` →
+    # `SendInput`. CI does not have a text target whose contents we can read
+    # back, so we verify the half we can observe: the clipboard is rewritten
+    # to the marker, and `SendInput` returns Ok (the CLI exits 0).
+    Set-Clipboard -Value 'sentinel-before-paste'
+    Invoke-CliSilent @('paste', $entryId)
+
+    $pasted = ''
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        $pasted = Get-Clipboard -Raw
+        if ($null -eq $pasted) { $pasted = '' }
+        if ($pasted -eq $marker) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($pasted -ne $marker) {
+        throw "'nagori paste' did not rewrite the clipboard to the marker`n  expected: $marker`n  actual:   $pasted"
+    }
+
     Step 'pin / unpin round-trip'
     Invoke-CliSilent @('pin', $entryId)
     $pinnedCount = (Invoke-Cli @('list', '--pinned', '--json') |
