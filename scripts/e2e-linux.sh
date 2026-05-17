@@ -267,6 +267,133 @@ if [[ "${PASTED}" != "${MARKER_A}" ]]; then
   exit 1
 fi
 
+step "file-list round-trip via text/uri-list"
+# Include a space in one filename so the daemon's `Url::from_file_path`
+# re-serialisation has to percent-encode it on copy-back. The unit test
+# already proves the encoder, but exercising the daemon's full
+# parse → store → re-serialise loop with a non-ASCII-safe path catches
+# regressions where someone normalises paths and loses the encoding.
+URI_FILE_A="${WORK_DIR}/uri test-a.txt"
+URI_FILE_B="${WORK_DIR}/uri-test-b.txt"
+printf "first"  > "${URI_FILE_A}"
+printf "second" > "${URI_FILE_B}"
+# RFC 2483 requires URIs in a uri-list to be valid URIs, so the space
+# in URI_FILE_A is percent-encoded on the way in.
+URI_A_ENCODED="${URI_FILE_A// /%20}"
+URI_B_ENCODED="${URI_FILE_B// /%20}"
+# Offer the paths as RFC 2483 file:// URIs under a single text/uri-list
+# MIME advertisement. wl-copy with `--type` offers only the requested
+# type, so the daemon's text-priority path cannot accidentally pick up
+# a fallback plain-text rep — the entry's content kind has to be
+# FileList for the test to pass.
+printf 'file://%s\r\nfile://%s\r\n' "${URI_A_ENCODED}" "${URI_B_ENCODED}" \
+  | wl-copy --type text/uri-list
+
+URI_ENTRY_ID=""
+URI_LIST_JSON=""
+deadline=$(( $(date +%s) + 15 ))
+while (( $(date +%s) < deadline )); do
+  if URI_LIST_JSON="$(run_cli list --limit 1 --json 2> "${CLI_ERR}")"; then
+    KIND="$(printf %s "${URI_LIST_JSON}" | jq -r '.[0].kind // ""')"
+    HAS_URI="$(printf %s "${URI_LIST_JSON}" \
+      | jq -r '[.[0].representation_summary[] | select(.mime_type == "text/uri-list")] | length')"
+    if [[ "${KIND}" == "FileList" && "${HAS_URI}" == "1" ]]; then
+      URI_ENTRY_ID="$(printf %s "${URI_LIST_JSON}" | jq -r '.[0].id')"
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ -z "${URI_ENTRY_ID}" ]]; then
+  echo "file-list capture failed; latest entry was:" >&2
+  printf %s "${URI_LIST_JSON}" >&2 || true
+  exit 1
+fi
+echo "captured file-list id=${URI_ENTRY_ID}"
+
+# Overwrite the selection with plain text so wl-paste --type text/uri-list
+# would fail if nagori copy were a no-op.
+printf %s "not-a-uri-list" | wl-copy
+run_cli copy "${URI_ENTRY_ID}" >/dev/null
+
+PASTED_URI=""
+deadline=$(( $(date +%s) + 5 ))
+while (( $(date +%s) < deadline )); do
+  PASTED_URI="$(wl-paste --type text/uri-list 2>/dev/null || true)"
+  if [[ "${PASTED_URI}" == *"file://${URI_A_ENCODED}"* \
+     && "${PASTED_URI}" == *"file://${URI_B_ENCODED}"* ]]; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${PASTED_URI}" != *"file://${URI_A_ENCODED}"* \
+   || "${PASTED_URI}" != *"file://${URI_B_ENCODED}"* ]]; then
+  echo "wl-paste text/uri-list did not include both file paths" >&2
+  echo "  expected substrings: file://${URI_A_ENCODED}, file://${URI_B_ENCODED}" >&2
+  echo "  actual:              ${PASTED_URI}" >&2
+  exit 1
+fi
+
+step "image round-trip via image/png"
+# Tiny 1x1 RGBA PNG fixture, base64-inlined so we don't keep a binary
+# artefact in the tree. Decodes to 70 bytes starting with the
+# `89 50 4e 47 0d 0a 1a 0a` signature the daemon's MIME magic check
+# requires.
+IMAGE_FIXTURE="${WORK_DIR}/fixture.png"
+base64 -d > "${IMAGE_FIXTURE}" <<'PNG_B64'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==
+PNG_B64
+
+EXPECTED_PNG_SHA="$(sha256sum "${IMAGE_FIXTURE}" | awk '{ print $1 }')"
+wl-copy --type image/png < "${IMAGE_FIXTURE}"
+
+IMAGE_ENTRY_ID=""
+IMAGE_LIST_JSON=""
+deadline=$(( $(date +%s) + 15 ))
+while (( $(date +%s) < deadline )); do
+  if IMAGE_LIST_JSON="$(run_cli list --limit 1 --json 2> "${CLI_ERR}")"; then
+    KIND="$(printf %s "${IMAGE_LIST_JSON}" | jq -r '.[0].kind // ""')"
+    HAS_PNG="$(printf %s "${IMAGE_LIST_JSON}" \
+      | jq -r '[.[0].representation_summary[] | select(.mime_type == "image/png")] | length')"
+    if [[ "${KIND}" == "Image" && "${HAS_PNG}" == "1" ]]; then
+      IMAGE_ENTRY_ID="$(printf %s "${IMAGE_LIST_JSON}" | jq -r '.[0].id')"
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ -z "${IMAGE_ENTRY_ID}" ]]; then
+  echo "image capture failed; latest entry was:" >&2
+  printf %s "${IMAGE_LIST_JSON}" >&2 || true
+  exit 1
+fi
+echo "captured image id=${IMAGE_ENTRY_ID}"
+
+# Sentinel text overwrite — same reason as the file-list step.
+printf %s "not-an-image" | wl-copy
+run_cli copy "${IMAGE_ENTRY_ID}" >/dev/null
+
+PASTED_PNG="${WORK_DIR}/pasted.png"
+PASTED_PNG_SHA=""
+deadline=$(( $(date +%s) + 5 ))
+while (( $(date +%s) < deadline )); do
+  # Land the wl-paste bytes in a file first so a transient `NoMimeType`
+  # (sentinel still on the selection, or wl-clipboard still wiring up
+  # the new offer) doesn't break the `sha256sum` pipeline under
+  # `set -euo pipefail` and abort the script mid-retry.
+  if wl-paste --type image/png > "${PASTED_PNG}" 2>/dev/null; then
+    PASTED_PNG_SHA="$(sha256sum "${PASTED_PNG}" | awk '{ print $1 }')"
+    [[ "${PASTED_PNG_SHA}" == "${EXPECTED_PNG_SHA}" ]] && break
+  fi
+  sleep 0.1
+done
+if [[ "${PASTED_PNG_SHA}" != "${EXPECTED_PNG_SHA}" ]]; then
+  echo "wl-paste image/png did not return the original PNG bytes" >&2
+  echo "  expected sha256: ${EXPECTED_PNG_SHA}" >&2
+  echo "  actual sha256:   ${PASTED_PNG_SHA}" >&2
+  exit 1
+fi
+
 step "graceful shutdown via daemon stop"
 run_cli daemon stop >/dev/null
 # Wait for the background process to exit on its own; do not force-kill.
