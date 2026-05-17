@@ -271,7 +271,6 @@ impl CodeContent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageContent {
-    pub payload_ref: PayloadRef,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub byte_count: usize,
@@ -281,7 +280,7 @@ pub struct ImageContent {
     pub mime_type: Option<String>,
     /// In-memory bytes carried from capture → factory → storage. Always
     /// `None` after deserialisation; the storage layer reads the same data
-    /// out of `entries.payload_blob` instead.
+    /// out of the dependent `entry_representations` row instead.
     #[serde(skip)]
     pub pending_bytes: Option<Vec<u8>>,
 }
@@ -295,7 +294,6 @@ pub struct FileListContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RichTextContent {
     pub plain_text: String,
-    pub payload_ref: PayloadRef,
     /// Inline rich-text source (HTML or RTF) when the source pasteboard
     /// exposed it. Optional because the capture pipeline still falls back
     /// to plain text when `markup_kind` is unsupported.
@@ -315,15 +313,7 @@ pub enum RichTextMarkup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnknownContent {
     pub mime_type: Option<String>,
-    pub payload_ref: Option<PayloadRef>,
     pub plain_text: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PayloadRef {
-    InlineText,
-    DatabaseBlob(String),
-    ContentAddressedFile { sha256: String, path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,11 +634,10 @@ impl RepresentationRole {
 
 /// Payload kept on a [`StoredClipboardRepresentation`].
 ///
-/// Text-shaped reps (plain, html, rtf, file paths) land in
+/// Text-shaped reps (plain, html, rtf) land in
 /// `entry_representations.text_content`; image bytes land in
-/// `entry_representations.payload_blob`. The `ContentAddressedFile`
-/// [`PayloadRef`] variant is reserved for a later phase and is not emitted
-/// by the capture pipeline today.
+/// `entry_representations.payload_blob`; file URL lists are encoded into
+/// `text_content` as one path per line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationDataRef {
     InlineText(String),

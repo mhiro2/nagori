@@ -10,10 +10,9 @@ use async_trait::async_trait;
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, ContentHash, ContentKind,
     EntryId, EntryLifecycle, EntryMetadata, FtsCandidate, HashAlgorithm, NgramCandidate,
-    PayloadRef, RecentOrder, RepresentationDataRef, RepresentationRole, Result,
-    SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
-    SearchResult, SearchService, Sensitivity, SourceApp, StoredClipboardRepresentation,
-    compile_user_regex,
+    RecentOrder, RepresentationDataRef, RepresentationRole, Result, SearchCandidateProvider,
+    SearchDocument, SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
+    Sensitivity, SourceApp, StoredClipboardRepresentation, compile_user_regex,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
@@ -752,11 +751,6 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             let mime = img.mime_type.clone();
             let mut stripped = img.clone();
             stripped.pending_bytes = None;
-            stripped.payload_ref = if bytes.is_some() {
-                PayloadRef::DatabaseBlob(requested_id.to_string())
-            } else {
-                stripped.payload_ref.clone()
-            };
             let payload = bytes.map(|bytes| PrimaryPayload::Bytes {
                 mime: mime
                     .clone()

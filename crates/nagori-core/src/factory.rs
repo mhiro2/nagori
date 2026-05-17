@@ -4,7 +4,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation, ClipboardSnapshot,
-    ContentHash, EntryId, EntryLifecycle, EntryMetadata, FileListContent, ImageContent, PayloadRef,
+    ContentHash, EntryId, EntryLifecycle, EntryMetadata, FileListContent, ImageContent,
     RepresentationDataRef, RepresentationRole, RichTextContent, RichTextMarkup, SearchDocument,
     StoredClipboardRepresentation, normalize_text,
 };
@@ -293,7 +293,6 @@ fn pick_image_primary(normalized: &[NormalizedRep]) -> Option<(ClipboardContent,
     let byte_count = bytes.len();
     Some((
         ClipboardContent::Image(ImageContent {
-            payload_ref: PayloadRef::DatabaseBlob(String::new()),
             width: None,
             height: None,
             byte_count,
@@ -312,7 +311,6 @@ const fn build_rich_text(
 ) -> ClipboardContent {
     ClipboardContent::RichText(RichTextContent {
         plain_text,
-        payload_ref: PayloadRef::InlineText,
         markup: Some(markup),
         markup_kind: Some(kind),
     })

@@ -843,7 +843,7 @@ mod image_scheme_tests {
     use super::*;
     use nagori_core::{
         ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository, ImageContent,
-        PayloadRef, Sensitivity,
+        Sensitivity,
     };
     use nagori_daemon::NagoriRuntime;
     use nagori_storage::SqliteStore;
@@ -898,7 +898,6 @@ mod image_scheme_tests {
         bytes: Vec<u8>,
     ) -> ClipboardEntry {
         let content = ClipboardContent::Image(ImageContent {
-            payload_ref: PayloadRef::DatabaseBlob(String::new()),
             width: Some(1),
             height: Some(1),
             byte_count: bytes.len(),

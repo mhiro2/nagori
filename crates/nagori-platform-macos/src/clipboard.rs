@@ -817,7 +817,7 @@ fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
 mod tests {
     use super::*;
     use nagori_core::{
-        EntryFactory, ImageContent, PayloadRef, RepresentationRole, StoredClipboardRepresentation,
+        EntryFactory, ImageContent, RepresentationRole, StoredClipboardRepresentation,
     };
     use objc2_foundation::NSArray;
 
@@ -850,7 +850,6 @@ mod tests {
         let byte_count = bytes.len();
         EntryFactory::from_content(
             ClipboardContent::Image(ImageContent {
-                payload_ref: PayloadRef::DatabaseBlob(String::new()),
                 width: Some(1),
                 height: Some(1),
                 byte_count,
