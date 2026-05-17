@@ -17,8 +17,8 @@ bundles, update checks outside macOS, GNOME Wayland, X11).
 | Platform               | Desktop app  | CLI daemon   | Capture                | Copy back              | Auto-paste        | Release bundle                       |
 | ---------------------- | ------------ | ------------ | ---------------------- | ---------------------- | ----------------- | ------------------------------------ |
 | macOS (arm64 / x86_64) | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (`.app`, update notifications)   |
-| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image           | Supported         | None — build from source             |
-| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image           | Requires `wtype`  | Yes (tarball, no update notifications) |
+| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image + files   | Supported         | None — build from source             |
+| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image + files   | Requires `wtype`  | Yes (tarball, no update notifications) |
 | Linux X11              | Unsupported  | Unsupported  | Unsupported            | Unsupported            | Unsupported       | n/a                                  |
 
 macOS-only capabilities: secure-input detection, sleep/wake

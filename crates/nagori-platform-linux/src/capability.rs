@@ -32,12 +32,7 @@ pub fn report_capabilities() -> PlatformCapabilities {
         capture_files: Capability::Available,
         write_text: Capability::Available,
         write_image: Capability::Available,
-        clipboard_multi_representation_write: Capability::Unsupported {
-            reason: "wl-clipboard-rs publishes a single MIME per offer; \
-                 Wayland copy-back falls back to the primary representation \
-                 via write_text and cannot re-publish HTML/RTF alongside it."
-                .to_owned(),
-        },
+        clipboard_multi_representation_write: Capability::Available,
         auto_paste: Capability::RequiresExternalTool {
             tool: "wtype".to_owned(),
             install_hint: Some(
@@ -114,10 +109,15 @@ mod tests {
     }
 
     #[test]
-    fn multi_rep_hotkey_frontmost_and_updater_are_not_usable() {
+    fn multi_rep_write_is_usable() {
+        let caps = report_capabilities();
+        assert!(caps.clipboard_multi_representation_write.is_usable());
+    }
+
+    #[test]
+    fn hotkey_frontmost_and_updater_are_not_usable() {
         let caps = report_capabilities();
         for cap in [
-            &caps.clipboard_multi_representation_write,
             &caps.global_hotkey,
             &caps.frontmost_app,
             &caps.permissions_ui,

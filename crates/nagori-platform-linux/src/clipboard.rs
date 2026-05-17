@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot, Result,
+    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot,
+    RepresentationDataRef, Result, StoredClipboardRepresentation,
 };
 #[cfg(target_os = "linux")]
 use nagori_core::{ClipboardData, ClipboardRepresentation};
@@ -15,7 +16,7 @@ use std::io::Read;
 use time::OffsetDateTime;
 #[cfg(target_os = "linux")]
 use wl_clipboard_rs::{
-    copy::{self, MimeType as CopyMimeType, Options, Source},
+    copy::{self, MimeSource, MimeType as CopyMimeType, Options, Source},
     paste::{self, ClipboardType, MimeType as PasteMimeType, Seat},
 };
 
@@ -231,6 +232,17 @@ impl ClipboardWriter for LinuxClipboard {
                 return Err(unsupported_off_target());
             }
         }
+        if let ClipboardContent::FileList(files) = &entry.content {
+            #[cfg(target_os = "linux")]
+            {
+                return self.write_files(files.paths.clone()).await;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = files;
+                return Err(unsupported_off_target());
+            }
+        }
         let Some(text) = entry.plain_text() else {
             return Err(AppError::Unsupported(
                 "clipboard entry has no representable payload".to_owned(),
@@ -272,10 +284,89 @@ impl ClipboardWriter for LinuxClipboard {
             Err(unsupported_off_target())
         }
     }
+
+    async fn write_representations(
+        &self,
+        entry: &ClipboardEntry,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Result<()> {
+        // Pre-scan so an entry whose stored reps are all outside the
+        // Wayland publisher's mapping table falls back through
+        // `write_entry` instead of issuing a `copy_multi` that registers
+        // an offer for no MIME the daemon actually publishes. The check
+        // matches the macOS adapter's contract: only when we have at
+        // least one publishable rep do we go down the multi-rep path.
+        if representations.is_empty() || !has_publishable_representation(representations) {
+            return self.write_entry(entry).await;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return self.publish_representations(representations.to_vec()).await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported_off_target())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxClipboard {
+    async fn publish_representations(
+        &self,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<()> {
+        // Map stored reps to `MimeSource` ahead of the blocking hop so a
+        // bad path (e.g. relative entry in a file-list rep) surfaces as
+        // an error before we spawn a worker. `copy_multi` advertises
+        // every offered MIME atomically with the compositor, so a paste
+        // target that wants `text/html` still sees it alongside the
+        // `text/plain` fallback — matching the macOS `write_representations`
+        // contract on Wayland for the first time.
+        let sources = build_mime_sources(&representations)?;
+        if sources.is_empty() {
+            // Pre-scan in `write_representations` rules this out in
+            // normal use; the only way to land here is if `build_mime_sources`
+            // dropped every rep (e.g. an image rep whose bytes were empty).
+            // Surface it so the daemon's `copy_entry_with_format` propagates
+            // the failure instead of silently leaving the clipboard empty.
+            return Err(AppError::Platform(
+                "no representable bytes for Wayland multi-rep publish".to_owned(),
+            ));
+        }
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            copy::copy_multi(Options::new(), sources)
+                .map_err(|err| AppError::Platform(format!("wl-clipboard copy_multi failed: {err}")))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+
+    async fn write_files(&self, paths: Vec<String>) -> Result<()> {
+        // Wayland publishes file lists as `text/uri-list` (RFC 2483):
+        // each line is a fully-qualified URI separated by CRLF. We refuse
+        // empty lists up-front so a "copy-back" of a zero-path entry does
+        // not blank the selection with an empty offer that downstream
+        // readers would surface as "empty file list".
+        if paths.is_empty() {
+            return Err(AppError::Unsupported(
+                "file-list clipboard entry has no paths".to_owned(),
+            ));
+        }
+        let body = serialize_uri_list(&paths)?;
+        let bytes = body.into_bytes().into_boxed_slice();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            copy::copy(
+                Options::new(),
+                Source::Bytes(bytes),
+                CopyMimeType::Specific("text/uri-list".to_owned()),
+            )
+            .map_err(|err| AppError::Platform(format!("wl-clipboard file-list copy failed: {err}")))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+
     async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
         // Detect the MIME from the byte magic before handing the buffer
         // to `wl-clipboard-rs`. We cannot use `CopyMimeType::Autodetect`
@@ -297,6 +388,79 @@ impl LinuxClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
+}
+
+/// True when at least one rep has a known Wayland MIME mapping.
+///
+/// Pre-scan used by `write_representations` so an entry whose stored
+/// reps are all outside the publisher's table (e.g. only `application/json`
+/// without a plain fallback) falls back to `write_entry` instead of
+/// issuing a `copy_multi` for nothing. The body inspects only `nagori-core`
+/// types so it stays target-independent — the workspace builds every
+/// platform crate on every host and this helper has to resolve on
+/// non-Linux targets too.
+fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
+    reps.iter()
+        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
+            (
+                "text/plain" | "text/html" | "application/rtf",
+                RepresentationDataRef::InlineText(_),
+            )
+            | (
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
+                RepresentationDataRef::DatabaseBlob(_),
+            ) => true,
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
+            _ => false,
+        })
+}
+
+/// Map stored representations into a `MimeSource` batch for
+/// `copy::copy_multi`.
+///
+/// `text/uri-list` reps are re-serialised through `serialize_uri_list`
+/// so the on-wire payload matches what fresh `write_files` calls would
+/// produce; an absolute-path rejection propagates as `AppError::Unsupported`
+/// rather than silently dropping the file list. Unsupported (mime, payload)
+/// combinations are dropped silently — the pre-scan above guarantees at
+/// least one mapping exists before we get here.
+#[cfg(target_os = "linux")]
+fn build_mime_sources(reps: &[StoredClipboardRepresentation]) -> Result<Vec<MimeSource>> {
+    let mut out = Vec::new();
+    for rep in reps {
+        match (rep.mime_type.as_str(), &rep.data) {
+            (
+                "text/plain" | "text/html" | "application/rtf",
+                RepresentationDataRef::InlineText(text),
+            ) => {
+                out.push(MimeSource {
+                    source: Source::Bytes(text.as_bytes().to_vec().into_boxed_slice()),
+                    mime_type: CopyMimeType::Specific(rep.mime_type.clone()),
+                });
+            }
+            (
+                mime @ ("image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"),
+                RepresentationDataRef::DatabaseBlob(bytes),
+            ) => {
+                if bytes.is_empty() {
+                    continue;
+                }
+                out.push(MimeSource {
+                    source: Source::Bytes(bytes.clone().into_boxed_slice()),
+                    mime_type: CopyMimeType::Specific(mime.to_owned()),
+                });
+            }
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) if !paths.is_empty() => {
+                let body = serialize_uri_list(paths)?;
+                out.push(MimeSource {
+                    source: Source::Bytes(body.into_bytes().into_boxed_slice()),
+                    mime_type: CopyMimeType::Specific("text/uri-list".to_owned()),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(target_os = "linux")]
@@ -488,6 +652,28 @@ fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// Serialise filesystem paths into a `text/uri-list` payload.
+///
+/// Each path is converted to a `file://` URL via `url::Url::from_file_path`,
+/// which percent-encodes path segments (so spaces become `%20`, etc.) and
+/// rejects relative paths. RFC 2483 specifies CRLF as the line separator;
+/// we follow it so receivers that parse strictly (Nautilus, Dolphin) accept
+/// the offer. A trailing CRLF terminates the last entry — also per RFC.
+#[cfg(target_os = "linux")]
+fn serialize_uri_list(paths: &[String]) -> Result<String> {
+    let mut out = String::new();
+    for path in paths {
+        let url = url::Url::from_file_path(path).map_err(|()| {
+            AppError::Unsupported(format!(
+                "cannot publish {path:?} as a Wayland file-list entry: path must be absolute",
+            ))
+        })?;
+        out.push_str(url.as_str());
+        out.push_str("\r\n");
+    }
+    Ok(out)
+}
+
 /// Parse a `text/uri-list` payload into raw filesystem paths.
 ///
 /// Per RFC 2483 each line is a URI separated by CRLF; lines starting
@@ -654,7 +840,7 @@ mod tests {
 
     use super::{
         IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, oversized_sequence, parse_uri_list,
-        pick_image_mime,
+        pick_image_mime, serialize_uri_list,
     };
 
     struct CountingChunks {
@@ -821,5 +1007,40 @@ mod tests {
         assert!(parse_uri_list(b"").is_none());
         assert!(parse_uri_list(b"# only comments\n").is_none());
         assert!(parse_uri_list(b"https://example.test/no-files\n").is_none());
+    }
+
+    #[test]
+    fn serialize_uri_list_percent_encodes_and_round_trips() {
+        let payload = serialize_uri_list(&[
+            "/tmp/nagori alpha".to_owned(),
+            "/tmp/nagori-beta".to_owned(),
+        ])
+        .expect("absolute paths are accepted");
+        assert!(
+            payload.contains("file:///tmp/nagori%20alpha"),
+            "space should percent-encode: {payload}",
+        );
+        assert!(payload.ends_with("\r\n"), "trailing CRLF: {payload:?}");
+        let parsed = parse_uri_list(payload.as_bytes()).expect("non-empty parse");
+        assert_eq!(
+            parsed,
+            vec![
+                "/tmp/nagori alpha".to_owned(),
+                "/tmp/nagori-beta".to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn serialize_uri_list_rejects_relative_paths() {
+        // `url::Url::from_file_path` only accepts absolute paths; surface
+        // that as `Unsupported` so the daemon's copy-back surfaces a clear
+        // error instead of publishing a malformed `text/uri-list`.
+        let err = serialize_uri_list(&["relative/path".to_owned()])
+            .expect_err("relative paths should be rejected");
+        assert!(
+            matches!(err, nagori_core::AppError::Unsupported(_)),
+            "expected Unsupported, got {err:?}",
+        );
     }
 }

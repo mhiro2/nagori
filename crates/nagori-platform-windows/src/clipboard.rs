@@ -93,6 +93,9 @@ impl ClipboardWriter for WindowsClipboard {
             })?;
             return self.write_image_bytes(bytes).await;
         }
+        if let ClipboardContent::FileList(files) = &entry.content {
+            return self.write_files(files.paths.clone()).await;
+        }
         let Some(text) = entry.plain_text() else {
             return Err(AppError::Unsupported(
                 "clipboard entry has no representable payload".to_owned(),
@@ -126,6 +129,36 @@ impl ClipboardWriter for WindowsClipboard {
 }
 
 impl WindowsClipboard {
+    async fn write_files(&self, paths: Vec<String>) -> Result<()> {
+        if paths.is_empty() {
+            return Err(AppError::Unsupported(
+                "file-list clipboard entry has no paths".to_owned(),
+            ));
+        }
+        let clipboard = self.clipboard.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            // Hold the arboard mutex across the whole `OpenClipboard +
+            // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
+            // concurrent text-write through arboard cannot land between
+            // our `EmptyClipboard` call (which would wipe our CF_HDROP
+            // offer) and `SetClipboardData`.
+            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            #[cfg(windows)]
+            {
+                win::write_file_list(&paths)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = paths;
+                Err(AppError::Unsupported(
+                    "Windows file-list writes are Windows-only".to_owned(),
+                ))
+            }
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+
     async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
         // arboard publishes images on Windows as `CF_DIBV5`, so callers must
         // hand us decoded RGBA. The capture path stores encoded bytes
@@ -304,16 +337,21 @@ const fn native_sequence_number() -> u32 {
 #[cfg(windows)]
 mod win {
     use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::{char, mem, slice};
 
+    use windows_sys::Win32::Foundation::{GlobalFree, TRUE};
     use windows_sys::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-        RegisterClipboardFormatW,
+        CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
-    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    };
     use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
-    use windows_sys::Win32::UI::Shell::DragQueryFileW;
+    use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW};
+
+    use nagori_core::{AppError, Result};
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
     /// the function returns the file count instead of writing a path.
@@ -529,6 +567,120 @@ mod win {
             }
             // `_guard` releases the clipboard on scope exit.
             if out.is_empty() { None } else { Some(out) }
+        }
+    }
+
+    /// Publish a list of filesystem paths as `CF_HDROP`.
+    ///
+    /// The Win32 clipboard expects a `HGLOBAL` allocated with
+    /// `GMEM_MOVEABLE` whose contents are a `DROPFILES` header followed
+    /// by a wide-character path buffer terminated by a double NUL. We
+    /// own the allocation up to the point `SetClipboardData` succeeds —
+    /// from there the OS takes ownership and we must NOT free it. On
+    /// any earlier failure we explicitly `GlobalFree` so a partial path
+    /// publish does not leak the allocation.
+    pub(super) fn write_file_list(paths: &[String]) -> Result<()> {
+        // Build the wide-char buffer first so we can reject pathological
+        // inputs (paths containing interior NULs, lengths above the Win32
+        // long-path cap) before touching the clipboard at all.
+        let mut wide_buffer: Vec<u16> = Vec::new();
+        for path in paths {
+            let encoded: Vec<u16> = OsString::from(path).encode_wide().collect();
+            if encoded.contains(&0) {
+                return Err(AppError::Unsupported(format!(
+                    "path {path:?} contains an interior NUL; cannot publish as CF_HDROP",
+                )));
+            }
+            if encoded.len() >= MAX_PATH_WCHARS as usize {
+                return Err(AppError::Unsupported(format!(
+                    "path {path:?} exceeds the Win32 long-path limit",
+                )));
+            }
+            wide_buffer.extend_from_slice(&encoded);
+            wide_buffer.push(0);
+        }
+        // Terminate the path list with an extra NUL so receivers know
+        // where it ends. `DROPFILES.fWide = TRUE` means the terminator
+        // is a single 16-bit NUL, which `wide_buffer.push(0)` already
+        // appended at the end of the last path; add one more to close
+        // the list.
+        wide_buffer.push(0);
+
+        let header_size = mem::size_of::<DROPFILES>();
+        // `DROPFILES.pFiles` is `u32`. The struct's layout is fixed at
+        // compile time (~20 bytes), so the truncation can never happen,
+        // but expressing it as `try_from` keeps the conversion explicit
+        // instead of paving over it with a cast-allow attribute.
+        let header_size_u32 = u32::try_from(header_size)
+            .map_err(|_| AppError::Platform("DROPFILES header size exceeds u32".to_owned()))?;
+        let payload_bytes = wide_buffer.len().saturating_mul(mem::size_of::<u16>());
+        let total_bytes = header_size.saturating_add(payload_bytes);
+
+        // SAFETY: every Win32 call below is paired with its release.
+        // `GlobalAlloc` returns null on failure and we surface that as
+        // a platform error. On every error path between the allocation
+        // and a successful `SetClipboardData` we call `GlobalFree`;
+        // after `SetClipboardData` succeeds, the OS owns the handle.
+        unsafe {
+            let handle = GlobalAlloc(GMEM_MOVEABLE, total_bytes);
+            if handle.is_null() {
+                return Err(AppError::Platform(
+                    "GlobalAlloc failed for CF_HDROP payload".to_owned(),
+                ));
+            }
+            let locked = GlobalLock(handle);
+            if locked.is_null() {
+                GlobalFree(handle);
+                return Err(AppError::Platform(
+                    "GlobalLock failed for CF_HDROP payload".to_owned(),
+                ));
+            }
+            let header = DROPFILES {
+                pFiles: header_size_u32,
+                pt: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+                fNC: 0,
+                fWide: TRUE,
+            };
+            std::ptr::copy_nonoverlapping(
+                std::ptr::from_ref(&header).cast::<u8>(),
+                locked.cast::<u8>(),
+                header_size,
+            );
+            // Copy the wide-char path buffer as raw bytes so we don't
+            // tell clippy we're hand-aligning a `*mut u8` up to `*mut u16`.
+            // `GlobalAlloc` returns at least 8-byte alignment and the
+            // DROPFILES header is 4-byte aligned, so the destination is
+            // 2-byte aligned in practice — copying as bytes is just
+            // hygienic.
+            std::ptr::copy_nonoverlapping(
+                wide_buffer.as_ptr().cast::<u8>(),
+                locked.cast::<u8>().add(header_size),
+                payload_bytes,
+            );
+            let _ = GlobalUnlock(handle);
+
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                GlobalFree(handle);
+                return Err(AppError::Platform(
+                    "OpenClipboard failed for CF_HDROP write".to_owned(),
+                ));
+            }
+            let _guard = ClipboardGuard;
+            if EmptyClipboard() == 0 {
+                GlobalFree(handle);
+                return Err(AppError::Platform(
+                    "EmptyClipboard failed for CF_HDROP write".to_owned(),
+                ));
+            }
+            if SetClipboardData(u32::from(CF_HDROP), handle).is_null() {
+                // SetClipboardData failed → ownership is still ours, free it.
+                GlobalFree(handle);
+                return Err(AppError::Platform(
+                    "SetClipboardData(CF_HDROP) failed".to_owned(),
+                ));
+            }
+            // From here the OS owns the handle; do not free.
+            Ok(())
         }
     }
 }

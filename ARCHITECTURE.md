@@ -93,8 +93,8 @@ domain code. This leads to four design rules:
 | `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker, semantic search hooks |
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
-| `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image copy-back via arboard (PNG re-encoded back to RGBA bitmap on write), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image copy-back (`image::guess_format` → `copy::MimeType::Specific`), `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
+| `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image + file-list copy-back (PNG → RGBA via arboard, file paths packed into a hand-rolled `DROPFILES` + `SetClipboardData(CF_HDROP)`), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
+| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
@@ -579,7 +579,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + per-rep `setData_forType` under the arboard mutex; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`), with a default impl that falls back to `write_entry` everywhere else. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -625,10 +625,18 @@ Implementations:
   fallback) through a shared SHA-256 hasher with per-rep MIME framing
   so the resulting sequence is unambiguous about the rep layout, not
   just the concatenated bodies. The cumulative hash also fixes the
-  per-rep race window. Copy-back publishes the matching MIME via
-  `copy::MimeType::Specific` (selected with `image::guess_format` so the
-  offer label matches the bytes) for image rows and falls back to the
-  text rep otherwise. Because Wayland exposes no equivalent of
+  per-rep race window. Copy-back routes through `write_entry`, which
+  publishes the matching MIME via `copy::MimeType::Specific` (selected
+  with `image::guess_format` so the offer label matches the bytes) for
+  image rows, serialises `text/uri-list` payloads from
+  `ClipboardData::FilePaths` via `url::Url::from_file_path` (RFC 2483 —
+  CRLF-separated `file://` URIs, absolute paths only), and falls back
+  to the text rep otherwise. Preserve copy-back goes through
+  `write_representations`, which pre-scans the stored rep set and then
+  hands a single `copy::copy_multi` batch (text/plain, text/html,
+  application/rtf, image/png|jpeg|gif|webp|tiff, text/uri-list) to the
+  compositor so a paste target receives every advertised MIME alongside
+  the plain-text fallback in one offer. Because Wayland exposes no equivalent of
   `GetClipboardSequenceNumber`, `current_sequence()` reuses the same
   multi-rep streaming hasher up to the configured byte ceiling;
   oversized transfers close the pipe immediately and use a
