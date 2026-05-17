@@ -9,6 +9,95 @@ use nagori_daemon::NagoriRuntime;
 use state::AppState;
 use tauri::Manager;
 
+/// Event name emitted when global-shortcut registration fails. The
+/// Settings view subscribes via `TAURI_EVENTS.hotkeyRegisterFailed` and
+/// surfaces the error inline. Keep the literal in lockstep with the
+/// frontend `lib/tauri.ts` constant — drift is caught by
+/// `SettingsView.test.ts` (mocks the same string).
+const HOTKEY_REGISTER_FAILED_EVENT: &str = "nagori://hotkey_register_failed";
+
+/// Which side of the hotkey wiring produced a registration failure.
+/// The emitted payload includes a `kind: "secondary"` tag for secondary
+/// accelerators and omits the field for the primary palette shortcut,
+/// so a future frontend handler can route the two without a new event
+/// channel. The current `SettingsView.svelte` listener collapses both
+/// into the same inline-error slot; the tag is preserved for that
+/// future routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyFailureKind {
+    Primary,
+    Secondary,
+}
+
+/// Build the JSON envelope emitted on `nagori://hotkey_register_failed`.
+/// Extracted so the wire shape is locked down by unit tests without
+/// needing a Tauri runtime — the desktop UI parses these fields on
+/// every emit.
+fn build_hotkey_failure_payload(
+    accelerator: &str,
+    error: &str,
+    kind: HotkeyFailureKind,
+) -> serde_json::Value {
+    match kind {
+        HotkeyFailureKind::Primary => serde_json::json!({
+            "hotkey": accelerator,
+            "error": error,
+        }),
+        HotkeyFailureKind::Secondary => serde_json::json!({
+            "hotkey": accelerator,
+            "error": error,
+            "kind": "secondary",
+        }),
+    }
+}
+
+/// Reconciliation plan for the secondary hotkey map. Pure data so
+/// callers can apply registration results without re-deriving the diff.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SecondaryHotkeyDiff {
+    /// Accelerators that should be torn down before any new registration
+    /// runs. Each entry corresponds to a `previous` binding whose
+    /// accelerator was either removed in `next` or remapped to a
+    /// different value. Trimmed-empty bindings count as removals.
+    unregister: Vec<(SecondaryHotkeyAction, String)>,
+    /// Bindings that should be registered. Excludes empty/whitespace
+    /// accelerators and identical (action, accel) pairs already present
+    /// in `previous`. Order is deterministic (`BTreeMap` iteration).
+    register: Vec<(SecondaryHotkeyAction, String)>,
+}
+
+/// Compute which secondary hotkeys to (un)register when reconciling
+/// from `previous` → `next`. Splitting this out keeps the diff logic —
+/// the bit that's easy to get wrong on partial-failure reconciliation —
+/// unit-testable without a `tauri::AppHandle`.
+fn compute_secondary_hotkey_diff(
+    previous: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+    next: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+) -> SecondaryHotkeyDiff {
+    let mut diff = SecondaryHotkeyDiff::default();
+
+    for (action, accel) in previous {
+        // Only schedule an unregister if the binding actually changed.
+        // Leaving an unchanged binding alone avoids a brief window
+        // where the shortcut is unregistered between cycles.
+        if next.get(action).map(String::as_str) != Some(accel.as_str()) {
+            diff.unregister.push((*action, accel.clone()));
+        }
+    }
+
+    for (action, accel) in next {
+        if accel.trim().is_empty() {
+            continue;
+        }
+        if previous.get(action) == Some(accel) {
+            continue;
+        }
+        diff.register.push((*action, accel.clone()));
+    }
+
+    diff
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -285,11 +374,12 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             // pick a different hotkey rather than silently leaving the
             // feature disabled.
             let _ = app.emit(
-                "nagori://hotkey_register_failed",
-                serde_json::json!({
-                    "hotkey": current_hotkey.clone(),
-                    "error": err.to_string(),
-                }),
+                HOTKEY_REGISTER_FAILED_EVENT,
+                build_hotkey_failure_payload(
+                    current_hotkey.as_str(),
+                    &err.to_string(),
+                    HotkeyFailureKind::Primary,
+                ),
             );
         }
 
@@ -339,11 +429,12 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                         "global_shortcut_reregister_failed"
                     );
                     let _ = app.emit(
-                        "nagori://hotkey_register_failed",
-                        serde_json::json!({
-                            "hotkey": next.clone(),
-                            "error": err.to_string(),
-                        }),
+                        HOTKEY_REGISTER_FAILED_EVENT,
+                        build_hotkey_failure_payload(
+                            next.as_str(),
+                            &err.to_string(),
+                            HotkeyFailureKind::Primary,
+                        ),
                     );
                     let _ = register_primary_hotkey(&app, current_hotkey.as_str());
                 } else {
@@ -447,25 +538,15 @@ fn register_secondary_hotkeys(
     use tauri::Emitter;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+    let diff = compute_secondary_hotkey_diff(previous, next);
     let mut active = previous.clone();
 
-    for (action, accel) in previous {
-        // Only unregister if the next map either drops the binding or
-        // changes the accelerator — leaving an unchanged binding alone
-        // avoids a brief window where the shortcut is unregistered.
-        if next.get(action) != Some(accel) {
-            let _ = app.global_shortcut().unregister(accel.as_str());
-            active.remove(action);
-        }
+    for (action, accel) in &diff.unregister {
+        let _ = app.global_shortcut().unregister(accel.as_str());
+        active.remove(action);
     }
 
-    for (action, accel) in next {
-        if accel.trim().is_empty() {
-            continue;
-        }
-        if previous.get(action) == Some(accel) {
-            continue;
-        }
+    for (action, accel) in &diff.register {
         let captured = *action;
         let result =
             app.global_shortcut()
@@ -482,12 +563,12 @@ fn register_secondary_hotkeys(
                 "secondary_hotkey_register_failed",
             );
             let _ = app.emit(
-                "nagori://hotkey_register_failed",
-                serde_json::json!({
-                    "hotkey": accel,
-                    "error": err.to_string(),
-                    "kind": "secondary",
-                }),
+                HOTKEY_REGISTER_FAILED_EVENT,
+                build_hotkey_failure_payload(
+                    accel.as_str(),
+                    &err.to_string(),
+                    HotkeyFailureKind::Secondary,
+                ),
             );
         } else {
             active.insert(*action, accel.clone());
@@ -1168,5 +1249,185 @@ mod image_scheme_tests {
         let id = insert(&runtime, make_image_entry(Sensitivity::Blocked)).await;
         let resp = build_image_response(&runtime, &format!("/{id}")).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::{
+        HOTKEY_REGISTER_FAILED_EVENT, HotkeyFailureKind, SecondaryHotkeyDiff,
+        build_hotkey_failure_payload, compute_secondary_hotkey_diff,
+    };
+    use nagori_core::SecondaryHotkeyAction;
+    use std::collections::BTreeMap;
+
+    fn map(entries: &[(SecondaryHotkeyAction, &str)]) -> BTreeMap<SecondaryHotkeyAction, String> {
+        entries
+            .iter()
+            .map(|(action, accel)| (*action, (*accel).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn event_name_matches_frontend_contract() {
+        // The Settings view subscribes to this exact string via
+        // `TAURI_EVENTS.hotkeyRegisterFailed` in `lib/tauri.ts`. Drift
+        // would silently break the inline error surface, so lock the
+        // wire constant here.
+        assert_eq!(
+            HOTKEY_REGISTER_FAILED_EVENT,
+            "nagori://hotkey_register_failed"
+        );
+    }
+
+    #[test]
+    fn primary_failure_payload_omits_kind_field() {
+        // Primary failures are surfaced as the global-hotkey error in
+        // Settings → General. The frontend treats the absence of `kind`
+        // as "primary", so emitting a `kind: "primary"` literal would
+        // change its handling. Keep the envelope minimal.
+        let payload = build_hotkey_failure_payload(
+            "Cmd+Shift+V",
+            "already in use",
+            HotkeyFailureKind::Primary,
+        );
+        assert_eq!(payload["hotkey"], "Cmd+Shift+V");
+        assert_eq!(payload["error"], "already in use");
+        assert!(
+            payload.get("kind").is_none(),
+            "primary failure envelope must not include a kind tag, got {payload}",
+        );
+    }
+
+    #[test]
+    fn secondary_failure_payload_tags_kind() {
+        // Secondary failures land in the same channel but the frontend
+        // routes them differently — the `kind: "secondary"` tag is how
+        // it distinguishes "your repaste hotkey clashed" from "the main
+        // palette shortcut is broken". Round-trip the exact string.
+        let payload = build_hotkey_failure_payload(
+            "Cmd+Shift+R",
+            "shortcut already registered",
+            HotkeyFailureKind::Secondary,
+        );
+        assert_eq!(payload["hotkey"], "Cmd+Shift+R");
+        assert_eq!(payload["error"], "shortcut already registered");
+        assert_eq!(payload["kind"], "secondary");
+    }
+
+    #[test]
+    fn diff_is_empty_when_previous_equals_next() {
+        // No-op reconciliation: nothing has changed, so no register /
+        // unregister calls should be queued. Without this guard a
+        // settings-watch tick that re-publishes the same accelerator
+        // would tear the binding down for a heartbeat before
+        // re-establishing it.
+        let m = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
+        ]);
+        let diff = compute_secondary_hotkey_diff(&m, &m);
+        assert_eq!(diff, SecondaryHotkeyDiff::default());
+    }
+
+    #[test]
+    fn diff_skips_empty_and_whitespace_accelerators() {
+        // An accelerator string that's empty (or all whitespace) means
+        // "this action has no binding" — the user cleared the input.
+        // Treat it as both a request to unregister whatever was there
+        // before *and* a no-op on the register side.
+        let previous = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let next = map(&[
+            (SecondaryHotkeyAction::RepasteLast, ""),
+            (SecondaryHotkeyAction::ClearHistory, "   "),
+        ]);
+        let diff = compute_secondary_hotkey_diff(&previous, &next);
+        assert_eq!(
+            diff.unregister,
+            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
+        );
+        assert!(diff.register.is_empty(), "empty bindings must not register");
+    }
+
+    #[test]
+    fn diff_remaps_action_to_new_accelerator() {
+        // Action stays bound but the user changed the accelerator. The
+        // old binding has to be torn down before the new one can take
+        // its place — otherwise the OS rejects the second register
+        // with "already in use".
+        let previous = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let next = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Alt+R")]);
+        let diff = compute_secondary_hotkey_diff(&previous, &next);
+        assert_eq!(
+            diff.unregister,
+            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
+        );
+        assert_eq!(
+            diff.register,
+            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Alt+R".to_owned())],
+        );
+    }
+
+    #[test]
+    fn diff_unregisters_dropped_action() {
+        // The user removed an action from the map (action no longer
+        // bound). Just unregister; nothing to register for it.
+        let previous = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
+        ]);
+        let next = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let diff = compute_secondary_hotkey_diff(&previous, &next);
+        assert_eq!(
+            diff.unregister,
+            vec![(
+                SecondaryHotkeyAction::ClearHistory,
+                "Cmd+Shift+X".to_owned()
+            )],
+        );
+        assert!(diff.register.is_empty());
+    }
+
+    #[test]
+    fn diff_registers_brand_new_action() {
+        // A previously empty action gains a binding. No unregister
+        // needed because there was nothing to tear down.
+        let previous = map(&[]);
+        let next = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let diff = compute_secondary_hotkey_diff(&previous, &next);
+        assert!(diff.unregister.is_empty());
+        assert_eq!(
+            diff.register,
+            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
+        );
+    }
+
+    #[test]
+    fn diff_keeps_unchanged_bindings_untouched_when_sibling_changes() {
+        // Regression guard for the partial-failure scenario described
+        // in `register_secondary_hotkeys`'s doc comment: changing one
+        // sibling must not produce a (un)register pair for the
+        // unchanged action, otherwise a transient unregister window
+        // would let the OS reassign the still-bound accelerator.
+        let previous = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
+        ]);
+        let next = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Alt+X"),
+        ]);
+        let diff = compute_secondary_hotkey_diff(&previous, &next);
+        assert_eq!(
+            diff.unregister,
+            vec![(
+                SecondaryHotkeyAction::ClearHistory,
+                "Cmd+Shift+X".to_owned()
+            )],
+        );
+        assert_eq!(
+            diff.register,
+            vec![(SecondaryHotkeyAction::ClearHistory, "Cmd+Alt+X".to_owned())],
+        );
     }
 }
