@@ -188,12 +188,16 @@ impl NagoriRuntime {
                 let results = self
                     .search(SearchQuery::new(&query, normalize_text(&query), limit))
                     .await?;
-                let mut dtos = Vec::with_capacity(results.len());
-                for result in results {
-                    let entry_id = result.entry_id;
-                    let reps = self.store.list_representations(entry_id).await?;
-                    dtos.push(SearchResultDto::from(result).with_representation_summary(&reps));
-                }
+                let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
+                let summaries = self.store.list_representation_summaries(&ids).await?;
+                let dtos = results
+                    .into_iter()
+                    .map(|result| {
+                        let entry_id = result.entry_id;
+                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+                        SearchResultDto::from(result).with_representation_summaries(reps)
+                    })
+                    .collect();
                 Ok(IpcResponse::Search(SearchResponse { results: dtos }))
             }
             IpcRequest::GetEntry(GetEntryRequest {
@@ -204,9 +208,13 @@ impl NagoriRuntime {
                 let include_text =
                     include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
                 let entry_id = entry.id;
-                let reps = self.store.list_representations(entry_id).await?;
+                let summaries = self
+                    .store
+                    .list_representation_summaries(&[entry_id])
+                    .await?;
+                let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                 Ok(IpcResponse::Entry(
-                    EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+                    EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
                 ))
             }
             IpcRequest::ListRecent(ListRecentRequest {
@@ -214,32 +222,36 @@ impl NagoriRuntime {
                 include_sensitive,
             }) => {
                 let entries = self.list_recent(limit).await?;
-                let mut dtos = Vec::with_capacity(entries.len());
-                for entry in entries {
-                    let include_text =
-                        include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                    let entry_id = entry.id;
-                    let reps = self.store.list_representations(entry_id).await?;
-                    dtos.push(
+                let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+                let summaries = self.store.list_representation_summaries(&ids).await?;
+                let dtos = entries
+                    .into_iter()
+                    .map(|entry| {
+                        let include_text =
+                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                        let entry_id = entry.id;
+                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                         EntryDto::from_entry(entry, include_text)
-                            .with_representation_summary(&reps),
-                    );
-                }
+                            .with_representation_summaries(reps)
+                    })
+                    .collect();
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::ListPinned(ListPinnedRequest { include_sensitive }) => {
                 let entries = self.list_pinned().await?;
-                let mut dtos = Vec::with_capacity(entries.len());
-                for entry in entries {
-                    let include_text =
-                        include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                    let entry_id = entry.id;
-                    let reps = self.store.list_representations(entry_id).await?;
-                    dtos.push(
+                let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+                let summaries = self.store.list_representation_summaries(&ids).await?;
+                let dtos = entries
+                    .into_iter()
+                    .map(|entry| {
+                        let include_text =
+                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                        let entry_id = entry.id;
+                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                         EntryDto::from_entry(entry, include_text)
-                            .with_representation_summary(&reps),
-                    );
-                }
+                            .with_representation_summaries(reps)
+                    })
+                    .collect();
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::AddEntry(AddEntryRequest { text }) => {
@@ -247,9 +259,13 @@ impl NagoriRuntime {
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text = is_text_safe_for_default_output(entry.sensitivity);
                 let entry_id = entry.id;
-                let reps = self.store.list_representations(entry_id).await?;
+                let summaries = self
+                    .store
+                    .list_representation_summaries(&[entry_id])
+                    .await?;
+                let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                 Ok(IpcResponse::Entry(
-                    EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+                    EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
                 ))
             }
             IpcRequest::CopyEntry(CopyEntryRequest { id }) => {

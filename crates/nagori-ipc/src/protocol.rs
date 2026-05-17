@@ -1,6 +1,6 @@
 use nagori_core::{
     AiActionId, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId, PasteFormat,
-    RankReason, RepresentationRole, SearchResult, Sensitivity, StoredClipboardRepresentation,
+    RankReason, RepresentationRole, RepresentationSummary, SearchResult, Sensitivity,
     safe_preview_for_dto,
 };
 use nagori_platform::PlatformCapabilities;
@@ -251,13 +251,10 @@ impl From<SearchResult> for SearchResultDto {
 
 impl SearchResultDto {
     #[must_use]
-    pub fn with_representation_summary(
-        mut self,
-        representations: &[StoredClipboardRepresentation],
-    ) -> Self {
-        self.representation_summary = representations
+    pub fn with_representation_summaries(mut self, summaries: &[RepresentationSummary]) -> Self {
+        self.representation_summary = summaries
             .iter()
-            .map(RepresentationSummaryDto::from_stored)
+            .map(RepresentationSummaryDto::from_summary)
             .collect();
         self
     }
@@ -278,11 +275,11 @@ pub struct RepresentationSummaryDto {
 }
 
 impl RepresentationSummaryDto {
-    pub fn from_stored(rep: &StoredClipboardRepresentation) -> Self {
+    pub fn from_summary(summary: &RepresentationSummary) -> Self {
         Self {
-            mime_type: rep.mime_type.clone(),
-            role: rep.role,
-            byte_count: rep.byte_count() as u64,
+            mime_type: summary.mime_type.clone(),
+            role: summary.role,
+            byte_count: summary.byte_count,
         }
     }
 }
@@ -328,13 +325,10 @@ impl EntryDto {
     }
 
     #[must_use]
-    pub fn with_representation_summary(
-        mut self,
-        representations: &[StoredClipboardRepresentation],
-    ) -> Self {
-        self.representation_summary = representations
+    pub fn with_representation_summaries(mut self, summaries: &[RepresentationSummary]) -> Self {
+        self.representation_summary = summaries
             .iter()
-            .map(RepresentationSummaryDto::from_stored)
+            .map(RepresentationSummaryDto::from_summary)
             .collect();
         self
     }

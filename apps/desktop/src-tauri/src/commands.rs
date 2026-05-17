@@ -40,12 +40,20 @@ pub async fn search_clipboard(
     let results = state.runtime.search(query).await?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let total_candidates = results.len();
-    let mut dto_results: Vec<SearchResultDto> = Vec::with_capacity(results.len());
-    for result in results {
-        let entry_id = result.entry_id;
-        let reps = state.runtime.store().list_representations(entry_id).await?;
-        dto_results.push(SearchResultDto::from(result).with_representation_summary(&reps));
-    }
+    let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&ids)
+        .await?;
+    let dto_results: Vec<SearchResultDto> = results
+        .into_iter()
+        .map(|result| {
+            let entry_id = result.entry_id;
+            let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+            SearchResultDto::from(result).with_representation_summaries(reps)
+        })
+        .collect();
 
     Ok(SearchResponseDto {
         results: dto_results,
@@ -63,24 +71,40 @@ pub async fn list_recent_entries(
         .unwrap_or(DEFAULT_RECENT_LIMIT)
         .clamp(1, MAX_COMMAND_LIMIT);
     let entries = state.runtime.list_recent(limit).await?;
-    let mut dtos = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let entry_id = entry.id;
-        let reps = state.runtime.store().list_representations(entry_id).await?;
-        dtos.push(EntryDto::from_entry(entry, false).with_representation_summary(&reps));
-    }
+    let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&ids)
+        .await?;
+    let dtos = entries
+        .into_iter()
+        .map(|entry| {
+            let entry_id = entry.id;
+            let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+            EntryDto::from_entry(entry, false).with_representation_summaries(reps)
+        })
+        .collect();
     Ok(dtos)
 }
 
 #[tauri::command]
 pub async fn list_pinned_entries(state: State<'_, AppState>) -> CommandResult<Vec<EntryDto>> {
     let entries = state.runtime.list_pinned().await?;
-    let mut dtos = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let entry_id = entry.id;
-        let reps = state.runtime.store().list_representations(entry_id).await?;
-        dtos.push(EntryDto::from_entry(entry, false).with_representation_summary(&reps));
-    }
+    let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&ids)
+        .await?;
+    let dtos = entries
+        .into_iter()
+        .map(|entry| {
+            let entry_id = entry.id;
+            let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+            EntryDto::from_entry(entry, false).with_representation_summaries(reps)
+        })
+        .collect();
     Ok(dtos)
 }
 
@@ -93,9 +117,14 @@ pub async fn get_entry(state: State<'_, AppState>, id: String) -> CommandResult<
     };
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
     let entry_id = entry.id;
-    let reps = state.runtime.store().list_representations(entry_id).await?;
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&[entry_id])
+        .await?;
+    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
     Ok(Some(
-        EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+        EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
     ))
 }
 
@@ -273,8 +302,13 @@ pub async fn add_entry(state: State<'_, AppState>, text: String) -> CommandResul
         .ok_or(AppError::NotFound)?;
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
     let entry_id = entry.id;
-    let reps = state.runtime.store().list_representations(entry_id).await?;
-    Ok(EntryDto::from_entry(entry, include_text).with_representation_summary(&reps))
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&[entry_id])
+        .await?;
+    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+    Ok(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps))
 }
 
 #[tauri::command]
@@ -624,8 +658,13 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
         .ok_or(AppError::NotFound)?;
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
     let entry_id = entry.id;
-    let reps = state.runtime.store().list_representations(entry_id).await?;
-    Ok(EntryDto::from_entry(entry, include_text).with_representation_summary(&reps))
+    let summaries = state
+        .runtime
+        .store()
+        .list_representation_summaries(&[entry_id])
+        .await?;
+    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+    Ok(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps))
 }
 
 /// Manual "Check for updates now" probe surfaced in Settings → Advanced.

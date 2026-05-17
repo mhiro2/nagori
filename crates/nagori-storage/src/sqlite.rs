@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     ops::{Deref, DerefMut},
     path::Path,
@@ -10,9 +11,10 @@ use async_trait::async_trait;
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, ContentHash, ContentKind,
     EntryId, EntryLifecycle, EntryMetadata, FtsCandidate, HashAlgorithm, NgramCandidate,
-    RecentOrder, RepresentationDataRef, RepresentationRole, Result, SearchCandidateProvider,
-    SearchDocument, SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
-    Sensitivity, SourceApp, StoredClipboardRepresentation, compile_user_regex,
+    RecentOrder, RepresentationDataRef, RepresentationRole, RepresentationSummary, Result,
+    SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
+    SearchResult, SearchService, Sensitivity, SourceApp, StoredClipboardRepresentation,
+    compile_user_regex,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
@@ -694,6 +696,81 @@ impl nagori_core::EntryRepository for SqliteStore {
                     ordinal,
                     data,
                 });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn list_representation_summaries(
+        &self,
+        ids: &[EntryId],
+    ) -> Result<HashMap<EntryId, Vec<RepresentationSummary>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let id_strings: Vec<String> = ids.iter().map(EntryId::to_string).collect();
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            // One round-trip for the whole batch — reads only the columns
+            // the DTO needs (no blob / text_content), so even a 200-row
+            // palette refresh stays cheap. Role precedence + ordinal match
+            // `list_representations` so badges and the "preserved formats"
+            // row reflect the same ordering the copy-back path will replay.
+            let mut sql = String::from(
+                "SELECT r.entry_id, r.role, r.mime_type, r.byte_count \
+                 FROM entry_representations r \
+                 JOIN entries e ON e.id = r.entry_id \
+                 WHERE e.deleted_at IS NULL AND r.entry_id IN (",
+            );
+            for idx in 0..id_strings.len() {
+                if idx > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+            }
+            sql.push_str(
+                ") ORDER BY \
+                 r.entry_id, \
+                 CASE r.role \
+                     WHEN 'primary' THEN 0 \
+                     WHEN 'plain_fallback' THEN 1 \
+                     WHEN 'alternative' THEN 2 \
+                     ELSE 3 \
+                 END, \
+                 r.ordinal ASC",
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let params: Vec<&dyn ToSql> = id_strings.iter().map(|s| s as &dyn ToSql).collect();
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    let entry_id_str: String = row.get(0)?;
+                    let role: String = row.get(1)?;
+                    let mime: String = row.get(2)?;
+                    let byte_count: i64 = row.get(3)?;
+                    Ok((entry_id_str, role, mime, byte_count))
+                })
+                .map_err(|err| storage_err(&err))?;
+            let mut out: HashMap<EntryId, Vec<RepresentationSummary>> = HashMap::new();
+            for row in rows {
+                let (entry_id_str, role_str, mime, byte_count) =
+                    row.map_err(|err| storage_err(&err))?;
+                let entry_id = EntryId::from_str(&entry_id_str).map_err(|err| {
+                    AppError::Storage(format!("invalid entry_id in summary row: {err}"))
+                })?;
+                let role = RepresentationRole::from_db_str(&role_str).ok_or_else(|| {
+                    AppError::Storage(format!("unknown representation role: {role_str}"))
+                })?;
+                let byte_count = u64::try_from(byte_count).map_err(|err| {
+                    AppError::Storage(format!("representation byte_count out of range: {err}"))
+                })?;
+                out.entry(entry_id)
+                    .or_default()
+                    .push(RepresentationSummary {
+                        role,
+                        mime_type: mime,
+                        byte_count,
+                    });
             }
             Ok(out)
         })
@@ -3076,6 +3153,118 @@ mod tests {
         let store = SqliteStore::open_memory().unwrap();
         let reps = store.list_representations(EntryId::new()).await.unwrap();
         assert!(reps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_representation_summaries_batches_across_entries() {
+        // Palette refreshes ask for summaries of every visible row in a
+        // single round-trip. Insert two multi-rep entries plus one
+        // single-rep entry, query them as a batch, and confirm each id
+        // gets back its own representations in role/ordinal order with no
+        // payload bytes leaking through.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let mk = |seq: &str, reps: Vec<(&str, &str)>| {
+            let snapshot = ClipboardSnapshot {
+                sequence: ClipboardSequence::content_hash(seq),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: reps
+                    .into_iter()
+                    .map(|(mime, payload)| ClipboardRepresentation {
+                        mime_type: mime.to_owned(),
+                        data: ClipboardData::Text(payload.to_owned()),
+                    })
+                    .collect(),
+            };
+            EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry")
+        };
+
+        let store = SqliteStore::open_memory().unwrap();
+        let id_a = store
+            .insert(mk(
+                "batch-a",
+                vec![("text/html", "<p>a</p>"), ("text/plain", "a")],
+            ))
+            .await
+            .unwrap();
+        let id_b = store
+            .insert(mk("batch-b", vec![("text/plain", "b")]))
+            .await
+            .unwrap();
+        let id_c = store
+            .insert(mk(
+                "batch-c",
+                vec![
+                    ("text/html", "<i>c</i>"),
+                    ("text/plain", "c"),
+                    ("application/rtf", "{\\rtf1 c}"),
+                ],
+            ))
+            .await
+            .unwrap();
+
+        let summaries = store
+            .list_representation_summaries(&[id_a, id_b, id_c])
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 3);
+
+        let a = summaries.get(&id_a).unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].role, RepresentationRole::Primary);
+        assert_eq!(a[0].mime_type, "text/html");
+        assert_eq!(a[0].byte_count, "<p>a</p>".len() as u64);
+        assert_eq!(a[1].role, RepresentationRole::PlainFallback);
+        assert_eq!(a[1].mime_type, "text/plain");
+
+        let b = summaries.get(&id_b).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].role, RepresentationRole::Primary);
+        assert_eq!(b[0].mime_type, "text/plain");
+
+        let c = summaries.get(&id_c).unwrap();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0].role, RepresentationRole::Primary);
+        assert_eq!(c[1].role, RepresentationRole::PlainFallback);
+        assert_eq!(c[2].role, RepresentationRole::Alternative);
+        assert_eq!(c[2].mime_type, "application/rtf");
+    }
+
+    #[tokio::test]
+    async fn list_representation_summaries_empty_input_returns_empty_map() {
+        let store = SqliteStore::open_memory().unwrap();
+        let summaries = store.list_representation_summaries(&[]).await.unwrap();
+        assert!(summaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_representation_summaries_skips_soft_deleted_entries() {
+        // Mirror of `list_representations_skips_soft_deleted_entries` for
+        // the batch path: a soft-deleted entry must not contribute rows
+        // even when its id is supplied alongside live entries.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let store = SqliteStore::open_memory().unwrap();
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("batch-soft-delete"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text("gone".to_owned()),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let id = store.insert(entry).await.unwrap();
+        store.mark_deleted(id).await.unwrap();
+
+        let summaries = store.list_representation_summaries(&[id]).await.unwrap();
+        assert!(!summaries.contains_key(&id));
     }
 
     #[tokio::test]

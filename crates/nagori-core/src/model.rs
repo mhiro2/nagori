@@ -596,6 +596,31 @@ impl StoredClipboardRepresentation {
     }
 }
 
+/// Lightweight projection of `entry_representations` for IPC and palette
+/// rendering.
+///
+/// Carries only the columns the frontend needs to render "HTML + Plain"
+/// badges and the "preserved formats" row — no payload bytes — so the
+/// search-list hot path can batch-fetch every result row without
+/// decoding blobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepresentationSummary {
+    pub role: RepresentationRole,
+    pub mime_type: String,
+    pub byte_count: u64,
+}
+
+impl RepresentationSummary {
+    #[must_use]
+    pub fn from_stored(rep: &StoredClipboardRepresentation) -> Self {
+        Self {
+            role: rep.role,
+            mime_type: rep.mime_type.clone(),
+            byte_count: rep.byte_count() as u64,
+        }
+    }
+}
+
 /// Role of a stored representation inside an entry's representation set.
 ///
 /// Maps 1:1 to the `entry_representations.role` SQL column. The variant
