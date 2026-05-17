@@ -736,10 +736,14 @@ intersection of {`text/plain`, `text/html`, `application/rtf`,
 declared via dynamic UTIs (`public.jpeg` / `com.compuserve.gif` /
 `org.webmproject.webp`) so a downstream paste target that asks for any
 of those MIMEs still gets the bytes the source originally advertised.
-File-list reps are republished as one `NSPasteboardItem` per stored
-POSIX path with `public.file-url` carrying the corresponding `file://`
-URL, so Finder, terminals, and editors see the same drop-targets the
-source produced. To avoid clearing the pasteboard for nothing, the
+File-list reps are republished by looping `setString_forType` with the
+`file://` URL for each stored POSIX path against
+`NSPasteboardTypeFileURL`. AppKit's implicit first pasteboard item only
+holds one value per type, so the last URL written is the one a paste
+target reads back: Finder / TextEdit accept a single-file drop, which
+covers the common case and is a strict improvement over the previous
+"skip every file-list rep" behaviour. True multi-file batches via
+`NSPasteboardItem` are deferred. To avoid clearing the pasteboard for nothing, the
 macOS adapter pre-scans the rep set: when every entry falls outside
 the publishable table the call falls back to `write_entry` *before*
 `clearContents()` runs, so the existing primary-only path either
