@@ -10,9 +10,8 @@ use nagori_core::{
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardItem, NSPasteboardType, NSPasteboardTypeFileURL,
-    NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF,
+    NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSData, NSString};
@@ -20,6 +19,21 @@ use time::OffsetDateTime;
 
 #[cfg(target_os = "macos")]
 const MAX_FILE_URL_ITEMS: usize = 4096;
+
+/// UTI mapped to `image/jpeg` for pasteboard publishing.
+///
+/// `NSPasteboardType` is a `NSString` newtype, so MIMEs that lack a static
+/// `NSPasteboardTypePNG`-style constant are still publishable by building a
+/// fresh `NSString` from the canonical Uniform Type Identifier. Apps that
+/// register `public.jpeg` / `com.compuserve.gif` / `org.webmproject.webp`
+/// in their `NSServices` registration (Preview, `TextEdit`, Mail, most
+/// browsers) accept these the same way they accept the bundled constants.
+#[cfg(target_os = "macos")]
+const UTI_JPEG: &str = "public.jpeg";
+#[cfg(target_os = "macos")]
+const UTI_GIF: &str = "com.compuserve.gif";
+#[cfg(target_os = "macos")]
+const UTI_WEBP: &str = "org.webmproject.webp";
 
 /// macOS clipboard adapter.
 ///
@@ -264,19 +278,36 @@ impl MacosClipboard {
             //   shared reference, and AppKit retains its own copy of the
             //   data on the pasteboard before returning.
             unsafe {
-                let pasteboard_type: &NSPasteboardType = match mime_owned.as_str() {
-                    "image/png" => NSPasteboardTypePNG,
-                    "image/tiff" => NSPasteboardTypeTIFF,
+                // Dynamic UTI strings (JPEG/GIF/WebP) outlive the call by
+                // virtue of `Retained<NSString>` keeping the backing buffer
+                // alive across `setData_forType` — AppKit copies the type
+                // string before returning. Static `NSPasteboardType*` constants
+                // are handed straight back to AppKit by reference.
+                let pb = NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                let data = NSData::with_bytes(&bytes);
+                let accepted = match mime_owned.as_str() {
+                    "image/png" => pb.setData_forType(Some(&data), NSPasteboardTypePNG),
+                    "image/tiff" => pb.setData_forType(Some(&data), NSPasteboardTypeTIFF),
+                    "image/jpeg" => {
+                        let ty = NSString::from_str(UTI_JPEG);
+                        pb.setData_forType(Some(&data), &ty)
+                    }
+                    "image/gif" => {
+                        let ty = NSString::from_str(UTI_GIF);
+                        pb.setData_forType(Some(&data), &ty)
+                    }
+                    "image/webp" => {
+                        let ty = NSString::from_str(UTI_WEBP);
+                        pb.setData_forType(Some(&data), &ty)
+                    }
                     other => {
                         return Err(AppError::Unsupported(format!(
                             "unsupported image clipboard mime type: {other}"
                         )));
                     }
                 };
-                let pb = NSPasteboard::generalPasteboard();
-                pb.clearContents();
-                let data = NSData::with_bytes(&bytes);
-                if !pb.setData_forType(Some(&data), pasteboard_type) {
+                if !accepted {
                     return Err(AppError::Platform(
                         "NSPasteboard::setData failed for image type".to_owned(),
                     ));
@@ -405,30 +436,33 @@ enum PublishOutcome {
 /// crate is a workspace member built on every host and the helper has to
 /// resolve on non-mac targets too.
 fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
-    reps.iter().any(|rep| {
-        matches!(
-            (rep.mime_type.as_str(), &rep.data),
+    reps.iter()
+        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
             (
                 "text/plain" | "text/html" | "application/rtf",
-                RepresentationDataRef::InlineText(_)
-            ) | (
-                "image/png" | "image/tiff",
-                RepresentationDataRef::DatabaseBlob(_)
+                RepresentationDataRef::InlineText(_),
             )
-        )
-    })
+            | (
+                "image/png" | "image/tiff" | "image/jpeg" | "image/gif" | "image/webp",
+                RepresentationDataRef::DatabaseBlob(_),
+            ) => true,
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
+            _ => false,
+        })
 }
 
 /// Publish a single stored representation onto the shared `NSPasteboard`.
 ///
-/// The MIME → `NSPasteboardType` table is intentionally small: plain text,
-/// HTML, RTF, PNG, and TIFF. Other reps that the capture pipeline persists
-/// (`text/uri-list` file lists, `image/jpeg` / `image/gif` / `image/webp`)
-/// are returned as [`PublishOutcome::Skipped`] — file URLs would require a
-/// separate `NSPasteboardItem` array, and the non-PNG/TIFF image types do
-/// not have a stable `NSPasteboardType` constant. The pre-scan in
-/// [`has_publishable_representation`] keeps copy-back of an all-skipped set
-/// from clearing the pasteboard.
+/// The MIME → `NSPasteboardType` table covers plain text, HTML, RTF, PNG,
+/// TIFF, JPEG, GIF, WebP, and `text/uri-list` file lists. Image MIMEs that
+/// lack a static `NSPasteboardType*` constant (JPEG/GIF/WebP) are published
+/// against their canonical Uniform Type Identifier strings — `AppKit` copies
+/// the type name, so the dynamic `NSString` only has to outlive
+/// `setData_forType`. File paths fan out per-item via `setString_forType`
+/// on `NSPasteboardTypeFileURL`; multi-file lists currently keep only the
+/// last URL on the implicit pasteboard item, which is the Phase 4
+/// limitation documented in ARCHITECTURE.md and addressed once
+/// `NSPasteboardItem` batches replace the per-rep `setString` loop.
 #[cfg(target_os = "macos")]
 unsafe fn publish_one_representation(
     pb: &NSPasteboard,
@@ -459,6 +493,49 @@ unsafe fn publish_one_representation(
             let data = NSData::with_bytes(bytes);
             unsafe { pb.setData_forType(Some(&data), NSPasteboardTypeTIFF) }
         }
+        ("image/jpeg", RepresentationDataRef::DatabaseBlob(bytes)) => {
+            // `NSString::from_str` returns a freshly retained NSString
+            // that AppKit copies on `setData_forType`. No static-borrow
+            // requirements, hence no inner `unsafe` block.
+            let data = NSData::with_bytes(bytes);
+            let ty = NSString::from_str(UTI_JPEG);
+            pb.setData_forType(Some(&data), &ty)
+        }
+        ("image/gif", RepresentationDataRef::DatabaseBlob(bytes)) => {
+            let data = NSData::with_bytes(bytes);
+            let ty = NSString::from_str(UTI_GIF);
+            pb.setData_forType(Some(&data), &ty)
+        }
+        ("image/webp", RepresentationDataRef::DatabaseBlob(bytes)) => {
+            let data = NSData::with_bytes(bytes);
+            let ty = NSString::from_str(UTI_WEBP);
+            pb.setData_forType(Some(&data), &ty)
+        }
+        ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => {
+            // The Phase 4 "simple" path: write each file URL via
+            // `setString_forType(NSPasteboardTypeFileURL)`. AppKit holds
+            // one value per type on the implicit pasteboard item, so a
+            // multi-file list collapses to its last URL — Finder / TextEdit
+            // still accept a single-file paste, which is the common case
+            // and a strict improvement over the previous "skip every
+            // file-list rep" behaviour. Switching to `NSPasteboardItem`
+            // batches for true multi-file paste is tracked for a later
+            // phase.
+            let mut any_accepted = false;
+            for path in paths {
+                let Some(url) = path_to_file_url(path) else {
+                    continue;
+                };
+                let value = NSString::from_str(&url);
+                // SAFETY: `NSPasteboardTypeFileURL` is a `'static` AppKit
+                // constant, and `value` is a freshly retained NSString
+                // copied by AppKit before the call returns.
+                if unsafe { pb.setString_forType(&value, NSPasteboardTypeFileURL) } {
+                    any_accepted = true;
+                }
+            }
+            any_accepted
+        }
         (mime, _) => {
             tracing::debug!(
                 mime = %mime,
@@ -474,6 +551,18 @@ unsafe fn publish_one_representation(
     } else {
         PublishOutcome::Failed
     }
+}
+
+/// Convert a filesystem path string into a `file://` URL string suitable
+/// for `NSPasteboardTypeFileURL`. Returns `None` for paths that aren't
+/// representable as a URL — typically relative paths from a corrupted
+/// history row.
+#[cfg(target_os = "macos")]
+fn path_to_file_url(path: &str) -> Option<String> {
+    let trimmed = std::path::Path::new(path);
+    url::Url::from_file_path(trimmed)
+        .ok()
+        .map(|u| u.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -812,6 +901,32 @@ mod tests {
         }
     }
 
+    /// Read raw `NSPasteboard` data for the given UTI. JPEG / GIF / WebP
+    /// do not have a stable `NSPasteboardType*` constant, so a round-trip
+    /// assertion has to materialise an `NSString` for the UTI on the spot.
+    fn read_pasteboard_data_for_uti(uti: &str) -> Option<Vec<u8>> {
+        let pb = NSPasteboard::generalPasteboard();
+        let ty = NSString::from_str(uti);
+        let data = pb.dataForType(&ty)?;
+        ns_data_to_vec(&data)
+    }
+
+    /// Read the first file URL string parked on the implicit pasteboard
+    /// item. Used to verify `text/uri-list` round-trips without going
+    /// through `current_snapshot`, which collects file URLs across every
+    /// pasteboard item — the per-rep `setString_forType` publish path only
+    /// produces a single implicit item.
+    fn read_pasteboard_file_url_string() -> Option<String> {
+        // SAFETY: AppKit FFI on the shared pasteboard. `NSPasteboardTypeFileURL`
+        // is a `'static` extern constant; the returned `Retained<NSString>`
+        // owns its bytes independently of any Rust lifetime.
+        unsafe {
+            let pb = NSPasteboard::generalPasteboard();
+            let s = pb.stringForType(NSPasteboardTypeFileURL)?;
+            Some(s.to_string())
+        }
+    }
+
     /// Cover PNG / TIFF / text / unsupported-mime / multi-rep cases in one
     /// test so they share a single serialized run against the system
     /// pasteboard. Splitting them into separate `#[tokio::test]`s would let
@@ -882,14 +997,46 @@ mod tests {
             .expect("text/plain missing from snapshot");
         assert_eq!(text_back, "write_entry text fallback round-trip");
 
-        let unsupported = image_entry(vec![0x00, 0x01, 0x02], "image/webp");
+        // Phase 4: JPEG / GIF / WebP go through dynamic UTI strings rather
+        // than the static `NSPasteboardType*` constants — round-trip each
+        // through its UTI to confirm the publisher's match arm fires and
+        // AppKit accepts the bytes verbatim.
+        for (mime, uti, bytes) in [
+            (
+                "image/jpeg",
+                UTI_JPEG,
+                &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0x02][..],
+            ),
+            ("image/gif", UTI_GIF, &[0xCA, 0xFE, 0xBA, 0xBE][..]),
+            (
+                "image/webp",
+                UTI_WEBP,
+                &[0x52, 0x49, 0x46, 0x46, 0x77, 0x65, 0x62, 0x70][..],
+            ),
+        ] {
+            let entry = image_entry(bytes.to_vec(), mime);
+            clipboard
+                .write_entry(&entry)
+                .await
+                .unwrap_or_else(|err| panic!("write {mime} entry: {err:?}"));
+            let read_back = tokio::task::spawn_blocking(move || read_pasteboard_data_for_uti(uti))
+                .await
+                .expect("join blocking read");
+            assert_eq!(
+                read_back.as_deref(),
+                Some(bytes),
+                "{mime} bytes must round-trip through {uti} verbatim"
+            );
+        }
+
+        let truly_unsupported = image_entry(vec![0x00, 0x01, 0x02], "image/heic");
         let err = clipboard
-            .write_entry(&unsupported)
+            .write_entry(&truly_unsupported)
             .await
-            .expect_err("write_entry must reject unsupported image mime types");
+            .expect_err("write_entry must reject genuinely unsupported image mime types");
         assert!(
             matches!(err, AppError::Unsupported(_)),
-            "expected AppError::Unsupported for image/webp, got {err:?}"
+            "expected AppError::Unsupported for image/heic, got {err:?}"
         );
 
         // Preserve copy-back: a rich-text entry should land HTML + plain
@@ -983,28 +1130,47 @@ mod tests {
             "empty rep list should publish entry plain text via write_entry",
         );
 
+        // Round-trip a single-file `text/uri-list` rep. The publisher
+        // writes each path via `setString_forType(NSPasteboardTypeFileURL)`,
+        // so a single-file list lands on the implicit pasteboard item and
+        // any Finder / TextEdit paste target sees the same URL it would
+        // get from a Finder copy.
+        let file_url_entry = EntryFactory::from_text("/tmp/nagori-uri-list-roundtrip");
+        let file_url_reps = vec![StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::FilePaths(vec![
+                "/tmp/nagori-uri-list-roundtrip".to_owned(),
+            ]),
+        }];
+        clipboard
+            .write_representations(&file_url_entry, &file_url_reps)
+            .await
+            .expect("write_representations file-URL rep");
+        let url_back = tokio::task::spawn_blocking(read_pasteboard_file_url_string)
+            .await
+            .expect("join blocking read");
+        assert_eq!(
+            url_back.as_deref(),
+            Some("file:///tmp/nagori-uri-list-roundtrip"),
+            "text/uri-list rep must publish a file:// URL on NSPasteboardTypeFileURL"
+        );
+
         // A rep set whose MIMEs are all outside the NSPasteboard publisher's
-        // table (file URLs, image/jpeg, etc.) must fall back to write_entry
-        // *before* `clearContents()` runs — otherwise an all-unsupported set
-        // would leave the user's clipboard empty and the copy command would
-        // surface a platform error.
+        // table (a MIME we genuinely cannot publish — e.g. `application/pdf`)
+        // must fall back to write_entry *before* `clearContents()` runs —
+        // otherwise an all-unsupported set would leave the user's clipboard
+        // empty and the copy command would surface a platform error.
         let only_unsupported_entry = EntryFactory::from_text(
             "write_representations falls back to write_entry when no rep is publishable",
         );
-        let unsupported_reps = vec![
-            StoredClipboardRepresentation {
-                role: RepresentationRole::Primary,
-                mime_type: "text/uri-list".to_owned(),
-                ordinal: 0,
-                data: RepresentationDataRef::FilePaths(vec!["/tmp/nagori-fallback".to_owned()]),
-            },
-            StoredClipboardRepresentation {
-                role: RepresentationRole::Alternative,
-                mime_type: "image/jpeg".to_owned(),
-                ordinal: 1,
-                data: RepresentationDataRef::DatabaseBlob(vec![0xFF, 0xD8, 0xFF, 0xE0]),
-            },
-        ];
+        let unsupported_reps = vec![StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "application/pdf".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::DatabaseBlob(vec![0x25, 0x50, 0x44, 0x46]),
+        }];
         clipboard
             .write_representations(&only_unsupported_entry, &unsupported_reps)
             .await
