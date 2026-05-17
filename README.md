@@ -98,12 +98,37 @@ reports trace back to one of them.
 
 ### Windows notes
 
-Windows builds target x86_64 and use Win32 clipboard APIs
-(`GetClipboardSequenceNumber` polling, `arboard` for text, `CF_HDROP`
-for file lists) with `SendInput` Ctrl+V auto-paste and Tauri-managed
-global shortcuts. Installer artifacts are not yet produced by the
-release workflow — build from source until a signed Windows bundle
-ships.
+Windows builds target x86_64 and use Win32 clipboard APIs:
+`GetClipboardSequenceNumber` polling to detect changes, `arboard`
+for text and `CF_DIBV5` / `CF_DIB` image reads, a hand-rolled
+`DROPFILES` + `SetClipboardData(CF_HDROP)` writer for file lists,
+and `DragQueryFileW` for file-list reads. Auto-paste is `SendInput`
+Ctrl+V and global shortcuts use the Tauri global-shortcut plugin.
+
+Supported environment:
+
+- Windows 10 1809 or later, or Windows 11. The desktop shell embeds
+  WebView2, which requires the Edge WebView2 runtime
+  (preinstalled on every supported version).
+- Standard user privileges. Nagori does not require Administrator
+  rights and is not designed to run elevated.
+- A normal interactive desktop session. Nagori does not run as a
+  Windows service and does not currently observe the
+  per-session clipboard from a different security context.
+
+Known limitations:
+
+- Installer artifacts are not yet produced by the release workflow —
+  build from source until a signed Windows bundle ships.
+- Auto-paste cannot target an elevated foreground window from a
+  non-elevated Nagori process: `SendInput` is blocked by UIPI when
+  the target window runs at a higher integrity level. Run Nagori at
+  the same level as the apps you paste into.
+- Multi-representation copy-back falls back to a single format on
+  Windows. macOS sessions paste-restored on Windows re-publish the
+  highest-priority representation rather than every MIME variant
+  the source originally offered. The `Preserve` toggle is read-only
+  for these entries until the multi-rep writer lands.
 
 ## Documentation
 
