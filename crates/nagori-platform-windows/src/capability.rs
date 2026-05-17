@@ -1,10 +1,11 @@
 //! Static capability report for the Windows host adapter.
 //!
-//! Windows is experimental: capture and copy-back are text-and-files
-//! only (no image clipboard), auto-paste / global hotkeys / frontmost
-//! app are all wired, and there is no first-class permission UI or
-//! bundled update-check probe yet (the release workflow does not
-//! currently produce a signed Windows installer).
+//! Windows is experimental: capture covers text, file lists, and images
+//! (encoded as `image/png` from `CF_DIBV5`/`CF_DIB`); copy-back covers
+//! text and images, auto-paste / global hotkeys / frontmost app are all
+//! wired, and there is no first-class permission UI or bundled
+//! update-check probe yet (the release workflow does not currently
+//! produce a signed Windows installer).
 
 use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
 
@@ -14,26 +15,17 @@ pub fn report_capabilities() -> PlatformCapabilities {
         platform: Platform::Windows,
         tier: SupportTier::Experimental,
         capture_text: Capability::Available,
-        capture_image: Capability::Unsupported {
-            reason: "Windows capture is text + CF_HDROP file lists only; \
-                 image clipboard capture is not implemented yet."
-                .to_owned(),
-        },
+        capture_image: Capability::Available,
         // Windows captures Explorer file selections via CF_HDROP — the
         // README's "Text + files" coverage hinges on this row.
         capture_files: Capability::Available,
         write_text: Capability::Available,
-        write_image: Capability::Unsupported {
-            reason: "writing images back to the Windows clipboard is not \
-                 implemented; image entries from macOS sessions fall back \
-                 to Unsupported on copy-back."
-                .to_owned(),
-        },
+        write_image: Capability::Available,
         clipboard_multi_representation_write: Capability::Unsupported {
             reason: "Windows copy-back is primary-only on this adapter; \
                  SetClipboardData with multiple CF_* formats in one \
                  transaction is not wired yet, so Preserve falls back to \
-                 the single-format write_text path."
+                 the single-format write_entry path."
                 .to_owned(),
         },
         auto_paste: Capability::Available,
@@ -64,24 +56,24 @@ mod tests {
     }
 
     #[test]
-    fn text_files_and_input_rows_are_usable() {
+    fn text_files_input_and_image_rows_are_usable() {
         let caps = report_capabilities();
         assert!(caps.capture_text.is_usable());
-        // Without `capture_files`, the README's "Text + files" claim
-        // would silently regress on Windows. Lock it down here.
+        // Without `capture_files`, the README's file-list coverage on
+        // Windows would silently regress. Lock it down here.
         assert!(caps.capture_files.is_usable());
+        assert!(caps.capture_image.is_usable());
         assert!(caps.write_text.is_usable());
+        assert!(caps.write_image.is_usable());
         assert!(caps.auto_paste.is_usable());
         assert!(caps.global_hotkey.is_usable());
         assert!(caps.frontmost_app.is_usable());
     }
 
     #[test]
-    fn image_clipboard_and_updater_are_not_usable() {
+    fn multi_representation_and_updater_are_not_usable() {
         let caps = report_capabilities();
         for cap in [
-            &caps.capture_image,
-            &caps.write_image,
             &caps.clipboard_multi_representation_write,
             &caps.permissions_ui,
             &caps.update_check,

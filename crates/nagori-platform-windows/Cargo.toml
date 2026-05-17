@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 arboard.workspace = true
 async-trait.workspace = true
+image.workspace = true
 nagori-core = { path = "../nagori-core" }
 nagori-platform = { path = "../nagori-platform" }
 time.workspace = true

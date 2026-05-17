@@ -198,6 +198,13 @@ fn activate_hwnd_sync(handle: u64) {
     // palette open and paste) cannot crash. `SetForegroundWindow` is
     // a best-effort hint — Windows can deny the focus change (foreground
     // lock, UAC integrity gap) but never crashes the caller.
+    //
+    // The `handle as usize` cast is *intentionally* truncating on 32-bit
+    // Windows targets: `HWND` is pointer-sized, so on `i686-pc-windows-*`
+    // it is 32 bits wide and a 64-bit `u64` carrying a real HWND already
+    // fits in the low 32 bits. Allow the lint here because the truncation
+    // matches the OS handle width on the target we're compiling for.
+    #[allow(clippy::cast_possible_truncation)]
     unsafe {
         let hwnd = handle as usize as HWND;
         if hwnd.is_null() || IsWindow(hwnd) == 0 {

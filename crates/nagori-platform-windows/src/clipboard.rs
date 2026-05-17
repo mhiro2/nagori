@@ -1,7 +1,10 @@
+use std::borrow::Cow;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
-use arboard::Clipboard;
+use arboard::{Clipboard, ImageData};
 use async_trait::async_trait;
+use image::{ImageFormat, ImageReader};
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
     ClipboardSequence, ClipboardSnapshot, Result,
@@ -82,10 +85,13 @@ impl ClipboardReader for WindowsClipboard {
 #[async_trait]
 impl ClipboardWriter for WindowsClipboard {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()> {
-        if let ClipboardContent::Image(_) = &entry.content {
-            return Err(AppError::Unsupported(
-                "image clipboard writes are not implemented on Windows yet".to_owned(),
-            ));
+        if let ClipboardContent::Image(image) = &entry.content {
+            let bytes = image.pending_bytes.clone().ok_or_else(|| {
+                AppError::Platform(
+                    "image payload bytes were not loaded before clipboard write".to_owned(),
+                )
+            })?;
+            return self.write_image_bytes(bytes).await;
         }
         let Some(text) = entry.plain_text() else {
             return Err(AppError::Unsupported(
@@ -112,6 +118,39 @@ impl ClipboardWriter for WindowsClipboard {
                 .lock()
                 .map_err(|err| lock_err(&err))?
                 .set_text(owned)
+                .map_err(|err| platform_err(&err))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+}
+
+impl WindowsClipboard {
+    async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
+        // arboard publishes images on Windows as `CF_DIBV5`, so callers must
+        // hand us decoded RGBA. The capture path stores encoded bytes
+        // (image/png from this adapter, image/{tiff,jpeg,gif,webp} from
+        // macOS sessions paste-restored on Windows) and `image` auto-detects
+        // the format. The decode runs on the blocking pool because
+        // `image::ImageReader::decode` is CPU-bound.
+        let clipboard = self.clipboard.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let rgba = ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
+                .decode()
+                .map_err(|err| AppError::Platform(format!("image decode failed: {err}")))?
+                .to_rgba8();
+            let (width, height) = rgba.dimensions();
+            let image_data = ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: Cow::Owned(rgba.into_raw()),
+            };
+            clipboard
+                .lock()
+                .map_err(|err| lock_err(&err))?
+                .set_image(image_data)
                 .map_err(|err| platform_err(&err))
         })
         .await
@@ -147,6 +186,19 @@ fn capture_snapshot(
             Err(arboard::Error::ContentNotAvailable) => None,
             Err(err) => return Err(platform_err(&err)),
         };
+        // arboard's `get_image` opens its own `OpenClipboard` session and pulls
+        // the raw `CF_DIBV5` (falling back to `CF_DIB`) bytes into a freshly
+        // allocated RGBA buffer. Encode to PNG so the rest of the pipeline
+        // (storage, search snippets, IPC, copy-back) can treat Windows
+        // captures the same way macOS publishes `image/png` straight off the
+        // pasteboard. Format unavailability is the common case and surfaces
+        // as `ContentNotAvailable`, which we silently skip — only true Win32
+        // failures bubble up as `AppError::Platform`.
+        let image = match guard.get_image() {
+            Ok(img) => Some(img),
+            Err(arboard::Error::ContentNotAvailable) => None,
+            Err(err) => return Err(platform_err(&err)),
+        };
         // Drop the arboard guard before the second Win32 read so we don't hold
         // it across the CF_HDROP OpenClipboard call; the sequence-stability
         // check is what protects us against a write landing in between.
@@ -159,6 +211,15 @@ fn capture_snapshot(
             representations.push(ClipboardRepresentation {
                 mime_type: "text/uri-list".to_owned(),
                 data: ClipboardData::FilePaths(files),
+            });
+        }
+
+        if let Some(img) = image
+            && let Some(png) = encode_rgba_to_png(img)
+        {
+            representations.push(ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(png),
             });
         }
 
@@ -204,6 +265,24 @@ fn total_payload_bytes(snapshot: &ClipboardSnapshot) -> usize {
         .sum()
 }
 
+fn encode_rgba_to_png(img: ImageData<'_>) -> Option<Vec<u8>> {
+    // arboard returns 8-bit RGBA. Width/height come back as `usize` but
+    // `image::RgbaImage::from_raw` takes `u32`; reject silently when a
+    // pathological clipboard claims dimensions larger than `u32::MAX` (real
+    // Win32 bitmaps cannot exceed `LONG`) so the rest of the capture path
+    // still yields whatever text / file-list it already collected. Take the
+    // `ImageData` by value so we can move its `Cow` buffer straight into
+    // `RgbaImage::from_raw` without cloning the (potentially multi-MB) RGBA
+    // payload.
+    let width = u32::try_from(img.width).ok()?;
+    let height = u32::try_from(img.height).ok()?;
+    let rgba = image::RgbaImage::from_raw(width, height, img.bytes.into_owned())?;
+    let mut buf = Vec::new();
+    rgba.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
+
 #[cfg(windows)]
 fn native_sequence_number() -> u32 {
     // SAFETY: GetClipboardSequenceNumber takes no arguments and is
@@ -230,9 +309,10 @@ mod win {
 
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
     };
     use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-    use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+    use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
     use windows_sys::Win32::UI::Shell::DragQueryFileW;
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
@@ -301,8 +381,60 @@ mod win {
                     return Some(observed);
                 }
             }
+            // CF_DIBV5 is the canonical format apps publish today; CF_DIB
+            // remains for compatibility with older sources. Prefer V5 first
+            // so the size reported is the one arboard will actually pull
+            // when it decodes the image. The raw DIB blob is uncompressed
+            // (~width*height*4 bytes), which is an over-estimate compared
+            // to the PNG we eventually push into storage, but that bias is
+            // the safe direction: we reject before allocating an RGBA copy
+            // rather than learning the payload is huge only after decode.
+            if let Some(image_bytes) = image_format_size() {
+                observed = observed.saturating_add(image_bytes);
+                if observed > max_bytes {
+                    return Some(observed);
+                }
+            }
             None
         }
+    }
+
+    unsafe fn image_format_size() -> Option<usize> {
+        // arboard prefers a registered `"PNG"` format if it is offered
+        // (then `CF_DIBV5`, then `CF_DIB`). If we only probed the standard
+        // bitmap formats, a publisher that registers PNG without also
+        // offering DIB would slip past the size guard and force the
+        // capture path to read a multi-MB blob before failing further
+        // along. Mirror arboard's lookup order so the probe matches the
+        // bytes the reader is actually about to materialise.
+        unsafe {
+            if let Some(png_id) = png_format_id()
+                && IsClipboardFormatAvailable(png_id) != 0
+                && let Some(bytes) = global_data_size(png_id)
+            {
+                return Some(bytes);
+            }
+            for format in [CF_DIBV5, CF_DIB] {
+                if IsClipboardFormatAvailable(u32::from(format)) != 0
+                    && let Some(bytes) = global_data_size(u32::from(format))
+                {
+                    return Some(bytes);
+                }
+            }
+            None
+        }
+    }
+
+    /// Register the `"PNG"` clipboard format name and return its
+    /// session-stable id. Registering the same name twice returns the
+    /// same id, so calling this every probe is cheap. A registration
+    /// failure (out of clipboard-format slots) is treated as "no PNG
+    /// row" — the `CF_DIBV5` / `CF_DIB` fallback still runs.
+    unsafe fn png_format_id() -> Option<u32> {
+        // "PNG" as a NUL-terminated UTF-16 literal.
+        const PNG_NAME: [u16; 4] = [b'P' as u16, b'N' as u16, b'G' as u16, 0];
+        let id = unsafe { RegisterClipboardFormatW(PNG_NAME.as_ptr()) };
+        (id != 0).then_some(id)
     }
 
     unsafe fn global_data_size(format: u32) -> Option<usize> {
