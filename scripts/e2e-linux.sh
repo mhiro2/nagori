@@ -176,6 +176,34 @@ if [[ "${PASTED}" != "${MARKER}" ]]; then
   exit 1
 fi
 
+step "paste: nagori paste -> selection rewritten + wtype exits cleanly"
+# `nagori paste` writes the entry to the OS clipboard then synthesises Ctrl+V
+# via the platform PasteController. On Linux that is `LinuxPasteController`,
+# which shells out to `wtype` (-> `zwp_virtual_keyboard_v1`). sway --headless
+# exposes the protocol, so the keystroke succeeds even though there is no
+# text target. We verify the observable half: the selection is rewritten to
+# the marker and the CLI exits 0 (meaning the wtype invocation returned Ok).
+if command -v wtype >/dev/null 2>&1; then
+  printf %s "sentinel-before-paste" | wl-copy
+  run_cli paste "${ENTRY_ID}" >/dev/null
+
+  PASTED=""
+  deadline=$(( $(date +%s) + 5 ))
+  while (( $(date +%s) < deadline )); do
+    PASTED="$(wl-paste --no-newline 2>/dev/null || true)"
+    [[ "${PASTED}" == "${MARKER}" ]] && break
+    sleep 0.1
+  done
+  if [[ "${PASTED}" != "${MARKER}" ]]; then
+    echo "'nagori paste' did not rewrite the selection to the marker" >&2
+    echo "  expected: ${MARKER}" >&2
+    echo "  actual:   ${PASTED}" >&2
+    exit 1
+  fi
+else
+  echo "wtype not on PATH; skipping auto-paste round-trip"
+fi
+
 step "pin / unpin round-trip"
 run_cli pin "${ENTRY_ID}" >/dev/null
 PINNED_HITS="$(run_cli list --pinned --json | jq --arg id "${ENTRY_ID}" '[.[] | select(.id == $id)] | length')"
