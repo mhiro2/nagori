@@ -1,8 +1,19 @@
 <script lang="ts">
   import { formatByteCount, formatRelativeTime } from "../lib/formatting";
   import { messages } from "../lib/i18n/index.svelte";
-  import type { EntryPreviewDto, SearchResultDto } from "../lib/types";
+  import { dedupedRepresentationLabels } from "../lib/representations";
+  import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from "../lib/types";
   import { tokenize } from "./tokenize";
+
+  // Comma-joined "preserved formats" footer line. Only shown when an entry
+  // kept more than its primary representation so single-format clips don't
+  // clutter the row.
+  const formatPreservedList = (
+    summary: readonly RepresentationSummary[] | undefined,
+  ): string | undefined => {
+    const labels = dedupedRepresentationLabels(summary);
+    return labels.length > 1 ? labels.join(", ") : undefined;
+  };
 
   type Props = {
     item: SearchResultDto | undefined;
@@ -15,6 +26,7 @@
   const { item, preview, loading, errorMessage, expanded = false }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? "");
+  const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
   const showHighlighting = $derived(
     preview !== undefined && (preview.body.type === "code" || preview.body.type === "url"),
   );
@@ -89,6 +101,10 @@
         {/if}
         <dt>{t.preview.fields.rank}</dt>
         <dd>{item.rankReasons.join(", ") || t.preview.none}</dd>
+        {#if preservedFormats}
+          <dt>{t.preview.fields.formats}</dt>
+          <dd>{preservedFormats}</dd>
+        {/if}
       </dl>
     </footer>
   {:else}

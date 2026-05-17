@@ -31,6 +31,7 @@ export const ja: Messages = {
       source: '送信元',
       size: 'サイズ',
       rank: 'ランク',
+      formats: '保持された形式',
     },
     none: '—',
     image: {

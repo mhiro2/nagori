@@ -31,6 +31,7 @@ export const zhHans: Messages = {
       source: '来源',
       size: '大小',
       rank: '排名',
+      formats: '保留的格式',
     },
     none: '—',
     image: {

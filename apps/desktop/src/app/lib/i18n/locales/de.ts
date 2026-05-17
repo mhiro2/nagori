@@ -32,6 +32,7 @@ export const de: Messages = {
       source: 'Quelle',
       size: 'Größe',
       rank: 'Rang',
+      formats: 'Erhaltene Formate',
     },
     none: '—',
     image: {

@@ -34,6 +34,7 @@ export type Messages = {
       source: string;
       size: string;
       rank: string;
+      formats: string;
     };
     none: string;
     image: {
@@ -294,6 +295,7 @@ export const en: Messages = {
       source: 'source',
       size: 'size',
       rank: 'rank',
+      formats: 'preserved formats',
     },
     none: '—',
     image: {

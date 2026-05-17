@@ -31,6 +31,7 @@ export const ko: Messages = {
       source: '출처',
       size: '크기',
       rank: '순위',
+      formats: '보존된 형식',
     },
     none: '—',
     image: {

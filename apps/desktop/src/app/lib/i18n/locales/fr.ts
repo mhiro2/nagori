@@ -32,6 +32,7 @@ export const fr: Messages = {
       source: 'source',
       size: 'taille',
       rank: 'rang',
+      formats: 'formats conservés',
     },
     none: '—',
     image: {

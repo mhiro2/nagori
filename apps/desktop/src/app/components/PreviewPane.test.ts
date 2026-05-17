@@ -243,4 +243,38 @@ describe('PreviewPane', () => {
     expect(getByText('Safari')).toBeTruthy();
     expect(container.querySelector('.foot')?.textContent).toMatch(/ExactMatch/);
   });
+
+  it('shows a preserved-formats row when the entry kept multiple representations', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({
+          representationSummary: [
+            { mimeType: 'text/plain', role: 'primary', byteCount: 5 },
+            { mimeType: 'text/html', role: 'alternative', byteCount: 20 },
+          ],
+        }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const foot = container.querySelector('.foot')?.textContent ?? '';
+    expect(foot).toMatch(/Plain.*HTML|HTML.*Plain/);
+  });
+
+  it('omits the preserved-formats row for single-format entries', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({
+          representationSummary: [{ mimeType: 'text/plain', role: 'primary', byteCount: 5 }],
+        }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    // The dt label for the formats row is keyed off t.preview.fields.formats
+    // ("preserved formats" in en); it must not appear when there's only one.
+    expect(container.querySelector('.foot')?.textContent).not.toMatch(/preserved formats/);
+  });
 });

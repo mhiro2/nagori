@@ -31,6 +31,7 @@ export const zhHant: Messages = {
       source: '來源',
       size: '大小',
       rank: '排名',
+      formats: '保留的格式',
     },
     none: '—',
     image: {

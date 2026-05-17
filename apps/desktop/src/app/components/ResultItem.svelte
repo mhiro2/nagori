@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { dedupedRepresentationLabels } from "../lib/representations";
   import type { RepresentationSummary } from "../lib/types";
 
   // Per-kind label for the leading badge. Keep these short so the column
@@ -42,48 +43,13 @@
     }
   };
 
-  // Short label per MIME type so the row stays readable. We collapse
-  // image alts to a single "IMG" tag and skip the primary representation
-  // because the kind badge on the left already covers it — the goal is
-  // just to flag "this clip also carried other formats".
-  const REP_LABEL_BY_MIME: Record<string, string> = {
-    "text/plain": "Plain",
-    "text/html": "HTML",
-    "application/rtf": "RTF",
-    "text/uri-list": "Files",
-    "image/png": "PNG",
-    "image/jpeg": "JPEG",
-    "image/gif": "GIF",
-    "image/webp": "WebP",
-    "image/tiff": "TIFF",
-  };
-
-  const representationLabel = (mime: string): string => {
-    const known = REP_LABEL_BY_MIME[mime];
-    if (known !== undefined) return known;
-    if (mime.startsWith("image/")) return "IMG";
-    return mime;
-  };
-
-  // Build the trailing "HTML + Plain" badge string from the stored
-  // representation set. Returns `undefined` when an entry only kept its
-  // primary representation, so the row stays uncluttered for the common
-  // single-format case (most copied plain text never carries an HTML
-  // alternative). Duplicates are deduped so a primary + plain_fallback
-  // pair with the same MIME (which the publisher already collapses)
-  // doesn't render twice.
+  // Trailing "HTML + Plain" chip for rows that kept more than one format.
+  // Single-format rows (the common case for plain text) get `undefined` so
+  // the meta strip stays uncluttered.
   export const formatRepresentationBadge = (
     summary: readonly RepresentationSummary[] | undefined,
   ): string | undefined => {
-    if (!summary || summary.length <= 1) return undefined;
-    const seen = new Set<string>();
-    const labels: string[] = [];
-    for (const rep of summary) {
-      const label = representationLabel(rep.mimeType);
-      if (seen.has(label)) continue;
-      seen.add(label);
-      labels.push(label);
-    }
+    const labels = dedupedRepresentationLabels(summary);
     return labels.length > 1 ? labels.join(" + ") : undefined;
   };
 </script>
