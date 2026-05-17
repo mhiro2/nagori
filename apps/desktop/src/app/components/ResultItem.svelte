@@ -56,6 +56,7 @@
 
 <script lang="ts">
   import { collapseWhitespace, formatRelativeTime, truncatePreview } from "../lib/formatting";
+  import { messages } from "../lib/i18n/index.svelte";
   import type { SearchResultDto } from "../lib/types";
 
   type Props = {
@@ -69,6 +70,7 @@
 
   const { item, selected, marked = false, index, onSelect, onConfirm }: Props = $props();
 
+  const t = $derived(messages());
   const previewText = $derived(truncatePreview(collapseWhitespace(item.preview)));
   const timeLabel = $derived(formatRelativeTime(item.createdAt));
   const url = $derived(item.kind === "url" ? safeUrl(item.preview) : undefined);
@@ -106,7 +108,7 @@
   {/if}
 
   <span class="meta">
-    {#if repBadge}<span class="rep-badge" title="Preserved formats">{repBadge}</span>{/if}
+    {#if repBadge}<span class="rep-badge" title={t.preview.fields.formats}>{repBadge}</span>{/if}
     {#if item.pinned}<span class="pin" aria-label="pinned">📌</span>{/if}
     {#if item.sensitivity === "Secret" || item.sensitivity === "Blocked"}
       <span class="sens">{item.sensitivity}</span>
