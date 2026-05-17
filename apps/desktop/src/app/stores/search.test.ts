@@ -140,6 +140,7 @@ describe('runQuery', () => {
           pinned: false,
           sensitivity: 'Public',
           rankReasons: ['FullTextMatch'],
+          representationSummary: [],
         },
       ],
       totalCandidates: 1,
@@ -318,4 +319,5 @@ const toResult = (entry: ReturnType<typeof sampleEntry>): SearchResultDto => ({
   pinned: entry.pinned,
   sensitivity: entry.sensitivity,
   rankReasons: [...entry.rankReasons],
+  representationSummary: [],
 });

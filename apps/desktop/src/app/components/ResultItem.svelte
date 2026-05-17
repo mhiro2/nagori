@@ -1,4 +1,6 @@
 <script module lang="ts">
+  import type { RepresentationSummary } from "../lib/types";
+
   // Per-kind label for the leading badge. Keep these short so the column
   // stays a fixed width regardless of the active locale.
   const KIND_BADGE: Record<string, string> = {
@@ -39,6 +41,51 @@
       return undefined;
     }
   };
+
+  // Short label per MIME type so the row stays readable. We collapse
+  // image alts to a single "IMG" tag and skip the primary representation
+  // because the kind badge on the left already covers it — the goal is
+  // just to flag "this clip also carried other formats".
+  const REP_LABEL_BY_MIME: Record<string, string> = {
+    "text/plain": "Plain",
+    "text/html": "HTML",
+    "application/rtf": "RTF",
+    "text/uri-list": "Files",
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/gif": "GIF",
+    "image/webp": "WebP",
+    "image/tiff": "TIFF",
+  };
+
+  const representationLabel = (mime: string): string => {
+    const known = REP_LABEL_BY_MIME[mime];
+    if (known !== undefined) return known;
+    if (mime.startsWith("image/")) return "IMG";
+    return mime;
+  };
+
+  // Build the trailing "HTML + Plain" badge string from the stored
+  // representation set. Returns `undefined` when an entry only kept its
+  // primary representation, so the row stays uncluttered for the common
+  // single-format case (most copied plain text never carries an HTML
+  // alternative). Duplicates are deduped so a primary + plain_fallback
+  // pair with the same MIME (which the publisher already collapses)
+  // doesn't render twice.
+  export const formatRepresentationBadge = (
+    summary: readonly RepresentationSummary[] | undefined,
+  ): string | undefined => {
+    if (!summary || summary.length <= 1) return undefined;
+    const seen = new Set<string>();
+    const labels: string[] = [];
+    for (const rep of summary) {
+      const label = representationLabel(rep.mimeType);
+      if (seen.has(label)) continue;
+      seen.add(label);
+      labels.push(label);
+    }
+    return labels.length > 1 ? labels.join(" + ") : undefined;
+  };
 </script>
 
 <script lang="ts">
@@ -60,6 +107,7 @@
   const timeLabel = $derived(formatRelativeTime(item.createdAt));
   const url = $derived(item.kind === "url" ? safeUrl(item.preview) : undefined);
   const codeLang = $derived(item.kind === "code" ? detectCodeLang(item.preview) : undefined);
+  const repBadge = $derived(formatRepresentationBadge(item.representationSummary));
 </script>
 
 <button
@@ -92,6 +140,7 @@
   {/if}
 
   <span class="meta">
+    {#if repBadge}<span class="rep-badge" title="Preserved formats">{repBadge}</span>{/if}
     {#if item.pinned}<span class="pin" aria-label="pinned">📌</span>{/if}
     {#if item.sensitivity === "Secret" || item.sensitivity === "Blocked"}
       <span class="sens">{item.sensitivity}</span>
@@ -194,5 +243,13 @@
   }
   .sens {
     color: var(--warning, #f59e0b);
+  }
+  .rep-badge {
+    padding: 0.05rem 0.35rem;
+    border: 1px solid rgba(120, 160, 255, 0.35);
+    border-radius: 4px;
+    color: var(--accent, #6c8dff);
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
   }
 </style>

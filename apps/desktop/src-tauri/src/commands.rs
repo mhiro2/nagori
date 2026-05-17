@@ -40,7 +40,12 @@ pub async fn search_clipboard(
     let results = state.runtime.search(query).await?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let total_candidates = results.len();
-    let dto_results: Vec<SearchResultDto> = results.into_iter().map(Into::into).collect();
+    let mut dto_results: Vec<SearchResultDto> = Vec::with_capacity(results.len());
+    for result in results {
+        let entry_id = result.entry_id;
+        let reps = state.runtime.store().list_representations(entry_id).await?;
+        dto_results.push(SearchResultDto::from(result).with_representation_summary(&reps));
+    }
 
     Ok(SearchResponseDto {
         results: dto_results,

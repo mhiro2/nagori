@@ -25,6 +25,7 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   pinned: false,
   sensitivity: 'Public',
   rankReasons: [],
+  representationSummary: [],
   ...overrides,
 });
 
@@ -186,6 +187,7 @@ describe('ActionMenu', () => {
       useCount: 0,
       pinned: false,
       sensitivity: 'Public',
+      representationSummary: [],
     });
 
     const { findByText, getByText } = render(ActionMenu, {

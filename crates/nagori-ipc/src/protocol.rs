@@ -228,6 +228,8 @@ pub struct SearchResultDto {
     pub rank_reasons: Vec<RankReason>,
     #[serde(default)]
     pub source_app_name: Option<String>,
+    #[serde(default)]
+    pub representation_summary: Vec<RepresentationSummaryDto>,
 }
 
 impl From<SearchResult> for SearchResultDto {
@@ -242,7 +244,22 @@ impl From<SearchResult> for SearchResultDto {
             sensitivity: value.sensitivity,
             rank_reasons: value.rank_reason,
             source_app_name: value.source_app_name,
+            representation_summary: Vec::new(),
         }
+    }
+}
+
+impl SearchResultDto {
+    #[must_use]
+    pub fn with_representation_summary(
+        mut self,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Self {
+        self.representation_summary = representations
+            .iter()
+            .map(RepresentationSummaryDto::from_stored)
+            .collect();
+        self
     }
 }
 

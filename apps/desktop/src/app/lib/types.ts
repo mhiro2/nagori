@@ -47,6 +47,15 @@ export type SearchResultDto = {
   sensitivity: Sensitivity;
   rankReasons: RankReason[];
   sourceAppName?: string;
+  representationSummary: RepresentationSummary[];
+};
+
+export type RepresentationRole = 'primary' | 'plainFallback' | 'alternative';
+
+export type RepresentationSummary = {
+  mimeType: string;
+  role: RepresentationRole;
+  byteCount: number;
 };
 
 export type EntryDto = {
@@ -61,6 +70,7 @@ export type EntryDto = {
   pinned: boolean;
   sourceAppName?: string;
   sensitivity: Sensitivity;
+  representationSummary: RepresentationSummary[];
 };
 
 export type EntryPreviewBody =

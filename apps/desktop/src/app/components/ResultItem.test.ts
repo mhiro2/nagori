@@ -13,6 +13,7 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   pinned: false,
   sensitivity: 'Public',
   rankReasons: [],
+  representationSummary: [],
   ...overrides,
 });
 

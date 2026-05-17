@@ -28,6 +28,7 @@ const result = (id: string): SearchResultDto => ({
   pinned: false,
   sensitivity: 'Public',
   rankReasons: ['Recent'],
+  representationSummary: [],
 });
 
 const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({

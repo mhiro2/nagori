@@ -187,11 +187,14 @@ impl NagoriRuntime {
             IpcRequest::Search(SearchRequest { query, limit }) => {
                 let results = self
                     .search(SearchQuery::new(&query, normalize_text(&query), limit))
-                    .await?
-                    .into_iter()
-                    .map(SearchResultDto::from)
-                    .collect();
-                Ok(IpcResponse::Search(SearchResponse { results }))
+                    .await?;
+                let mut dtos = Vec::with_capacity(results.len());
+                for result in results {
+                    let entry_id = result.entry_id;
+                    let reps = self.store.list_representations(entry_id).await?;
+                    dtos.push(SearchResultDto::from(result).with_representation_summary(&reps));
+                }
+                Ok(IpcResponse::Search(SearchResponse { results: dtos }))
             }
             IpcRequest::GetEntry(GetEntryRequest {
                 id,

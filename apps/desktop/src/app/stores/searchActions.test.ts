@@ -46,6 +46,7 @@ const result = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   pinned: false,
   sensitivity: 'Public',
   rankReasons: ['Recent'],
+  representationSummary: [],
   ...overrides,
 });
 

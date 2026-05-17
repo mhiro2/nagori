@@ -22,6 +22,7 @@ const fallbackFixture = (): SearchResultDto[] => [
     pinned: false,
     sensitivity: 'Public',
     rankReasons: ['Recent'],
+    representationSummary: [],
   },
 ];
 
