@@ -292,20 +292,20 @@ Types live in `nagori-core` (`model.rs`, `settings.rs`, `policy.rs`,
 
 - `TextContent` / `UrlContent` / `CodeContent` carry plain strings plus
   derived metadata (counts, normalized URL, language hint).
-- `ImageContent` carries a `PayloadRef` plus optional in-memory
-  `pending_bytes` that flow from capture → factory → storage; after
-  insertion the bytes live in `entry_representations.payload_blob` (the
-  `role = 'primary'` row owned by the entry) and the field is always
-  `None` post-deserialisation.
+- `ImageContent` carries optional in-memory `pending_bytes` that flow
+  from capture → factory → storage; after insertion the bytes live in
+  `entry_representations.payload_blob` (the `role = 'primary'` row owned
+  by the entry) and the field is always `None` post-deserialisation.
 - `RichTextContent` keeps `plain_text` (for FTS / ngrams) and an optional
   `markup` payload tagged `Html` or `Rtf` for preview rendering.
 - `FileListContent` flattens `NSPasteboardTypeFileURL` URLs into POSIX
   paths plus a `display_text` newline-joined form for search.
 
-**`PayloadRef`** — `InlineText` / `DatabaseBlob(String)` /
-`ContentAddressedFile { sha256, path }`. Today images use
-`DatabaseBlob`; the variant exists so a future content-addressed store
-can be plugged in without changing the entry model.
+Payload storage is uniform: every captured representation (primary,
+plain fallback, alternative) writes one row in `entry_representations`
+with either inline `text_content` or a binary `payload_blob`. The
+domain model no longer needs a per-kind storage discriminator — the
+representation rows are the source of truth.
 
 **`EntryMetadata`** — timestamps, source app (`bundle_id`, `name`,
 `executable_path`), use count, `ContentHash` (SHA-256 — used for dedup),
@@ -422,7 +422,7 @@ are forward-only; downgrades are not supported.
 | Table | Purpose |
 |-------|---------|
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column identifies the joint hash of the entry's representations so duplicate sets can be deduped without re-reading the children. |
-| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime` / `payload_ref`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
+| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. The legacy `payload_ref` column is kept for schema compatibility but always `NULL` — a future content-addressed store can opt in without a migration. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. |
 | `search_fts` | FTS5 virtual table over `title` / `preview` / `normalized_text` (`unicode61`). |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. |
@@ -579,7 +579,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS), with a default impl that falls back to `write_entry` everywhere else. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -730,25 +730,25 @@ replays the reps whose MIME has a known `NSPasteboardType` mapping in
 one pasteboard transaction. The macOS adapter
 (`clipboard_multi_representation_write = Available`) publishes the
 intersection of {`text/plain`, `text/html`, `application/rtf`,
-`image/png`, `image/tiff`} with the stored set through
-`setString:forType:` / `setData:forType:`, so a downstream paste target
-that asks for HTML / RTF / a plain fallback or a PNG/TIFF still gets
-the bytes the source originally advertised. Other persisted MIMEs
-(`text/uri-list` file lists, `image/jpeg` / `image/gif` / `image/webp`)
-are recorded in the entry's representation rows but are not re-published
-today — `NSPasteboardItem` plumbing for file URLs and stable
-`NSPasteboardType` constants for the alternate image formats are still
-TODO. To avoid clearing the pasteboard for nothing, the macOS adapter
-pre-scans the rep set: when every entry falls outside the publishable
-table the call falls back to `write_entry` *before* `clearContents()`
-runs, so the existing primary-only path either restores the entry (text
-and PNG/TIFF images) or surfaces the same `AppError::Unsupported` it
-would have raised on a direct `write_entry` call (e.g. `image/jpeg`
-primary). Either way the previous pasteboard contents survive instead
-of being wiped out for a publish attempt that was going to error
-anyway. Adapters
-whose capability is `Unsupported` (Windows, Linux Wayland today) inherit
-the default impl that delegates back to `write_entry`, so Preserve still
+`image/png`, `image/tiff`, `image/jpeg`, `image/gif`, `image/webp`,
+`text/uri-list`} with the stored set; static types go through
+`setString:forType:` / `setData:forType:`, while JPEG/GIF/WebP are
+declared via dynamic UTIs (`public.jpeg` / `com.compuserve.gif` /
+`org.webmproject.webp`) so a downstream paste target that asks for any
+of those MIMEs still gets the bytes the source originally advertised.
+File-list reps are republished as one `NSPasteboardItem` per stored
+POSIX path with `public.file-url` carrying the corresponding `file://`
+URL, so Finder, terminals, and editors see the same drop-targets the
+source produced. To avoid clearing the pasteboard for nothing, the
+macOS adapter pre-scans the rep set: when every entry falls outside
+the publishable table the call falls back to `write_entry` *before*
+`clearContents()` runs, so the existing primary-only path either
+restores the entry or surfaces the same `AppError::Unsupported` it
+would have raised on a direct `write_entry` call. Either way the
+previous pasteboard contents survive instead of being wiped out for a
+publish attempt that was going to error anyway. Adapters whose
+capability is `Unsupported` (Windows, Linux Wayland today) inherit the
+default impl that delegates back to `write_entry`, so Preserve still
 publishes the primary content there — just without the rich-MIME set.
 The daemon-side wiring lives in `NagoriRuntime::copy_entry_with_format`:
 the Preserve branch reads the persisted rows via
