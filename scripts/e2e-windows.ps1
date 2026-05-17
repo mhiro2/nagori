@@ -326,6 +326,175 @@ try {
         throw "older-entry copy-back did not return marker A`n  expected: $markerA`n  actual:   $pasted"
     }
 
+    Step 'file-list round-trip via Set-Clipboard -Path'
+    # Include a space in one filename so the daemon's path ↔ URL conversion
+    # has to percent-encode it on the way in and decode it on the way out.
+    # The unit tests already prove the codec; exercising the daemon's
+    # capture → store → republish loop with a non-ASCII-safe path catches
+    # regressions where someone normalises paths and loses the encoding.
+    $UriFileA = Join-Path $WorkDir 'cf hdrop-a.txt'
+    $UriFileB = Join-Path $WorkDir 'cf-hdrop-b.txt'
+    Set-Content -Path $UriFileA -Value 'first'  -NoNewline
+    Set-Content -Path $UriFileB -Value 'second' -NoNewline
+    # `Set-Clipboard -Path` writes CF_HDROP, the same format Explorer uses for
+    # file copies. The Windows daemon surfaces CF_HDROP captures as `FileList`
+    # with a `text/uri-list` representation.
+    Set-Clipboard -Path @($UriFileA, $UriFileB)
+
+    $UriEntryId = $null
+    $UriListJson = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $UriListJson = Invoke-Cli @('list', '--limit', '1', '--json') | ConvertFrom-Json
+            if ($null -ne $UriListJson -and $UriListJson.Count -gt 0) {
+                $top = $UriListJson[0]
+                $topKind = if ($top.PSObject.Properties['kind']) { $top.kind } else { '' }
+                $hasUri = if ($top.PSObject.Properties['representation_summary']) {
+                    ($top.representation_summary | Where-Object { $_.mime_type -eq 'text/uri-list' } | Measure-Object).Count
+                } else { 0 }
+                if ($topKind -eq 'FileList' -and $hasUri -eq 1) {
+                    $UriEntryId = $top.id
+                    break
+                }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $UriEntryId) {
+        throw "file-list capture failed; latest entry: $($UriListJson | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    Write-Host "captured file-list id=$UriEntryId"
+
+    # Overwrite the selection with plain text so a no-op `copy` would be
+    # visible — `Get-Clipboard -Format FileDropList` on a text selection
+    # returns `$null`.
+    Set-Clipboard -Value 'not-a-file-list'
+    Invoke-CliSilent @('copy', $UriEntryId)
+
+    # Sort both sides before comparing so a stable Compare-Object check
+    # doesn't get tripped up by CF_HDROP order vs. the order we passed to
+    # `Set-Clipboard -Path`.
+    $pastedPaths = @()
+    $expectedPaths = @($UriFileA, $UriFileB) | Sort-Object
+    $diff = $expectedPaths  # non-null so the loop runs at least once
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $raw = Get-Clipboard -Format FileDropList
+            if ($null -ne $raw) {
+                $pastedPaths = @($raw | ForEach-Object { $_.ToString() }) | Sort-Object
+                if ($pastedPaths.Count -eq $expectedPaths.Count) {
+                    $diff = Compare-Object $pastedPaths $expectedPaths -SyncWindow 0
+                    if (-not $diff) { break }
+                }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 100
+    }
+    if ($diff) {
+        throw "file-list copy-back paths did not match`n  expected: $($expectedPaths -join ', ')`n  actual:   $($pastedPaths -join ', ')"
+    }
+
+    Step 'image round-trip via image/png'
+    # Tiny 1x1 RGBA PNG fixture, base64-inlined so we don't keep a binary
+    # artefact in the tree. Same bytes as the Linux e2e's fixture.
+    $ImageFixture = Join-Path $WorkDir 'fixture.png'
+    $ImageBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==')
+    [IO.File]::WriteAllBytes($ImageFixture, $ImageBytes)
+
+    # `[Windows.Forms.Clipboard]::SetImage` requires STA, and pwsh 7's default
+    # runspace is MTA. Spawn a short STA child via `pwsh -Sta` to push the
+    # bitmap; the OS owns the data after `SetImage` (which copies, not delays)
+    # so the child can exit immediately without clearing the offer.
+    # `SetImage` raises `System.Runtime.InteropServices.ExternalException` if
+    # another process holds the clipboard at the moment of the OLE call.
+    # Retry under the standard CI 5s budget so a transient Win32 collision
+    # (e.g. the harness's own `Set-Clipboard 'not-an-image'` from the previous
+    # step still being committed) doesn't flake the test.
+    $PushScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+`$bmp = [System.Drawing.Image]::FromFile('$ImageFixture')
+try {
+    `$deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt `$deadline) {
+        try { [System.Windows.Forms.Clipboard]::SetImage(`$bmp); exit 0 }
+        catch [System.Runtime.InteropServices.ExternalException] { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Error 'SetImage failed after retries'
+    exit 1
+} finally { `$bmp.Dispose() }
+"@
+    $pushEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($PushScript))
+    & pwsh -Sta -NoProfile -EncodedCommand $pushEncoded | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to push image onto clipboard via STA child (exit $LASTEXITCODE)"
+    }
+
+    $ImageEntryId = $null
+    $ImageListJson = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $ImageListJson = Invoke-Cli @('list', '--limit', '1', '--json') | ConvertFrom-Json
+            if ($null -ne $ImageListJson -and $ImageListJson.Count -gt 0) {
+                $top = $ImageListJson[0]
+                $topKind = if ($top.PSObject.Properties['kind']) { $top.kind } else { '' }
+                $hasPng = if ($top.PSObject.Properties['representation_summary']) {
+                    ($top.representation_summary | Where-Object { $_.mime_type -eq 'image/png' } | Measure-Object).Count
+                } else { 0 }
+                if ($topKind -eq 'Image' -and $hasPng -eq 1) {
+                    $ImageEntryId = $top.id
+                    break
+                }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $ImageEntryId) {
+        throw "image capture failed; latest entry: $($ImageListJson | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    Write-Host "captured image id=$ImageEntryId"
+
+    # Sentinel: overwrite with plain text so a no-op `copy` would be visible.
+    Set-Clipboard -Value 'not-an-image'
+    Invoke-CliSilent @('copy', $ImageEntryId)
+
+    # Read-back also needs STA. We don't compare PNG bytes because the
+    # daemon's capture re-encodes `CF_DIB(V5)` into PNG via the `image`
+    # crate, so byte-identity with the fixture is broken by design. The
+    # `CF_DIBV5` portion of the multi-rep publish is what the
+    # `Get-Clipboard -Format Image` path renders, so a 1x1 bitmap on the
+    # other side is enough to know the new transactional writer worked.
+    # `GetImage` returns `$null` if no image is on the clipboard but raises
+    # `ExternalException` when the clipboard is busy. Treat both as
+    # "not ready yet" and retry until the deadline.
+    $ReadScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+`$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while ([DateTime]::UtcNow -lt `$deadline) {
+    try {
+        `$img = [System.Windows.Forms.Clipboard]::GetImage()
+        if (`$null -ne `$img) {
+            Write-Output ("{0}x{1}" -f `$img.Width, `$img.Height)
+            `$img.Dispose()
+            exit 0
+        }
+    } catch [System.Runtime.InteropServices.ExternalException] { }
+    Start-Sleep -Milliseconds 100
+}
+exit 1
+"@
+    $readEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ReadScript))
+    $dim = (& pwsh -Sta -NoProfile -EncodedCommand $readEncoded | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $dim -ne '1x1') {
+        throw "image copy-back did not return a 1x1 Bitmap`n  got: '$dim'"
+    }
+
     Step 'graceful shutdown via daemon stop'
     Invoke-CliSilent @('daemon', 'stop')
     $deadline = (Get-Date).AddSeconds(5)
