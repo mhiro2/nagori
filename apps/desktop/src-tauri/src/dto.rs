@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use nagori_core::settings::AiProviderSetting;
 use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
-    Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, SearchFilters, SearchMode,
-    SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity, UpdateChannel,
-    is_text_safe_for_default_output, safe_preview_for_dto,
+    Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, RepresentationRole,
+    SearchFilters, SearchMode, SearchResult, SecondaryHotkeyAction, SecretHandling, Sensitivity,
+    StoredClipboardRepresentation, UpdateChannel, is_text_safe_for_default_output,
+    safe_preview_for_dto,
 };
 use nagori_platform::{
     Capability, PermissionKind, PermissionState, PermissionStatus, Platform, PlatformCapabilities,
@@ -61,6 +62,47 @@ fn default_capture_kind_dtos() -> Vec<ContentKindDto> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RepresentationRoleDto {
+    Primary,
+    PlainFallback,
+    Alternative,
+}
+
+impl From<RepresentationRole> for RepresentationRoleDto {
+    fn from(role: RepresentationRole) -> Self {
+        match role {
+            RepresentationRole::Primary => Self::Primary,
+            RepresentationRole::PlainFallback => Self::PlainFallback,
+            RepresentationRole::Alternative => Self::Alternative,
+        }
+    }
+}
+
+/// Wire-safe projection of one preserved representation row. Mirrors
+/// `nagori_ipc::RepresentationSummaryDto` but serialises in camelCase so
+/// the Svelte side can consume the field without a transformation layer.
+/// Bytes/text stay daemon-side; only the MIME type, role, and byte count
+/// reach the renderer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepresentationSummaryDto {
+    pub mime_type: String,
+    pub role: RepresentationRoleDto,
+    pub byte_count: u64,
+}
+
+impl RepresentationSummaryDto {
+    pub fn from_stored(rep: &StoredClipboardRepresentation) -> Self {
+        Self {
+            mime_type: rep.mime_type.clone(),
+            role: rep.role.into(),
+            byte_count: rep.byte_count() as u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryDto {
@@ -83,6 +125,7 @@ pub struct EntryDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app_name: Option<String>,
     pub sensitivity: Sensitivity,
+    pub representation_summary: Vec<RepresentationSummaryDto>,
 }
 
 impl EntryDto {
@@ -100,7 +143,20 @@ impl EntryDto {
             pinned: entry.lifecycle.pinned,
             source_app_name: entry.metadata.source.and_then(|source| source.name),
             sensitivity: entry.sensitivity,
+            representation_summary: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_representation_summary(
+        mut self,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Self {
+        self.representation_summary = representations
+            .iter()
+            .map(RepresentationSummaryDto::from_stored)
+            .collect();
+        self
     }
 }
 

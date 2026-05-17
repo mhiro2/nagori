@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use nagori_core::{
-    AiActionId, AppError, EntryId, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity,
+    AiActionId, AppError, EntryId, EntryRepository, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity,
     is_text_safe_for_default_output,
 };
 use nagori_search::normalize_text;
@@ -58,29 +58,40 @@ pub async fn list_recent_entries(
         .unwrap_or(DEFAULT_RECENT_LIMIT)
         .clamp(1, MAX_COMMAND_LIMIT);
     let entries = state.runtime.list_recent(limit).await?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| EntryDto::from_entry(entry, false))
-        .collect())
+    let mut dtos = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry_id = entry.id;
+        let reps = state.runtime.store().list_representations(entry_id).await?;
+        dtos.push(EntryDto::from_entry(entry, false).with_representation_summary(&reps));
+    }
+    Ok(dtos)
 }
 
 #[tauri::command]
 pub async fn list_pinned_entries(state: State<'_, AppState>) -> CommandResult<Vec<EntryDto>> {
     let entries = state.runtime.list_pinned().await?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| EntryDto::from_entry(entry, false))
-        .collect())
+    let mut dtos = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry_id = entry.id;
+        let reps = state.runtime.store().list_representations(entry_id).await?;
+        dtos.push(EntryDto::from_entry(entry, false).with_representation_summary(&reps));
+    }
+    Ok(dtos)
 }
 
 #[tauri::command]
 pub async fn get_entry(state: State<'_, AppState>, id: String) -> CommandResult<Option<EntryDto>> {
     let entry_id = parse_entry_id(&id)?;
     let entry = state.runtime.get_entry(entry_id).await?;
-    Ok(entry.map(|entry| {
-        let include_text = is_text_safe_for_default_output(entry.sensitivity);
-        EntryDto::from_entry(entry, include_text)
-    }))
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let include_text = is_text_safe_for_default_output(entry.sensitivity);
+    let entry_id = entry.id;
+    let reps = state.runtime.store().list_representations(entry_id).await?;
+    Ok(Some(
+        EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+    ))
 }
 
 #[tauri::command]
@@ -256,7 +267,9 @@ pub async fn add_entry(state: State<'_, AppState>, text: String) -> CommandResul
         .await?
         .ok_or(AppError::NotFound)?;
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
-    Ok(EntryDto::from_entry(entry, include_text))
+    let entry_id = entry.id;
+    let reps = state.runtime.store().list_representations(entry_id).await?;
+    Ok(EntryDto::from_entry(entry, include_text).with_representation_summary(&reps))
 }
 
 #[tauri::command]
@@ -605,7 +618,9 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
         .await?
         .ok_or(AppError::NotFound)?;
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
-    Ok(EntryDto::from_entry(entry, include_text))
+    let entry_id = entry.id;
+    let reps = state.runtime.store().list_representations(entry_id).await?;
+    Ok(EntryDto::from_entry(entry, include_text).with_representation_summary(&reps))
 }
 
 /// Manual "Check for updates now" probe surfaced in Settings → Advanced.

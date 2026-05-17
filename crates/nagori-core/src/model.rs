@@ -601,7 +601,8 @@ impl StoredClipboardRepresentation {
 /// Maps 1:1 to the `entry_representations.role` SQL column. The variant
 /// order also encodes the persisted ordinal ranking: primary < plain
 /// fallback < alternatives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepresentationRole {
     Primary,
     PlainFallback,

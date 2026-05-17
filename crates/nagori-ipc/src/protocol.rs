@@ -1,6 +1,7 @@
 use nagori_core::{
     AiActionId, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId, PasteFormat,
-    RankReason, SearchResult, Sensitivity, safe_preview_for_dto,
+    RankReason, RepresentationRole, SearchResult, Sensitivity, StoredClipboardRepresentation,
+    safe_preview_for_dto,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,30 @@ impl From<SearchResult> for SearchResultDto {
     }
 }
 
+/// Wire-safe projection of one row from `entry_representations`.
+///
+/// Bytes and text never cross the IPC boundary — the desktop frontend only
+/// needs to know what flavours the entry preserved (so it can render
+/// "HTML + Plain" badges, "Preserved formats:" lists, etc.) and how big
+/// each one was. The blob itself is fetched lazily through the dedicated
+/// preview / image-scheme paths when the user actually selects an entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepresentationSummaryDto {
+    pub mime_type: String,
+    pub role: RepresentationRole,
+    pub byte_count: u64,
+}
+
+impl RepresentationSummaryDto {
+    pub fn from_stored(rep: &StoredClipboardRepresentation) -> Self {
+        Self {
+            mime_type: rep.mime_type.clone(),
+            role: rep.role,
+            byte_count: rep.byte_count() as u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntryDto {
     pub id: EntryId,
@@ -262,6 +287,8 @@ pub struct EntryDto {
     pub source_app_name: Option<String>,
     #[serde(default)]
     pub sensitivity: Sensitivity,
+    #[serde(default)]
+    pub representation_summary: Vec<RepresentationSummaryDto>,
 }
 
 impl EntryDto {
@@ -279,7 +306,20 @@ impl EntryDto {
             pinned: entry.lifecycle.pinned,
             source_app_name: entry.metadata.source.and_then(|source| source.name),
             sensitivity: entry.sensitivity,
+            representation_summary: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_representation_summary(
+        mut self,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Self {
+        self.representation_summary = representations
+            .iter()
+            .map(RepresentationSummaryDto::from_stored)
+            .collect();
+        self
     }
 }
 

@@ -763,6 +763,7 @@ mod tests {
                         pinned: false,
                         source_app_name: None,
                         sensitivity: nagori_core::Sensitivity::Public,
+                        representation_summary: Vec::new(),
                     })
                 }
                 IpcRequest::ListRecent(ListRecentRequest { .. })

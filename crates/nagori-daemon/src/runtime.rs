@@ -200,48 +200,54 @@ impl NagoriRuntime {
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text =
                     include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                Ok(IpcResponse::Entry(EntryDto::from_entry(
-                    entry,
-                    include_text,
-                )))
+                let entry_id = entry.id;
+                let reps = self.store.list_representations(entry_id).await?;
+                Ok(IpcResponse::Entry(
+                    EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+                ))
             }
             IpcRequest::ListRecent(ListRecentRequest {
                 limit,
                 include_sensitive,
             }) => {
-                let entries = self
-                    .list_recent(limit)
-                    .await?
-                    .into_iter()
-                    .map(|entry| {
-                        let include_text =
-                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                let entries = self.list_recent(limit).await?;
+                let mut dtos = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let include_text =
+                        include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                    let entry_id = entry.id;
+                    let reps = self.store.list_representations(entry_id).await?;
+                    dtos.push(
                         EntryDto::from_entry(entry, include_text)
-                    })
-                    .collect();
-                Ok(IpcResponse::Entries(entries))
+                            .with_representation_summary(&reps),
+                    );
+                }
+                Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::ListPinned(ListPinnedRequest { include_sensitive }) => {
-                let entries = self
-                    .list_pinned()
-                    .await?
-                    .into_iter()
-                    .map(|entry| {
-                        let include_text =
-                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                let entries = self.list_pinned().await?;
+                let mut dtos = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let include_text =
+                        include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+                    let entry_id = entry.id;
+                    let reps = self.store.list_representations(entry_id).await?;
+                    dtos.push(
                         EntryDto::from_entry(entry, include_text)
-                    })
-                    .collect();
-                Ok(IpcResponse::Entries(entries))
+                            .with_representation_summary(&reps),
+                    );
+                }
+                Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::AddEntry(AddEntryRequest { text }) => {
                 let id = self.add_text(text).await?;
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text = is_text_safe_for_default_output(entry.sensitivity);
-                Ok(IpcResponse::Entry(EntryDto::from_entry(
-                    entry,
-                    include_text,
-                )))
+                let entry_id = entry.id;
+                let reps = self.store.list_representations(entry_id).await?;
+                Ok(IpcResponse::Entry(
+                    EntryDto::from_entry(entry, include_text).with_representation_summary(&reps),
+                ))
             }
             IpcRequest::CopyEntry(CopyEntryRequest { id }) => {
                 self.copy_entry(id).await?;
