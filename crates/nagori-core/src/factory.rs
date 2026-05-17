@@ -485,7 +485,7 @@ const fn canonical_text_mime(bare: &str) -> Option<&'static str> {
 fn is_allowlisted_image_mime(bare: &str) -> bool {
     matches!(
         bare.to_ascii_lowercase().as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"
     )
 }
 
@@ -702,6 +702,33 @@ mod tests {
             crate::ClipboardContent::Image(img) => {
                 assert_eq!(img.mime_type.as_deref(), Some("image/jpeg"));
                 assert_eq!(img.byte_count, jpeg_bytes.len());
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_tiff_signature_is_accepted() {
+        // The macOS reader emits `image/tiff` for screenshots and rich-text
+        // copies that carry an embedded TIFF preview. The allowlist guards
+        // against bytes-vs-mime spoofing but must still accept TIFF, both
+        // little-endian (II) and big-endian (MM) magic.
+        let tiff_le_header = vec![0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("tiff-ok"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/tiff".to_owned(),
+                data: ClipboardData::Bytes(tiff_le_header.clone()),
+            }],
+        };
+
+        let entry = EntryFactory::from_snapshot(snapshot).expect("tiff should build entry");
+        match entry.content {
+            crate::ClipboardContent::Image(img) => {
+                assert_eq!(img.mime_type.as_deref(), Some("image/tiff"));
+                assert_eq!(img.byte_count, tiff_le_header.len());
             }
             other => panic!("expected Image, got {other:?}"),
         }
