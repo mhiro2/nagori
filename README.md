@@ -102,8 +102,13 @@ Windows builds target x86_64 and use Win32 clipboard APIs:
 `GetClipboardSequenceNumber` polling to detect changes, `arboard`
 for text and `CF_DIBV5` / `CF_DIB` image reads, a hand-rolled
 `DROPFILES` + `SetClipboardData(CF_HDROP)` writer for file lists,
-and `DragQueryFileW` for file-list reads. Auto-paste is `SendInput`
-Ctrl+V and global shortcuts use the Tauri global-shortcut plugin.
+`DragQueryFileW` for file-list reads, and a multi-format publisher
+that batches `CF_UNICODETEXT` + `CF_HTML` + `Rich Text Format` +
+`CF_DIBV5` (with a registered `"PNG"` companion) + `CF_HDROP` in a
+single `OpenClipboard` / `EmptyClipboard` / N × `SetClipboardData`
+transaction so Preserve copy-back keeps every stored representation
+on the clipboard. Auto-paste is `SendInput` Ctrl+V and global
+shortcuts use the Tauri global-shortcut plugin.
 
 Supported environment:
 
@@ -124,11 +129,6 @@ Known limitations:
   non-elevated Nagori process: `SendInput` is blocked by UIPI when
   the target window runs at a higher integrity level. Run Nagori at
   the same level as the apps you paste into.
-- Multi-representation copy-back falls back to a single format on
-  Windows. macOS sessions paste-restored on Windows re-publish the
-  highest-priority representation rather than every MIME variant
-  the source originally offered. The `Preserve` toggle is read-only
-  for these entries until the multi-rep writer lands.
 
 ## Documentation
 

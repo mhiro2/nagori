@@ -579,7 +579,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + per-rep `setData_forType` under the arboard mutex; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`), with a default impl that falls back to `write_entry` everywhere else. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + per-rep `setData_forType` under the arboard mutex; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`; Windows — `OpenClipboard` + `EmptyClipboard` + N × `SetClipboardData` against `CF_UNICODETEXT` / `CF_HTML` / `Rich Text Format` / `CF_DIBV5` (plus a registered `"PNG"` companion) / `CF_HDROP` under the arboard mutex), with a default impl that falls back to `write_entry` on any adapter that does not advertise the capability. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -593,16 +593,29 @@ Implementations:
   list, and `open(1)` shelling for the `x-apple.systempreferences:`
   deep link.
 - **Windows** (`nagori-platform-windows`) — daemon adapters are wired
-  on top of `windows-sys` 0.59. The capture loop reads
+  on top of `windows-sys` 0.61. The capture loop reads
   `GetClipboardSequenceNumber` plus arboard text (with a `CF_HDROP`
   file-list pass for file copies); auto-paste synthesises Ctrl+V via
   `SendInput`; frontmost-app metadata is collected through
-  `GetForegroundWindow` + `QueryFullProcessImageNameW`. Global hotkey
-  registration is intentionally delegated to the Tauri shell's
-  `global-shortcut` plugin (same MVP arrangement as macOS), so the
-  daemon-side `HotkeyManager` reports `Unsupported`. Windows has no
-  TCC-style user permissions for clipboard / synthetic input, so the
-  `PermissionChecker` reports `Granted` for those kinds and
+  `GetForegroundWindow` + `QueryFullProcessImageNameW`. Preserve
+  copy-back goes through `write_representations`, which pre-scans
+  the stored rep set and then opens the clipboard once, calls
+  `EmptyClipboard`, and walks a pre-allocated `(format, HGLOBAL)`
+  list publishing `CF_UNICODETEXT` (NUL-terminated UTF-16), `CF_HTML`
+  (with the `Version`/`StartHTML`/`EndHTML`/`StartFragment`/
+  `EndFragment` header offsets), `Rich Text Format` (registered name,
+  raw RTF bytes), `CF_DIBV5` (124-byte `BITMAPV5HEADER`, `BI_BITFIELDS`,
+  BGRA, bottom-up, sRGB) with a registered `"PNG"` companion for
+  apps that prefer the original PNG, and `CF_HDROP` (`DROPFILES` +
+  wide-char path buffer) under the same arboard mutex used for text /
+  image writes; handles whose `SetClipboardData` succeed are owned by
+  the OS, while the failing handle and any not-yet-transferred
+  successors are `GlobalFree`d so a partial transaction never leaks.
+  Global hotkey registration is intentionally delegated to the Tauri
+  shell's `global-shortcut` plugin (same MVP arrangement as macOS), so
+  the daemon-side `HotkeyManager` reports `Unsupported`. Windows has
+  no TCC-style user permissions for clipboard / synthetic input, so
+  the `PermissionChecker` reports `Granted` for those kinds and
   `Unsupported` for `InputMonitoring`, `Notifications`, and
   `AutoLaunch` (managed elsewhere).
 - **Linux** (`nagori-platform-linux`) — Wayland-only, wired for the
@@ -735,18 +748,16 @@ matrix on the `NagoriRuntime`. The result is exposed on three surfaces:
 
 The desktop shell additionally exposes the matrix as a `get_capabilities`
 Tauri command, rendered read-only under Settings → Advanced. Wayland
-`frontmost_app`, Windows `update_check`, Linux Wayland `auto_paste`
-without `wtype`, and Windows / Linux `clipboard_multi_representation_write`
-are the canonical examples of where capability state diverges from
-permission state — the UI can render an actionable hint ("install
-`wtype`", "switch to a wlroots compositor", "rich-text copy-back will
-publish plain text only on this OS") instead of a generic "feature
-unavailable" toast.
+`frontmost_app`, Windows `update_check`, and Linux Wayland `auto_paste`
+without `wtype` are the canonical examples of where capability state
+diverges from permission state — the UI can render an actionable hint
+("install `wtype`", "switch to a wlroots compositor") instead of a
+generic "feature unavailable" toast.
 
 **Preserve copy-back hydration.** `ClipboardWriter::write_representations`
 takes the stored representation set for the entry being re-copied and
-replays the reps whose MIME has a known `NSPasteboardType` mapping in
-one pasteboard transaction. The macOS adapter
+replays the reps whose MIME has a known platform mapping in one
+clipboard transaction. The macOS adapter
 (`clipboard_multi_representation_write = Available`) publishes the
 intersection of {`text/plain`, `text/html`, `application/rtf`,
 `image/png`, `image/tiff`, `image/jpeg`, `image/gif`, `image/webp`,
@@ -762,15 +773,35 @@ holds one value per type, so the last URL written is the one a paste
 target reads back: Finder / TextEdit accept a single-file drop, which
 covers the common case and is a strict improvement over the previous
 "skip every file-list rep" behaviour. True multi-file batches via
-`NSPasteboardItem` are deferred. To avoid clearing the pasteboard for nothing, the
-macOS adapter pre-scans the rep set: when every entry falls outside
-the publishable table the call falls back to `write_entry` *before*
-`clearContents()` runs, so the existing primary-only path either
-restores the entry or surfaces the same `AppError::Unsupported` it
-would have raised on a direct `write_entry` call. Either way the
-previous pasteboard contents survive instead of being wiped out for a
-publish attempt that was going to error anyway. Adapters whose
-capability is `Unsupported` (Windows, Linux Wayland today) inherit the
+`NSPasteboardItem` are deferred. The Windows adapter
+(`clipboard_multi_representation_write = Available`) builds every
+`HGLOBAL` first — `CF_UNICODETEXT` for `text/plain`, `CF_HTML` (with
+the documented `Version` / `StartHTML` / `EndHTML` / `StartFragment` /
+`EndFragment` header) for `text/html`, the registered `Rich Text
+Format` for `application/rtf`, `CF_DIBV5` (124-byte `BITMAPV5HEADER`
++ BGRA bottom-up pixels + sRGB colour space) for `image/png` (with a
+registered `"PNG"` companion so apps that prefer the original byte
+stream still get it) and for `image/jpeg` / `image/gif` / `image/webp`
+/ `image/tiff` (decoded once via the `image` crate), and `CF_HDROP`
+for `text/uri-list` — then opens the clipboard, calls `EmptyClipboard`,
+and walks the handle list. Successful `SetClipboardData` calls transfer
+ownership to the OS; on a mid-sequence failure the remaining
+not-yet-transferred handles are `GlobalFree`d so a partial transaction
+never leaks. The Linux Wayland adapter
+(`clipboard_multi_representation_write = Available`) issues a single
+`copy::copy_multi` over `wlr_data_control` / `ext_data_control` with
+the same `MimeSource` set, so a Wayland paste target that prefers
+`text/html` still sees it alongside the `text/plain` fallback. To
+avoid clearing the clipboard for nothing, every adapter pre-scans the
+rep set before touching the OS: when every entry falls outside the
+publishable table the call falls back to `write_entry` *before* the
+clear, so the existing primary-only path either restores the entry or
+surfaces the same `AppError::Unsupported` it would have raised on a
+direct `write_entry` call. Either way the previous clipboard contents
+survive instead of being wiped out for a publish attempt that was
+going to error anyway. Adapters whose capability is `Unsupported`
+(`MemoryClipboard` in the daemon's in-process tests, plus the
+fallback path used when no host adapter could be built) inherit the
 default impl that delegates back to `write_entry`, so Preserve still
 publishes the primary content there — just without the rich-MIME set.
 The daemon-side wiring lives in `NagoriRuntime::copy_entry_with_format`:

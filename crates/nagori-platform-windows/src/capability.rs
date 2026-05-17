@@ -2,10 +2,12 @@
 //!
 //! Windows is experimental: capture covers text, file lists, and images
 //! (encoded as `image/png` from `CF_DIBV5`/`CF_DIB`); copy-back covers
-//! text and images, auto-paste / global hotkeys / frontmost app are all
-//! wired, and there is no first-class permission UI or bundled
-//! update-check probe yet (the release workflow does not currently
-//! produce a signed Windows installer).
+//! text, file lists, images, and multi-representation Preserve publishes
+//! (`CF_UNICODETEXT` + `CF_HTML` + `Rich Text Format` + `CF_DIBV5` /
+//! registered `PNG` + `CF_HDROP` in a single transaction); auto-paste /
+//! global hotkeys / frontmost app are all wired; there is no first-class
+//! permission UI or bundled update-check probe yet (the release workflow
+//! does not currently produce a signed Windows installer).
 
 use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
 
@@ -21,13 +23,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
         capture_files: Capability::Available,
         write_text: Capability::Available,
         write_image: Capability::Available,
-        clipboard_multi_representation_write: Capability::Unsupported {
-            reason: "Windows copy-back is primary-only on this adapter; \
-                 SetClipboardData with multiple CF_* formats in one \
-                 transaction is not wired yet, so Preserve falls back to \
-                 the single-format write_entry path."
-                .to_owned(),
-        },
+        // Multi-rep publishes CF_UNICODETEXT + CF_HTML + RFT + CF_DIBV5
+        // (plus the registered "PNG" companion) + CF_HDROP in a single
+        // OpenClipboard / EmptyClipboard / N × SetClipboardData
+        // transaction, so Preserve can keep every stored representation
+        // alive on copy-back without the primary-only fallback.
+        clipboard_multi_representation_write: Capability::Available,
         auto_paste: Capability::Available,
         global_hotkey: Capability::Available,
         frontmost_app: Capability::Available,
@@ -65,19 +66,19 @@ mod tests {
         assert!(caps.capture_image.is_usable());
         assert!(caps.write_text.is_usable());
         assert!(caps.write_image.is_usable());
+        // Multi-rep publish landed alongside CF_DIBV5 + CF_HTML +
+        // CF_HDROP support; the README's Preserve row hinges on this
+        // capability advertising as usable.
+        assert!(caps.clipboard_multi_representation_write.is_usable());
         assert!(caps.auto_paste.is_usable());
         assert!(caps.global_hotkey.is_usable());
         assert!(caps.frontmost_app.is_usable());
     }
 
     #[test]
-    fn multi_representation_and_updater_are_not_usable() {
+    fn permissions_ui_and_updater_are_not_usable() {
         let caps = report_capabilities();
-        for cap in [
-            &caps.clipboard_multi_representation_write,
-            &caps.permissions_ui,
-            &caps.update_check,
-        ] {
+        for cap in [&caps.permissions_ui, &caps.update_check] {
             assert!(!cap.is_usable());
             assert!(matches!(cap, Capability::Unsupported { .. }));
         }

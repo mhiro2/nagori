@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use image::{ImageFormat, ImageReader};
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, Result,
+    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
+    StoredClipboardRepresentation,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 use time::OffsetDateTime;
@@ -126,6 +127,70 @@ impl ClipboardWriter for WindowsClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
+
+    async fn write_representations(
+        &self,
+        entry: &ClipboardEntry,
+        representations: &[StoredClipboardRepresentation],
+    ) -> Result<()> {
+        // Pre-scan before touching the clipboard so an entry whose stored
+        // reps all sit outside the Windows publisher's mapping table falls
+        // back through `write_entry` instead of issuing an `EmptyClipboard`
+        // followed by zero `SetClipboardData` calls. Matches the macOS /
+        // Linux Wayland contract: only when at least one rep is publishable
+        // do we go down the multi-rep path.
+        if representations.is_empty() || !has_publishable_representation(representations) {
+            return self.write_entry(entry).await;
+        }
+        #[cfg(windows)]
+        {
+            let clipboard = self.clipboard.clone();
+            let reps = representations.to_vec();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                // Hold the arboard mutex across the entire OpenClipboard +
+                // EmptyClipboard + N × SetClipboardData batch so a concurrent
+                // text-write through arboard cannot land between our
+                // EmptyClipboard and the last SetClipboardData call and wipe
+                // a partial offer.
+                let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                win::write_multi_rep(&reps)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = representations;
+            Err(AppError::Unsupported(
+                "Windows multi-representation writes are Windows-only".to_owned(),
+            ))
+        }
+    }
+}
+
+/// True when at least one stored rep has a known Windows mapping.
+///
+/// Pre-scan used by `write_representations` so an entry whose stored reps
+/// are all outside the publisher's table (e.g. only `application/json`
+/// without a plain fallback) falls back to `write_entry` instead of
+/// issuing an `EmptyClipboard` for nothing. The body inspects only
+/// `nagori-core` types so it stays target-independent — the workspace
+/// builds every platform crate on every host and this helper has to
+/// resolve on non-Windows targets too.
+fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
+    reps.iter()
+        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
+            (
+                "text/plain" | "text/html" | "application/rtf",
+                RepresentationDataRef::InlineText(_),
+            )
+            | (
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
+                RepresentationDataRef::DatabaseBlob(_),
+            ) => true,
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
+            _ => false,
+        })
 }
 
 impl WindowsClipboard {
@@ -337,10 +402,13 @@ const fn native_sequence_number() -> u32 {
 #[cfg(windows)]
 mod win {
     use std::ffi::OsString;
+    use std::io::Cursor;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::{char, mem, slice};
 
-    use windows_sys::Win32::Foundation::{GlobalFree, TRUE};
+    use image::ImageReader;
+    use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, TRUE};
+    use windows_sys::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER, LCS_GM_IMAGES};
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
         OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -351,7 +419,7 @@ mod win {
     use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
     use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW};
 
-    use nagori_core::{AppError, Result};
+    use nagori_core::{AppError, RepresentationDataRef, Result, StoredClipboardRepresentation};
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
     /// the function returns the file count instead of writing a path.
@@ -580,6 +648,274 @@ mod win {
     /// any earlier failure we explicitly `GlobalFree` so a partial path
     /// publish does not leak the allocation.
     pub(super) fn write_file_list(paths: &[String]) -> Result<()> {
+        let handle = prepare_cf_hdrop(paths)?;
+        publish_handles(&[(u32::from(CF_HDROP), handle)])
+    }
+
+    /// Publish multiple stored representations atomically.
+    ///
+    /// Allocates one `HGLOBAL` per mappable rep (and, for `image/png`,
+    /// two — the registered "PNG" payload plus a `CF_DIBV5` companion so
+    /// Word-class targets that ignore "PNG" still receive a bitmap), then
+    /// opens the clipboard once, calls `EmptyClipboard`, and walks the
+    /// pre-allocated handle list publishing each format. Building every
+    /// `HGLOBAL` before touching the clipboard means a decode error
+    /// (e.g. an unreadable PNG blob) surfaces before we clear the user's
+    /// previous selection — matching the macOS adapter's pre-scan
+    /// guarantee.
+    pub(super) fn write_multi_rep(reps: &[StoredClipboardRepresentation]) -> Result<()> {
+        let handles = prepare_handles_for_reps(reps)?;
+        if handles.is_empty() {
+            // Caller pre-scanned; reaching this branch means every rep
+            // dropped through to `_ => {}` between the pre-scan and now,
+            // which can only happen if the rep set changed shape under
+            // us. Surface the platform error rather than issue an
+            // `EmptyClipboard` for nothing.
+            return Err(AppError::Platform(
+                "no representable bytes for Windows multi-rep publish".to_owned(),
+            ));
+        }
+        publish_handles(&handles)
+    }
+
+    /// Allocate every `(format, HGLOBAL)` pair for the rep batch.
+    ///
+    /// All handles are built before the clipboard is touched so any
+    /// allocation / decode error tears down the partial allocation
+    /// list cleanly (via `GlobalFree`) instead of leaking. Duplicate
+    /// formats from a malformed rep set are coalesced: only the first
+    /// occurrence wins, subsequent duplicates are freed in place.
+    fn prepare_handles_for_reps(
+        reps: &[StoredClipboardRepresentation],
+    ) -> Result<Vec<(u32, HANDLE)>> {
+        let mut acquired: Vec<(u32, HANDLE)> = Vec::new();
+        let result = (|| -> Result<()> {
+            for rep in reps {
+                prepare_one_rep(rep, &mut acquired)?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            // Free every handle we already acquired before bubbling
+            // the error out — none have been handed to the OS yet.
+            for (_, handle) in &acquired {
+                // SAFETY: handles in `acquired` came from `GlobalAlloc`
+                // and have not been transferred via `SetClipboardData`.
+                unsafe { GlobalFree(*handle) };
+            }
+            return Err(err);
+        }
+        Ok(acquired)
+    }
+
+    /// Push the `(format, HGLOBAL)` for one rep into `acquired`.
+    /// Duplicates of an already-acquired format are freed in place so
+    /// a malformed input with two `text/plain` reps doesn't publish
+    /// two `CF_UNICODETEXT` handles (the second `SetClipboardData`
+    /// would win, leaking the first allocation).
+    fn prepare_one_rep(
+        rep: &StoredClipboardRepresentation,
+        acquired: &mut Vec<(u32, HANDLE)>,
+    ) -> Result<()> {
+        match (rep.mime_type.as_str(), &rep.data) {
+            ("text/plain", RepresentationDataRef::InlineText(text)) => {
+                push_handle(
+                    acquired,
+                    u32::from(CF_UNICODETEXT),
+                    prepare_cf_unicode_text(text)?,
+                );
+            }
+            ("text/html", RepresentationDataRef::InlineText(text)) => {
+                let format_id = register_format("HTML Format").ok_or_else(|| {
+                    AppError::Platform(
+                        "RegisterClipboardFormatW(\"HTML Format\") failed".to_owned(),
+                    )
+                })?;
+                push_handle(acquired, format_id, prepare_cf_html(text)?);
+            }
+            ("application/rtf", RepresentationDataRef::InlineText(text)) => {
+                let format_id = register_format("Rich Text Format").ok_or_else(|| {
+                    AppError::Platform(
+                        "RegisterClipboardFormatW(\"Rich Text Format\") failed".to_owned(),
+                    )
+                })?;
+                push_handle(acquired, format_id, prepare_byte_buffer(text.as_bytes())?);
+            }
+            ("image/png", RepresentationDataRef::DatabaseBlob(bytes)) => {
+                if bytes.is_empty() {
+                    return Ok(());
+                }
+                // Decode once so both the "PNG" registered format (raw
+                // PNG) and the `CF_DIBV5` companion (encoded BGRA
+                // bottom-up) come from the same source.
+                let dibv5 = build_dibv5_payload(bytes)?;
+                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(&dibv5)?);
+                if let Some(png_id) = register_format("PNG") {
+                    push_handle(acquired, png_id, prepare_byte_buffer(bytes)?);
+                }
+            }
+            (
+                "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
+                RepresentationDataRef::DatabaseBlob(bytes),
+            ) => {
+                if bytes.is_empty() {
+                    return Ok(());
+                }
+                // Non-PNG image formats lack a stable registered
+                // clipboard format on Windows, so we only publish a
+                // `CF_DIBV5` rendering. The pixel data is the decoded
+                // source, which is what Word / Paint pull from
+                // `CF_DIBV5` anyway.
+                let dibv5 = build_dibv5_payload(bytes)?;
+                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(&dibv5)?);
+            }
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) if !paths.is_empty() => {
+                push_handle(acquired, u32::from(CF_HDROP), prepare_cf_hdrop(paths)?);
+            }
+            _ => {
+                // The pre-scan guarantees at least one mappable rep
+                // exists; drop unsupported entries silently so
+                // unfamiliar future MIMEs do not block the publish of
+                // the ones we already understand.
+            }
+        }
+        Ok(())
+    }
+
+    /// Append `(format, handle)` to `acquired`, freeing the handle in
+    /// place if `format` is already present.
+    fn push_handle(acquired: &mut Vec<(u32, HANDLE)>, format: u32, handle: HANDLE) {
+        if acquired.iter().any(|(existing, _)| *existing == format) {
+            // SAFETY: `handle` came from `GlobalAlloc` and has not yet
+            // been transferred via `SetClipboardData`.
+            unsafe { GlobalFree(handle) };
+            return;
+        }
+        acquired.push((format, handle));
+    }
+
+    /// Open the clipboard, empty it, and call `SetClipboardData` for each
+    /// `(format, handle)` pair in order. Handles whose `SetClipboardData`
+    /// succeeded are owned by the OS; the remaining handles (including
+    /// the failing one) are freed before returning the error so a partial
+    /// transaction never leaks `HGLOBAL` allocations.
+    fn publish_handles(handles: &[(u32, HANDLE)]) -> Result<()> {
+        // SAFETY: every Win32 call below is paired with its release.
+        // `OpenClipboard(null)` attaches to the calling thread and is
+        // unwound by `ClipboardGuard::drop`. Handles that succeed
+        // `SetClipboardData` are owned by the OS; handles that fail
+        // and the remaining never-transferred handles get explicit
+        // `GlobalFree` before returning.
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                for (_, handle) in handles {
+                    GlobalFree(*handle);
+                }
+                return Err(AppError::Platform(
+                    "OpenClipboard failed for multi-rep write".to_owned(),
+                ));
+            }
+            let _guard = ClipboardGuard;
+            if EmptyClipboard() == 0 {
+                for (_, handle) in handles {
+                    GlobalFree(*handle);
+                }
+                return Err(AppError::Platform(
+                    "EmptyClipboard failed for multi-rep write".to_owned(),
+                ));
+            }
+            for (index, (format, handle)) in handles.iter().enumerate() {
+                if SetClipboardData(*format, *handle).is_null() {
+                    // This handle failed and is still ours; every
+                    // remaining handle (this one + later) needs freeing.
+                    // Earlier handles already transferred ownership to
+                    // the OS — do NOT free those.
+                    for (_, leftover) in &handles[index..] {
+                        GlobalFree(*leftover);
+                    }
+                    return Err(AppError::Platform(format!(
+                        "SetClipboardData(format=0x{format:04x}) failed"
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Register a clipboard format by UTF-8 name and return its
+    /// session-stable id. Names are encoded to UTF-16 with a NUL
+    /// terminator before the call. `RegisterClipboardFormatW` returns
+    /// 0 only when the per-session format table is exhausted (49,151
+    /// slots), so callers can treat `None` as a non-fatal "no such
+    /// row".
+    fn register_format(name: &str) -> Option<u32> {
+        let mut wide: Vec<u16> = name.encode_utf16().collect();
+        wide.push(0);
+        // SAFETY: the pointer references a NUL-terminated wide string
+        // that lives for the duration of the call.
+        let id = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+        (id != 0).then_some(id)
+    }
+
+    /// Allocate a `GMEM_MOVEABLE` `HGLOBAL` and copy `bytes` into it.
+    /// Used by every multi-rep payload that ships as a flat byte buffer
+    /// (`CF_DIBV5`, the registered "PNG" and "Rich Text Format" rows,
+    /// and `CF_HTML` once the wrapper is built).
+    fn prepare_byte_buffer(bytes: &[u8]) -> Result<HANDLE> {
+        // Win32 `SetClipboardData` is happy with a zero-byte handle, but
+        // the empty payload would be a no-op for every consumer; refuse
+        // it so the caller catches the case rather than publishing an
+        // empty offer.
+        if bytes.is_empty() {
+            return Err(AppError::Platform(
+                "refusing to publish an empty payload".to_owned(),
+            ));
+        }
+        // SAFETY: `GlobalAlloc` returns null on failure (handled below).
+        // On success, `GlobalLock` returns a writable pointer to a
+        // contiguous region of at least `bytes.len()` bytes — that is
+        // the contract `GMEM_MOVEABLE` provides, and `GlobalSize`
+        // confirms it. We unlock before returning so the handle is in
+        // a publishable state when `SetClipboardData` runs.
+        unsafe {
+            let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+            if handle.is_null() {
+                return Err(AppError::Platform(
+                    "GlobalAlloc failed for clipboard payload".to_owned(),
+                ));
+            }
+            let locked = GlobalLock(handle);
+            if locked.is_null() {
+                GlobalFree(handle);
+                return Err(AppError::Platform(
+                    "GlobalLock failed for clipboard payload".to_owned(),
+                ));
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len());
+            let _ = GlobalUnlock(handle);
+            Ok(handle)
+        }
+    }
+
+    /// Build a NUL-terminated UTF-16 `HGLOBAL` for `CF_UNICODETEXT`.
+    fn prepare_cf_unicode_text(text: &str) -> Result<HANDLE> {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0);
+        let byte_len = wide.len().saturating_mul(mem::size_of::<u16>());
+        let bytes = unsafe { slice::from_raw_parts(wide.as_ptr().cast::<u8>(), byte_len) };
+        prepare_byte_buffer(bytes)
+    }
+
+    /// Build a `CF_HTML`-wrapped `HGLOBAL` from an HTML fragment.
+    /// The wrapper layout is documented at
+    /// <https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format>.
+    fn prepare_cf_html(html: &str) -> Result<HANDLE> {
+        let wrapped = build_cf_html(html);
+        prepare_byte_buffer(wrapped.as_bytes())
+    }
+
+    /// Build a `CF_HDROP` `HGLOBAL` containing the given paths.
+    pub(super) fn prepare_cf_hdrop(paths: &[String]) -> Result<HANDLE> {
         // Build the wide-char buffer first so we can reject pathological
         // inputs (paths containing interior NULs, lengths above the Win32
         // long-path cap) before touching the clipboard at all.
@@ -607,20 +943,15 @@ mod win {
         wide_buffer.push(0);
 
         let header_size = mem::size_of::<DROPFILES>();
-        // `DROPFILES.pFiles` is `u32`. The struct's layout is fixed at
-        // compile time (~20 bytes), so the truncation can never happen,
-        // but expressing it as `try_from` keeps the conversion explicit
-        // instead of paving over it with a cast-allow attribute.
         let header_size_u32 = u32::try_from(header_size)
             .map_err(|_| AppError::Platform("DROPFILES header size exceeds u32".to_owned()))?;
         let payload_bytes = wide_buffer.len().saturating_mul(mem::size_of::<u16>());
         let total_bytes = header_size.saturating_add(payload_bytes);
 
         // SAFETY: every Win32 call below is paired with its release.
-        // `GlobalAlloc` returns null on failure and we surface that as
-        // a platform error. On every error path between the allocation
-        // and a successful `SetClipboardData` we call `GlobalFree`;
-        // after `SetClipboardData` succeeds, the OS owns the handle.
+        // The handle is freed on every error path before `SetClipboardData`
+        // can claim ownership; callers that successfully publish the
+        // handle must NOT free it themselves.
         unsafe {
             let handle = GlobalAlloc(GMEM_MOVEABLE, total_bytes);
             if handle.is_null() {
@@ -646,42 +977,159 @@ mod win {
                 locked.cast::<u8>(),
                 header_size,
             );
-            // Copy the wide-char path buffer as raw bytes so we don't
-            // tell clippy we're hand-aligning a `*mut u8` up to `*mut u16`.
-            // `GlobalAlloc` returns at least 8-byte alignment and the
-            // DROPFILES header is 4-byte aligned, so the destination is
-            // 2-byte aligned in practice — copying as bytes is just
-            // hygienic.
             std::ptr::copy_nonoverlapping(
                 wide_buffer.as_ptr().cast::<u8>(),
                 locked.cast::<u8>().add(header_size),
                 payload_bytes,
             );
             let _ = GlobalUnlock(handle);
-
-            if OpenClipboard(std::ptr::null_mut()) == 0 {
-                GlobalFree(handle);
-                return Err(AppError::Platform(
-                    "OpenClipboard failed for CF_HDROP write".to_owned(),
-                ));
-            }
-            let _guard = ClipboardGuard;
-            if EmptyClipboard() == 0 {
-                GlobalFree(handle);
-                return Err(AppError::Platform(
-                    "EmptyClipboard failed for CF_HDROP write".to_owned(),
-                ));
-            }
-            if SetClipboardData(u32::from(CF_HDROP), handle).is_null() {
-                // SetClipboardData failed → ownership is still ours, free it.
-                GlobalFree(handle);
-                return Err(AppError::Platform(
-                    "SetClipboardData(CF_HDROP) failed".to_owned(),
-                ));
-            }
-            // From here the OS owns the handle; do not free.
-            Ok(())
+            Ok(handle)
         }
+    }
+
+    /// Compose the `CF_HTML` wrapper for a fragment. The wrapper requires
+    /// byte offsets for the `<html>` start, `</html>` end, fragment start,
+    /// and fragment end; offsets are 10-digit zero-padded decimals so the
+    /// header length is fixed and the placeholders can be replaced in
+    /// place once the body length is known.
+    ///
+    /// Exposed at module scope (instead of inside `unsafe`) so unit
+    /// tests on any host can verify the offsets match the bytes they
+    /// reference.
+    pub(super) fn build_cf_html(fragment: &str) -> String {
+        // Build the body first so we can compute byte offsets relative
+        // to the start of the wrapper.
+        let body_prefix = "<html>\r\n<body>\r\n<!--StartFragment-->";
+        let body_suffix = "<!--EndFragment-->\r\n</body>\r\n</html>";
+        // 10-digit zero-padded placeholders so substituting actual
+        // offsets does not change the header length.
+        let header_template = "Version:0.9\r\n\
+            StartHTML:0000000000\r\n\
+            EndHTML:0000000000\r\n\
+            StartFragment:0000000000\r\n\
+            EndFragment:0000000000\r\n";
+        let header_len = header_template.len();
+        let start_html = header_len;
+        let start_fragment = start_html + body_prefix.len();
+        let end_fragment = start_fragment + fragment.len();
+        let end_html = end_fragment + body_suffix.len();
+
+        // Format real offsets. The header was sized to fit 10 digits;
+        // payloads larger than ~9.9 GB cannot be expressed and would
+        // exceed Win32 clipboard limits anyway, so we accept the
+        // bound implicitly.
+        let header = format!(
+            "Version:0.9\r\n\
+            StartHTML:{start_html:010}\r\n\
+            EndHTML:{end_html:010}\r\n\
+            StartFragment:{start_fragment:010}\r\n\
+            EndFragment:{end_fragment:010}\r\n"
+        );
+        debug_assert_eq!(
+            header.len(),
+            header_len,
+            "CF_HTML header changed size after offset substitution",
+        );
+
+        let mut out = String::with_capacity(
+            header.len() + body_prefix.len() + fragment.len() + body_suffix.len(),
+        );
+        out.push_str(&header);
+        out.push_str(body_prefix);
+        out.push_str(fragment);
+        out.push_str(body_suffix);
+        out
+    }
+
+    /// Decode an encoded image (PNG/JPEG/GIF/WebP/TIFF) and emit a
+    /// `CF_DIBV5` byte buffer with the canonical Word-compatible layout:
+    /// 124-byte `BITMAPV5HEADER`, `BI_BITFIELDS` compression, BGRA
+    /// channel order, bottom-up rows (positive height), and the sRGB
+    /// colour space.
+    ///
+    /// Exposed at module scope (instead of inside `unsafe`) so unit
+    /// tests on any host can verify the header layout and pixel-byte
+    /// order match expectations.
+    pub(super) fn build_dibv5_payload(encoded: &[u8]) -> Result<Vec<u8>> {
+        let rgba = ImageReader::new(Cursor::new(encoded))
+            .with_guessed_format()
+            .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
+            .decode()
+            .map_err(|err| AppError::Platform(format!("image decode failed: {err}")))?
+            .to_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width == 0 || height == 0 {
+            return Err(AppError::Platform(
+                "image has zero width or height; cannot publish as CF_DIBV5".to_owned(),
+            ));
+        }
+        let width_i32 = i32::try_from(width)
+            .map_err(|_| AppError::Platform("image width exceeds i32".to_owned()))?;
+        let height_i32 = i32::try_from(height)
+            .map_err(|_| AppError::Platform("image height exceeds i32".to_owned()))?;
+        let stride = (width as usize).saturating_mul(4);
+        let size_image = stride
+            .checked_mul(height as usize)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| {
+                AppError::Platform("image dimensions overflow CF_DIBV5 size field".to_owned())
+            })?;
+
+        // SAFETY: `BITMAPV5HEADER` is a `repr(C)` struct made entirely
+        // of integers plus a `CIEXYZTRIPLE` of integers; the all-zero
+        // representation is valid and we overwrite every field we care
+        // about below.
+        let mut header: BITMAPV5HEADER = unsafe { mem::zeroed() };
+        // `BITMAPV5HEADER` is 124 bytes by spec; `try_from` keeps the
+        // conversion explicit instead of relying on `as u32` and a
+        // matching clippy allow.
+        header.bV5Size = u32::try_from(mem::size_of::<BITMAPV5HEADER>())
+            .map_err(|_| AppError::Platform("BITMAPV5HEADER size exceeds u32".to_owned()))?;
+        header.bV5Width = width_i32;
+        // POSITIVE height = bottom-up scan order, the layout MS Word /
+        // Paint pull from `CF_DIBV5`. Top-down (negative height) is
+        // valid by spec but Word renders it upside-down.
+        header.bV5Height = height_i32;
+        header.bV5Planes = 1;
+        header.bV5BitCount = 32;
+        header.bV5Compression = BI_BITFIELDS;
+        header.bV5SizeImage = size_image;
+        header.bV5RedMask = 0x00FF_0000;
+        header.bV5GreenMask = 0x0000_FF00;
+        header.bV5BlueMask = 0x0000_00FF;
+        header.bV5AlphaMask = 0xFF00_0000;
+        // 'sRGB' little-endian == 0x73524742, the documented value for
+        // an sRGB colour space. Hand-coded so the constant stays
+        // visible at the call site (windows-sys exposes it under the
+        // `LCS_sRGB` symbol on some feature bundles but not all).
+        header.bV5CSType = 0x7352_4742;
+        header.bV5Intent = LCS_GM_IMAGES as u32;
+
+        let header_size = mem::size_of::<BITMAPV5HEADER>();
+        let mut out =
+            Vec::with_capacity(header_size.saturating_add(stride.saturating_mul(height as usize)));
+        // SAFETY: `header` is a fully-initialised `BITMAPV5HEADER` and
+        // we read its bytes through a raw pointer — valid because the
+        // type is `repr(C)`.
+        out.extend_from_slice(unsafe {
+            slice::from_raw_parts(std::ptr::from_ref(&header).cast::<u8>(), header_size)
+        });
+
+        // RGBA → BGRA + vertical flip. Iterate rows from the last row
+        // upward so the first row written to the buffer is the bottom
+        // row of the image (required by positive-height DIB layout).
+        let raw = rgba.as_raw();
+        for row in (0..height as usize).rev() {
+            let start = row.saturating_mul(stride);
+            let end = start.saturating_add(stride);
+            for pixel in raw[start..end].chunks_exact(4) {
+                out.push(pixel[2]); // B
+                out.push(pixel[1]); // G
+                out.push(pixel[0]); // R
+                out.push(pixel[3]); // A
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -691,4 +1139,152 @@ fn platform_err(err: &arboard::Error) -> AppError {
 
 fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
     AppError::Platform(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nagori_core::RepresentationRole;
+
+    #[test]
+    fn has_publishable_representation_matches_known_mimes() {
+        let plain = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/plain".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("hi".to_owned()),
+        };
+        let html = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/html".to_owned(),
+            ordinal: 1,
+            data: RepresentationDataRef::InlineText("<p>hi</p>".to_owned()),
+        };
+        let png = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "image/png".to_owned(),
+            ordinal: 2,
+            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50, 0x4e, 0x47]),
+        };
+        let paths = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 3,
+            data: RepresentationDataRef::FilePaths(vec!["C:\\one".to_owned()]),
+        };
+        assert!(has_publishable_representation(&[plain]));
+        assert!(has_publishable_representation(&[html]));
+        assert!(has_publishable_representation(&[png]));
+        assert!(has_publishable_representation(&[paths]));
+    }
+
+    #[test]
+    fn has_publishable_representation_rejects_unmapped_mimes() {
+        let json = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "application/json".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("{}".to_owned()),
+        };
+        let empty_paths = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 1,
+            data: RepresentationDataRef::FilePaths(Vec::new()),
+        };
+        assert!(!has_publishable_representation(&[]));
+        assert!(!has_publishable_representation(&[json, empty_paths]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_cf_html_wrapper_offsets_are_consistent() {
+        let fragment = "<p>hello <b>world</b></p>";
+        let wrapped = win::build_cf_html(fragment);
+        let bytes = wrapped.as_bytes();
+
+        let find_value = |key: &str| -> usize {
+            let needle = format!("{key}:");
+            let start = wrapped.find(&needle).expect("header line present") + needle.len();
+            let end = wrapped[start..]
+                .find("\r\n")
+                .expect("header line is CRLF terminated")
+                + start;
+            wrapped[start..end]
+                .parse::<usize>()
+                .expect("offset is a decimal integer")
+        };
+        let start_html = find_value("StartHTML");
+        let end_html = find_value("EndHTML");
+        let start_fragment = find_value("StartFragment");
+        let end_fragment = find_value("EndFragment");
+
+        // <html> must start exactly at StartHTML.
+        assert_eq!(&bytes[start_html..start_html + 6], b"<html>");
+        // Fragment substring lives between StartFragment and EndFragment.
+        assert_eq!(&bytes[start_fragment..end_fragment], fragment.as_bytes());
+        // </html> must close right before EndHTML.
+        assert_eq!(&bytes[end_html - 7..end_html], b"</html>");
+        // Header length is fixed-width (offsets are zero-padded to 10
+        // digits), so StartHTML equals the header line count × 64.
+        assert!(start_html >= b"Version:0.9\r\n".len());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_dibv5_payload_round_trips_1x1_png() {
+        // 1×1 RGBA(0xAA, 0xBB, 0xCC, 0xDD) PNG, generated via the image
+        // crate so the test does not bake an opaque base64 blob.
+        let mut png = Vec::new();
+        let pixel = image::Rgba::<u8>([0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, pixel);
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode 1x1 PNG");
+
+        let payload = win::build_dibv5_payload(&png).expect("DIBV5 builds");
+
+        // 124-byte BITMAPV5HEADER + 4 pixel bytes.
+        assert_eq!(payload.len(), 124 + 4);
+        // bV5Size at offset 0 = 124.
+        assert_eq!(
+            u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+            124,
+            "bV5Size",
+        );
+        // bV5Width at offset 4 = 1.
+        assert_eq!(
+            i32::from_le_bytes(payload[4..8].try_into().unwrap()),
+            1,
+            "bV5Width",
+        );
+        // bV5Height at offset 8 = 1 (POSITIVE = bottom-up).
+        assert_eq!(
+            i32::from_le_bytes(payload[8..12].try_into().unwrap()),
+            1,
+            "bV5Height (positive ⇒ bottom-up rows for Word compat)",
+        );
+        // bV5BitCount at offset 14 = 32.
+        assert_eq!(
+            u16::from_le_bytes(payload[14..16].try_into().unwrap()),
+            32,
+            "bV5BitCount",
+        );
+        // bV5Compression at offset 16 = BI_BITFIELDS (3).
+        assert_eq!(
+            u32::from_le_bytes(payload[16..20].try_into().unwrap()),
+            3,
+            "bV5Compression == BI_BITFIELDS",
+        );
+        // bV5CSType at offset 56 = 'sRGB' = 0x73524742.
+        assert_eq!(
+            u32::from_le_bytes(payload[56..60].try_into().unwrap()),
+            0x7352_4742,
+            "bV5CSType == LCS_sRGB",
+        );
+
+        // Pixel bytes: input RGBA(0xAA,0xBB,0xCC,0xDD) → output
+        // BGRA(0xCC,0xBB,0xAA,0xDD).
+        assert_eq!(&payload[124..128], &[0xCC, 0xBB, 0xAA, 0xDD]);
+    }
 }
