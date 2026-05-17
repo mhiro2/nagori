@@ -465,11 +465,11 @@ impl NagoriRuntime {
                 // understands HTML / RTF / image bytes can pick the richest
                 // representation the source originally advertised, while a
                 // plain-text target still finds the matching `text/plain`
-                // fallback. Platforms whose
+                // fallback. Adapters whose
                 // `clipboard_multi_representation_write` capability is
-                // `Unsupported` inherit the trait's default impl, which
-                // delegates to `write_entry`, so this code path stays
-                // primary-only on Windows / Wayland today.
+                // `Unsupported` (e.g. `MemoryClipboard`, or any host
+                // adapter not built into this binary) inherit the trait's
+                // default impl, which delegates to `write_entry`.
                 let representations = self.store.list_representations(id).await?;
                 if representations.is_empty() {
                     self.clipboard.write_entry(&entry).await?;

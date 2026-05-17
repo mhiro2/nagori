@@ -221,12 +221,12 @@ mod tests {
 
     #[tokio::test]
     async fn write_representations_default_falls_back_to_write_entry() {
-        // Platforms without `clipboard_multi_representation_write` keep the
+        // Adapters without `clipboard_multi_representation_write` keep the
         // default impl, which has to publish the entry's primary text
         // through `write_entry`. `MemoryClipboard` inherits that path —
         // exercising it locks the contract that the daemon's Preserve
-        // copy-back stays functional on Windows / Wayland even when
-        // multi-rep publishing is not available.
+        // copy-back stays functional on any adapter (test stub or future
+        // host) that hasn't opted into multi-rep yet.
         let clipboard = MemoryClipboard::new();
         let entry = EntryFactory::from_text("primary body");
         let reps = vec![

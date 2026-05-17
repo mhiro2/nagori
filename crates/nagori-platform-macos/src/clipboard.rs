@@ -403,7 +403,7 @@ impl MacosClipboard {
         _representations: Vec<StoredClipboardRepresentation>,
     ) -> Result<()> {
         Err(AppError::Unsupported(
-            "multi-representation clipboard writes are macOS-only".to_owned(),
+            "the macOS clipboard adapter only runs on a macOS host".to_owned(),
         ))
     }
 }
