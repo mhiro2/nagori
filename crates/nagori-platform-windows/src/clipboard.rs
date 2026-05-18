@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use image::{ImageFormat, ImageReader};
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
+    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
     StoredClipboardRepresentation,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
@@ -233,6 +233,11 @@ impl WindowsClipboard {
         // `image::ImageReader::decode` is CPU-bound.
         let clipboard = self.clipboard.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
+            // Probe dimensions first so an encoded payload whose advertised
+            // canvas blows past `MAX_DECODED_IMAGE_PIXELS` (e.g. a 1 KB PNG
+            // claiming 65535×65535) is rejected before `decode` allocates a
+            // multi-GB RGBA buffer.
+            reject_oversized_image(&bytes)?;
             let rgba = ImageReader::new(Cursor::new(&bytes))
                 .with_guessed_format()
                 .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
@@ -254,6 +259,96 @@ impl WindowsClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
+}
+
+/// Reject an encoded image payload whose decoded canvas would exceed
+/// [`MAX_DECODED_IMAGE_PIXELS`].
+///
+/// `image::ImageReader::into_dimensions` reads only the format header (e.g.
+/// PNG's IHDR, JPEG's SOF) so the probe stays bounded even when the encoded
+/// payload itself is multiple MB. The error path matches the rest of the
+/// adapter: callers receive an `AppError::Unsupported` and report the
+/// rejection upward instead of crashing on the subsequent `decode`.
+///
+/// A probe failure (corrupt header, unknown format) returns `Ok(())` so the
+/// downstream `decode` call still gets to produce the more descriptive
+/// platform error; it is the dimensions-exceed-cap case that needs the
+/// early bail-out.
+fn reject_oversized_image(bytes: &[u8]) -> Result<()> {
+    let Some(pixels) = image_pixel_count_from_encoded(bytes) else {
+        return Ok(());
+    };
+    if pixels > MAX_DECODED_IMAGE_PIXELS {
+        return Err(AppError::Unsupported(format!(
+            "image dimensions {pixels} pixels exceed MAX_DECODED_IMAGE_PIXELS ({MAX_DECODED_IMAGE_PIXELS})"
+        )));
+    }
+    Ok(())
+}
+
+/// Compute the decoded pixel count of an encoded image header.
+///
+/// Returns `None` when the prefix is too short to identify a format or when
+/// `into_dimensions` fails for any reason; the only contract is that a
+/// successful return reflects the dimensions the corresponding `decode`
+/// call would observe.
+fn image_pixel_count_from_encoded(bytes: &[u8]) -> Option<u64> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    Some(u64::from(width).saturating_mul(u64::from(height)))
+}
+
+/// Pixel count parsed from the leading bytes of a `BITMAPINFOHEADER` /
+/// `BITMAPV5HEADER`.
+///
+/// Both headers share the same first 12 bytes: `biSize` (u32, offset 0),
+/// `biWidth` (i32, offset 4), `biHeight` (i32, offset 8). `biHeight` is
+/// signed because a top-down DIB encodes scan-order in its sign, so the
+/// pixel count uses the absolute values of both axes. Returns `None` when
+/// the prefix is shorter than 12 bytes.
+#[cfg(any(windows, test))]
+fn dib_pixel_count_from_header(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 12 {
+        return None;
+    }
+    let width = i32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let height = i32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    Some(u64::from(width.unsigned_abs()).saturating_mul(u64::from(height.unsigned_abs())))
+}
+
+/// Pixel count parsed directly from a PNG's IHDR chunk.
+///
+/// `image::ImageReader::into_dimensions` advances the PNG decoder until it
+/// finds IDAT, which means a real PNG with ancillary chunks (gAMA, sRGB,
+/// pHYs, …) sitting between IHDR and IDAT would need an unbounded prefix
+/// to probe — and a 64-byte prefix would silently return `None`, letting
+/// an oversized PNG slip past the capture probe and into arboard's
+/// unbounded `read_png` allocation.
+///
+/// The PNG spec (RFC 2083 §3.2, §4.1.1) mandates IHDR is the first chunk
+/// and that its layout is fixed: signature (8 B) + length=`0x0000_000D`
+/// (4 B BE) + type=`"IHDR"` (4 B) + width (4 B BE) + height (4 B BE) + …
+/// So reading bytes 0..24 is enough to recover the advertised dimensions
+/// even when later chunks are absent or unparseable. Returns `None` on
+/// signature / chunk-type mismatch so callers fall through to whatever
+/// decode error the platform path produces.
+#[cfg(any(windows, test))]
+fn png_pixel_count_from_ihdr(bytes: &[u8]) -> Option<u64> {
+    const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if bytes.len() < 24 || bytes[..8] != PNG_SIGNATURE {
+        return None;
+    }
+    // bytes[8..12] = chunk length, bytes[12..16] = chunk type. PNG spec
+    // requires the very first chunk to be IHDR with payload length 13.
+    let length = u32::from_be_bytes(bytes[8..12].try_into().ok()?);
+    if length != 13 || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some(u64::from(width).saturating_mul(u64::from(height)))
 }
 
 fn capture_snapshot(
@@ -284,18 +379,45 @@ fn capture_snapshot(
             Err(arboard::Error::ContentNotAvailable) => None,
             Err(err) => return Err(platform_err(&err)),
         };
-        // arboard's `get_image` opens its own `OpenClipboard` session and pulls
-        // the raw `CF_DIBV5` (falling back to `CF_DIB`) bytes into a freshly
-        // allocated RGBA buffer. Encode to PNG so the rest of the pipeline
-        // (storage, search snippets, IPC, copy-back) can treat Windows
-        // captures the same way macOS publishes `image/png` straight off the
-        // pasteboard. Format unavailability is the common case and surfaces
-        // as `ContentNotAvailable`, which we silently skip — only true Win32
-        // failures bubble up as `AppError::Platform`.
-        let image = match guard.get_image() {
-            Ok(img) => Some(img),
-            Err(arboard::Error::ContentNotAvailable) => None,
-            Err(err) => return Err(platform_err(&err)),
+        // arboard's `get_image` opens its own `OpenClipboard` session and
+        // pulls the raw `CF_DIBV5` (falling back to `CF_DIB`) bytes into a
+        // freshly allocated RGBA buffer. Encode to PNG so the rest of the
+        // pipeline (storage, search snippets, IPC, copy-back) can treat
+        // Windows captures the same way macOS publishes `image/png` straight
+        // off the pasteboard. Format unavailability is the common case and
+        // surfaces as `ContentNotAvailable`, which we silently skip — only
+        // true Win32 failures bubble up as `AppError::Platform`.
+        //
+        // Probe the published image dimensions before letting arboard
+        // materialise an RGBA buffer: arboard's `read_png` /
+        // `read_cf_dibv5` allocate `width × height × 4` bytes
+        // unconditionally, so a small encoded PNG with pathological
+        // dimensions (e.g. 65535×65535) would OOM the daemon long before
+        // the post-load byte-budget check runs. Skip the image rep when
+        // the cap is exceeded and continue with whatever text / file-list
+        // also rode on this snapshot.
+        #[cfg(windows)]
+        let skip_image = match win::image_pixel_overflow(MAX_DECODED_IMAGE_PIXELS) {
+            Some(observed) => {
+                tracing::warn!(
+                    observed_pixels = observed,
+                    max_pixels = MAX_DECODED_IMAGE_PIXELS,
+                    "image_rep_dropped reason=decoded_pixels_exceed_cap"
+                );
+                true
+            }
+            None => false,
+        };
+        #[cfg(not(windows))]
+        let skip_image = false;
+        let image = if skip_image {
+            None
+        } else {
+            match guard.get_image() {
+                Ok(img) => Some(img),
+                Err(arboard::Error::ContentNotAvailable) => None,
+                Err(err) => return Err(platform_err(&err)),
+            }
         };
         // Drop the arboard guard before the second Win32 read so we don't hold
         // it across the CF_HDROP OpenClipboard call; the sequence-stability
@@ -458,6 +580,107 @@ mod win {
                 CloseClipboard();
             }
         }
+    }
+
+    /// Peek the image rep on the clipboard and return the decoded pixel
+    /// count when it exceeds `max_pixels`.
+    ///
+    /// arboard's `get_image` decodes whichever format it finds in PNG →
+    /// `CF_DIBV5` → `CF_DIB` order and then allocates a `width × height × 4`
+    /// RGBA buffer, so an attacker-controlled small PNG with huge advertised
+    /// dimensions would OOM the daemon long before the post-load byte check.
+    /// This probe mirrors arboard's lookup order *and stops at the first
+    /// format that's available* — checking later formats once the winning
+    /// one is safe would incorrectly drop a safe PNG just because a stale
+    /// oversized `CF_DIBV5` sits alongside it.
+    ///
+    /// PNG dimensions are read from the IHDR chunk directly (24-byte
+    /// prefix) rather than through `image::ImageReader::into_dimensions`,
+    /// because the latter advances to IDAT and a real PNG with ancillary
+    /// chunks before IDAT would silently return `None` from a 64-byte
+    /// peek, letting an oversized payload through. DIB / DIBV5 dimensions
+    /// come from the 12-byte `BITMAPINFOHEADER` prefix that both header
+    /// variants share.
+    ///
+    /// Returns `None` when no image rep is present, when the winning
+    /// format's dimensions fit under the cap, or when its probe fails —
+    /// the daemon then proceeds with the regular capture path so a
+    /// malformed header surfaces as an arboard error rather than a silent
+    /// skip.
+    pub(super) fn image_pixel_overflow(max_pixels: u64) -> Option<u64> {
+        // SAFETY: every successful `OpenClipboard` is paired with the
+        // `ClipboardGuard` drop path. `GetClipboardData` handles are borrowed
+        // from the OS-owned clipboard and are only inspected while the
+        // clipboard remains open.
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return None;
+            }
+            let _guard = ClipboardGuard;
+            if let Some(png_id) = png_format_id()
+                && IsClipboardFormatAvailable(png_id) != 0
+            {
+                return png_pixel_count(png_id).filter(|pixels| *pixels > max_pixels);
+            }
+            for format in [CF_DIBV5, CF_DIB] {
+                if IsClipboardFormatAvailable(u32::from(format)) != 0 {
+                    return dib_pixel_count(u32::from(format))
+                        .filter(|pixels| *pixels > max_pixels);
+                }
+            }
+            None
+        }
+    }
+
+    /// Copy out at most `max_len` bytes from the clipboard handle's
+    /// `HGLOBAL` so a small prefix can be fed to the pure parsing
+    /// helpers without holding the clipboard lock across the parse.
+    ///
+    /// Returns `None` for null handles, empty buffers, or any `GlobalLock`
+    /// failure — the caller then continues with the regular capture path
+    /// and a downstream arboard error surfaces the underlying issue.
+    unsafe fn copy_clipboard_prefix(format: u32, max_len: usize) -> Option<Vec<u8>> {
+        let handle = unsafe { GetClipboardData(format) };
+        if handle.is_null() {
+            return None;
+        }
+        let size = unsafe { GlobalSize(handle) };
+        if size == 0 {
+            return None;
+        }
+        let locked = unsafe { GlobalLock(handle) };
+        if locked.is_null() {
+            return None;
+        }
+        let prefix_len = size.min(max_len);
+        let mut prefix = vec![0u8; prefix_len];
+        unsafe {
+            std::ptr::copy_nonoverlapping(locked.cast::<u8>(), prefix.as_mut_ptr(), prefix_len);
+            let _ = GlobalUnlock(handle);
+        }
+        Some(prefix)
+    }
+
+    /// Read the PNG's width × height directly from the IHDR chunk.
+    ///
+    /// PNG's signature is 8 bytes and IHDR's `length + type + payload`
+    /// fields occupy the next 16 bytes (length=13, type="IHDR", then
+    /// width / height u32 BE). 24 bytes is therefore the exact prefix
+    /// needed; we copy 32 to absorb any host quirks without paying for
+    /// the rest of the blob.
+    unsafe fn png_pixel_count(format: u32) -> Option<u64> {
+        let prefix = unsafe { copy_clipboard_prefix(format, 32) }?;
+        super::png_pixel_count_from_ihdr(&prefix)
+    }
+
+    /// Read the DIB / DIBV5 `biWidth` / `biHeight` directly from the
+    /// `BITMAPINFOHEADER` prefix. Both `BITMAPINFOHEADER` and
+    /// `BITMAPV5HEADER` start with `biSize` (offset 0, u32), `biWidth`
+    /// (offset 4, i32), `biHeight` (offset 8, i32) — so the same 12-byte
+    /// peek works for either header layout.
+    unsafe fn dib_pixel_count(format: u32) -> Option<u64> {
+        let prefix = unsafe { copy_clipboard_prefix(format, 12) }?;
+        super::dib_pixel_count_from_header(&prefix)
     }
 
     pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
@@ -1051,6 +1274,11 @@ mod win {
     /// tests on any host can verify the header layout and pixel-byte
     /// order match expectations.
     pub(super) fn build_dibv5_payload(encoded: &[u8]) -> Result<Vec<u8>> {
+        // Multi-rep copy-back walks every stored representation through
+        // `build_dibv5_payload`, so the same encoded-vs-decoded asymmetry
+        // applies here as in the single-image path. Probe dimensions before
+        // the `decode` call materialises the RGBA buffer.
+        super::reject_oversized_image(encoded)?;
         let rgba = ImageReader::new(Cursor::new(encoded))
             .with_guessed_format()
             .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
@@ -1176,6 +1404,248 @@ mod tests {
         assert!(has_publishable_representation(&[html]));
         assert!(has_publishable_representation(&[png]));
         assert!(has_publishable_representation(&[paths]));
+    }
+
+    /// CRC-32 (PNG/IEEE 802.3 polynomial 0xEDB88320).
+    ///
+    /// Hand-rolled instead of pulling in `crc32fast` so the dev-dep set
+    /// stays untouched. PNG's IHDR chunk fails to parse without a valid
+    /// CRC, so the forged-header test below needs to compute one.
+    fn png_crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFF_u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// Build a PNG header with arbitrary advertised dimensions.
+    ///
+    /// Emits the 8-byte signature, a valid IHDR chunk advertising
+    /// `width × height`, an IDAT chunk holding a zero-byte zlib stream,
+    /// and IEND. `image::ImageReader::into_dimensions` parses the chunk
+    /// stream until it finds IDAT before exposing dimensions, so the
+    /// IDAT marker is mandatory even though we never invoke `decode`.
+    /// The encoded payload stays under ~100 bytes regardless of the
+    /// dimensions encoded, which is the whole point of the fixture:
+    /// proving that a tiny encoded blob can advertise a multi-GB canvas.
+    /// Append a single PNG chunk to `out` with the canonical
+    /// `length + type + payload + CRC` layout. Shared between
+    /// `forge_png_header` and the ancillary-chunk regression test.
+    fn push_chunk_for_test(out: &mut Vec<u8>, chunk_type: [u8; 4], payload: &[u8]) {
+        let length = u32::try_from(payload.len()).expect("chunk payload fits in u32");
+        out.extend_from_slice(&length.to_be_bytes());
+        let mut typed_payload = Vec::with_capacity(4 + payload.len());
+        typed_payload.extend_from_slice(&chunk_type);
+        typed_payload.extend_from_slice(payload);
+        let crc = png_crc32(&typed_payload);
+        out.extend_from_slice(&typed_payload);
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+
+    fn forge_png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        // PNG signature.
+        out.extend_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        // IHDR: 13-byte payload — width, height, depth, colour type,
+        // compression, filter, interlace.
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.push(8); // bit depth
+        ihdr.push(2); // colour type (RGB)
+        ihdr.push(0); // compression
+        ihdr.push(0); // filter
+        ihdr.push(0); // interlace
+        push_chunk_for_test(&mut out, *b"IHDR", &ihdr);
+        // Minimal zlib empty stream (`78 9C 03 00 00 00 00 01`).
+        push_chunk_for_test(
+            &mut out,
+            *b"IDAT",
+            &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        push_chunk_for_test(&mut out, *b"IEND", &[]);
+        out
+    }
+
+    fn encode_real_png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = Vec::new();
+        let img = image::RgbaImage::new(width, height);
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .expect("encode small PNG");
+        png
+    }
+
+    #[test]
+    fn image_pixel_count_from_encoded_reads_forged_png_header() {
+        // Bare IHDR — no IDAT / IEND, decode would fail, but the
+        // dimensions probe must still report the advertised canvas so
+        // copy-back can reject pre-decode.
+        let forged = forge_png_header(40_000, 40_000);
+        let pixels = image_pixel_count_from_encoded(&forged).expect("dimensions parse");
+        assert_eq!(pixels, 40_000_u64 * 40_000_u64);
+    }
+
+    #[test]
+    fn image_pixel_count_from_encoded_returns_none_for_non_image_bytes() {
+        // No format guess possible → caller falls through to whatever
+        // platform-level error the downstream `decode` produces.
+        assert!(image_pixel_count_from_encoded(b"definitely not an image").is_none());
+        assert!(image_pixel_count_from_encoded(&[]).is_none());
+    }
+
+    #[test]
+    fn png_pixel_count_from_ihdr_reads_real_and_forged_headers() {
+        // The capture probe runs against a 32-byte prefix copied out of
+        // the clipboard `HGLOBAL`, so it must work without seeing IDAT
+        // (which `image::ImageReader::into_dimensions` requires). The
+        // forged header has only IHDR + IDAT + IEND; the prefix path
+        // must agree with the encoded full PNG on dimensions.
+        let forged = forge_png_header(40_000, 40_000);
+        assert_eq!(
+            png_pixel_count_from_ihdr(&forged[..24]),
+            Some(40_000_u64 * 40_000_u64),
+        );
+        let real = encode_real_png(8, 8);
+        assert_eq!(png_pixel_count_from_ihdr(&real[..24]), Some(64));
+    }
+
+    #[test]
+    fn png_pixel_count_from_ihdr_rejects_wrong_signature_or_chunk() {
+        // Truncated prefix → None so the daemon falls through to the
+        // regular capture path and any downstream decode error surfaces.
+        assert!(png_pixel_count_from_ihdr(&[0u8; 23]).is_none());
+        // Wrong signature.
+        assert!(png_pixel_count_from_ihdr(&[0u8; 24]).is_none());
+        // Right signature but wrong first chunk type.
+        let mut bogus = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        bogus.extend_from_slice(&13_u32.to_be_bytes());
+        bogus.extend_from_slice(b"WRNG");
+        bogus.extend_from_slice(&[0u8; 8]);
+        assert!(png_pixel_count_from_ihdr(&bogus).is_none());
+    }
+
+    #[test]
+    fn png_pixel_count_from_ihdr_survives_real_png_with_ancillary_chunks() {
+        // The regression codex flagged: a valid PNG with `gAMA` / `sRGB`
+        // / `pHYs` between IHDR and IDAT would push IDAT past a 32-byte
+        // peek, making `into_dimensions` return None. The IHDR-only
+        // parser must still recover the dimensions from the first 24
+        // bytes regardless of what follows.
+        let mut png = Vec::new();
+        png.extend_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        push_chunk_for_test(&mut png, *b"IHDR", &{
+            let mut ihdr = Vec::with_capacity(13);
+            ihdr.extend_from_slice(&65_535_u32.to_be_bytes());
+            ihdr.extend_from_slice(&65_535_u32.to_be_bytes());
+            ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+            ihdr
+        });
+        // Ancillary chunks deliberately injected before IDAT.
+        push_chunk_for_test(&mut png, *b"gAMA", &[0x00, 0x00, 0xB1, 0x8F]);
+        push_chunk_for_test(&mut png, *b"sRGB", &[0]);
+        push_chunk_for_test(
+            &mut png,
+            *b"pHYs",
+            &[0x00, 0x00, 0x0B, 0x13, 0x00, 0x00, 0x0B, 0x13, 0x01],
+        );
+        push_chunk_for_test(
+            &mut png,
+            *b"IDAT",
+            &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        push_chunk_for_test(&mut png, *b"IEND", &[]);
+        assert_eq!(
+            png_pixel_count_from_ihdr(&png[..24]),
+            Some(65_535_u64 * 65_535_u64),
+        );
+    }
+
+    /// Smallest square dimension whose product exceeds
+    /// `MAX_DECODED_IMAGE_PIXELS`, derived via integer sqrt to avoid f64
+    /// cast lints. Centralised so both the cross-platform and
+    /// Windows-only rejection tests stay in sync as the cap evolves.
+    fn dim_above_cap() -> u32 {
+        let cap = MAX_DECODED_IMAGE_PIXELS;
+        let dim = u32::try_from(cap.isqrt()).expect("isqrt fits in u32") + 1;
+        assert!(u64::from(dim).saturating_mul(u64::from(dim)) > cap);
+        dim
+    }
+
+    #[test]
+    fn reject_oversized_image_blocks_canvas_above_cap() {
+        // Forged PNG that advertises a pixel count above
+        // MAX_DECODED_IMAGE_PIXELS but encodes to a few-dozen bytes —
+        // exactly the asymmetric payload the REVIEW.md P1 entry called
+        // out. Must return Unsupported so `write_image_bytes` /
+        // `build_dibv5_payload` bail before `decode()` allocates the
+        // multi-GB RGBA buffer.
+        let dim = dim_above_cap();
+        let forged = forge_png_header(dim, dim);
+        let err = reject_oversized_image(&forged).expect_err("must reject above cap");
+        assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn reject_oversized_image_allows_canvas_at_or_below_cap() {
+        // A real small PNG must pass without complaint so legitimate
+        // captures keep round-tripping through the copy-back path.
+        let small = encode_real_png(8, 8);
+        reject_oversized_image(&small).expect("small PNG must be accepted");
+    }
+
+    #[test]
+    fn reject_oversized_image_tolerates_unrecognised_bytes() {
+        // Probe failure (unknown format) is not the cap's job to report;
+        // the downstream `decode` produces a clearer platform error.
+        reject_oversized_image(b"not an image at all").expect("unknown bytes pass the cap");
+    }
+
+    #[test]
+    fn dib_pixel_count_from_header_reads_top_down_and_bottom_up() {
+        // bV5Size = 124, biWidth = 10, biHeight = +5 (bottom-up).
+        let mut bottom_up = vec![0u8; 12];
+        bottom_up[0..4].copy_from_slice(&124_u32.to_le_bytes());
+        bottom_up[4..8].copy_from_slice(&10_i32.to_le_bytes());
+        bottom_up[8..12].copy_from_slice(&5_i32.to_le_bytes());
+        assert_eq!(dib_pixel_count_from_header(&bottom_up), Some(50));
+
+        // Negative biHeight (top-down DIB) — pixel count uses the
+        // absolute value of both axes.
+        let mut top_down = bottom_up.clone();
+        top_down[8..12].copy_from_slice(&(-5_i32).to_le_bytes());
+        assert_eq!(dib_pixel_count_from_header(&top_down), Some(50));
+
+        // Short prefix → None.
+        assert_eq!(dib_pixel_count_from_header(&bottom_up[..8]), None);
+    }
+
+    #[test]
+    fn dib_pixel_count_from_header_flags_pathological_dimensions() {
+        // i32::MIN.unsigned_abs() == 2_147_483_648 — exercising the
+        // unsigned_abs path so a top-down DIB with the maximum-magnitude
+        // height still yields a finite pixel count via saturating_mul.
+        let mut header = vec![0u8; 12];
+        header[0..4].copy_from_slice(&40_u32.to_le_bytes());
+        header[4..8].copy_from_slice(&1_i32.to_le_bytes());
+        header[8..12].copy_from_slice(&i32::MIN.to_le_bytes());
+        assert_eq!(dib_pixel_count_from_header(&header), Some(1 << 31));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_dibv5_payload_rejects_canvas_above_cap() {
+        // Same forged PNG fixture as the top-level reject test; the
+        // multi-rep copy-back path runs through `build_dibv5_payload`
+        // on Windows hosts and must bail before decode allocates.
+        let dim = dim_above_cap();
+        let forged = forge_png_header(dim, dim);
+        let err = win::build_dibv5_payload(&forged).expect_err("must reject above cap");
+        assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
     }
 
     #[test]

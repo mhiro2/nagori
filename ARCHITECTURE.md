@@ -1296,6 +1296,27 @@ under 80 ms for 100k text entries on a developer machine.
   against a payload like an HTML body mislabelled as `image/png`.
   Rejections are logged with declared MIME, detected MIME, and byte
   count; raw bytes are never written to the log.
+- **Decoded-image pixel cap** — `max_entry_size_bytes` only inspects
+  encoded bytes, but `image::decode().to_rgba8()` materialises the
+  full `width × height × 4` buffer. A few-KB PNG advertising
+  65535×65535 would allocate ~16 GB before any byte budget fires.
+  `nagori_core::MAX_DECODED_IMAGE_PIXELS` (64 MP → ~256 MB worst-case
+  RGBA, above an 8K screenshot) is the platform-wide guard. The
+  Windows capture path probes whichever format `arboard::get_image`
+  will read first — registered `"PNG"` wins if available, otherwise
+  `CF_DIBV5` / `CF_DIB` — and bails out before allocating. The PNG
+  probe reads the IHDR chunk directly from the 24-byte signature +
+  length + type + width + height prefix, deliberately avoiding
+  `ImageReader::into_dimensions` because the latter advances to IDAT
+  and a real PNG with ancillary chunks (gAMA / sRGB / pHYs) would
+  silently fail a short-prefix probe. DIB dimensions come from the
+  shared 12-byte `BITMAPINFOHEADER` prefix. Oversized payloads get an
+  `image_rep_dropped reason=decoded_pixels_exceed_cap` warn log;
+  sibling text / file-list reps still capture. Copy-back
+  (`write_image_bytes`, `build_dibv5_payload`) probes the same way
+  and surfaces `AppError::Unsupported` so the daemon refuses to decode
+  an attacker-controlled canvas. The cap is intentionally not
+  user-tunable.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.

@@ -21,6 +21,23 @@ pub const MAX_IPC_BYTES: usize = 1024 * 1024;
 /// the daemon stores but neither the desktop nor the CLI can read back.
 pub const MAX_ENTRY_SIZE_BYTES: usize = (MAX_IPC_BYTES * 3) / 4;
 
+/// Hard cap on decoded image pixel count for clipboard image captures and
+/// copy-back.
+///
+/// `max_entry_size_bytes` only inspects the encoded bytes on the wire, but
+/// encoded formats like PNG / JPEG / WebP can advertise huge dimensions in
+/// a tiny payload (a few-KB PNG can decode to a 16 GB RGBA buffer). Capping
+/// the decoded pixel count is the only defence against that asymmetry, and
+/// the limit has to be platform-wide because the same encoded bytes can be
+/// pushed through capture, copy-back, or a future preview pipeline.
+///
+/// 64 megapixels keeps the worst-case RGBA buffer at 256 MB — comfortably
+/// above an 8K screenshot (~33 MP) but well below the OOM threshold on a
+/// typical workstation. The value is intentionally not user-tunable: the
+/// only reason to raise it is to accept payloads that would routinely
+/// crash the daemon.
+pub const MAX_DECODED_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;
