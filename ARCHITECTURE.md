@@ -1276,7 +1276,9 @@ under 80 ms for 100k text entries on a developer machine.
   permission bits keep other local users out but do not defend
   against backups, sync clients, or code running as the same user.
   README documents the gap and recommended mitigations (avoid sync
-  targets, rely on FileVault, prefer `Store redacted`).
+  targets, rely on FileVault, prefer `Store redacted`); the
+  SQLCipher / OS-keystore trade-offs are captured in
+  `docs/security-encryption-at-rest.md`.
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret
   imagery never reaches the WebView.
