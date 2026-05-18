@@ -11,22 +11,27 @@ is covered by per-OS smoke tests: macOS and Windows run on PRs that
 touch relevant paths (and on every push to `main`), and Linux Wayland
 runs on a nightly schedule. Desktop UI flows, auto-paste, and
 global-shortcut registration are not yet exercised by automated tests
-off macOS, and several integrations remain incomplete (Windows release
-bundles, update checks outside macOS, GNOME Wayland, X11).
+off macOS, and several integrations remain incomplete (Windows
+Authenticode signing, GNOME Wayland, X11).
 
-| Platform               | Desktop app  | CLI daemon   | Capture                | Copy back              | Auto-paste        | Release bundle                       |
-| ---------------------- | ------------ | ------------ | ---------------------- | ---------------------- | ----------------- | ------------------------------------ |
-| macOS (arm64 / x86_64) | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (`.app`, update notifications)   |
-| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image + files   | Supported         | None — build from source             |
-| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image + files   | Requires `wtype`  | Yes (tarball, no update notifications) |
-| Linux X11              | Unsupported  | Unsupported  | Unsupported            | Unsupported            | Unsupported       | n/a                                  |
+| Platform               | Desktop app  | CLI daemon   | Capture                | Copy back              | Auto-paste        | Release bundle                                |
+| ---------------------- | ------------ | ------------ | ---------------------- | ---------------------- | ----------------- | --------------------------------------------- |
+| macOS (arm64 / x86_64) | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (`.app` / `.dmg`, in-app update probe)    |
+| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image + files   | Supported         | Yes (unsigned NSIS, in-app update probe)      |
+| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image + files   | Requires `wtype`  | Yes (`deb` + `AppImage`, in-app update probe) |
+| Linux X11              | Unsupported  | Unsupported  | Unsupported            | Unsupported            | Unsupported       | n/a                                           |
 
-macOS-only capabilities: secure-input detection, sleep/wake
-`changeCount` resynchronisation, and the bundled update-check probe.
-The Tauri updater plugin is registered on every OS, but the runtime
-gates it to macOS and the MVP surface is read-only: users still
-upgrade by following the GitHub release link rather than an in-app
-`download_and_install` flow.
+macOS-only capabilities: secure-input detection and sleep/wake
+`changeCount` resynchronisation. The Tauri updater plugin is registered
+on every supported OS and the release workflow publishes a signed
+`latest.json` feed for macOS, Windows, and Linux, so the in-app
+availability probe runs everywhere. The current MVP surface is
+read-only — users upgrade by following the GitHub release link — and
+the wording differs by install medium: bundles that the updater could
+swap in place (`.app` / `.dmg`, NSIS, `AppImage`) show "View release",
+while `deb` installs show "Download manually" to reflect that the
+GitHub artefact has to be re-installed by hand. The NSIS bundle is not
+yet Authenticode-signed, so SmartScreen warns on first launch.
 
 For the authoritative answer for this OS build, query the runtime
 itself: `nagori capabilities` prints the matrix on the CLI (add
@@ -123,8 +128,11 @@ Supported environment:
 
 Known limitations:
 
-- Installer artifacts are not yet produced by the release workflow —
-  build from source until a signed Windows bundle ships.
+- The release workflow ships an unsigned per-user NSIS installer.
+  SmartScreen warns on first launch (`More info → Run anyway`).
+  Authenticode signing is still pending; until it lands, every fresh
+  download will trip the SmartScreen warning because the certificate
+  is missing.
 - Auto-paste cannot target an elevated foreground window from a
   non-elevated Nagori process: `SendInput` is blocked by UIPI when
   the target window runs at a higher integrity level. Run Nagori at

@@ -1189,37 +1189,50 @@ change.
   the user directly to the Accessibility pane.
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
   `app.updater()` is always wired. `release.yaml` builds bundles for
-  macOS (arm64 + x86_64) and Linux x86_64, but the auto-update feed
-  (`latest.json` + `download_and_install`) is wired only for macOS:
-  the startup probe gates on `updater_release_target()` and
-  `commands::check_for_updates` returns `Unsupported` off macOS, with
-  the Settings → Advanced fieldset hidden on those platforms. Linux
-  users still get tarball artefacts on the GitHub release page but
-  upgrade by re-downloading; Windows has no release artefact yet and
-  must be built from source. The plugin reads its endpoint and signing
-  pubkey from
-  `tauri.conf.json` (`plugins.updater`); the endpoint resolves
+  macOS (arm64 + x86_64), Windows x86_64 (NSIS), and Linux x86_64
+  (`deb` + `AppImage`), and `tauri-action` emits a consolidated signed
+  `latest.json` for every row in the matrix, so the availability
+  probe runs on every supported OS. The MVP surface is read-only — the
+  desktop shell calls `updater.check()` for the version comparison but
+  does not call `update.download_and_install()`; users still follow
+  the GitHub release link to upgrade. The wording differs by install
+  medium so the user sees the right next step: bundles the updater
+  *could* swap in place (`.app` / `.dmg`, NSIS, `AppImage`) show a
+  "View release" link, while `deb` installs show "Download manually"
+  to reflect that the GitHub artefact has to be re-installed by hand
+  (no in-app `dpkg` prompt). The Rust side computes the medium gate
+  in `commands::in_place_update_supported()` by delegating to
+  `tauri::utils::platform::bundle_type()` — the same signal the
+  plugin uses to pick a `latest.json` entry, so the UI advertisement
+  and the underlying selection stay aligned — and exposes the result
+  as `UpdateInfoDto.download_supported`. The plugin reads its
+  endpoint and signing pubkey from `tauri.conf.json`
+  (`plugins.updater`); the endpoint resolves
   `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`
-  via GitHub's "always points at the newest release asset" redirect, so
-  no manifest needs to be edited per release. `release.yaml` already
-  passes `includeUpdaterJson: true` to `tauri-action`, which emits the
-  signed `latest.json` next to the `.app.tar.gz` bundle. The
-  `commands::check_for_updates` Tauri command wraps `updater.check()`
-  and is surfaced as the "Check for updates now" button under
-  Settings → Advanced. `AppSettings.auto_update_check`, when enabled
-  (and `local_only_mode` is off), drives the one-shot startup probe in
+  via GitHub's "always points at the newest release asset" redirect,
+  so no manifest needs to be edited per release. `release.yaml` passes
+  `includeUpdaterJson: true` to `tauri-action@v0.6.2` and the bundle
+  config sets `createUpdaterArtifacts: true` so the matching `.sig`
+  sidecars land next to each bundle; `max-parallel: 1` serialises the
+  matrix because `tauri-action` rewrites the shared `latest.json`
+  asset per row. The `commands::check_for_updates` Tauri command
+  wraps `updater.check()` and is surfaced as the "Check for updates
+  now" button under Settings → Advanced.
+  `AppSettings.auto_update_check`, when enabled (and `local_only_mode`
+  is off), drives the one-shot startup probe in
   `spawn_startup_update_probe`, which surfaces availability via an OS
-  notification (the same path used by capture/AI state changes); the
-  MVP surface is read-only (no `download_and_install`), so users
-  follow the GitHub release link to upgrade. `AppSettings.update_channel`
-  (currently fixed to `Stable`) is persisted so future Beta/Nightly
-  channels can land without a settings migration. The signing keypair
-  is generated once per release line via
-  `pnpm exec tauri signer generate`; the private half lives in the
-  GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` /
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the public half is committed
+  notification (the same path used by capture/AI state changes).
+  `AppSettings.update_channel` (currently fixed to `Stable`) is
+  persisted so future Beta/Nightly channels can land without a
+  settings migration. The signing keypair is generated once per
+  release line via
+  `pnpm --dir apps/desktop exec tauri signer generate`; the private
+  half lives in the GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY`
+  / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the public half is committed
   into `tauri.conf.json`. `release.yaml` fails fast when that pubkey
-  is empty so an unverifiable bundle never ships.
+  is empty so an unverifiable bundle never ships. The Windows NSIS
+  bundle is not yet Authenticode-signed; SmartScreen warns on first
+  launch even though the Tauri-side `minisign` signature verifies.
 
 ---
 
