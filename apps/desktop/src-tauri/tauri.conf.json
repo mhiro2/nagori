@@ -51,7 +51,7 @@
       "endpoints": [
         "https://github.com/mhiro2/nagori/releases/latest/download/latest.json"
       ],
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5Q0Q0Q0JERkM4M0Q0ODAKUldTQTFJUDh2VXpOK1JMcTFsTHBnVGxOQzVYSm9UWE1rTldLUXpxRjg4bWJuWEphWS9ad3hhaG0K",
       "windows": {
         "installMode": "passive"
       }
