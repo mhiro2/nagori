@@ -133,7 +133,7 @@ export const es: Messages = {
         'Un nombre de aplicación de origen por línea. Las capturas desde estas apps se descartan.',
       regexDenylist: 'Lista de regex denegados',
       regexDenylistHelp:
-        'Un regex de Rust por línea. Las capturas que coincidan con algún patrón se descartan.',
+        'Un patrón por línea (p. ej. INTERNAL-\\d+). Las coincidencias se descartan antes de llegar al historial. Cada patrón debe tener menos de 256 bytes (UTF-8) y un máximo de 3 niveles de paréntesis ( ) sin escapar; divide las reglas complejas en varias líneas en lugar de anidar grupos.',
       secretHandling: 'Tratamiento de secretos',
       secretHandlingHelp:
         'Qué hacer cuando un clip se clasifica como secreto (claves API, JWT, claves privadas…).',
@@ -158,6 +158,18 @@ export const es: Messages = {
         'Aviso: «Almacenar completo» mantiene claves API, JWT y claves privadas en texto plano dentro de la base de datos SQLite local. La base de datos no está cifrada en reposo, así que cualquiera con acceso de lectura a tu carpeta personal (copias de seguridad, clientes de sincronización, malware) podría recuperar los secretos. Usa «Almacenar redactado» a menos que entiendas el riesgo.',
       storeFullConfirm:
         '¿Almacenar los secretos en texto plano? La base de datos no está cifrada; los secretos en bruto serán recuperables desde el disco y desde cualquier copia de seguridad que incluya el directorio de datos.',
+      regexDenylistFixHint:
+        'Corrige las entradas resaltadas de la lista de regex denegados antes de guardar.',
+      regexErrors: {
+        lineLabel: 'Línea {line}:',
+        tooLong:
+          'demasiado largo ({bytes} bytes > {limit}). Divide el patrón en varias líneas o elimina alternativas sin usar.',
+        tooNested:
+          'anidamiento de paréntesis {depth} supera el límite de {limit}. Aplana los grupos (usa (?: … ) una sola vez) o divide en varias líneas.',
+        invalidSyntax:
+          'sintaxis de regex inválida: {error}. Escapa los metacaracteres literales con \\\\ o reescribe el patrón.',
+        empty: 'entrada vacía: elimina la línea en blanco o escribe un patrón.',
+      },
     },
     ai: {
       legend: 'IA',

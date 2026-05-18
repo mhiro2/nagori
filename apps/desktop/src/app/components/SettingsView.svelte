@@ -3,6 +3,12 @@
   import { describeError } from "../lib/errors";
   import { checkForUpdates, getCapabilities, getSettings, updateSettings } from "../lib/commands";
   import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
+  import {
+    MAX_USER_REGEX_LEN,
+    MAX_USER_REGEX_NESTING,
+    validateUserRegex,
+    type UserRegexError,
+  } from "../lib/policyValidation";
   import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
   import {
@@ -115,6 +121,23 @@
   let error: string | undefined = $state(undefined);
   let appDenylistText = $state("");
   let regexDenylistText = $state("");
+  // Live preflight against the same limits `compile_user_regex` enforces in
+  // `nagori-core::policy`. Rendered inline next to the textarea so the user
+  // sees per-line guidance ("too long", "nested too deep", "invalid syntax")
+  // before they hit Save, and `save()` short-circuits if anything still fails.
+  // The validator's `index` is set to the textarea's 1-based row number minus
+  // one so the rendered `Line N` label matches the row the user is editing,
+  // even when blank lines sit between entries.
+  let regexDenylistErrors = $derived.by<UserRegexError[]>(() =>
+    regexDenylistText
+      .split(/\r?\n/)
+      .flatMap((line, idx) => {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) return [];
+        const err = validateUserRegex(trimmed, idx);
+        return err ? [err] : [];
+      }),
+  );
   // Populated when the backend fails to register the configured global
   // hotkey at startup or after a save — surfaces the conflict to the user
   // rather than letting the feature silently break.
@@ -252,6 +275,16 @@
 
   const save = async (): Promise<void> => {
     if (!isTauri() || !settings) return;
+    // Block the round-trip when any regex denylist entry already fails the
+    // policy limits — the backend would return a single opaque
+    // `invalid_input` string, but the inline list of per-line hints below
+    // the textarea is far more actionable. The preflight mirrors
+    // `nagori_core::policy::compile_user_regex`, so we never deny a save
+    // the daemon would have accepted.
+    if (regexDenylistErrors.length > 0) {
+      error = t.settings.privacy.regexDenylistFixHint;
+      return;
+    }
     settings.appDenylist = linesToList(appDenylistText);
     settings.regexDenylist = linesToList(regexDenylistText);
     saving = true;
@@ -263,6 +296,24 @@
       error = describeError(err);
     } finally {
       saving = false;
+    }
+  };
+
+  const describeRegexError = (err: UserRegexError): string => {
+    const regexMessages = t.settings.privacy.regexErrors;
+    switch (err.kind) {
+      case 'too_long':
+        return regexMessages.tooLong
+          .replace('{bytes}', String(err.detail.byteLength ?? 0))
+          .replace('{limit}', String(MAX_USER_REGEX_LEN));
+      case 'too_nested':
+        return regexMessages.tooNested
+          .replace('{depth}', String(err.detail.nesting ?? 0))
+          .replace('{limit}', String(MAX_USER_REGEX_NESTING));
+      case 'invalid_syntax':
+        return regexMessages.invalidSyntax.replace('{error}', err.detail.syntaxError ?? '');
+      case 'empty':
+        return regexMessages.empty;
     }
   };
 
@@ -491,8 +542,32 @@
         </label>
         <label class="stack">
           {t.settings.privacy.regexDenylist}
-          <textarea rows="4" bind:value={regexDenylistText}></textarea>
-          <span class="help">{t.settings.privacy.regexDenylistHelp}</span>
+          <textarea
+            rows="4"
+            bind:value={regexDenylistText}
+            aria-invalid={regexDenylistErrors.length > 0 || undefined}
+            aria-describedby={regexDenylistErrors.length > 0
+              ? "regex-denylist-help regex-denylist-errors"
+              : "regex-denylist-help"}
+          ></textarea>
+          <span class="help" id="regex-denylist-help">
+            {t.settings.privacy.regexDenylistHelp}
+          </span>
+          {#if regexDenylistErrors.length > 0}
+            <ul id="regex-denylist-errors" class="status error regex-errors" role="alert">
+              {#each regexDenylistErrors as err (`${err.index}:${err.kind}`)}
+                <li>
+                  <strong>
+                    {t.settings.privacy.regexErrors.lineLabel.replace(
+                      '{line}',
+                      String(err.index + 1),
+                    )}
+                  </strong>
+                  {describeRegexError(err)}
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </label>
         <label class="stack">
           {t.settings.privacy.secretHandling}
@@ -787,6 +862,22 @@
     color: var(--warning, #f59e0b);
     font-size: 0.75rem;
     line-height: 1.4;
+  }
+  .regex-errors {
+    margin: 0;
+    padding: 0.4rem 0.75rem 0.4rem 1.5rem;
+    border: 1px solid var(--danger, #f87171);
+    border-radius: 6px;
+    background: rgba(248, 113, 113, 0.08);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    list-style: disc;
+  }
+  .regex-errors li + li {
+    margin-top: 0.25rem;
+  }
+  .regex-errors strong {
+    margin-right: 0.35rem;
   }
   .tabs {
     display: flex;

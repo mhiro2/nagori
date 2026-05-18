@@ -124,7 +124,8 @@ export const zhHans: Messages = {
       appDenylist: '应用拒绝列表',
       appDenylistHelp: '每行填写一个来源应用名。来自这些应用的复制不会被捕获。',
       regexDenylist: '正则表达式拒绝列表',
-      regexDenylistHelp: '每行填写一个 Rust 正则。匹配的复制不会被捕获。',
+      regexDenylistHelp:
+        '每行填写一个正则（例如 INTERNAL-\\d+）。匹配到的内容不会进入历史记录。单个正则应不超过 256 字节（UTF-8），未转义的 ( ) 嵌套不超过 3 层；复杂规则请拆成多行，而不是嵌套分组。',
       secretHandling: '密钥处理',
       secretHandlingHelp: '当一段复制内容被识别为密钥（API key、JWT、私钥等）时的处理方式。',
       secretHandlingOptions: {
@@ -147,6 +148,15 @@ export const zhHans: Messages = {
         '警告：选择「原文保存」会把 API 密钥、JWT、私钥等机密以明文保存在本地 SQLite 数据库。数据库未加密，任何能读取主目录的进程（备份、同步客户端、恶意软件等）都可能恢复这些机密。如未充分理解相关风险，请使用「以脱敏形式保存」。',
       storeFullConfirm:
         '确定要以明文保存机密吗？数据库未加密，磁盘和包含数据目录的备份都将能还原原文。',
+      regexDenylistFixHint: '请先修正高亮的正则表达式拒绝列表项后再保存。',
+      regexErrors: {
+        lineLabel: '第 {line} 行：',
+        tooLong: '过长（{bytes} 字节 > {limit}）。请拆成多行或删除用不到的分支。',
+        tooNested:
+          '括号嵌套深度 {depth} 超过上限 {limit}。请展开分组（仅使用一次 (?: … ) ）或拆成多行。',
+        invalidSyntax: '正则语法错误：{error}。请用 \\\\ 转义字面元字符，或改写表达式。',
+        empty: '空条目——请删除空行或填写正则。',
+      },
     },
     ai: {
       legend: 'AI',

@@ -126,7 +126,8 @@ export const ko: Messages = {
       appDenylist: '앱 차단 목록',
       appDenylistHelp: '한 줄에 한 앱 이름. 해당 앱의 복사는 캡처되지 않습니다.',
       regexDenylist: '정규식 차단 목록',
-      regexDenylistHelp: '한 줄에 하나의 Rust 정규식. 일치하는 복사는 캡처되지 않습니다.',
+      regexDenylistHelp:
+        '한 줄에 하나의 패턴(예: INTERNAL-\\d+). 일치하는 내용은 기록에 저장되지 않습니다. 각 패턴은 256바이트(UTF-8) 이하, 이스케이프하지 않은 ( ) 중첩은 최대 3단계까지 유지하세요. 복잡한 규칙은 그룹을 중첩하지 말고 여러 줄로 나눠 작성합니다.',
       secretHandling: '보안 정보 처리',
       secretHandlingHelp: 'API 키, JWT, 개인 키 등 비밀 정보로 분류된 항목을 저장할 때의 동작.',
       secretHandlingOptions: {
@@ -149,6 +150,17 @@ export const ko: Messages = {
         "경고: '원문 그대로 저장'을 선택하면 API 키, JWT, 개인 키와 같은 비밀이 로컬 SQLite DB에 평문으로 남습니다. DB는 암호화되어 있지 않으므로 홈 디렉터리에 접근할 수 있는 모든 주체(백업, 동기화 클라이언트, 악성코드 등)가 비밀을 복원할 수 있습니다. 위험을 충분히 이해하지 못했다면 '마스킹된 상태로 저장'을 권장합니다.",
       storeFullConfirm:
         '비밀을 평문으로 저장하시겠습니까? DB는 암호화되지 않으며, 데이터 디렉터리 백업을 포함해 디스크에서 원문을 복원할 수 있습니다.',
+      regexDenylistFixHint: '저장하기 전에 강조 표시된 정규식 차단 목록 항목을 수정하세요.',
+      regexErrors: {
+        lineLabel: '{line}번째 줄:',
+        tooLong:
+          '너무 깁니다({bytes}바이트 > {limit}). 여러 줄로 나누거나 사용하지 않는 분기점을 제거하세요.',
+        tooNested:
+          '괄호 중첩 깊이 {depth}가 한계 {limit}를 초과합니다. 캡처하지 않는 그룹(?: … )을 한 번만 사용하거나 여러 줄로 나누세요.',
+        invalidSyntax:
+          '정규식 구문 오류: {error}. 리터럴 메타 문자를 \\\\로 이스케이프하거나 패턴을 수정하세요.',
+        empty: '빈 항목입니다. 빈 줄을 제거하거나 패턴을 입력하세요.',
+      },
     },
     ai: {
       legend: 'AI',

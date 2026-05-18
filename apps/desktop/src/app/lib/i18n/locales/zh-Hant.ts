@@ -124,7 +124,8 @@ export const zhHant: Messages = {
       appDenylist: '應用程式拒絕清單',
       appDenylistHelp: '每行一個來源應用程式名稱。來自這些應用程式的複製不會被擷取。',
       regexDenylist: '正規表示式拒絕清單',
-      regexDenylistHelp: '每行一個 Rust 正規表示式。符合的複製不會被擷取。',
+      regexDenylistHelp:
+        '每行一個樣式（例如 INTERNAL-\\d+）。符合的內容不會進入歷史紀錄。每個樣式長度應在 256 位元組（UTF-8）以內，未跳脫的 ( ) 巢狀不超過 3 層；複雜規則請拆成多行，而不是巢狀分組。',
       secretHandling: '機密處理',
       secretHandlingHelp: '當複製的內容被判定為機密（API 金鑰、JWT、私密金鑰等）時的處理方式。',
       secretHandlingOptions: {
@@ -147,6 +148,15 @@ export const zhHant: Messages = {
         '警告：選擇「原文儲存」會將 API 金鑰、JWT、私密金鑰等機密以明文保存在本機 SQLite 資料庫。資料庫並未加密，任何能讀取家目錄的程序（備份、同步用戶端、惡意軟體等）都可能還原這些機密。除非您完全理解相關風險，否則建議使用「以遮蔽形式儲存」。',
       storeFullConfirm:
         '確定要以明文儲存機密嗎？資料庫並未加密，磁碟與包含資料目錄的備份都將能還原原文。',
+      regexDenylistFixHint: '請先修正反白的正規表示式拒絕清單項目，再儲存。',
+      regexErrors: {
+        lineLabel: '第 {line} 行：',
+        tooLong: '太長了（{bytes} 位元組 > {limit}）。請拆成多行或刪除用不到的分支。',
+        tooNested:
+          '括號巢狀深度 {depth} 超過上限 {limit}。請展開分組（僅使用一次 (?: … )）或拆成多行。',
+        invalidSyntax: '正規表示式語法錯誤：{error}。請用 \\\\ 跳脫字面元字元，或改寫樣式。',
+        empty: '空白項目——請刪除空行或填入樣式。',
+      },
     },
     ai: {
       legend: 'AI',

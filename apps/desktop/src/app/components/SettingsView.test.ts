@@ -226,6 +226,60 @@ describe('SettingsView', () => {
     confirmSpy.mockRestore();
   });
 
+  it('blocks save and renders inline guidance when a regex denylist entry is invalid', async () => {
+    // The privacy view runs the same preflight `compile_user_regex` does in
+    // `nagori-core::policy`, so users see an actionable hint *before* the
+    // backend rejects the save with a single opaque `invalid_input` string.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container, queryByRole } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    // The privacy fieldset has two textareas (app denylist, regex denylist);
+    // the regex one is the second.
+    const textareas = container.querySelectorAll('textarea');
+    expect(textareas.length).toBeGreaterThanOrEqual(2);
+    const regexTextarea = textareas[1] as HTMLTextAreaElement;
+    // Unbalanced parens are the cheapest way to provoke an invalid-syntax
+    // error without bumping the length cap.
+    await fireEvent.input(regexTextarea, { target: { value: '(' } });
+
+    await waitFor(() => {
+      const alert = queryByRole('alert');
+      expect(alert).toBeTruthy();
+      expect(alert?.textContent ?? '').toMatch(/Line 1/);
+      expect(alert?.textContent ?? '').toMatch(/invalid regex/i);
+    });
+
+    const form = container.querySelector('form');
+    if (form) await fireEvent.submit(form);
+
+    // Save must short-circuit before reaching the backend so the user
+    // doesn't get a generic "Invalid input." round-trip.
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('reports the original textarea row when blank lines precede the bad regex', async () => {
+    // Regression: `linesToList` used to trim + drop empty lines before
+    // validation, so the `Line N` label counted non-blank entries instead
+    // of the row the user was editing. The validator now keys off the raw
+    // split index so a leading blank line still produces `Line 2`.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container, queryByRole } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const regexTextarea = container.querySelectorAll('textarea')[1] as HTMLTextAreaElement;
+    await fireEvent.input(regexTextarea, { target: { value: '\n(' } });
+
+    await waitFor(() => {
+      const alert = queryByRole('alert');
+      expect(alert).toBeTruthy();
+      expect(alert?.textContent ?? '').toMatch(/Line 2/);
+      expect(alert?.textContent ?? '').not.toMatch(/Line 1/);
+    });
+  });
+
   it('commits the store_full switch when the user accepts the warning', async () => {
     const { findByRole, getByDisplayValue, queryByRole } = render(SettingsView);
     const privacyTab = await findByRole('tab', { name: 'Privacy' });

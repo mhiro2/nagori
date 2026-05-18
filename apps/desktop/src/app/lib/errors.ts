@@ -24,7 +24,15 @@ export const describeError = (err: unknown): string => {
       case 'not_found':
         return t.notFound;
       case 'invalid_input':
-        return t.invalidInput;
+        // Backend `invalid_input` payloads tend to be actionable (e.g. the
+        // regex_denylist limit messages produced by `compile_user_regex`).
+        // Surfacing the backend message verbatim keeps the user-facing hint
+        // specific instead of squashing every input failure to a generic
+        // "Invalid input." label. Fall back to the translation only if the
+        // backend chose not to attach a message.
+        return hasStringField(err, 'message') && err.message.length > 0
+          ? err.message
+          : t.invalidInput;
       case 'unsupported':
         // Prefer the backend-curated message (e.g. "auto-update is only
         // available on macOS", "Linux Wayland has no Accessibility settings

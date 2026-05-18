@@ -132,7 +132,7 @@ export const de: Messages = {
         'Ein Quell-App-Name pro Zeile. Erfassungen aus diesen Apps werden verworfen.',
       regexDenylist: 'Regex-Sperrliste',
       regexDenylistHelp:
-        'Ein Rust-Regex pro Zeile. Erfassungen, die einem Muster entsprechen, werden verworfen.',
+        'Ein Muster pro Zeile (z. B. INTERNAL-\\d+). Treffer landen nicht im Verlauf. Jedes Muster sollte unter 256 Byte (UTF-8) lang sein und maximal 3 Ebenen unmaskierter ( )-Klammern enthalten – komplexe Regeln bitte auf mehrere Zeilen aufteilen, statt Gruppen zu verschachteln.',
       secretHandling: 'Umgang mit Geheimnissen',
       secretHandlingHelp:
         'Was passieren soll, wenn ein Clip als Geheimnis erkannt wird (API-Schlüssel, JWTs, private Schlüssel …).',
@@ -156,6 +156,18 @@ export const de: Messages = {
         'Warnung: „Vollständig speichern“ behält API-Schlüssel, JWTs und private Schlüssel im lokalen SQLite-DB. Die Datenbank ist nicht im Ruhezustand verschlüsselt – jeder mit Lesezugriff auf Ihr Home-Verzeichnis (Backups, Sync-Clients, Schadsoftware) kann die Geheimnisse wiederherstellen. Wählen Sie „Geschwärzt speichern“, sofern Sie das Risiko nicht eingeschätzt haben.',
       storeFullConfirm:
         'Geheimnisse im Klartext speichern? Die Datenbank ist unverschlüsselt; rohe Geheimnisse sind von der Festplatte und aus jedem Backup mit dem Datenverzeichnis rekonstruierbar.',
+      regexDenylistFixHint:
+        'Bitte die markierten Regex-Sperrlisten-Einträge vor dem Speichern korrigieren.',
+      regexErrors: {
+        lineLabel: 'Zeile {line}:',
+        tooLong:
+          'zu lang ({bytes} Bytes > {limit}). Teilen Sie das Muster auf mehrere Zeilen auf oder entfernen Sie nicht benötigte Alternativen.',
+        tooNested:
+          'Klammerverschachtelung {depth} überschreitet das Limit von {limit}. Flachen Sie die Gruppen ab (z. B. einmal (?: … ) verwenden) oder teilen Sie das Muster auf.',
+        invalidSyntax:
+          'ungültige Regex-Syntax: {error}. Maskieren Sie wörtliche Metazeichen mit \\\\ oder schreiben Sie das Muster um.',
+        empty: 'leerer Eintrag – entfernen Sie die leere Zeile oder schreiben Sie ein Muster.',
+      },
     },
     ai: {
       legend: 'KI',

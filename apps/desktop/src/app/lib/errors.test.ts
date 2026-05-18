@@ -20,7 +20,6 @@ describe('describeError', () => {
     ['ai_error', () => t().ai],
     ['policy_error', () => t().policy],
     ['not_found', () => t().notFound],
-    ['invalid_input', () => t().invalidInput],
     ['configuration_error', () => t().configuration],
   ];
 
@@ -42,6 +41,24 @@ describe('describeError', () => {
   it('falls back to the localized label for unsupported when message is missing', () => {
     expect(describeError({ code: 'unsupported' })).toBe(t().unsupported);
     expect(describeError({ code: 'unsupported', message: '' })).toBe(t().unsupported);
+  });
+
+  // `invalid_input` follows the same shape as `unsupported`: the backend
+  // attaches actionable specifics (the regex_denylist limit messages from
+  // `compile_user_regex` being the canonical case), so squashing them to
+  // "Invalid input." hid the *why* the user's save was rejected.
+  it('prefers the backend message for the invalid_input code', () => {
+    expect(
+      describeError({
+        code: 'invalid_input',
+        message: 'regex_denylist entry exceeds 256-byte limit',
+      }),
+    ).toBe('regex_denylist entry exceeds 256-byte limit');
+  });
+
+  it('falls back to the localized label for invalid_input when message is missing', () => {
+    expect(describeError({ code: 'invalid_input' })).toBe(t().invalidInput);
+    expect(describeError({ code: 'invalid_input', message: '' })).toBe(t().invalidInput);
   });
 
   it('falls back to the raw message for unrecognised codes', () => {

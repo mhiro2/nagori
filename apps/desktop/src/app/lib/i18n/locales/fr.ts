@@ -132,7 +132,7 @@ export const fr: Messages = {
         'Un nom d’application source par ligne. Les captures depuis ces apps sont ignorées.',
       regexDenylist: 'Liste de refus regex',
       regexDenylistHelp:
-        'Un regex Rust par ligne. Les captures correspondant à un motif sont ignorées.',
+        'Un motif par ligne (ex. INTERNAL-\\d+). Toute correspondance est ignorée avant d’atteindre l’historique. Chaque motif doit faire moins de 256 octets (UTF-8) et ne pas dépasser 3 niveaux de parenthèses ( ) non échappées ; scindez les règles complexes sur plusieurs lignes plutôt que d’imbriquer des groupes.',
       secretHandling: 'Gestion des secrets',
       secretHandlingHelp:
         'Que faire lorsqu’un clip est classé comme secret (clés API, JWT, clés privées, …).',
@@ -156,6 +156,18 @@ export const fr: Messages = {
         'Avertissement : « Enregistrer en entier » conserve les clés API, JWT et clés privées en clair dans la base SQLite locale. La base n’est pas chiffrée au repos, donc quiconque a accès en lecture à votre dossier personnel (sauvegardes, clients de synchronisation, logiciels malveillants) peut récupérer les secrets. Préférez « Enregistrer masqué » si vous ne mesurez pas le risque.',
       storeFullConfirm:
         'Enregistrer les secrets en clair ? La base n’est pas chiffrée ; les secrets bruts seront récupérables depuis le disque et depuis toute sauvegarde incluant le répertoire de données.',
+      regexDenylistFixHint:
+        'Corrigez les entrées de la liste de refus regex mises en évidence avant d’enregistrer.',
+      regexErrors: {
+        lineLabel: 'Ligne {line} :',
+        tooLong:
+          'trop long ({bytes} octets > {limit}). Scindez le motif sur plusieurs lignes ou supprimez les branches inutiles.',
+        tooNested:
+          'imbrication de parenthèses {depth} au-delà de la limite {limit}. Aplatissez les groupes (utilisez une seule fois (?: … )) ou scindez sur plusieurs lignes.',
+        invalidSyntax:
+          'syntaxe regex invalide : {error}. Échappez les métacaractères littéraux avec \\\\ ou réécrivez le motif.',
+        empty: 'entrée vide — supprimez la ligne vide ou saisissez un motif.',
+      },
     },
     ai: {
       legend: 'IA',
