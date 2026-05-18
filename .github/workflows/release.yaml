@@ -23,24 +23,40 @@ jobs:
   bundle:
     name: Bundle (${{ matrix.target }})
     # Platform policy (see README → "Platform support" and ARCHITECTURE
-    # updater notes): macOS arm64/x86_64 are the primary signed targets
-    # and the only ones with an in-app update feed. Linux x86_64 is
-    # built as an experimental tarball — present on the GitHub release
-    # page but the runtime gates `check_for_updates` so users upgrade
-    # manually. Windows is intentionally absent: there is no signing
-    # / installer infrastructure yet, so the README directs Windows
-    # users to build from source. Add a `windows-latest` entry once a
-    # code-signing cert and an installer (NSIS/MSI) design are in place.
+    # updater notes): every target ships an installer bundle and an
+    # `updater` companion (created by `bundle.createUpdaterArtifacts`
+    # in tauri.conf.json). macOS arm64/x86_64 deliver `.app`/`.dmg`,
+    # Linux ships `deb` (Debian/Ubuntu family) plus `appimage` (any
+    # distro + the only Linux format the updater plugin can install
+    # in place), and Windows ships an unsigned NSIS `.exe`. The
+    # runtime always probes `latest.json` and reports the in-app
+    # install capability per bundle type, so users on `deb` see an
+    # availability notice and follow the GitHub release link.
+    # Windows code-signing is still pending — until an EV cert lands
+    # the NSIS bundle triggers a SmartScreen warning on first launch.
     strategy:
       fail-fast: false
+      # `tauri-action` reads the draft release's existing `latest.json`,
+      # appends the current row's platform entry, deletes the old asset,
+      # and re-uploads — so two rows finishing in parallel would race on
+      # the same asset and only the last writer's platform would land in
+      # the published feed. Serialize the matrix to keep every platform
+      # in the consolidated manifest.
+      max-parallel: 1
       matrix:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            bundles: app,dmg
           - os: macos-latest
             target: x86_64-apple-darwin
+            bundles: app,dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -120,7 +136,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
           releaseDraft: true

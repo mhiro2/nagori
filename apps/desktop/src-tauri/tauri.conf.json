@@ -60,6 +60,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "Productivity",
     "shortDescription": "Local-first, AI-assisted clipboard manager.",
     "longDescription": "Nagori is a local-first clipboard manager with full-text search, optional AI actions, and explicit secret/regex policies. History stays on the user's machine; remote AI calls require explicit opt-in.",
