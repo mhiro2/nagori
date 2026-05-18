@@ -253,7 +253,10 @@ export const fr: Messages = {
       checking: 'Vérification…',
       upToDate: 'Vous utilisez la dernière version.',
       available: 'Mise à jour disponible : {version}',
+      availableManual:
+        'Mise à jour disponible : {version}. Votre mode d’installation ne permet pas la mise à jour en place — téléchargez la nouvelle build depuis GitHub.',
       viewRelease: 'Voir la version',
+      downloadManual: 'Télécharger depuis GitHub',
     },
   },
   keybindings: {

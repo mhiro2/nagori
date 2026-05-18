@@ -238,7 +238,10 @@ export const zhHant: Messages = {
       checking: '檢查中…',
       upToDate: '已是最新版本。',
       available: '有可用的更新：{version}',
+      availableManual:
+        '有可用的更新：{version}。目前的安裝形式不支援自動更新，請從 GitHub 下載新版本。',
       viewRelease: '檢視版本',
+      downloadManual: '從 GitHub 下載',
     },
   },
   keybindings: {

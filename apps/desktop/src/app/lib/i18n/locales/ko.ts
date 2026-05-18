@@ -244,7 +244,10 @@ export const ko: Messages = {
       checking: '확인 중…',
       upToDate: '최신 릴리스를 사용 중입니다.',
       available: '업데이트 사용 가능: {version}',
+      availableManual:
+        '업데이트 사용 가능: {version}. 현재 설치 형식에서는 자동 업데이트를 사용할 수 없습니다. GitHub에서 새 빌드를 다운로드하세요.',
       viewRelease: '릴리스 보기',
+      downloadManual: 'GitHub에서 다운로드',
     },
   },
   keybindings: {

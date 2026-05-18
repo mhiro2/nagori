@@ -247,7 +247,10 @@ export const ja: Messages = {
       checking: '確認中…',
       upToDate: '最新バージョンを使用しています。',
       available: '新しいバージョンがあります: {version}',
+      availableManual:
+        '新しいバージョンがあります: {version}。現在のインストール形態では自動更新ができないため、GitHub から新しいビルドをダウンロードしてください。',
       viewRelease: 'リリースを表示',
+      downloadManual: 'GitHub からダウンロード',
     },
   },
   keybindings: {

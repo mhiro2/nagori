@@ -238,7 +238,10 @@ export const zhHans: Messages = {
       checking: '检查中…',
       upToDate: '已是最新版本。',
       available: '有可用更新：{version}',
+      availableManual:
+        '有可用更新：{version}。当前安装形式不支持自动更新，请从 GitHub 下载新版本。',
       viewRelease: '查看版本',
+      downloadManual: '从 GitHub 下载',
     },
   },
   keybindings: {

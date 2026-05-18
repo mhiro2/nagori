@@ -111,10 +111,7 @@ const windowsCapabilities = (): PlatformCapabilities => ({
     reason:
       'Windows does not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
   },
-  updateCheck: {
-    status: 'unsupported',
-    reason: 'no signed Windows release bundle is produced yet, so the updater feed is macOS-only.',
-  },
+  updateCheck: { status: 'available' },
 });
 
 const linuxWaylandCapabilities = (): PlatformCapabilities => ({
@@ -144,11 +141,7 @@ const linuxWaylandCapabilities = (): PlatformCapabilities => ({
     reason:
       'Wayland sessions do not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
   },
-  updateCheck: {
-    status: 'unsupported',
-    reason:
-      'no Linux updater feed is published; the tarball ships without in-app update notifications.',
-  },
+  updateCheck: { status: 'available' },
 });
 
 beforeEach(() => {
@@ -518,7 +511,7 @@ describe('SettingsView Advanced tab — capability table', () => {
     }
   });
 
-  it('renders Windows capabilities — permissions UI / updates Unsupported', async () => {
+  it('renders Windows capabilities — permissions UI Unsupported, updates Available', async () => {
     const { container } = await openAdvancedTab(windowsCapabilities());
     const table = readCapabilityTable(container);
 
@@ -536,7 +529,7 @@ describe('SettingsView Advanced tab — capability table', () => {
       'Global hotkey': STATUS_BADGE.available,
       'Frontmost app': STATUS_BADGE.available,
       'Permissions UI': STATUS_BADGE.unsupported,
-      'Update check': STATUS_BADGE.unsupported,
+      'Update check': STATUS_BADGE.available,
     };
     for (const row of table.rows) {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
@@ -546,8 +539,6 @@ describe('SettingsView Advanced tab — capability table', () => {
     // onboarding UI reads these to explain why a feature is greyed out.
     const permissions = table.rows.find((r) => r.label === 'Permissions UI');
     expect(permissions?.detail).toContain('permission UI');
-    const updateCheck = table.rows.find((r) => r.label === 'Update check');
-    expect(updateCheck?.detail).toContain('signed Windows release bundle');
   });
 
   it('renders Linux Wayland capabilities — wtype external tool + global hotkey unsupported', async () => {
@@ -568,7 +559,7 @@ describe('SettingsView Advanced tab — capability table', () => {
       'Global hotkey': STATUS_BADGE.unsupported,
       'Frontmost app': STATUS_BADGE.unsupported,
       'Permissions UI': STATUS_BADGE.unsupported,
-      'Update check': STATUS_BADGE.unsupported,
+      'Update check': STATUS_BADGE.available,
     };
     for (const row of table.rows) {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
@@ -584,11 +575,5 @@ describe('SettingsView Advanced tab — capability table', () => {
     // that motivates the README's Linux footnote.
     const globalHotkey = table.rows.find((r) => r.label === 'Global hotkey');
     expect(globalHotkey?.detail).toContain('X11-only');
-
-    // Update check stays Unsupported until the release workflow publishes
-    // a Linux updater feed — backend reason words it as "no Linux updater
-    // feed is published".
-    const updateCheck = table.rows.find((r) => r.label === 'Update check');
-    expect(updateCheck?.detail).toContain('no Linux updater feed is published');
   });
 });

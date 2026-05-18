@@ -6,8 +6,11 @@
 //! on the external `wtype` binary, and global hotkeys / frontmost-app
 //! probing have no portable Wayland API and are surfaced as
 //! `Unsupported`. The permission UI is a no-op probe (no TCC-style
-//! gate on Wayland) and the release feed does not ship an updater
-//! channel for the Linux tarball.
+//! gate on Wayland). The release feed publishes a `latest.json` entry
+//! for Linux too — availability check runs everywhere, and the
+//! updater plugin can swap an `AppImage` install in place; `deb`
+//! installs see the availability surface but follow the GitHub
+//! release link to upgrade manually (no dpkg root prompt).
 //!
 //! Scope: this report describes the **Wayland** Linux target nagori
 //! builds for. X11 sessions and Wayland compositors without a
@@ -58,11 +61,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
                  no-op."
                 .to_owned(),
         },
-        update_check: Capability::Unsupported {
-            reason: "no Linux updater feed is published; the tarball ships \
-                 without in-app update notifications."
-                .to_owned(),
-        },
+        // release.yaml ships a `deb` + `AppImage` pair and the signed
+        // `latest.json` advertises both, so the availability probe runs
+        // on every Linux install. Whether the discovered update can be
+        // applied in place is decided per medium at runtime (AppImage
+        // only — `deb` users follow the GitHub release link).
+        update_check: Capability::Available,
     }
 }
 
@@ -115,16 +119,25 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_frontmost_and_updater_are_not_usable() {
+    fn hotkey_frontmost_and_permissions_ui_are_not_usable() {
         let caps = report_capabilities();
         for cap in [
             &caps.global_hotkey,
             &caps.frontmost_app,
             &caps.permissions_ui,
-            &caps.update_check,
         ] {
             assert!(!cap.is_usable());
             assert!(matches!(cap, Capability::Unsupported { .. }));
         }
+    }
+
+    #[test]
+    fn update_check_is_usable() {
+        // release.yaml publishes deb + AppImage and `latest.json` lists
+        // both, so the availability probe runs on every Linux install.
+        // In-place apply is gated per install medium in the desktop
+        // shell (`download_supported`).
+        let caps = report_capabilities();
+        assert!(caps.update_check.is_usable());
     }
 }

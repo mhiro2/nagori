@@ -195,6 +195,7 @@ export type UpdateInfo = {
   version: string;
   currentVersion: string;
   releaseNotes?: string | null;
+  downloadSupported: boolean;
 };
 
 export type PermissionKind =

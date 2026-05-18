@@ -219,7 +219,9 @@ export type Messages = {
       checking: string;
       upToDate: string;
       available: string;
+      availableManual: string;
       viewRelease: string;
+      downloadManual: string;
     };
   };
   keybindings: {
@@ -518,7 +520,10 @@ export const en: Messages = {
       checking: 'Checking…',
       upToDate: 'You are running the latest release.',
       available: 'Update available: {version}',
+      availableManual:
+        'Update available: {version}. Your install medium does not support in-app upgrade — download the new build from GitHub.',
       viewRelease: 'View release',
+      downloadManual: 'Download from GitHub',
     },
   },
   keybindings: {

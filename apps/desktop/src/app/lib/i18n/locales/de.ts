@@ -254,7 +254,10 @@ export const de: Messages = {
       checking: 'Wird geprüft …',
       upToDate: 'Sie verwenden die neueste Version.',
       available: 'Update verfügbar: {version}',
+      availableManual:
+        'Update verfügbar: {version}. Die Installationsart unterstützt kein In-place-Update — bitte den neuen Build von GitHub herunterladen.',
       viewRelease: 'Release anzeigen',
+      downloadManual: 'Von GitHub herunterladen',
     },
   },
   keybindings: {

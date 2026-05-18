@@ -353,19 +353,18 @@ impl NagoriRuntime {
         };
         // Probe the GitHub Releases API for the latest tag so `nagori
         // doctor` can show whether an update is available. Best-effort:
-        // the probe is gated on macOS (the only target where the
-        // updater plugin actually runs in MVP) and skipped when the
-        // user has either disabled background update checks or opted
-        // into `local_only_mode`. The call is capped by a short
-        // timeout, and any error (offline, rate-limited, malformed
-        // payload) collapses to `None` so doctor still completes.
-        let latest_version =
-            if cfg!(target_os = "macos") && settings.auto_update_check && !settings.local_only_mode
-            {
-                fetch_latest_release_version().await
-            } else {
-                None
-            };
+        // the probe runs on every release target (macOS / Windows /
+        // Linux all ship a `latest.json` entry today) and is skipped
+        // only when the user has either disabled background update
+        // checks or opted into `local_only_mode`. The call is capped
+        // by a short timeout, and any error (offline, rate-limited,
+        // malformed payload) collapses to `None` so doctor still
+        // completes.
+        let latest_version = if settings.auto_update_check && !settings.local_only_mode {
+            fetch_latest_release_version().await
+        } else {
+            None
+        };
         Ok(DoctorReport {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             db_path: String::new(),

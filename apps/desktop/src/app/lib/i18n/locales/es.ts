@@ -255,7 +255,10 @@ export const es: Messages = {
       checking: 'Buscando…',
       upToDate: 'Estás usando la última versión.',
       available: 'Actualización disponible: {version}',
+      availableManual:
+        'Actualización disponible: {version}. Tu modo de instalación no admite la actualización en sitio: descarga la nueva compilación desde GitHub.',
       viewRelease: 'Ver la versión',
+      downloadManual: 'Descargar desde GitHub',
     },
   },
   keybindings: {

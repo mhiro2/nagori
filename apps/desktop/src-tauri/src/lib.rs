@@ -120,12 +120,15 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(autostart_plugin())
         // Updater plugin reads `plugins.updater.endpoints` and the
-        // bundled signing pubkey from `tauri.conf.json`. The plugin
-        // itself is registered on every OS so `app.updater()` is wired
-        // for diagnostics; whether a release artifact actually exists
-        // for the current target is captured by `updater_release_target()`
-        // and gates both the startup probe and the manual
-        // `commands::check_for_updates` trigger.
+        // bundled signing pubkey from `tauri.conf.json`. `release.yaml`
+        // builds `.app`/`.dmg` (macOS), NSIS `.exe` (Windows) and `deb`
+        // + `AppImage` (Linux) bundles, and `bundle.createUpdaterArtifacts`
+        // emits the signed `.tar.gz`/`.zip`/`AppImage.tar.gz` siblings
+        // that `latest.json` references. The startup probe and the
+        // manual `commands::check_for_updates` run on every OS;
+        // whether the discovered update can be installed in place is
+        // reported via `UpdateInfoDto::download_supported` so the UI
+        // can fall back to the GitHub release link for `deb` users.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("nagori-image", dispatch_image_request);
 
@@ -237,17 +240,6 @@ pub fn run() {
 fn autostart_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     use tauri_plugin_autostart::MacosLauncher;
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
-}
-
-/// Whether the current target ships an updater feed. `release.yaml`
-/// produces macOS `arm64` / `x86_64` and Linux `x86_64` bundles, but
-/// the signed `latest.json` feed is wired only for macOS — Linux
-/// users upgrade by re-downloading the tarball, and Windows has no
-/// release artefact at all. The startup probe and the manual command
-/// short-circuit on non-macOS targets so we don't ping the macOS feed
-/// from a binary that can't install its result.
-const fn updater_release_target() -> bool {
-    cfg!(target_os = "macos")
 }
 
 /// One-shot guard so multiple `RunEvent::ExitRequested` deliveries cannot
@@ -401,18 +393,18 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         tray::set_visible(&app, current_show_in_menu_bar);
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
-        // Startup updater probe. Honours `auto_update_check`,
-        // `local_only_mode`, *and* whether the current target actually
-        // has an update feed (`updater_release_target()` — macOS only;
-        // Linux ships tarballs without an in-app feed, Windows has no
-        // release artefact). A user who has opted out of background
-        // network calls never sees a request, and we don't ping the
-        // macOS feed from a binary that can't install its result.
-        // Emits `nagori://update_available` with `{version,
-        // currentVersion, releaseNotes}` when an update is found;
-        // failures are logged at warn so a transient network blip
+        // Startup updater probe. Honours `auto_update_check` and
+        // `local_only_mode` — a user who has opted out of background
+        // network calls never sees a request. `release.yaml` ships
+        // signed bundles for every target (macOS `.app`/`.dmg`,
+        // Windows NSIS, Linux deb + AppImage) and `latest.json` lists
+        // them all, so the probe runs on every OS. The probe surfaces
+        // an OS notification on availability; whether the result can
+        // be applied in place is decided per install medium in
+        // `commands::check_for_updates` (`download_supported`).
+        // Failures are logged at warn so a transient network blip
         // doesn't surface a banner.
-        if updater_release_target() && initial.auto_update_check && !initial.local_only_mode {
+        if initial.auto_update_check && !initial.local_only_mode {
             spawn_startup_update_probe(&app);
         }
 

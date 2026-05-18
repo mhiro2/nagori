@@ -5,9 +5,11 @@
 //! text, file lists, images, and multi-representation Preserve publishes
 //! (`CF_UNICODETEXT` + `CF_HTML` + `Rich Text Format` + `CF_DIBV5` /
 //! registered `PNG` + `CF_HDROP` in a single transaction); auto-paste /
-//! global hotkeys / frontmost app are all wired; there is no first-class
-//! permission UI or bundled update-check probe yet (the release workflow
-//! does not currently produce a signed Windows installer).
+//! global hotkeys / frontmost app are all wired; the release workflow
+//! ships an unsigned NSIS bundle that the in-app updater can swap in
+//! place (signing is still pending — `SmartScreen` warns on first
+//! launch). There is no first-class permission UI: Windows does not
+//! gate clipboard / input synthesis behind a user-managed permission.
 
 use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
 
@@ -37,11 +39,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
                  a user-managed permission UI; the doctor probe is a no-op."
                 .to_owned(),
         },
-        update_check: Capability::Unsupported {
-            reason: "no signed Windows release bundle is produced yet, so the \
-                 updater feed is macOS-only."
-                .to_owned(),
-        },
+        // release.yaml ships a signed NSIS bundle and a `latest.json`
+        // entry alongside the macOS feed, so `tauri-plugin-updater` can
+        // both probe availability and replace the installed binary in
+        // place. Authenticode signing is still pending — `SmartScreen`
+        // warns on first launch but the updater itself is functional.
+        update_check: Capability::Available,
     }
 }
 
@@ -57,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn text_files_input_and_image_rows_are_usable() {
+    fn text_files_input_image_and_updater_rows_are_usable() {
         let caps = report_capabilities();
         assert!(caps.capture_text.is_usable());
         // Without `capture_files`, the README's file-list coverage on
@@ -73,14 +76,18 @@ mod tests {
         assert!(caps.auto_paste.is_usable());
         assert!(caps.global_hotkey.is_usable());
         assert!(caps.frontmost_app.is_usable());
+        // Updater opened up alongside the NSIS release bundle — the
+        // signed `latest.json` lets the in-app probe run on Windows.
+        assert!(caps.update_check.is_usable());
     }
 
     #[test]
-    fn permissions_ui_and_updater_are_not_usable() {
+    fn permissions_ui_is_not_usable() {
         let caps = report_capabilities();
-        for cap in [&caps.permissions_ui, &caps.update_check] {
-            assert!(!cap.is_usable());
-            assert!(matches!(cap, Capability::Unsupported { .. }));
-        }
+        assert!(!caps.permissions_ui.is_usable());
+        assert!(matches!(
+            caps.permissions_ui,
+            Capability::Unsupported { .. }
+        ));
     }
 }

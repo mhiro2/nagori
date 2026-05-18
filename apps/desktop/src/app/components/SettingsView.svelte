@@ -152,15 +152,7 @@
   // the bundle themselves and verify Apple's signature dialog.
   let updateReleaseUrl: string | undefined = $state(undefined);
 
-  // The updater plugin is wired on every OS, but only macOS has a
-  // signed `latest.json` feed (Linux ships tarballs without an in-app
-  // feed, Windows has no release artefact). See
-  // `updater_release_target` in lib.rs. On non-macOS platforms the
-  // backend short-circuits with `Unsupported`, so the whole fieldset
-  // is hidden rather than rendering controls that would only ever
-  // error.
-  const isMacOs =
-    typeof navigator !== "undefined" && /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
+  let updateDownloadSupported = $state(true);
 
   const runUpdateCheck = async (): Promise<void> => {
     if (updateChecking) return;
@@ -171,7 +163,15 @@
       const info = await checkForUpdates();
       updateStatusKind = "info";
       if (info) {
-        updateStatus = t.settings.updates.available.replace("{version}", info.version);
+        updateDownloadSupported = info.downloadSupported;
+        // Whether the install medium supports in-place replacement
+        // decides the wording: AppImage/NSIS/.app can swap the bundle
+        // automatically, a `.deb` install needs the user to fetch a
+        // new package manually. We always link to the GitHub release
+        // page; the difference is the surrounding copy.
+        updateStatus = info.downloadSupported
+          ? t.settings.updates.available.replace("{version}", info.version)
+          : t.settings.updates.availableManual.replace("{version}", info.version);
         // Always-current redirect — never needs to be edited per release.
         updateReleaseUrl = `https://github.com/mhiro2/nagori/releases/tag/v${info.version}`;
       } else {
@@ -770,42 +770,42 @@
           </table>
         </fieldset>
       {/if}
-      {#if isMacOs}
-        <fieldset>
-          <legend>{t.settings.updates.legend}</legend>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.autoUpdateCheck}
-              disabled={settings.localOnlyMode}
-            />
-            {t.settings.updates.autoCheck}
-          </label>
-          <p class="help">
-            {settings.localOnlyMode
-              ? t.settings.updates.autoCheckLocalOnly
-              : t.settings.updates.autoCheckHelp}
+      <fieldset>
+        <legend>{t.settings.updates.legend}</legend>
+        <label>
+          <input
+            type="checkbox"
+            bind:checked={settings.autoUpdateCheck}
+            disabled={settings.localOnlyMode}
+          />
+          {t.settings.updates.autoCheck}
+        </label>
+        <p class="help">
+          {settings.localOnlyMode
+            ? t.settings.updates.autoCheckLocalOnly
+            : t.settings.updates.autoCheckHelp}
+        </p>
+        <p class="help">
+          {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
+        </p>
+        <div class="actions">
+          <button type="button" disabled={updateChecking} onclick={runUpdateCheck}>
+            {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
+          </button>
+        </div>
+        {#if updateStatus}
+          <p class="status" class:error={updateStatusKind === "error"}>
+            {updateStatus}
+            {#if updateReleaseUrl}
+              <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
+                {updateDownloadSupported
+                  ? t.settings.updates.viewRelease
+                  : t.settings.updates.downloadManual}
+              </a>
+            {/if}
           </p>
-          <p class="help">
-            {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
-          </p>
-          <div class="actions">
-            <button type="button" disabled={updateChecking} onclick={runUpdateCheck}>
-              {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
-            </button>
-          </div>
-          {#if updateStatus}
-            <p class="status" class:error={updateStatusKind === "error"}>
-              {updateStatus}
-              {#if updateReleaseUrl}
-                <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
-                  {t.settings.updates.viewRelease}
-                </a>
-              {/if}
-            </p>
-          {/if}
-        </fieldset>
-      {/if}
+        {/if}
+      </fieldset>
     {/if}
 
       <div class="actions">
