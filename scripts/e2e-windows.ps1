@@ -348,7 +348,7 @@ try {
         throw "older-entry copy-back did not return marker A`n  expected: $markerA`n  actual:   $pasted"
     }
 
-    Step 'file-list round-trip via Set-Clipboard -Path'
+    Step 'file-list round-trip via STA SetFileDropList'
     # Include a space in one filename so the daemon's path ↔ URL conversion
     # has to percent-encode it on the way in and decode it on the way out.
     # The unit tests already prove the codec; exercising the daemon's
@@ -358,10 +358,36 @@ try {
     $UriFileB = Join-Path $WorkDir 'cf-hdrop-b.txt'
     Set-Content -Path $UriFileA -Value 'first'  -NoNewline
     Set-Content -Path $UriFileB -Value 'second' -NoNewline
-    # `Set-Clipboard -Path` writes CF_HDROP, the same format Explorer uses for
-    # file copies. The Windows daemon surfaces CF_HDROP captures as `FileList`
-    # with a `text/uri-list` representation.
-    Set-Clipboard -Path @($UriFileA, $UriFileB)
+    # `[System.Windows.Forms.Clipboard]::SetFileDropList` writes CF_HDROP, the
+    # same format Explorer uses for file copies. The Windows daemon surfaces
+    # CF_HDROP captures as `FileList` with a `text/uri-list` representation.
+    # We go through the .NET API in an STA child because pwsh 7's
+    # `Set-Clipboard` dropped the `-Path` parameter that Windows PowerShell
+    # 5.1 had, and `SetFileDropList` (like `SetImage`) requires STA while
+    # pwsh 7 defaults to MTA. Retry `ExternalException` under the standard
+    # 5s budget so a transient clipboard-busy collision (e.g. the previous
+    # step's sentinel still committing) doesn't flake the test.
+    $EscapedA = $UriFileA.Replace("'", "''")
+    $EscapedB = $UriFileB.Replace("'", "''")
+    $PushFileScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+`$paths = New-Object System.Collections.Specialized.StringCollection
+[void]`$paths.Add('$EscapedA')
+[void]`$paths.Add('$EscapedB')
+`$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while ([DateTime]::UtcNow -lt `$deadline) {
+    try { [System.Windows.Forms.Clipboard]::SetFileDropList(`$paths); exit 0 }
+    catch [System.Runtime.InteropServices.ExternalException] { Start-Sleep -Milliseconds 100 }
+}
+Write-Error 'SetFileDropList failed after retries'
+exit 1
+"@
+    $pushFileEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($PushFileScript))
+    & pwsh -Sta -NoProfile -EncodedCommand $pushFileEncoded | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to push file-list onto clipboard via STA child (exit $LASTEXITCODE)"
+    }
 
     $UriEntryId = $null
     $UriListJson = $null
@@ -389,32 +415,43 @@ try {
     Write-Host "captured file-list id=$UriEntryId"
 
     # Overwrite the selection with plain text so a no-op `copy` would be
-    # visible — `Get-Clipboard -Format FileDropList` on a text selection
-    # returns `$null`.
+    # visible — `GetFileDropList` on a text selection returns an empty
+    # collection.
     Set-Clipboard -Value 'not-a-file-list'
     Invoke-CliSilent @('copy', $UriEntryId)
 
-    # Sort both sides before comparing so a stable Compare-Object check
-    # doesn't get tripped up by CF_HDROP order vs. the order we passed to
-    # `Set-Clipboard -Path`.
-    $pastedPaths = @()
-    $expectedPaths = @($UriFileA, $UriFileB) | Sort-Object
-    $diff = $expectedPaths  # non-null so the loop runs at least once
-    $deadline = (Get-Date).AddSeconds(5)
-    while ((Get-Date) -lt $deadline) {
-        try {
-            $raw = Get-Clipboard -Format FileDropList
-            if ($null -ne $raw) {
-                $pastedPaths = @($raw | ForEach-Object { $_.ToString() }) | Sort-Object
-                if ($pastedPaths.Count -eq $expectedPaths.Count) {
-                    $diff = Compare-Object $pastedPaths $expectedPaths -SyncWindow 0
-                    if (-not $diff) { break }
-                }
-            }
-        } catch {}
-        Start-Sleep -Milliseconds 100
+    # Read-back also goes through an STA child: pwsh 7's `Get-Clipboard`
+    # has no `-Format` parameter (that was Windows PowerShell 5.1), so we
+    # use `[System.Windows.Forms.Clipboard]::GetFileDropList`. The child
+    # writes one path per line on success and exits 0; exits 1 if the
+    # clipboard never holds a file drop list within the 5s budget.
+    $ReadFileScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+`$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while ([DateTime]::UtcNow -lt `$deadline) {
+    try {
+        `$drops = [System.Windows.Forms.Clipboard]::GetFileDropList()
+        if (`$null -ne `$drops -and `$drops.Count -gt 0) {
+            foreach (`$p in `$drops) { Write-Output `$p }
+            exit 0
+        }
+    } catch [System.Runtime.InteropServices.ExternalException] { }
+    Start-Sleep -Milliseconds 100
+}
+exit 1
+"@
+    $readFileEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ReadFileScript))
+    $readOutput = & pwsh -Sta -NoProfile -EncodedCommand $readFileEncoded
+    if ($LASTEXITCODE -ne 0) {
+        throw "file-list copy-back did not return a FileDropList within 5s"
     }
-    if ($diff) {
+    # Sort both sides before comparing so a stable Compare-Object check
+    # doesn't get tripped up by CF_HDROP order vs. the order we offered.
+    $pastedPaths = @($readOutput | Where-Object { $_ -ne '' }) | Sort-Object
+    $expectedPaths = @($UriFileA, $UriFileB) | Sort-Object
+    $diff = Compare-Object $pastedPaths $expectedPaths -SyncWindow 0
+    if ($diff -or $pastedPaths.Count -ne $expectedPaths.Count) {
         throw "file-list copy-back paths did not match`n  expected: $($expectedPaths -join ', ')`n  actual:   $($pastedPaths -join ', ')"
     }
 
