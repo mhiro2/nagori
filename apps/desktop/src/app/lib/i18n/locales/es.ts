@@ -44,33 +44,27 @@ export const es: Messages = {
   status: {
     captureOn: 'Captura activa',
     capturePaused: 'Captura en pausa',
-    aiOn: 'IA activada',
-    aiOff: 'IA desactivada',
     entryCount: (n: number): string =>
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
   },
   actionMenu: {
-    title: 'Acciones de IA',
+    title: 'Acciones rápidas',
     actions: {
       Summarize: 'Resumir',
-      Translate: 'Traducir',
       FormatJson: 'Formatear JSON',
-      FormatMarkdown: 'Formatear Markdown',
-      ExplainCode: 'Explicar el código',
-      Rewrite: 'Reescribir',
       ExtractTasks: 'Extraer tareas',
       RedactSecrets: 'Ocultar secretos',
     },
-    tauriRequired: 'Las acciones de IA requieren el runtime de Tauri.',
+    tauriRequired: 'Las acciones rápidas requieren el runtime de Tauri.',
     resultTitle: 'Resultado',
     copyResult: 'Copiar',
     copied: 'Copiado',
     saveResult: 'Guardar como nueva entrada',
     saved: 'Guardado',
     closeResult: 'Cerrar',
-    runFailed: 'La acción de IA falló.',
+    runFailed: 'La acción rápida falló.',
   },
   onboarding: {
     title: 'Termina la configuración de Nagori',
@@ -81,7 +75,7 @@ export const es: Messages = {
     autoPasteDisabled:
       'El pegado automático está DESACTIVADO — Intro solo copia al portapapeles hasta que concedas Accesibilidad.',
     notificationsHint:
-      'Permite las notificaciones para recibir alertas de errores de IA y de captura en pausa.',
+      'Permite las notificaciones para recibir alertas de captura en pausa y de pegado automático fallido.',
     openSettings: 'Abrir Ajustes del Sistema',
     dismiss: 'Continuar sin ello',
   },
@@ -95,7 +89,6 @@ export const es: Messages = {
     tabs: {
       general: 'General',
       privacy: 'Privacidad',
-      ai: 'IA',
       cli: 'CLI',
       advanced: 'Avanzado',
     },
@@ -127,7 +120,7 @@ export const es: Messages = {
     },
     privacy: {
       legend: 'Filtros',
-      localOnly: 'Modo solo local (bloquear llamadas a IA remota)',
+      localOnly: 'Modo solo local (bloquear comprobaciones automáticas de actualización)',
       appDenylist: 'Lista de apps denegadas',
       appDenylistHelp:
         'Un nombre de aplicación de origen por línea. Las capturas desde estas apps se descartan.',
@@ -170,17 +163,6 @@ export const es: Messages = {
           'sintaxis de regex inválida: {error}. Escapa los metacaracteres literales con \\\\ o reescribe el patrón.',
         empty: 'entrada vacía: elimina la línea en blanco o escribe un patrón.',
       },
-    },
-    ai: {
-      legend: 'IA',
-      enabled: 'Activar acciones de IA',
-      provider: 'Proveedor',
-      providers: {
-        none: 'Ninguno',
-        local: 'Local',
-        remote: 'Remoto',
-      },
-      semanticSearch: 'Activar búsqueda semántica',
     },
     cli: {
       legend: 'CLI',
@@ -267,7 +249,7 @@ export const es: Messages = {
     selectFirst: 'Saltar al primero',
     selectLast: 'Saltar al último',
     confirm: 'Pegar selección',
-    openActions: 'Abrir acciones de IA',
+    openActions: 'Abrir acciones rápidas',
     togglePin: 'Fijar / desfijar',
     delete: 'Eliminar',
     openSettings: 'Abrir ajustes',
@@ -285,7 +267,7 @@ export const es: Messages = {
     search: 'Error de búsqueda.',
     platform: 'Error de plataforma.',
     permission: 'Permiso ausente.',
-    ai: 'Error del proveedor de IA.',
+    ai: 'Error de acción rápida.',
     policy: 'Acción bloqueada por la política.',
     notFound: 'No encontrado.',
     invalidInput: 'Entrada no válida.',

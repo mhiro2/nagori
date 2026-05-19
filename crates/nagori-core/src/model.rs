@@ -776,6 +776,23 @@ pub enum AiActionId {
     RedactSecrets,
 }
 
+impl AiActionId {
+    /// Quick actions are the four entries surfaced by the desktop
+    /// palette's action menu; they always run against the on-device
+    /// rule-based runner regardless of `ai_enabled` / `ai_provider`.
+    /// Legacy variants (`Translate`, `Rewrite`, `FormatMarkdown`,
+    /// `ExplainCode`) remain in the enum for schema compatibility but
+    /// have no UI entry point — they still flow through the regular
+    /// provider gating logic.
+    #[must_use]
+    pub const fn is_quick_action(&self) -> bool {
+        matches!(
+            self,
+            Self::Summarize | Self::FormatJson | Self::ExtractTasks | Self::RedactSecrets
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiInputPolicy {
     pub allow_remote: bool,

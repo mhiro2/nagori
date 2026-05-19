@@ -301,33 +301,6 @@ describe('SettingsView', () => {
     expect(await findByText('backend offline')).toBeTruthy();
   });
 
-  it('persists the picked AI provider tag via setProvider', async () => {
-    vi.mocked(updateSettings).mockResolvedValue();
-    const { findByRole, container } = render(SettingsView);
-    const aiTab = await findByRole('tab', { name: 'AI' });
-    await fireEvent.click(aiTab);
-
-    // The provider <select> exposes the three tags (none/local/remote);
-    // switching to "remote" should hydrate the remote provider object on
-    // the next save call.
-    const select = Array.from(container.querySelectorAll('select')).find((candidate) =>
-      Array.from(candidate.options).some((option) => option.value === 'remote'),
-    );
-    expect(select).toBeTruthy();
-    if (select) {
-      select.value = 'remote';
-      await fireEvent.change(select);
-    }
-
-    const form = container.querySelector('form');
-    if (form) await fireEvent.submit(form);
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalled();
-    });
-    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.aiProvider).toEqual({ remote: { name: 'openai' } });
-  });
-
   it('renders the CLI tab fieldset and toggles the IPC flag', async () => {
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container } = render(SettingsView);

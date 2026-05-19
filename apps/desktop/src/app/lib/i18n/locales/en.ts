@@ -45,8 +45,6 @@ export type Messages = {
   status: {
     captureOn: string;
     capturePaused: string;
-    aiOn: string;
-    aiOff: string;
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
   };
@@ -54,11 +52,7 @@ export type Messages = {
     title: string;
     actions: {
       Summarize: string;
-      Translate: string;
       FormatJson: string;
-      FormatMarkdown: string;
-      ExplainCode: string;
-      Rewrite: string;
       ExtractTasks: string;
       RedactSecrets: string;
     };
@@ -91,7 +85,6 @@ export type Messages = {
     tabs: {
       general: string;
       privacy: string;
-      ai: string;
       cli: string;
       advanced: string;
     };
@@ -152,13 +145,6 @@ export type Messages = {
         invalidSyntax: string;
         empty: string;
       };
-    };
-    ai: {
-      legend: string;
-      enabled: string;
-      provider: string;
-      providers: { none: string; local: string; remote: string };
-      semanticSearch: string;
     };
     cli: { legend: string; ipcEnabled: string };
     appearance: {
@@ -316,31 +302,25 @@ export const en: Messages = {
   status: {
     captureOn: 'Capture on',
     capturePaused: 'Capture paused',
-    aiOn: 'AI on',
-    aiOff: 'AI off',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
   },
   actionMenu: {
-    title: 'AI actions',
+    title: 'Quick actions',
     actions: {
       Summarize: 'Summarize',
-      Translate: 'Translate',
       FormatJson: 'Format JSON',
-      FormatMarkdown: 'Format Markdown',
-      ExplainCode: 'Explain code',
-      Rewrite: 'Rewrite',
       ExtractTasks: 'Extract tasks',
       RedactSecrets: 'Redact secrets',
     },
-    tauriRequired: 'AI actions require the Tauri runtime.',
+    tauriRequired: 'Quick actions require the Tauri runtime.',
     resultTitle: 'Result',
     copyResult: 'Copy',
     copied: 'Copied',
     saveResult: 'Save as new entry',
     saved: 'Saved',
     closeResult: 'Close',
-    runFailed: 'AI action failed.',
+    runFailed: 'Quick action failed.',
   },
   onboarding: {
     title: 'Finish setting up Nagori',
@@ -350,7 +330,8 @@ export const en: Messages = {
       'Grant Accessibility access in System Settings → Privacy & Security so Nagori can paste into the focused app.',
     autoPasteDisabled:
       'Auto-paste is currently OFF — Enter copies to clipboard until you grant Accessibility.',
-    notificationsHint: 'Allow notifications to receive AI errors and capture-paused alerts.',
+    notificationsHint:
+      'Allow notifications to receive capture-paused and auto-paste failure alerts.',
     openSettings: 'Open System Settings',
     dismiss: 'Continue without it',
   },
@@ -364,7 +345,6 @@ export const en: Messages = {
     tabs: {
       general: 'General',
       privacy: 'Privacy',
-      ai: 'AI',
       cli: 'CLI',
       advanced: 'Advanced',
     },
@@ -396,7 +376,7 @@ export const en: Messages = {
     },
     privacy: {
       legend: 'Filters',
-      localOnly: 'Local-only mode (block remote AI calls)',
+      localOnly: 'Local-only mode (block automatic update checks)',
       appDenylist: 'App denylist',
       appDenylistHelp: 'One source-app name per line. Captures from these apps are dropped.',
       regexDenylist: 'Regex denylist',
@@ -436,17 +416,6 @@ export const en: Messages = {
           'invalid regex syntax: {error}. Escape literal metacharacters with \\\\ or rewrite the pattern.',
         empty: 'empty entry — drop the blank line or write a pattern.',
       },
-    },
-    ai: {
-      legend: 'AI',
-      enabled: 'Enable AI actions',
-      provider: 'Provider',
-      providers: {
-        none: 'None',
-        local: 'Local',
-        remote: 'Remote',
-      },
-      semanticSearch: 'Enable semantic search',
     },
     cli: {
       legend: 'CLI',
@@ -532,7 +501,7 @@ export const en: Messages = {
     selectFirst: 'Jump to first',
     selectLast: 'Jump to last',
     confirm: 'Paste selection',
-    openActions: 'Open AI actions',
+    openActions: 'Open Quick actions',
     togglePin: 'Pin / unpin',
     delete: 'Delete',
     openSettings: 'Open settings',
@@ -550,7 +519,7 @@ export const en: Messages = {
     search: 'Search error.',
     platform: 'Platform error.',
     permission: 'Missing permission.',
-    ai: 'AI provider error.',
+    ai: 'Quick action error.',
     policy: 'Action blocked by policy.',
     notFound: 'Not found.',
     invalidInput: 'Invalid input.',

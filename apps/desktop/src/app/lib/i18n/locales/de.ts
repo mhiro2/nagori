@@ -43,33 +43,27 @@ export const de: Messages = {
   status: {
     captureOn: 'Erfassung aktiv',
     capturePaused: 'Erfassung pausiert',
-    aiOn: 'KI aktiv',
-    aiOff: 'KI aus',
     entryCount: (n: number): string =>
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
   },
   actionMenu: {
-    title: 'KI-Aktionen',
+    title: 'Schnellaktionen',
     actions: {
       Summarize: 'Zusammenfassen',
-      Translate: 'Übersetzen',
       FormatJson: 'JSON formatieren',
-      FormatMarkdown: 'Markdown formatieren',
-      ExplainCode: 'Code erklären',
-      Rewrite: 'Umschreiben',
       ExtractTasks: 'Aufgaben extrahieren',
       RedactSecrets: 'Geheimnisse maskieren',
     },
-    tauriRequired: 'KI-Aktionen erfordern die Tauri-Laufzeit.',
+    tauriRequired: 'Schnellaktionen erfordern die Tauri-Laufzeit.',
     resultTitle: 'Ergebnis',
     copyResult: 'Kopieren',
     copied: 'Kopiert',
     saveResult: 'Als neuen Eintrag speichern',
     saved: 'Gespeichert',
     closeResult: 'Schließen',
-    runFailed: 'KI-Aktion fehlgeschlagen.',
+    runFailed: 'Schnellaktion fehlgeschlagen.',
   },
   onboarding: {
     title: 'Nagori-Einrichtung abschließen',
@@ -80,7 +74,7 @@ export const de: Messages = {
     autoPasteDisabled:
       'Automatisches Einfügen ist derzeit AUS – Enter kopiert nur in die Zwischenablage, bis die Bedienungshilfen freigegeben sind.',
     notificationsHint:
-      'Mitteilungen erlauben, um KI-Fehler und Hinweise zu pausierter Erfassung zu erhalten.',
+      'Mitteilungen erlauben, um Hinweise zu pausierter Erfassung und fehlgeschlagenem Einfügen zu erhalten.',
     openSettings: 'Systemeinstellungen öffnen',
     dismiss: 'Vorerst ohne fortfahren',
   },
@@ -94,7 +88,6 @@ export const de: Messages = {
     tabs: {
       general: 'Allgemein',
       privacy: 'Datenschutz',
-      ai: 'KI',
       cli: 'CLI',
       advanced: 'Erweitert',
     },
@@ -126,7 +119,7 @@ export const de: Messages = {
     },
     privacy: {
       legend: 'Filter',
-      localOnly: 'Nur-Lokal-Modus (Remote-KI-Aufrufe blockieren)',
+      localOnly: 'Nur-Lokal-Modus (automatische Update-Prüfungen blockieren)',
       appDenylist: 'App-Sperrliste',
       appDenylistHelp:
         'Ein Quell-App-Name pro Zeile. Erfassungen aus diesen Apps werden verworfen.',
@@ -168,17 +161,6 @@ export const de: Messages = {
           'ungültige Regex-Syntax: {error}. Maskieren Sie wörtliche Metazeichen mit \\\\ oder schreiben Sie das Muster um.',
         empty: 'leerer Eintrag – entfernen Sie die leere Zeile oder schreiben Sie ein Muster.',
       },
-    },
-    ai: {
-      legend: 'KI',
-      enabled: 'KI-Aktionen aktivieren',
-      provider: 'Anbieter',
-      providers: {
-        none: 'Keiner',
-        local: 'Lokal',
-        remote: 'Remote',
-      },
-      semanticSearch: 'Semantische Suche aktivieren',
     },
     cli: {
       legend: 'CLI',
@@ -266,7 +248,7 @@ export const de: Messages = {
     selectFirst: 'Zum ersten springen',
     selectLast: 'Zum letzten springen',
     confirm: 'Auswahl einfügen',
-    openActions: 'KI-Aktionen öffnen',
+    openActions: 'Schnellaktionen öffnen',
     togglePin: 'Anheften / lösen',
     delete: 'Löschen',
     openSettings: 'Einstellungen öffnen',
@@ -284,7 +266,7 @@ export const de: Messages = {
     search: 'Suchfehler.',
     platform: 'Plattformfehler.',
     permission: 'Fehlende Berechtigung.',
-    ai: 'Fehler beim KI-Anbieter.',
+    ai: 'Fehler bei Schnellaktion.',
     policy: 'Aktion durch Richtlinie blockiert.',
     notFound: 'Nicht gefunden.',
     invalidInput: 'Ungültige Eingabe.',

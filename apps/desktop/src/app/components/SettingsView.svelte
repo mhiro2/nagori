@@ -13,7 +13,6 @@
   import { applyAppearance } from "../lib/theme";
   import {
     CONTENT_KINDS,
-    type AiProviderSetting,
     type Appearance,
     type AppSettings,
     type Capability,
@@ -30,10 +29,9 @@
 
   type HotkeyFailurePayload = { hotkey: string; error: string };
 
-  type AiProviderTag = "none" | "local" | "remote";
-  type Tab = "general" | "privacy" | "ai" | "cli" | "advanced";
+  type Tab = "general" | "privacy" | "cli" | "advanced";
 
-  const TABS: readonly Tab[] = ["general", "privacy", "ai", "cli", "advanced"];
+  const TABS: readonly Tab[] = ["general", "privacy", "cli", "advanced"];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
     "pin",
     "delete",
@@ -46,14 +44,6 @@
     "repaste-last",
     "clear-history",
   ];
-
-  const providerTag = (value: AiProviderSetting): AiProviderTag =>
-    typeof value === "string" ? value : "remote";
-
-  const setProvider = (tag: AiProviderTag): void => {
-    if (!settings) return;
-    settings.aiProvider = tag === "remote" ? { remote: { name: "openai" } } : tag;
-  };
 
   const onLocaleChange = (next: LocaleSetting): void => {
     if (!settings) return;
@@ -668,32 +658,6 @@
             }}
           />
           <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
-        </label>
-      </fieldset>
-    {/if}
-
-    {#if activeTab === "ai"}
-      <fieldset>
-        <legend>{t.settings.ai.legend}</legend>
-        <label>
-          <input type="checkbox" bind:checked={settings.aiEnabled} />
-          {t.settings.ai.enabled}
-        </label>
-        <label>
-          {t.settings.ai.provider}
-          <select
-            value={providerTag(settings.aiProvider)}
-            onchange={(e) =>
-              setProvider((e.target as HTMLSelectElement).value as AiProviderTag)}
-          >
-            <option value="none">{t.settings.ai.providers.none}</option>
-            <option value="local">{t.settings.ai.providers.local}</option>
-            <option value="remote">{t.settings.ai.providers.remote}</option>
-          </select>
-        </label>
-        <label>
-          <input type="checkbox" bind:checked={settings.semanticSearchEnabled} />
-          {t.settings.ai.semanticSearch}
         </label>
       </fieldset>
     {/if}

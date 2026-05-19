@@ -1,6 +1,6 @@
 <script lang="ts">
   import { messages } from "../lib/i18n/index.svelte";
-  import { aiEnabled, captureEnabled } from "../stores/settings.svelte";
+  import { captureEnabled } from "../stores/settings.svelte";
 
   type Props = {
     entryCount: number;
@@ -14,7 +14,6 @@
   const t = $derived(messages());
 
   const capture = $derived(captureEnabled());
-  const ai = $derived(aiEnabled());
 </script>
 
 <footer class="status">
@@ -39,10 +38,6 @@
     <span class="badge" class:on={capture} class:off={!capture}>
       <span class="dot-icon" aria-hidden="true"></span>
       {capture ? t.status.captureOn : t.status.capturePaused}
-    </span>
-    <span class="badge" class:on={ai} class:off={!ai}>
-      <span class="dot-icon" aria-hidden="true"></span>
-      {ai ? t.status.aiOn : t.status.aiOff}
     </span>
     <span class="hints">
       <kbd>↑↓</kbd>{t.palette.hints.navigate}

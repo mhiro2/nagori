@@ -3,7 +3,7 @@
   import { describeError } from "../lib/errors";
   import { messages } from "../lib/i18n/index.svelte";
   import { isTauri } from "../lib/tauri";
-  import type { AiActionId, SearchResultDto } from "../lib/types";
+  import type { SearchResultDto } from "../lib/types";
 
   type Props = {
     target: SearchResultDto | undefined;
@@ -13,20 +13,20 @@
 
   const { target, open, onClose }: Props = $props();
 
-  const ACTION_IDS: readonly AiActionId[] = [
+  // Narrowed to the four quick-action variants the UI surfaces. The
+  // `AiActionId` enum still carries legacy LLM-only variants for
+  // backend compatibility, but those are not addressable here.
+  type QuickActionId = "Summarize" | "FormatJson" | "ExtractTasks" | "RedactSecrets";
+  const ACTION_IDS: readonly QuickActionId[] = [
     "Summarize",
-    "Translate",
     "FormatJson",
-    "FormatMarkdown",
-    "ExplainCode",
-    "Rewrite",
     "ExtractTasks",
     "RedactSecrets",
   ];
 
   const t = $derived(messages());
 
-  let pending: AiActionId | undefined = $state(undefined);
+  let pending: QuickActionId | undefined = $state(undefined);
   let lastResult: string | undefined = $state(undefined);
   let runError: string | undefined = $state(undefined);
   let copyOk = $state(false);
@@ -55,7 +55,7 @@
     }
   });
 
-  const run = async (id: AiActionId): Promise<void> => {
+  const run = async (id: QuickActionId): Promise<void> => {
     if (!target || !isTauri()) return;
     pending = id;
     runError = undefined;

@@ -43,33 +43,27 @@ export const fr: Messages = {
   status: {
     captureOn: 'Capture active',
     capturePaused: 'Capture en pause',
-    aiOn: 'IA activée',
-    aiOff: 'IA désactivée',
     entryCount: (n: number): string =>
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
   },
   actionMenu: {
-    title: 'Actions IA',
+    title: 'Actions rapides',
     actions: {
       Summarize: 'Résumer',
-      Translate: 'Traduire',
       FormatJson: 'Formater JSON',
-      FormatMarkdown: 'Formater Markdown',
-      ExplainCode: 'Expliquer le code',
-      Rewrite: 'Réécrire',
       ExtractTasks: 'Extraire les tâches',
       RedactSecrets: 'Masquer les secrets',
     },
-    tauriRequired: 'Les actions IA nécessitent le runtime Tauri.',
+    tauriRequired: 'Les actions rapides nécessitent le runtime Tauri.',
     resultTitle: 'Résultat',
     copyResult: 'Copier',
     copied: 'Copié',
     saveResult: 'Enregistrer comme nouvelle entrée',
     saved: 'Enregistré',
     closeResult: 'Fermer',
-    runFailed: 'Échec de l’action IA.',
+    runFailed: 'Échec de l’action rapide.',
   },
   onboarding: {
     title: 'Terminer la configuration de Nagori',
@@ -80,7 +74,7 @@ export const fr: Messages = {
     autoPasteDisabled:
       'Le collage automatique est désactivé — Entrée se contente de copier dans le presse-papiers tant que l’Accessibilité n’est pas accordée.',
     notificationsHint:
-      'Autorisez les notifications pour recevoir les erreurs IA et les alertes de capture en pause.',
+      'Autorisez les notifications pour recevoir les alertes de capture en pause et d’échec de collage automatique.',
     openSettings: 'Ouvrir les Réglages Système',
     dismiss: 'Continuer sans',
   },
@@ -94,7 +88,6 @@ export const fr: Messages = {
     tabs: {
       general: 'Général',
       privacy: 'Confidentialité',
-      ai: 'IA',
       cli: 'CLI',
       advanced: 'Avancé',
     },
@@ -126,7 +119,7 @@ export const fr: Messages = {
     },
     privacy: {
       legend: 'Filtres',
-      localOnly: 'Mode local uniquement (bloquer les appels IA distants)',
+      localOnly: 'Mode local uniquement (bloquer les vérifications de mise à jour automatiques)',
       appDenylist: 'Liste de refus d’apps',
       appDenylistHelp:
         'Un nom d’application source par ligne. Les captures depuis ces apps sont ignorées.',
@@ -168,17 +161,6 @@ export const fr: Messages = {
           'syntaxe regex invalide : {error}. Échappez les métacaractères littéraux avec \\\\ ou réécrivez le motif.',
         empty: 'entrée vide — supprimez la ligne vide ou saisissez un motif.',
       },
-    },
-    ai: {
-      legend: 'IA',
-      enabled: 'Activer les actions IA',
-      provider: 'Fournisseur',
-      providers: {
-        none: 'Aucun',
-        local: 'Local',
-        remote: 'Distant',
-      },
-      semanticSearch: 'Activer la recherche sémantique',
     },
     cli: {
       legend: 'CLI',
@@ -265,7 +247,7 @@ export const fr: Messages = {
     selectFirst: 'Aller au premier',
     selectLast: 'Aller au dernier',
     confirm: 'Coller la sélection',
-    openActions: 'Ouvrir les actions IA',
+    openActions: 'Ouvrir les actions rapides',
     togglePin: 'Épingler / désépingler',
     delete: 'Supprimer',
     openSettings: 'Ouvrir les paramètres',
@@ -283,7 +265,7 @@ export const fr: Messages = {
     search: 'Erreur de recherche.',
     platform: 'Erreur de plateforme.',
     permission: 'Autorisation manquante.',
-    ai: 'Erreur du fournisseur IA.',
+    ai: 'Erreur d’action rapide.',
     policy: 'Action bloquée par la stratégie.',
     notFound: 'Introuvable.',
     invalidInput: 'Entrée invalide.',

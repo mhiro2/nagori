@@ -20,7 +20,7 @@ keeping the desktop palette, CLI, and capture daemon aligned.
 11. [IPC boundary](#11-ipc-boundary)
 12. [Tauri boundary and frontend](#12-tauri-boundary-and-frontend)
 13. [CLI](#13-cli)
-14. [AI actions](#14-ai-actions)
+14. [Quick actions](#14-quick-actions)
 15. [Internationalization](#15-internationalization)
 16. [Desktop shell integration](#16-desktop-shell-integration)
 17. [Observability](#17-observability)
@@ -51,7 +51,7 @@ domain code. This leads to four design rules:
    through.
 4. **Same runtime for every surface** — the palette, the CLI's `--ipc` /
    `--auto-ipc` mode, and the standalone daemon all drive the same
-   `NagoriRuntime` so capture, search, paste, and AI actions behave
+   `NagoriRuntime` so capture, search, paste, and Quick actions behave
    identically regardless of entry point.
 
 ---
@@ -90,13 +90,13 @@ domain code. This leads to four design rules:
 |-------|------|
 | `nagori-core` | Domain model, sensitivity policy, repository traits, `SearchService` orchestration, settings, errors |
 | `nagori-storage` | SQLite (rusqlite) repositories, FTS5 / ngram tables, migrations, image blob handling |
-| `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker, semantic search hooks |
+| `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker |
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image + file-list copy-back (PNG → RGBA via arboard, file paths packed into a hand-rolled `DROPFILES` + `SetClipboardData(CF_HDROP)`), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
-| `nagori-ai` | AI provider trait, local mocks, OpenAI provider, action registry, redactor |
+| `nagori-ai` | `AiProvider` trait, rule-based local runner, action registry, redactor |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
@@ -135,7 +135,7 @@ apps/desktop (Tauri)
   ├─ Svelte WebView UI
   ├─ Tauri commands  ────► NagoriRuntime ──► SqliteStore
   ├─ tray + autostart      AppState spawns:    + search cache
-  └─ AppState              · capture loop      + AI provider
+  └─ AppState              · capture loop      + action runner
        └ spawns tasks      · settings sub      + platform adapters
                            · maintenance
 
@@ -946,17 +946,18 @@ not duplicate runtime logic.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview`; includes a token-based syntax highlighter for
   `code` / `url` kinds.
-- `ActionMenu.svelte` — modal for AI actions. The result block shows
-  *Copy* (uses `navigator.clipboard`) and *Save as new entry* (calls
+- `ActionMenu.svelte` — modal for Quick actions (Summarize, Format
+  JSON, Extract tasks, Redact secrets). The result block shows *Copy*
+  (uses `navigator.clipboard`) and *Save as new entry* (calls
   `save_ai_result`).
-- `SettingsView.svelte` — tabbed *General* / *Privacy* / *AI* / *CLI*
-  / *Advanced* settings panel. Denylists are edited as multi-line
+- `SettingsView.svelte` — tabbed *General* / *Privacy* / *CLI* /
+  *Advanced* settings panel. Denylists are edited as multi-line
   textareas serialised back into `string[]`; capture kinds, paste
   format, recent ordering, total storage limit, and appearance are
   exposed as structured controls.
 
 The `stores/settings.svelte.ts` store is the single source for
-`captureEnabled()`, `aiEnabled()`, `accessibilityState()`, and
+`captureEnabled()`, `accessibilityState()`, and
 `accessibilityGranted()`; status bar and onboarding banner subscribe
 to it.
 
@@ -1022,30 +1023,41 @@ AutoLaunch) — the canonical first step for support tickets.
 
 ---
 
-## 14. AI actions
+## 14. Quick actions
 
 `nagori-ai` exposes:
 
-- `AiProvider` trait (local / OpenAI / mock implementations).
-- Action registry (`Summarize`, `Translate`, `FormatJson`,
-  `FormatMarkdown`, `ExplainCode`, `Rewrite`, `ExtractTasks`,
-  `RedactSecrets`).
-- Prompt templates per action.
-- A `Redactor` for shaping payloads before they leave the machine.
+- `AiProvider` trait (rule-based local runner + mock impls).
+- Action registry. The desktop palette surfaces only four entries —
+  `Summarize`, `FormatJson`, `ExtractTasks`, `RedactSecrets` — and
+  `AiActionId::is_quick_action` is the canonical check for that set.
+  The enum still carries legacy variants (`Translate`, `Rewrite`,
+  `FormatMarkdown`, `ExplainCode`) for schema compatibility; the
+  rule-based runner handles `FormatMarkdown` / `ExplainCode` with
+  simple text transforms and only refuses `Translate` / `Rewrite`,
+  which need a real model.
+- A `Redactor` for shaping payloads as a defence-in-depth pass before
+  the runner consumes them.
 
-**Privacy contract.** `local_only_mode` is the default: remote
-providers are off until the user opts in. Even with remote enabled,
-`AiInputPolicy` decides whether redaction is required (`require_redaction
-= true` for any action invoked on a `Secret` entry) and whether the
-payload exceeds `max_bytes`. When the classifier returns `Blocked` the
-action returns `PolicyError` without contacting the provider.
+**Privacy contract.** Quick actions short-circuit the legacy
+`ai_enabled` / `ai_provider` gates in
+`NagoriRuntime::run_ai_action` and always route to the on-device
+runner — the desktop UI no longer surfaces those toggles, so making
+them load-bearing would brick the palette under default config. The
+input-policy pipeline (`AiInputPolicy::require_redaction`, the
+secret/blocked sensitivity rules, the `max_bytes` cap) still runs
+before the runner sees the text. Legacy variants keep the original
+gating so an IPC caller can't silently reach a remote provider when
+the user has disabled AI. The schema retains the `ai_enabled` /
+`ai_provider` / `semantic_search_enabled` fields so older config
+files round-trip unchanged.
 
-**Output.** `run_ai_action` returns `AiOutput` (text + provider
+**Output.** `run_ai_action` returns `AiOutput` (text + runner
 warnings). When the user clicks *Save as new entry* in
 `ActionMenu.svelte`, the frontend invokes the separate `save_ai_result`
 Tauri command which writes the text via `runtime.add_text()` and
 returns the resulting `EntryDto`. The persistence is intentionally a
-second user-driven step rather than a side effect of the AI call.
+second user-driven step rather than a side effect of the action.
 
 The caller surface for settings-aware redaction is
 `SensitivityClassifier::redact`, **not** the bare `Redactor` — see
@@ -1178,8 +1190,8 @@ change.
   main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the
   webview handle a later palette toggle relies on) alive.
 - **Notifications (`tauri-plugin-notification`)** — one-shot "ready"
-  alert after setup, plus state-change toasts when `capture_enabled` or
-  `ai_enabled` flip. Auto-paste failures (e.g. revoked Accessibility)
+  alert after setup, plus a state-change toast when `capture_enabled`
+  flips. Auto-paste failures (e.g. revoked Accessibility)
   emit `nagori://paste_failed`; the palette renders an in-window toast
   with a one-click jump into Settings. No-op silently if notification
   permission is not granted.
@@ -1356,9 +1368,9 @@ clipboard history → per-app filters → embedding / semantic recall
    → editor & browser integrations → multi-device sync (opt-in)
 ```
 
-The crate boundaries assume daemon separation, AI provider plurality,
-and a stable IPC schema so this path can be walked without rewriting
-the core.
+The crate boundaries assume daemon separation, action-runner
+plurality, and a stable IPC schema so this path can be walked
+without rewriting the core.
 
 Concrete near-term extensions: embedding index, local vector
 database, per-project clipboard scopes, app-specific history filters,

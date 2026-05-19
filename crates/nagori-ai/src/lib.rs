@@ -1,6 +1,5 @@
 pub mod actions;
 pub mod local;
-pub mod openai;
 pub mod provider;
 // `redaction` is intentionally crate-private. ARCHITECTURE.md requires
 // all redaction to flow through the runtime's `SensitivityClassifier`
@@ -16,5 +15,4 @@ pub(crate) mod redaction;
 
 pub use actions::AiActionRegistry;
 pub use local::LocalAiProvider;
-pub use openai::StubOpenAiProvider;
 pub use provider::{AiProvider, MockAiProvider};

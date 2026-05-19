@@ -45,8 +45,6 @@ export const refreshSettings = async (): Promise<void> => {
 
 export const captureEnabled = (): boolean => settingsState.settings?.captureEnabled ?? true;
 
-export const aiEnabled = (): boolean => settingsState.settings?.aiEnabled ?? false;
-
 export const accessibilityState = (): PermissionStatus | undefined =>
   settingsState.permissions.find((p) => p.kind === 'accessibility');
 

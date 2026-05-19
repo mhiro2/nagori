@@ -1,7 +1,8 @@
 # Privacy and security
 
-Nagori is local-first: capture, search, and AI scrubbing all run in
-your process and the daemon never reaches a network on its own.
+Nagori is local-first: capture, search, redaction, and Quick actions
+all run in your process and the daemon never reaches a network on its
+own.
 
 ## Data at rest
 
@@ -69,12 +70,19 @@ groups", …) instead of a generic save failure. Split complex
 intents into multiple lines rather than nesting groups — the
 denylist is an `OR` of every line.
 
-## AI and network
+## Quick actions and network
 
-- The classifier runs **before** any AI call. Remote providers are
-  opt-in (`Privacy → Local-only mode` is the kill switch) and the
-  payload is always shaped by the canonical scrubber via
-  `AiInputPolicy::require_redaction` before it leaves the process.
+- Quick actions (Summarize, Format JSON, Extract tasks, Redact
+  secrets) run entirely on-device against the rule-based runner —
+  no remote provider is dispatched, regardless of `Local-only mode`.
+- The runner re-applies the secret scrubber to its input as a
+  defence-in-depth pass (`AiInputPolicy::require_redaction`) so a
+  result block can never contain a token the classifier already
+  flagged on the source entry.
+- The daemon's only outbound network use is the periodic
+  update-availability probe against GitHub Releases. `Privacy →
+  Local-only mode` toggles that probe off and the in-app update
+  banner stays silent.
 - Clipboard bodies are never written to logs — only metadata
   (declared MIME, detected MIME, byte counts, sensitivity verdict)
   shows up in tracing output.

@@ -10,8 +10,8 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
   PEM blocks, credit-card numbers, and OTPs before they hit disk.
 - User regex denylist for project-specific patterns.
 - Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
-- Optional, opt-in AI actions (summarise / rewrite / translate) that always
-  run the scrubber before sending payloads off the device.
+- Quick actions on a selected entry: summarise, format JSON, extract tasks,
+  redact secrets — all computed locally without any network calls.
 - Bundled per-OS release artefacts with an in-app update-availability probe.
 
 ## Install
@@ -36,7 +36,7 @@ for the full compatibility matrix and troubleshooting.
 2. Press the hotkey to open the palette, type to search, arrow keys to
    navigate, **Enter** to paste the highlighted entry back into the previous
    window.
-3. Use **Settings** for privacy, hotkey, and AI configuration. Run
+3. Use **Settings** for privacy and hotkey configuration. Run
    `nagori doctor` if something feels off (the desktop app's
    **Settings → Advanced → Diagnostics** runs the same probe).
 

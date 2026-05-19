@@ -15,7 +15,6 @@ import type { AppSettings, PermissionStatus } from '../lib/types';
 import {
   accessibilityGranted,
   accessibilityState,
-  aiEnabled,
   captureEnabled,
   refreshSettings,
   settingsState,
@@ -108,14 +107,6 @@ describe('selectors', () => {
     vi.mocked(getPermissions).mockResolvedValue([]);
     await refreshSettings();
     expect(captureEnabled()).toBe(false);
-  });
-
-  it('aiEnabled defaults to false and reflects loaded settings', async () => {
-    expect(aiEnabled()).toBe(false);
-    vi.mocked(getSettings).mockResolvedValue(baseSettings());
-    vi.mocked(getPermissions).mockResolvedValue([]);
-    await refreshSettings();
-    expect(aiEnabled()).toBe(true);
   });
 
   it('accessibilityState/accessibilityGranted reflect the granted state', async () => {

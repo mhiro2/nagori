@@ -106,18 +106,14 @@ describe('StatusBar', () => {
     expect(getByText('backend offline')).toBeTruthy();
   });
 
-  it('reflects capture/AI badge state from the settings store', async () => {
-    vi.mocked(getSettings).mockResolvedValue(
-      baseSettings({ captureEnabled: false, aiEnabled: true }),
-    );
+  it('reflects capture badge state from the settings store', async () => {
+    vi.mocked(getSettings).mockResolvedValue(baseSettings({ captureEnabled: false }));
     vi.mocked(getPermissions).mockResolvedValue([]);
     await refreshSettings();
 
     const { getByText } = render(StatusBar, {
       props: { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined },
     });
-    // English copy from the i18n dictionary — "Capture paused" / "AI on".
     expect(getByText(/Capture paused/i)).toBeTruthy();
-    expect(getByText(/AI on/i)).toBeTruthy();
   });
 });

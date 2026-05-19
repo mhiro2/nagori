@@ -44,13 +44,14 @@ describe('ActionMenu', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('renders a dialog with all AI actions when open', () => {
+  it('renders a dialog with the quick actions when open', () => {
     const { getByRole, getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     expect(getByRole('dialog')).toBeTruthy();
     expect(getByText('Summarize')).toBeTruthy();
-    expect(getByText('Translate')).toBeTruthy();
+    expect(getByText('Format JSON')).toBeTruthy();
+    expect(getByText('Extract tasks')).toBeTruthy();
     expect(getByText('Redact secrets')).toBeTruthy();
   });
 
@@ -113,7 +114,7 @@ describe('ActionMenu', () => {
     const { getByText, findByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    await user.click(getByText('Translate'));
+    await user.click(getByText('Format JSON'));
     expect(await findByText('provider down')).toBeTruthy();
   });
 
@@ -130,11 +131,11 @@ describe('ActionMenu', () => {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await user.click(getByText('Summarize'));
-    // The eight AI-action buttons should all be disabled while pending.
+    // The four quick-action buttons should all be disabled while pending.
     const actionButtons = getAllByRole('button').filter(
       (btn) => btn.parentElement?.tagName === 'LI',
     );
-    expect(actionButtons).toHaveLength(8);
+    expect(actionButtons).toHaveLength(4);
     for (const btn of actionButtons) {
       expect((btn as HTMLButtonElement).disabled).toBe(true);
     }
@@ -147,7 +148,7 @@ describe('ActionMenu', () => {
     const { getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    expect(getByText('AI actions require the Tauri runtime.')).toBeTruthy();
+    expect(getByText('Quick actions require the Tauri runtime.')).toBeTruthy();
   });
 
   it('auto-focuses the dialog when opened', async () => {
