@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 /// from a different task.
 const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
-use nagori_core::{AppError, EntryId, Result};
-use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime};
+use nagori_core::{AppError, AppSettings, EntryId, Result};
+use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime, StartupHealth};
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
@@ -210,13 +210,14 @@ impl AppState {
         let window = self.window.clone();
         let reader = self.capture_reader.clone();
         let search_cache = self.runtime.search_cache_handle();
+        let startup_health = self.runtime.startup_health();
         let capture = tauri::async_runtime::spawn(async move {
             // Fail closed: refuse to start the capture loop if the persisted
             // settings cannot be loaded — running with `Default` would drop
             // the user's denylist / regex_denylist / secret_handling and
             // capture more aggressively than configured.
-            if let Err(err) = runtime.refresh_settings_from_store().await {
-                tracing::error!(error = %err, "settings_load_failed_aborting_capture");
+            let refresh = runtime.refresh_settings_from_store().await;
+            if !note_capture_settings_load_outcome(&startup_health, &refresh) {
                 return;
             }
             let store = runtime.store().clone();
@@ -323,6 +324,42 @@ async fn drain_background_task(
     }
 }
 
+/// Funnels the capture task's `refresh_settings_from_store` outcome into the
+/// shared `StartupHealth` signal and decides whether the capture loop should
+/// proceed to enter polling. Extracted so the wiring between "settings load
+/// failed" and "`StartupHealth` records failed" can be pinned by a unit test
+/// rather than living only inside `tauri::async_runtime::spawn`, where the
+/// previous inline version silently dropped failures and left users with a
+/// "Clipboard history is ready" notification while capture never started.
+pub(crate) fn note_capture_settings_load_outcome(
+    health: &StartupHealth,
+    result: &Result<AppSettings>,
+) -> bool {
+    match result {
+        Ok(_) => {
+            health.record_capture_ready();
+            true
+        }
+        Err(err) => {
+            health.record_capture_failed(err.to_string());
+            tracing::error!(error = %err, "settings_load_failed_aborting_capture");
+            false
+        }
+    }
+}
+
+/// Subscriber-side counterpart to `note_capture_settings_load_outcome`. The
+/// settings subscriber and the capture task both abort on a failed initial
+/// settings load; recording the same failure here means a subscriber-only
+/// abort (which the capture task may not even reach) still flips the
+/// desktop's gated "ready" notification to "failed". `StartupHealth` is
+/// first-outcome-wins, so calling this after a capture-side success cannot
+/// mask the running state.
+pub(crate) fn record_subscriber_settings_load_failure(health: &StartupHealth, err: &AppError) {
+    health.record_capture_failed(err.to_string());
+    tracing::error!(error = %err, "settings_load_failed_aborting_subscribers");
+}
+
 #[cfg(test)]
 mod tests {
     use std::future;
@@ -356,6 +393,102 @@ mod tests {
         drain_background_task("test", handle, Duration::from_millis(10)).await;
 
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    /// Capture-task abort path: when `refresh_settings_from_store` returns
+    /// an error, `StartupHealth` must flip to `failed` with the error
+    /// string preserved verbatim. This pins the wiring extracted out of
+    /// `spawn_background_tasks` so a future inline refactor that drops
+    /// the recording is caught even without running the full spawn.
+    #[test]
+    fn note_capture_settings_load_outcome_records_failure() {
+        let health = StartupHealth::new();
+        let err = AppError::Storage("disk full".to_owned());
+        let expected = err.to_string();
+        let result: Result<AppSettings> = Err(err);
+        let proceed = note_capture_settings_load_outcome(&health, &result);
+        assert!(!proceed, "capture loop must abort when settings load fails");
+        let report = health.report();
+        assert!(!report.ready);
+        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
+    }
+
+    /// Capture-task success path: a settled refresh must flip ready, with
+    /// no error recorded. Combined with the failure test, this fixes the
+    /// helper as the single source of truth for "did the capture loop
+    /// reach polling?" — the bug that motivated 1.2 was precisely that
+    /// the desktop notification fired before this signal existed.
+    #[test]
+    fn note_capture_settings_load_outcome_records_ready_on_success() {
+        let health = StartupHealth::new();
+        let result: Result<AppSettings> = Ok(AppSettings::default());
+        let proceed = note_capture_settings_load_outcome(&health, &result);
+        assert!(proceed, "capture loop must continue when settings load");
+        let report = health.report();
+        assert!(report.ready);
+        assert!(report.last_error.is_none());
+    }
+
+    /// Subscriber-task abort path: like the capture-side helper but
+    /// driven by the settings subscriber's own initial `get_settings`
+    /// call. The subscriber and capture task race on the same store; the
+    /// first abort to land wins. This test pins that the subscriber
+    /// helper records the failure string as-is.
+    #[test]
+    fn record_subscriber_settings_load_failure_records_error_string() {
+        let health = StartupHealth::new();
+        let err = AppError::Storage("permission denied".to_owned());
+        let expected = err.to_string();
+        record_subscriber_settings_load_failure(&health, &err);
+        let report = health.report();
+        assert!(!report.ready);
+        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
+    }
+
+    /// First-outcome-wins must hold across both spawn helpers: a
+    /// capture-side ready followed by a subscriber-side abort cannot
+    /// downgrade an already-ready signal. This is critical for the
+    /// desktop notification — once "Nagori is running" has fired, a
+    /// late subscriber failure must not retroactively rewrite history.
+    #[test]
+    fn helpers_respect_first_outcome_wins() {
+        let health = StartupHealth::new();
+        assert!(note_capture_settings_load_outcome(
+            &health,
+            &Ok(AppSettings::default()),
+        ));
+        record_subscriber_settings_load_failure(
+            &health,
+            &AppError::Storage("late failure".to_owned()),
+        );
+        let report = health.report();
+        assert!(report.ready);
+        assert!(report.last_error.is_none());
+    }
+
+    /// The mirror case: if the subscriber's initial `get_settings()`
+    /// fails before the capture task races in, the failure must stick
+    /// even if the capture task later loads settings successfully.
+    /// Treating this as "intentional sticky failure" (rather than a
+    /// surprise) is the deliberate trade-off documented on
+    /// `StartupHealthReport` — either task aborting on settings load
+    /// means the desktop is not fully running, so the gated
+    /// notification stays in its failed wording until the next launch.
+    #[test]
+    fn subscriber_failure_sticks_even_if_capture_later_succeeds() {
+        let health = StartupHealth::new();
+        record_subscriber_settings_load_failure(
+            &health,
+            &AppError::Storage("subscriber abort".to_owned()),
+        );
+        let proceed = note_capture_settings_load_outcome(&health, &Ok(AppSettings::default()));
+        // Helper return value still reflects the capture-side outcome
+        // (so the spawn body can enter polling if its own refresh
+        // landed), but the externally-visible report stays failed.
+        assert!(proceed);
+        let report = health.report();
+        assert!(!report.ready, "subscriber failure must remain sticky");
+        assert!(report.last_error.is_some());
     }
 }
 

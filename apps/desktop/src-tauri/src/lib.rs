@@ -164,22 +164,16 @@ pub fn run() {
 
             spawn_settings_subscribers(app.handle());
 
-            // Surface a "ready" notification once everything is wired
-            // up. Runs on every OS: macOS routes through `UNUserNotificationCenter`,
-            // Windows through the Toast Notifications COM API, and Linux
-            // through `org.freedesktop.Notifications` (libnotify). The
-            // notification plugin no-ops if the user has not granted
-            // permission yet (or, on Linux, if no notification daemon is
-            // running), so this is best-effort and never blocks startup.
-            {
-                use tauri_plugin_notification::NotificationExt;
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("Nagori")
-                    .body("Clipboard history is ready.")
-                    .show();
-            }
+            // Defer the startup notification until the capture loop has
+            // either entered polling or aborted, so the body matches the
+            // truth instead of always claiming "Clipboard history is
+            // ready." (the prior wording fired even when settings load
+            // silently aborted the capture task). The probe polls
+            // `runtime.startup_health()` rather than threading a oneshot
+            // through every call site: the snapshot is sticky after the
+            // first outcome, and `nagori doctor` reads from the same
+            // surface so the two never disagree.
+            spawn_startup_ready_notification(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -347,7 +341,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         let initial = match store.get_settings().await {
             Ok(s) => s,
             Err(err) => {
-                tracing::error!(error = %err, "settings_load_failed_aborting_subscribers");
+                state::record_subscriber_settings_load_failure(&runtime.startup_health(), &err);
                 return;
             }
         };
@@ -622,6 +616,110 @@ fn sync_auto_launch(
         manager.disable()?;
     }
     Ok(())
+}
+
+/// Hard cap on how long the startup notification waits for the capture
+/// loop to report its outcome. Picked at 10 s so a slow first
+/// `refresh_settings_from_store` (cold `SQLite` open on a large history)
+/// still gets a tailored message, but a wedged init doesn't leave the
+/// user without any feedback. After the cap the notification falls back
+/// to the neutral "Nagori started" body — `nagori doctor` continues to
+/// report the eventual outcome once it lands.
+const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long to wait between `StartupHealth` polls. The snapshot is
+/// updated once during init and is cheap to read (one mutex lock), so a
+/// short interval keeps the perceived latency low without measurably
+/// burning CPU.
+const STARTUP_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Outcome we render into the OS notification. Split out so the body
+/// selection is unit-testable without spinning up a Tauri runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupNotice {
+    /// Capture loop entered polling. The notification body confirms
+    /// readiness without lying about what's running underneath.
+    Ready,
+    /// Capture loop aborted (typically settings-load failure). The body
+    /// directs the user to `nagori doctor` for the recorded reason.
+    Failed,
+    /// Init did not settle inside `STARTUP_READY_TIMEOUT`. We still
+    /// announce the app is running so the user knows it launched, but
+    /// avoid claiming readiness.
+    Pending,
+}
+
+const fn startup_notice_body(notice: StartupNotice) -> &'static str {
+    match notice {
+        StartupNotice::Ready => "Nagori is running. Clipboard history is ready.",
+        StartupNotice::Failed => {
+            "Nagori started, but clipboard capture failed to initialise. Run `nagori doctor` for details."
+        }
+        StartupNotice::Pending => {
+            "Nagori started. Clipboard capture is still initialising — run `nagori doctor` if it does not settle."
+        }
+    }
+}
+
+/// Spawn a background task that waits for the capture loop's
+/// initialisation to settle, then fires a single OS notification with a
+/// body matching the actual outcome.
+///
+/// Runs on every OS: macOS routes through `UNUserNotificationCenter`,
+/// Windows through the Toast Notifications COM API, and Linux through
+/// `org.freedesktop.Notifications` (libnotify). The notification plugin
+/// no-ops if the user has not granted permission yet (or, on Linux, if
+/// no notification daemon is running), so this stays best-effort and
+/// never blocks startup.
+fn spawn_startup_ready_notification(handle: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+
+    let Some(state) = handle.try_state::<AppState>() else {
+        // No state means setup() bailed before `manage(state)` ran.
+        // There is nothing to gate on; the caller has already aborted.
+        return;
+    };
+    let startup_health = state.runtime.startup_health();
+    let app = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let notice = await_startup_outcome(
+            startup_health,
+            STARTUP_READY_TIMEOUT,
+            STARTUP_READY_POLL_INTERVAL,
+        )
+        .await;
+        let _ = app
+            .notification()
+            .builder()
+            .title("Nagori")
+            .body(startup_notice_body(notice))
+            .show();
+    });
+}
+
+/// Poll a `StartupHealth` handle until it reports an outcome or the
+/// timeout fires. Extracted so the polling cadence and the
+/// timeout-vs-failure branching are unit-testable without a Tauri
+/// runtime or OS notification daemon.
+async fn await_startup_outcome(
+    startup_health: nagori_daemon::StartupHealth,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> StartupNotice {
+    let started = std::time::Instant::now();
+    loop {
+        let report = startup_health.report();
+        if report.ready {
+            return StartupNotice::Ready;
+        }
+        if report.last_error.is_some() {
+            return StartupNotice::Failed;
+        }
+        if started.elapsed() >= timeout {
+            return StartupNotice::Pending;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 /// Fire a one-shot background updater probe at launch and surface the
@@ -1421,5 +1519,100 @@ mod hotkey_tests {
             diff.register,
             vec![(SecondaryHotkeyAction::ClearHistory, "Cmd+Alt+X".to_owned())],
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_notice_tests {
+    use super::{
+        STARTUP_READY_POLL_INTERVAL, STARTUP_READY_TIMEOUT, StartupNotice, await_startup_outcome,
+        startup_notice_body,
+    };
+    use nagori_daemon::StartupHealth;
+    use std::time::Duration;
+
+    #[test]
+    fn body_distinguishes_each_outcome() {
+        // The three bodies have to read as distinct user-facing
+        // messages — the whole point of gating the notification is that
+        // "ready" can no longer be claimed when capture aborted. Lock
+        // the strings here so a copy-edit to one doesn't accidentally
+        // collide with another and re-introduce the original bug.
+        let ready = startup_notice_body(StartupNotice::Ready);
+        let failed = startup_notice_body(StartupNotice::Failed);
+        let pending = startup_notice_body(StartupNotice::Pending);
+        assert!(ready.contains("ready"));
+        assert!(
+            !ready.contains("failed"),
+            "ready body must not imply failure"
+        );
+        assert!(failed.contains("failed"));
+        assert!(failed.contains("nagori doctor"));
+        assert!(pending.contains("initialising"));
+        assert!(pending.contains("nagori doctor"));
+        // Distinctness: a future edit collapsing two bodies onto the
+        // same string would silently reintroduce the "always says
+        // ready" UX bug for one of the outcomes.
+        assert_ne!(ready, failed);
+        assert_ne!(ready, pending);
+        assert_ne!(failed, pending);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_returns_ready_when_capture_succeeds() {
+        let health = StartupHealth::new();
+        health.record_capture_ready();
+        let notice =
+            await_startup_outcome(health, Duration::from_secs(1), Duration::from_millis(5)).await;
+        assert_eq!(notice, StartupNotice::Ready);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_returns_failed_when_capture_aborts() {
+        let health = StartupHealth::new();
+        health.record_capture_failed("could not load settings");
+        let notice =
+            await_startup_outcome(health, Duration::from_secs(1), Duration::from_millis(5)).await;
+        assert_eq!(notice, StartupNotice::Failed);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_waits_for_late_signal() {
+        // Mirrors the real flow: the spawn_background_tasks task posts
+        // its outcome after the notification probe is already polling.
+        // Without the polling loop the gate would short-circuit to
+        // `Pending` and the user would see the wrong body.
+        let health = StartupHealth::new();
+        let signal = health.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            signal.record_capture_ready();
+        });
+        let notice =
+            await_startup_outcome(health, Duration::from_secs(2), Duration::from_millis(10)).await;
+        assert_eq!(notice, StartupNotice::Ready);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_falls_back_to_pending_after_timeout() {
+        // Wedged init: no outcome posted before the cap. The body must
+        // not claim readiness, but also must not pretend a failure was
+        // recorded — `Pending` is the honest answer.
+        let health = StartupHealth::new();
+        let notice =
+            await_startup_outcome(health, Duration::from_millis(40), Duration::from_millis(10))
+                .await;
+        assert_eq!(notice, StartupNotice::Pending);
+    }
+
+    #[test]
+    fn timeout_constants_are_reasonable() {
+        // Guard against accidental edits that would make the cap so
+        // short that a cold SQLite open always falls back to `Pending`
+        // (defeating the gate), or so long that a real failure never
+        // surfaces a notification within a useful window.
+        assert!(STARTUP_READY_TIMEOUT >= Duration::from_secs(2));
+        assert!(STARTUP_READY_TIMEOUT <= Duration::from_secs(30));
+        assert!(STARTUP_READY_POLL_INTERVAL <= Duration::from_millis(500));
     }
 }
