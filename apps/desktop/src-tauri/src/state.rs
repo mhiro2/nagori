@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
 use nagori_core::{AppError, AppSettings, EntryId, Result};
-use nagori_daemon::{CaptureLoop, MaintenanceService, NagoriRuntime, StartupHealth};
+use nagori_daemon::{
+    CaptureLoop, MaintenanceHealth, MaintenanceReport, MaintenanceService, NagoriRuntime,
+    StartupHealth,
+};
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
@@ -211,6 +214,7 @@ impl AppState {
         let reader = self.capture_reader.clone();
         let search_cache = self.runtime.search_cache_handle();
         let startup_health = self.runtime.startup_health();
+        let capture_health = self.runtime.capture_health();
         let capture = tauri::async_runtime::spawn(async move {
             // Fail closed: refuse to start the capture loop if the persisted
             // settings cannot be loaded — running with `Default` would drop
@@ -224,7 +228,8 @@ impl AppState {
             let settings = runtime.current_settings();
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_window(window)
-                .with_search_cache(search_cache);
+                .with_search_cache(search_cache)
+                .with_capture_health(capture_health);
             let mut shutdown = runtime.shutdown_handle();
             let shutdown_signal = async move { shutdown.cancelled().await };
             if let Err(err) = capture
@@ -244,13 +249,13 @@ impl AppState {
             let store = runtime.store().clone();
             let mut settings_rx = runtime.settings_subscribe();
             let mut shutdown = runtime.shutdown_handle();
+            let health = runtime.maintenance_health();
             let maintenance =
                 MaintenanceService::new(store).with_search_cache(runtime.search_cache_handle());
             loop {
                 let settings = settings_rx.borrow().clone();
-                if let Err(err) = maintenance.run(&settings).await {
-                    tracing::warn!(error = %err, "maintenance_failed");
-                }
+                let outcome = maintenance.run(&settings).await;
+                note_maintenance_outcome(&health, &outcome);
                 tokio::select! {
                     () = shutdown.cancelled() => return,
                     _ = settings_rx.changed() => {},
@@ -360,6 +365,26 @@ pub(crate) fn record_subscriber_settings_load_failure(health: &StartupHealth, er
     tracing::error!(error = %err, "settings_load_failed_aborting_subscribers");
 }
 
+/// Funnels one maintenance iteration's outcome into `MaintenanceHealth` so
+/// `nagori doctor` reflects retention failures on the desktop the same way
+/// it does on the daemon (`serve.rs`). Extracted from the spawn body so the
+/// "did the desktop record the outcome?" contract is pinned by a unit test
+/// instead of living inside `tauri::async_runtime::spawn`, where the prior
+/// inline version dropped maintenance results on the floor and let `nagori
+/// doctor` report `consecutive_failures=0` against a wedged loop.
+pub(crate) fn note_maintenance_outcome(
+    health: &MaintenanceHealth,
+    result: &Result<MaintenanceReport>,
+) {
+    match result {
+        Ok(_) => health.record_success(),
+        Err(err) => {
+            health.record_failure(err.to_string());
+            tracing::warn!(error = %err, "maintenance_failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future;
@@ -464,6 +489,79 @@ mod tests {
         let report = health.report();
         assert!(report.ready);
         assert!(report.last_error.is_none());
+    }
+
+    /// Desktop maintenance loop must record `record_failure` with the
+    /// underlying error string so `nagori doctor` flags a wedged retention
+    /// loop. Previously the desktop dropped the result on the floor and the
+    /// report always showed `consecutive_failures=0`. The helper is the
+    /// single source of truth shared between the spawn body and this test
+    /// — a regression that bypasses it (or swallows the failure) is caught.
+    #[test]
+    fn note_maintenance_outcome_records_failure_string() {
+        let health = MaintenanceHealth::new();
+        let err = AppError::Storage("locked".to_owned());
+        let expected = err.to_string();
+        let result: Result<MaintenanceReport> = Err(err);
+        note_maintenance_outcome(&health, &result);
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 1);
+        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
+    }
+
+    /// A successful run must clear any failure recorded by an earlier
+    /// iteration. The threshold-based `degraded` flag in
+    /// `MaintenanceHealthReport` only resets when the counter does, so a
+    /// helper that forgets to thread `Ok(_)` through `record_success`
+    /// would leave the doctor surface stuck on "degraded" after recovery.
+    #[test]
+    fn note_maintenance_outcome_clears_state_on_success() {
+        let health = MaintenanceHealth::new();
+        note_maintenance_outcome(
+            &health,
+            &Err::<MaintenanceReport, _>(AppError::Storage("transient".to_owned())),
+        );
+        note_maintenance_outcome(&health, &Ok(MaintenanceReport::default()));
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 0);
+        assert!(report.last_error.is_none());
+    }
+
+    /// Parity with the daemon's `serve.rs` path: feeding the same
+    /// outcome stream into either host's `MaintenanceHealth` must produce
+    /// identical `MaintenanceHealthReport`s, so `nagori doctor` reads the
+    /// same fields regardless of whether the desktop or the daemon hosted
+    /// the maintenance loop. The daemon's call sites are
+    /// `health.record_success()` / `health.record_failure(err.to_string())`;
+    /// the desktop helper above is the same two calls in the same order,
+    /// and this test pins that contract so a future refactor that, e.g.,
+    /// reformats the desktop's error string can't drift the two surfaces.
+    #[test]
+    fn maintenance_outcome_matches_daemon_recording() {
+        let desktop_health = MaintenanceHealth::new();
+        let daemon_health = MaintenanceHealth::new();
+
+        let failure = AppError::Storage("disk full".to_owned());
+        let failure_string = failure.to_string();
+        note_maintenance_outcome(&desktop_health, &Err::<MaintenanceReport, _>(failure));
+        daemon_health.record_failure(failure_string.clone());
+        assert_eq!(desktop_health.report(), daemon_health.report());
+
+        note_maintenance_outcome(&desktop_health, &Ok(MaintenanceReport::default()));
+        daemon_health.record_success();
+        assert_eq!(desktop_health.report(), daemon_health.report());
+
+        // Three consecutive failures should flip both reports to
+        // `degraded` simultaneously — same threshold (3) feeds both.
+        for _ in 0..3 {
+            let err = AppError::Storage("disk full".to_owned());
+            note_maintenance_outcome(&desktop_health, &Err::<MaintenanceReport, _>(err));
+            daemon_health.record_failure(failure_string.clone());
+        }
+        let desktop_after = desktop_health.report();
+        let daemon_after = daemon_health.report();
+        assert!(desktop_after.degraded);
+        assert_eq!(desktop_after, daemon_after);
     }
 
     /// The mirror case: if the subscriber's initial `get_settings()`

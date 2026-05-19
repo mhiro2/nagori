@@ -163,6 +163,14 @@ pub fn run() {
             }
 
             spawn_settings_subscribers(app.handle());
+            // Periodically refresh the tray tooltip from `CaptureHealth`
+            // / `MaintenanceHealth` so a degraded loop visibly surfaces
+            // without the user having to re-open `nagori doctor`. The
+            // 5 s cadence is well under the capture loop's degraded
+            // threshold latency (3 ticks * default 500 ms = 1.5 s) but
+            // generous enough that the cost — two mutex locks plus a
+            // tooltip write per tick — is negligible.
+            spawn_tray_health_refresher(app.handle());
 
             // Defer the startup notification until the capture loop has
             // either entered polling or aborted, so the body matches the
@@ -633,6 +641,26 @@ const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// burning CPU.
 const STARTUP_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// After startup reports ready, how long to give the capture loop to
+/// either land a successful tick or accumulate enough failures to flip
+/// `degraded` before resolving the notification body.
+///
+/// `StartupHealth.ready` flips the moment `refresh_settings_from_store`
+/// returns successfully — that happens before the very first polling
+/// tick fires, so a bare `ready` snapshot tells us nothing about
+/// whether the loop is actually going to be able to capture clips.
+/// Without this settle window we'd unconditionally send "Nagori is
+/// running" even while the first three ticks are all about to error,
+/// resurrecting the silent-data-loss bug the gate is supposed to catch.
+///
+/// 2 s comfortably covers four ticks at the default 500 ms cadence —
+/// the loop needs three consecutive failures to flip `degraded` (≈1.5
+/// s), so a true outage is observed before this elapses. If the user
+/// configured a much slower cadence and no tick has fired yet, we fall
+/// back to `Ready`: nagori doctor remains the source of truth once an
+/// outcome lands.
+const CAPTURE_READY_SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Outcome we render into the OS notification. Split out so the body
 /// selection is unit-testable without spinning up a Tauri runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -640,6 +668,13 @@ enum StartupNotice {
     /// Capture loop entered polling. The notification body confirms
     /// readiness without lying about what's running underneath.
     Ready,
+    /// Capture loop entered polling but already crossed the degraded
+    /// threshold inside the startup window (adapter errors,
+    /// settings-load failures). The notification body has to be honest
+    /// about that — claiming "ready" while every tick is silently
+    /// failing is the original silent-data-loss bug `CaptureHealth`
+    /// exists to surface.
+    ReadyButDegraded,
     /// Capture loop aborted (typically settings-load failure). The body
     /// directs the user to `nagori doctor` for the recorded reason.
     Failed,
@@ -652,6 +687,9 @@ enum StartupNotice {
 const fn startup_notice_body(notice: StartupNotice) -> &'static str {
     match notice {
         StartupNotice::Ready => "Nagori is running. Clipboard history is ready.",
+        StartupNotice::ReadyButDegraded => {
+            "Nagori is running, but clipboard capture is currently degraded. Run `nagori doctor` for details."
+        }
         StartupNotice::Failed => {
             "Nagori started, but clipboard capture failed to initialise. Run `nagori doctor` for details."
         }
@@ -659,6 +697,41 @@ const fn startup_notice_body(notice: StartupNotice) -> &'static str {
             "Nagori started. Clipboard capture is still initialising — run `nagori doctor` if it does not settle."
         }
     }
+}
+
+/// Inter-tick cadence for the tray tooltip refresher. Short enough that
+/// a degraded capture loop is visible within a few seconds of crossing
+/// the threshold (the loop's degraded threshold is 3 ticks at the
+/// default 500 ms cadence — 1.5 s — so 5 s buys us at most one missed
+/// refresh between cliff and reveal), but long enough that the per-poll
+/// cost (two `Mutex` locks + a tray FFI write) stays below the noise
+/// floor.
+const TRAY_HEALTH_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Spawn a background task that periodically refreshes the tray tooltip
+/// from the live `CaptureHealth` / `MaintenanceHealth` snapshots so the
+/// tray surfaces the same degraded state `nagori doctor` would. The
+/// task exits when the runtime's shutdown signal fires.
+fn spawn_tray_health_refresher(handle: &tauri::AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let mut shutdown = state.runtime.shutdown_handle();
+    let app = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        // Initial refresh so a fresh process whose capture loop already
+        // tripped during init does not have to wait a full interval
+        // before the tooltip catches up.
+        tray::refresh_tooltip(&app);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(TRAY_HEALTH_REFRESH_INTERVAL) => {
+                    tray::refresh_tooltip(&app);
+                }
+            }
+        }
+    });
 }
 
 /// Spawn a background task that waits for the capture loop's
@@ -680,12 +753,15 @@ fn spawn_startup_ready_notification(handle: &tauri::AppHandle) {
         return;
     };
     let startup_health = state.runtime.startup_health();
+    let capture_health = state.runtime.capture_health();
     let app = handle.clone();
     tauri::async_runtime::spawn(async move {
         let notice = await_startup_outcome(
             startup_health,
+            capture_health,
             STARTUP_READY_TIMEOUT,
             STARTUP_READY_POLL_INTERVAL,
+            CAPTURE_READY_SETTLE_WINDOW,
         )
         .await;
         let _ = app
@@ -697,23 +773,52 @@ fn spawn_startup_ready_notification(handle: &tauri::AppHandle) {
     });
 }
 
-/// Poll a `StartupHealth` handle until it reports an outcome or the
-/// timeout fires. Extracted so the polling cadence and the
-/// timeout-vs-failure branching are unit-testable without a Tauri
-/// runtime or OS notification daemon.
+/// Poll the startup and capture health handles until startup reports an
+/// outcome or the timeout fires. Extracted so the polling cadence, the
+/// timeout-vs-failure branching, and the "ready but already degraded"
+/// case are unit-testable without a Tauri runtime or OS notification
+/// daemon.
+///
+/// `capture_health` is consulted *after* startup reports `ready`: once
+/// startup flips, we keep polling capture for up to
+/// `capture_settle_window` until the loop either lands a successful
+/// tick (`last_success_at` set) or accumulates enough failures to flip
+/// `degraded`. Without that window the body would always claim
+/// readiness even when the first ticks are silently erroring —
+/// `StartupHealth` goes ready the moment settings load returns, which
+/// is before any polling tick has run, so `degraded` is structurally
+/// false at that point regardless of what's about to happen. The
+/// settle window lets the true degraded state surface; if no tick
+/// fires inside the window we fall back to `Ready` and let
+/// `nagori doctor` reflect the eventual outcome.
 async fn await_startup_outcome(
     startup_health: nagori_daemon::StartupHealth,
+    capture_health: nagori_daemon::CaptureHealth,
     timeout: std::time::Duration,
     poll_interval: std::time::Duration,
+    capture_settle_window: std::time::Duration,
 ) -> StartupNotice {
     let started = std::time::Instant::now();
+    let mut ready_observed_at: Option<std::time::Instant> = None;
     loop {
         let report = startup_health.report();
-        if report.ready {
-            return StartupNotice::Ready;
-        }
         if report.last_error.is_some() {
             return StartupNotice::Failed;
+        }
+        if report.ready {
+            let capture = capture_health.report();
+            if capture.degraded {
+                return StartupNotice::ReadyButDegraded;
+            }
+            if capture.last_success_at.is_some() {
+                return StartupNotice::Ready;
+            }
+            let waited = ready_observed_at
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed();
+            if waited >= capture_settle_window {
+                return StartupNotice::Ready;
+            }
         }
         if started.elapsed() >= timeout {
             return StartupNotice::Pending;
@@ -1525,20 +1630,24 @@ mod hotkey_tests {
 #[cfg(test)]
 mod startup_notice_tests {
     use super::{
-        STARTUP_READY_POLL_INTERVAL, STARTUP_READY_TIMEOUT, StartupNotice, await_startup_outcome,
-        startup_notice_body,
+        CAPTURE_READY_SETTLE_WINDOW, STARTUP_READY_POLL_INTERVAL, STARTUP_READY_TIMEOUT,
+        StartupNotice, await_startup_outcome, startup_notice_body,
     };
-    use nagori_daemon::StartupHealth;
+    use nagori_daemon::{CAPTURE_DEGRADED_THRESHOLD, CaptureHealth, StartupHealth};
+    use nagori_ipc::CaptureEventCategory;
     use std::time::Duration;
+    use time::OffsetDateTime;
 
     #[test]
     fn body_distinguishes_each_outcome() {
-        // The three bodies have to read as distinct user-facing
+        // The four bodies have to read as distinct user-facing
         // messages — the whole point of gating the notification is that
-        // "ready" can no longer be claimed when capture aborted. Lock
-        // the strings here so a copy-edit to one doesn't accidentally
-        // collide with another and re-introduce the original bug.
+        // "ready" can no longer be claimed when capture aborted or is
+        // silently degraded. Lock the strings here so a copy-edit to
+        // one doesn't accidentally collide with another and re-introduce
+        // the original bug.
         let ready = startup_notice_body(StartupNotice::Ready);
+        let degraded = startup_notice_body(StartupNotice::ReadyButDegraded);
         let failed = startup_notice_body(StartupNotice::Failed);
         let pending = startup_notice_body(StartupNotice::Pending);
         assert!(ready.contains("ready"));
@@ -1546,6 +1655,8 @@ mod startup_notice_tests {
             !ready.contains("failed"),
             "ready body must not imply failure"
         );
+        assert!(degraded.contains("degraded"));
+        assert!(degraded.contains("nagori doctor"));
         assert!(failed.contains("failed"));
         assert!(failed.contains("nagori doctor"));
         assert!(pending.contains("initialising"));
@@ -1553,26 +1664,78 @@ mod startup_notice_tests {
         // Distinctness: a future edit collapsing two bodies onto the
         // same string would silently reintroduce the "always says
         // ready" UX bug for one of the outcomes.
-        assert_ne!(ready, failed);
-        assert_ne!(ready, pending);
-        assert_ne!(failed, pending);
+        for (a, b) in [
+            (ready, degraded),
+            (ready, failed),
+            (ready, pending),
+            (degraded, failed),
+            (degraded, pending),
+            (failed, pending),
+        ] {
+            assert_ne!(a, b);
+        }
     }
 
     #[tokio::test]
     async fn await_outcome_returns_ready_when_capture_succeeds() {
         let health = StartupHealth::new();
         health.record_capture_ready();
-        let notice =
-            await_startup_outcome(health, Duration::from_secs(1), Duration::from_millis(5)).await;
+        let capture = CaptureHealth::new();
+        // Simulate the loop having landed at least one healthy tick
+        // before the gate inspects health — that's the production
+        // signal that takes precedence over the settle window.
+        capture.record_success(OffsetDateTime::now_utc());
+        let notice = await_startup_outcome(
+            health,
+            capture,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            Duration::from_millis(50),
+        )
+        .await;
         assert_eq!(notice, StartupNotice::Ready);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_returns_ready_but_degraded_when_capture_already_failing() {
+        // Startup announced ready, but the capture loop has already
+        // tripped its degraded threshold inside the init window. The
+        // notification must not claim "ready" — that was the silent
+        // data-loss bug `CaptureHealth` exists to surface.
+        let health = StartupHealth::new();
+        health.record_capture_ready();
+        let capture = CaptureHealth::new();
+        for _ in 0..CAPTURE_DEGRADED_THRESHOLD {
+            capture.record_error(
+                CaptureEventCategory::Adapter,
+                "ax read failed",
+                OffsetDateTime::now_utc(),
+            );
+        }
+        let notice = await_startup_outcome(
+            health,
+            capture,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(notice, StartupNotice::ReadyButDegraded);
     }
 
     #[tokio::test]
     async fn await_outcome_returns_failed_when_capture_aborts() {
         let health = StartupHealth::new();
         health.record_capture_failed("could not load settings");
-        let notice =
-            await_startup_outcome(health, Duration::from_secs(1), Duration::from_millis(5)).await;
+        let capture = CaptureHealth::new();
+        let notice = await_startup_outcome(
+            health,
+            capture,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            Duration::from_millis(50),
+        )
+        .await;
         assert_eq!(notice, StartupNotice::Failed);
     }
 
@@ -1588,8 +1751,16 @@ mod startup_notice_tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             signal.record_capture_ready();
         });
-        let notice =
-            await_startup_outcome(health, Duration::from_secs(2), Duration::from_millis(10)).await;
+        let capture = CaptureHealth::new();
+        capture.record_success(OffsetDateTime::now_utc());
+        let notice = await_startup_outcome(
+            health,
+            capture,
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+        )
+        .await;
         assert_eq!(notice, StartupNotice::Ready);
     }
 
@@ -1599,10 +1770,70 @@ mod startup_notice_tests {
         // not claim readiness, but also must not pretend a failure was
         // recorded — `Pending` is the honest answer.
         let health = StartupHealth::new();
-        let notice =
-            await_startup_outcome(health, Duration::from_millis(40), Duration::from_millis(10))
-                .await;
+        let capture = CaptureHealth::new();
+        let notice = await_startup_outcome(
+            health,
+            capture,
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+        )
+        .await;
         assert_eq!(notice, StartupNotice::Pending);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_waits_for_first_capture_outcome_after_ready() {
+        // Regression: when startup flips ready before any polling tick
+        // has run, `capture_health.degraded` is structurally false
+        // (counter is 0) even if the first three ticks are about to
+        // all error. The gate must keep watching capture until either
+        // a tick succeeds or the threshold flips — short-circuiting on
+        // ready alone resurrects the silent-data-loss bug.
+        let startup = StartupHealth::new();
+        startup.record_capture_ready();
+        let capture = CaptureHealth::new();
+        let signal = capture.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            for _ in 0..CAPTURE_DEGRADED_THRESHOLD {
+                signal.record_error(
+                    CaptureEventCategory::Adapter,
+                    "late adapter error",
+                    OffsetDateTime::now_utc(),
+                );
+            }
+        });
+        let notice = await_startup_outcome(
+            startup,
+            capture,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(notice, StartupNotice::ReadyButDegraded);
+    }
+
+    #[tokio::test]
+    async fn await_outcome_falls_back_to_ready_when_settle_window_elapses_idle() {
+        // The capture loop may be running at a slow cadence (or the
+        // host is genuinely idle) and produce no outcomes inside the
+        // settle window. Treating that as "ready" is the only honest
+        // answer — `nagori doctor` continues to report the eventual
+        // state once a tick lands.
+        let startup = StartupHealth::new();
+        startup.record_capture_ready();
+        let capture = CaptureHealth::new();
+        let notice = await_startup_outcome(
+            startup,
+            capture,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+        )
+        .await;
+        assert_eq!(notice, StartupNotice::Ready);
     }
 
     #[test]
@@ -1610,9 +1841,14 @@ mod startup_notice_tests {
         // Guard against accidental edits that would make the cap so
         // short that a cold SQLite open always falls back to `Pending`
         // (defeating the gate), or so long that a real failure never
-        // surfaces a notification within a useful window.
+        // surfaces a notification within a useful window. The settle
+        // window has to fit inside the cap and be long enough to cover
+        // a few default-cadence ticks (500 ms × 3 = 1.5 s degraded
+        // latency).
         assert!(STARTUP_READY_TIMEOUT >= Duration::from_secs(2));
         assert!(STARTUP_READY_TIMEOUT <= Duration::from_secs(30));
         assert!(STARTUP_READY_POLL_INTERVAL <= Duration::from_millis(500));
+        assert!(CAPTURE_READY_SETTLE_WINDOW >= Duration::from_millis(1_500));
+        assert!(CAPTURE_READY_SETTLE_WINDOW < STARTUP_READY_TIMEOUT);
     }
 }

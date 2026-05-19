@@ -116,6 +116,51 @@ pub fn refresh(app: &AppHandle, capture_enabled: bool) {
     handles.set_capture_label(capture_enabled);
 }
 
+/// Refresh the tray tooltip from the live health snapshots.
+///
+/// The default tooltip ("Nagori clipboard history") makes the tray entry
+/// recognisable when nothing is wrong, but it does not surface the
+/// silent-data-loss case we care about most: capture is still polling,
+/// startup said "ready", and yet every clip is being silently dropped
+/// because the adapter keeps erroring or the user's denylist matches
+/// everything. Reading `CaptureHealth` / `MaintenanceHealth` here lets
+/// the tray reflect the same source of truth as `nagori doctor` and the
+/// gated startup notification — at the cost of one mutex lock per poll
+/// tick, which is negligible.
+pub fn refresh_tooltip(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let capture = state.runtime.capture_health().report();
+    let maintenance = state.runtime.maintenance_health().report();
+    let tooltip = build_tray_tooltip(capture.degraded, maintenance.degraded);
+    if let Err(err) = tray.set_tooltip(Some(tooltip)) {
+        // Failing to set the tooltip is non-fatal — the tray icon still
+        // works, and `nagori doctor` will still surface the underlying
+        // condition. Log so the failure is not invisible.
+        tracing::warn!(error = %err, "tray_set_tooltip_failed");
+    }
+}
+
+/// Choose the tray tooltip body for the current capture / maintenance
+/// health. Extracted so the wording can be unit-tested without spinning
+/// up a Tauri runtime. The "degraded" suffix is appended only when
+/// `nagori doctor` would also flag the row as degraded, so the tray
+/// and CLI never disagree on whether anything is wrong.
+pub(crate) fn build_tray_tooltip(capture_degraded: bool, maintenance_degraded: bool) -> String {
+    match (capture_degraded, maintenance_degraded) {
+        (false, false) => "Nagori clipboard history".to_owned(),
+        (true, false) => "Nagori — clipboard capture degraded (run `nagori doctor`)".to_owned(),
+        (false, true) => "Nagori — retention paused (run `nagori doctor`)".to_owned(),
+        (true, true) => {
+            "Nagori — clipboard capture and retention degraded (run `nagori doctor`)".to_owned()
+        }
+    }
+}
+
 /// Toggle whether the tray icon is currently shown in the OS tray
 /// surface (macOS menu bar, Windows notification area, Linux
 /// `StatusNotifierItem`). Idempotent: calling repeatedly with the same
@@ -167,5 +212,49 @@ fn open_settings(app: &AppHandle) {
         let _ = window.set_focus();
         // The frontend listens for this event and switches the route.
         let _ = app.emit("nagori://navigate", "settings");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_tray_tooltip;
+
+    #[test]
+    fn tooltip_reads_clean_when_nothing_is_degraded() {
+        let tip = build_tray_tooltip(false, false);
+        assert!(tip.contains("Nagori"));
+        assert!(!tip.contains("degraded"));
+        assert!(!tip.contains("paused"));
+    }
+
+    #[test]
+    fn tooltip_flags_capture_degraded() {
+        // Surfaced first because capture-loss is the silent-data-loss
+        // failure mode the user most needs to see; the body must point
+        // them at `nagori doctor` for the recorded category.
+        let tip = build_tray_tooltip(true, false);
+        assert!(tip.contains("capture"));
+        assert!(tip.contains("degraded"));
+        assert!(tip.contains("nagori doctor"));
+    }
+
+    #[test]
+    fn tooltip_flags_maintenance_only() {
+        // Retention paused but capture still healthy: existing history
+        // is being kept around past `max_entries` / retention age, but
+        // new clips still land. The body has to say *retention* so the
+        // user does not think their clipboard is broken.
+        let tip = build_tray_tooltip(false, true);
+        assert!(tip.contains("retention"));
+        assert!(!tip.contains("capture"));
+        assert!(tip.contains("nagori doctor"));
+    }
+
+    #[test]
+    fn tooltip_flags_both_when_both_degraded() {
+        let tip = build_tray_tooltip(true, true);
+        assert!(tip.contains("capture"));
+        assert!(tip.contains("retention"));
+        assert!(tip.contains("nagori doctor"));
     }
 }
