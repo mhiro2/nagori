@@ -4,22 +4,26 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
 
 ## Platform support
 
-Nagori is **macOS-first**. Windows and Linux Wayland are
-**experimental**: the desktop app and CLI daemon build and run on each
-target, and a CLI clipboard round-trip (capture → search → copy back)
-is covered by per-OS smoke tests: macOS and Windows run on PRs that
+Nagori targets macOS, Windows, and Linux Wayland. The desktop app and
+CLI daemon build and run on each, and the clipboard pipeline (capture
+of text / image / file-list, copy-back, and `nagori paste` auto-paste)
+is covered by per-OS CI smoke tests: macOS and Windows run on PRs that
 touch relevant paths (and on every push to `main`), and Linux Wayland
-runs on a nightly schedule. Desktop UI flows, auto-paste, and
-global-shortcut registration are not yet exercised by automated tests
-off macOS, and several integrations remain incomplete (Windows
+runs on a nightly schedule. The desktop shell's palette UI flow is not
+yet exercised by an automated WebView test (tracked separately for
+tauri-driver), and a few platform-specific limitations remain (Windows
 Authenticode signing, GNOME Wayland, X11).
 
 | Platform               | Desktop app  | CLI daemon   | Capture                | Copy back              | Auto-paste        | Release bundle                                |
 | ---------------------- | ------------ | ------------ | ---------------------- | ---------------------- | ----------------- | --------------------------------------------- |
 | macOS (arm64 / x86_64) | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (`.app` / `.dmg`, in-app update probe)    |
-| Windows (x86_64)       | Experimental | Experimental | Text + image + files   | Text + image + files   | Supported         | Yes (unsigned NSIS, in-app update probe)      |
-| Linux Wayland (x86_64) | Experimental | Experimental | Text + image + files   | Text + image + files   | Requires `wtype`  | Yes (`deb` + `AppImage`, in-app update probe) |
+| Windows (x86_64)       | Supported    | Supported    | Supported              | Supported              | Supported         | Yes (unsigned NSIS, in-app update probe)      |
+| Linux Wayland (x86_64) | Supported    | Supported    | Supported              | Supported              | Supported (note*) | Yes (`deb` + `AppImage`, in-app update probe) |
 | Linux X11              | Unsupported  | Unsupported  | Unsupported            | Unsupported            | Unsupported       | n/a                                           |
+
+*Linux auto-paste depends on the `wtype` binary being on `$PATH` and on
+the compositor advertising `zwp_virtual_keyboard_manager_v1`; see
+[Linux requirements](#linux-requirements) below.
 
 macOS-only capabilities: secure-input detection and sleep/wake
 `changeCount` resynchronisation. The Tauri updater plugin is registered
