@@ -6,7 +6,10 @@ pub mod search_cache;
 pub mod serve;
 
 pub use capture_loop::CaptureLoop;
-pub use health::{MAINTENANCE_DEGRADED_THRESHOLD, MaintenanceHealth, StartupHealth};
+pub use health::{
+    CAPTURE_DEGRADED_THRESHOLD, CaptureHealth, MAINTENANCE_DEGRADED_THRESHOLD, MaintenanceHealth,
+    StartupHealth,
+};
 pub use maintenance::{MaintenanceReport, MaintenanceService};
 pub use runtime::{NagoriRuntime, NagoriRuntimeBuilder, ShutdownHandle};
 pub use search_cache::{

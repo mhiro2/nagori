@@ -6,10 +6,13 @@ use nagori_core::{
     EntryRepository, Result, SecretAction, Sensitivity, SensitivityClassifier,
     StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
+use nagori_ipc::CaptureEventCategory;
 use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
+use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use crate::health::CaptureHealth;
 use crate::search_cache::{SharedSearchCache, lock_or_recover};
 
 /// Minimum gap between two consecutive warnings of the same error kind.
@@ -105,6 +108,24 @@ impl CaptureErrorKind {
             Self::InvalidInput => "invalid_input",
             Self::Unsupported => "unsupported",
             Self::Configuration => "configuration",
+        }
+    }
+
+    /// Map an internal error bucket onto the public `CaptureHealth`
+    /// category. `Configuration` lands as `SettingsLoad` because the only
+    /// in-loop site that returns `AppError::Configuration` is
+    /// `SensitivityClassifier::try_new` (uncompilable `regex_denylist`),
+    /// which means classification is silently failing on every clip.
+    /// `Storage` is broken out so the doctor hint points at disk / DB
+    /// rather than clipboard permissions. Everything else collapses to
+    /// `Adapter`: from the user's perspective the loop has lost
+    /// visibility into the clipboard regardless of which sub-component
+    /// broke.
+    const fn capture_event_category(self) -> CaptureEventCategory {
+        match self {
+            Self::Configuration => CaptureEventCategory::SettingsLoad,
+            Self::Storage => CaptureEventCategory::Storage,
+            _ => CaptureEventCategory::Adapter,
         }
     }
 }
@@ -230,6 +251,13 @@ pub struct CaptureLoop<R, E, A> {
     /// still fires regardless: those system password UIs are positively
     /// identified, not assumed.
     secure_focus_fail_closed_enabled: bool,
+    /// Optional shared snapshot for steady-state capture health. When
+    /// wired (production via `with_capture_health`), every `capture_once`
+    /// outcome — success, intentional drop, error — is reflected here so
+    /// `nagori doctor` and the desktop tray can flag a silently filtering
+    /// loop. `None` in unit tests keeps the loop independent of the
+    /// daemon's shared-state plumbing.
+    capture_health: Option<CaptureHealth>,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -256,6 +284,7 @@ where
             last_content_hash: None,
             force_content_check: false,
             secure_focus_fail_closed_enabled: true,
+            capture_health: None,
         }
     }
 
@@ -301,10 +330,31 @@ where
         } else {
             self.suppressed_warns[slot] = self.suppressed_warns[slot].saturating_add(1);
         }
+        if let Some(health) = &self.capture_health {
+            health.record_error(
+                kind.capture_event_category(),
+                err.to_string(),
+                OffsetDateTime::now_utc(),
+            );
+        }
     }
 
-    const fn note_capture_success(&mut self) {
+    fn note_capture_success(&mut self) {
         self.consecutive_failures = 0;
+        if let Some(health) = &self.capture_health {
+            health.record_success(OffsetDateTime::now_utc());
+        }
+    }
+
+    /// Record an intentional in-loop drop (oversized payload, policy /
+    /// secret refusal). Does not bump the failure counter — the loop did
+    /// its job — but updates the shared `CaptureHealth` snapshot so the
+    /// UI can distinguish "we lost visibility" from "we're rejecting on
+    /// purpose".
+    fn note_capture_drop(&self, category: CaptureEventCategory) {
+        if let Some(health) = &self.capture_health {
+            health.record_drop(category, OffsetDateTime::now_utc());
+        }
     }
 
     /// Compute the inter-tick sleep applied after a failed
@@ -338,6 +388,19 @@ where
     #[must_use]
     pub fn with_search_cache(mut self, cache: SharedSearchCache) -> Self {
         self.search_cache = Some(cache);
+        self
+    }
+
+    /// Wire a shared [`CaptureHealth`] handle so every `capture_once`
+    /// outcome is reflected in the daemon's per-tick health snapshot.
+    /// Production callers (`serve.rs` for the daemon, `state.rs` for the
+    /// desktop) wire this from `runtime.capture_health()` so the
+    /// `nagori doctor` capture row and the desktop tray see one source
+    /// of truth; tests omit it and exercise the capture path in
+    /// isolation.
+    #[must_use]
+    pub fn with_capture_health(mut self, health: CaptureHealth) -> Self {
+        self.capture_health = Some(health);
         self
     }
 
@@ -545,6 +608,7 @@ where
                         Some(&format!("oversized:pre_read:{observed_bytes}>{limit}")),
                     )
                     .await;
+                self.note_capture_drop(CaptureEventCategory::OversizedDrop);
                 // Anchor the sequence so the next poll skips this same
                 // oversized clip without re-probing pasteboard sizes.
                 self.force_content_check = false;
@@ -582,6 +646,7 @@ where
                 .audit
                 .record("capture_skipped", Some(entry.id), Some("kind_disabled"))
                 .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(None);
         }
         // Size each entry by the bytes that will actually land in storage,
@@ -608,6 +673,7 @@ where
                 .audit
                 .record("capture_skipped", Some(entry.id), Some("oversized"))
                 .await;
+            self.note_capture_drop(CaptureEventCategory::OversizedDrop);
             return Ok(None);
         }
         // Fail closed if the persisted regex_denylist contains an
@@ -626,6 +692,7 @@ where
                     Some(&format!("{:?}", classification.reasons)),
                 )
                 .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(None);
         }
         if let Some(preview) = classification.redacted_preview {
@@ -644,6 +711,7 @@ where
                     Some(&format!("{:?}", classification.reasons)),
                 )
                 .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(None);
         }
 
@@ -817,7 +885,9 @@ mod tests {
             capture_kinds: std::iter::once(nagori_core::ContentKind::Image).collect(),
             ..AppSettings::default()
         };
-        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+        let health = CaptureHealth::new();
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings)
+            .with_capture_health(health.clone());
         clipboard
             .write_text("plain text should be ignored")
             .await
@@ -825,6 +895,16 @@ mod tests {
 
         assert!(loop_.capture_once().await.unwrap().is_none());
         assert!(store.list_recent(10).await.unwrap().is_empty());
+        // The kind filter is part of capture *policy*, not an error
+        // condition. The drop must land as `Policy` so the doctor /
+        // tray hint matches `entry_blocked` / `secret_blocked` rather
+        // than silently disappearing.
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 0);
+        assert_eq!(
+            report.last_event_category,
+            Some(nagori_ipc::CaptureEventCategory::Policy)
+        );
     }
 
     #[tokio::test]
@@ -2169,5 +2249,40 @@ mod tests {
         // The Storage suppression is independent and its in-flight
         // suppressed counter is unaffected by the invalid-input emit.
         assert_eq!(loop_.suppressed_warns[storage_slot], 1);
+    }
+
+    #[tokio::test]
+    async fn note_capture_error_routes_storage_failures_to_storage_category() {
+        // A wedged-disk / DB-locked failure has to land as `Storage`,
+        // not `Adapter` — otherwise the doctor / tray hint would point
+        // the user at re-granting clipboard permissions instead of
+        // checking disk space. Lock the boundary here so a future edit
+        // to the error→category map can't silently collapse Storage
+        // back into the generic adapter bucket.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let health = CaptureHealth::new();
+        let mut loop_ =
+            loop_for(clipboard, store, AppSettings::default()).with_capture_health(health.clone());
+
+        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::Platform("ax read failed".to_owned()));
+        let report = health.report();
+        // The most recent non-success outcome was the Platform error,
+        // which collapses into `Adapter` — verifies the catch-all arm
+        // still functions alongside the carved-out Storage variant.
+        assert_eq!(
+            report.last_event_category,
+            Some(nagori_ipc::CaptureEventCategory::Adapter)
+        );
+
+        // And the Storage variant routes correctly when it is the
+        // most recent.
+        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        let report = health.report();
+        assert_eq!(
+            report.last_event_category,
+            Some(nagori_ipc::CaptureEventCategory::Storage)
+        );
     }
 }

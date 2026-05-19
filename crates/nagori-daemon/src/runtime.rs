@@ -24,7 +24,7 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::error;
 
-use crate::health::{MaintenanceHealth, StartupHealth};
+use crate::health::{CaptureHealth, MaintenanceHealth, StartupHealth};
 use crate::search_cache::{
     CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
 };
@@ -56,6 +56,12 @@ pub struct NagoriRuntime {
     /// read by `nagori doctor` plus the desktop's gated "ready"
     /// notification.
     startup_health: StartupHealth,
+    /// Shared health snapshot of the capture loop's per-tick outcomes.
+    /// Updated from the process hosting the capture task (`serve.rs` for
+    /// the daemon, `state.rs` for the desktop); read by the IPC `Health`
+    /// and `Doctor` handlers so dashboards can distinguish "retention is
+    /// wedged" from "every clip is being dropped".
+    capture_health: CaptureHealth,
     /// Static report of what the host adapter can do. Populated by the
     /// caller (typically `nagori-platform-native::build_native_runtime`)
     /// so the daemon doesn't have to take a dep on the per-OS crates;
@@ -103,6 +109,16 @@ impl NagoriRuntime {
     /// definitive outcome.
     pub fn startup_health(&self) -> StartupHealth {
         self.startup_health.clone()
+    }
+
+    /// Shared handle to the capture loop's steady-state health snapshot.
+    /// Whichever process hosts the capture task records per-tick outcomes
+    /// (success / adapter error / oversized drop / policy refusal /
+    /// settings-load error) on this handle; the IPC `Health` and `Doctor`
+    /// handlers read it so a silently filtering loop is visible in
+    /// `nagori doctor` without grepping logs.
+    pub fn capture_health(&self) -> CaptureHealth {
+        self.capture_health.clone()
     }
 
     /// Snapshot of the host adapter's capability matrix.
@@ -331,13 +347,16 @@ impl NagoriRuntime {
             }
             IpcRequest::Health => {
                 let maintenance = self.maintenance_health.report();
-                // `ok` flips to false once retention is wedged so simple
-                // health probes (load balancers, oncall checks) light up
-                // without needing to inspect the nested struct.
+                let capture = self.capture_health.report();
+                // `ok` flips to false once *either* retention or steady-
+                // state capture is wedged so simple health probes (load
+                // balancers, oncall checks) light up without needing to
+                // inspect the nested struct.
                 Ok(IpcResponse::Health(HealthResponse {
-                    ok: !maintenance.degraded,
+                    ok: !maintenance.degraded && !capture.degraded,
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     maintenance,
+                    capture,
                 }))
             }
             IpcRequest::Shutdown => {
@@ -391,6 +410,7 @@ impl NagoriRuntime {
             ai_provider: provider_label,
             permissions,
             maintenance: self.maintenance_health.report(),
+            capture: self.capture_health.report(),
             startup: self.startup_health.report(),
             update_channel: settings.update_channel.as_str().to_owned(),
             latest_version,
@@ -849,6 +869,7 @@ impl NagoriRuntimeBuilder {
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
             startup_health: StartupHealth::new(),
+            capture_health: CaptureHealth::new(),
             capabilities,
         }
     }

@@ -975,6 +975,26 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                 "maintenance\t{state}\tconsecutive_failures={}{suffix}",
                 maintenance.consecutive_failures
             );
+            // Steady-state capture-loop health. `degraded` flips once
+            // the per-tick failure counter crosses the daemon's threshold;
+            // the category column distinguishes "we lost visibility"
+            // (`adapter` / `settings_load` / `storage`) from "we're
+            // rejecting on purpose" (`policy` / `oversized_drop`) so an
+            // operator can tell a permission outage apart from a
+            // too-tight denylist or a wedged disk.
+            let capture = &report.capture;
+            let capture_state = if capture.degraded { "degraded" } else { "ok" };
+            let capture_category = capture
+                .last_event_category
+                .map_or("none", format_capture_event_category);
+            let capture_suffix = capture
+                .last_error
+                .as_deref()
+                .map_or_else(String::new, |msg| format!("\t{msg}"));
+            println!(
+                "capture\t{capture_state}\tconsecutive_failures={}\tlast_event={capture_category}{capture_suffix}",
+                capture.consecutive_failures
+            );
             // Capture loop's pre-poll init status. `ready=true` means the
             // host process loaded settings and entered polling; a
             // recorded `last_error` is the silent-abort case the desktop
@@ -993,6 +1013,22 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Render a `CaptureEventCategory` as the stable `snake_case` token used
+/// in `nagori doctor` output. Kept separate from the enum's `Display`
+/// (which `serde` already provides via `rename_all = "snake_case"`) so
+/// the text formatter doesn't reach through `serde_json` for every
+/// doctor row.
+const fn format_capture_event_category(category: nagori_ipc::CaptureEventCategory) -> &'static str {
+    use nagori_ipc::CaptureEventCategory;
+    match category {
+        CaptureEventCategory::SettingsLoad => "settings_load",
+        CaptureEventCategory::Adapter => "adapter",
+        CaptureEventCategory::Storage => "storage",
+        CaptureEventCategory::Policy => "policy",
+        CaptureEventCategory::OversizedDrop => "oversized_drop",
+    }
 }
 
 fn print_capabilities(caps: &PlatformCapabilities, format: OutputFormat) -> Result<()> {

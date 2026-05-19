@@ -86,11 +86,18 @@ permission status (TCC kinds on macOS; Clipboard / Accessibility =
 
 When `nagori doctor` successfully connects to a daemon via
 `--ipc <endpoint>` (or runs alongside the desktop app's in-process
-runtime), two extra health rows are included in the daemon-driven
+runtime), three extra health rows are included in the daemon-driven
 report:
 
 - `maintenance\t<ok|degraded>\tconsecutive_failures=N[\t<last error>]`
   — retention loop status (cleared on the next successful run).
+- `capture\t<ok|degraded>\tconsecutive_failures=N\tlast_event=<category>[\t<last error>]`
+  — steady-state capture-loop status. `consecutive_failures` counts
+  adapter / settings-load / storage errors (intentional drops do not
+  contribute); `last_event` is the most recent non-success category,
+  one of `none`, `adapter`, `settings_load`, `storage`, `policy`,
+  `oversized_drop`. The desktop tray surfaces the same degraded state
+  in its tooltip so the CLI and tray never disagree.
 - `startup\t<ready|failed|pending>[\t<last error>]` — outcome of the
   capture loop's pre-poll initialisation. `pending` means the host
   process is still loading settings; `failed` means the loop aborted

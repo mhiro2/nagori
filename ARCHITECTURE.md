@@ -1019,9 +1019,10 @@ text. See [`docs/cli.md`](./docs/cli.md) for the full command list.
 
 **Doctor.** `nagori doctor` prints version, paths, daemon status,
 permission states (Accessibility, Input Monitoring, Notifications,
-AutoLaunch), and two background-health rows: `maintenance` for the
-retention loop and `startup` for the capture loop's pre-poll
-initialisation. The canonical first step for support tickets.
+AutoLaunch), and three background-health rows: `maintenance` for the
+retention loop, `capture` for the steady-state capture loop, and
+`startup` for the capture loop's pre-poll initialisation. The
+canonical first step for support tickets.
 
 **Startup health.** `NagoriRuntime::startup_health()` returns a
 shared `StartupHealth` snapshot. The host process (`serve.rs` for the
@@ -1033,6 +1034,21 @@ history is ready." notification while capture quietly never started.
 The snapshot is sticky after the first outcome, so transient
 re-inits cannot mask the original failure — both `nagori doctor` and
 the desktop's gated startup notification read the same signal.
+
+**Capture health.** `NagoriRuntime::capture_health()` returns a shared
+`CaptureHealth` snapshot covering the capture loop's *steady-state*
+polling (where `StartupHealth` covers one-shot pre-poll init). The
+loop posts `record_success` on every healthy tick, `record_error` with
+an `Adapter` / `SettingsLoad` category on reader / classifier
+failures, and `record_drop` with a `Policy` / `OversizedDrop` category
+on intentional refusals. The failure counter and the drop category
+are tracked separately so a burst of policy drops cannot mask a real
+adapter outage; once the counter crosses
+`CAPTURE_DEGRADED_THRESHOLD`, both `nagori doctor` and the desktop
+tray tooltip flip to degraded with the recorded category, and the
+startup-ready notification body switches to "Nagori is running, but
+clipboard capture is currently degraded." instead of falsely claiming
+readiness.
 
 ---
 

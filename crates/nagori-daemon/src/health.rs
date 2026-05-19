@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use nagori_ipc::{MaintenanceHealthReport, StartupHealthReport};
+use nagori_ipc::{
+    CaptureEventCategory, CaptureHealthReport, MaintenanceHealthReport, StartupHealthReport,
+};
+use time::OffsetDateTime;
 
 /// After this many consecutive failed maintenance runs the loop is
 /// reported as `degraded` to clients (`nagori health`, `nagori doctor`).
@@ -10,6 +13,22 @@ use nagori_ipc::{MaintenanceHealthReport, StartupHealthReport};
 /// outage (locked DB, FTS5 corruption, missing migrations) that the
 /// operator needs to know about by polling rather than tailing logs.
 pub const MAINTENANCE_DEGRADED_THRESHOLD: u32 = 3;
+
+/// After this many consecutive `capture_once` errors the capture loop is
+/// reported as `degraded` to clients (`nagori doctor`, desktop tray
+/// tooltip).
+///
+/// Capture errors are noisier than maintenance failures (a single AX
+/// flake or pasteboard read hiccup is normal), so the threshold sits at
+/// the same value the loop's internal exponential backoff uses
+/// (`BACKOFF_AFTER_CONSECUTIVE_FAILURES`) — once the loop itself has
+/// decided the failure is sustained enough to slow polling down, the
+/// health surface treats it as degraded too. Intentional drops
+/// (oversized payload, policy / secret refusal) do *not* count against
+/// this counter; they're recorded on `CaptureHealth` with a category
+/// instead so the UI can distinguish "we're losing visibility" from
+/// "we're rejecting on purpose".
+pub const CAPTURE_DEGRADED_THRESHOLD: u32 = 3;
 
 /// Shared health snapshot of the maintenance background loop.
 ///
@@ -162,6 +181,117 @@ impl StartupHealth {
     }
 }
 
+/// Shared health snapshot of the capture loop's per-tick outcomes.
+///
+/// The maintenance and startup surfaces above cover periodic retention
+/// runs and the one-shot pre-poll init. Neither catches the steady-state
+/// failure mode this struct exists to surface: a capture loop that has
+/// entered polling but is silently dropping every clip — either because the
+/// adapter keeps erroring (revoked permissions, wedged `AppKit`) or
+/// because the user's `max_entry_size_bytes` / `regex_denylist` /
+/// `secret_handling=block` settings reject every observed sequence.
+/// Without a category, `nagori doctor` and the desktop tray can't
+/// distinguish "we lost visibility" from "we're filtering on purpose",
+/// and the user perceives both as "nothing gets saved".
+///
+/// `record_success(at)` updates the last-success anchor and resets the
+/// failure counter. `record_error(category, message, at)` bumps the
+/// counter and stores the latest error + category. `record_drop(
+/// category, at)` records an intentional drop without incrementing the
+/// failure counter — the category is still updated so the UI can flag
+/// "the loop is running but everything is being filtered out". The
+/// failure counter and the drop category are tracked separately so a
+/// burst of policy drops can't shadow a real adapter outage.
+///
+/// As with the other health surfaces, the lock is held briefly enough
+/// that `std::sync::Mutex` over an async lock is fine (no awaits while
+/// held), and a poisoned mutex is recovered so a previous panic cannot
+/// permanently break the health endpoint.
+#[derive(Debug, Default, Clone)]
+pub struct CaptureHealth {
+    inner: Arc<Mutex<CaptureInner>>,
+}
+
+#[derive(Debug, Default)]
+struct CaptureInner {
+    last_success_at: Option<OffsetDateTime>,
+    consecutive_failures: u32,
+    last_error: Option<String>,
+    last_event_category: Option<CaptureEventCategory>,
+    last_event_at: Option<OffsetDateTime>,
+}
+
+impl CaptureHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a `capture_once` tick produced or skipped a clip
+    /// without erroring. Anchors `last_success_at` so the UI can render
+    /// "last captured 3 minutes ago" without the loop having to plumb
+    /// its own clock, and clears the consecutive-failures counter so a
+    /// recovered adapter immediately reads `degraded=false`.
+    ///
+    /// The drop category is intentionally *not* cleared: a steady run
+    /// of successful captures should not erase the fact that the most
+    /// recent observable event was, say, an oversized drop — readers
+    /// only care about "what was the most recent non-success outcome".
+    pub fn record_success(&self, at: OffsetDateTime) {
+        let mut guard = self.lock();
+        guard.last_success_at = Some(at);
+        guard.consecutive_failures = 0;
+        guard.last_error = None;
+    }
+
+    /// Record an error-class capture outcome (adapter failure,
+    /// settings-load error). Bumps the consecutive-failures counter,
+    /// captures the error message, and records the category + observed
+    /// time so the UI can show *why* the capture loop is degraded.
+    pub fn record_error(
+        &self,
+        category: CaptureEventCategory,
+        message: impl Into<String>,
+        at: OffsetDateTime,
+    ) {
+        let mut guard = self.lock();
+        guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
+        guard.last_error = Some(message.into());
+        guard.last_event_category = Some(category);
+        guard.last_event_at = Some(at);
+    }
+
+    /// Record an intentional drop (oversized payload, policy / secret
+    /// refusal). The failure counter is *not* incremented because the
+    /// loop did its job — but the category + timestamp are preserved so
+    /// the UI can flag "every recent clip was filtered out".
+    pub fn record_drop(&self, category: CaptureEventCategory, at: OffsetDateTime) {
+        let mut guard = self.lock();
+        guard.last_event_category = Some(category);
+        guard.last_event_at = Some(at);
+    }
+
+    /// Wire-format snapshot suitable for inclusion in `HealthResponse` /
+    /// `DoctorReport`.
+    pub fn report(&self) -> CaptureHealthReport {
+        let guard = self.lock();
+        CaptureHealthReport {
+            last_success_at: guard.last_success_at,
+            consecutive_failures: guard.consecutive_failures,
+            degraded: guard.consecutive_failures >= CAPTURE_DEGRADED_THRESHOLD,
+            last_error: guard.last_error.clone(),
+            last_event_category: guard.last_event_category,
+            last_event_at: guard.last_event_at,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CaptureInner> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +353,94 @@ mod tests {
         let report = health.report();
         assert!(!report.ready);
         assert_eq!(report.last_error.as_deref(), Some("settings load aborted"));
+    }
+
+    #[test]
+    fn capture_health_record_error_increments_and_categorises() {
+        let health = CaptureHealth::new();
+        let at = OffsetDateTime::now_utc();
+        health.record_error(CaptureEventCategory::Adapter, "ax read failed", at);
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 1);
+        assert!(!report.degraded);
+        assert_eq!(report.last_error.as_deref(), Some("ax read failed"));
+        assert_eq!(
+            report.last_event_category,
+            Some(CaptureEventCategory::Adapter)
+        );
+        assert_eq!(report.last_event_at, Some(at));
+    }
+
+    #[test]
+    fn capture_health_marks_degraded_at_threshold() {
+        let health = CaptureHealth::new();
+        for _ in 0..CAPTURE_DEGRADED_THRESHOLD {
+            health.record_error(
+                CaptureEventCategory::Adapter,
+                "flake",
+                OffsetDateTime::now_utc(),
+            );
+        }
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, CAPTURE_DEGRADED_THRESHOLD);
+        assert!(report.degraded);
+    }
+
+    #[test]
+    fn capture_health_record_drop_preserves_failure_counter() {
+        // Intentional drops (policy / oversized) must not bump the failure
+        // counter — the loop did its job. The drop category is still
+        // recorded so the UI can distinguish "we lost visibility" from
+        // "we're rejecting on purpose" once both have happened.
+        let health = CaptureHealth::new();
+        health.record_error(
+            CaptureEventCategory::Adapter,
+            "lost",
+            OffsetDateTime::now_utc(),
+        );
+        let at = OffsetDateTime::now_utc();
+        health.record_drop(CaptureEventCategory::OversizedDrop, at);
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 1);
+        assert_eq!(
+            report.last_event_category,
+            Some(CaptureEventCategory::OversizedDrop)
+        );
+        assert_eq!(report.last_event_at, Some(at));
+        // The latest error message is preserved across drops so the UI
+        // can keep showing the underlying adapter outage.
+        assert_eq!(report.last_error.as_deref(), Some("lost"));
+    }
+
+    #[test]
+    fn capture_health_record_success_clears_errors_keeps_drop_category() {
+        // Successful captures reset the failure counter and the cached
+        // error message — but the drop category is preserved so a string
+        // of successes after an oversized drop still surfaces "the most
+        // recent non-success was an oversized payload".
+        let health = CaptureHealth::new();
+        health.record_drop(
+            CaptureEventCategory::OversizedDrop,
+            OffsetDateTime::now_utc(),
+        );
+        health.record_error(
+            CaptureEventCategory::Adapter,
+            "transient",
+            OffsetDateTime::now_utc(),
+        );
+        let success_at = OffsetDateTime::now_utc();
+        health.record_success(success_at);
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 0);
+        assert!(!report.degraded);
+        assert!(report.last_error.is_none());
+        assert_eq!(report.last_success_at, Some(success_at));
+        // Drop / error category is preserved across the success — readers
+        // only care about the most recent non-success outcome.
+        assert_eq!(
+            report.last_event_category,
+            Some(CaptureEventCategory::Adapter)
+        );
     }
 
     #[test]

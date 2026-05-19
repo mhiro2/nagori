@@ -619,6 +619,7 @@ mod tests {
                 ok: true,
                 version: "test-version".to_owned(),
                 maintenance: crate::MaintenanceHealthReport::default(),
+                capture: crate::CaptureHealthReport::default(),
             })
         })
         .await;
@@ -1035,6 +1036,7 @@ mod tests_windows {
                     ok: true,
                     version: "pipe-test".to_owned(),
                     maintenance: crate::MaintenanceHealthReport::default(),
+                    capture: crate::CaptureHealthReport::default(),
                 })
             })
             .await;

@@ -284,6 +284,7 @@ fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run_daemon<R>(
     runtime: NagoriRuntime,
     reader: R,
@@ -310,6 +311,7 @@ where
         let settings_rx = settings_rx.clone();
         let window = window.clone();
         let search_cache = runtime.search_cache_handle();
+        let capture_health = runtime.capture_health();
         let secure_focus_fail_closed = config.secure_focus_fail_closed;
         // `refresh_settings_from_store` already succeeded above, so the
         // daemon's pre-poll init is healthy by definition — record it
@@ -319,7 +321,8 @@ where
         tokio::spawn(async move {
             let settings = settings_rx.borrow().clone();
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
-                .with_search_cache(search_cache);
+                .with_search_cache(search_cache)
+                .with_capture_health(capture_health);
             if !secure_focus_fail_closed {
                 capture = capture.without_secure_focus_fail_closed();
             }

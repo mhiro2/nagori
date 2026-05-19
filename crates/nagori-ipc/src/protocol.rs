@@ -163,6 +163,14 @@ pub struct DoctorReport {
     /// having to grep tracing logs.
     #[serde(default)]
     pub maintenance: MaintenanceHealthReport,
+    /// Steady-state health snapshot of the capture loop. Where `startup`
+    /// covers the one-shot pre-poll init, this row captures per-tick
+    /// outcomes once the loop is polling: degraded counter, last
+    /// success / non-success timestamps, and the category of the most
+    /// recent non-success outcome. Surfaced here so a silently filtering
+    /// loop is visible in `nagori doctor` without grepping logs.
+    #[serde(default)]
+    pub capture: CaptureHealthReport,
     /// Outcome of desktop startup's settings-load gate. Covers both the
     /// capture loop's pre-poll initialisation and the settings subscriber's
     /// initial `get_settings()` — either one aborting on a failed load
@@ -186,7 +194,78 @@ pub struct DoctorReport {
     pub latest_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Categorisation of the most recent non-success outcome observed by the
+/// capture loop.
+///
+/// The values cover the failure surfaces that drive silent data loss
+/// differently — adapter / settings-load / storage errors mean the loop
+/// lost a clip even though it tried to land one, while policy /
+/// oversized drops mean the loop saw the clip but refused it. The UI
+/// uses the category to render a tailored hint (re-grant Accessibility,
+/// raise `max_entry_size_bytes`, loosen `regex_denylist`, check disk
+/// space, …) instead of a generic "degraded".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureEventCategory {
+    /// Settings could not be loaded / a runtime `SensitivityClassifier`
+    /// rebuild failed (e.g. uncompilable `regex_denylist`). Treated as
+    /// an error: the loop will keep retrying but every clip is silently
+    /// failing classification.
+    SettingsLoad,
+    /// Reader / window adapter call returned an error (pasteboard read,
+    /// AX query, snapshot capture). The loop cannot tell whether
+    /// anything is on the clipboard, so this is the worst-case silent
+    /// data loss.
+    Adapter,
+    /// Storage layer (`SqliteStore::insert` / blocking task) returned an
+    /// error. The loop saw the clip and classified it successfully but
+    /// could not persist it — disk full, DB locked, schema migration
+    /// blocker. Surfaced separately from `Adapter` so the UI can point
+    /// at storage diagnostics rather than re-granting clipboard
+    /// permissions.
+    Storage,
+    /// Capture policy refused the clip — `Blocked` sensitivity, secret
+    /// handling = `block`, or a `kind_disabled` filter. Not an error;
+    /// the loop did its job. Surfaced so the UI can explain "we saw
+    /// the clip but it matched your denylist".
+    Policy,
+    /// Payload exceeded `max_entry_size_bytes` (either at pre-read or
+    /// after the body landed). Not an error; the loop deliberately
+    /// dropped the clip. Surfaced so the UI can suggest raising the
+    /// limit when the user expected the clip to land.
+    OversizedDrop,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureHealthReport {
+    /// Wall-clock time of the most recent successful `capture_once`
+    /// tick. `None` until the first one lands — combined with `degraded`
+    /// this lets the UI render "never captured" vs. "stopped capturing
+    /// 12 minutes ago".
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_success_at: Option<OffsetDateTime>,
+    /// Consecutive error-class outcomes (`Adapter` / `SettingsLoad` /
+    /// `Storage`). Reset on the next success. Drops (`Policy` /
+    /// `OversizedDrop`) do not contribute because they're intentional.
+    pub consecutive_failures: u32,
+    /// `true` once `consecutive_failures` crosses the daemon's degraded
+    /// threshold; cleared on the next successful tick.
+    pub degraded: bool,
+    /// Most recent error-class message, if any. Cleared on the next
+    /// success so the UI can stop showing a stale error after a flake
+    /// recovers.
+    pub last_error: Option<String>,
+    /// Category of the most recent non-success outcome (error *or*
+    /// drop). Stable across the degraded window so the UI keeps showing
+    /// a consistent "why" until a non-success outcome of a different
+    /// kind lands.
+    pub last_event_category: Option<CaptureEventCategory>,
+    /// Wall-clock time of the most recent non-success outcome.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_event_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaintenanceHealthReport {
     /// Consecutive failed runs of the maintenance loop. Resets to zero
     /// on the next successful run.
@@ -240,6 +319,11 @@ pub struct HealthResponse {
     /// place to learn that retention has stopped advancing.
     #[serde(default)]
     pub maintenance: MaintenanceHealthReport,
+    /// Health snapshot of the capture loop's steady-state polling.
+    /// Lets dashboards distinguish "retention is wedged" from "every
+    /// clip is being dropped" without a second IPC roundtrip.
+    #[serde(default)]
+    pub capture: CaptureHealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
