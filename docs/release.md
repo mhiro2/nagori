@@ -4,7 +4,7 @@ This document captures the workflow `.github/workflows/release.yaml`
 expects to run against and the one-time setup needed for an end-to-end
 signed release. The user-facing surface — install media, platform
 support, the in-app updater — is described in
-[README → Platform support](../README.md#platform-support) and in
+[`docs/platforms.md`](./platforms.md) and in
 [ARCHITECTURE.md §16 → Updater](../ARCHITECTURE.md#16-desktop-shell-integration).
 
 ## What `release.yaml` produces
