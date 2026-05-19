@@ -1017,9 +1017,22 @@ and AI logic stay in `nagori-daemon` / `nagori-core`.
 internal error. Agents and scripts can branch on these without parsing
 text. See [`docs/cli.md`](./docs/cli.md) for the full command list.
 
-**Doctor.** `nagori doctor` prints version, paths, daemon status, and
+**Doctor.** `nagori doctor` prints version, paths, daemon status,
 permission states (Accessibility, Input Monitoring, Notifications,
-AutoLaunch) — the canonical first step for support tickets.
+AutoLaunch), and two background-health rows: `maintenance` for the
+retention loop and `startup` for the capture loop's pre-poll
+initialisation. The canonical first step for support tickets.
+
+**Startup health.** `NagoriRuntime::startup_health()` returns a
+shared `StartupHealth` snapshot. The host process (`serve.rs` for the
+daemon, `state.rs::spawn_background_tasks` for the desktop) records
+either `record_capture_ready()` once settings load and the capture
+loop is entering polling, or `record_capture_failed(reason)` on the
+silent-abort path that used to leave the user staring at a "Clipboard
+history is ready." notification while capture quietly never started.
+The snapshot is sticky after the first outcome, so transient
+re-inits cannot mask the original failure — both `nagori doctor` and
+the desktop's gated startup notification read the same signal.
 
 ---
 

@@ -84,6 +84,24 @@ Print database / IPC paths, capture and AI flags, and per-platform
 permission status (TCC kinds on macOS; Clipboard / Accessibility =
 `Granted` and the rest = `Unsupported` on Windows).
 
+When `nagori doctor` successfully connects to a daemon via
+`--ipc <endpoint>` (or runs alongside the desktop app's in-process
+runtime), two extra health rows are included in the daemon-driven
+report:
+
+- `maintenance\t<ok|degraded>\tconsecutive_failures=N[\t<last error>]`
+  — retention loop status (cleared on the next successful run).
+- `startup\t<ready|failed|pending>[\t<last error>]` — outcome of the
+  capture loop's pre-poll initialisation. `pending` means the host
+  process is still loading settings; `failed` means the loop aborted
+  before polling (typically a settings-load error) and is the same
+  signal the desktop app reads when deciding whether to surface a
+  "Nagori is running" notification.
+
+The local fallback (no daemon available — runs directly against the
+SQLite store) prints settings / paths / permissions only; the health
+rows require a daemon process to report on.
+
 ### `nagori capabilities`
 
 Print the host adapter's static capability matrix — what nagori can

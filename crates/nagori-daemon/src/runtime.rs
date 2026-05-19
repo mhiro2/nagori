@@ -24,7 +24,7 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::error;
 
-use crate::health::MaintenanceHealth;
+use crate::health::{MaintenanceHealth, StartupHealth};
 use crate::search_cache::{
     CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
 };
@@ -50,6 +50,12 @@ pub struct NagoriRuntime {
     /// loop writes from `serve.rs` after each iteration; the IPC
     /// `Health` and `Doctor` handlers read it.
     maintenance_health: MaintenanceHealth,
+    /// Shared one-shot health snapshot of the capture loop's pre-poll
+    /// initialisation. Recorded by whichever process hosts the capture
+    /// task (`serve.rs` for the daemon, `state.rs` for the desktop) and
+    /// read by `nagori doctor` plus the desktop's gated "ready"
+    /// notification.
+    startup_health: StartupHealth,
     /// Static report of what the host adapter can do. Populated by the
     /// caller (typically `nagori-platform-native::build_native_runtime`)
     /// so the daemon doesn't have to take a dep on the per-OS crates;
@@ -88,6 +94,15 @@ impl NagoriRuntime {
     /// degraded retention without round-tripping through the loop.
     pub fn maintenance_health(&self) -> MaintenanceHealth {
         self.maintenance_health.clone()
+    }
+
+    /// Shared handle to the capture loop's startup health snapshot.
+    /// Whichever process hosts the capture task records `ready` or
+    /// `failed(reason)` once initialisation settles; readers (`nagori
+    /// doctor`, the desktop's gated notification) see the first
+    /// definitive outcome.
+    pub fn startup_health(&self) -> StartupHealth {
+        self.startup_health.clone()
     }
 
     /// Snapshot of the host adapter's capability matrix.
@@ -376,6 +391,7 @@ impl NagoriRuntime {
             ai_provider: provider_label,
             permissions,
             maintenance: self.maintenance_health.report(),
+            startup: self.startup_health.report(),
             update_channel: settings.update_channel.as_str().to_owned(),
             latest_version,
         })
@@ -832,6 +848,7 @@ impl NagoriRuntimeBuilder {
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
+            startup_health: StartupHealth::new(),
             capabilities,
         }
     }
@@ -1004,6 +1021,66 @@ mod tests {
             .paste(paste)
             .build_for_test();
         (runtime, clipboard)
+    }
+
+    #[tokio::test]
+    async fn doctor_report_reflects_startup_health_outcome() {
+        // Lock the wiring from `StartupHealth` into the `Doctor` IPC
+        // handler: `nagori doctor` is the operator-facing surface where
+        // a silent capture-init abort has to be visible. Without this
+        // test, dropping the `startup` field from `DoctorReport` (or
+        // forgetting to record it) would compile cleanly and re-introduce
+        // the original "looks ready, isn't" bug.
+        let (runtime, _) = runtime_with_memory_clipboard();
+        let pending = runtime
+            .build_doctor_report()
+            .await
+            .expect("doctor report builds with default startup state");
+        assert!(
+            !pending.startup.ready,
+            "default startup state must report not-ready"
+        );
+        assert!(pending.startup.last_error.is_none());
+
+        runtime
+            .startup_health()
+            .record_capture_failed("could not load settings");
+        let failed = runtime
+            .build_doctor_report()
+            .await
+            .expect("doctor report builds after recording a failure");
+        assert!(!failed.startup.ready);
+        assert_eq!(
+            failed.startup.last_error.as_deref(),
+            Some("could not load settings"),
+        );
+
+        // Late `record_capture_ready` must not flip a recorded failure
+        // back to ready — `StartupHealth` is first-outcome-wins.
+        runtime.startup_health().record_capture_ready();
+        let still_failed = runtime
+            .build_doctor_report()
+            .await
+            .expect("doctor report builds after a no-op ready record");
+        assert!(!still_failed.startup.ready);
+        assert!(still_failed.startup.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn doctor_report_marks_ready_once_capture_records_success() {
+        // Positive case: once the host process records readiness, the
+        // doctor surface reports it without needing any additional
+        // wiring. Pair with the failure test above so a future refactor
+        // that hard-codes `ready: false` or `ready: true` in the
+        // builder is caught.
+        let (runtime, _) = runtime_with_memory_clipboard();
+        runtime.startup_health().record_capture_ready();
+        let report = runtime
+            .build_doctor_report()
+            .await
+            .expect("doctor report builds after recording readiness");
+        assert!(report.startup.ready);
+        assert!(report.startup.last_error.is_none());
     }
 
     #[tokio::test]

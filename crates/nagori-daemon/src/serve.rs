@@ -311,6 +311,11 @@ where
         let window = window.clone();
         let search_cache = runtime.search_cache_handle();
         let secure_focus_fail_closed = config.secure_focus_fail_closed;
+        // `refresh_settings_from_store` already succeeded above, so the
+        // daemon's pre-poll init is healthy by definition — record it
+        // here so `nagori doctor` doesn't transiently report "not ready"
+        // while the capture task is being spawned.
+        runtime.startup_health().record_capture_ready();
         tokio::spawn(async move {
             let settings = settings_rx.borrow().clone();
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)

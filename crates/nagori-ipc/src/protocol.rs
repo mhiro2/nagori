@@ -163,6 +163,18 @@ pub struct DoctorReport {
     /// having to grep tracing logs.
     #[serde(default)]
     pub maintenance: MaintenanceHealthReport,
+    /// Outcome of desktop startup's settings-load gate. Covers both the
+    /// capture loop's pre-poll initialisation and the settings subscriber's
+    /// initial `get_settings()` — either one aborting on a failed load
+    /// degrades the gated "ready" notification. `ready` stays `false`
+    /// until the runtime hosting these tasks posts its outcome, and is
+    /// first-outcome-wins so a subscriber-only failure sticks even if
+    /// the capture task later loads settings on its own retry. The
+    /// desktop's `setup()` fires the "ready" notification only after
+    /// this flips to `ready=true`, so `nagori doctor` and the
+    /// notification share one source of truth instead of drifting.
+    #[serde(default)]
+    pub startup: StartupHealthReport,
     /// Active update channel (e.g. `"stable"`).
     #[serde(default)]
     pub update_channel: String,
@@ -184,6 +196,23 @@ pub struct MaintenanceHealthReport {
     pub degraded: bool,
     /// Most recent failure message, if any. Kept stable across the
     /// degraded window so doctor / health output is reproducible.
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StartupHealthReport {
+    /// `true` once the desktop's startup gate posts a successful
+    /// outcome (today: the capture loop loaded settings and entered
+    /// polling). `false` while initialisation is still pending and
+    /// after a recorded failure — callers should treat `!ready &&
+    /// last_error.is_none()` as "still initialising".
+    pub ready: bool,
+    /// Most recent startup-init failure message, if any. Sticky after
+    /// the first outcome so transient retries can't mask the original
+    /// abort reason (see `StartupHealth::record_capture_failed`). A
+    /// subscriber-side failure can land here even if the capture task
+    /// itself never aborted, because either failure means the desktop
+    /// isn't fully running.
     pub last_error: Option<String>,
 }
 
@@ -348,5 +377,97 @@ impl From<AiOutput> for AiOutputDto {
             created_entry: value.created_entry,
             warnings: value.warnings,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pre-`startup`-field `DoctorReport` JSON must still deserialize against
+    /// the current shape so a newer CLI can read a `Doctor` reply from an
+    /// older daemon without a wire break. The reverse direction (newer daemon,
+    /// older CLI) is covered by `deserializes_unknown_startup_field_is_ignored`.
+    #[test]
+    fn deserializes_doctor_report_without_startup_field() {
+        let legacy_json = r#"{
+            "version": "0.1.0",
+            "db_path": "/tmp/db.sqlite",
+            "socket_path": "/tmp/sock",
+            "capture_enabled": true,
+            "auto_paste_enabled": false,
+            "ai_enabled": false,
+            "local_only_mode": false,
+            "ai_provider": "none",
+            "permissions": []
+        }"#;
+        let report: DoctorReport =
+            serde_json::from_str(legacy_json).expect("legacy DoctorReport must still deserialize");
+        assert!(!report.startup.ready);
+        assert!(report.startup.last_error.is_none());
+        assert!(!report.maintenance.degraded);
+        assert_eq!(report.maintenance.consecutive_failures, 0);
+    }
+
+    /// `DoctorReport` must keep accepting unknown JSON fields so a newer
+    /// daemon can ship extra health rows without breaking older CLI
+    /// builds — this pins the *current* type's behaviour rather than a
+    /// hypothetical frozen legacy shape. If someone later adds
+    /// `#[serde(deny_unknown_fields)]` to `DoctorReport`, this test
+    /// trips and forces a deliberate wire-break decision.
+    #[test]
+    fn doctor_report_ignores_unknown_top_level_fields() {
+        let future_json = r#"{
+            "version": "0.3.0",
+            "db_path": "/tmp/db.sqlite",
+            "socket_path": "/tmp/sock",
+            "capture_enabled": true,
+            "auto_paste_enabled": false,
+            "ai_enabled": false,
+            "local_only_mode": false,
+            "ai_provider": "none",
+            "permissions": [],
+            "future_health_row": {"foo": "bar"},
+            "another_unknown": 42
+        }"#;
+        let report: DoctorReport = serde_json::from_str(future_json)
+            .expect("DoctorReport must silently ignore unknown fields");
+        assert_eq!(report.version, "0.3.0");
+        assert!(!report.startup.ready);
+    }
+
+    /// Equivalent guard for the nested `StartupHealthReport`: extra
+    /// fields within `startup` must be tolerated so the inner schema
+    /// can grow (e.g. an `error_code` companion to `last_error`).
+    #[test]
+    fn startup_health_report_ignores_unknown_inner_fields() {
+        let future_json = r#"{
+            "ready": false,
+            "last_error": "settings load failed",
+            "error_code": "storage_error",
+            "retries": 3
+        }"#;
+        let parsed: StartupHealthReport = serde_json::from_str(future_json)
+            .expect("StartupHealthReport must silently ignore unknown fields");
+        assert!(!parsed.ready);
+        assert_eq!(parsed.last_error.as_deref(), Some("settings load failed"));
+    }
+
+    /// Full round-trip of a populated `startup` field — ensures the
+    /// serialized shape matches the schema embedded in `nagori doctor`
+    /// JSON output and the desktop notification gate.
+    #[test]
+    fn startup_health_report_round_trips() {
+        let original = StartupHealthReport {
+            ready: false,
+            last_error: Some("settings load failed".to_owned()),
+        };
+        let json = serde_json::to_string(&original).expect("StartupHealthReport must serialize");
+        assert!(json.contains("\"ready\":false"));
+        assert!(json.contains("\"last_error\":\"settings load failed\""));
+        let parsed: StartupHealthReport =
+            serde_json::from_str(&json).expect("StartupHealthReport must round-trip");
+        assert!(!parsed.ready);
+        assert_eq!(parsed.last_error.as_deref(), Some("settings load failed"));
     }
 }

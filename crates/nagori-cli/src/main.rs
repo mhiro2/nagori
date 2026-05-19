@@ -975,6 +975,21 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                 "maintenance\t{state}\tconsecutive_failures={}{suffix}",
                 maintenance.consecutive_failures
             );
+            // Capture loop's pre-poll init status. `ready=true` means the
+            // host process loaded settings and entered polling; a
+            // recorded `last_error` is the silent-abort case the desktop
+            // notification gate also branches on.
+            let startup = &report.startup;
+            let startup_state = match (startup.ready, startup.last_error.as_deref()) {
+                (true, _) => "ready",
+                (false, Some(_)) => "failed",
+                (false, None) => "pending",
+            };
+            let startup_suffix = startup
+                .last_error
+                .as_deref()
+                .map_or_else(String::new, |msg| format!("\t{msg}"));
+            println!("startup\t{startup_state}{startup_suffix}");
         }
     }
     Ok(())
