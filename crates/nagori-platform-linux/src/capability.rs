@@ -1,6 +1,6 @@
 //! Static capability report for the Linux Wayland host adapter.
 //!
-//! Linux Wayland is experimental: text / image / file-list capture and
+//! Linux Wayland is supported: text / image / file-list capture and
 //! text + image copy-back work on compositors that expose
 //! `wlr_data_control` / `ext_data_control`, auto-paste is conditional
 //! on the external `wtype` binary, and global hotkeys / frontmost-app
@@ -29,7 +29,7 @@ use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
 pub fn report_capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         platform: Platform::LinuxWayland,
-        tier: SupportTier::Experimental,
+        tier: SupportTier::Supported,
         capture_text: Capability::Available,
         capture_image: Capability::Available,
         capture_files: Capability::Available,
@@ -75,10 +75,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn report_advertises_linux_wayland_experimental_tier() {
+    fn report_advertises_linux_wayland_supported_tier() {
         let caps = report_capabilities();
         assert_eq!(caps.platform, Platform::LinuxWayland);
-        assert_eq!(caps.tier, SupportTier::Experimental);
+        assert_eq!(caps.tier, SupportTier::Supported);
     }
 
     #[test]

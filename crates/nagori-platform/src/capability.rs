@@ -38,8 +38,8 @@ pub enum Platform {
 }
 
 /// Overall maturity of the platform port. Mirrors the README support
-/// table: macOS is first-class, Windows and Linux Wayland are
-/// experimental, everything else is unsupported.
+/// table: macOS, Windows, and Linux Wayland are supported; everything
+/// else is unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportTier {
@@ -81,10 +81,10 @@ pub enum Capability {
         tool: String,
         install_hint: Option<String>,
     },
-    /// Feature is wired up but not hardened on this platform — for
-    /// example the experimental Linux Wayland clipboard or Windows
-    /// file-list capture. Callers should still try it; the UI should
-    /// flag it so users know regressions are possible.
+    /// Feature is wired up but not hardened on this platform. Callers
+    /// should still try it; the UI should flag it so users know
+    /// regressions are possible. Reserved for newly-landed capabilities
+    /// during their stabilisation window.
     Experimental { message: String },
 }
 

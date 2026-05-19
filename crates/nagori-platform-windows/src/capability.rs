@@ -1,6 +1,6 @@
 //! Static capability report for the Windows host adapter.
 //!
-//! Windows is experimental: capture covers text, file lists, and images
+//! Windows is supported: capture covers text, file lists, and images
 //! (encoded as `image/png` from `CF_DIBV5`/`CF_DIB`); copy-back covers
 //! text, file lists, images, and multi-representation Preserve publishes
 //! (`CF_UNICODETEXT` + `CF_HTML` + `Rich Text Format` + `CF_DIBV5` /
@@ -17,7 +17,7 @@ use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
 pub fn report_capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         platform: Platform::Windows,
-        tier: SupportTier::Experimental,
+        tier: SupportTier::Supported,
         capture_text: Capability::Available,
         capture_image: Capability::Available,
         // Windows captures Explorer file selections via CF_HDROP — the
@@ -53,10 +53,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn report_advertises_windows_experimental_tier() {
+    fn report_advertises_windows_supported_tier() {
         let caps = report_capabilities();
         assert_eq!(caps.platform, Platform::Windows);
-        assert_eq!(caps.tier, SupportTier::Experimental);
+        assert_eq!(caps.tier, SupportTier::Supported);
     }
 
     #[test]

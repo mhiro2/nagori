@@ -91,7 +91,7 @@ const macosCapabilities = (): PlatformCapabilities => ({
 
 const windowsCapabilities = (): PlatformCapabilities => ({
   platform: 'windows',
-  tier: 'experimental',
+  tier: 'supported',
   captureText: { status: 'available' },
   captureImage: { status: 'available' },
   captureFiles: { status: 'available' },
@@ -116,7 +116,7 @@ const windowsCapabilities = (): PlatformCapabilities => ({
 
 const linuxWaylandCapabilities = (): PlatformCapabilities => ({
   platform: 'linuxWayland',
-  tier: 'experimental',
+  tier: 'supported',
   captureText: { status: 'available' },
   captureImage: { status: 'available' },
   captureFiles: { status: 'available' },
@@ -516,7 +516,7 @@ describe('SettingsView Advanced tab — capability table', () => {
     const table = readCapabilityTable(container);
 
     expect(table.platform).toBe('windows');
-    expect(table.tier).toBe('experimental');
+    expect(table.tier).toBe('supported');
 
     const expectedStatus: Record<string, string> = {
       'Capture text': STATUS_BADGE.available,
@@ -546,7 +546,7 @@ describe('SettingsView Advanced tab — capability table', () => {
     const table = readCapabilityTable(container);
 
     expect(table.platform).toBe('linuxWayland');
-    expect(table.tier).toBe('experimental');
+    expect(table.tier).toBe('supported');
 
     const expectedStatus: Record<string, string> = {
       'Capture text': STATUS_BADGE.available,

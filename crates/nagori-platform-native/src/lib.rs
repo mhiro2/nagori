@@ -260,12 +260,12 @@ mod tests {
         #[cfg(target_os = "windows")]
         {
             assert_eq!(caps.platform, Platform::Windows);
-            assert_eq!(caps.tier, SupportTier::Experimental);
+            assert_eq!(caps.tier, SupportTier::Supported);
         }
         #[cfg(target_os = "linux")]
         {
             assert_eq!(caps.platform, Platform::LinuxWayland);
-            assert_eq!(caps.tier, SupportTier::Experimental);
+            assert_eq!(caps.tier, SupportTier::Supported);
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
