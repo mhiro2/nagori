@@ -1,6 +1,7 @@
 mod commands;
 mod dto;
 mod error;
+mod fallback;
 mod state;
 mod tray;
 
@@ -137,15 +138,35 @@ pub fn run() {
             let state = match AppState::try_new() {
                 Ok(state) => state,
                 Err(err) => {
-                    // setup() is called before any UI is mounted, so we
-                    // can't render a recovery dialog. Log to tracing (which
-                    // tauri-plugin-log fans out to the OS log) and to
-                    // stderr so the user gets the actionable hint baked
-                    // into the error — it includes the DB path and the
-                    // exact `mv` to move the file aside.
+                    // The stderr/log lines stay so launchd / login items
+                    // and `journalctl` keep seeing the failure; the
+                    // fallback window then surfaces the same message in
+                    // a GUI surface for users who never see the
+                    // terminal output (the only path a clipboard
+                    // manager normally has to its operator).
                     tracing::error!(error = %err, "startup_failed");
                     eprintln!("nagori: failed to start: {err}");
-                    return Err(Box::new(err));
+                    match fallback::show_startup_fallback_window(app.handle(), &err.to_string()) {
+                        Ok(()) => {
+                            // Keep the app alive so the event loop can
+                            // render the fallback window. `AppState` is
+                            // intentionally left unmanaged: every
+                            // command's `State<'_, AppState>` extractor
+                            // will reject, and `on_run_event` exits the
+                            // process when the user closes the fallback
+                            // window. Skipping the rest of setup keeps
+                            // tray / background tasks / shortcuts from
+                            // panicking against the missing state.
+                            return Ok(());
+                        }
+                        Err(win_err) => {
+                            tracing::warn!(
+                                error = %win_err,
+                                "startup_fallback_window_failed",
+                            );
+                            return Err(Box::new(err));
+                        }
+                    }
                 }
             };
             app.manage(state);
@@ -286,6 +307,21 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
             if let Some(state) = handle.try_state::<AppState>() {
                 state.clear_previous_frontmost();
             }
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { .. },
+            ..
+        } if label == fallback::FALLBACK_WINDOW_LABEL => {
+            // Fallback mode runs without `AppState` and without the
+            // capture / maintenance loops, so there is nothing to
+            // drain — but `perform_exit_cleanup` already guards on
+            // `try_state` so calling `exit` here remains safe. The
+            // user's only path out of the fallback is to close the
+            // window, so closing it must terminate the process; the
+            // hidden main window would otherwise keep the app alive
+            // on macOS (and in the systray on Windows / Linux).
+            handle.exit(0);
         }
         _ => {}
     }

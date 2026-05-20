@@ -1224,6 +1224,21 @@ change.
   emit `nagori://paste_failed`; the palette renders an in-window toast
   with a one-click jump into Settings. No-op silently if notification
   permission is not granted.
+- **Startup fallback window** — when `AppState::try_new()` fails in
+  `setup()` (Linux session whose compositor lacks `wl_data_control` /
+  `ext_data_control`, denied data directory, corrupted SQLite file),
+  the setup closure builds a small `WebviewWindow` labelled `fallback`
+  whose contents are an inline `data:text/html;base64,...` document
+  rendered by `fallback::build_fallback_html`. The page surfaces the
+  annotated `AppError` (the same wording the CLI's
+  `annotate_startup_error` / `annotate_linux_clipboard_error` emit on
+  stderr) and links to `docs/platforms.md`. The error string is
+  HTML-escaped before embedding so a crafted DB path cannot inject
+  markup. `AppState` is intentionally left unmanaged in this branch,
+  background tasks / tray / settings subscribers are skipped, and the
+  fallback arm of `on_run_event` exits the process via
+  `handle.exit(0)` when the user closes the window so the hidden main
+  window cannot keep the app alive on macOS.
 - **Permissions deep link** — the `open_accessibility_settings`
   command shells out to `open(1)` with the
   `x-apple.systempreferences:` URL so the onboarding banner can take

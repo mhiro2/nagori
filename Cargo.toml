@@ -42,7 +42,14 @@ tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tauri = { version = "2", features = ["tray-icon"] }
+# `webview-data-url` is required so the startup fallback window can load
+# its inline error HTML via `WebviewUrl::External(data:text/html;...)` —
+# without it, `WebviewWindowBuilder::build` returns `InvalidWebviewUrl`
+# at runtime ("data URLs are not supported without the `webview-data-url`
+# feature."). Tauri reuses the main-app CSP for the injected document, so
+# the existing `style-src 'unsafe-inline'` keeps the fallback's inline
+# `<style>` block valid even though no IPC is wired into that window.
+tauri = { version = "2", features = ["tray-icon", "webview-data-url"] }
 tauri-build = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"

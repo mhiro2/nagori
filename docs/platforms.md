@@ -74,7 +74,10 @@ reports trace back to one of them.
   compositor lacks the required protocol and Nagori cannot capture
   the clipboard. Known-good: sway, Hyprland, river, other
   wlroots-based compositors, KDE Plasma 5.27+. Known-bad: GNOME
-  Wayland.
+  Wayland. When the desktop shell hits this case at launch it opens
+  a small fallback window with the same annotated error the CLI
+  prints and a link back here, so launching from a desktop file (no
+  visible stderr) still surfaces the cause.
 - **Verify `wtype` is installed.** `wtype --help` should print usage.
   On Debian/Ubuntu install with `apt install wtype`; on Arch
   `pacman -S wtype`. Nagori's doctor probe uses this same call to
