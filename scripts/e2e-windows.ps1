@@ -554,6 +554,101 @@ exit 1
         throw "image copy-back did not return a 1x1 Bitmap`n  got: '$dim'"
     }
 
+    Step 'multi-representation preserve round-trip (image + text)'
+    # Push CF_BITMAP + CF_UNICODETEXT together in a single `SetDataObject`
+    # call so the daemon's capture pass sees both reps on one snapshot. The
+    # Windows capture path independently probes plain text (arboard
+    # `get_text`) and image (`get_image` → PNG re-encode), so the resulting
+    # entry should expose both `image/png` and `text/plain` in its
+    # `representation_summary`. The copy-back assertion below proves
+    # `write_representations` republishes the full set instead of collapsing
+    # to a single rep on the way out.
+    $multiText = "multi-rep marker $((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')) $((Get-Random))_$((Get-Random))"
+    $EscapedMultiText = $multiText.Replace("'", "''")
+    $PushMultiScript = @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+`$bmp = [System.Drawing.Image]::FromFile('$ImageFixture')
+try {
+    `$do = New-Object System.Windows.Forms.DataObject
+    `$do.SetImage(`$bmp)
+    `$do.SetText('$EscapedMultiText')
+    `$deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt `$deadline) {
+        try { [System.Windows.Forms.Clipboard]::SetDataObject(`$do, `$true); exit 0 }
+        catch [System.Runtime.InteropServices.ExternalException] { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Error 'SetDataObject failed after retries'
+    exit 1
+} finally { `$bmp.Dispose() }
+"@
+    $pushMultiEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($PushMultiScript))
+    & pwsh -Sta -NoProfile -EncodedCommand $pushMultiEncoded | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to push multi-rep DataObject via STA child (exit $LASTEXITCODE)"
+    }
+
+    # Wait for an entry whose representation_summary carries BOTH
+    # `image/png` and `text/plain`. We can't pivot on `kind` alone because
+    # the capture path may pick either content kind as the primary depending
+    # on rep ordering, but the summary is the authoritative inventory.
+    $MultiEntryId = $null
+    $MultiListJson = $null
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $MultiListJson = Invoke-Cli @('list', '--limit', '1', '--json') | ConvertFrom-Json
+            if ($null -ne $MultiListJson -and $MultiListJson.Count -gt 0) {
+                $top = $MultiListJson[0]
+                if ($top.PSObject.Properties['representation_summary']) {
+                    $hasPng = ($top.representation_summary |
+                        Where-Object { $_.mime_type -eq 'image/png' } |
+                        Measure-Object).Count
+                    $hasText = ($top.representation_summary |
+                        Where-Object { $_.mime_type -eq 'text/plain' } |
+                        Measure-Object).Count
+                    if ($hasPng -ge 1 -and $hasText -ge 1) {
+                        $MultiEntryId = $top.id
+                        break
+                    }
+                }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $MultiEntryId) {
+        throw "multi-rep capture failed; latest entry: $($MultiListJson | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    Write-Host "captured multi-rep id=$MultiEntryId"
+
+    # Sentinel: overwrite with plain text so a no-op `copy` would surface as
+    # both Get-Clipboard returning the sentinel and GetImage returning $null.
+    Set-Clipboard -Value 'sentinel-multi-rep'
+    Invoke-CliSilent @('copy', $MultiEntryId)
+
+    # Plain-text rep should be reachable via Get-Clipboard (CF_UNICODETEXT).
+    $pasted = ''
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline) {
+        $pasted = Get-Clipboard -Raw
+        if ($null -eq $pasted) { $pasted = '' }
+        if ($pasted -eq $multiText) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($pasted -ne $multiText) {
+        throw "multi-rep copy-back did not republish CF_UNICODETEXT`n  expected: $multiText`n  actual:   $pasted"
+    }
+
+    # Image rep should be reachable via STA GetImage (CF_DIBV5 → CF_BITMAP
+    # synthesized). Same 1x1 fixture as the image roundtrip above; dimension
+    # is the cheapest proof the bitmap landed.
+    $readMultiEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ReadScript))
+    $dim = (& pwsh -Sta -NoProfile -EncodedCommand $readMultiEncoded | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $dim -ne '1x1') {
+        throw "multi-rep copy-back did not republish the image rep`n  got: '$dim'"
+    }
+
     Step 'graceful shutdown via daemon stop'
     Invoke-CliSilent @('daemon', 'stop')
     $deadline = (Get-Date).AddSeconds(5)
