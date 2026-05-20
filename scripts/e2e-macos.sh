@@ -337,6 +337,180 @@ if ! cmp -s "${PNG}" "${OUT_PNG}"; then
   exit 1
 fi
 
+step "file-list round-trip via NSPasteboardTypeFileURL"
+# Include a space in the filename so the daemon's `Url::from_file_path` /
+# `Url::parse` percent-encoding round-trip on macOS is exercised end-to-end
+# (mirrors the Linux e2e's same-shaped check). The macOS capture path
+# enumerates `pasteboardItems()` and reads `NSPasteboardTypeFileURL` per item,
+# which is what AppleScript's «class furl» publishes when you set the
+# clipboard to a `POSIX file`.
+URI_FILE="${WORK_DIR}/file url-a.txt"
+printf "macos-furl-content" > "${URI_FILE}"
+# No pre-step sentinel: the previous "image copy-back" step already pushed a
+# distinct change-count onto the pasteboard, and `osascript "set the
+# clipboard to ..."` will land its own change-count whether or not the slot
+# is currently text. The copy-back sentinel below is what actually proves
+# `nagori copy` was not a no-op.
+osascript -e "set the clipboard to (POSIX file \"${URI_FILE}\")"
+
+FURL_ENTRY_ID=""
+FURL_LIST_JSON=""
+deadline=$(( $(date +%s) + 15 ))
+while (( $(date +%s) < deadline )); do
+  if FURL_LIST_JSON="$(run_cli list --limit 1 --json 2> "${CLI_ERR}")"; then
+    KIND="$(printf %s "${FURL_LIST_JSON}" | jq -r '.[0].kind // ""')"
+    HAS_URI="$(printf %s "${FURL_LIST_JSON}" \
+      | jq -r '[.[0].representation_summary[] | select(.mime_type == "text/uri-list")] | length')"
+    if [[ "${KIND}" == "FileList" && "${HAS_URI}" == "1" ]]; then
+      FURL_ENTRY_ID="$(printf %s "${FURL_LIST_JSON}" | jq -r '.[0].id')"
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ -z "${FURL_ENTRY_ID}" ]]; then
+  echo "file-list capture failed; latest entry was:" >&2
+  printf %s "${FURL_LIST_JSON}" >&2 || true
+  exit 1
+fi
+echo "captured file-list id=${FURL_ENTRY_ID}"
+
+# Overwrite with plain text so a no-op `nagori copy` would be visible: an
+# AppleScript "as «class furl»" coercion on a text-only pasteboard raises an
+# error, which would propagate through `osascript` as a non-zero exit.
+printf %s "sentinel-not-a-furl" | pbcopy
+run_cli copy "${FURL_ENTRY_ID}" >/dev/null
+
+PASTED_FURL=""
+deadline=$(( $(date +%s) + 5 ))
+while (( $(date +%s) < deadline )); do
+  PASTED_FURL="$(osascript -e 'POSIX path of (the clipboard as «class furl»)' 2>/dev/null || true)"
+  [[ "${PASTED_FURL}" == "${URI_FILE}" ]] && break
+  sleep 0.1
+done
+if [[ "${PASTED_FURL}" != "${URI_FILE}" ]]; then
+  echo "file-list copy-back did not republish the file URL" >&2
+  echo "  expected: ${URI_FILE}" >&2
+  echo "  actual:   ${PASTED_FURL}" >&2
+  exit 1
+fi
+
+step "multi-representation preserve round-trip (HTML + plain)"
+# Push HTML + plain text together on the same NSPasteboard item so the
+# daemon's macOS capture sees both reps on one snapshot:
+#   - `arboard::Clipboard::get_text()` reads NSPasteboardTypeString
+#   - `collect_macos_extras` adds NSPasteboardTypeHTML
+# The resulting entry must carry both `text/html` and `text/plain` in
+# `representation_summary`. The copy-back assertion below proves
+# `write_representations` republishes the full set instead of collapsing
+# to a single rep on the way out. Drive AppKit directly from Swift because
+# `osascript`'s clipboard model is single-coercion (`set the clipboard to
+# ...` overwrites all types on the pasteboard), so it can't compose two
+# pasteboard types in one snapshot.
+MULTI_SUFFIX="$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}${RANDOM}"
+MULTI_TEXT="multi-rep marker ${MULTI_SUFFIX}"
+MULTI_HTML="<p>multi-rep <b>marker</b> ${MULTI_SUFFIX}</p>"
+PUSH_MULTI_SWIFT="${WORK_DIR}/push_multi.swift"
+cat > "${PUSH_MULTI_SWIFT}" <<'SWIFT'
+import AppKit
+guard CommandLine.arguments.count == 3 else {
+    FileHandle.standardError.write(Data("expected <html> <plain> args\n".utf8))
+    exit(2)
+}
+let pb = NSPasteboard.general
+pb.clearContents()
+let html = CommandLine.arguments[1]
+let plain = CommandLine.arguments[2]
+let okHtml = pb.setString(html, forType: .html)
+let okString = pb.setString(plain, forType: .string)
+exit(okHtml && okString ? 0 : 1)
+SWIFT
+if ! swift "${PUSH_MULTI_SWIFT}" "${MULTI_HTML}" "${MULTI_TEXT}" >/dev/null 2>&1; then
+  echo "failed to push HTML+plain onto NSPasteboard via swift" >&2
+  exit 1
+fi
+
+MULTI_ENTRY_ID=""
+MULTI_LIST_JSON=""
+deadline=$(( $(date +%s) + 15 ))
+while (( $(date +%s) < deadline )); do
+  if MULTI_LIST_JSON="$(run_cli list --limit 1 --json 2> "${CLI_ERR}")"; then
+    HAS_HTML="$(printf %s "${MULTI_LIST_JSON}" \
+      | jq -r '[.[0].representation_summary[] | select(.mime_type == "text/html")] | length')"
+    HAS_TEXT="$(printf %s "${MULTI_LIST_JSON}" \
+      | jq -r '[.[0].representation_summary[] | select(.mime_type == "text/plain")] | length')"
+    if [[ "${HAS_HTML}" == "1" && "${HAS_TEXT}" == "1" ]]; then
+      MULTI_ENTRY_ID="$(printf %s "${MULTI_LIST_JSON}" | jq -r '.[0].id')"
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ -z "${MULTI_ENTRY_ID}" ]]; then
+  echo "multi-rep capture failed; latest entry was:" >&2
+  printf %s "${MULTI_LIST_JSON}" >&2 || true
+  exit 1
+fi
+echo "captured multi-rep id=${MULTI_ENTRY_ID}"
+
+# Sentinel overwrite: pbcopy wipes every prior type on the pasteboard, so a
+# no-op `nagori copy` would surface as the html-read-back returning the
+# sentinel (or empty) instead of our HTML marker.
+printf %s "sentinel-pre-multi-rep" | pbcopy
+run_cli copy "${MULTI_ENTRY_ID}" >/dev/null
+
+READ_MULTI_SWIFT="${WORK_DIR}/read_multi.swift"
+# Compare both reps inside Swift so an AppKit-wrapped HTML payload (which
+# can grow extra `<meta>` headers or split across lines on some macOS
+# versions) is still matched correctly via Swift's `String.contains`. A
+# shell `awk` pass over `print`-separated output only captures the first
+# line of each rep and would falsely fail when the marker ends up on a
+# wrapped continuation line.
+cat > "${READ_MULTI_SWIFT}" <<'SWIFT'
+import AppKit
+let args = Array(CommandLine.arguments.dropFirst())
+guard args.count == 2 else {
+    FileHandle.standardError.write(Data("expected <html-suffix> <plain> args\n".utf8))
+    exit(2)
+}
+let expectedSuffix = args[0]
+let expectedPlain = args[1]
+let pb = NSPasteboard.general
+let html = pb.string(forType: .html) ?? ""
+let plain = pb.string(forType: .string) ?? ""
+let htmlOk = html.contains(expectedSuffix)
+let plainOk = plain == expectedPlain
+if htmlOk && plainOk {
+    print("OK")
+    exit(0)
+}
+print("htmlOk=\(htmlOk) plainOk=\(plainOk)")
+print("html=\(html.prefix(400))")
+print("plain=\(plain.prefix(400))")
+exit(1)
+SWIFT
+# Allow up to 15s because the first `swift` invocation has to JIT-compile
+# the script (typically 2–4s on macOS runners) before reading the
+# pasteboard. The daemon writes back synchronously before `nagori copy`
+# returns, so the data is already there — the loop is only here to absorb
+# the Swift startup cost without flaking under CI scheduling jitter.
+MULTI_READ_LOG="${WORK_DIR}/multi-readback.log"
+MULTI_OK=0
+deadline=$(( $(date +%s) + 15 ))
+while (( $(date +%s) < deadline )); do
+  if swift "${READ_MULTI_SWIFT}" "${MULTI_SUFFIX}" "${MULTI_TEXT}" \
+       > "${MULTI_READ_LOG}" 2>&1; then
+    MULTI_OK=1
+    break
+  fi
+  sleep 0.1
+done
+if (( MULTI_OK != 1 )); then
+  echo "multi-rep copy-back did not republish both types" >&2
+  cat "${MULTI_READ_LOG}" >&2 || true
+  exit 1
+fi
+
 step "graceful shutdown via daemon stop"
 run_cli daemon stop >/dev/null
 # Wait for the background process to exit on its own; do not force-kill.
