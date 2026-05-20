@@ -113,7 +113,6 @@ export const zhHant: Messages = {
     },
     privacy: {
       legend: '篩選器',
-      localOnly: '僅本機模式（封鎖自動更新檢查）',
       appDenylist: '應用程式拒絕清單',
       appDenylistHelp: '每行一個來源應用程式名稱。來自這些應用程式的複製不會被擷取。',
       regexDenylist: '正規表示式拒絕清單',
@@ -212,9 +211,8 @@ export const zhHant: Messages = {
     updates: {
       legend: '更新',
       autoCheck: '自動檢查更新',
-      autoCheckHelp: '定期檢查發行來源，發現新版本時提示。未經確認不會自動安裝。',
-      autoCheckLocalOnly:
-        '僅本機模式開啟時此項目停用。請前往 隱私 → 僅本機模式 關閉後才能檢查更新。',
+      autoCheckHelp:
+        '定期檢查發行來源，發現新版本時提示。未經確認不會自動安裝。這是 Nagori 自行發起的唯一一次網路呼叫——關閉後守護程式將完全離線運作。',
       channel: '通道',
       checkNow: '立即檢查更新',
       checking: '檢查中…',

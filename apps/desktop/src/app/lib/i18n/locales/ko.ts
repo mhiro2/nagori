@@ -115,7 +115,6 @@ export const ko: Messages = {
     },
     privacy: {
       legend: '필터',
-      localOnly: '로컬 전용 모드(자동 업데이트 확인 차단)',
       appDenylist: '앱 차단 목록',
       appDenylistHelp: '한 줄에 한 앱 이름. 해당 앱의 복사는 캡처되지 않습니다.',
       regexDenylist: '정규식 차단 목록',
@@ -218,9 +217,7 @@ export const ko: Messages = {
       legend: '업데이트',
       autoCheck: '자동으로 업데이트 확인',
       autoCheckHelp:
-        '릴리스 피드를 주기적으로 확인하고 새 빌드가 있을 때 배너를 표시합니다. 확인 없이 설치되지는 않습니다.',
-      autoCheckLocalOnly:
-        '로컬 전용 모드가 켜져 있는 동안에는 비활성화됩니다. 개인정보 보호 → 로컬 전용 모드를 끄면 업데이트 확인이 허용됩니다.',
+        '릴리스 피드를 주기적으로 확인하고 새 빌드가 있을 때 배너를 표시합니다. 확인 없이 설치되지는 않습니다. Nagori 가 스스로 호출하는 유일한 네트워크 통신이므로, 끄면 데몬은 완전히 오프라인으로 동작합니다.',
       channel: '채널',
       checkNow: '지금 업데이트 확인',
       checking: '확인 중…',

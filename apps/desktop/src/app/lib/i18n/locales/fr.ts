@@ -119,7 +119,6 @@ export const fr: Messages = {
     },
     privacy: {
       legend: 'Filtres',
-      localOnly: 'Mode local uniquement (bloquer les vérifications de mise à jour automatiques)',
       appDenylist: 'Liste de refus d’apps',
       appDenylistHelp:
         'Un nom d’application source par ligne. Les captures depuis ces apps sont ignorées.',
@@ -227,9 +226,7 @@ export const fr: Messages = {
       legend: 'Mises à jour',
       autoCheck: 'Vérifier automatiquement les mises à jour',
       autoCheckHelp:
-        'Interroge le flux de versions régulièrement et affiche une bannière quand une nouvelle build est disponible. Le téléchargement n’est jamais installé sans votre confirmation.',
-      autoCheckLocalOnly:
-        'Désactivé tant que le mode local uniquement est actif. Désactivez-le (Confidentialité → Mode local uniquement) pour autoriser les vérifications.',
+        'Interroge le flux de versions régulièrement et affiche une bannière quand une nouvelle build est disponible. Le téléchargement n’est jamais installé sans votre confirmation. C’est le seul appel réseau que Nagori effectue de lui-même — désactivez-le pour que le démon reste totalement hors ligne.',
       channel: 'Canal',
       checkNow: 'Vérifier maintenant',
       checking: 'Vérification…',

@@ -120,7 +120,6 @@ export const es: Messages = {
     },
     privacy: {
       legend: 'Filtros',
-      localOnly: 'Modo solo local (bloquear comprobaciones automáticas de actualización)',
       appDenylist: 'Lista de apps denegadas',
       appDenylistHelp:
         'Un nombre de aplicación de origen por línea. Las capturas desde estas apps se descartan.',
@@ -229,9 +228,7 @@ export const es: Messages = {
       legend: 'Actualizaciones',
       autoCheck: 'Buscar actualizaciones automáticamente',
       autoCheckHelp:
-        'Consulta el canal de versiones periódicamente y muestra un aviso cuando hay una nueva. La descarga nunca se instala sin tu confirmación.',
-      autoCheckLocalOnly:
-        'Desactivado mientras el modo solo local está activo. Apágalo en Privacidad → Modo solo local para permitir las comprobaciones.',
+        'Consulta el canal de versiones periódicamente y muestra un aviso cuando hay una nueva. La descarga nunca se instala sin tu confirmación. Es la única llamada de red que Nagori realiza por sí mismo: desactívala para que el daemon trabaje totalmente sin conexión.',
       channel: 'Canal',
       checkNow: 'Buscar ahora',
       checking: 'Buscando…',

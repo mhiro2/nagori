@@ -155,7 +155,13 @@ pub struct DoctorReport {
     pub capture_enabled: bool,
     pub auto_paste_enabled: bool,
     pub ai_enabled: bool,
-    pub local_only_mode: bool,
+    /// Surfaces the only background network-touching setting the daemon
+    /// honours today. Doctor prints it so operators can see at a glance
+    /// what (if anything) is allowed to reach the network. `false` means
+    /// neither the startup probe nor doctor's `latest_version` lookup
+    /// run; the manual "Check for updates now" button still works.
+    #[serde(default = "default_auto_update_check_report")]
+    pub auto_update_check: bool,
     pub ai_provider: String,
     pub permissions: Vec<DoctorPermission>,
     /// Health snapshot of the background maintenance loop. Surfaced here
@@ -192,6 +198,13 @@ pub struct DoctorReport {
     /// surfaces that as "(unknown)".
     #[serde(default)]
     pub latest_version: Option<String>,
+}
+
+const fn default_auto_update_check_report() -> bool {
+    // A legacy daemon reply that predates this field still drove the
+    // updater probe by default — match that here so the absence in JSON
+    // doesn't surface as "network disabled" in `nagori doctor`.
+    true
 }
 
 /// Categorisation of the most recent non-success outcome observed by the

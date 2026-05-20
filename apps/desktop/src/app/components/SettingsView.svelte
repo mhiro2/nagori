@@ -521,10 +521,6 @@
     {#if activeTab === "privacy"}
       <fieldset>
         <legend>{t.settings.privacy.legend}</legend>
-        <label>
-          <input type="checkbox" bind:checked={settings.localOnlyMode} />
-          {t.settings.privacy.localOnly}
-        </label>
         <label class="stack">
           {t.settings.privacy.appDenylist}
           <textarea rows="4" bind:value={appDenylistText}></textarea>
@@ -737,18 +733,10 @@
       <fieldset>
         <legend>{t.settings.updates.legend}</legend>
         <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.autoUpdateCheck}
-            disabled={settings.localOnlyMode}
-          />
+          <input type="checkbox" bind:checked={settings.autoUpdateCheck} />
           {t.settings.updates.autoCheck}
         </label>
-        <p class="help">
-          {settings.localOnlyMode
-            ? t.settings.updates.autoCheckLocalOnly
-            : t.settings.updates.autoCheckHelp}
-        </p>
+        <p class="help">{t.settings.updates.autoCheckHelp}</p>
         <p class="help">
           {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
         </p>

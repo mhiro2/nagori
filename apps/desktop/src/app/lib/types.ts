@@ -170,7 +170,6 @@ export type AppSettings = {
   pasteDelayMs: number;
   appDenylist: string[];
   regexDenylist: string[];
-  localOnlyMode: boolean;
   aiProvider: AiProviderSetting;
   aiEnabled: boolean;
   semanticSearchEnabled: boolean;

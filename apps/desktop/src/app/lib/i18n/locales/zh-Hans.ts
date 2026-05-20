@@ -113,7 +113,6 @@ export const zhHans: Messages = {
     },
     privacy: {
       legend: '过滤器',
-      localOnly: '仅本地模式（阻止自动更新检查）',
       appDenylist: '应用拒绝列表',
       appDenylistHelp: '每行填写一个来源应用名。来自这些应用的复制不会被捕获。',
       regexDenylist: '正则表达式拒绝列表',
@@ -212,9 +211,8 @@ export const zhHans: Messages = {
     updates: {
       legend: '更新',
       autoCheck: '自动检查更新',
-      autoCheckHelp: '定期检查发布源，发现新版本时提示。未经确认不会自动安装。',
-      autoCheckLocalOnly:
-        '本地专用模式开启时此项被禁用。前往 隐私 → 本地专用模式 关闭后才能检查更新。',
+      autoCheckHelp:
+        '定期检查发布源，发现新版本时提示。未经确认不会自动安装。这是 Nagori 自行发起的唯一一次网络调用——关闭后守护进程将完全离线运行。',
       channel: '通道',
       checkNow: '立即检查更新',
       checking: '检查中…',

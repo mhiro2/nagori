@@ -949,7 +949,10 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
             println!("capture_enabled\t{}", report.capture_enabled);
             println!("auto_paste_enabled\t{}", report.auto_paste_enabled);
             println!("ai_enabled\t{}", report.ai_enabled);
-            println!("local_only_mode\t{}", report.local_only_mode);
+            // The only background network call the daemon makes is the
+            // updater probe; surface its enablement so operators see at
+            // a glance whether anything is allowed to reach the network.
+            println!("auto_update_check\t{}", report.auto_update_check);
             println!("ai_provider\t{}", report.ai_provider);
             for permission in &report.permissions {
                 let suffix = permission
@@ -1100,7 +1103,7 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     println!("capture_enabled\t{}", settings.capture_enabled);
     println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);
     println!("ai_enabled\t{}", settings.ai_enabled);
-    println!("local_only_mode\t{}", settings.local_only_mode);
+    println!("auto_update_check\t{}", settings.auto_update_check);
     println!("ai_provider\t{provider_label}");
     #[cfg(target_os = "macos")]
     {

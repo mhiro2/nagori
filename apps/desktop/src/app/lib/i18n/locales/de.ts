@@ -119,7 +119,6 @@ export const de: Messages = {
     },
     privacy: {
       legend: 'Filter',
-      localOnly: 'Nur-Lokal-Modus (automatische Update-Prüfungen blockieren)',
       appDenylist: 'App-Sperrliste',
       appDenylistHelp:
         'Ein Quell-App-Name pro Zeile. Erfassungen aus diesen Apps werden verworfen.',
@@ -228,9 +227,7 @@ export const de: Messages = {
       legend: 'Updates',
       autoCheck: 'Automatisch nach Updates suchen',
       autoCheckHelp:
-        'Prüft regelmäßig den Release-Feed und zeigt ein Banner, sobald ein neuer Build verfügbar ist. Der Download wird niemals ohne Ihre Bestätigung installiert.',
-      autoCheckLocalOnly:
-        'Deaktiviert, solange der Nur-Lokal-Modus aktiv ist. Schalten Sie ihn unter Datenschutz → Nur-Lokal-Modus aus, um Update-Prüfungen zuzulassen.',
+        'Prüft regelmäßig den Release-Feed und zeigt ein Banner, sobald ein neuer Build verfügbar ist. Der Download wird niemals ohne Ihre Bestätigung installiert. Dies ist der einzige Netzwerkaufruf, den Nagori von sich aus tätigt — deaktivieren Sie ihn, damit der Daemon vollständig offline bleibt.',
       channel: 'Kanal',
       checkNow: 'Jetzt nach Updates suchen',
       checking: 'Wird geprüft …',

@@ -851,7 +851,6 @@ pub struct AppSettingsDto {
     pub paste_delay_ms: u64,
     pub app_denylist: Vec<String>,
     pub regex_denylist: Vec<String>,
-    pub local_only_mode: bool,
     pub ai_provider: AiProviderSettingDto,
     pub ai_enabled: bool,
     pub semantic_search_enabled: bool,
@@ -905,7 +904,6 @@ impl From<AppSettings> for AppSettingsDto {
             paste_delay_ms: value.paste_delay_ms,
             app_denylist: value.app_denylist,
             regex_denylist: value.regex_denylist,
-            local_only_mode: value.local_only_mode,
             ai_provider: value.ai_provider.into(),
             ai_enabled: value.ai_enabled,
             semantic_search_enabled: value.semantic_search_enabled,
@@ -943,7 +941,6 @@ impl From<AppSettingsDto> for AppSettings {
             paste_delay_ms: value.paste_delay_ms,
             app_denylist: value.app_denylist,
             regex_denylist: value.regex_denylist,
-            local_only_mode: value.local_only_mode,
             ai_provider: value.ai_provider.into(),
             ai_enabled: value.ai_enabled,
             semantic_search_enabled: value.semantic_search_enabled,
@@ -1116,7 +1113,6 @@ mod tests {
             paste_delay_ms: 80,
             app_denylist: vec!["1Password".to_owned(), "Bitwarden".to_owned()],
             regex_denylist: vec!["INTERNAL-\\d+".to_owned()],
-            local_only_mode: true,
             ai_provider: AiProviderSetting::Remote {
                 name: "anthropic".to_owned(),
             },
@@ -1159,7 +1155,6 @@ mod tests {
         assert_eq!(restored.paste_delay_ms, original.paste_delay_ms);
         assert_eq!(restored.app_denylist, original.app_denylist);
         assert_eq!(restored.regex_denylist, original.regex_denylist);
-        assert_eq!(restored.local_only_mode, original.local_only_mode);
         assert!(matches!(
             restored.ai_provider,
             AiProviderSetting::Remote { ref name } if name == "anthropic",

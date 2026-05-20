@@ -112,7 +112,6 @@ export type Messages = {
     };
     privacy: {
       legend: string;
-      localOnly: string;
       appDenylist: string;
       appDenylistHelp: string;
       regexDenylist: string;
@@ -199,7 +198,6 @@ export type Messages = {
       legend: string;
       autoCheck: string;
       autoCheckHelp: string;
-      autoCheckLocalOnly: string;
       channel: string;
       checkNow: string;
       checking: string;
@@ -376,7 +374,6 @@ export const en: Messages = {
     },
     privacy: {
       legend: 'Filters',
-      localOnly: 'Local-only mode (block automatic update checks)',
       appDenylist: 'App denylist',
       appDenylistHelp: 'One source-app name per line. Captures from these apps are dropped.',
       regexDenylist: 'Regex denylist',
@@ -481,9 +478,7 @@ export const en: Messages = {
       legend: 'Updates',
       autoCheck: 'Check for updates automatically',
       autoCheckHelp:
-        'Probe the release feed periodically and surface a banner when a new build is available. The download is never installed without your confirmation.',
-      autoCheckLocalOnly:
-        'Disabled while Local-only mode is on. Turn that off (Privacy → Local-only mode) to allow update checks.',
+        'Probe the release feed periodically and surface a banner when a new build is available. The download is never installed without your confirmation. This is the only network call Nagori makes on its own — turn it off to keep the daemon fully offline.',
       channel: 'Channel',
       checkNow: 'Check for updates now',
       checking: 'Checking…',

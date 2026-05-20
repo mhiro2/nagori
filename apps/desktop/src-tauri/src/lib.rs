@@ -431,18 +431,17 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         tray::set_visible(&app, current_show_in_menu_bar);
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
-        // Startup updater probe. Honours `auto_update_check` and
-        // `local_only_mode` — a user who has opted out of background
-        // network calls never sees a request. `release.yaml` ships
-        // signed bundles for every target (macOS `.app`/`.dmg`,
-        // Windows NSIS, Linux deb + AppImage) and `latest.json` lists
-        // them all, so the probe runs on every OS. The probe surfaces
-        // an OS notification on availability; whether the result can
-        // be applied in place is decided per install medium in
-        // `commands::check_for_updates` (`download_supported`).
-        // Failures are logged at warn so a transient network blip
-        // doesn't surface a banner.
-        if initial.auto_update_check && !initial.local_only_mode {
+        // Startup updater probe. Honours `auto_update_check` — a user
+        // who has opted out of background network calls never sees a
+        // request. `release.yaml` ships signed bundles for every target
+        // (macOS `.app`/`.dmg`, Windows NSIS, Linux deb + AppImage) and
+        // `latest.json` lists them all, so the probe runs on every OS.
+        // The probe surfaces an OS notification on availability;
+        // whether the result can be applied in place is decided per
+        // install medium in `commands::check_for_updates`
+        // (`download_supported`). Failures are logged at warn so a
+        // transient network blip doesn't surface a banner.
+        if initial.auto_update_check {
             spawn_startup_update_probe(&app);
         }
 

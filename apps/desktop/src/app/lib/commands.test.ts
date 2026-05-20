@@ -21,7 +21,6 @@ const baseSettings = (): AppSettings => ({
   pasteDelayMs: 50,
   appDenylist: [],
   regexDenylist: [],
-  localOnlyMode: false,
   aiProvider: 'none',
   aiEnabled: false,
   semanticSearchEnabled: false,

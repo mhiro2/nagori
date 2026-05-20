@@ -389,12 +389,11 @@ impl NagoriRuntime {
         // doctor` can show whether an update is available. Best-effort:
         // the probe runs on every release target (macOS / Windows /
         // Linux all ship a `latest.json` entry today) and is skipped
-        // only when the user has either disabled background update
-        // checks or opted into `local_only_mode`. The call is capped
-        // by a short timeout, and any error (offline, rate-limited,
-        // malformed payload) collapses to `None` so doctor still
-        // completes.
-        let latest_version = if settings.auto_update_check && !settings.local_only_mode {
+        // only when the user has disabled background update checks
+        // (`auto_update_check`). The call is capped by a short timeout,
+        // and any error (offline, rate-limited, malformed payload)
+        // collapses to `None` so doctor still completes.
+        let latest_version = if settings.auto_update_check {
             fetch_latest_release_version().await
         } else {
             None
@@ -406,7 +405,7 @@ impl NagoriRuntime {
             capture_enabled: settings.capture_enabled,
             auto_paste_enabled: settings.auto_paste_enabled,
             ai_enabled: settings.ai_enabled,
-            local_only_mode: settings.local_only_mode,
+            auto_update_check: settings.auto_update_check,
             ai_provider: provider_label,
             permissions,
             maintenance: self.maintenance_health.report(),
@@ -657,45 +656,40 @@ impl NagoriRuntime {
         // RedactSecrets) always run on-device against the rule-based
         // runner, regardless of the legacy `ai_enabled` / `ai_provider`
         // settings — those toggles no longer have a UI entry point but
-        // remain in `AppSettings` so older configs round-trip without
-        // erasure. The input policy (redaction, size cap) below still
-        // applies. Legacy LLM-only variants keep the original gating so
-        // a direct IPC caller can't accidentally bypass the user's
-        // provider choice.
-        let is_remote = if action.is_quick_action() {
-            false
-        } else {
+        // remain in `AppSettings` as schema-compat seats so a future
+        // remote provider can be reintroduced without a settings
+        // migration. The input policy (redaction, size cap) below
+        // still applies. Legacy LLM-only variants keep the original
+        // gating so a direct IPC caller can't accidentally bypass the
+        // user's provider choice.
+        if !action.is_quick_action() {
             if !settings.ai_enabled {
                 return Err(AppError::Policy(
                     "ai actions are disabled in settings".to_owned(),
                 ));
             }
-            // Provider gating: `None` blocks everything; `Local` allows only
-            // local-only actions; `Remote` is blocked when the user enabled
-            // `local_only_mode` or when the action's `allow_remote=false`.
+            // Provider gating: `None` blocks everything; `Local` runs the
+            // on-device runner; `Remote` is reserved as an extension
+            // point for a future OpenAI-compatible generic provider but
+            // has no implementation wired in this build, so we surface
+            // an Unsupported error rather than silently fall through to
+            // the local runner. The `allow_remote` per-action policy is
+            // kept on `AiActionDef` so the gate site stays one line when
+            // a remote provider is later wired back in.
             match &settings.ai_provider {
                 AiProviderSetting::None => {
                     return Err(AppError::Policy(
                         "ai_provider is set to None — refusing to run".to_owned(),
                     ));
                 }
-                AiProviderSetting::Local => false,
+                AiProviderSetting::Local => {}
                 AiProviderSetting::Remote { .. } => {
-                    if settings.local_only_mode {
-                        return Err(AppError::Policy(
-                            "local_only_mode is on — remote ai_provider blocked".to_owned(),
-                        ));
-                    }
-                    if !policy.allow_remote {
-                        return Err(AppError::Policy(format!(
-                            "action {} disallows remote providers",
-                            action_def.name
-                        )));
-                    }
-                    true
+                    return Err(AppError::Unsupported(
+                        "remote ai_provider has no implementation wired in this build".to_owned(),
+                    ));
                 }
             }
-        };
+        }
         let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
         let raw = entry.plain_text().unwrap_or_default();
         // The redactor here must be settings-aware: a bare `redact_text`
@@ -719,7 +713,7 @@ impl NagoriRuntime {
             }
             (Sensitivity::Private, _) => classifier.redact(raw),
             _ => {
-                if policy.require_redaction || is_remote {
+                if policy.require_redaction {
                     classifier.redact(raw)
                 } else {
                     raw.to_owned()
@@ -1551,16 +1545,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_ai_action_quick_action_bypasses_default_gates() {
-        // Defaults are `ai_enabled=false`, `ai_provider=None`,
-        // `local_only_mode=true`. The desktop UI no longer surfaces any
-        // of these toggles after 1.1, so the four Quick actions must
-        // still execute against the on-device runner under the default
-        // config or the palette's "Summarize / Format JSON / Extract
-        // tasks / Redact secrets" buttons would be perma-broken. Each
-        // action gets a stable input that the real `LocalAiProvider`
-        // accepts — `FormatJson` in particular needs valid JSON, since
-        // anything else would surface as `AppError::Ai` and look like
-        // the gate is still rejecting.
+        // Defaults are `ai_enabled=false`, `ai_provider=None`. The
+        // desktop UI no longer surfaces any of these toggles, so the
+        // four Quick actions must still execute against the on-device
+        // runner under the default config or the palette's "Summarize /
+        // Format JSON / Extract tasks / Redact secrets" buttons would
+        // be perma-broken. Each action gets a stable input that the
+        // real `LocalAiProvider` accepts — `FormatJson` in particular
+        // needs valid JSON, since anything else would surface as
+        // `AppError::Ai` and look like the gate is still rejecting.
         let cases: &[(AiActionId, &str)] = &[
             (AiActionId::Summarize, "hello world"),
             (AiActionId::FormatJson, r#"{"a":1}"#),
@@ -1584,12 +1577,11 @@ mod tests {
     async fn run_ai_action_quick_action_ignores_remote_provider_config() {
         // A persisted `ai_provider = Remote { .. }` from an older config
         // must not change Quick-action behaviour: they always run
-        // on-device, regardless of `local_only_mode` or `allow_remote`.
+        // on-device, regardless of `allow_remote`.
         let (runtime, _) = runtime_with_local_ai();
         runtime
             .save_settings(AppSettings {
                 ai_enabled: true,
-                local_only_mode: false,
                 ai_provider: AiProviderSetting::Remote {
                     name: "openai".to_owned(),
                 },
@@ -1608,16 +1600,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ai_action_blocked_when_remote_provider_in_local_only_mode() {
-        // Only legacy actions are subject to provider gating now — Quick
-        // actions short-circuit to the on-device runner regardless of
-        // `ai_provider`, so we drive this case through `Rewrite`.
+    async fn run_ai_action_remote_provider_returns_unsupported_for_legacy_actions() {
+        // No remote provider is wired in this build. Legacy AI actions
+        // (driven through `Rewrite` here, since Quick actions
+        // short-circuit) must surface that as `AppError::Unsupported`
+        // rather than silently fall through to the on-device runner —
+        // the latter would mask "you asked for a remote summary, here's
+        // a local one" from a direct IPC caller.
         let (runtime, _) = runtime_with_memory_clipboard();
         runtime
             .store()
             .save_settings(AppSettings {
                 ai_enabled: true,
-                local_only_mode: true,
                 ai_provider: AiProviderSetting::Remote {
                     name: "openai".to_owned(),
                 },
@@ -1632,8 +1626,8 @@ mod tests {
         let err = runtime
             .run_ai_action(id, AiActionId::Rewrite)
             .await
-            .expect_err("local_only_mode must veto remote providers");
-        assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
+            .expect_err("remote ai_provider must surface as Unsupported");
+        assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
     }
 
     #[tokio::test]
