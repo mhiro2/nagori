@@ -1,8 +1,11 @@
 # Privacy and security
 
 Nagori is local-first: capture, search, redaction, and Quick actions
-all run in your process and the daemon never reaches a network on its
-own.
+all run in your process. The daemon's only background network call
+is the update-availability probe against GitHub Releases, and it
+runs only while **Settings → Advanced → Updates → Check for updates
+automatically** is on (default: on). Turn that toggle off to keep
+the daemon fully offline.
 
 ## Data at rest
 
@@ -74,15 +77,23 @@ denylist is an `OR` of every line.
 
 - Quick actions (Summarize, Format JSON, Extract tasks, Redact
   secrets) run entirely on-device against the rule-based runner —
-  no remote provider is dispatched, regardless of `Local-only mode`.
+  no remote provider is dispatched.
 - The runner re-applies the secret scrubber to its input as a
   defence-in-depth pass (`AiInputPolicy::require_redaction`) so a
   result block can never contain a token the classifier already
   flagged on the source entry.
-- The daemon's only outbound network use is the periodic
-  update-availability probe against GitHub Releases. `Privacy →
-  Local-only mode` toggles that probe off and the in-app update
-  banner stays silent.
+- The daemon's only background outbound network use is the
+  update-availability probe against GitHub Releases. **Settings →
+  Advanced → Updates → Check for updates automatically** controls
+  it; turning it off keeps the daemon fully offline (the same
+  toggle gates both the desktop startup probe and the
+  `latest_version` lookup that `nagori doctor` shows). The manual
+  **Check for updates now** button bypasses this toggle by design —
+  it is an explicit user action and always reaches the network when
+  pressed.
+- `nagori doctor` prints `auto_update_check` so operators can
+  confirm at a glance whether anything is allowed to reach the
+  network.
 - Clipboard bodies are never written to logs — only metadata
   (declared MIME, detected MIME, byte counts, sensitivity verdict)
   shows up in tracing output.

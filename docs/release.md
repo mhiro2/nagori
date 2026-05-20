@@ -110,9 +110,11 @@ two options:
    `latest.json` sidecar to a draft GitHub release, and the `publish`
    job promotes the draft to a published release once every matrix row
    succeeds.
-4. The next time any installed copy of nagori starts (or the user
-   clicks **Settings → Advanced → Check for updates now**), the
-   updater probe will read `latest.json` and surface the new version.
+4. The next time any installed copy of nagori starts with
+   **Settings → Advanced → Updates → Check for updates automatically**
+   on (or the user clicks **Settings → Advanced → Check for updates
+   now** explicitly — that button bypasses the toggle), the updater
+   probe will read `latest.json` and surface the new version.
    Bundles the updater could swap in place (`.app` / `.dmg`, NSIS,
    `AppImage`) link to the release with "View release" copy; `deb`
    installs show "Download manually" instead. The desktop shell does

@@ -1274,10 +1274,15 @@ change.
   asset per row. The `commands::check_for_updates` Tauri command
   wraps `updater.check()` and is surfaced as the "Check for updates
   now" button under Settings → Advanced.
-  `AppSettings.auto_update_check`, when enabled (and `local_only_mode`
-  is off), drives the one-shot startup probe in
-  `spawn_startup_update_probe`, which surfaces availability via an OS
-  notification (the same path used by capture/AI state changes).
+  `AppSettings.auto_update_check`, when enabled, drives the one-shot
+  startup probe in `spawn_startup_update_probe`, which surfaces
+  availability via an OS notification (the same path used by
+  capture/AI state changes). It is also the single network-affecting
+  toggle the daemon honours: `nagori doctor` reports it under
+  `auto_update_check` so operators can see at a glance whether any
+  background network call is permitted. The manual "Check for updates
+  now" button bypasses the toggle by design — it is an explicit user
+  action.
   `AppSettings.update_channel` (currently fixed to `Stable`) is
   persisted so future Beta/Nightly channels can land without a
   settings migration. The signing keypair is generated once per
