@@ -73,6 +73,25 @@ groups", …) instead of a generic save failure. Split complex
 intents into multiple lines rather than nesting groups — the
 denylist is an `OR` of every line.
 
+## Preview thumbnails and external URL open
+
+- Image entries get a 512px cached thumbnail under
+  `entry_thumbnails` so the preview pane stays responsive on
+  multi-megabyte screenshots. Generation is gated by sensitivity —
+  the daemon refuses to derive a thumbnail for `Private`, `Secret`,
+  or `Blocked` entries, so image bytes from those entries never
+  leak into the cached preview surface. The table is a regenerable
+  cache: an LRU sweep bounded by `max_thumbnail_total_bytes`
+  (default 64 MiB) evicts cold rows, and `ON DELETE CASCADE`
+  removes the thumbnail whenever the source entry is deleted.
+- The "open URL in browser" action from the expanded preview is
+  also gated to `Public` entries with an `https` / `http` scheme,
+  and the desktop pops a confirm dialog that shows the resolved host
+  (with a punycode badge when the displayed Unicode host differs
+  from its ASCII form) before invoking the OS shell handler. Other
+  schemes — `file://`, `javascript:`, `data:`, custom protocol
+  handlers — are refused without a prompt.
+
 ## Quick actions and network
 
 - Quick actions (Summarize, Format JSON, Extract tasks, Redact

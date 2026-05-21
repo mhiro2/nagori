@@ -105,9 +105,23 @@ report:
   signal the desktop app reads when deciding whether to surface a
   "Nagori is running" notification.
 
+`nagori doctor` also prints a thumbnail cache row in both
+daemon-driven and direct-DB reports:
+
+- `thumbnails\tused=<bytes>\tcap=<bytes|disabled>` — aggregate
+  `entry_thumbnails` footprint versus the
+  `max_thumbnail_total_bytes` LRU budget (default 64 MiB; `disabled`
+  means the eviction sweep is off and the cache may grow unbounded).
+  Thumbnails are derived from the original image payloads and are
+  regenerable, so the row is a performance signal — a `used` value
+  hovering near `cap` combined with sluggish image previews suggests
+  raising the budget. If the footprint read fails, `used` falls back
+  to `(unknown)`.
+
 The local fallback (no daemon available — runs directly against the
-SQLite store) prints settings / paths / permissions only; the health
-rows require a daemon process to report on.
+SQLite store) prints settings / paths / permissions and that
+`thumbnails` row; the maintenance / capture / startup health rows
+require a daemon process to report on.
 
 ### `nagori capabilities`
 

@@ -19,6 +19,10 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
 - Image preview uses a daemon-cached 512px thumbnail on row navigation so
   the palette stays responsive on multi-megabyte screenshots; the
   expanded preview switches to the original payload for click-to-zoom.
+- Long-text preview shows head and tail with a middle-elided marker so
+  the end of large logs / pastes stays visible; when the active search
+  hit lands inside the elided range the preview flags it so you can
+  expand to the 1 MiB full view (Public entries only).
 - Bundled per-OS release artefacts with an in-app update-availability probe.
 
 ## Install
