@@ -35,9 +35,35 @@ export const fr: Messages = {
       formats: 'formats conservés',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string =>
+        count <= 1 ? `${count} ligne` : `${count.toLocaleString('fr')} lignes`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: 'Chargement de l’image…',
       unavailable: 'Image indisponible.',
+      alt: 'Aperçu de l’image du presse-papiers',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? total <= 1
+            ? `${total} fichier`
+            : `${total.toLocaleString('fr')} fichiers`
+          : `${shown.toLocaleString('fr')} / ${total.toLocaleString('fr')} fichiers`,
+      moreFiles: (count: number): string =>
+        count <= 1
+          ? `+${count} fichier de plus`
+          : `+${count.toLocaleString('fr')} fichiers de plus`,
     },
   },
   status: {

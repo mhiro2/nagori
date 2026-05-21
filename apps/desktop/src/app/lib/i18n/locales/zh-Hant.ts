@@ -34,9 +34,29 @@ export const zhHant: Messages = {
       formats: '保留的格式',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string => `${count.toLocaleString('zh-Hant')} 行`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: '正在載入影像…',
       unavailable: '影像無法使用。',
+      alt: '剪貼簿影像預覽',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? `${total.toLocaleString('zh-Hant')} 個檔案`
+          : `${shown.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')} 個檔案`,
+      moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hant')} 個`,
     },
   },
   status: {

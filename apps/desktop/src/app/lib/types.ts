@@ -84,7 +84,7 @@ export type EntryPreviewBody =
       width?: number | null;
       height?: number | null;
     }
-  | { type: 'fileList'; paths: string[] }
+  | { type: 'fileList'; paths: string[]; total: number }
   | { type: 'richText'; text: string }
   | { type: 'unknown'; text: string };
 

@@ -297,6 +297,11 @@ pub enum PreviewBodyDto {
     },
     FileList {
         paths: Vec<String>,
+        // Pre-truncation `paths.len()`. The wire `paths` is capped at 50
+        // entries so the renderer can show `paths.length / total` without
+        // re-counting and surface a "+N more" hint when the underlying
+        // clipboard list is longer.
+        total: usize,
     },
     RichText {
         text: String,
@@ -350,6 +355,7 @@ impl EntryPreviewDto {
                 },
                 ClipboardContent::FileList(value) => PreviewBodyDto::FileList {
                     paths: value.paths.iter().take(50).cloned().collect(),
+                    total: value.paths.len(),
                 },
                 ClipboardContent::RichText(_) => PreviewBodyDto::RichText {
                     text: preview_text.clone(),
@@ -1084,6 +1090,67 @@ mod tests {
         assert!(dto.metadata.truncated);
         assert!(dto.preview_text.ends_with('…'));
         assert!(dto.preview_text.len() <= 128 * 1024 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn entry_preview_for_file_list_caps_paths_but_reports_total() {
+        // Frontend renders `paths.len() / total` and a "+N more files" hint
+        // when the underlying clip exceeds the 50-path wire cap. Ensure the
+        // DTO carries the pre-truncation count rather than the truncated
+        // `paths.len()`.
+        let paths: Vec<String> = (0..75).map(|i| format!("/tmp/file-{i:03}.txt")).collect();
+        let snapshot = ClipboardSnapshot {
+            sequence: nagori_core::ClipboardSequence::content_hash("fl-many"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(paths),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("file list snapshot");
+        let dto = EntryPreviewDto::from_entry(&entry);
+        match dto.body {
+            PreviewBodyDto::FileList {
+                paths: wire_paths,
+                total,
+            } => {
+                assert_eq!(wire_paths.len(), 50);
+                assert_eq!(total, 75);
+                assert_eq!(
+                    wire_paths.first().map(String::as_str),
+                    Some("/tmp/file-000.txt")
+                );
+            }
+            other => panic!("expected FileList body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_preview_for_short_file_list_reports_total_equal_to_paths() {
+        let paths = vec!["/tmp/a.txt".to_owned(), "/tmp/b.txt".to_owned()];
+        let expected_len = paths.len();
+        let snapshot = ClipboardSnapshot {
+            sequence: nagori_core::ClipboardSequence::content_hash("fl-short"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(paths.clone()),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("file list snapshot");
+        let dto = EntryPreviewDto::from_entry(&entry);
+        match dto.body {
+            PreviewBodyDto::FileList {
+                paths: wire_paths,
+                total,
+            } => {
+                assert_eq!(wire_paths, paths);
+                assert_eq!(total, expected_len);
+            }
+            other => panic!("expected FileList body, got {other:?}"),
+        }
     }
 
     #[test]

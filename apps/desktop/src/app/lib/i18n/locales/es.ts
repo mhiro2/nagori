@@ -36,9 +36,33 @@ export const es: Messages = {
       formats: 'formatos conservados',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string =>
+        count === 1 ? '1 línea' : `${count.toLocaleString('es')} líneas`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: 'Cargando imagen…',
       unavailable: 'Imagen no disponible.',
+      alt: 'Vista previa de imagen del portapapeles',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? total === 1
+            ? '1 archivo'
+            : `${total.toLocaleString('es')} archivos`
+          : `${shown.toLocaleString('es')} / ${total.toLocaleString('es')} archivos`,
+      moreFiles: (count: number): string =>
+        count === 1 ? '+1 archivo más' : `+${count.toLocaleString('es')} archivos más`,
     },
   },
   status: {

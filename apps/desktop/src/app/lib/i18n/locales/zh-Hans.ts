@@ -34,9 +34,29 @@ export const zhHans: Messages = {
       formats: '保留的格式',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string => `${count.toLocaleString('zh-Hans')} 行`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: '正在加载图像…',
       unavailable: '图像不可用。',
+      alt: '剪贴板图像预览',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? `${total.toLocaleString('zh-Hans')} 个文件`
+          : `${shown.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')} 个文件`,
+      moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hans')} 个`,
     },
   },
   status: {

@@ -37,9 +37,21 @@ export type Messages = {
       formats: string;
     };
     none: string;
+    summary: {
+      lines: CountFormatter;
+      // Composed image chip. Each part is pre-formatted (e.g. "1920×1080",
+      // "PNG", "2.3 MB"); null entries are skipped so the locale controls
+      // both the join separator and the ordering.
+      image: (parts: { dimensions: string | null; format: string | null; bytes: string }) => string;
+    };
     image: {
       loading: string;
       unavailable: string;
+      alt: string;
+    };
+    fileList: {
+      summary: (shown: number, total: number) => string;
+      moreFiles: CountFormatter;
     };
   };
   status: {
@@ -292,9 +304,23 @@ export const en: Messages = {
       formats: 'preserved formats',
     },
     none: '—',
+    summary: {
+      lines: (count) => (count === 1 ? '1 line' : `${count.toLocaleString('en')} lines`),
+      image: ({ dimensions, format, bytes }) =>
+        [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: 'Loading image…',
       unavailable: 'Image unavailable.',
+      alt: 'Clipboard image preview',
+    },
+    fileList: {
+      summary: (shown, total) =>
+        total === shown
+          ? `${total.toLocaleString('en')} ${total === 1 ? 'file' : 'files'}`
+          : `${shown.toLocaleString('en')} / ${total.toLocaleString('en')} files`,
+      moreFiles: (count) =>
+        count === 1 ? '+1 more file' : `+${count.toLocaleString('en')} more files`,
     },
   },
   status: {

@@ -35,9 +35,33 @@ export const de: Messages = {
       formats: 'Erhaltene Formate',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string =>
+        count === 1 ? '1 Zeile' : `${count.toLocaleString('de')} Zeilen`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: 'Bild wird geladen …',
       unavailable: 'Bild nicht verfügbar.',
+      alt: 'Bildvorschau aus der Zwischenablage',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? total === 1
+            ? '1 Datei'
+            : `${total.toLocaleString('de')} Dateien`
+          : `${shown.toLocaleString('de')} / ${total.toLocaleString('de')} Dateien`,
+      moreFiles: (count: number): string =>
+        count === 1 ? '+1 weitere Datei' : `+${count.toLocaleString('de')} weitere Dateien`,
     },
   },
   status: {

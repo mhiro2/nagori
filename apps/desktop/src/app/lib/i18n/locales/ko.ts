@@ -34,9 +34,29 @@ export const ko: Messages = {
       formats: '보존된 형식',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string => `${count.toLocaleString('ko')}줄`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: '이미지 불러오는 중…',
       unavailable: '이미지를 표시할 수 없습니다.',
+      alt: '클립보드 이미지 미리보기',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? `${total.toLocaleString('ko')}개`
+          : `${shown.toLocaleString('ko')} / ${total.toLocaleString('ko')}개`,
+      moreFiles: (count: number): string => `+${count.toLocaleString('ko')}개 더`,
     },
   },
   status: {

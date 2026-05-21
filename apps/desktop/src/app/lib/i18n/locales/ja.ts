@@ -34,9 +34,29 @@ export const ja: Messages = {
       formats: '保持された形式',
     },
     none: '—',
+    summary: {
+      lines: (count: number): string => `${count.toLocaleString('ja')} 行`,
+      image: ({
+        dimensions,
+        format,
+        bytes,
+      }: {
+        dimensions: string | null;
+        format: string | null;
+        bytes: string;
+      }): string => [dimensions, format, bytes].filter((p): p is string => !!p).join(' · '),
+    },
     image: {
       loading: '画像を読み込み中…',
       unavailable: '画像を表示できません。',
+      alt: 'クリップボード画像のプレビュー',
+    },
+    fileList: {
+      summary: (shown: number, total: number): string =>
+        total === shown
+          ? `${total.toLocaleString('ja')} 件`
+          : `${shown.toLocaleString('ja')} / ${total.toLocaleString('ja')} 件`,
+      moreFiles: (count: number): string => `他 ${count.toLocaleString('ja')} 件`,
     },
   },
   status: {

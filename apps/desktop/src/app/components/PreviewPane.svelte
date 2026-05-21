@@ -15,6 +15,27 @@
     return labels.length > 1 ? labels.join(", ") : undefined;
   };
 
+  // `image/png` → `PNG`. Strip the `+xml` / `+json` structured-syntax suffix
+  // so `image/svg+xml` renders as `SVG`. Used by the head summary chip.
+  const formatImageMime = (mime: string | null | undefined): string | null => {
+    if (!mime) return null;
+    const slash = mime.indexOf("/");
+    let subtype = slash < 0 ? mime : mime.slice(slash + 1);
+    const plus = subtype.indexOf("+");
+    if (plus > 0) subtype = subtype.slice(0, plus);
+    if (!subtype) return null;
+    return subtype.toUpperCase();
+  };
+
+  // Split on the last `/` or `\` so Windows-style file lists also light up
+  // the basename emphasis. The dir portion keeps its trailing separator so
+  // the visual order is "<dim>parent/</dim><strong>basename</strong>".
+  const splitPath = (path: string): { dir: string; base: string } => {
+    const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (lastSlash < 0) return { dir: "", base: path };
+    return { dir: path.slice(0, lastSlash + 1), base: path.slice(lastSlash + 1) };
+  };
+
   type Props = {
     item: SearchResultDto | undefined;
     preview: EntryPreviewDto | undefined;
@@ -39,6 +60,60 @@
   const imageSrc = $derived(
     preview?.body.type === "image" ? buildImageUrl(preview.id) : undefined,
   );
+  const imageDimensions = $derived.by(() => {
+    if (preview?.body.type !== "image") return undefined;
+    const { width, height } = preview.body;
+    return width && height ? { width, height } : undefined;
+  });
+  let imageLoaded = $state(false);
+  let imageFailed = $state(false);
+  // Reset the skeleton whenever a different image entry is selected so the
+  // checkerboard reappears while the new bytes are streaming in. `void`
+  // marks the dependency read as intentional for the linter.
+  $effect(() => {
+    void imageSrc;
+    imageLoaded = false;
+    imageFailed = false;
+  });
+
+  // Head summary chip: kind-specific one-liner that surfaces lineCount /
+  // byteCount / dimensions / domain / file count without ever leaking
+  // sensitive body bytes.
+  const summaryChip = $derived.by((): string | undefined => {
+    if (!preview) return undefined;
+    const body = preview.body;
+    switch (body.type) {
+      case "text":
+      case "code":
+      case "richText":
+      case "unknown": {
+        const lines = t.preview.summary.lines(preview.metadata.lineCount);
+        const bytes = formatByteCount(preview.metadata.byteCount);
+        return `${lines} · ${bytes}`;
+      }
+      case "image": {
+        return t.preview.summary.image({
+          dimensions:
+            body.width != null && body.height != null ? `${body.width}×${body.height}` : null,
+          format: formatImageMime(body.mimeType ?? null),
+          bytes: formatByteCount(body.byteCount),
+        });
+      }
+      case "fileList": {
+        return t.preview.fileList.summary(body.paths.length, body.total);
+      }
+      case "url": {
+        return body.domain ?? preview.metadata.domain ?? undefined;
+      }
+    }
+  });
+
+  // Number of paths hidden by the 50-row cap that the backend applies before
+  // the DTO crosses the IPC boundary.
+  const fileListOverflow = $derived.by((): number => {
+    if (preview?.body.type !== "fileList") return 0;
+    return Math.max(0, preview.body.total - preview.body.paths.length);
+  });
 
   function buildImageUrl(entryId: string): string {
     // macOS / iOS / Linux origin: scheme://localhost/<path>
@@ -59,22 +134,45 @@
       <span class="kind">{preview?.title ?? item.kind}</span>
       <span class="time">{formatRelativeTime(item.createdAt)}</span>
     </header>
+    {#if summaryChip}
+      <p class="summary" data-testid="preview-summary">{summaryChip}</p>
+    {/if}
     <div class="body-wrap">
       {#if loading}
         <p class="state">{t.preview.loading}</p>
       {:else if errorMessage}
         <p class="state error">{errorMessage}</p>
       {:else if preview?.body.type === "image"}
-        {#if imageSrc}
-          <img class="image" src={imageSrc} alt="" />
+        {#if imageSrc && !imageFailed}
+          <div class="image-frame" class:loaded={imageLoaded}>
+            <img
+              class="image"
+              src={imageSrc}
+              alt={t.preview.image.alt}
+              loading="lazy"
+              decoding="async"
+              width={imageDimensions?.width}
+              height={imageDimensions?.height}
+              onload={() => (imageLoaded = true)}
+              onerror={() => (imageFailed = true)}
+            />
+          </div>
         {:else}
-          <p class="state">{t.preview.image.unavailable}</p>
+          <p class="state" role="status">{t.preview.image.unavailable}</p>
         {/if}
       {:else if preview?.body.type === "fileList"}
         <ul class="files">
           {#each preview.body.paths as path (path)}
-            <li>{path}</li>
+            {@const parts = splitPath(path)}
+            <li title={path}>
+              {#if parts.dir}<span class="dim">{parts.dir}</span>{/if}<strong class="base"
+                >{parts.base}</strong
+              >
+            </li>
           {/each}
+          {#if fileListOverflow > 0}
+            <li class="more" aria-live="polite">{t.preview.fileList.moreFiles(fileListOverflow)}</li>
+          {/if}
         </ul>
       {:else if showHighlighting}
         <pre class="body code"><code>{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code></pre>
@@ -135,6 +233,13 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
+  .summary {
+    margin: 0;
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
   .body-wrap {
     flex: 1;
     min-height: 0;
@@ -154,6 +259,11 @@
     font-size: 0.8125rem;
     white-space: pre-wrap;
     word-break: break-word;
+    /* Skip layout/paint for offscreen lines so very long previews don't
+       block scroll. `contain-intrinsic-size` gives the browser a placeholder
+       height before the offscreen subtree is rendered. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 1rem;
   }
   .state,
   .note {
@@ -168,13 +278,52 @@
   .note {
     padding: 0;
   }
+  .image-frame {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 80px;
+    background: rgba(0, 0, 0, 0.4);
+  }
+  /* Checkerboard placeholder shown until the lazy <img> finishes decoding.
+     Pure CSS so we never reference an external skeleton image (CSP-safe). */
+  .image-frame:not(.loaded)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.2);
+    background-image:
+      linear-gradient(45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%),
+      linear-gradient(-45deg, rgba(255, 255, 255, 0.06) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.06) 75%),
+      linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.06) 75%);
+    background-size: 16px 16px;
+    background-position:
+      0 0,
+      0 8px,
+      8px -8px,
+      -8px 0;
+    pointer-events: none;
+  }
   .image {
     display: block;
     max-width: 100%;
     max-height: 100%;
     margin: 0 auto;
     object-fit: contain;
-    background: rgba(0, 0, 0, 0.4);
+    /* Make the <img>'s intrinsic ratio drive layout when width/height attrs
+       are present, so layout shift between skeleton and decoded image stays
+       within the aspect ratio rather than collapsing to 0×0. */
+    height: auto;
+    width: auto;
+  }
+  .image-frame:not(.loaded) .image {
+    opacity: 0;
+  }
+  .image-frame.loaded .image {
+    opacity: 1;
+    transition: opacity 120ms linear;
   }
   .files {
     margin: 0;
@@ -187,6 +336,19 @@
       monospace;
     font-size: 0.8125rem;
     overflow-wrap: anywhere;
+  }
+  .files .dim {
+    color: var(--muted, rgba(255, 255, 255, 0.45));
+  }
+  .files .base {
+    font-weight: 600;
+    color: var(--fg, #f5f5f5);
+  }
+  .files .more {
+    margin-top: 0.25rem;
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+    list-style: none;
+    font-style: italic;
   }
   .body.code code {
     font: inherit;
