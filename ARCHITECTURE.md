@@ -423,6 +423,7 @@ are forward-only; downgrades are not supported.
 |-------|---------|
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column identifies the joint hash of the entry's representations so duplicate sets can be deduped without re-reading the children. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. The legacy `payload_ref` column is kept for schema compatibility but always `NULL` — a future content-addressed store can opt in without a migration. |
+| `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. |
 | `search_fts` | FTS5 virtual table over `title` / `preview` / `normalized_text` (`unicode61`). |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. |
@@ -438,6 +439,31 @@ the WebView fetches `nagori-image://localhost/<entry_id>` like any other
 `<img src>`. The handler returns 403 for
 `Sensitivity::Private | Secret | Blocked` so secret imagery never
 reaches the WebView.
+
+**Thumbnails.** Inline preview rows fetch
+`nagori-image://localhost/thumb/<entry_id>` instead of the original
+payload — the daemon's `nagori-daemon::thumbnails` module decodes,
+downscales to 512px, and re-encodes capped at 256 KiB per row. The
+encoder branches on the source's alpha channel: opaque images take a
+JPEG path (quality 85, then 60 on overflow); images carrying alpha
+take a PNG path so transparent pixels survive into the inline
+preview and the expanded view of the original payload shows the same
+picture. A header-only dimension probe rejects encoded payloads whose
+advertised canvas would breach `MAX_DECODED_IMAGE_PIXELS` so a forged
+PNG IHDR cannot force the decoder to materialise a multi-GB buffer.
+Generation is gated by an in-memory `HashSet<EntryId>` so a burst of
+preview opens collapses to one decoder, and the same
+`is_text_safe_for_default_output` sensitivity check that gates the
+original-payload scheme handler is re-asserted inside the generator
+before the thumbnail is written so a Private / Secret / Blocked
+entry never produces a derived artifact. The scheme handler returns
+`503 Service Unavailable` + `Retry-After: 1` on miss; the frontend
+re-fetches once on a fixed cadence (the `<img onerror>` event exposes
+neither the status code nor headers), and on a second miss falls
+back to the original payload URL so the row still renders. The
+`MaintenanceService` applies `enforce_thumbnail_budget` after the
+regular retention sweep, evicting the least-recently-accessed rows
+first.
 
 **Retention budget.** `enforce_total_bytes` sums every live representation's
 `byte_count` (joined to `entries` so soft-deleted rows do not consume
@@ -1373,7 +1399,11 @@ under 80 ms for 100k text entries on a developer machine.
   `docs/security-encryption-at-rest.md`.
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret
-  imagery never reaches the WebView.
+  imagery never reaches the WebView. The `/thumb/<id>` branch
+  re-asserts the same gate before serving a cached row, and the
+  generator refuses to write a thumbnail for non-Public sensitivities,
+  so the derived raster cache cannot become a side-channel for
+  classified content.
 - **Image payload validation** — external clipboard producers freely
   label arbitrary bytes as `image/*`, so the workspace treats every
   raster payload as untrusted. `nagori_core::image_signature::detect`

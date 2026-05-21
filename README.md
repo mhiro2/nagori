@@ -16,6 +16,9 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
   displayed Unicode host differs from its ASCII form; press **Enter** in
   the expanded preview to open the URL in the default browser after a
   confirm dialog (Public entries only, `https` / `http` only).
+- Image preview uses a daemon-cached 512px thumbnail on row navigation so
+  the palette stays responsive on multi-megabyte screenshots; the
+  expanded preview switches to the original payload for click-to-zoom.
 - Bundled per-OS release artefacts with an in-app update-availability probe.
 
 ## Install
