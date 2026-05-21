@@ -601,7 +601,7 @@ describe('PreviewPane', () => {
     expect(summary).toContain('218');
   });
 
-  it('renders an <img> with the platform-default nagori-image:// URL', () => {
+  it('renders an <img> with the platform-default thumbnail URL by default', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'image' }),
@@ -614,7 +614,10 @@ describe('PreviewPane', () => {
       },
     });
     const img = container.querySelector('img.image');
-    expect(img?.getAttribute('src')).toMatch(/nagori-image:\/\/localhost\/entry-id$/);
+    // Inline preview points at the daemon's 512px thumbnail; switching
+    // to the original would re-introduce the 5 MB-per-row hit that
+    // motivated the entry_thumbnails table.
+    expect(img?.getAttribute('src')).toMatch(/nagori-image:\/\/localhost\/thumb\/entry-id$/);
     // Lazy load + async decode keep the image off the initial render's
     // critical path. The alt is a fixed, body-free description.
     expect(img?.getAttribute('loading')).toBe('lazy');
@@ -623,7 +626,7 @@ describe('PreviewPane', () => {
     expect(img?.getAttribute('alt')).not.toBe('');
   });
 
-  it('falls back to the unavailable state when the <img> errors', async () => {
+  it('streams the original payload when the preview pane is expanded', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'image' }),
@@ -633,17 +636,59 @@ describe('PreviewPane', () => {
         }),
         loading: false,
         errorMessage: undefined,
+        expanded: true,
       },
     });
     const img = container.querySelector('img.image');
-    expect(img).toBeTruthy();
-    img?.dispatchEvent(new Event('error'));
-    // Svelte 5 flushes effect-derived DOM updates on the microtask queue.
-    await Promise.resolve();
-    expect(container.querySelector('img.image')).toBeNull();
-    expect(container.querySelector('.state')?.textContent ?? '').toMatch(
-      /unavailable|not available/i,
-    );
+    // Expanded mode is the click-to-zoom path and shows the full
+    // resolution image, so it must skip the thumb cache entirely.
+    expect(img?.getAttribute('src')).toMatch(/nagori-image:\/\/localhost\/entry-id$/);
+  });
+
+  it('retries the thumbnail after a 503-style error before giving up', async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render(PreviewPane, {
+        props: {
+          item: sampleItem({ kind: 'image' }),
+          preview: samplePreview({
+            previewText: '',
+            body: { type: 'image', byteCount: 100 },
+          }),
+          loading: false,
+          errorMessage: undefined,
+        },
+      });
+      const initial = container.querySelector('img.image')!;
+      expect(initial.getAttribute('src')).toMatch(/\/thumb\/entry-id$/);
+
+      // First error: the scheme handler returned 503 + Retry-After: 1
+      // because the generator just kicked. Wait the 1s, then re-fetch
+      // the same path with a cache-buster so the webview refetches.
+      initial.dispatchEvent(new Event('error'));
+      await vi.advanceTimersByTimeAsync(1000);
+      const retried = container.querySelector('img.image')!;
+      expect(retried).not.toBeNull();
+      expect(retried.getAttribute('src')).toMatch(/\/thumb\/entry-id\?v=1$/);
+
+      // Second error: fall back to streaming the original payload so
+      // the row still renders something rather than the placeholder.
+      retried.dispatchEvent(new Event('error'));
+      await Promise.resolve();
+      const fallback = container.querySelector('img.image')!;
+      expect(fallback.getAttribute('src')).toMatch(/nagori-image:\/\/localhost\/entry-id\?v=2$/);
+
+      // Third error: original payload also failed. Now show the
+      // unavailable state.
+      fallback.dispatchEvent(new Event('error'));
+      await Promise.resolve();
+      expect(container.querySelector('img.image')).toBeNull();
+      expect(container.querySelector('.state')?.textContent ?? '').toMatch(
+        /unavailable|not available/i,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses a body-free alt text on the <img> regardless of previewText', () => {

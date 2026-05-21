@@ -190,12 +190,30 @@
   }
 
   // Image bytes are streamed by the `nagori-image://` custom URI scheme
-  // registered in src-tauri/src/lib.rs. The webview fetches the bytes lazily
-  // as it would any other img src, so we don't pay the base64 + IPC tax for
-  // every previewed row. The Rust handler enforces sensitivity gating.
-  const imageSrc = $derived(
-    preview?.body.type === "image" ? buildImageUrl(preview.id) : undefined,
-  );
+  // registered in src-tauri/src/lib.rs. In the inline preview we request
+  // the daemon's cached 512px thumbnail (`/thumb/<id>`); the expanded
+  // preview window switches to the original payload so a click-to-zoom
+  // delivers full resolution. The Rust handler enforces sensitivity
+  // gating on both paths.
+  //
+  // Attempt ladder for the non-expanded path:
+  //   0 → first thumb fetch
+  //   1 → thumb retry after a fixed 1s delay
+  //   2 → original payload fallback (defends against an LRU-evicted or
+  //       perma-skipped thumbnail row)
+  //
+  // The scheme handler returns 503 + Retry-After: 1 on a thumbnail miss
+  // and kicks generation, but `<img onerror>` exposes neither the status
+  // code nor headers — every error collapses to a single event. The
+  // retry policy below is therefore a fixed frontend cadence, not an
+  // observation of the spec'd header.
+  let imageAttempt = $state(0);
+  let retryTimer: number | undefined = undefined;
+  const imageSrc = $derived.by((): string | undefined => {
+    if (preview?.body.type !== "image") return undefined;
+    const useThumb = !expanded && imageAttempt < 2;
+    return buildImageUrl(preview.id, useThumb, imageAttempt);
+  });
   const imageDimensions = $derived.by(() => {
     if (preview?.body.type !== "image") return undefined;
     const { width, height } = preview.body;
@@ -203,14 +221,48 @@
   });
   let imageLoaded = $state(false);
   let imageFailed = $state(false);
-  // Reset the skeleton whenever a different image entry is selected so the
-  // checkerboard reappears while the new bytes are streaming in. `void`
-  // marks the dependency read as intentional for the linter.
+  // Reset the skeleton + attempt ladder whenever a different entry is
+  // selected or the user toggles into the expanded preview window. `void`
+  // marks the dependency reads as intentional for the linter. The
+  // cleanup clears any pending retry from the previous entry so a stale
+  // timer can't flip the newly-selected row into retry state.
   $effect(() => {
-    void imageSrc;
+    void preview?.id;
+    void expanded;
+    imageAttempt = 0;
     imageLoaded = false;
     imageFailed = false;
+    return () => {
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+    };
   });
+  function handleImageError(): void {
+    if (expanded) {
+      imageFailed = true;
+      return;
+    }
+    if (imageAttempt === 0) {
+      // First miss: the daemon almost certainly returned 503 and kicked
+      // generation. Wait a fixed 1s, then re-request the same path with
+      // a cache-busting query so the webview actually re-fetches.
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        imageAttempt = 1;
+      }, 1000);
+      return;
+    }
+    if (imageAttempt === 1) {
+      // Retry also missed (slow decoder, oversized payload, LRU-evicted
+      // mid-flight). Stream the original instead so the row still shows
+      // something rather than the unavailable placeholder.
+      imageAttempt = 2;
+      return;
+    }
+    imageFailed = true;
+  }
 
   // Head summary chip: kind-specific one-liner that surfaces lineCount /
   // byteCount / dimensions / domain / file count without ever leaking
@@ -370,16 +422,24 @@
     return () => window.removeEventListener("keydown", handler);
   });
 
-  function buildImageUrl(entryId: string): string {
+  function buildImageUrl(entryId: string, useThumb: boolean, attempt: number): string {
     // macOS / iOS / Linux origin: scheme://localhost/<path>
     // Windows / Android origin: http://<scheme>.localhost/<path>
     // We pick the platform-specific form so the webview's Origin matches the
     // fetched URL (otherwise SecurityError on Win/Android).
     const isWinAndroid =
       typeof navigator !== "undefined" && /Windows|Android/i.test(navigator.userAgent);
-    return isWinAndroid
-      ? `http://nagori-image.localhost/${entryId}`
-      : `nagori-image://localhost/${entryId}`;
+    const origin = isWinAndroid
+      ? "http://nagori-image.localhost"
+      : "nagori-image://localhost";
+    const segment = useThumb ? `thumb/${entryId}` : entryId;
+    // The cache-buster only matters for the post-503 retry: without a
+    // unique URL the webview may short-circuit the second fetch even
+    // though the response was `Cache-Control: no-store`. The Rust
+    // handler ignores the query string (`parse_image_entry_id` reads
+    // only the path), so this is a free no-op for the first attempt.
+    const suffix = attempt > 0 ? `?v=${attempt}` : "";
+    return `${origin}/${segment}${suffix}`;
   }
 </script>
 
@@ -445,7 +505,7 @@
               width={imageDimensions?.width}
               height={imageDimensions?.height}
               onload={() => (imageLoaded = true)}
-              onerror={() => (imageFailed = true)}
+              onerror={handleImageError}
             />
           </div>
         {:else}

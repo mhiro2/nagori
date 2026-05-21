@@ -1230,6 +1230,8 @@ pub struct AppSettingsDto {
     pub auto_update_check: bool,
     #[serde(default)]
     pub update_channel: UpdateChannelDto,
+    #[serde(default = "nagori_core::settings::default_max_thumbnail_total_bytes")]
+    pub max_thumbnail_total_bytes: Option<u64>,
 }
 
 impl Default for SecretHandlingDto {
@@ -1271,6 +1273,7 @@ impl From<AppSettings> for AppSettingsDto {
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
+            max_thumbnail_total_bytes: value.max_thumbnail_total_bytes,
         }
     }
 }
@@ -1308,6 +1311,7 @@ impl From<AppSettingsDto> for AppSettings {
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
+            max_thumbnail_total_bytes: value.max_thumbnail_total_bytes,
         }
     }
 }
@@ -1700,6 +1704,7 @@ mod tests {
             capture_initial_clipboard_on_launch: false,
             auto_update_check: false,
             update_channel: UpdateChannel::Stable,
+            max_thumbnail_total_bytes: Some(32 * 1024 * 1024),
         };
 
         let dto: AppSettingsDto = original.clone().into();

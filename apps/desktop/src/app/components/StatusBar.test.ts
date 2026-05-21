@@ -46,6 +46,7 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',
+  maxThumbnailTotalBytes: 64 * 1024 * 1024,
   ...overrides,
 });
 

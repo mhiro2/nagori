@@ -60,6 +60,7 @@ const baseSettings = (): AppSettings => ({
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',
+  maxThumbnailTotalBytes: 64 * 1024 * 1024,
 });
 
 // Capability fixtures mirror what `nagori-platform-{macos,windows,linux}`

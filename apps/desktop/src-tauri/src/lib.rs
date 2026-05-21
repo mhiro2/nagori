@@ -929,7 +929,7 @@ fn dispatch_image_request(
     let app = ctx.app_handle().clone();
     tauri::async_runtime::spawn(async move {
         let response = match app.try_state::<AppState>() {
-            Some(state) => build_image_response(&state.runtime, &path).await,
+            Some(state) => dispatch_image_path(&state.runtime, &path).await,
             None => plain_response(
                 tauri::http::StatusCode::SERVICE_UNAVAILABLE,
                 "app state unavailable",
@@ -937,6 +937,124 @@ fn dispatch_image_request(
         };
         responder.respond(response);
     });
+}
+
+/// Route `nagori-image://<host>/<path>` requests to the original-payload
+/// or the lazy-thumbnail branch.
+///
+/// Thumbnails live under `/thumb/<id>` so the preview pane can request a
+/// downscaled copy on row navigation without paying the full-resolution
+/// cost (see `nagori_daemon::thumbnails`). Anything else falls through to
+/// the original image at `/<id>`.
+async fn dispatch_image_path(
+    runtime: &NagoriRuntime,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    if let Some(rest) = path
+        .trim_start_matches('/')
+        .strip_prefix("thumb/")
+        .or_else(|| path.strip_prefix("/thumb/"))
+    {
+        return build_thumbnail_response(runtime, rest).await;
+    }
+    build_image_response(runtime, path).await
+}
+
+/// Serve a cached thumbnail for `/thumb/<id>` requests, kicking lazy
+/// generation on miss.
+///
+/// On miss the response is `503 Service Unavailable` with `Retry-After: 1`
+/// so the frontend can re-request once the generator has populated the
+/// `entry_thumbnails` row. The same sensitivity gate as
+/// [`build_image_response`] applies — Private / Secret / Blocked entries
+/// never produce a thumbnail, so we never disclose a derived artifact
+/// for a row the rest of the system suppresses.
+async fn build_thumbnail_response(
+    runtime: &NagoriRuntime,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let Ok(entry_id) = parse_image_entry_id(path) else {
+        return plain_response(tauri::http::StatusCode::BAD_REQUEST, "invalid entry id");
+    };
+    let entry = match runtime.get_entry(entry_id).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return plain_response(tauri::http::StatusCode::NOT_FOUND, "not found"),
+        Err(err) => {
+            tracing::warn!(error = %err, "thumb_scheme_get_entry_failed");
+            return plain_response(
+                tauri::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "lookup failed",
+            );
+        }
+    };
+    if !is_text_safe_for_default_output(entry.sensitivity) {
+        return plain_response(tauri::http::StatusCode::FORBIDDEN, "sensitivity withheld");
+    }
+    let cached = match runtime.get_thumbnail(entry_id).await {
+        Ok(record) => record,
+        Err(err) => {
+            tracing::warn!(error = %err, "thumb_scheme_get_thumbnail_failed");
+            return plain_response(
+                tauri::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "thumbnail lookup failed",
+            );
+        }
+    };
+    if let Some(record) = cached {
+        let Some(safe_mime) = sanitise_image_mime(&record.mime_type) else {
+            tracing::warn!(mime = %record.mime_type, "thumb_scheme_blocked_mime");
+            return plain_response(
+                tauri::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "mime not allowed",
+            );
+        };
+        if !nagori_core::matches_declared_mime(safe_mime, &record.payload) {
+            tracing::warn!(
+                declared_mime = %safe_mime,
+                byte_count = record.payload.len(),
+                "thumb_scheme_signature_mismatch"
+            );
+            return plain_response(
+                tauri::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "signature mismatch",
+            );
+        }
+        return tauri::http::Response::builder()
+            .status(tauri::http::StatusCode::OK)
+            .header(tauri::http::header::CONTENT_TYPE, safe_mime)
+            .header(tauri::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(tauri::http::header::CONTENT_DISPOSITION, "inline")
+            .header(tauri::http::header::CACHE_CONTROL, "no-store")
+            .body(record.payload)
+            .unwrap_or_else(|_| {
+                tauri::http::Response::builder()
+                    .status(tauri::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Vec::new())
+                    .expect("status-only response")
+            });
+    }
+    // Miss: kick lazy generation and ask the client to retry. The gate
+    // inside `kick_thumbnail_generation` collapses repeated misses for
+    // the same id so a burst of preview opens spawns one decoder. The
+    // generator re-reads the entry's sensitivity from storage before
+    // writing, so the dispatch-layer check above is not load-bearing
+    // for the gate.
+    runtime.kick_thumbnail_generation(entry_id);
+    tauri::http::Response::builder()
+        .status(tauri::http::StatusCode::SERVICE_UNAVAILABLE)
+        .header(tauri::http::header::RETRY_AFTER, "1")
+        .header(
+            tauri::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
+        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+        .body(b"thumbnail pending".to_vec())
+        .unwrap_or_else(|_| {
+            tauri::http::Response::builder()
+                .status(tauri::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Vec::new())
+                .expect("status-only response")
+        })
 }
 
 /// Reject requests that didn't come from our bundled webview or from a
@@ -1481,6 +1599,105 @@ mod image_scheme_tests {
         let id = insert(&runtime, make_image_entry(Sensitivity::Blocked)).await;
         let resp = build_image_response(&runtime, &format!("/{id}")).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_returns_503_with_retry_after_on_miss() {
+        // First navigation to a row that has no cached thumbnail must
+        // return 503 + Retry-After so the frontend can re-fetch once the
+        // background generator has populated `entry_thumbnails`.
+        let runtime = build_runtime();
+        let id = insert(&runtime, make_image_entry(Sensitivity::Public)).await;
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+        );
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_serves_cached_bytes() {
+        // Once the daemon has stored a thumbnail row, the scheme handler
+        // streams it with the same hardened header set as the original
+        // payload path (nosniff, no-store, inline).
+        let runtime = build_runtime();
+        let id = insert(&runtime, make_image_entry(Sensitivity::Public)).await;
+        runtime
+            .store()
+            .put_thumbnail(
+                id,
+                nagori_core::ThumbnailRecord {
+                    payload: TINY_JPEG.to_vec(),
+                    mime_type: "image/jpeg".to_owned(),
+                    width: 1,
+                    height: 1,
+                },
+            )
+            .await
+            .expect("seed thumbnail");
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/jpeg"),
+        );
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+        );
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+        );
+        assert_eq!(resp.body().as_slice(), TINY_JPEG);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_withholds_private_entry() {
+        // Sensitivity gate must apply to derived artifacts too — even if
+        // a thumbnail row somehow exists for a Private entry, dispatch
+        // must refuse to serve it.
+        let runtime = build_runtime();
+        let id = insert(&runtime, make_image_entry(Sensitivity::Private)).await;
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.body().as_slice(), b"sensitivity withheld");
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_returns_404_for_unknown_entry() {
+        let runtime = build_runtime();
+        let missing = EntryId::new();
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{missing}")).await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.body().as_slice(), b"not found");
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_rejects_invalid_entry_id() {
+        let runtime = build_runtime();
+
+        let resp = dispatch_image_path(&runtime, "/thumb/not-a-uuid").await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.body().as_slice(), b"invalid entry id");
     }
 }
 

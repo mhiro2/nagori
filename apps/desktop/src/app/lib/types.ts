@@ -216,6 +216,7 @@ export type AppSettings = {
   captureInitialClipboardOnLaunch: boolean;
   autoUpdateCheck: boolean;
   updateChannel: UpdateChannel;
+  maxThumbnailTotalBytes: number | null;
 };
 
 export type UpdateInfo = {
