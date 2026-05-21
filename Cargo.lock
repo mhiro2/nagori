@@ -2947,6 +2947,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "dirs 6.0.0",
+ "idna",
  "nagori-ai",
  "nagori-core",
  "nagori-daemon",
@@ -2971,6 +2972,8 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

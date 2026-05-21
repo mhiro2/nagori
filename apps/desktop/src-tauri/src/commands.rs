@@ -651,6 +651,165 @@ pub async fn open_accessibility_settings() -> CommandResult<()> {
     Err(CommandError::unsupported("open_accessibility_settings"))
 }
 
+/// Allowlisted URL schemes for the `open_url_external` external-open
+/// gate. The renderer hides the "Enter to open" hint for everything else,
+/// but we duplicate the check here so a forged invoke can't escape via a
+/// custom scheme handler the user wouldn't expect. `mailto:` was on the
+/// original plan but the core URL classifier only tags `http(s)` clips
+/// as `ClipboardContent::Url`, so a `mailto:` body never reaches this
+/// code path today — re-add it here alongside the classifier change.
+const URL_SCHEME_ALLOWLIST: &[&str] = &["https", "http"];
+
+/// Open a URL belonging to a Public entry in the user's default browser.
+/// The renderer pre-confirms the host so the user has explicit intent;
+/// this handler re-verifies sensitivity and scheme server-side so a
+/// forged invoke cannot ferry a Secret body out via the system handler.
+/// The `url` argument must match the entry's stored URL — we re-fetch
+/// the entry and compare to defend against a compromised renderer
+/// claiming any arbitrary target.
+#[tauri::command]
+pub async fn open_url_external(
+    state: State<'_, AppState>,
+    entry_id: String,
+    url: String,
+) -> CommandResult<()> {
+    let entry_id = parse_entry_id(&entry_id)?;
+    let entry = state
+        .runtime
+        .get_entry(entry_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    // Sensitivity gate first — never reach the OS handler for a
+    // Private/Secret/Blocked clip even if the renderer asks. The preview
+    // pane already hides the Enter hint for these, but a forged invoke
+    // could still arrive (e.g. via DevTools in a debug build).
+    let canonical = validate_external_open(&entry, &url)?;
+    open_external_url(&canonical)?;
+    Ok(())
+}
+
+/// Pure gate for `open_url_external` — extracted so the
+/// sensitivity / kind / URL-match / scheme-allowlist checks can be
+/// exercised without spinning up a runtime. Returns the canonical
+/// (parsed-and-re-serialised) URL that should be handed to the platform
+/// opener so the rest of the command never re-uses the raw renderer
+/// string.
+fn validate_external_open(
+    entry: &nagori_core::ClipboardEntry,
+    requested_url: &str,
+) -> Result<String, CommandError> {
+    if !matches!(entry.sensitivity, Sensitivity::Public) {
+        return Err(CommandError::forbidden(
+            "external open is only available for Public entries",
+        ));
+    }
+    let nagori_core::ClipboardContent::Url(stored) = &entry.content else {
+        return Err(CommandError::invalid_input("entry is not a URL clip"));
+    };
+    // Compare against the entry's stored URL so a compromised renderer
+    // can't redirect to an attacker-controlled URL while presenting the
+    // user's confirm dialog with the legitimate host.
+    if requested_url.trim() != stored.raw.trim() {
+        return Err(CommandError::invalid_input(
+            "url does not match the stored entry",
+        ));
+    }
+    let parsed = url::Url::parse(requested_url.trim())
+        .map_err(|err| CommandError::invalid_input(format!("invalid url: {err}")))?;
+    let scheme = parsed.scheme();
+    if !URL_SCHEME_ALLOWLIST.contains(&scheme) {
+        return Err(CommandError::invalid_input(format!(
+            "scheme `{scheme}` is not allowed for external open"
+        )));
+    }
+    Ok(parsed.as_str().to_owned())
+}
+
+/// Hand the URL to the platform's default URL handler. We shell out
+/// directly (mirroring `open_accessibility_settings`) rather than wiring
+/// `tauri-plugin-shell`'s JS surface — every call site here is already
+/// inside a Rust command that has run the full sensitivity / allowlist
+/// gate, so the plugin's capability layer would be redundant overhead.
+///
+/// Windows uses `ShellExecuteW` directly instead of `cmd /c start`: the
+/// canonical URL has already been validated against the entry's stored
+/// claim, but `cmd.exe` interprets `&`, `^`, `|`, etc. on its argument
+/// strings before invoking `start`, so a future allowlist relaxation
+/// (or a URL whose query contains those characters) could turn a benign
+/// argument into a shell metacharacter. `ShellExecuteW` skips the shell
+/// parser entirely.
+fn open_external_url(url: &str) -> CommandResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let mut command = Command::new("open");
+        // `--` stops `open(1)` from interpreting a URL beginning with a
+        // dash as one of its own flags, even though the upstream parser
+        // is currently strict about that — keeps us safe across releases.
+        command.arg("--").arg(url);
+        command
+            .status()
+            .map_err(|err| CommandError::internal(err.to_string()))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+            .status()
+            .map_err(|err| CommandError::internal(err.to_string()))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr::null;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let operation: Vec<u16> = std::ffi::OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let file: Vec<u16> = std::ffi::OsStr::new(url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `operation` and `file` are NUL-terminated UTF-16 strings
+        // that outlive the call. `ShellExecuteW` returns an HINSTANCE that
+        // is `> 32` on success per the documented contract. The desktop
+        // crate inherits the workspace `unsafe_code = "deny"` lint, so the
+        // single Win32 FFI here is opted in locally rather than relaxing
+        // the whole crate; the call site is otherwise pure Rust glue.
+        #[allow(unsafe_code)]
+        let hinstance = unsafe {
+            ShellExecuteW(
+                null::<core::ffi::c_void>() as _,
+                operation.as_ptr(),
+                file.as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (hinstance as isize) <= 32 {
+            return Err(CommandError::internal(format!(
+                "ShellExecuteW failed with code {}",
+                hinstance as isize
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = url;
+        Err(CommandError::unsupported(
+            "external URL open is not supported on this platform",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;
@@ -663,6 +822,87 @@ mod helper_tests {
         let original = EntryId::new();
         let parsed = parse_entry_id(&original.to_string()).expect("uuid parses");
         assert_eq!(parsed, original);
+    }
+
+    fn url_entry(raw: &str) -> nagori_core::ClipboardEntry {
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash, EntryFactory,
+        };
+        use time::OffsetDateTime;
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash(ContentHash::sha256(raw.as_bytes()).value),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text(raw.to_owned()),
+            }],
+        };
+        let mut entry = EntryFactory::from_snapshot(snapshot).expect("url snapshot");
+        // `from_snapshot` defaults `sensitivity` to `Unknown`; the gate
+        // requires an explicit `Public` clip, so set it here for the
+        // accept/match/scheme paths and let the negative test override it.
+        entry.sensitivity = Sensitivity::Public;
+        entry
+    }
+
+    #[test]
+    fn validate_external_open_accepts_public_https_match() {
+        let entry = url_entry("https://example.com/foo?bar=1");
+        let canonical = validate_external_open(&entry, "https://example.com/foo?bar=1")
+            .expect("public https url is accepted");
+        assert!(canonical.starts_with("https://example.com/"));
+    }
+
+    #[test]
+    fn validate_external_open_rejects_non_public_entries_with_forbidden() {
+        // Sensitivity gate must trip before the URL-match check so a
+        // forged invoke against a Secret entry can never reach the OS
+        // handler — even if the renderer happened to know the URL.
+        let mut entry = url_entry("https://example.com/foo");
+        entry.sensitivity = Sensitivity::Secret;
+        let err = validate_external_open(&entry, "https://example.com/foo")
+            .expect_err("secret entries are blocked");
+        assert_eq!(err.code, "forbidden");
+        assert!(!err.recoverable);
+    }
+
+    #[test]
+    fn validate_external_open_rejects_url_mismatch() {
+        // The renderer-supplied URL must equal the stored one byte-for-byte
+        // (after trim) so a compromised webview can't redirect to an
+        // attacker-controlled host while displaying the legitimate confirm.
+        let entry = url_entry("https://example.com/foo");
+        let err = validate_external_open(&entry, "https://attacker.test/foo")
+            .expect_err("mismatched url is rejected");
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("does not match"));
+    }
+
+    #[test]
+    fn validate_external_open_rejects_disallowed_schemes() {
+        // `file://`, `javascript:`, etc. must never reach the platform
+        // handler — even on a Public clip with a matching URL string —
+        // because the system handler interprets them in ways the user
+        // does not expect from a clipboard preview.
+        // Constructing a `file://` ClipboardEntry isn't possible (the
+        // core URL parser only accepts http/https), so we exercise the
+        // scheme gate through a hand-rolled mismatch fixture:
+        let mut entry = url_entry("https://example.com/foo");
+        // Swap the stored URL to a file:// scheme so the scheme gate
+        // becomes the failure surface, not the URL-match check.
+        if let nagori_core::ClipboardContent::Url(stored) = &mut entry.content {
+            stored.raw = "file:///etc/passwd".to_owned();
+        }
+        let err = validate_external_open(&entry, "file:///etc/passwd")
+            .expect_err("file scheme is rejected");
+        assert_eq!(err.code, "invalid_input");
+        assert!(
+            err.message.contains("not allowed"),
+            "expected scheme-allowlist message, got {:?}",
+            err.message,
+        );
     }
 
     #[test]

@@ -293,7 +293,11 @@ pub enum TruncationDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PreviewBodyDto {
     Text {
         text: String,
@@ -305,6 +309,23 @@ pub enum PreviewBodyDto {
     Url {
         url: String,
         domain: Option<String>,
+        // Structured decomposition of `url` so the renderer can show
+        // `scheme://host` and `/path?query` on separate visual rows. All
+        // three new fields are `None` (or `null` after camelCase JSON
+        // rendering) when `url::Url::parse` rejected the body — the UI
+        // falls back to the flat `url` string in that case.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scheme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host_display: Option<String>,
+        // Only emitted when the IDN punycode form differs from
+        // `host_display` (i.e. the user-facing host is non-ASCII Unicode).
+        // The renderer surfaces a phishing-resistance badge when this is
+        // `Some`. Stays `None` for plain ASCII domains.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host_punycode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path_and_query: Option<String>,
     },
     Image {
         mime_type: Option<String>,
@@ -422,10 +443,17 @@ impl EntryPreviewDto {
                     text: preview_text.clone(),
                     language: value.language_hint.clone().or_else(|| language.clone()),
                 },
-                ClipboardContent::Url(value) => PreviewBodyDto::Url {
-                    url: preview_text.clone(),
-                    domain: value.domain.clone(),
-                },
+                ClipboardContent::Url(value) => {
+                    let parts = UrlParts::from_raw(&value.raw);
+                    PreviewBodyDto::Url {
+                        url: preview_text.clone(),
+                        domain: value.domain.clone(),
+                        scheme: parts.as_ref().map(|p| p.scheme.clone()),
+                        host_display: parts.as_ref().map(|p| p.host_display.clone()),
+                        host_punycode: parts.as_ref().and_then(|p| p.host_punycode.clone()),
+                        path_and_query: parts.as_ref().map(|p| p.path_and_query.clone()),
+                    }
+                }
                 ClipboardContent::Image(value) => PreviewBodyDto::Image {
                     mime_type: value.mime_type.clone(),
                     byte_count: value.byte_count,
@@ -463,6 +491,70 @@ impl EntryPreviewDto {
                 elided_contains_match,
             },
         }
+    }
+}
+
+/// Three-way decomposition of a URL body used by the preview pane to
+/// render `host`, `scheme://path`, and an optional punycode badge on
+/// separate rows. Built from the entry's raw URL via `url::Url::parse`
+/// and `idna::domain_to_unicode`, so we never trust the user-supplied
+/// string for the display split.
+#[derive(Debug, Clone)]
+pub(crate) struct UrlParts {
+    pub scheme: String,
+    pub host_display: String,
+    /// `Some` only when the ASCII (punycode) host differs from
+    /// `host_display`. Plain ASCII domains leave this `None` so the
+    /// renderer can skip the badge.
+    pub host_punycode: Option<String>,
+    pub path_and_query: String,
+}
+
+impl UrlParts {
+    /// Best-effort parse. Returns `None` when the body isn't a syntactically
+    /// valid absolute URL (e.g. a `mailto:` without an addr-spec) or the
+    /// host part is empty — the caller falls back to a flat URL render.
+    pub fn from_raw(raw: &str) -> Option<Self> {
+        let parsed = url::Url::parse(raw.trim()).ok()?;
+        let scheme = parsed.scheme().to_owned();
+        let host_ascii = parsed.host_str()?.to_owned();
+        if host_ascii.is_empty() {
+            return None;
+        }
+        // `host_str()` returns the IDNA-A form (`xn--…`). Convert back to
+        // Unicode for the display row; on conversion error fall back to
+        // the ASCII string so the renderer still has something to show.
+        // Non-default ports are folded into `host_display` (and the
+        // punycode badge value when surfaced) so the confirm modal cannot
+        // hide a redirect to `:8443` behind a familiar-looking hostname.
+        let (unicode, errors) = idna::domain_to_unicode(&host_ascii);
+        let port_suffix = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let (host_display, host_punycode) = if errors.is_ok() && unicode != host_ascii {
+            (
+                format!("{unicode}{port_suffix}"),
+                Some(format!("{host_ascii}{port_suffix}")),
+            )
+        } else {
+            (format!("{host_ascii}{port_suffix}"), None)
+        };
+        let mut path_and_query = parsed.path().to_owned();
+        if let Some(query) = parsed.query() {
+            path_and_query.push('?');
+            path_and_query.push_str(query);
+        }
+        if let Some(fragment) = parsed.fragment() {
+            path_and_query.push('#');
+            path_and_query.push_str(fragment);
+        }
+        if path_and_query.is_empty() {
+            path_and_query.push('/');
+        }
+        Some(Self {
+            scheme,
+            host_display,
+            host_punycode,
+            path_and_query,
+        })
     }
 }
 
@@ -1701,6 +1793,40 @@ mod tests {
     }
 
     #[test]
+    fn url_preview_serialises_fields_in_camel_case() {
+        // The Url variant's structured fields cross the IPC wire to
+        // the TS renderer as camelCase. `rename_all = "camelCase"` on
+        // the enum only renames variant names, so without the matching
+        // `rename_all_fields` the new structured fields would ship as
+        // snake_case and silently break the renderer fallback (the host
+        // row would always read from `url`, the punycode badge would
+        // never fire). Lock this here so a future serde refactor cannot
+        // regress the contract.
+        let snapshot = ClipboardSnapshot {
+            sequence: nagori_core::ClipboardSequence::content_hash(
+                nagori_core::ContentHash::sha256(b"https://example.com/foo").value,
+            ),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text("https://example.com/foo?bar=1".to_owned()),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("url snapshot");
+        let dto = EntryPreviewDto::from_entry(&entry);
+        let json = serde_json::to_value(&dto.body).expect("serialise url body");
+        assert_eq!(json["type"], serde_json::json!("url"));
+        assert_eq!(json["hostDisplay"], serde_json::json!("example.com"));
+        assert_eq!(json["pathAndQuery"], serde_json::json!("/foo?bar=1"));
+        assert_eq!(json["scheme"], serde_json::json!("https"));
+        assert!(
+            json.get("host_display").is_none() && json.get("path_and_query").is_none(),
+            "snake_case fields must not coexist with camelCase rename"
+        );
+    }
+
+    #[test]
     fn entry_preview_for_url_emits_url_body_with_domain() {
         // URL-shaped clips should round-trip the parsed domain so the
         // frontend can render the badged preview without re-parsing.
@@ -1718,12 +1844,67 @@ mod tests {
         let entry = EntryFactory::from_snapshot(snapshot).expect("url snapshot");
         let dto = EntryPreviewDto::from_entry(&entry);
         match dto.body {
-            PreviewBodyDto::Url { url, domain } => {
+            PreviewBodyDto::Url {
+                url,
+                domain,
+                scheme,
+                host_display,
+                host_punycode,
+                path_and_query,
+            } => {
                 assert!(url.contains("example.com"));
                 assert_eq!(domain.as_deref(), Some("example.com"));
+                assert_eq!(scheme.as_deref(), Some("https"));
+                assert_eq!(host_display.as_deref(), Some("example.com"));
+                assert!(host_punycode.is_none(), "ASCII host must omit punycode");
+                assert_eq!(path_and_query.as_deref(), Some("/foo?bar=1"));
             }
             other => panic!("expected Url body, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn url_parts_flag_idn_host_with_punycode_badge() {
+        // IDN hosts get a Unicode display row and the xn-- ASCII form
+        // surfaces so the renderer can warn about homograph attacks.
+        let parts = UrlParts::from_raw("https://xn--bcher-kva.example/").expect("idn parses");
+        assert_eq!(parts.scheme, "https");
+        assert_eq!(parts.host_display, "bücher.example");
+        assert_eq!(
+            parts.host_punycode.as_deref(),
+            Some("xn--bcher-kva.example")
+        );
+        assert_eq!(parts.path_and_query, "/");
+    }
+
+    #[test]
+    fn url_parts_reject_non_url_bodies() {
+        // Non-URL strings (no scheme + host) must fall through to the flat
+        // `url` render rather than producing a partially-populated split.
+        assert!(UrlParts::from_raw("not a url").is_none());
+        assert!(UrlParts::from_raw("mailto:user@example.com").is_none());
+    }
+
+    #[test]
+    fn url_parts_surface_non_default_port_in_host_display() {
+        // Non-default ports must appear in `host_display` (and in the
+        // punycode badge value when set) so the confirm modal can't hide
+        // a redirect to `:8443` behind a familiar-looking hostname.
+        let parts = UrlParts::from_raw("https://example.com:8443/admin").expect("parses");
+        assert_eq!(parts.host_display, "example.com:8443");
+        assert!(parts.host_punycode.is_none());
+
+        let idn = UrlParts::from_raw("https://xn--bcher-kva.example:8443/").expect("idn parses");
+        assert_eq!(idn.host_display, "bücher.example:8443");
+        assert_eq!(
+            idn.host_punycode.as_deref(),
+            Some("xn--bcher-kva.example:8443")
+        );
+
+        // Default port for the scheme is collapsed by `url::Url`, so it
+        // does not leak into the display row.
+        let default_port = UrlParts::from_raw("https://example.com:443/").expect("parses");
+        assert_eq!(default_port.host_display, "example.com");
     }
 
     #[test]

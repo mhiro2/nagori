@@ -26,9 +26,11 @@ nagori-platform-native = { path = "../../../crates/nagori-platform-native" }
 nagori-search = { path = "../../../crates/nagori-search" }
 nagori-storage = { path = "../../../crates/nagori-storage" }
 dirs = { workspace = true }
+idna = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
+url = { workspace = true }
 tauri-plugin-autostart = { workspace = true }
 tauri-plugin-global-shortcut = { workspace = true }
 tauri-plugin-log = { workspace = true }
@@ -44,6 +46,11 @@ nagori-platform-macos = { path = "../../../crates/nagori-platform-macos" }
 
 [target."cfg(target_os = \"windows\")".dependencies]
 nagori-platform-windows = { path = "../../../crates/nagori-platform-windows" }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [target."cfg(target_os = \"linux\")".dependencies]
 nagori-platform-linux = { path = "../../../crates/nagori-platform-linux" }

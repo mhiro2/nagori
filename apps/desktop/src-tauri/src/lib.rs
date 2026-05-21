@@ -233,6 +233,7 @@ pub fn run() {
             commands::get_permissions,
             commands::get_capabilities,
             commands::open_accessibility_settings,
+            commands::open_url_external,
             commands::toggle_palette,
             commands::hide_palette,
             commands::check_for_updates,
