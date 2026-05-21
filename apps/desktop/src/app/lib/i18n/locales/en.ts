@@ -64,6 +64,10 @@ export type Messages = {
     fileList: {
       summary: (shown: number, total: number) => string;
       moreFiles: CountFormatter;
+      // Common-parent header shown above the list when every row shares the
+      // same directory prefix. The prefix string already includes the
+      // trailing separator.
+      inFolder: (prefix: string) => string;
     };
   };
   status: {
@@ -340,6 +344,7 @@ export const en: Messages = {
           : `${shown.toLocaleString('en')} / ${total.toLocaleString('en')} files`,
       moreFiles: (count) =>
         count === 1 ? '+1 more file' : `+${count.toLocaleString('en')} more files`,
+      inFolder: (prefix) => `in ${prefix}`,
     },
   },
   status: {

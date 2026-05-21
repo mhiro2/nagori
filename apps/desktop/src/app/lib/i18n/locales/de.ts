@@ -71,6 +71,7 @@ export const de: Messages = {
           : `${shown.toLocaleString('de')} / ${total.toLocaleString('de')} Dateien`,
       moreFiles: (count: number): string =>
         count === 1 ? '+1 weitere Datei' : `+${count.toLocaleString('de')} weitere Dateien`,
+      inFolder: (prefix: string): string => `in ${prefix}`,
     },
   },
   status: {

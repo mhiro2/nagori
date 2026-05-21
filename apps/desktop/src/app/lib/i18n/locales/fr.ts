@@ -73,6 +73,7 @@ export const fr: Messages = {
         count <= 1
           ? `+${count} fichier de plus`
           : `+${count.toLocaleString('fr')} fichiers de plus`,
+      inFolder: (prefix: string): string => `dans ${prefix}`,
     },
   },
   status: {

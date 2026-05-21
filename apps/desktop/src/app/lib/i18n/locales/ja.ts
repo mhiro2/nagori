@@ -66,6 +66,7 @@ export const ja: Messages = {
           ? `${total.toLocaleString('ja')} 件`
           : `${shown.toLocaleString('ja')} / ${total.toLocaleString('ja')} 件`,
       moreFiles: (count: number): string => `他 ${count.toLocaleString('ja')} 件`,
+      inFolder: (prefix: string): string => `${prefix} 配下`,
     },
   },
   status: {

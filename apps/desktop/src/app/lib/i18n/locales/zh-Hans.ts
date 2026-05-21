@@ -66,6 +66,7 @@ export const zhHans: Messages = {
           ? `${total.toLocaleString('zh-Hans')} 个文件`
           : `${shown.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')} 个文件`,
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hans')} 个`,
+      inFolder: (prefix: string): string => `位于 ${prefix}`,
     },
   },
   status: {

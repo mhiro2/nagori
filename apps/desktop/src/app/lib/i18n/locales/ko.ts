@@ -66,6 +66,7 @@ export const ko: Messages = {
           ? `${total.toLocaleString('ko')}개`
           : `${shown.toLocaleString('ko')} / ${total.toLocaleString('ko')}개`,
       moreFiles: (count: number): string => `+${count.toLocaleString('ko')}개 더`,
+      inFolder: (prefix: string): string => `${prefix} 하위`,
     },
   },
   status: {

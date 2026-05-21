@@ -66,6 +66,7 @@ export const zhHant: Messages = {
           ? `${total.toLocaleString('zh-Hant')} 個檔案`
           : `${shown.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')} 個檔案`,
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hant')} 個`,
+      inFolder: (prefix: string): string => `位於 ${prefix}`,
     },
   },
   status: {

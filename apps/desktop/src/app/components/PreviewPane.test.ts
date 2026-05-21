@@ -182,7 +182,11 @@ describe('PreviewPane', () => {
         item: sampleItem({ kind: 'fileList' }),
         preview: samplePreview({
           previewText: '',
-          body: { type: 'fileList', paths: ['/tmp/a.txt', '/tmp/b.txt'], total: 2 },
+          body: {
+            type: 'fileList',
+            paths: ['/tmp/proj/a.txt', '/tmp/other/b.txt'],
+            total: 2,
+          },
         }),
         loading: false,
         errorMessage: undefined,
@@ -190,14 +194,206 @@ describe('PreviewPane', () => {
     });
     const items = Array.from(container.querySelectorAll('ul.files > li'));
     expect(items).toHaveLength(2);
-    expect(items[0]?.textContent).toContain('/tmp/');
-    expect(items[0]?.textContent).toContain('a.txt');
-    // Full path lives in `title` for hover-disclosure of middle-elided rows.
-    expect(items[0]?.getAttribute('title')).toBe('/tmp/a.txt');
+    // Title retains the full original path for hover disclosure even when
+    // the common parent prefix is stripped from the visible row.
+    expect(items[0]?.getAttribute('title')).toBe('/tmp/proj/a.txt');
     // The basename is emphasised via <strong>; the directory part lives in
     // a dimmed span so the eye lands on the filename first.
     expect(items[0]?.querySelector('strong.base')?.textContent).toBe('a.txt');
-    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('/tmp/');
+    // The common parent `/tmp/` is hoisted, leaving `proj/` as the dim dir.
+    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('proj/');
+  });
+
+  it('hoists the common directory prefix into a single header above the list', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: ['/Users/me/proj/a.txt', '/Users/me/proj/b.txt'],
+            total: 2,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const header = container.querySelector('[data-testid="preview-files-common-parent"]');
+    expect(header?.textContent).toContain('/Users/me/proj/');
+    // Title preserves the full prefix so hover-discloses the path even if
+    // CSS ellipsis truncates the visible header.
+    expect(header?.getAttribute('title')).toBe('/Users/me/proj/');
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    // With the common parent hoisted, each row collapses to the basename
+    // only — no dir segment remains.
+    expect(items[0]?.querySelector('span.dim')).toBeNull();
+    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('a.txt');
+  });
+
+  it('omits the common-parent header when there is only a single path', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'fileList', paths: ['/tmp/only.txt'], total: 1 },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
+    expect(container.querySelector('ul.files > li span.dim')?.textContent).toBe('/tmp/');
+  });
+
+  it('omits the common-parent header when the only shared prefix is the root', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'fileList', paths: ['/a.txt', '/b.txt'], total: 2 },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    // `/` alone is too noisy to surface; the rows keep their own dir tokens.
+    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
+  });
+
+  it('omits the common-parent header for a Windows drive root only', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'fileList', paths: ['C:\\a.txt', 'C:\\b.txt'], total: 2 },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
+  });
+
+  it('keeps a directory entry visible when it is also the common-parent input', () => {
+    // When one of the paths is itself a directory (e.g. `/proj/build/`) and
+    // a sibling lives inside it (`/proj/build/file.txt`), the common parent
+    // is `/proj/` — the directory entry must still render as `build/` and
+    // not collapse to an empty row.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: ['/proj/build/', '/proj/build/file.txt'],
+            total: 2,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const header = container.querySelector('[data-testid="preview-files-common-parent"]');
+    expect(header?.textContent).toContain('/proj/');
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('build/');
+    expect(items[0]?.classList.contains('kind-directory')).toBe(true);
+    expect(items[1]?.querySelector('span.dim')?.textContent).toBe('build/');
+    expect(items[1]?.querySelector('strong.base')?.textContent).toBe('file.txt');
+  });
+
+  it('extracts the same common parent regardless of directory/file order', () => {
+    // Order-independence guard: reversing the inputs must not pin the
+    // prefix at `/proj/build/` and collapse the directory row.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: ['/proj/build/file.txt', '/proj/build/'],
+            total: 2,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const header = container.querySelector('[data-testid="preview-files-common-parent"]');
+    expect(header?.textContent).toContain('/proj/');
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('build/');
+    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('file.txt');
+    expect(items[1]?.querySelector('strong.base')?.textContent).toBe('build/');
+    expect(items[1]?.classList.contains('kind-directory')).toBe(true);
+  });
+
+  it('tags each row with an extension category for the colour dot', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: [
+              '/proj/photo.PNG',
+              '/proj/main.rs',
+              '/proj/release.zip',
+              '/proj/spec.pdf',
+              '/proj/Makefile',
+              '/proj/build/',
+            ],
+            total: 6,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.classList.contains('kind-image')).toBe(true);
+    expect(items[1]?.classList.contains('kind-code')).toBe(true);
+    expect(items[2]?.classList.contains('kind-archive')).toBe(true);
+    expect(items[3]?.classList.contains('kind-document')).toBe(true);
+    expect(items[4]?.classList.contains('kind-unknown')).toBe(true);
+    expect(items[5]?.classList.contains('kind-directory')).toBe(true);
+    // The dot itself carries the category class so CSS can colour it
+    // without the row's class hook needing global selectors.
+    expect(items[0]?.querySelector('.ext-dot.image')).toBeTruthy();
+    expect(items[5]?.querySelector('.ext-dot.directory')).toBeTruthy();
+    // The colour dot must not be announced as content; aria-hidden keeps
+    // screen readers focused on the path itself.
+    expect(items[0]?.querySelector('.ext-dot')?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('re-attaches the trailing slash to directory rows so foo/ stays foo/', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: ['/proj/build/', '/proj/dist/'],
+            total: 2,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('build/');
+    expect(items[1]?.querySelector('strong.base')?.textContent).toBe('dist/');
+    expect(items[0]?.classList.contains('kind-directory')).toBe(true);
   });
 
   it('renders a "more files" hint when the file list exceeds the wire cap', () => {
