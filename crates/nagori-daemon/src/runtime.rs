@@ -24,10 +24,13 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::error;
 
+use nagori_core::ThumbnailRecord;
+
 use crate::health::{CaptureHealth, MaintenanceHealth, StartupHealth};
 use crate::search_cache::{
     CacheKey, CacheLookup, SharedSearchCache, lock_or_recover, new_shared_cache,
 };
+use crate::thumbnails::{self, ThumbnailGate};
 
 #[derive(Clone)]
 pub struct NagoriRuntime {
@@ -68,6 +71,12 @@ pub struct NagoriRuntime {
     /// the IPC `Capabilities` handler clones it on demand. Wrapped in
     /// `Arc` to keep `NagoriRuntime: Clone` cheap.
     capabilities: Arc<PlatformCapabilities>,
+    /// Deduplicator for in-flight thumbnail generation. Frontend layouts
+    /// often fire several `nagori-image://thumb/<id>` requests for the
+    /// same row in quick succession; the gate keeps a single decode in
+    /// flight per entry id so a burst of misses doesn't spawn redundant
+    /// blocking-pool work or race two `put_thumbnail` writes.
+    thumbnail_gate: ThumbnailGate,
 }
 
 impl NagoriRuntime {
@@ -398,6 +407,17 @@ impl NagoriRuntime {
         } else {
             None
         };
+        // Surface thumbnail usage so operators can see whether the LRU
+        // budget is doing its job. A read failure here (e.g. corrupt
+        // schema in a future migration) must not abort the whole
+        // report, so we fall back to `None` and log.
+        let thumbnail_total_bytes = match self.store.total_thumbnail_bytes().await {
+            Ok(total) => Some(total),
+            Err(err) => {
+                tracing::warn!(error = %err, "doctor_thumbnail_total_failed");
+                None
+            }
+        };
         Ok(DoctorReport {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             db_path: String::new(),
@@ -413,6 +433,8 @@ impl NagoriRuntime {
             startup: self.startup_health.report(),
             update_channel: settings.update_channel.as_str().to_owned(),
             latest_version,
+            thumbnail_total_bytes,
+            thumbnail_budget_bytes: settings.max_thumbnail_total_bytes,
         })
     }
 
@@ -614,6 +636,61 @@ impl NagoriRuntime {
 
     pub async fn get_payload(&self, id: EntryId) -> Result<Option<(Vec<u8>, String)>> {
         self.store.get_payload(id).await
+    }
+
+    /// Fetch a cached thumbnail for `id`, or return `None` if the
+    /// derived row has not been generated yet.
+    ///
+    /// Read-only — callers that want lazy generation on miss should
+    /// follow this with [`Self::kick_thumbnail_generation`] and either
+    /// retry the fetch on the next request (the `nagori-image://thumb/`
+    /// path's `503 Retry-After`) or stream the original payload.
+    pub async fn get_thumbnail(&self, id: EntryId) -> Result<Option<ThumbnailRecord>> {
+        self.store.get_thumbnail(id).await
+    }
+
+    /// Kick a background thumbnail generation for `id` if one is not
+    /// already in flight, returning immediately.
+    ///
+    /// The generator is gated by [`ThumbnailGate`] so concurrent requests
+    /// for the same entry collapse to a single decoder, and re-asserts
+    /// the sensitivity check inside [`thumbnails::generate_thumbnail`]
+    /// (defence-in-depth — the public API does not commit a thumbnail
+    /// for non-Public rows even if a caller bypasses the dispatch gate).
+    /// The sensitivity gate is re-read from storage inside the generator
+    /// so a stale caller-supplied classification cannot persist a
+    /// derived row that the dispatch layer would have refused.
+    /// Once generation completes, [`SqliteStore::enforce_thumbnail_budget`]
+    /// is invoked to apply the LRU sweep if the operator configured one.
+    pub fn kick_thumbnail_generation(&self, id: EntryId) {
+        let Some(guard) = self.thumbnail_gate.try_acquire(id) else {
+            // Another request is already generating this thumbnail; the
+            // first caller's `put_thumbnail` will satisfy us on the next
+            // fetch.
+            return;
+        };
+        let store = self.store.clone();
+        let settings_rx = self.settings_rx.clone();
+        tokio::spawn(async move {
+            // Hold the gate guard across the whole generation so a
+            // second request that beats us to the cache lookup still
+            // observes the in-flight slot.
+            let _guard = guard;
+            match thumbnails::generate_thumbnail(&store, id).await {
+                Ok(Some(_)) => {
+                    let budget = settings_rx.borrow().max_thumbnail_total_bytes;
+                    if let Some(budget) = budget
+                        && let Err(err) = store.enforce_thumbnail_budget(budget).await
+                    {
+                        tracing::warn!(error = %err, "thumbnail_budget_enforce_failed");
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, entry_id = %id, "thumbnail_generate_failed");
+                }
+            }
+        });
     }
 
     pub async fn get_settings(&self) -> Result<AppSettings> {
@@ -865,6 +942,7 @@ impl NagoriRuntimeBuilder {
             startup_health: StartupHealth::new(),
             capture_health: CaptureHealth::new(),
             capabilities,
+            thumbnail_gate: ThumbnailGate::default(),
         }
     }
 }

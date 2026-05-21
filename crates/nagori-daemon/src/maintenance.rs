@@ -94,6 +94,22 @@ impl MaintenanceService {
         } else {
             0
         };
+        // Thumbnail budget is enforced opportunistically every time a
+        // new thumbnail is generated, but a stale history (settings
+        // tightened, schema replayed) can leave the table above the
+        // current cap. The maintenance sweep is the catch-up step.
+        if let Some(budget) = settings.max_thumbnail_total_bytes {
+            match self.store.enforce_thumbnail_budget(budget).await {
+                Ok(evicted) if evicted > 0 => {
+                    self.record_retention_drop("thumbnail_budget", evicted, settings)
+                        .await;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(error = %err, "thumbnail_budget_enforce_failed");
+                }
+            }
+        }
         let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size;
         let vacuumed = if total_deleted >= VACUUM_DELETION_THRESHOLD {
             self.store.vacuum().await?;
@@ -141,6 +157,12 @@ impl MaintenanceService {
                 "deleted={deleted} cap_bytes={cap}",
                 cap = settings
                     .max_total_bytes
+                    .map_or_else(|| "none".to_owned(), |b| b.to_string())
+            ),
+            "thumbnail_budget" => format!(
+                "evicted={deleted} cap_bytes={cap}",
+                cap = settings
+                    .max_thumbnail_total_bytes
                     .map_or_else(|| "none".to_owned(), |b| b.to_string())
             ),
             _ => format!("deleted={deleted}"),

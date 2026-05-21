@@ -1013,6 +1013,19 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                 .as_deref()
                 .map_or_else(String::new, |msg| format!("\t{msg}"));
             println!("startup\t{startup_state}{startup_suffix}");
+            // Thumbnail cache footprint and configured budget. `used`
+            // is the current `entry_thumbnails` total; `cap` reflects
+            // `max_thumbnail_total_bytes`. Operators check this when
+            // diagnosing "preview is slow on a big image" — a near-cap
+            // total combined with frequent regeneration suggests
+            // raising the budget.
+            let thumb_used = report
+                .thumbnail_total_bytes
+                .map_or_else(|| "(unknown)".to_owned(), |b| b.to_string());
+            let thumb_cap = report
+                .thumbnail_budget_bytes
+                .map_or_else(|| "disabled".to_owned(), |b| b.to_string());
+            println!("thumbnails\tused={thumb_used}\tcap={thumb_cap}");
         }
     }
     Ok(())
@@ -1153,6 +1166,14 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
             }
         }
     }
+    let thumb_used = store
+        .total_thumbnail_bytes()
+        .await
+        .map_or_else(|_| "(unknown)".to_owned(), |b| b.to_string());
+    let thumb_cap = settings
+        .max_thumbnail_total_bytes
+        .map_or_else(|| "disabled".to_owned(), |b| b.to_string());
+    println!("thumbnails\tused={thumb_used}\tcap={thumb_cap}");
     Ok(())
 }
 

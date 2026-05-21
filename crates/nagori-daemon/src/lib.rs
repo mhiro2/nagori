@@ -4,6 +4,7 @@ pub mod maintenance;
 pub mod runtime;
 pub mod search_cache;
 pub mod serve;
+pub mod thumbnails;
 
 pub use capture_loop::CaptureLoop;
 pub use health::{
