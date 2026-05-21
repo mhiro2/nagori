@@ -10,8 +10,8 @@ catalogs:
       specifier: 7.1.2
       version: 7.1.2
     svelte:
-      specifier: 5.55.5
-      version: 5.55.5
+      specifier: 5.55.7
+      version: 5.55.7
     svelte-check:
       specifier: 4.4.8
       version: 4.4.8
@@ -75,11 +75,11 @@ importers:
         version: 2.11.0
       svelte:
         specifier: catalog:frontend
-        version: 5.55.5
+        version: 5.55.7
     devDependencies:
       '@sveltejs/vite-plugin-svelte':
         specifier: catalog:frontend
-        version: 7.1.2(svelte@5.55.5)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))
+        version: 7.1.2(svelte@5.55.7)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))
       '@tauri-apps/cli':
         specifier: catalog:tauri
         version: 2.11.1
@@ -88,7 +88,7 @@ importers:
         version: 6.9.1
       '@testing-library/svelte':
         specifier: catalog:testing
-        version: 5.3.1(svelte@5.55.5)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))(vitest@4.1.5)
+        version: 5.3.1(svelte@5.55.7)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))(vitest@4.1.5)
       '@testing-library/user-event':
         specifier: catalog:testing
         version: 14.6.1(@testing-library/dom@10.4.1)
@@ -115,7 +115,7 @@ importers:
         version: 0.22.1
       svelte-check:
         specifier: catalog:frontend
-        version: 4.4.8(picomatch@4.0.4)(svelte@5.55.5)(typescript@6.0.3)
+        version: 4.4.8(picomatch@4.0.4)(svelte@5.55.7)(typescript@6.0.3)
       vite:
         specifier: catalog:frontend
         version: 8.0.11(@types/node@24.12.2)(esbuild@0.28.0)
@@ -1091,8 +1091,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  devalue@5.7.1:
-    resolution: {integrity: sha512-MUbZ586EgQqdRnC4yDrlod3BEdyvE4TapGYHMW2CiaW+KkkFmWEFqBUaLltEZCGi0iFXCEjRF0OjF0DV2QHjOA==}
+  devalue@5.8.1:
+    resolution: {integrity: sha512-4CXDYRBGqN+57wVJkuXBYmpAVUSg3L6JAQa/DFqm238G73E1wuyc/JhGQJzN7vUf/CMphYau2zXbfWzDR5aTEw==}
 
   dom-accessibility-api@0.5.16:
     resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
@@ -1412,8 +1412,8 @@ packages:
       svelte: ^4.0.0 || ^5.0.0-next.0
       typescript: '>=5.0.0'
 
-  svelte@5.55.5:
-    resolution: {integrity: sha512-2uCs/LZ9us+AktdzYJM8OcxQ8qnPS1kpaO7syGT/MgO+6Qr1Ybl+TqPq+97u7PHqmmMlye5ZkoyXONy5mjjAbw==}
+  svelte@5.55.7:
+    resolution: {integrity: sha512-ymI5ykLPwIHW839E053FQbI1G+jnRFJEw3Kv5Y4njixVWywQBx+NUFpkkKyk5LIb36Fg9DVXSYpqiGekLD0hyw==}
     engines: {node: '>=18'}
 
   symbol-tree@3.2.4:
@@ -1979,12 +1979,12 @@ snapshots:
     dependencies:
       acorn: 8.16.0
 
-  '@sveltejs/vite-plugin-svelte@7.1.2(svelte@5.55.5)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))':
+  '@sveltejs/vite-plugin-svelte@7.1.2(svelte@5.55.7)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))':
     dependencies:
       deepmerge: 4.3.1
       magic-string: 0.30.21
       obug: 2.1.1
-      svelte: 5.55.5
+      svelte: 5.55.7
       vite: 8.0.11(@types/node@24.12.2)(esbuild@0.28.0)
       vitefu: 1.1.3(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))
 
@@ -2057,15 +2057,15 @@ snapshots:
       picocolors: 1.1.1
       redent: 3.0.0
 
-  '@testing-library/svelte-core@1.0.0(svelte@5.55.5)':
+  '@testing-library/svelte-core@1.0.0(svelte@5.55.7)':
     dependencies:
-      svelte: 5.55.5
+      svelte: 5.55.7
 
-  '@testing-library/svelte@5.3.1(svelte@5.55.5)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))(vitest@4.1.5)':
+  '@testing-library/svelte@5.3.1(svelte@5.55.7)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))(vitest@4.1.5)':
     dependencies:
       '@testing-library/dom': 10.4.1
-      '@testing-library/svelte-core': 1.0.0(svelte@5.55.5)
-      svelte: 5.55.5
+      '@testing-library/svelte-core': 1.0.0(svelte@5.55.7)
+      svelte: 5.55.7
     optionalDependencies:
       vite: 8.0.11(@types/node@24.12.2)(esbuild@0.28.0)
       vitest: 4.1.5(@types/node@24.12.2)(@vitest/coverage-v8@4.1.5)(jsdom@29.1.1)(vite@8.0.11(@types/node@24.12.2)(esbuild@0.28.0))
@@ -2241,7 +2241,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  devalue@5.7.1: {}
+  devalue@5.8.1: {}
 
   dom-accessibility-api@0.5.16: {}
 
@@ -2577,19 +2577,19 @@ snapshots:
     dependencies:
       has-flag: 4.0.0
 
-  svelte-check@4.4.8(picomatch@4.0.4)(svelte@5.55.5)(typescript@6.0.3):
+  svelte-check@4.4.8(picomatch@4.0.4)(svelte@5.55.7)(typescript@6.0.3):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       chokidar: 5.0.0
       fdir: 6.5.0(picomatch@4.0.4)
       picocolors: 1.1.1
       sade: 1.8.1
-      svelte: 5.55.5
+      svelte: 5.55.7
       typescript: 6.0.3
     transitivePeerDependencies:
       - picomatch
 
-  svelte@5.55.5:
+  svelte@5.55.7:
     dependencies:
       '@jridgewell/remapping': 2.3.5
       '@jridgewell/sourcemap-codec': 1.5.5
@@ -2600,7 +2600,7 @@ snapshots:
       aria-query: 5.3.1
       axobject-query: 4.1.0
       clsx: 2.1.1
-      devalue: 5.7.1
+      devalue: 5.8.1
       esm-env: 1.2.2
       esrap: 2.2.5
       is-reference: 3.0.3
