@@ -116,7 +116,7 @@ describe('PreviewPane', () => {
     expect(summary).toMatch(/KB|kB/i);
   });
 
-  it('renders highlighted code via tokenize for code/url body types', () => {
+  it('renders highlighted code via tokenize for code body type', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'code' }),
@@ -139,6 +139,186 @@ describe('PreviewPane', () => {
     });
     // Code body produces inner spans for keyword/punct tokens.
     expect(container.querySelector('pre.body.code .kw')).toBeTruthy();
+  });
+
+  it('renders the URL kind with separate host and path rows, no code highlight', () => {
+    // URL kind got its own layout (host on top, scheme+path below) so the
+    // user can scan the destination at a glance and tell a punycode lookalike
+    // host from a legitimate one before pressing Enter.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Public' }),
+        preview: samplePreview({
+          kind: 'url',
+          previewText: 'https://example.com/foo?bar=1',
+          body: {
+            type: 'url',
+            url: 'https://example.com/foo?bar=1',
+            domain: 'example.com',
+            scheme: 'https',
+            hostDisplay: 'example.com',
+            pathAndQuery: '/foo?bar=1',
+          },
+          metadata: {
+            byteCount: 29,
+            charCount: 29,
+            lineCount: 1,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+            domain: 'example.com',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-url-body"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="preview-url-host"]')?.textContent).toContain(
+      'example.com',
+    );
+    expect(container.querySelector('[data-testid="preview-url-path"]')?.textContent).toContain(
+      '/foo?bar=1',
+    );
+    // The URL body must never reuse the code highlighter — the new layout
+    // owns the visual treatment so we don't want the gutter / kw spans.
+    expect(container.querySelector('pre.body.code')).toBeNull();
+    // The punycode badge must stay hidden when the host already matches
+    // the displayed Unicode form.
+    expect(container.querySelector('[data-testid="preview-url-punycode-badge"]')).toBeNull();
+  });
+
+  it('shows the punycode badge when the host has an IDN ASCII mismatch', () => {
+    // Phishing resistance: when the backend reports a different `hostPunycode`
+    // than the Unicode `hostDisplay`, the renderer surfaces a status badge so
+    // the user can spot homograph-style attacks before opening.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Public' }),
+        preview: samplePreview({
+          kind: 'url',
+          previewText: 'https://bücher.example/foo',
+          body: {
+            type: 'url',
+            url: 'https://bücher.example/foo',
+            domain: 'bücher.example',
+            scheme: 'https',
+            hostDisplay: 'bücher.example',
+            hostPunycode: 'xn--bcher-kva.example',
+            pathAndQuery: '/foo',
+          },
+          metadata: {
+            byteCount: 30,
+            charCount: 27,
+            lineCount: 1,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+            domain: 'bücher.example',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const badge = container.querySelector('[data-testid="preview-url-punycode-badge"]');
+    expect(badge).toBeTruthy();
+    // The badge's title carries the raw ASCII form so the user can
+    // cross-check it against an external source without leaving the pane.
+    expect(badge?.getAttribute('title')).toContain('xn--bcher-kva.example');
+  });
+
+  it('does not trigger an external open when Enter fires from the Cancel button', async () => {
+    // Regression: the confirm dialog's overlay-level keydown handler used
+    // to treat any Enter inside the dialog as confirmation, which would
+    // open the URL even when the keyboard user had tabbed to Cancel. The
+    // overlay now only fires `performOpenUrl()` when the dialog scaffold
+    // itself owns focus; native button activation wins on the Cancel and
+    // Open buttons.
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Public' }),
+        preview: samplePreview({
+          kind: 'url',
+          previewText: 'https://example.com/',
+          body: {
+            type: 'url',
+            url: 'https://example.com/',
+            scheme: 'https',
+            hostDisplay: 'example.com',
+            pathAndQuery: '/',
+          },
+          metadata: {
+            byteCount: 20,
+            charCount: 20,
+            lineCount: 1,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    // Open the confirm dialog by clicking the trigger button; the
+    // window-level Enter listener short-circuits while the dialog is
+    // already open, so we have a clean baseline.
+    const trigger = container.querySelector(
+      '[data-testid="preview-url-open-button"]',
+    ) as HTMLButtonElement | null;
+    expect(trigger).not.toBeNull();
+    trigger!.click();
+    await Promise.resolve();
+    const cancel = container.querySelector(
+      '[data-testid="preview-url-confirm-cancel"]',
+    ) as HTMLButtonElement | null;
+    expect(cancel).not.toBeNull();
+    cancel!.focus();
+    cancel!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalledWith('open_url_external', expect.anything());
+  });
+
+  it('hides the open trigger and Enter hint for non-Public URL entries', () => {
+    // Sensitivity gate must trip before any external-open affordance ships:
+    // a Private URL shouldn't even let the user reach the confirm modal,
+    // because the backend would reject the invoke and the user would just
+    // see a forbidden toast.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Private' }),
+        preview: samplePreview({
+          kind: 'url',
+          previewText: 'https://example.com/',
+          body: {
+            type: 'url',
+            url: 'https://example.com/',
+            scheme: 'https',
+            hostDisplay: 'example.com',
+            pathAndQuery: '/',
+          },
+          metadata: {
+            byteCount: 20,
+            charCount: 20,
+            lineCount: 1,
+            truncated: false,
+            sensitive: true,
+            fullContentAvailable: false,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-url-open-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="preview-url-open-hint"]')).toBeNull();
   });
 
   it('wraps each code line and marks the line-number gutter aria-hidden', () => {

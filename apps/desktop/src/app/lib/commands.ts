@@ -89,4 +89,11 @@ export const saveAiResult = (text: string): Promise<EntryDto> => invoke('save_ai
 
 export const openAccessibilitySettings = (): Promise<void> => invoke('open_accessibility_settings');
 
+// Public-only external URL open. Backend verifies sensitivity, entry-id
+// vs. URL match, and scheme allowlist (https/http) before handing the
+// URL to the platform's default opener; the renderer also gates the
+// trigger to keep forged invokes out of the UI loop.
+export const openUrlExternal = (entryId: string, url: string): Promise<void> =>
+  invoke('open_url_external', { entryId, url });
+
 export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');

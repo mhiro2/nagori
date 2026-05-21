@@ -69,6 +69,25 @@ export type Messages = {
       // trailing separator.
       inFolder: (prefix: string) => string;
     };
+    url: {
+      // Phishing-resistance badge surfaced when the IDN punycode form
+      // differs from the displayed Unicode host. Hover/title reveals the
+      // raw `xn--…` ASCII string.
+      punycodeBadge: string;
+      punycodeBadgeTitle: (parts: { ascii: string }) => string;
+      // "Enter" kbd hint shown when external open is allowed (Public
+      // entry + allowlisted scheme). Hidden otherwise so the user is
+      // never told to press a key that won't work.
+      openHint: string;
+      // Confirm modal labels. `host` is the displayed (Unicode) host.
+      confirmTitle: string;
+      confirmDescription: (parts: { host: string }) => string;
+      confirm: string;
+      cancel: string;
+      // Toast surfaced when `open_url_external` rejects the request
+      // (allowlist hit, sensitivity mismatch, OS handler missing).
+      openFailed: string;
+    };
   };
   status: {
     captureOn: string;
@@ -345,6 +364,16 @@ export const en: Messages = {
       moreFiles: (count) =>
         count === 1 ? '+1 more file' : `+${count.toLocaleString('en')} more files`,
       inFolder: (prefix) => `in ${prefix}`,
+    },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }) => `IDN host. Raw ASCII form: ${ascii}`,
+      openHint: 'Enter to open',
+      confirmTitle: 'Open this link?',
+      confirmDescription: ({ host }) => `Nagori will hand ${host} to your default browser.`,
+      confirm: 'Open',
+      cancel: 'Cancel',
+      openFailed: 'Could not open the URL.',
     },
   },
   status: {

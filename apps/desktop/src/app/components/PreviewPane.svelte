@@ -1,9 +1,16 @@
 <script lang="ts">
+  import { openUrlExternal } from "../lib/commands";
   import { formatByteCount, formatRelativeTime } from "../lib/formatting";
   import { messages } from "../lib/i18n/index.svelte";
   import { dedupedRepresentationLabels } from "../lib/representations";
   import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from "../lib/types";
   import { tokenize, type Span } from "./tokenize";
+
+  // Renderer-side mirror of the backend `URL_SCHEME_ALLOWLIST`. The
+  // `open_url_external` command re-validates this server-side so a
+  // forged invoke can't escape — keeping the list here lets us hide
+  // the trigger entirely when the user couldn't act on it anyway.
+  const URL_OPEN_SCHEMES = new Set(["https", "http"]);
 
   // Comma-joined "preserved formats" footer line. Only shown when an entry
   // kept more than its primary representation so single-format clips don't
@@ -153,9 +160,7 @@
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? "");
   const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
-  const showHighlighting = $derived(
-    preview !== undefined && (preview.body.type === "code" || preview.body.type === "url"),
-  );
+  const showHighlighting = $derived(preview !== undefined && preview.body.type === "code");
   const tokens = $derived(
     showHighlighting ? tokenize(bodyText, preview?.metadata.language ?? null) : [],
   );
@@ -234,7 +239,9 @@
         return t.preview.fileList.summary(body.paths.length, body.total);
       }
       case "url": {
-        return body.domain ?? preview.metadata.domain ?? undefined;
+        // The dedicated URL layout already shows the host on its own row,
+        // so the chip is redundant for URL kinds — leave it blank.
+        return undefined;
       }
     }
   });
@@ -295,6 +302,74 @@
     return Math.max(0, preview.body.total - preview.body.paths.length);
   });
 
+  // URL-kind derived state. Each of these is `undefined` for non-URL
+  // bodies; the template guards with `body.type === "url"` so the
+  // values never reach the renderer in that case.
+  const urlBody = $derived(preview?.body.type === "url" ? preview.body : undefined);
+  // Show the punycode badge when the backend signals an IDN mismatch
+  // (display Unicode host differs from the ASCII xn-- form). The hover
+  // title carries the raw ASCII so the user can verify against an
+  // external source.
+  const urlPunycode = $derived(urlBody?.hostPunycode ?? null);
+  // Gate the external-open trigger to Public + allowlisted-scheme URLs.
+  // Backend re-checks this; the renderer keeps the hint and the button
+  // hidden when the action would just bounce.
+  const urlCanOpen = $derived.by((): boolean => {
+    if (!urlBody) return false;
+    if (item?.sensitivity !== "Public") return false;
+    const scheme = urlBody.scheme?.toLowerCase();
+    return scheme !== undefined && URL_OPEN_SCHEMES.has(scheme);
+  });
+  // Confirm modal state. The renderer pops a curated dialog whose body
+  // names the host so a renderer compromise can't silently re-direct
+  // the user to an attacker URL while the dialog reads "example.com".
+  let confirmOpenUrl = $state(false);
+  let openingUrl = $state(false);
+  let openUrlError = $state<string | undefined>(undefined);
+  let confirmDialogEl = $state<HTMLDivElement | undefined>(undefined);
+
+  // Move keyboard focus into the dialog on open so screen readers
+  // announce the role, Escape can fire from a reachable element, and
+  // tab navigation lands inside the dialog rather than on a button
+  // behind it. Mirrors the pattern in ActionMenu.svelte.
+  $effect(() => {
+    if (confirmOpenUrl && confirmDialogEl) {
+      confirmDialogEl.focus();
+    }
+  });
+
+  async function performOpenUrl(): Promise<void> {
+    if (!urlBody || !preview || !urlCanOpen) return;
+    openingUrl = true;
+    openUrlError = undefined;
+    try {
+      await openUrlExternal(preview.id, urlBody.url);
+      confirmOpenUrl = false;
+    } catch (err) {
+      openUrlError = (err as { message?: string } | null)?.message ?? t.preview.url.openFailed;
+    } finally {
+      openingUrl = false;
+    }
+  }
+
+  // Enter shortcut: only active in the dedicated preview window
+  // (`expanded` mode) so the palette's Enter-to-paste isn't shadowed.
+  // Attaches to `window` because the preview pane has no focused child
+  // by default; expanded mode hands the whole window over to this
+  // component, so a window-scoped listener is safe.
+  $effect(() => {
+    if (!expanded || !urlCanOpen) return;
+    if (typeof window === "undefined") return;
+    const handler = (event: KeyboardEvent): void => {
+      if (event.key !== "Enter") return;
+      if (confirmOpenUrl) return;
+      event.preventDefault();
+      confirmOpenUrl = true;
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  });
+
   function buildImageUrl(entryId: string): string {
     // macOS / iOS / Linux origin: scheme://localhost/<path>
     // Windows / Android origin: http://<scheme>.localhost/<path>
@@ -322,6 +397,42 @@
         <p class="state">{t.preview.loading}</p>
       {:else if errorMessage}
         <p class="state error">{errorMessage}</p>
+      {:else if urlBody}
+        <div class="url-body" data-testid="preview-url-body">
+          <p class="url-host" data-testid="preview-url-host">
+            {urlBody.hostDisplay ?? urlBody.domain ?? urlBody.url}
+            {#if urlPunycode}
+              <span
+                class="punycode-badge"
+                role="status"
+                data-testid="preview-url-punycode-badge"
+                title={t.preview.url.punycodeBadgeTitle({ ascii: urlPunycode })}
+              >
+                ⚠ {t.preview.url.punycodeBadge}
+              </span>
+            {/if}
+          </p>
+          {#if urlBody.scheme || urlBody.pathAndQuery}
+            <p class="url-path" data-testid="preview-url-path">
+              {#if urlBody.scheme}<span class="dim">{urlBody.scheme}://</span>{/if}
+              <span title={urlBody.pathAndQuery ?? urlBody.url}>
+                {urlBody.pathAndQuery ?? ""}
+              </span>
+            </p>
+          {/if}
+          {#if urlCanOpen}
+            <button
+              type="button"
+              class="url-open"
+              data-testid="preview-url-open-button"
+              onclick={() => {
+                confirmOpenUrl = true;
+              }}
+            >
+              {t.preview.url.confirm}
+            </button>
+          {/if}
+        </div>
       {:else if preview?.body.type === "image"}
         {#if imageSrc && !imageFailed}
           <div class="image-frame" class:loaded={imageLoaded}>
@@ -407,6 +518,11 @@
       </div>
     {/if}
     <footer class="foot">
+      {#if expanded && urlCanOpen}
+        <p class="kbd-hint" data-testid="preview-url-open-hint">
+          <kbd>Enter</kbd> {t.preview.url.openHint}
+        </p>
+      {/if}
       <dl>
         <dt>{t.preview.fields.id}</dt>
         <dd>{item.id}</dd>
@@ -430,6 +546,83 @@
     </footer>
   {:else}
     <p class="empty">{t.preview.empty}</p>
+  {/if}
+  {#if confirmOpenUrl && urlBody}
+    <!-- Confirm modal: host display lives in the description so the user can
+         compare it against the row above before the OS handler takes over.
+         The renderer-side scheme gate already hides the trigger for
+         non-allowlisted schemes, but the backend re-validates so this
+         dialog can never produce a forged invoke that bypasses the gate. -->
+    <div
+      class="confirm-overlay"
+      role="dialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="preview-url-confirm-title"
+      aria-describedby="preview-url-confirm-desc"
+      data-testid="preview-url-confirm"
+      bind:this={confirmDialogEl}
+      onkeydown={(e) => {
+        // Trap keyboard events inside the dialog so they cannot bubble
+        // into the palette behind. Escape closes the dialog first; the
+        // global Escape handler in App.svelte would otherwise close
+        // the whole preview window.
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          if (!openingUrl) {
+            confirmOpenUrl = false;
+            openUrlError = undefined;
+          }
+          return;
+        }
+        // Enter on the dialog scaffold itself (initial focus target)
+        // confirms — matches the "Enter to open" hint that triggered
+        // this dialog. When focus has Tab-moved to a button, fall
+        // through so the browser's native button activation runs and
+        // the Cancel path is honoured. The Enter window-listener
+        // short-circuits when `confirmOpenUrl` is already true.
+        if (e.key === "Enter" && !openingUrl && e.target === confirmDialogEl) {
+          e.stopPropagation();
+          e.preventDefault();
+          void performOpenUrl();
+        }
+      }}
+    >
+      <div class="confirm-card">
+        <h3 id="preview-url-confirm-title">{t.preview.url.confirmTitle}</h3>
+        <p id="preview-url-confirm-desc">
+          {t.preview.url.confirmDescription({
+            host: urlBody.hostDisplay ?? urlBody.domain ?? urlBody.url,
+          })}
+        </p>
+        {#if openUrlError}
+          <p class="error" role="alert">{openUrlError}</p>
+        {/if}
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="secondary"
+            data-testid="preview-url-confirm-cancel"
+            disabled={openingUrl}
+            onclick={() => {
+              confirmOpenUrl = false;
+              openUrlError = undefined;
+            }}
+          >
+            {t.preview.url.cancel}
+          </button>
+          <button
+            type="button"
+            class="primary"
+            data-testid="preview-url-confirm-open"
+            disabled={openingUrl}
+            onclick={performOpenUrl}
+          >
+            {t.preview.url.confirm}
+          </button>
+        </div>
+      </div>
+    </div>
   {/if}
 </aside>
 
@@ -717,5 +910,135 @@
   .empty {
     color: var(--muted, rgba(255, 255, 255, 0.4));
     font-size: 0.875rem;
+  }
+  .url-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.75rem;
+  }
+  .url-host {
+    margin: 0;
+    color: var(--fg, #f5f5f5);
+    font-family:
+      ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .url-path {
+    margin: 0;
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font-family:
+      ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      monospace;
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+  }
+  .url-path .dim {
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .punycode-badge {
+    display: inline-block;
+    margin-left: 0.5em;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--warn, #f5c97b);
+    border-radius: 999px;
+    color: var(--warn, #f5c97b);
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    vertical-align: middle;
+  }
+  .url-open {
+    align-self: flex-start;
+    margin-top: 0.25rem;
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg, #f5f5f5);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .url-open:hover {
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  }
+  .kbd-hint {
+    margin: 0 0 0.25rem;
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+  .kbd-hint kbd {
+    margin-right: 0.35em;
+    padding: 0.05rem 0.3rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+    border-radius: 3px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+    font-family: inherit;
+    font-size: 0.7rem;
+  }
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 50;
+  }
+  .confirm-card {
+    width: min(420px, 90vw);
+    padding: 1.25rem;
+    border-radius: 8px;
+    background: var(--bg, #1a1a1a);
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    color: var(--fg, #f5f5f5);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  }
+  .confirm-card h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+  }
+  .confirm-card p {
+    margin: 0 0 0.75rem;
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+  }
+  .confirm-card p.error {
+    color: var(--danger, #f87171);
+  }
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+  .confirm-actions button {
+    padding: 0.35rem 0.85rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg, #f5f5f5);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .confirm-actions button.primary {
+    background: var(--syntax-link, #7ec8ff);
+    border-color: transparent;
+    color: var(--bg, #1a1a1a);
+    font-weight: 600;
+  }
+  .confirm-actions button[disabled] {
+    opacity: 0.5;
+    cursor: progress;
   }
 </style>

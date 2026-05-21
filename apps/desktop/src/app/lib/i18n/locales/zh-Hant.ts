@@ -68,6 +68,18 @@ export const zhHant: Messages = {
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hant')} 個`,
       inFolder: (prefix: string): string => `位於 ${prefix}`,
     },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }: { ascii: string }): string =>
+        `IDN 主機名稱。ASCII 形式：${ascii}`,
+      openHint: '按 Enter 開啟',
+      confirmTitle: '要開啟此連結嗎？',
+      confirmDescription: ({ host }: { host: string }): string =>
+        `Nagori 將在預設瀏覽器開啟 ${host}。`,
+      confirm: '開啟',
+      cancel: '取消',
+      openFailed: '無法開啟該 URL。',
+    },
   },
   status: {
     captureOn: '擷取已啟用',

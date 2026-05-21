@@ -75,6 +75,18 @@ export const fr: Messages = {
           : `+${count.toLocaleString('fr')} fichiers de plus`,
       inFolder: (prefix: string): string => `dans ${prefix}`,
     },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }: { ascii: string }): string =>
+        `Hôte IDN. Forme ASCII : ${ascii}`,
+      openHint: 'Entrée pour ouvrir',
+      confirmTitle: 'Ouvrir ce lien ?',
+      confirmDescription: ({ host }: { host: string }): string =>
+        `Nagori va ouvrir ${host} dans votre navigateur par défaut.`,
+      confirm: 'Ouvrir',
+      cancel: 'Annuler',
+      openFailed: 'Impossible d’ouvrir l’URL.',
+    },
   },
   status: {
     captureOn: 'Capture active',

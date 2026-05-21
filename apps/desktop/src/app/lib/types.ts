@@ -76,7 +76,22 @@ export type EntryDto = {
 export type EntryPreviewBody =
   | { type: 'text'; text: string }
   | { type: 'code'; text: string; language?: string | null }
-  | { type: 'url'; url: string; domain?: string | null }
+  | {
+      type: 'url';
+      url: string;
+      domain?: string | null;
+      // Three-way decomposition supplied by `UrlParts::from_raw` on the
+      // backend. All four extra fields are absent when the URL failed
+      // to parse, in which case the renderer falls back to the flat
+      // `url` string.
+      scheme?: string | null;
+      hostDisplay?: string | null;
+      // Only present when the IDN punycode form differs from
+      // `hostDisplay` — the renderer surfaces a phishing-resistance
+      // badge when this is truthy.
+      hostPunycode?: string | null;
+      pathAndQuery?: string | null;
+    }
   | {
       type: 'image';
       mimeType?: string | null;

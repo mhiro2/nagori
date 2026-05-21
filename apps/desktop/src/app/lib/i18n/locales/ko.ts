@@ -68,6 +68,18 @@ export const ko: Messages = {
       moreFiles: (count: number): string => `+${count.toLocaleString('ko')}개 더`,
       inFolder: (prefix: string): string => `${prefix} 하위`,
     },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }: { ascii: string }): string =>
+        `IDN 호스트입니다. ASCII 표기: ${ascii}`,
+      openHint: 'Enter로 열기',
+      confirmTitle: '이 링크를 열까요?',
+      confirmDescription: ({ host }: { host: string }): string =>
+        `기본 브라우저에서 ${host}을(를) 엽니다.`,
+      confirm: '열기',
+      cancel: '취소',
+      openFailed: 'URL을 열 수 없습니다.',
+    },
   },
   status: {
     captureOn: '캡처 켜짐',

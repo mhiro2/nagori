@@ -68,6 +68,18 @@ export const zhHans: Messages = {
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hans')} 个`,
       inFolder: (prefix: string): string => `位于 ${prefix}`,
     },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }: { ascii: string }): string =>
+        `IDN 主机。ASCII 形式：${ascii}`,
+      openHint: '按 Enter 打开',
+      confirmTitle: '要打开此链接吗？',
+      confirmDescription: ({ host }: { host: string }): string =>
+        `Nagori 将在默认浏览器中打开 ${host}。`,
+      confirm: '打开',
+      cancel: '取消',
+      openFailed: '无法打开该 URL。',
+    },
   },
   status: {
     captureOn: '已开启捕获',

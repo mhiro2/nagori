@@ -68,6 +68,18 @@ export const ja: Messages = {
       moreFiles: (count: number): string => `他 ${count.toLocaleString('ja')} 件`,
       inFolder: (prefix: string): string => `${prefix} 配下`,
     },
+    url: {
+      punycodeBadge: 'punycode',
+      punycodeBadgeTitle: ({ ascii }: { ascii: string }): string =>
+        `IDN ホスト名。ASCII 表記: ${ascii}`,
+      openHint: 'Enter で開く',
+      confirmTitle: 'このリンクを開きますか？',
+      confirmDescription: ({ host }: { host: string }): string =>
+        `既定のブラウザで ${host} を開きます。`,
+      confirm: '開く',
+      cancel: 'キャンセル',
+      openFailed: 'URL を開けませんでした。',
+    },
   },
   status: {
     captureOn: '取り込み有効',
