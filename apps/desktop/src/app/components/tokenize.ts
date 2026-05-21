@@ -3,50 +3,242 @@
 // — the goal is just to make code/JSON readable in the preview pane without
 // bloating the bundle or coupling to a grammar set.
 export type Span = {
-  kind: 'kw' | 'str' | 'num' | 'punct' | 'comment' | 'text';
+  kind: 'kw' | 'str' | 'num' | 'punct' | 'comment' | 'text' | 'link';
   text: string;
 };
 
-const KEYWORDS = new Set([
-  'fn',
-  'let',
-  'mut',
-  'const',
-  'var',
-  'if',
-  'else',
-  'for',
-  'while',
-  'return',
-  'match',
-  'true',
-  'false',
-  'null',
-  'None',
-  'Some',
-  'Ok',
-  'Err',
-  'import',
-  'from',
-  'export',
+// Language profiles. The default set is intentionally narrow: keywords that
+// are nearly universal across the languages we care about, so unlabeled
+// snippets get a tasteful amount of colour without false positives.
+type LanguageId = 'default' | 'rust' | 'typescript' | 'python' | 'go' | 'shell' | 'json';
+
+const KEYWORDS: Record<LanguageId, ReadonlySet<string>> = {
+  default: new Set(['if', 'else', 'for', 'while', 'return', 'true', 'false', 'null']),
+  rust: new Set([
+    'fn',
+    'let',
+    'mut',
+    'const',
+    'static',
+    'if',
+    'else',
+    'for',
+    'while',
+    'loop',
+    'return',
+    'match',
+    'true',
+    'false',
+    'None',
+    'Some',
+    'Ok',
+    'Err',
+    'use',
+    'pub',
+    'impl',
+    'struct',
+    'enum',
+    'trait',
+    'self',
+    'Self',
+    'async',
+    'await',
+    'move',
+    'ref',
+    'as',
+    'where',
+    'break',
+    'continue',
+    'crate',
+    'mod',
+    'dyn',
+    'type',
+    'unsafe',
+    'in',
+  ]),
+  typescript: new Set([
+    'let',
+    'const',
+    'var',
+    'if',
+    'else',
+    'for',
+    'while',
+    'do',
+    'return',
+    'true',
+    'false',
+    'null',
+    'undefined',
+    'import',
+    'from',
+    'export',
+    'default',
+    'type',
+    'interface',
+    'class',
+    'function',
+    'async',
+    'await',
+    'new',
+    'this',
+    'extends',
+    'implements',
+    'instanceof',
+    'typeof',
+    'void',
+    'try',
+    'catch',
+    'finally',
+    'throw',
+    'switch',
+    'case',
+    'break',
+    'continue',
+    'as',
+    'in',
+    'of',
+    'yield',
+    'static',
+    'public',
+    'private',
+    'protected',
+    'readonly',
+  ]),
+  python: new Set([
+    'def',
+    'if',
+    'elif',
+    'else',
+    'for',
+    'while',
+    'return',
+    'True',
+    'False',
+    'None',
+    'import',
+    'from',
+    'class',
+    'async',
+    'await',
+    'try',
+    'except',
+    'finally',
+    'raise',
+    'as',
+    'with',
+    'pass',
+    'yield',
+    'lambda',
+    'in',
+    'not',
+    'and',
+    'or',
+    'is',
+    'global',
+    'nonlocal',
+    'continue',
+    'break',
+  ]),
+  go: new Set([
+    'func',
+    'if',
+    'else',
+    'for',
+    'return',
+    'true',
+    'false',
+    'nil',
+    'var',
+    'const',
+    'type',
+    'struct',
+    'interface',
+    'package',
+    'import',
+    'range',
+    'chan',
+    'defer',
+    'go',
+    'select',
+    'switch',
+    'case',
+    'default',
+    'break',
+    'continue',
+    'map',
+  ]),
+  shell: new Set([
+    'if',
+    'then',
+    'else',
+    'elif',
+    'fi',
+    'for',
+    'while',
+    'until',
+    'do',
+    'done',
+    'case',
+    'esac',
+    'function',
+    'return',
+    'local',
+    'export',
+    'in',
+    'break',
+    'continue',
+    'true',
+    'false',
+  ]),
+  json: new Set(['true', 'false', 'null']),
+};
+
+const normalizeLanguage = (lang: string | null | undefined): LanguageId => {
+  if (!lang) return 'default';
+  const lower = lang.toLowerCase();
+  switch (lower) {
+    case 'rust':
+    case 'rs':
+      return 'rust';
+    case 'typescript':
+    case 'ts':
+    case 'tsx':
+    case 'javascript':
+    case 'js':
+    case 'jsx':
+      return 'typescript';
+    case 'python':
+    case 'py':
+      return 'python';
+    case 'go':
+    case 'golang':
+      return 'go';
+    case 'shell':
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+      return 'shell';
+    case 'json':
+      return 'json';
+    default:
+      return 'default';
+  }
+};
+
+// `#` is a line comment in shell/python (and our unlabeled default fallback),
+// but in rust/typescript/go/json a leading `#` is meaningful syntax we'd
+// rather not paint as a comment (e.g. Rust attributes `#[derive(...)]`).
+const HASH_COMMENT_LANGS: ReadonlySet<LanguageId> = new Set<LanguageId>([
   'default',
-  'type',
-  'interface',
-  'class',
-  'function',
-  'async',
-  'await',
-  'new',
-  'this',
-  'self',
-  'use',
-  'pub',
-  'impl',
-  'struct',
-  'enum',
-  'trait',
-  'def',
+  'shell',
+  'python',
 ]);
+
+// `"""..."""` (or `'''`) is only a string-literal block in python. Other
+// languages would rather see three consecutive empty strings than a single
+// span swallowing what follows.
+const TRIPLE_QUOTE_LANGS: ReadonlySet<LanguageId> = new Set<LanguageId>(['python']);
 
 // charCode helpers — the per-character regex .test() calls used to dominate
 // this scanner; switching to numeric comparisons is several times faster on
@@ -68,15 +260,110 @@ const isNumPart = (cc: number): boolean => isDigit(cc) || cc === CC_DOT || cc ==
 
 const PUNCT_CHARS = new Set('{}[](),;:.<>=+-*/!&|?');
 
+// Past this many UTF-16 code units (≈ chars), tokenization stops and the
+// remainder lands in a single `text` span. Keeps the span count (and DOM
+// node count downstream) bounded for pathological pastes. Note: this is a
+// character/code-unit count, not a byte count — non-ASCII bodies are
+// allowed to occupy more UTF-8 bytes before the valve trips.
+const SAFETY_VALVE_UNITS = 32 * 1024;
+
+// URL terminator — `https?://` is consumed until one of these characters
+// (so trailing punctuation like `).` doesn't end up inside the link).
+const URL_STOP = /[\s)<>'"`]/;
+
+const startsWith = (source: string, needle: string, at: number): boolean => {
+  if (at + needle.length > source.length) return false;
+  for (let k = 0; k < needle.length; k += 1) {
+    if (source.charCodeAt(at + k) !== needle.charCodeAt(k)) return false;
+  }
+  return true;
+};
+
+const scanBlockComment = (
+  source: string,
+  i: number,
+  open: string,
+  close: string,
+): { end: number } => {
+  const start = i + open.length;
+  const idx = source.indexOf(close, start);
+  const end = idx === -1 ? source.length : idx + close.length;
+  return { end };
+};
+
 // Single-pass scanner — returns tokens in order. Strings and comments win
 // first so keywords inside them aren't re-coloured.
-export const tokenize = (source: string): Span[] => {
+export const tokenize = (source: string, language?: string | null): Span[] => {
+  const lang = normalizeLanguage(language);
+  const keywords = KEYWORDS[lang];
+  const hashComment = HASH_COMMENT_LANGS.has(lang);
+  const tripleQuote = TRIPLE_QUOTE_LANGS.has(lang);
   const out: Span[] = [];
   const len = source.length;
   let i = 0;
   while (i < len) {
+    // Safety valve: dump the rest of the source as a single text span so
+    // huge inputs can't blow out the span count.
+    if (i >= SAFETY_VALVE_UNITS) {
+      out.push({ kind: 'text', text: source.slice(i) });
+      break;
+    }
+
     const ch = source.charAt(i);
     const cc = source.charCodeAt(i);
+
+    // Block comment: `/* ... */` — universal across the C-family languages
+    // we paint; safe to apply unconditionally because the digraph is rare in
+    // shell/python source.
+    if (ch === '/' && source.charCodeAt(i + 1) === 42 /* '*' */) {
+      const { end } = scanBlockComment(source, i, '/*', '*/');
+      out.push({ kind: 'comment', text: source.slice(i, end) });
+      i = end;
+      continue;
+    }
+
+    // HTML/XML comment: `<!-- ... -->`. Distinctive enough that we accept it
+    // for any language without false positives.
+    if (ch === '<' && startsWith(source, '<!--', i)) {
+      const { end } = scanBlockComment(source, i, '<!--', '-->');
+      out.push({ kind: 'comment', text: source.slice(i, end) });
+      i = end;
+      continue;
+    }
+
+    // Python triple-quoted strings — gated on language so other dialects
+    // keep their normal single-quote behavior.
+    if (tripleQuote && (ch === '"' || ch === "'")) {
+      const triple = ch + ch + ch;
+      if (startsWith(source, triple, i)) {
+        const { end } = scanBlockComment(source, i, triple, triple);
+        out.push({ kind: 'str', text: source.slice(i, end) });
+        i = end;
+        continue;
+      }
+    }
+
+    // Inline URLs: paint `https?://…` as a link span so the reader can tell
+    // it from surrounding identifiers. We deliberately leave it non-clickable
+    // — opening the URL is a separate confirmed action handled elsewhere.
+    if (ch === 'h' && (startsWith(source, 'http://', i) || startsWith(source, 'https://', i))) {
+      let j = i;
+      while (j < len && !URL_STOP.test(source.charAt(j))) j += 1;
+      // Trim trailing punctuation that's commonly adjacent to a URL in prose
+      // (".", ",", ";", ":") so "see https://a.example/." doesn't paint the
+      // period into the link.
+      while (j > i + 8) {
+        const last = source.charAt(j - 1);
+        if (last === '.' || last === ',' || last === ';' || last === ':') {
+          j -= 1;
+        } else {
+          break;
+        }
+      }
+      out.push({ kind: 'link', text: source.slice(i, j) });
+      i = j;
+      continue;
+    }
 
     if (ch === '"' || ch === "'" || ch === '`') {
       const quote = ch;
@@ -98,7 +385,7 @@ export const tokenize = (source: string): Span[] => {
       continue;
     }
 
-    if (ch === '#' && (i === 0 || source[i - 1] === '\n')) {
+    if (hashComment && ch === '#' && (i === 0 || source[i - 1] === '\n')) {
       const end = source.indexOf('\n', i);
       const stop = end === -1 ? len : end;
       out.push({ kind: 'comment', text: source.slice(i, stop) });
@@ -118,7 +405,7 @@ export const tokenize = (source: string): Span[] => {
       let j = i;
       while (j < len && isIdentPart(source.charCodeAt(j))) j += 1;
       const word = source.slice(i, j);
-      out.push({ kind: KEYWORDS.has(word) ? 'kw' : 'text', text: word });
+      out.push({ kind: keywords.has(word) ? 'kw' : 'text', text: word });
       i = j;
       continue;
     }

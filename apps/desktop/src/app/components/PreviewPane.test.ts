@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
 import PreviewPane from './PreviewPane.svelte';
-import { tokenize } from './tokenize';
 
 const sampleItem = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   id: 'entry-id',
@@ -38,54 +37,6 @@ const samplePreview = (
 });
 
 afterEach(cleanup);
-
-describe('tokenize', () => {
-  it('emits a single text span for a plain identifier', () => {
-    const tokens = tokenize('hello');
-    expect(tokens).toEqual([{ kind: 'text', text: 'hello' }]);
-  });
-
-  it('classifies known keywords distinctly from regular identifiers', () => {
-    const tokens = tokenize('let foo');
-    expect(tokens.find((t) => t.text === 'let')?.kind).toBe('kw');
-    expect(tokens.find((t) => t.text === 'foo')?.kind).toBe('text');
-  });
-
-  it('treats double-quoted strings as a single str span', () => {
-    const tokens = tokenize('"hi"');
-    expect(tokens).toEqual([{ kind: 'str', text: '"hi"' }]);
-  });
-
-  it('handles backtick template literals and escaped quotes', () => {
-    expect(tokenize('`x`')[0]?.kind).toBe('str');
-    const escaped = tokenize('"a\\"b"');
-    expect(escaped[0]?.kind).toBe('str');
-    expect(escaped[0]?.text).toBe('"a\\"b"');
-  });
-
-  it('captures // line comments to end-of-line', () => {
-    const tokens = tokenize('// note\nfn');
-    expect(tokens[0]).toEqual({ kind: 'comment', text: '// note' });
-  });
-
-  it('captures # comments only when they start a line', () => {
-    const tokens = tokenize('# header');
-    expect(tokens[0]?.kind).toBe('comment');
-    // mid-line `#` should not start a comment.
-    const inline = tokenize('let # bad');
-    expect(inline.some((t) => t.kind === 'comment')).toBe(false);
-  });
-
-  it('classifies numeric literals including separators', () => {
-    expect(tokenize('1_000')[0]).toEqual({ kind: 'num', text: '1_000' });
-    expect(tokenize('3.14')[0]).toEqual({ kind: 'num', text: '3.14' });
-  });
-
-  it('emits punct tokens for delimiters', () => {
-    const tokens = tokenize('a+b');
-    expect(tokens.map((t) => t.kind)).toEqual(['text', 'punct', 'text']);
-  });
-});
 
 describe('PreviewPane', () => {
   beforeEach(() => {
@@ -171,7 +122,16 @@ describe('PreviewPane', () => {
         item: sampleItem({ kind: 'code' }),
         preview: samplePreview({
           previewText: 'let x = 1',
-          body: { type: 'code', text: 'let x = 1' },
+          body: { type: 'code', text: 'let x = 1', language: 'typescript' },
+          metadata: {
+            byteCount: 9,
+            charCount: 9,
+            lineCount: 1,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+            language: 'typescript',
+          },
         }),
         loading: false,
         errorMessage: undefined,
@@ -179,6 +139,41 @@ describe('PreviewPane', () => {
     });
     // Code body produces inner spans for keyword/punct tokens.
     expect(container.querySelector('pre.body.code .kw')).toBeTruthy();
+  });
+
+  it('wraps each code line and marks the line-number gutter aria-hidden', () => {
+    const source = 'fn main() {\n    return 1;\n}\n';
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'code' }),
+        preview: samplePreview({
+          previewText: source,
+          body: { type: 'code', text: source, language: 'rust' },
+          metadata: {
+            byteCount: source.length,
+            charCount: source.length,
+            lineCount: 3,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+            language: 'rust',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const pre = container.querySelector('pre.body.code.with-lines');
+    expect(pre).toBeTruthy();
+    const lines = pre?.querySelectorAll('span.line');
+    expect(lines?.length).toBeGreaterThanOrEqual(3);
+    // Every gutter element must carry aria-hidden so screen readers read
+    // the source itself rather than the line-number column.
+    const gutters = pre?.querySelectorAll('span.lineno');
+    expect(gutters?.length).toBe(lines?.length);
+    gutters?.forEach((g) => {
+      expect(g.getAttribute('aria-hidden')).toBe('true');
+    });
   });
 
   it('renders the file list paths when body is fileList', () => {

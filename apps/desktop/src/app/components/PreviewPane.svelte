@@ -3,7 +3,7 @@
   import { messages } from "../lib/i18n/index.svelte";
   import { dedupedRepresentationLabels } from "../lib/representations";
   import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from "../lib/types";
-  import { tokenize } from "./tokenize";
+  import { tokenize, type Span } from "./tokenize";
 
   // Comma-joined "preserved formats" footer line. Only shown when an entry
   // kept more than its primary representation so single-format clips don't
@@ -63,7 +63,33 @@
   const showHighlighting = $derived(
     preview !== undefined && (preview.body.type === "code" || preview.body.type === "url"),
   );
-  const tokens = $derived(showHighlighting ? tokenize(bodyText) : []);
+  const tokens = $derived(
+    showHighlighting ? tokenize(bodyText, preview?.metadata.language ?? null) : [],
+  );
+  // Line numbers only make sense for the multi-line code body. The url body
+  // shares the highlighter for inline URL colouring but stays single-line.
+  const showLineNumbers = $derived(preview?.body.type === "code" && tokens.length > 0);
+  const tokenLines = $derived<Span[][]>(showLineNumbers ? splitTokensByLine(tokens) : []);
+
+  // Walk the token stream and break each token at every `\n`. Newlines become
+  // line boundaries (dropped from the rendered span text — the `display:block`
+  // on `.line` paints the break). Tokens that span multiple lines (block
+  // comments, multi-line strings) emit one span per line with the same kind
+  // so colouring is preserved across the gutter.
+  function splitTokensByLine(allTokens: Span[]): Span[][] {
+    const lines: Span[][] = [[]];
+    for (const tok of allTokens) {
+      const parts = tok.text.split("\n");
+      for (let idx = 0; idx < parts.length; idx += 1) {
+        if (idx > 0) lines.push([]);
+        const part = parts[idx];
+        if (part && part.length > 0) {
+          lines[lines.length - 1]!.push({ kind: tok.kind, text: part });
+        }
+      }
+    }
+    return lines;
+  }
 
   // Image bytes are streamed by the `nagori-image://` custom URI scheme
   // registered in src-tauri/src/lib.rs. The webview fetches the bytes lazily
@@ -235,6 +261,15 @@
             <li class="more" aria-live="polite">{t.preview.fileList.moreFiles(fileListOverflow)}</li>
           {/if}
         </ul>
+      {:else if showLineNumbers}
+        <pre class="body code with-lines"
+          ><code>{#each tokenLines as line, lineIdx (lineIdx)}<span
+              class="line"
+              ><span class="lineno" aria-hidden="true"
+              ></span>{#each line as tok, idx (idx)}<span class={tok.kind}
+                >{tok.text}</span
+              >{/each}</span
+            >{/each}</code></pre>
       {:else if showHighlighting}
         <pre class="body code"><code>{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code></pre>
       {:else}
@@ -477,6 +512,33 @@
   .body :global(.comment) {
     color: var(--syntax-comment, rgba(170, 170, 170, 0.7));
     font-style: italic;
+  }
+  .body :global(.link) {
+    color: var(--syntax-link, #7ec8ff);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+  /* Line-number gutter: CSS counter on each `.line` block; the `.lineno`
+     element is aria-hidden so screen readers read the code only. */
+  .body.code.with-lines code {
+    counter-reset: line;
+  }
+  .body.code.with-lines :global(.line) {
+    counter-increment: line;
+    display: block;
+  }
+  .body.code.with-lines :global(.line .lineno)::before {
+    content: counter(line);
+    display: inline-block;
+    width: 2.5em;
+    margin-right: 0.75em;
+    padding-right: 0.25em;
+    color: var(--muted, rgba(255, 255, 255, 0.35));
+    text-align: right;
+    user-select: none;
+    -webkit-user-select: none;
+    border-right: 1px solid var(--border, rgba(255, 255, 255, 0.08));
   }
   .foot dl {
     display: grid;
