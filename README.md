@@ -12,6 +12,10 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
 - Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
 - Quick actions on a selected entry: summarise, format JSON, extract tasks,
   redact secrets — all computed locally without any network calls.
+- URL preview shows host on its own row with a punycode badge when the
+  displayed Unicode host differs from its ASCII form; press **Enter** in
+  the expanded preview to open the URL in the default browser after a
+  confirm dialog (Public entries only, `https` / `http` only).
 - Bundled per-OS release artefacts with an in-app update-availability probe.
 
 ## Install

@@ -946,11 +946,24 @@ not duplicate runtime logic.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
-  highlighter for `code` / `url` kinds. When a search query matches text
+  highlighter for `code` kinds. When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
   warning. For Public text entries the pane offers an "expand" button that
   fetches the body up to 1 MiB via `get_entry_preview_full`; non-Public
   entries hide the affordance because the IPC enforces the same gate.
+  URL entries use a dedicated three-tier layout (`host_display` on top,
+  `scheme` + `path_and_query` muted below) sourced from the
+  `PreviewBodyDto::Url` fields populated via `url::Url::parse` +
+  `idna::domain_to_unicode`. When the displayed Unicode host differs from
+  its ASCII (`xn--…`) form a `role="status"` punycode badge surfaces the
+  ASCII via `title`. The pane registers an Enter-key handler in
+  `expanded` mode that opens a confirm modal and only then invokes
+  `open_url_external(entry_id, url)`. The backend command re-fetches the
+  entry, verifies the URL matches the stored claim, enforces
+  `Sensitivity::Public`, restricts the scheme allowlist to `https` /
+  `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
+  — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
+  Non-Public entries hide both the Enter hint and the open button.
 - `ActionMenu.svelte` — modal for Quick actions (Summarize, Format
   JSON, Extract tasks, Redact secrets). The result block shows *Copy*
   (uses `navigator.clipboard`) and *Save as new entry* (calls
