@@ -2925,6 +2925,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "image",
  "nagori-ai",
  "nagori-core",
  "nagori-ipc",

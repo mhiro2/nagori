@@ -621,6 +621,23 @@ impl RepresentationSummary {
     }
 }
 
+/// Downscaled image bytes plus dimensions, persisted in the
+/// `entry_thumbnails` table.
+///
+/// Used by the desktop preview pane to keep the `WebView` from rendering
+/// multi-MB originals every time the user navigates between rows. Lives
+/// outside `StoredClipboardRepresentation` on purpose: copy-back
+/// (`PasteFormat::Preserve`) walks every stored representation when the
+/// user re-pastes an entry, and a downscaled PNG must never be promoted
+/// to the system clipboard alongside (or in place of) the original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThumbnailRecord {
+    pub payload: Vec<u8>,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Role of a stored representation inside an entry's representation set.
 ///
 /// Maps 1:1 to the `entry_representations.role` SQL column. The variant

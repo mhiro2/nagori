@@ -39,6 +39,15 @@ pub struct AppSettings {
     #[serde(default = "default_capture_kinds")]
     pub capture_kinds: BTreeSet<ContentKind>,
     pub max_total_bytes: Option<u64>,
+    /// Cap on the aggregate `entry_thumbnails.byte_count`. `None` disables
+    /// the LRU eviction sweep entirely; `Some(0)` evicts every thumbnail
+    /// after each generation. The default budget (64 MiB) sits comfortably
+    /// below the per-image cap of 256 KiB × ~256 entries, so a typical
+    /// history can hold roughly a screen's worth of recent imagery cached.
+    /// Thumbnails are derived from the original payload and regenerable on
+    /// demand, so the budget can be cleared without losing user data.
+    #[serde(default = "default_max_thumbnail_total_bytes")]
+    pub max_thumbnail_total_bytes: Option<u64>,
     pub capture_enabled: bool,
     pub auto_paste_enabled: bool,
     pub paste_format_default: PasteFormat,
@@ -411,6 +420,7 @@ impl Default for AppSettings {
             max_entry_size_bytes: 512 * 1024,
             capture_kinds: default_capture_kinds(),
             max_total_bytes: None,
+            max_thumbnail_total_bytes: default_max_thumbnail_total_bytes(),
             capture_enabled: true,
             auto_paste_enabled: true,
             paste_format_default: PasteFormat::default(),
@@ -462,6 +472,10 @@ pub const fn default_capture_initial_clipboard_on_launch() -> bool {
 
 pub const fn default_auto_update_check() -> bool {
     true
+}
+
+pub const fn default_max_thumbnail_total_bytes() -> Option<u64> {
+    Some(64 * 1024 * 1024)
 }
 
 pub fn default_capture_kinds() -> BTreeSet<ContentKind> {

@@ -198,6 +198,17 @@ pub struct DoctorReport {
     /// surfaces that as "(unknown)".
     #[serde(default)]
     pub latest_version: Option<String>,
+    /// Aggregate byte count currently held in the `entry_thumbnails`
+    /// derived cache. Surfaced here so operators can verify the LRU
+    /// budget is being respected without dropping to SQL. `None` when
+    /// the daemon could not read the stat (e.g. legacy schema).
+    #[serde(default)]
+    pub thumbnail_total_bytes: Option<u64>,
+    /// Configured upper bound for `thumbnail_total_bytes`. `None` means
+    /// the operator disabled the LRU sweep; positive values are the
+    /// active budget in bytes.
+    #[serde(default)]
+    pub thumbnail_budget_bytes: Option<u64>,
 }
 
 const fn default_auto_update_check_report() -> bool {
