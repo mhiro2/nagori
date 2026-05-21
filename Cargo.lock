@@ -2949,6 +2949,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",
  "idna",
+ "image",
  "nagori-ai",
  "nagori-core",
  "nagori-daemon",

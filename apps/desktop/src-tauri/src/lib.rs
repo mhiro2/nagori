@@ -1272,6 +1272,7 @@ pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod image_scheme_tests {
     use super::*;
+    use image::ImageEncoder;
     use nagori_core::{
         ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository, ImageContent,
         Sensitivity,
@@ -1698,6 +1699,173 @@ mod image_scheme_tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(resp.body().as_slice(), b"invalid entry id");
+    }
+
+    /// Encode a small RGB PNG (no alpha). The thumbnail generator's
+    /// alpha-branch check should route this through the JPEG encoder.
+    fn encode_rgb_png_fixture() -> Vec<u8> {
+        let mut img = image::RgbImage::new(8, 8);
+        for pixel in img.pixels_mut() {
+            *pixel = image::Rgb([0x33, 0x66, 0x99]);
+        }
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("encode rgb png");
+        bytes
+    }
+
+    /// Encode a small RGBA PNG with at least one transparent pixel. The
+    /// generator must keep this on the PNG path so transparency survives
+    /// into the served thumbnail.
+    fn encode_rgba_png_fixture() -> Vec<u8> {
+        let mut img = image::RgbaImage::new(8, 8);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            let alpha: u8 = if (x + y) % 2 == 0 { 0 } else { 0xff };
+            *pixel = image::Rgba([0x33, 0x66, 0x99, alpha]);
+        }
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode rgba png");
+        bytes
+    }
+
+    /// End-to-end pipeline test: an opaque RGB source must reach the
+    /// scheme handler as `image/jpeg`. Catches drift between the
+    /// generator's alpha-branch output and the served-MIME signature
+    /// gate — either side flipping in isolation would fail the
+    /// `matches_declared_mime` check that fronts the `WebView` origin.
+    #[tokio::test]
+    async fn thumbnail_pipeline_opaque_source_serves_jpeg() {
+        let runtime = build_runtime();
+        let bytes = encode_rgb_png_fixture();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/png", bytes);
+        let id = insert(&runtime, entry).await;
+
+        let outcome = nagori_daemon::thumbnails::generate_thumbnail(runtime.store(), id)
+            .await
+            .expect("generator runs");
+        assert!(outcome.is_some(), "opaque source must produce a thumbnail");
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/jpeg"),
+            "opaque source routes through the JPEG encoder",
+        );
+        assert!(
+            resp.body().starts_with(&[0xFF, 0xD8, 0xFF]),
+            "body must carry the JPEG SOI signature",
+        );
+        // Re-decode parity with the alpha test below: a JPEG whose SOI
+        // signature is intact but whose stream is truncated would still
+        // pass the `matches_declared_mime` gate. Decoding the served
+        // body forces the assertion to fail unless the encoder produced
+        // a renderable frame.
+        let decoded = image::load_from_memory(resp.body())
+            .expect("re-decode served thumbnail")
+            .to_rgb8();
+        assert!(
+            decoded.width() > 0 && decoded.height() > 0,
+            "served JPEG must decode to a non-empty frame",
+        );
+    }
+
+    /// End-to-end pipeline test: an RGBA source carrying transparent
+    /// pixels must reach the scheme handler as `image/png` so the inline
+    /// preview matches the original. A regression that flattened alpha
+    /// to RGB in the generator would surface here as a content-type
+    /// flip to JPEG (and visual divergence from the expanded view).
+    #[tokio::test]
+    async fn thumbnail_pipeline_alpha_source_serves_png() {
+        let runtime = build_runtime();
+        let bytes = encode_rgba_png_fixture();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/png", bytes);
+        let id = insert(&runtime, entry).await;
+
+        let outcome = nagori_daemon::thumbnails::generate_thumbnail(runtime.store(), id)
+            .await
+            .expect("generator runs");
+        assert!(outcome.is_some(), "alpha source must produce a thumbnail");
+
+        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png"),
+            "alpha source routes through the PNG encoder",
+        );
+        assert!(
+            resp.body().starts_with(b"\x89PNG\r\n\x1a\n"),
+            "body must carry the PNG signature",
+        );
+        let decoded = image::load_from_memory(resp.body())
+            .expect("re-decode served thumbnail")
+            .to_rgba8();
+        assert!(
+            decoded.pixels().any(|p| p.0[3] < 0xff),
+            "served thumbnail must keep at least one transparent pixel",
+        );
+    }
+
+    /// End-to-end pipeline test for the lazy kick path. Production
+    /// first-misses go through `runtime.kick_thumbnail_generation` from
+    /// inside `build_thumbnail_response`, not through a direct call to
+    /// `generate_thumbnail`. Drop that kick and the served-cache tests
+    /// still pass (they pre-seed the row); this test fails because the
+    /// post-503 retry never observes a populated row.
+    #[tokio::test]
+    async fn thumbnail_pipeline_lazy_kick_eventually_serves() {
+        let runtime = build_runtime();
+        let bytes = encode_rgb_png_fixture();
+        let entry = make_image_entry_with(Sensitivity::Public, "image/png", bytes);
+        let id = insert(&runtime, entry).await;
+
+        let miss = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+        assert_eq!(miss.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Bounded poll — the kick runs on a spawned task, so the next
+        // request becomes 200 once `put_thumbnail` commits.
+        let mut served = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+            if resp.status() == StatusCode::OK {
+                served = Some(resp);
+                break;
+            }
+        }
+        let served = served.expect("lazy kick must populate the thumbnail row within budget");
+        assert_eq!(
+            served
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/jpeg"),
+        );
+        let decoded = image::load_from_memory(served.body())
+            .expect("lazy-served body must decode")
+            .to_rgb8();
+        assert!(
+            decoded.width() > 0 && decoded.height() > 0,
+            "lazy-served thumbnail must decode to a non-empty frame",
+        );
     }
 }
 
