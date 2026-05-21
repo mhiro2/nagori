@@ -42,9 +42,21 @@
     loading: boolean;
     errorMessage: string | undefined;
     expanded?: boolean;
+    expandedLoading?: boolean;
+    expandedErrorMessage?: string | undefined;
+    onExpandBody?: (entryId: string) => void;
   };
 
-  const { item, preview, loading, errorMessage, expanded = false }: Props = $props();
+  const {
+    item,
+    preview,
+    loading,
+    errorMessage,
+    expanded = false,
+    expandedLoading = false,
+    expandedErrorMessage = undefined,
+    onExpandBody,
+  }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? "");
   const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
@@ -106,6 +118,55 @@
         return body.domain ?? preview.metadata.domain ?? undefined;
       }
     }
+  });
+
+  // Truncation note: branch on the DTO's structured `truncation` so the
+  // head+tail variant can spell out the elided byte count. Falls back to
+  // the legacy boolean for older payloads that lack `truncation` (e.g.
+  // tests or non-bundled IPC consumers).
+  const truncationNote = $derived.by((): string | undefined => {
+    if (!preview) return undefined;
+    const truncation = preview.metadata.truncation;
+    if (truncation) {
+      switch (truncation.kind) {
+        case 'none':
+          return undefined;
+        case 'headOnly': {
+          const shown = formatByteCount(Math.max(0, preview.metadata.byteCount - elidedBytes()));
+          const total = formatByteCount(preview.metadata.byteCount);
+          return t.preview.truncation.headOnly({ shown, total });
+        }
+        case 'headAndTail': {
+          const elided = formatByteCount(truncation.elidedBytes);
+          return t.preview.truncation.headAndTail({ elided });
+        }
+      }
+    }
+    return preview.metadata.truncated ? t.preview.truncated : undefined;
+  });
+
+  // For the headOnly fallback we don't get an explicit elided count, so we
+  // infer it from `byteCount` vs. the standard 128 KiB cap (best-effort).
+  function elidedBytes(): number {
+    if (!preview) return 0;
+    const trunc = preview.metadata.truncation;
+    if (trunc?.kind === 'headAndTail') return trunc.elidedBytes;
+    if (trunc?.kind === 'headOnly') return Math.max(0, preview.metadata.byteCount - 128 * 1024);
+    return 0;
+  }
+
+  const showElidedMatchWarning = $derived(preview?.metadata.elidedContainsMatch === true);
+
+  // Expand button only shows for Public, text-bearing bodies that were
+  // actually trimmed. Image / fileList expansions are out of scope (the
+  // bodies are not text and the IPC returns a richer DTO that we don't
+  // re-render here).
+  const canExpandBody = $derived.by((): boolean => {
+    if (!preview) return false;
+    if (!preview.metadata.fullContentAvailable) return false;
+    if (!preview.metadata.truncated) return false;
+    const kind = preview.body.type;
+    return kind === 'text' || kind === 'code' || kind === 'richText' || kind === 'unknown';
   });
 
   // Number of paths hidden by the 50-row cap that the backend applies before
@@ -180,8 +241,29 @@
         <pre class="body">{bodyText}</pre>
       {/if}
     </div>
-    {#if preview?.metadata.truncated}
-      <p class="note">{t.preview.truncated}</p>
+    {#if preview && truncationNote}
+      <div class="truncation" data-testid="preview-truncation">
+        <p class="note">{truncationNote}</p>
+        {#if showElidedMatchWarning}
+          <p class="note warn" role="status" data-testid="preview-elided-match">
+            ⚠ {t.preview.truncation.elidedMatch}
+          </p>
+        {/if}
+        {#if expanded && canExpandBody}
+          <button
+            type="button"
+            class="expand"
+            data-testid="preview-expand-button"
+            disabled={expandedLoading}
+            onclick={() => onExpandBody?.(preview.id)}
+          >
+            {expandedLoading ? t.preview.truncation.expanding : t.preview.truncation.expand}
+          </button>
+        {/if}
+        {#if expandedErrorMessage}
+          <p class="note error" role="alert">{expandedErrorMessage}</p>
+        {/if}
+      </div>
     {/if}
     <footer class="foot">
       <dl>
@@ -272,11 +354,38 @@
     color: var(--muted, rgba(255, 255, 255, 0.55));
     font-size: 0.8125rem;
   }
-  .state.error {
+  .state.error,
+  .note.error {
     color: var(--danger, #f87171);
   }
   .note {
     padding: 0;
+  }
+  .note.warn {
+    color: var(--warn, #f5c97b);
+  }
+  .truncation {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .truncation .expand {
+    align-self: flex-start;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg, #f5f5f5);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .truncation .expand:disabled {
+    opacity: 0.5;
+    cursor: progress;
+  }
+  .truncation .expand:hover:not(:disabled) {
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.05));
   }
   .image-frame {
     position: relative;

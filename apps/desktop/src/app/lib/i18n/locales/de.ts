@@ -26,6 +26,15 @@ export const de: Messages = {
     empty: 'Eintrag auswählen, um eine Vorschau anzuzeigen.',
     loading: 'Vorschau wird geladen …',
     truncated: 'Vorschau gekürzt.',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `Erste ${shown} von ${total} angezeigt.`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `Anfang und Ende werden angezeigt; ${elided} in der Mitte ausgelassen.`,
+      elidedMatch: 'Ein Suchtreffer liegt im ausgelassenen Mittelteil.',
+      expand: 'Vollständigen Inhalt anzeigen',
+      expanding: 'Vollständiger Inhalt wird geladen …',
+    },
     fields: {
       id: 'ID',
       sensitivity: 'Sensibilität',

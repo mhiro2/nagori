@@ -5,7 +5,7 @@ use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
     Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, RepresentationRole,
     RepresentationSummary, SearchFilters, SearchMode, SearchResult, SecondaryHotkeyAction,
-    SecretHandling, Sensitivity, UpdateChannel, is_text_safe_for_default_output,
+    SecretHandling, Sensitivity, UpdateChannel, is_text_safe_for_default_output, normalize_text,
     safe_preview_for_dto,
 };
 use nagori_platform::{
@@ -266,13 +266,30 @@ pub struct EntryPreviewMetadataDto {
     pub byte_count: usize,
     pub char_count: usize,
     pub line_count: usize,
+    // Kept for forward-compat with non-bundled callers (CLI, IPC). The
+    // frontend dispatches on `truncation` instead.
     pub truncated: bool,
+    pub truncation: TruncationDto,
     pub sensitive: bool,
     pub full_content_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    // best-effort signal: true when the user's current search query matches
+    // text inside the elided middle (so the renderer can warn that a hit
+    // is hidden). `None` when no query was passed or the body wasn't
+    // truncated. Not synced with FTS — substring-match only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elided_contains_match: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TruncationDto {
+    None,
+    HeadOnly,
+    HeadAndTail { elided_bytes: usize },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,19 +328,81 @@ pub enum PreviewBodyDto {
     },
 }
 
-impl EntryPreviewDto {
-    pub fn from_entry(entry: &ClipboardEntry) -> Self {
-        const MAX_PREVIEW_BYTES: usize = 128 * 1024;
+/// Default soft cap on preview byte length. Head+tail truncation kicks in
+/// above this threshold so the user keeps the tail context (closing
+/// braces, footer signatures) that a head-only cut would lose.
+pub const MAX_PREVIEW_BYTES: usize = 128 * 1024;
+/// Line-based cap applied before the byte cap. Keeps highlight tokenisation
+/// and the gutter renderer bounded even for files whose lines are short
+/// enough to stay under `MAX_PREVIEW_BYTES` (e.g. a 50k-line log).
+pub const MAX_PREVIEW_LINES: usize = 4_000;
+/// Byte cap for `get_entry_preview_full`. Higher than the default cap but
+/// still bounded — the full preview pane is opt-in (expanded mode) and
+/// hands the entire window over to the body, so an unbounded payload
+/// would block the renderer on multi-MB clips.
+pub const MAX_PREVIEW_FULL_BYTES: usize = 1024 * 1024;
 
+impl EntryPreviewDto {
+    // Default constructor used by tests and as the documented entry point;
+    // production code paths supply an optional query via
+    // `from_entry_with_query` so the elided-match hint can flow through.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_entry(entry: &ClipboardEntry) -> Self {
+        Self::build(entry, MAX_PREVIEW_BYTES, None)
+    }
+
+    /// Same as `from_entry` but tags `elided_contains_match` when the
+    /// supplied search query (raw user input — not normalised) appears in
+    /// the middle region we just elided. Empty queries are treated as
+    /// "no query" so the renderer never emits a misleading warning on a
+    /// pristine preview pane.
+    pub fn from_entry_with_query(entry: &ClipboardEntry, query: Option<&str>) -> Self {
+        let trimmed = query.map(str::trim).filter(|q| !q.is_empty());
+        Self::build(entry, MAX_PREVIEW_BYTES, trimmed)
+    }
+
+    /// Build a preview with a larger byte cap (used by `get_entry_preview_full`).
+    /// Sensitive entries are still redacted to the safe-preview placeholder
+    /// at the caller; this method does not relax sensitivity gating.
+    pub fn from_entry_full(entry: &ClipboardEntry) -> Self {
+        Self::build(entry, MAX_PREVIEW_FULL_BYTES, None)
+    }
+
+    fn build(entry: &ClipboardEntry, byte_cap: usize, query: Option<&str>) -> Self {
         let sensitive = !is_text_safe_for_default_output(entry.sensitivity);
         let raw_text = if sensitive {
             safe_preview_for_dto(entry)
         } else {
             entry.plain_text().unwrap_or_default().to_owned()
         };
-        let (preview_text, truncated) = truncate_utf8(&raw_text, MAX_PREVIEW_BYTES);
-        let full_content_available =
-            !sensitive && !matches!(entry.sensitivity, Sensitivity::Blocked);
+        let truncation_result = truncate_for_preview(&raw_text, byte_cap, MAX_PREVIEW_LINES);
+        let preview_text = truncation_result.text;
+        let truncation_dto = truncation_result.truncation;
+        let truncated = !matches!(truncation_dto, TruncationDto::None);
+        // Apply the same normalizer used by the FTS pipeline (NFKC + lowercase
+        // + whitespace collapse) so the hint matches whether the *search*
+        // would have hit text inside the elided middle. Per-term `all()` keeps
+        // a multi-token query like "foo bar" honest when only some of its
+        // tokens fall in the elided window.
+        let elided_contains_match = match (query, truncation_result.elided_region) {
+            (Some(q), Some((start, end))) if start < end && end <= raw_text.len() => {
+                let normalized_q = normalize_text(q);
+                if normalized_q.is_empty() {
+                    None
+                } else {
+                    let normalized_region = normalize_text(&raw_text[start..end]);
+                    let hit = normalized_q
+                        .split_whitespace()
+                        .all(|term| normalized_region.contains(term));
+                    Some(hit)
+                }
+            }
+            _ => None,
+        };
+        // Mirror the IPC gate on `get_entry_preview_full` (Public-only). If the
+        // entry isn't Public, the expand button would just trigger a forbidden
+        // response, so we hide it at the source.
+        let full_content_available = matches!(entry.sensitivity, Sensitivity::Public);
         let title = entry.search.title.clone();
         let language = entry.search.language.clone();
         let domain = match &entry.content {
@@ -376,26 +455,198 @@ impl EntryPreviewDto {
                 char_count: raw_text.chars().count(),
                 line_count: raw_text.lines().count().max(1),
                 truncated,
+                truncation: truncation_dto,
                 sensitive,
                 full_content_available,
                 domain,
                 language,
+                elided_contains_match,
             },
         }
     }
 }
 
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+#[derive(Debug, Clone)]
+struct TruncationResult {
+    text: String,
+    truncation: TruncationDto,
+    // Byte offsets in the original `raw_text` that were elided. `None`
+    // when nothing was dropped. Used to spot-check whether a search hit
+    // landed in the hidden middle.
+    elided_region: Option<(usize, usize)>,
+}
+
+/// Cap a preview body by line count first, then by byte length. Returns a
+/// head + sentinel + tail string with a single elided region in the
+/// middle. Falls back to a head-only cut when the body is small enough
+/// that head+tail would round-trip the entire string anyway.
+fn truncate_for_preview(value: &str, max_bytes: usize, max_lines: usize) -> TruncationResult {
+    if value.len() <= max_bytes && line_count(value) <= max_lines {
+        return TruncationResult {
+            text: value.to_owned(),
+            truncation: TruncationDto::None,
+            elided_region: None,
+        };
+    }
+    if let Some(line_trimmed) = head_tail_truncate_lines(value, max_lines) {
+        // Lines fell first. If the joined head+tail still busts the byte cap
+        // (long lines), fall through to byte-cap truncation on the
+        // original `value` so we don't double-elide. Otherwise emit the
+        // line-trimmed string.
+        if line_trimmed.text.len() <= max_bytes {
+            return line_trimmed;
+        }
+    }
+    head_tail_truncate_utf8(value, max_bytes)
+}
+
+fn line_count(value: &str) -> usize {
+    // Match the existing metadata path: empty → 1, otherwise count newlines
+    // and add one if the body doesn't end with `\n`.
+    if value.is_empty() {
+        return 1;
+    }
+    let trailing_nl = value.ends_with('\n');
+    let nl = value.matches('\n').count();
+    if trailing_nl { nl.max(1) } else { nl + 1 }
+}
+
+fn head_tail_truncate_lines(value: &str, max_lines: usize) -> Option<TruncationResult> {
+    if line_count(value) <= max_lines || max_lines < 2 {
+        return None;
+    }
+    // Half each side; bias the head slightly when `max_lines` is odd.
+    let tail_lines = max_lines / 2;
+    let head_lines = max_lines - tail_lines;
+    let lines: Vec<&str> = value.lines().collect();
+    if lines.len() <= max_lines {
+        return None;
+    }
+    // Reconstruct head / tail by absolute byte offsets so the elided range
+    // lines up with the original `value`.
+    let head_end = byte_offset_after_lines(value, head_lines);
+    let tail_start = byte_offset_before_last_lines(value, tail_lines);
+    if head_end >= tail_start {
+        return None;
+    }
+    let head = &value[..head_end];
+    let tail = &value[tail_start..];
+    let elided_bytes = tail_start - head_end;
+    let elided_lines = lines.len() - head_lines - tail_lines;
+    let sentinel = format!("\n… {elided_lines} lines elided ({elided_bytes} bytes) …\n");
+    let mut out = String::with_capacity(head.len() + sentinel.len() + tail.len());
+    out.push_str(head);
+    out.push_str(&sentinel);
+    out.push_str(tail);
+    Some(TruncationResult {
+        text: out,
+        truncation: TruncationDto::HeadAndTail { elided_bytes },
+        elided_region: Some((head_end, tail_start)),
+    })
+}
+
+fn byte_offset_after_lines(value: &str, lines: usize) -> usize {
+    if lines == 0 {
+        return 0;
+    }
+    let mut count = 0_usize;
+    for (idx, _) in value.match_indices('\n') {
+        count += 1;
+        if count == lines {
+            return idx + 1; // include the trailing newline
+        }
+    }
+    value.len()
+}
+
+fn byte_offset_before_last_lines(value: &str, lines: usize) -> usize {
+    if lines == 0 {
+        return value.len();
+    }
+    // Walk backwards through the newlines, ignoring the trailing newline
+    // (if any) so the final visible line counts as line 1 of the tail.
+    let bytes = value.as_bytes();
+    let mut i = value.len();
+    if i > 0 && bytes[i - 1] == b'\n' {
+        i -= 1;
+    }
+    let mut found = 0_usize;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'\n' {
+            found += 1;
+            if found == lines {
+                return i + 1;
+            }
+        }
+    }
+    0
+}
+
+fn head_tail_truncate_utf8(value: &str, max_bytes: usize) -> TruncationResult {
     if value.len() <= max_bytes {
-        return (value.to_owned(), false);
+        return TruncationResult {
+            text: value.to_owned(),
+            truncation: TruncationDto::None,
+            elided_region: None,
+        };
     }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
+    // Reserve room for the sentinel so the final string honours the byte
+    // budget. If the sentinel itself doesn't fit, fall back to head-only.
+    let half = max_bytes / 2;
+    // Probe sentinel length using the worst-case elided count.
+    let elided_bytes_estimate = value.len() - max_bytes;
+    let sentinel_probe = format!("\n… {elided_bytes_estimate} bytes elided …\n");
+    if sentinel_probe.len() + 16 > max_bytes {
+        // Tiny cap: degrade to head-only ellipsis to keep the rendered
+        // body coherent. Truncation is still flagged so the UI can warn.
+        let mut end = max_bytes.saturating_sub('…'.len_utf8());
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut out = value[..end].to_owned();
+        out.push('…');
+        return TruncationResult {
+            text: out,
+            truncation: TruncationDto::HeadOnly,
+            elided_region: Some((end, value.len())),
+        };
     }
-    let mut out = value[..end].to_owned();
-    out.push('…');
-    (out, true)
+    let mut head_end = half.saturating_sub(sentinel_probe.len() / 2);
+    while head_end > 0 && !value.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = value
+        .len()
+        .saturating_sub(max_bytes - head_end - sentinel_probe.len());
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    if tail_start <= head_end {
+        // Defensive: pathological inputs (tiny `max_bytes`) — fall back.
+        let mut end = max_bytes.saturating_sub('…'.len_utf8());
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut out = value[..end].to_owned();
+        out.push('…');
+        return TruncationResult {
+            text: out,
+            truncation: TruncationDto::HeadOnly,
+            elided_region: Some((end, value.len())),
+        };
+    }
+    let elided_bytes = tail_start - head_end;
+    let sentinel = format!("\n… {elided_bytes} bytes elided …\n");
+    let mut out = String::with_capacity(head_end + sentinel.len() + (value.len() - tail_start));
+    out.push_str(&value[..head_end]);
+    out.push_str(&sentinel);
+    out.push_str(&value[tail_start..]);
+    TruncationResult {
+        text: out,
+        truncation: TruncationDto::HeadAndTail { elided_bytes },
+        elided_region: Some((head_end, tail_start)),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1080,16 +1331,173 @@ mod tests {
     }
 
     #[test]
-    fn entry_preview_truncates_oversized_text_bodies() {
-        // 200 KiB exceeds the 128 KiB preview cap; body must end with the
-        // ellipsis sentinel and `truncated` must be set.
-        let huge: String = "a".repeat(200 * 1024);
-        let entry = text_entry(&huge);
+    fn entry_preview_head_and_tail_truncates_oversized_text_bodies() {
+        // 200 KiB exceeds the 128 KiB preview cap. Head+tail truncation
+        // keeps both ends visible with a middle sentinel that names the
+        // elided byte count, so users can spot trailing context (closing
+        // braces, footer signatures) that a head-only cut would lose.
+        let body = "a".repeat(200 * 1024);
+        let entry = text_entry(&body);
 
         let dto = EntryPreviewDto::from_entry(&entry);
         assert!(dto.metadata.truncated);
-        assert!(dto.preview_text.ends_with('…'));
-        assert!(dto.preview_text.len() <= 128 * 1024 + '…'.len_utf8());
+        match dto.metadata.truncation {
+            TruncationDto::HeadAndTail { elided_bytes } => {
+                assert!(elided_bytes > 0);
+                assert!(elided_bytes < body.len());
+            }
+            other => panic!("expected HeadAndTail truncation, got {other:?}"),
+        }
+        assert!(dto.preview_text.contains("bytes elided"));
+        // Cap honoured (sentinel adds a few dozen bytes, allow modest slack).
+        assert!(dto.preview_text.len() <= 128 * 1024 + 64);
+        // Head and tail both reach the rendered body.
+        assert!(dto.preview_text.starts_with('a'));
+        assert!(dto.preview_text.ends_with('a'));
+        // No query supplied → `elided_contains_match` stays `None` so the
+        // renderer doesn't flag a missing hit when there is no search.
+        assert!(dto.metadata.elided_contains_match.is_none());
+    }
+
+    #[test]
+    fn entry_preview_head_and_tail_preserves_multibyte_char_boundaries() {
+        // 4-byte emoji at both ends of the body. The truncator must split
+        // on a char boundary so the rendered preview stays valid UTF-8
+        // and the head/tail emojis survive.
+        let chunk = "あ".repeat(50_000); // 3 bytes × 50_000 = 150 KiB
+        let entry = text_entry(&chunk);
+        let dto = EntryPreviewDto::from_entry(&entry);
+        assert!(dto.metadata.truncated);
+        // Round-trips as valid UTF-8 (no panic on `chars()`).
+        assert!(dto.preview_text.chars().count() > 0);
+        assert!(dto.preview_text.starts_with('あ'));
+        assert!(dto.preview_text.ends_with('あ'));
+    }
+
+    #[test]
+    fn entry_preview_below_caps_reports_truncation_none() {
+        let entry = text_entry("hello world\nsecond line");
+        let dto = EntryPreviewDto::from_entry(&entry);
+        assert!(!dto.metadata.truncated);
+        assert!(matches!(dto.metadata.truncation, TruncationDto::None));
+    }
+
+    #[test]
+    fn entry_preview_with_query_flags_elided_match_only_when_hit_is_hidden() {
+        // Place the marker in the elided middle. With ~200 KiB total
+        // body and a 128 KiB cap, the kept head/tail are ≈64 KiB each
+        // and the marker (at byte ~100_000) lands inside the cut.
+        let mut body = String::with_capacity(200 * 1024);
+        body.push_str(&"x".repeat(100_000));
+        body.push_str("NEEDLE-IN-THE-HAYSTACK");
+        body.push_str(&"y".repeat(100_000));
+        let entry = text_entry(&body);
+        let with_match =
+            EntryPreviewDto::from_entry_with_query(&entry, Some("NEEDLE-IN-THE-HAYSTACK"));
+        assert_eq!(with_match.metadata.elided_contains_match, Some(true));
+        let with_other =
+            EntryPreviewDto::from_entry_with_query(&entry, Some("not-in-this-document"));
+        assert_eq!(with_other.metadata.elided_contains_match, Some(false));
+        // Empty / whitespace queries are treated as "no query" so the
+        // renderer never emits a spurious warning on an empty palette.
+        let with_empty = EntryPreviewDto::from_entry_with_query(&entry, Some("   "));
+        assert!(with_empty.metadata.elided_contains_match.is_none());
+    }
+
+    #[test]
+    fn entry_preview_with_query_normalizes_case_and_terms_against_elided_region() {
+        // The FTS pipeline lowercases via `normalize_text`; the hint must
+        // follow the same normalization so a case-mismatched query still
+        // surfaces the warning when the hit hides in the middle.
+        let mut body = String::with_capacity(200 * 1024);
+        body.push_str(&"x".repeat(100_000));
+        body.push_str("HiddenKeyword");
+        body.push_str(&"y".repeat(100_000));
+        let entry = text_entry(&body);
+        // Different case from the body — raw contains() would miss this.
+        let lowered = EntryPreviewDto::from_entry_with_query(&entry, Some("hiddenkeyword"));
+        assert_eq!(lowered.metadata.elided_contains_match, Some(true));
+        // Multi-term query: both tokens must hit the region (all-of-terms).
+        let mut body2 = String::with_capacity(200 * 1024);
+        body2.push_str(&"x".repeat(100_000));
+        body2.push_str("foo bar baz");
+        body2.push_str(&"y".repeat(100_000));
+        let entry2 = text_entry(&body2);
+        let both = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo BAR"));
+        assert_eq!(both.metadata.elided_contains_match, Some(true));
+        let one_missing = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo qux"));
+        assert_eq!(one_missing.metadata.elided_contains_match, Some(false));
+    }
+
+    #[test]
+    fn entry_preview_full_content_available_tracks_public_only() {
+        // `full_content_available` must mirror the IPC gate on
+        // `get_entry_preview_full` (Public-only) so the expand button is
+        // never offered for entries that would be rejected at invoke time.
+        // `EntryFactory::from_text` returns `Unknown` by default, so the
+        // base fixture is already a non-Public case.
+        let unknown = text_entry("hello world");
+        assert_eq!(unknown.sensitivity, Sensitivity::Unknown);
+        let unk_dto = EntryPreviewDto::from_entry(&unknown);
+        // `Unknown` is text-safe for default DTOs but not Public, so the
+        // expand affordance must stay off.
+        assert!(!unk_dto.metadata.full_content_available);
+
+        let mut public = text_entry("hello world");
+        public.sensitivity = Sensitivity::Public;
+        let pub_dto = EntryPreviewDto::from_entry(&public);
+        assert!(pub_dto.metadata.full_content_available);
+
+        let mut secret = text_entry("hello world");
+        secret.sensitivity = Sensitivity::Secret;
+        let sec_dto = EntryPreviewDto::from_entry(&secret);
+        assert!(!sec_dto.metadata.full_content_available);
+    }
+
+    #[test]
+    fn entry_preview_with_query_short_body_emits_no_elided_hint() {
+        // Body fits in the cap; nothing was elided so the flag must stay
+        // `None` rather than `Some(false)` (no region to inspect).
+        let entry = text_entry("alpha beta gamma");
+        let dto = EntryPreviewDto::from_entry_with_query(&entry, Some("delta"));
+        assert!(dto.metadata.elided_contains_match.is_none());
+    }
+
+    #[test]
+    fn entry_preview_full_uses_higher_byte_cap_than_default() {
+        // 256 KiB body exceeds the standard 128 KiB cap but fits inside
+        // the 1 MiB expanded cap, so the expanded path returns the body
+        // untruncated while the default path falls back to head+tail.
+        let body = "a".repeat(256 * 1024);
+        let entry = text_entry(&body);
+        let standard = EntryPreviewDto::from_entry(&entry);
+        assert!(standard.metadata.truncated);
+        let expanded = EntryPreviewDto::from_entry_full(&entry);
+        assert!(!expanded.metadata.truncated);
+        assert!(matches!(expanded.metadata.truncation, TruncationDto::None));
+        assert_eq!(expanded.preview_text.len(), body.len());
+    }
+
+    #[test]
+    fn entry_preview_truncates_by_line_count_with_head_and_tail() {
+        // A short-line body that beats the byte cap purely on line count
+        // (5,000 lines × 4 bytes = 20 KiB). The line-cap path must kick
+        // in before the byte cap and emit the head+tail sentinel.
+        let body: String = (0..5_000)
+            .map(|i| format!("ln{i}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let entry = text_entry(&body);
+        let dto = EntryPreviewDto::from_entry(&entry);
+        assert!(dto.metadata.truncated);
+        assert!(matches!(
+            dto.metadata.truncation,
+            TruncationDto::HeadAndTail { .. }
+        ));
+        assert!(dto.preview_text.contains("lines elided"));
+        // First and last lines survive.
+        assert!(dto.preview_text.starts_with("ln0\n"));
+        assert!(dto.preview_text.contains("ln4999"));
     }
 
     #[test]

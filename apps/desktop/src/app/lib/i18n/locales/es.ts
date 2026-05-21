@@ -27,6 +27,15 @@ export const es: Messages = {
     empty: 'Selecciona un elemento para previsualizar.',
     loading: 'Cargando vista previa…',
     truncated: 'Vista previa recortada.',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `Se muestran los primeros ${shown} de ${total}.`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `Se muestran el inicio y el final; se omiten ${elided} en el medio.`,
+      elidedMatch: 'Una coincidencia de la búsqueda está en la zona omitida.',
+      expand: 'Mostrar contenido completo',
+      expanding: 'Cargando contenido completo…',
+    },
     fields: {
       id: 'ID',
       sensitivity: 'sensibilidad',

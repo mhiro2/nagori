@@ -88,6 +88,14 @@ export type EntryPreviewBody =
   | { type: 'richText'; text: string }
   | { type: 'unknown'; text: string };
 
+// Mirrors `TruncationDto` in `apps/desktop/src-tauri/src/dto.rs`. The
+// frontend dispatches on `kind` and falls back to `truncated: boolean`
+// only when older builds emit the DTO without this field.
+export type PreviewTruncation =
+  | { kind: 'none' }
+  | { kind: 'headOnly' }
+  | { kind: 'headAndTail'; elidedBytes: number };
+
 export type EntryPreviewDto = {
   id: string;
   kind: ContentKind;
@@ -99,10 +107,15 @@ export type EntryPreviewDto = {
     charCount: number;
     lineCount: number;
     truncated: boolean;
+    truncation?: PreviewTruncation;
     sensitive: boolean;
     fullContentAvailable: boolean;
     domain?: string | null;
     language?: string | null;
+    // best-effort signal: when the body was truncated, indicates whether
+    // the current search query matches text inside the elided middle.
+    // `undefined` when no query was passed or nothing was elided.
+    elidedContainsMatch?: boolean;
   };
 };
 

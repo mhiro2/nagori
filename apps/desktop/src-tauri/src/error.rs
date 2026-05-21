@@ -34,6 +34,18 @@ impl CommandError {
             recoverable: false,
         }
     }
+
+    /// Reject a command whose target row has a sensitivity tier that the
+    /// caller is not permitted to read in full (e.g. expanded preview on
+    /// a Secret entry). Surfaces a stable `forbidden` code so the
+    /// frontend can render a curated, non-retryable message.
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            code: "forbidden".to_owned(),
+            message: message.into(),
+            recoverable: false,
+        }
+    }
 }
 
 impl From<AppError> for CommandError {
@@ -196,5 +208,18 @@ mod tests {
         let internal = CommandError::internal("explosion");
         assert_eq!(internal.code, "internal_error");
         assert!(!internal.recoverable);
+    }
+
+    #[test]
+    fn forbidden_constructor_is_irrecoverable_with_curated_message() {
+        // `forbidden` is used by `get_entry_preview_full` to refuse the
+        // expanded body of a Secret / Private / Blocked entry. The
+        // frontend special-cases the code to render a curated banner;
+        // the message itself is safe to surface because it is composed
+        // by the command handler.
+        let err = CommandError::forbidden("not allowed for this entry");
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(err.message, "not allowed for this entry");
+        assert!(!err.recoverable);
     }
 }

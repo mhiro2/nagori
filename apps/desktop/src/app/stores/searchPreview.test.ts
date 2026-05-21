@@ -33,6 +33,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   previewState.entryId = undefined;
+  previewState.query = undefined;
   previewState.preview = undefined;
   previewState.loading = false;
   previewState.errorMessage = undefined;
@@ -56,7 +57,7 @@ describe('hydratePreview', () => {
   it('hydrates preview state on a successful fetch', async () => {
     vi.mocked(getEntryPreview).mockResolvedValue(preview('e1'));
     await hydratePreview('e1');
-    expect(getEntryPreview).toHaveBeenCalledWith('e1');
+    expect(getEntryPreview).toHaveBeenCalledWith('e1', undefined);
     expect(previewState.preview?.id).toBe('e1');
     expect(previewState.loading).toBe(false);
   });
@@ -74,5 +75,15 @@ describe('hydratePreview', () => {
     vi.mocked(getEntryPreview).mockClear();
     await hydratePreview('e3');
     expect(getEntryPreview).not.toHaveBeenCalled();
+  });
+
+  it('refetches when only the query changes so the elided-match hint stays current', async () => {
+    vi.mocked(getEntryPreview).mockResolvedValue(preview('e4'));
+    await hydratePreview('e4', 'foo');
+    expect(getEntryPreview).toHaveBeenCalledWith('e4', 'foo');
+    vi.mocked(getEntryPreview).mockClear();
+    await hydratePreview('e4', 'bar');
+    expect(getEntryPreview).toHaveBeenCalledWith('e4', 'bar');
+    expect(previewState.query).toBe('bar');
   });
 });

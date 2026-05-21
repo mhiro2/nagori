@@ -28,6 +28,18 @@ export type Messages = {
     empty: string;
     loading: string;
     truncated: string;
+    truncation: {
+      // Head-only fallback (legacy / tiny caps): "First 64 KB of 2.3 MB shown."
+      headOnly: (parts: { shown: string; total: string }) => string;
+      // Head + tail with middle elision: "First and last shown; 1.9 MB elided."
+      headAndTail: (parts: { elided: string }) => string;
+      // Warning shown when the active query matches text inside the elided
+      // middle. Combined with `headAndTail` above it tells the user the hit
+      // is real but hidden — expanding will surface it.
+      elidedMatch: string;
+      expand: string;
+      expanding: string;
+    };
     fields: {
       id: string;
       sensitivity: string;
@@ -295,6 +307,13 @@ export const en: Messages = {
     empty: 'Select an item to preview.',
     loading: 'Loading preview…',
     truncated: 'Preview truncated.',
+    truncation: {
+      headOnly: ({ shown, total }) => `First ${shown} of ${total} shown.`,
+      headAndTail: ({ elided }) => `First and last shown; middle ${elided} elided.`,
+      elidedMatch: 'A search match lies inside the elided middle.',
+      expand: 'Show full body',
+      expanding: 'Loading full body…',
+    },
     fields: {
       id: 'id',
       sensitivity: 'sensitivity',

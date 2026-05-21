@@ -116,6 +116,12 @@ describe('command wrappers', () => {
       name: 'getEntryPreview',
       run: () => commands.getEntryPreview('e'),
       cmd: 'get_entry_preview',
+      args: { entryId: 'e', query: undefined },
+    },
+    {
+      name: 'getEntryPreviewFull',
+      run: () => commands.getEntryPreviewFull('e'),
+      cmd: 'get_entry_preview_full',
       args: { entryId: 'e' },
     },
     {

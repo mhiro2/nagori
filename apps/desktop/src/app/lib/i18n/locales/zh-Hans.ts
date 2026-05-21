@@ -25,6 +25,15 @@ export const zhHans: Messages = {
     empty: '选择一个项目进行预览。',
     loading: '正在加载预览…',
     truncated: '预览已截断。',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `已显示 ${total} 中的前 ${shown}。`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `已显示开头和结尾，中间省略 ${elided}。`,
+      elidedMatch: '搜索匹配项位于被省略的中间区域。',
+      expand: '显示完整内容',
+      expanding: '正在加载完整内容…',
+    },
     fields: {
       id: 'ID',
       sensitivity: '敏感度',

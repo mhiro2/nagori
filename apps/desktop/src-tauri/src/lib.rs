@@ -217,6 +217,7 @@ pub fn run() {
             commands::paste_entry_from_palette,
             commands::copy_entry_from_palette,
             commands::get_entry_preview,
+            commands::get_entry_preview_full,
             commands::add_entry,
             commands::delete_entry,
             commands::delete_entries,

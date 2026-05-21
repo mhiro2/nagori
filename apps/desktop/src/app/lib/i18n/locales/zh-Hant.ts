@@ -25,6 +25,15 @@ export const zhHant: Messages = {
     empty: '請選擇一個項目進行預覽。',
     loading: '正在載入預覽…',
     truncated: '預覽已截斷。',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `已顯示 ${total} 中的前 ${shown}。`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `已顯示開頭和結尾，中間省略 ${elided}。`,
+      elidedMatch: '搜尋符合項目位於被省略的中間區域。',
+      expand: '顯示完整內容',
+      expanding: '正在載入完整內容…',
+    },
     fields: {
       id: 'ID',
       sensitivity: '敏感度',

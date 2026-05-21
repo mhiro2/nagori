@@ -18,7 +18,7 @@
     selectAllMulti,
     toggleMultiSelect,
   } from "../stores/searchMultiSelect.svelte";
-  import { hydratePreview, previewState } from "../stores/searchPreview.svelte";
+  import { expandPreview, hydratePreview, previewState } from "../stores/searchPreview.svelte";
   import { refreshRecent, scheduleQuery, searchState } from "../stores/searchQuery.svelte";
   import {
     currentSelection,
@@ -54,10 +54,11 @@
   let previewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const id = selected?.id;
+    const query = searchState.query;
     if (previewDebounceTimer !== undefined) clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
       previewDebounceTimer = undefined;
-      void hydratePreview(id);
+      void hydratePreview(id, query);
     }, PREVIEW_DEBOUNCE_MS);
     return () => {
       if (previewDebounceTimer !== undefined) {
@@ -181,7 +182,16 @@
       />
     {/if}
     {#if showPreviewPane || previewExpanded}
-      <PreviewPane item={selected} preview={previewState.preview} loading={previewState.loading} errorMessage={previewState.errorMessage} expanded={previewExpanded} />
+      <PreviewPane
+        item={selected}
+        preview={previewState.preview}
+        loading={previewState.loading}
+        errorMessage={previewState.errorMessage}
+        expanded={previewExpanded}
+        expandedLoading={previewState.expandedLoading}
+        expandedErrorMessage={previewState.expandedErrorMessage}
+        onExpandBody={(id) => void expandPreview(id)}
+      />
     {/if}
   </div>
   <StatusBar

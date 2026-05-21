@@ -278,8 +278,36 @@ pub async fn copy_entry_from_palette(
     Ok(())
 }
 
+/// Build the standard 128 KiB preview body for an entry. The optional
+/// `query` is best-effort: when truncation kicks in, the DTO flags
+/// whether the query substring lives in the elided middle so the UI can
+/// warn that a search hit is hidden. Empty / whitespace queries are
+/// ignored so a pristine palette never sees a spurious warning.
 #[tauri::command]
 pub async fn get_entry_preview(
+    state: State<'_, AppState>,
+    entry_id: String,
+    query: Option<String>,
+) -> CommandResult<EntryPreviewDto> {
+    let entry_id = parse_entry_id(&entry_id)?;
+    let entry = state
+        .runtime
+        .get_entry(entry_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(EntryPreviewDto::from_entry_with_query(
+        &entry,
+        query.as_deref(),
+    ))
+}
+
+/// Larger 1 MiB preview body for the expanded preview pane. Sensitivity
+/// gating mirrors `get_entry_preview` but is enforced explicitly: any
+/// entry that is not `Public` is rejected with a `forbidden` code so the
+/// frontend can render a curated message rather than re-fetching with
+/// the standard cap.
+#[tauri::command]
+pub async fn get_entry_preview_full(
     state: State<'_, AppState>,
     entry_id: String,
 ) -> CommandResult<EntryPreviewDto> {
@@ -289,7 +317,16 @@ pub async fn get_entry_preview(
         .get_entry(entry_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(EntryPreviewDto::from_entry(&entry))
+    // Only Public bodies may flow through the full-content path. The
+    // standard preview already redacts Private / Secret / Blocked bodies
+    // to a placeholder, but the expanded pane hands the entire window
+    // over to the body, so the gate is enforced explicitly here.
+    if !matches!(entry.sensitivity, Sensitivity::Public) {
+        return Err(CommandError::forbidden(
+            "expanded preview is only available for Public entries",
+        ));
+    }
+    Ok(EntryPreviewDto::from_entry_full(&entry))
 }
 
 #[tauri::command]

@@ -364,6 +364,241 @@ describe('PreviewPane', () => {
     expect(getByText(/truncat/i)).toBeTruthy();
   });
 
+  it('renders the head+tail truncation note with elided byte count', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_500_000 - 128 * 1024 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const note =
+      container.querySelector('[data-testid="preview-truncation"] .note')?.textContent ?? '';
+    // The headAndTail formatter mentions "first and last" + an elided byte count.
+    expect(note).toMatch(/first and last/i);
+    expect(note).toMatch(/MB|kB|KB/);
+  });
+
+  it('surfaces the elided-match warning when the query lives in the omitted middle', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+            elidedContainsMatch: true,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-elided-match"]')).toBeTruthy();
+  });
+
+  it('does not render the elided-match warning when no match in the middle', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-elided-match"]')).toBeNull();
+  });
+
+  it('renders the expand button only when expanded mode is active and body is text-bearing', () => {
+    const truncated = {
+      byteCount: 2_500_000,
+      charCount: 2_500_000,
+      lineCount: 4_200,
+      truncated: true,
+      sensitive: false,
+      fullContentAvailable: true,
+      truncation: { kind: 'headAndTail' as const, elidedBytes: 2_300_000 },
+    };
+    // Compact (default) view hides the expand button even when eligible.
+    const compact = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({ metadata: truncated }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(compact.container.querySelector('[data-testid="preview-expand-button"]')).toBeNull();
+    cleanup();
+    // Expanded view shows the button when the entry is Public + truncated + text-bearing.
+    const expanded = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({ metadata: truncated }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    expect(expanded.container.querySelector('[data-testid="preview-expand-button"]')).toBeTruthy();
+  });
+
+  it('hides the expand button when fullContentAvailable is false (Sensitive / non-Public)', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ sensitivity: 'Secret' }),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: true,
+            fullContentAvailable: false,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-expand-button"]')).toBeNull();
+  });
+
+  it('hides the expand button for non-text bodies even when truncated', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'image' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'image', byteCount: 100 },
+          metadata: {
+            byteCount: 100,
+            charCount: 0,
+            lineCount: 0,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 64 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-expand-button"]')).toBeNull();
+  });
+
+  it('disables the expand button while expansion is in flight', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+        expandedLoading: true,
+      },
+    });
+    const btn = container.querySelector(
+      '[data-testid="preview-expand-button"]',
+    ) as HTMLButtonElement | null;
+    expect(btn).toBeTruthy();
+    expect(btn?.disabled).toBe(true);
+  });
+
+  it('invokes onExpandBody with the entry id when the expand button is clicked', async () => {
+    const onExpandBody = vi.fn();
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+        onExpandBody,
+      },
+    });
+    const btn = container.querySelector(
+      '[data-testid="preview-expand-button"]',
+    ) as HTMLButtonElement | null;
+    btn?.click();
+    await Promise.resolve();
+    expect(onExpandBody).toHaveBeenCalledWith('entry-id');
+  });
+
+  it('renders the expanded error message when expansion failed', () => {
+    const { getByRole } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({
+          metadata: {
+            byteCount: 2_500_000,
+            charCount: 2_500_000,
+            lineCount: 4_200,
+            truncated: true,
+            sensitive: false,
+            fullContentAvailable: true,
+            truncation: { kind: 'headAndTail', elidedBytes: 2_300_000 },
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+        expandedErrorMessage: 'expansion blocked',
+      },
+    });
+    expect(getByRole('alert').textContent).toMatch(/expansion blocked/);
+  });
+
   it('lists the source app and rank reasons in the footer when available', () => {
     const { getByText, container } = render(PreviewPane, {
       props: {

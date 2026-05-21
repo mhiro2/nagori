@@ -25,6 +25,15 @@ export const ja: Messages = {
     empty: 'プレビューする項目を選択してください。',
     loading: 'プレビューを読み込み中…',
     truncated: 'プレビューは途中まで表示しています。',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `${total} のうち先頭 ${shown} を表示しています。`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `先頭と末尾を表示しています。中間 ${elided} を省略しました。`,
+      elidedMatch: '検索一致が省略部分にあります。',
+      expand: '全文を表示',
+      expanding: '全文を読み込み中…',
+    },
     fields: {
       id: 'ID',
       sensitivity: '機密度',

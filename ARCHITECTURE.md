@@ -944,8 +944,13 @@ not duplicate runtime logic.
   the domain; code rows show a heuristic language badge (TS, RS, PY,
   JSON, …) inline.
 - `PreviewPane.svelte` — hydrates full preview lazily through
-  `get_entry_preview`; includes a token-based syntax highlighter for
-  `code` / `url` kinds.
+  `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
+  end of large bodies stays visible). Includes a token-based syntax
+  highlighter for `code` / `url` kinds. When a search query matches text
+  inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
+  warning. For Public text entries the pane offers an "expand" button that
+  fetches the body up to 1 MiB via `get_entry_preview_full`; non-Public
+  entries hide the affordance because the IPC enforces the same gate.
 - `ActionMenu.svelte` — modal for Quick actions (Summarize, Format
   JSON, Extract tasks, Redact secrets). The result block shows *Copy*
   (uses `navigator.clipboard`) and *Save as new entry* (calls

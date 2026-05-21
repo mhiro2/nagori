@@ -25,6 +25,15 @@ export const ko: Messages = {
     empty: '미리 볼 항목을 선택하세요.',
     loading: '미리보기 불러오는 중…',
     truncated: '미리보기가 잘렸습니다.',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `전체 ${total} 중 앞부분 ${shown}를 표시합니다.`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `앞부분과 끝부분을 표시합니다. 중간 ${elided}는 생략했습니다.`,
+      elidedMatch: '생략된 중간 영역에 검색 일치 항목이 있습니다.',
+      expand: '전체 내용 보기',
+      expanding: '전체 내용 불러오는 중…',
+    },
     fields: {
       id: 'ID',
       sensitivity: '민감도',

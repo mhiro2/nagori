@@ -41,8 +41,14 @@ export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Pr
 export const copyEntryFromPalette = (entryId: string): Promise<void> =>
   invoke('copy_entry_from_palette', { entryId });
 
-export const getEntryPreview = (entryId: string): Promise<EntryPreviewDto> =>
-  invoke('get_entry_preview', { entryId });
+export const getEntryPreview = (entryId: string, query?: string): Promise<EntryPreviewDto> =>
+  invoke('get_entry_preview', { entryId, query: query?.trim() ? query : undefined });
+
+// Expanded preview body (1 MiB cap). Backend rejects non-Public entries
+// with a `forbidden` code; the UI gates the button accordingly so the
+// promise rarely sees that error in practice.
+export const getEntryPreviewFull = (entryId: string): Promise<EntryPreviewDto> =>
+  invoke('get_entry_preview_full', { entryId });
 
 export const addEntry = (text: string): Promise<EntryDto> => invoke('add_entry', { text });
 

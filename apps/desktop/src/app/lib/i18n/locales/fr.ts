@@ -26,6 +26,15 @@ export const fr: Messages = {
     empty: 'Sélectionnez un élément à prévisualiser.',
     loading: 'Chargement de l’aperçu…',
     truncated: 'Aperçu tronqué.',
+    truncation: {
+      headOnly: ({ shown, total }: { shown: string; total: string }): string =>
+        `Affichage des ${shown} premiers sur ${total}.`,
+      headAndTail: ({ elided }: { elided: string }): string =>
+        `Début et fin affichés ; ${elided} omis au milieu.`,
+      elidedMatch: 'Une correspondance de recherche se trouve dans la partie omise.',
+      expand: 'Afficher tout le contenu',
+      expanding: 'Chargement du contenu complet…',
+    },
     fields: {
       id: 'id',
       sensitivity: 'sensibilité',
