@@ -172,6 +172,20 @@
   // General / a hotkey edit elsewhere can still reach disk instead of
   // silently stalling behind the broken Privacy entry.
   let lastValidRegexList: string[] = [];
+  // Hotkey controls update live state on every keystroke but only
+  // commit on `onblur` — partial accelerators ("Cmd+Sh…") would churn
+  // the OS-level shortcut registration. The autosave path runs
+  // independently of focus though, so a checkbox toggle elsewhere on
+  // the form would otherwise rebuild `buildSnapshotPayload` from live
+  // state and leak the partial accelerator into the IPC. Pin the last
+  // *blurred* value here and read it — not live state — when assembling
+  // the snapshot. The onblur handlers sync the current live value back
+  // in before scheduling the save; the unmount flush also syncs so a
+  // hotkey edit that never saw `blur` (Escape -> palette tears the
+  // input off the DOM) still reaches disk on the way out.
+  let lastBlurredGlobalHotkey = "";
+  let lastBlurredPaletteHotkeys: Partial<Record<PaletteHotkeyAction, string>> = {};
+  let lastBlurredSecondaryHotkeys: Partial<Record<SecondaryHotkeyAction, string>> = {};
   // JSON-serialised form of the last payload we handed to
   // `updateSettings`, set *before* the IPC is dispatched. Used by
   // `commitSave` to suppress idempotent IPC — typing in a broken regex
@@ -270,6 +284,9 @@
         appDenylistText = s.appDenylist.join("\n");
         regexDenylistText = s.regexDenylist.join("\n");
         lastValidRegexList = [...s.regexDenylist];
+        lastBlurredGlobalHotkey = s.globalHotkey;
+        lastBlurredPaletteHotkeys = { ...s.paletteHotkeys };
+        lastBlurredSecondaryHotkeys = { ...s.secondaryHotkeys };
         setLocale(s.locale);
         applyAppearance(s.appearance);
         // All form-bound state is now in sync with the backend snapshot;
@@ -366,9 +383,15 @@
   // states like a trailing blank line don't reshape the stored array.
   // While the regex textarea is mid-edit and fails preflight we
   // substitute the last valid list so a checkbox toggle on General
-  // isn't held hostage by a half-typed pattern on Privacy.
+  // isn't held hostage by a half-typed pattern on Privacy. Hotkey
+  // fields read from the pinned `lastBlurred…` set rather than live
+  // state so the "no save until blur" contract survives an unrelated
+  // autosave firing mid-typing.
   const buildSnapshotPayload = (): AppSettings => ({
     ...(settings as AppSettings),
+    globalHotkey: lastBlurredGlobalHotkey,
+    paletteHotkeys: lastBlurredPaletteHotkeys,
+    secondaryHotkeys: lastBlurredSecondaryHotkeys,
     appDenylist: linesToList(appDenylistText),
     regexDenylist:
       regexDenylistErrors.length === 0
@@ -599,6 +622,16 @@
     // webview context outlives the Svelte component, so a fire-and-forget
     // `updateSettings` reaches Tauri even though the UI is already gone.
     if (hydrated && settings) {
+      // Promote any unblurred hotkey edits into the pinned set before
+      // building the snapshot — unmount is the user's last chance, so
+      // accept whatever the live state holds (the normal autosave path
+      // would skip it). Without this the snapshot would carry the
+      // previously-blurred value and the unblurred edit would silently
+      // vanish — see "flushes a hotkey edit on unmount even without a
+      // blur event".
+      lastBlurredGlobalHotkey = settings.globalHotkey;
+      lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
+      lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
       const snapshotJson = JSON.stringify(buildSnapshotPayload());
       // Compare against the persisted baseline, not what's been sent.
       // A failed save advances `lastSentJson` but leaves
@@ -709,7 +742,11 @@
           <input
             type="text"
             bind:value={settings.globalHotkey}
-            onblur={() => scheduleSave(0)}
+            onblur={() => {
+              if (!settings) return;
+              lastBlurredGlobalHotkey = settings.globalHotkey;
+              scheduleSave(0);
+            }}
           />
         </label>
         {#if hotkeyError}
@@ -775,7 +812,11 @@
                 value={settings.paletteHotkeys[action] ?? ""}
                 oninput={(e) =>
                   setOverride("paletteHotkeys", action, (e.target as HTMLInputElement).value)}
-                onblur={() => scheduleSave(0)}
+                onblur={() => {
+                  if (!settings) return;
+                  lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
+                  scheduleSave(0);
+                }}
               />
             </label>
           {/each}
@@ -792,7 +833,11 @@
                 value={settings.secondaryHotkeys[action] ?? ""}
                 oninput={(e) =>
                   setOverride("secondaryHotkeys", action, (e.target as HTMLInputElement).value)}
-                onblur={() => scheduleSave(0)}
+                onblur={() => {
+                  if (!settings) return;
+                  lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
+                  scheduleSave(0);
+                }}
               />
             </label>
           {/each}

@@ -662,6 +662,36 @@ describe('SettingsView', () => {
     expect(updateSettings).toHaveBeenCalledTimes(2);
   });
 
+  it('does not leak a mid-typed hotkey into an unrelated autosave', async () => {
+    // The hotkey contract is "no save until blur" — partial
+    // accelerators like "Cmd+Sh…" must never reach the OS-level
+    // shortcut registration. A checkbox autosave fired while the user
+    // is mid-typing a hotkey would otherwise rebuild
+    // buildSnapshotPayload from live state and leak the partial
+    // accelerator into the IPC. Pinning the last blurred hotkey
+    // prevents that.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    // Type a partial accelerator without blurring.
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Sh' } });
+
+    // Unrelated edit (checkbox) triggers immediate autosave.
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.captureEnabled).toBe(false);
+    // The IPC must carry the original blurred hotkey, not the
+    // partial accelerator currently in the textbox.
+    expect(sent?.globalHotkey).toBe('Cmd+Shift+V');
+  });
+
   it('skips the unmount flush when nothing has changed', async () => {
     // The flush guard is an equality check against the persisted
     // baseline. Without it, every navigation back to the palette would
