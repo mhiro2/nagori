@@ -1,9 +1,11 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nagori_core::{
     AiActionId, AppError, EntryId, EntryRepository, MAX_PASTE_DELAY_MS, SearchQuery, Sensitivity,
     is_text_safe_for_default_output,
 };
+use nagori_platform::PreviewItem;
 use nagori_search::normalize_text;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -516,6 +518,128 @@ fn parse_entry_id(value: &str) -> Result<EntryId, CommandError> {
     value
         .parse::<EntryId>()
         .map_err(|err| CommandError::invalid_input(format!("invalid entry id: {err}")))
+}
+
+/// Open an OS-native preview overlay for the entry (Quick Look on
+/// macOS).
+///
+/// The palette binds Cmd+Y to this command. The body is gated to
+/// `Public` entries because Quick Look materialises content into a
+/// temp file readable by any process running as the user — surfacing
+/// a `Private` / `Secret` body through the cross-process preview path
+/// would silently undo the sensitivity classifier's job. `Blocked`
+/// content can never reach this command because it is dropped at
+/// capture time.
+///
+/// `FileList` entries hand the stored paths to the preview API
+/// directly; image entries write the payload bytes to a temp file
+/// keyed on the entry id; text-flavoured entries render through a
+/// `.txt` temp file so Quick Look's text preview can syntax-highlight.
+/// Empty / unrecoverable payloads return `InvalidInput` so the palette
+/// can fall back to its in-line preview pane.
+///
+/// On Windows / Linux the preview controller is the
+/// [`UnsupportedPreviewController`] stub. The command short-circuits
+/// on the capability row *before* materialising any temp file so a
+/// forged invoke from a non-macOS host cannot leave preview artefacts
+/// in `/tmp` even though the call ultimately fails.
+#[tauri::command]
+pub async fn preview_entry(state: State<'_, AppState>, entry_id: String) -> CommandResult<()> {
+    if !state.runtime.capabilities().preview_quick_look.is_usable() {
+        return Err(
+            AppError::Unsupported("preview is not available on this platform".to_owned()).into(),
+        );
+    }
+    let entry_id = parse_entry_id(&entry_id)?;
+    let entry = state
+        .runtime
+        .get_entry(entry_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !matches!(entry.sensitivity, Sensitivity::Public) {
+        return Err(CommandError::forbidden(
+            "preview is only available for Public entries",
+        ));
+    }
+    let items: Vec<PreviewItem> = match &entry.content {
+        nagori_core::ClipboardContent::FileList(file_list) => file_list
+            .paths
+            .iter()
+            .map(|path| PreviewItem::new(PathBuf::from(path)))
+            .collect(),
+        nagori_core::ClipboardContent::Image(_) => {
+            let Some((bytes, mime)) = state.runtime.get_payload(entry_id).await? else {
+                return Err(CommandError::invalid_input(
+                    "image payload is no longer stored",
+                ));
+            };
+            let path = write_preview_temp_file(entry_id, &bytes, extension_for_image_mime(&mime))?;
+            vec![PreviewItem::new(path)]
+        }
+        nagori_core::ClipboardContent::Text(_)
+        | nagori_core::ClipboardContent::Url(_)
+        | nagori_core::ClipboardContent::Code(_)
+        | nagori_core::ClipboardContent::RichText(_)
+        | nagori_core::ClipboardContent::Unknown(_) => {
+            let Some(text) = entry.content.plain_text() else {
+                return Err(CommandError::invalid_input(
+                    "entry has no previewable plain text",
+                ));
+            };
+            let path = write_preview_temp_file(entry_id, text.as_bytes(), "txt")?;
+            vec![PreviewItem::new(path)]
+        }
+    };
+    if items.is_empty() {
+        return Err(CommandError::invalid_input(
+            "entry has no content to preview",
+        ));
+    }
+    state.preview.preview(&items).await?;
+    Ok(())
+}
+
+/// Map a stored image mime to a Quick-Look-friendly extension. Falling
+/// back to `png` is deliberate — every macOS Quick Look generator we
+/// care about handles PNG, and the extension is only a hint (Quick
+/// Look re-sniffs the bytes anyway).
+fn extension_for_image_mime(mime: &str) -> &'static str {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/tiff" => "tiff",
+        "image/bmp" => "bmp",
+        "image/heic" | "image/heif" => "heic",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+/// Write `bytes` to `~/.../nagori-preview/<entry>.<ext>` and return the
+/// path. The directory is created with the same private-mode helper the
+/// `SQLite` store uses so the temp payload is not world-readable; reusing
+/// the entry id as the filename means repeated previews of the same
+/// entry overwrite a single file rather than littering the directory.
+fn write_preview_temp_file(
+    entry_id: EntryId,
+    bytes: &[u8],
+    extension: &str,
+) -> Result<PathBuf, CommandError> {
+    let dir = std::env::temp_dir().join("nagori-preview");
+    nagori_storage::ensure_private_directory(&dir).map_err(|err| {
+        CommandError::internal(format!(
+            "could not prepare preview temp dir {}: {err}",
+            dir.display()
+        ))
+    })?;
+    let file = dir.join(format!("{entry_id}.{extension}"));
+    std::fs::write(&file, bytes).map_err(|err| {
+        CommandError::internal(format!(
+            "could not write preview temp file {}: {err}",
+            file.display()
+        ))
+    })?;
+    Ok(file)
 }
 
 // Tauri injects `WebviewWindow` by value into command parameters, so the

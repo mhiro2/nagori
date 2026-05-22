@@ -11,6 +11,7 @@ vi.mock('../lib/commands', () => ({
   deleteEntry: vi.fn(),
   pasteEntryFromPalette: vi.fn(),
   pinEntry: vi.fn(),
+  previewEntry: vi.fn(),
   listRecent: vi.fn(async () => []),
   searchClipboard: vi.fn(),
 }));
@@ -22,6 +23,7 @@ import {
   deleteEntry,
   pasteEntryFromPalette,
   pinEntry,
+  previewEntry,
   searchClipboard,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
@@ -32,6 +34,7 @@ import {
   copySelection,
   deleteMultiSelection,
   deleteSelection,
+  previewSelection,
   togglePinSelection,
 } from './searchActions';
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
@@ -122,6 +125,28 @@ describe('deleteSelection', () => {
     vi.mocked(deleteEntry).mockRejectedValue(new Error('locked'));
     await deleteSelection();
     expect(searchState.errorMessage).toBe('locked');
+  });
+});
+
+describe('previewSelection', () => {
+  it('invokes preview_entry for a Public selection', async () => {
+    vi.mocked(previewEntry).mockResolvedValue();
+    await previewSelection();
+    expect(previewEntry).toHaveBeenCalledWith('r1');
+  });
+
+  it('suppresses the IPC for non-Public sensitivity', async () => {
+    // The backend would reject anyway, but mirroring the gate in the UI
+    // avoids a round-trip plus the temp-file materialisation cost.
+    searchState.results = [result({ sensitivity: 'Private' })];
+    await previewSelection();
+    expect(previewEntry).not.toHaveBeenCalled();
+  });
+
+  it('records the error if the backend rejects', async () => {
+    vi.mocked(previewEntry).mockRejectedValue(new Error('qlmanage missing'));
+    await previewSelection();
+    expect(searchState.errorMessage).toBe('qlmanage missing');
   });
 });
 

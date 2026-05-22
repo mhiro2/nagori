@@ -17,7 +17,7 @@ use nagori_daemon::{
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
-use nagori_platform::{ClipboardReader, RestoreTarget, WindowBehavior};
+use nagori_platform::{ClipboardReader, PreviewController, RestoreTarget, WindowBehavior};
 #[cfg(target_os = "macos")]
 use nagori_platform_macos::MacosWindowBehavior;
 #[cfg(target_os = "windows")]
@@ -26,6 +26,15 @@ use nagori_platform_windows::WindowsWindowBehavior;
 pub struct AppState {
     pub runtime: NagoriRuntime,
     pub window: Arc<dyn WindowBehavior>,
+    /// OS-native preview surface (Quick Look on macOS, `Unsupported`
+    /// stub on Windows / Linux). The Tauri `preview_entry` command
+    /// drives this directly from the desktop process rather than going
+    /// through IPC — the daemon does not run an `AppKit` event loop, so
+    /// the macOS adapter would not work from a free-standing daemon
+    /// even if we wired it. The capability layer reports `Unsupported`
+    /// on the OSes where this stub is wired, so palette UI can suppress
+    /// the shortcut up front.
+    pub preview: Arc<dyn PreviewController>,
     /// Clipboard reader handle shared with the runtime's writer. Holding the
     /// same `Arc` on both sides means the capture loop and the paste/copy path
     /// can't drift into a state where one is wired to a working adapter and
@@ -295,6 +304,7 @@ impl AppState {
         Ok(Self {
             runtime: parts.runtime,
             window: parts.window,
+            preview: parts.preview,
             capture_reader: parts.clipboard_reader,
             background_tasks: Mutex::new(None),
             previous_frontmost: Arc::new(Mutex::new(None)),

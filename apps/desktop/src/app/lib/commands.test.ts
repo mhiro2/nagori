@@ -227,6 +227,12 @@ describe('command wrappers', () => {
       cmd: 'open_accessibility_settings',
       args: undefined,
     },
+    {
+      name: 'previewEntry',
+      run: () => commands.previewEntry('e'),
+      cmd: 'preview_entry',
+      args: { entryId: 'e' },
+    },
   ];
 
   for (const { name, run, cmd, args } of cases) {

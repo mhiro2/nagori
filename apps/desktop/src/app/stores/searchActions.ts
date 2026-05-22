@@ -5,6 +5,7 @@ import {
   deleteEntry as deleteEntryCmd,
   pasteEntryFromPalette as pasteEntryCmd,
   pinEntry as pinEntryCmd,
+  previewEntry as previewEntryCmd,
 } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
@@ -66,6 +67,21 @@ export const deleteSelection = async (): Promise<void> => {
     return;
   }
   await runQuery(searchState.query);
+};
+
+export const previewSelection = async (): Promise<void> => {
+  const target = currentSelection();
+  if (!target || !isTauri()) return;
+  // Mirror the backend `Public`-only gate so non-public rows never
+  // round-trip through the IPC and never materialise a temp file.
+  // Suppress silently rather than flashing an error — the keybinding
+  // is intentionally inert on those rows.
+  if (target.sensitivity !== 'Public') return;
+  try {
+    await previewEntryCmd(target.id);
+  } catch (err) {
+    searchState.errorMessage = describeError(err);
+  }
 };
 
 // Order the multi-selected ids by their position in the visible result

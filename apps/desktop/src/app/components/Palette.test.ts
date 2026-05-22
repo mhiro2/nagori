@@ -18,6 +18,8 @@ vi.mock('../lib/commands', () => ({
   copyEntryFromPalette: vi.fn(),
   pinEntry: vi.fn(),
   deleteEntry: vi.fn(),
+  previewEntry: vi.fn(async () => undefined),
+  getCapabilities: vi.fn(),
 }));
 
 vi.mock('../stores/searchActions', () => ({
@@ -26,6 +28,13 @@ vi.mock('../stores/searchActions', () => ({
   copySelection: vi.fn(async () => undefined),
   togglePinSelection: vi.fn(async () => undefined),
   deleteSelection: vi.fn(async () => undefined),
+  previewSelection: vi.fn(async () => undefined),
+}));
+
+vi.mock('../stores/capabilities.svelte', () => ({
+  capabilitiesState: { capabilities: undefined, loaded: true },
+  refreshCapabilities: vi.fn(async () => undefined),
+  quickLookAvailable: vi.fn(() => true),
 }));
 
 vi.mock('../stores/searchPreview.svelte', () => ({
@@ -82,11 +91,13 @@ vi.mock('../stores/view.svelte', () => ({
 
 import { closePalette } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
+import { quickLookAvailable } from '../stores/capabilities.svelte';
 import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
   copySelection,
   deleteSelection,
+  previewSelection,
   togglePinSelection,
 } from '../stores/searchActions';
 import { scheduleQuery } from '../stores/searchQuery.svelte';
@@ -224,6 +235,22 @@ describe('Palette', () => {
     // Action menu is rendered via the same container; opening flips a local
     // state and renders a [role="dialog"].
     expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+  });
+
+  it('triggers Quick Look on Cmd+Y when the capability is available', async () => {
+    vi.mocked(quickLookAvailable).mockReturnValue(true);
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'y', metaKey: true });
+    expect(previewSelection).toHaveBeenCalled();
+  });
+
+  it('does not trigger Quick Look when the capability is unavailable', async () => {
+    vi.mocked(quickLookAvailable).mockReturnValue(false);
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'y', metaKey: true });
+    expect(previewSelection).not.toHaveBeenCalled();
   });
 });
 

@@ -20,6 +20,7 @@ export type PaletteAction =
   | 'delete'
   | 'clear-query'
   | 'open-preview'
+  | 'preview-quick-look'
   | 'open-settings'
   | 'multi-toggle'
   | 'multi-select-all'
@@ -55,6 +56,11 @@ export const PALETTE_BINDINGS: readonly Binding[] = [
   // would break the input's native select-all-text behaviour.)
   { action: 'multi-toggle', key: 'j', meta: true },
   { action: 'multi-select-all', key: 'a', meta: true, shift: true },
+  // Cmd+Y matches the Finder "Quick Look" menu accelerator; plain Space
+  // would conflict with typing a literal space into the search box and is
+  // intentionally avoided here for the same reason multi-toggle uses
+  // Cmd+J rather than Space.
+  { action: 'preview-quick-look', key: 'y', meta: true },
   { action: 'close', key: 'Escape' },
 ];
 

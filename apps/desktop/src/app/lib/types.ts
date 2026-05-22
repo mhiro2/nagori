@@ -266,6 +266,7 @@ export type PlatformCapabilities = {
   frontmostApp: Capability;
   permissionsUi: Capability;
   updateCheck: Capability;
+  previewQuickLook: Capability;
 };
 
 export type CommandError = {

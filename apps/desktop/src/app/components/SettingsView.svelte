@@ -228,6 +228,7 @@
       { label: "Frontmost app", capability: capabilities.frontmostApp },
       { label: "Permissions UI", capability: capabilities.permissionsUi },
       { label: "Update check", capability: capabilities.updateCheck },
+      { label: "Preview (Quick Look)", capability: capabilities.previewQuickLook },
     ];
   });
 

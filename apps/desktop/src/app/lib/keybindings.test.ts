@@ -53,6 +53,11 @@ describe('resolveAction', () => {
     expect(resolveAction(event({ key: ',', metaKey: true }))).toBe('open-settings');
   });
 
+  it('maps Cmd+Y to preview-quick-look (rejects bare Y)', () => {
+    expect(resolveAction(event({ key: 'y', metaKey: true }))).toBe('preview-quick-look');
+    expect(resolveAction(event({ key: 'y' }))).toBeUndefined();
+  });
+
   it('maps Escape to close, regardless of modifiers', () => {
     expect(resolveAction(event({ key: 'Escape' }))).toBe('close');
   });

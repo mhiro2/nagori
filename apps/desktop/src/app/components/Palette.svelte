@@ -2,6 +2,7 @@
   import { buildBindings, resolveAction } from "../lib/keybindings";
   import { closePalette } from "../lib/commands";
   import { isTauri } from "../lib/tauri";
+  import { quickLookAvailable, refreshCapabilities } from "../stores/capabilities.svelte";
   import {
     confirmSelection,
     confirmSelectionWithAlternateFormat,
@@ -9,6 +10,7 @@
     copySelection,
     deleteMultiSelection,
     deleteSelection,
+    previewSelection,
     togglePinSelection,
   } from "../stores/searchActions";
   import {
@@ -41,7 +43,7 @@
   let actionMenuOpen = $state(false);
 
   $effect(() => {
-    void Promise.all([refreshRecent(), refreshSettings()]);
+    void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);
   });
 
   const selected = $derived(currentSelection());
@@ -145,6 +147,9 @@
         break;
       case "open-preview":
         previewExpanded = !previewExpanded;
+        break;
+      case "preview-quick-look":
+        if (quickLookAvailable()) void previewSelection();
         break;
       case "open-settings":
         showSettings();

@@ -218,6 +218,7 @@ pub fn run() {
             commands::copy_entry_from_palette,
             commands::get_entry_preview,
             commands::get_entry_preview_full,
+            commands::preview_entry,
             commands::add_entry,
             commands::delete_entry,
             commands::delete_entries,

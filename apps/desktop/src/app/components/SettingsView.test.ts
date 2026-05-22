@@ -87,6 +87,7 @@ const macosCapabilities = (): PlatformCapabilities => ({
   frontmostApp: { status: 'available' },
   permissionsUi: { status: 'available' },
   updateCheck: { status: 'available' },
+  previewQuickLook: { status: 'available' },
 });
 
 const windowsCapabilities = (): PlatformCapabilities => ({
@@ -112,6 +113,11 @@ const windowsCapabilities = (): PlatformCapabilities => ({
       'Windows does not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
   },
   updateCheck: { status: 'available' },
+  previewQuickLook: {
+    status: 'unsupported',
+    reason:
+      "Windows has no OS-provided Quick-Look-equivalent overlay; the palette's preview shortcut is disabled.",
+  },
 });
 
 const linuxWaylandCapabilities = (): PlatformCapabilities => ({
@@ -142,6 +148,11 @@ const linuxWaylandCapabilities = (): PlatformCapabilities => ({
       'Wayland sessions do not gate clipboard / input synthesis behind a user-managed permission UI; the doctor probe is a no-op.',
   },
   updateCheck: { status: 'available' },
+  previewQuickLook: {
+    status: 'unsupported',
+    reason:
+      "Linux Wayland has no DE-agnostic Quick-Look-equivalent overlay; the palette's preview shortcut is disabled.",
+  },
 });
 
 beforeEach(() => {
@@ -416,6 +427,7 @@ const CAPABILITY_LABELS = [
   'Frontmost app',
   'Permissions UI',
   'Update check',
+  'Preview (Quick Look)',
 ] as const;
 
 // Status badge labels emitted by `capabilityStatusLabel`. Locks the
@@ -503,6 +515,7 @@ describe('SettingsView Advanced tab — capability table', () => {
       'Frontmost app': STATUS_BADGE.available,
       'Permissions UI': STATUS_BADGE.unsupported,
       'Update check': STATUS_BADGE.available,
+      'Preview (Quick Look)': STATUS_BADGE.unsupported,
     };
     for (const row of table.rows) {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
@@ -533,6 +546,7 @@ describe('SettingsView Advanced tab — capability table', () => {
       'Frontmost app': STATUS_BADGE.unsupported,
       'Permissions UI': STATUS_BADGE.unsupported,
       'Update check': STATUS_BADGE.available,
+      'Preview (Quick Look)': STATUS_BADGE.unsupported,
     };
     for (const row of table.rows) {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);

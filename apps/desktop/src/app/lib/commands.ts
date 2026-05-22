@@ -96,4 +96,7 @@ export const openAccessibilitySettings = (): Promise<void> => invoke('open_acces
 export const openUrlExternal = (entryId: string, url: string): Promise<void> =>
   invoke('open_url_external', { entryId, url });
 
+export const previewEntry = (entryId: string): Promise<void> =>
+  invoke('preview_entry', { entryId });
+
 export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');

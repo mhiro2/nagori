@@ -924,6 +924,7 @@ pub struct PlatformCapabilitiesDto {
     pub frontmost_app: CapabilityDto,
     pub permissions_ui: CapabilityDto,
     pub update_check: CapabilityDto,
+    pub preview_quick_look: CapabilityDto,
 }
 
 impl From<PlatformCapabilities> for PlatformCapabilitiesDto {
@@ -942,6 +943,7 @@ impl From<PlatformCapabilities> for PlatformCapabilitiesDto {
             frontmost_app: value.frontmost_app.into(),
             permissions_ui: value.permissions_ui.into(),
             update_check: value.update_check.into(),
+            preview_quick_look: value.preview_quick_look.into(),
         }
     }
 }
