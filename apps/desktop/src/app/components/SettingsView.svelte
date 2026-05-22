@@ -742,7 +742,12 @@
           {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
         </p>
         <div class="actions">
-          <button type="button" disabled={updateChecking} onclick={runUpdateCheck}>
+          <button
+            type="button"
+            class="secondary"
+            disabled={updateChecking}
+            onclick={runUpdateCheck}
+          >
             {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
           </button>
         </div>
@@ -776,12 +781,24 @@
   .settings {
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 1rem;
     height: 100%;
     padding: 1.5rem;
     background: var(--bg, #14161a);
     color: var(--fg, #f5f5f5);
     overflow: auto;
+  }
+  /* On wide windows the form would otherwise stretch edge-to-edge,
+     leaving selects and inputs awkwardly long. Cap the readable width
+     and center the content so each row stays scannable. */
+  .settings > .head,
+  .settings > .tabs,
+  .settings > .status,
+  .settings > form {
+    width: 100%;
+    max-width: 52rem;
+    margin-inline: auto;
   }
   .head {
     display: flex;
@@ -793,12 +810,16 @@
     font-size: 1.125rem;
   }
   .close {
-    padding: 0.35rem 0.75rem;
+    padding: 0.45rem 0.9rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
     border-radius: 6px;
     background: transparent;
     color: inherit;
+    font: inherit;
     cursor: pointer;
+  }
+  .close:hover {
+    background: rgba(255, 255, 255, 0.06);
   }
   .status {
     color: var(--muted, rgba(255, 255, 255, 0.5));
@@ -836,6 +857,15 @@
     display: flex;
     gap: 0.25rem;
     border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  }
+  /* Fieldsets are direct children of the form; without an explicit gap they
+     stack flush against each other. A column flex layout adds vertical
+     breathing room between CAPTURE / PALETTE DISPLAY / HOTKEYS / … and also
+     separates the trailing `.actions` row from the last fieldset. */
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
   }
   .tabs button {
     padding: 0.45rem 0.9rem;
@@ -914,12 +944,59 @@
   textarea,
   select {
     flex: 1;
-    padding: 0.25rem 0.5rem;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
     border-radius: 6px;
     background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
     color: inherit;
     font: inherit;
+  }
+  /* Cap fixed-width-feeling controls with max-width (not flex-basis) so
+     they behave correctly inside both row and column flex containers —
+     basis would otherwise be interpreted as height in `.stack` rows. */
+  input[type="number"] {
+    max-width: 9rem;
+  }
+  select {
+    max-width: 22rem;
+  }
+  /* WKWebView desaturates native form controls when the window goes
+     inactive, so the checked-state tint flickers between blue and gray
+     each time focus returns. `accent-color` alone isn't enough on macOS
+     — the renderer still applies the inactive overlay — so paint the
+     box ourselves with `appearance: none`. The checkmark is an inline
+     SVG drawn in `--bg` so it pops against the accent fill.
+     CSP note: `img-src` already allows `data:`, so the inline SVG
+     loads without a manifest change. */
+  input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.25));
+    border-radius: 4px;
+    background-color: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 78%;
+    cursor: pointer;
+    flex-shrink: 0;
+    vertical-align: middle;
+  }
+  input[type="checkbox"]:checked {
+    background-color: var(--accent, #6c8dff);
+    border-color: var(--accent, #6c8dff);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3.5 3.5L13 5.5'/></svg>");
+  }
+  input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
+  }
+  input[type="checkbox"]:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
   textarea {
     font-family:
@@ -933,15 +1010,43 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    /* Pin the action row to the start of its row so the button doesn't
+       stretch when the parent grows; flex column children default to
+       `align-items: stretch`. */
+    align-self: flex-start;
+  }
+  /* Form-level Save action belongs in the bottom-right per conventional
+     OS dialog layout — only the submit/Save row is repositioned; inline
+     `.actions` rows inside fieldsets (e.g. Check for updates) stay
+     left-aligned alongside the field they belong to. */
+  form > .actions {
+    align-self: flex-end;
   }
   .actions button {
-    padding: 0.5rem 1.25rem;
+    padding: 0.45rem 1.2rem;
     border: 1px solid transparent;
     border-radius: 6px;
     background: var(--accent, #6c8dff);
     color: var(--bg, #14161a);
+    font: inherit;
     font-weight: 600;
     cursor: pointer;
+  }
+  /* Lower-emphasis variant used by maintenance actions like "Check for
+     update" — same footprint, but reads as a secondary control rather
+     than competing with the primary Save button for attention. */
+  .actions button.secondary {
+    background: transparent;
+    color: inherit;
+    border-color: var(--border, rgba(255, 255, 255, 0.18));
+    font-weight: 500;
+  }
+  .actions button:not(:disabled):hover {
+    filter: brightness(1.08);
+  }
+  .actions button.secondary:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.06);
+    filter: none;
   }
   .actions button:disabled {
     opacity: 0.5;
