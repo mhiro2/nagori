@@ -1,6 +1,9 @@
 packages:
   - "apps/*"
 
+overrides:
+  chokidar: 5.0.0
+
 catalogs:
   frontend:
     "@sveltejs/vite-plugin-svelte": 7.1.2
