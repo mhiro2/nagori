@@ -21,7 +21,7 @@ use nagori_ai::{AiProvider, LocalAiProvider};
 use nagori_core::AppError;
 use nagori_core::Result;
 use nagori_daemon::NagoriRuntime;
-use nagori_platform::{ClipboardReader, PlatformCapabilities, WindowBehavior};
+use nagori_platform::{ClipboardReader, PlatformCapabilities, PreviewController, WindowBehavior};
 use nagori_storage::SqliteStore;
 
 /// Outputs of [`build_native_runtime`]: the runtime itself plus the
@@ -34,6 +34,16 @@ pub struct NativeRuntimeParts {
     /// state with the writer instead of polling a different adapter.
     pub clipboard_reader: Arc<dyn ClipboardReader>,
     pub window: Arc<dyn WindowBehavior>,
+    /// OS-native preview surface (Quick Look on macOS). Held alongside
+    /// the runtime — rather than threaded through `NagoriRuntime` — so
+    /// the desktop shell can drive it from a Tauri command without
+    /// going through the daemon IPC envelope. The daemon process does
+    /// not run an `AppKit` event loop, so wiring preview through IPC
+    /// would only be useful in the desktop process anyway. Windows and
+    /// Linux wire the [`UnsupportedPreviewController`] alias so
+    /// callers can probe via [`nagori_platform::PlatformCapabilities`]
+    /// instead of switching on `cfg(target_os)`.
+    pub preview: Arc<dyn PreviewController>,
 }
 
 /// Optional overrides for [`build_native_runtime`]. Defaults match the
@@ -105,12 +115,14 @@ fn build_native_runtime_inner(
     options: NativeRuntimeOptions,
 ) -> Result<NativeRuntimeParts> {
     use nagori_platform_macos::{
-        MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosWindowBehavior,
+        MacosClipboard, MacosPasteController, MacosPermissionChecker, MacosPreviewController,
+        MacosWindowBehavior,
     };
 
     let clipboard = Arc::new(MacosClipboard::new()?);
     let clipboard_reader: Arc<dyn ClipboardReader> = clipboard.clone();
     let window: Arc<dyn WindowBehavior> = Arc::new(MacosWindowBehavior::new());
+    let preview: Arc<dyn PreviewController> = Arc::new(MacosPreviewController::new());
     let runtime = assemble_runtime(
         store,
         clipboard,
@@ -122,6 +134,7 @@ fn build_native_runtime_inner(
         runtime,
         clipboard_reader,
         window,
+        preview,
     })
 }
 
@@ -131,12 +144,14 @@ fn build_native_runtime_inner(
     options: NativeRuntimeOptions,
 ) -> Result<NativeRuntimeParts> {
     use nagori_platform_windows::{
-        WindowsClipboard, WindowsPasteController, WindowsPermissionChecker, WindowsWindowBehavior,
+        WindowsClipboard, WindowsPasteController, WindowsPermissionChecker,
+        WindowsPreviewController, WindowsWindowBehavior,
     };
 
     let clipboard = Arc::new(WindowsClipboard::new()?);
     let clipboard_reader: Arc<dyn ClipboardReader> = clipboard.clone();
     let window: Arc<dyn WindowBehavior> = Arc::new(WindowsWindowBehavior::new());
+    let preview: Arc<dyn PreviewController> = Arc::new(WindowsPreviewController::default());
     let runtime = assemble_runtime(
         store,
         clipboard,
@@ -148,6 +163,7 @@ fn build_native_runtime_inner(
         runtime,
         clipboard_reader,
         window,
+        preview,
     })
 }
 
@@ -157,7 +173,8 @@ fn build_native_runtime_inner(
     options: NativeRuntimeOptions,
 ) -> Result<NativeRuntimeParts> {
     use nagori_platform_linux::{
-        LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxWindowBehavior,
+        LinuxClipboard, LinuxPasteController, LinuxPermissionChecker, LinuxPreviewController,
+        LinuxWindowBehavior,
     };
 
     // Annotate the platform error with Wayland-specific guidance: the
@@ -168,6 +185,7 @@ fn build_native_runtime_inner(
     let clipboard = Arc::new(LinuxClipboard::new().map_err(annotate_linux_clipboard_error)?);
     let clipboard_reader: Arc<dyn ClipboardReader> = clipboard.clone();
     let window: Arc<dyn WindowBehavior> = Arc::new(LinuxWindowBehavior::new());
+    let preview: Arc<dyn PreviewController> = Arc::new(LinuxPreviewController::default());
     let runtime = assemble_runtime(
         store,
         clipboard,
@@ -179,6 +197,7 @@ fn build_native_runtime_inner(
         runtime,
         clipboard_reader,
         window,
+        preview,
     })
 }
 
@@ -299,6 +318,7 @@ mod tests {
         let _ = parts.runtime.store();
         let _: Arc<dyn ClipboardReader> = parts.clipboard_reader;
         let _: Arc<dyn WindowBehavior> = parts.window;
+        let _: Arc<dyn PreviewController> = parts.preview;
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

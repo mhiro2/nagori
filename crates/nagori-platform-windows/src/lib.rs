@@ -17,3 +17,10 @@ pub use hotkey::WindowsHotkeyManager;
 pub use paste::WindowsPasteController;
 pub use permissions::WindowsPermissionChecker;
 pub use window::WindowsWindowBehavior;
+
+// Windows has no OS-provided Quick-Look-equivalent overlay (`IPreviewHandler`
+// is a Shell preview-pane COM surface, not a cross-app overlay; PowerToys
+// Peek is third-party). Alias the shared `UnsupportedPreviewController` so
+// the platform-native wiring can pick a concrete type per OS without each
+// stub crate re-implementing the trait.
+pub type WindowsPreviewController = nagori_platform::UnsupportedPreviewController;

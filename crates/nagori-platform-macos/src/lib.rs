@@ -8,6 +8,7 @@ mod clipboard;
 mod hotkey;
 mod paste;
 mod permissions;
+mod preview;
 #[cfg(target_os = "macos")]
 mod window;
 
@@ -16,6 +17,7 @@ pub use clipboard::MacosClipboard;
 pub use hotkey::MacosHotkeyManager;
 pub use paste::MacosPasteController;
 pub use permissions::MacosPermissionChecker;
+pub use preview::MacosPreviewController;
 #[cfg(target_os = "macos")]
 pub use window::MacosWindowBehavior;
 

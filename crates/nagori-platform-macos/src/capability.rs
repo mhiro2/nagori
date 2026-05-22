@@ -40,6 +40,11 @@ pub fn report_capabilities() -> PlatformCapabilities {
         frontmost_app: Capability::Available,
         permissions_ui: Capability::Available,
         update_check: Capability::Available,
+        // macOS ships Quick Look (`qlmanage` + `QLPreviewPanel`) as a
+        // first-class OS surface; the palette's Cmd+Y shortcut maps
+        // onto it directly. No permission gate beyond the implicit
+        // file-system read for the temp preview file.
+        preview_quick_look: Capability::Available,
     }
 }
 
@@ -68,6 +73,7 @@ mod tests {
             &caps.frontmost_app,
             &caps.permissions_ui,
             &caps.update_check,
+            &caps.preview_quick_look,
         ] {
             assert_eq!(cap, &Capability::Available);
             assert!(cap.is_usable());

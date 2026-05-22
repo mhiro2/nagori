@@ -24,3 +24,10 @@ pub use hotkey::LinuxHotkeyManager;
 pub use paste::LinuxPasteController;
 pub use permissions::LinuxPermissionChecker;
 pub use window::LinuxWindowBehavior;
+
+// Linux Wayland has no desktop-environment-agnostic Quick-Look-equivalent
+// surface; the GNOME (`gnome-sushi`) and KDE (`kio` preview) hooks differ
+// per DE and would force the palette to ship per-DE forks. The
+// `UnsupportedPreviewController` alias keeps the platform-native wiring
+// uniform — every per-OS crate hands out a concrete `*PreviewController`.
+pub type LinuxPreviewController = nagori_platform::UnsupportedPreviewController;

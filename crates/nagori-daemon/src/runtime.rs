@@ -1590,6 +1590,7 @@ mod tests {
             frontmost_app: Capability::Available,
             permissions_ui: Capability::Available,
             update_check: Capability::Available,
+            preview_quick_look: Capability::Available,
         };
         let runtime = NagoriRuntime::builder(store)
             .clipboard(Arc::new(MemoryClipboard::new()))

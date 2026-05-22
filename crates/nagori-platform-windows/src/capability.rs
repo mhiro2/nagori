@@ -45,6 +45,15 @@ pub fn report_capabilities() -> PlatformCapabilities {
         // place. Authenticode signing is still pending — `SmartScreen`
         // warns on first launch but the updater itself is functional.
         update_check: Capability::Available,
+        // Windows has no cross-application overlay preview API; the
+        // closest equivalents (Shell `IPreviewHandler`, PowerToys Peek)
+        // are not standard surfaces we can rely on, so the palette
+        // suppresses the Cmd+Y shortcut here.
+        preview_quick_look: Capability::Unsupported {
+            reason: "Windows has no OS-provided Quick-Look-equivalent overlay; \
+                 the palette's preview shortcut is disabled."
+                .to_owned(),
+        },
     }
 }
 
@@ -87,6 +96,16 @@ mod tests {
         assert!(!caps.permissions_ui.is_usable());
         assert!(matches!(
             caps.permissions_ui,
+            Capability::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn preview_quick_look_is_unsupported() {
+        let caps = report_capabilities();
+        assert!(!caps.preview_quick_look.is_usable());
+        assert!(matches!(
+            caps.preview_quick_look,
             Capability::Unsupported { .. }
         ));
     }

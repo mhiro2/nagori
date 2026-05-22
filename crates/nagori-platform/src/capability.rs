@@ -165,6 +165,12 @@ pub struct PlatformCapabilities {
     pub permissions_ui: Capability,
     /// Whether the bundled updater probe is wired on this platform.
     pub update_check: Capability,
+    /// Native preview overlay for the selected entry, bound to the
+    /// palette's Cmd+Y shortcut. macOS exposes this through Quick
+    /// Look (`qlmanage -p` / `QLPreviewPanel`); Windows and Linux have
+    /// no cross-application overlay equivalent, so the desktop palette
+    /// suppresses the shortcut when this row is `Unsupported`.
+    pub preview_quick_look: Capability,
 }
 
 /// Capability report for targets nagori does not build for.
@@ -196,6 +202,7 @@ pub fn unsupported_capabilities() -> PlatformCapabilities {
         frontmost_app: unsupported(),
         permissions_ui: unsupported(),
         update_check: unsupported(),
+        preview_quick_look: unsupported(),
     }
 }
 
@@ -246,6 +253,7 @@ mod tests {
             &caps.frontmost_app,
             &caps.permissions_ui,
             &caps.update_check,
+            &caps.preview_quick_look,
         ] {
             assert!(!cap.is_usable());
             assert!(!cap.is_supported_by_platform());

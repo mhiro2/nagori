@@ -67,6 +67,15 @@ pub fn report_capabilities() -> PlatformCapabilities {
         // applied in place is decided per medium at runtime (AppImage
         // only — `deb` users follow the GitHub release link).
         update_check: Capability::Available,
+        // Linux has no DE-agnostic Quick Look equivalent — `gnome-sushi`
+        // is GNOME-only and KDE preview hooks live behind `kio`. The
+        // palette suppresses the Cmd+Y shortcut here rather than
+        // ship an inconsistent per-DE fallback.
+        preview_quick_look: Capability::Unsupported {
+            reason: "Linux Wayland has no DE-agnostic Quick-Look-equivalent \
+                 overlay; the palette's preview shortcut is disabled."
+                .to_owned(),
+        },
     }
 }
 
@@ -125,6 +134,7 @@ mod tests {
             &caps.global_hotkey,
             &caps.frontmost_app,
             &caps.permissions_ui,
+            &caps.preview_quick_look,
         ] {
             assert!(!cap.is_usable());
             assert!(matches!(cap, Capability::Unsupported { .. }));
