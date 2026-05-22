@@ -23,6 +23,10 @@ Local-first clipboard history for macOS, Windows, and Linux Wayland.
   the end of large logs / pastes stays visible; when the active search
   hit lands inside the elided range the preview flags it so you can
   expand to the 1 MiB full view (Public entries only).
+- Quick Look preview on macOS — Cmd+Y in the palette opens the
+  highlighted entry in the system Quick Look overlay (Public entries
+  only). Windows and Linux Wayland surface the capability as
+  Unsupported because neither OS ships a comparable system overlay.
 - Bundled per-OS release artefacts with an in-app update-availability probe.
 
 ## Install

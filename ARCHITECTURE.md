@@ -747,6 +747,7 @@ struct PlatformCapabilities {
     auto_paste: Capability,
     global_hotkey: Capability, frontmost_app: Capability,
     permissions_ui: Capability, update_check: Capability,
+    preview_quick_look: Capability,
 }
 
 enum Capability {
@@ -994,6 +995,20 @@ not duplicate runtime logic.
   JSON, Extract tasks, Redact secrets). The result block shows *Copy*
   (uses `navigator.clipboard`) and *Save as new entry* (calls
   `save_ai_result`).
+- **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
+  the `preview_entry` Tauri command, which is gated to the desktop
+  process because the daemon does not host an AppKit event loop. The
+  command rejects non-`Public` entries up front, then materialises the
+  entry payload under `std::env::temp_dir()/nagori-preview/<entry_id>.<ext>`
+  through `nagori_storage::ensure_private_directory` (restrictive perms)
+  and spawns `/usr/bin/qlmanage -p` via the `PreviewController` adapter
+  (`MacosPreviewController`). `qlmanage` was chosen over an in-process
+  `QLPreviewPanel` to avoid the ObjC data-source protocol — the on-screen
+  affordance is identical. Windows and Linux Wayland report
+  `preview_quick_look = Unsupported` (Windows has no OS-provided
+  overlay; Linux lacks a desktop-environment-agnostic equivalent), and
+  the palette gates the keybinding on the capability snapshot so the
+  shortcut becomes inert outside macOS.
 - `SettingsView.svelte` — tabbed *General* / *Privacy* / *CLI* /
   *Advanced* settings panel. Denylists are edited as multi-line
   textareas serialised back into `string[]`; capture kinds, paste

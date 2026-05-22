@@ -26,8 +26,10 @@ push to `main`), and Linux Wayland runs on a nightly schedule. The
 desktop shell's palette UI flow is not yet exercised by an automated
 WebView test — that work is tracked separately for tauri-driver.
 
-macOS-only capabilities: secure-input detection and sleep/wake
-`changeCount` resynchronisation. The Tauri updater plugin is registered
+macOS-only capabilities: secure-input detection, sleep/wake
+`changeCount` resynchronisation, and Quick Look preview (Cmd+Y in
+the palette, dispatched through `/usr/bin/qlmanage -p`; restricted to
+Public entries). The Tauri updater plugin is registered
 on every supported OS and the release workflow publishes a signed
 `latest.json` feed for macOS, Windows, and Linux, so the in-app
 availability probe runs everywhere. The current MVP surface is
