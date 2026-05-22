@@ -563,13 +563,25 @@ exit 1
     # `representation_summary`. The copy-back assertion below proves
     # `write_representations` republishes the full set instead of collapsing
     # to a single rep on the way out.
+    #
+    # Build a fresh 1x1 red bitmap inline rather than reusing
+    # `$ImageFixture`: the daemon's content-hash dedupe (sqlite.rs's
+    # `entries.content_hash` lookup) keys an image entry on its captured
+    # PNG bytes, and the prior image-only step has already inserted the
+    # fixture's pixels. Re-publishing the same pixels would refresh that
+    # entry's timestamps without overwriting its representation set, and
+    # the multi-rep assertion below would see only `image/png` even though
+    # capture saw both reps. A distinct pixel sidesteps the dedupe and
+    # keeps the test focused on multi-rep capture/copy-back semantics
+    # rather than dedupe behaviour.
     $multiText = "multi-rep marker $((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')) $((Get-Random))_$((Get-Random))"
     $EscapedMultiText = $multiText.Replace("'", "''")
     $PushMultiScript = @"
 `$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
-`$bmp = [System.Drawing.Image]::FromFile('$ImageFixture')
+`$bmp = New-Object System.Drawing.Bitmap(1, 1, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+`$bmp.SetPixel(0, 0, [System.Drawing.Color]::Red)
 try {
     `$do = New-Object System.Windows.Forms.DataObject
     `$do.SetImage(`$bmp)
