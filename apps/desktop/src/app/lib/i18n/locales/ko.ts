@@ -120,8 +120,9 @@ export const ko: Messages = {
     title: '설정',
     backToPalette: '팔레트로 돌아가기',
     loading: '불러오는 중…',
-    saving: '저장 중…',
-    save: '저장',
+    statusSaving: '저장 중…',
+    statusSaved: '저장됨',
+    statusError: '저장 실패: {error}',
     tauriRequired: '설정 저장에는 Tauri 런타임이 필요합니다.',
     tabs: {
       general: '일반',
@@ -184,7 +185,7 @@ export const ko: Messages = {
         "경고: '원문 그대로 저장'을 선택하면 API 키, JWT, 개인 키와 같은 비밀이 로컬 SQLite DB에 평문으로 남습니다. DB는 암호화되어 있지 않으므로 홈 디렉터리에 접근할 수 있는 모든 주체(백업, 동기화 클라이언트, 악성코드 등)가 비밀을 복원할 수 있습니다. 위험을 충분히 이해하지 못했다면 '마스킹된 상태로 저장'을 권장합니다.",
       storeFullConfirm:
         '비밀을 평문으로 저장하시겠습니까? DB는 암호화되지 않으며, 데이터 디렉터리 백업을 포함해 디스크에서 원문을 복원할 수 있습니다.',
-      regexDenylistFixHint: '저장하기 전에 강조 표시된 정규식 차단 목록 항목을 수정하세요.',
+      regexDenylistAutosaveHint: '강조 표시된 정규식 오류를 수정하면 자동으로 저장됩니다.',
       regexErrors: {
         lineLabel: '{line}번째 줄:',
         tooLong:

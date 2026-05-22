@@ -119,8 +119,9 @@ export const zhHant: Messages = {
     title: '設定',
     backToPalette: '返回面板',
     loading: '載入中…',
-    saving: '儲存中…',
-    save: '儲存',
+    statusSaving: '儲存中…',
+    statusSaved: '已儲存',
+    statusError: '儲存失敗：{error}',
     tauriRequired: '儲存設定需要 Tauri 執行階段。',
     tabs: {
       general: '一般',
@@ -182,7 +183,7 @@ export const zhHant: Messages = {
         '警告：選擇「原文儲存」會將 API 金鑰、JWT、私密金鑰等機密以明文保存在本機 SQLite 資料庫。資料庫並未加密，任何能讀取家目錄的程序（備份、同步用戶端、惡意軟體等）都可能還原這些機密。除非您完全理解相關風險，否則建議使用「以遮蔽形式儲存」。',
       storeFullConfirm:
         '確定要以明文儲存機密嗎？資料庫並未加密，磁碟與包含資料目錄的備份都將能還原原文。',
-      regexDenylistFixHint: '請先修正反白的正規表示式拒絕清單項目，再儲存。',
+      regexDenylistAutosaveHint: '修正反白的正規表示式錯誤後將自動儲存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',
         tooLong: '太長了（{bytes} 位元組 > {limit}）。請拆成多行或刪除用不到的分支。',

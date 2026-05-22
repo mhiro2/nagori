@@ -129,8 +129,9 @@ export const es: Messages = {
     title: 'Ajustes',
     backToPalette: 'Volver a la paleta',
     loading: 'Cargando…',
-    saving: 'Guardando…',
-    save: 'Guardar',
+    statusSaving: 'Guardando…',
+    statusSaved: 'Guardado',
+    statusError: 'Error al guardar: {error}',
     tauriRequired: 'Guardar los ajustes requiere el runtime de Tauri.',
     tabs: {
       general: 'General',
@@ -196,8 +197,8 @@ export const es: Messages = {
         'Aviso: «Almacenar completo» mantiene claves API, JWT y claves privadas en texto plano dentro de la base de datos SQLite local. La base de datos no está cifrada en reposo, así que cualquiera con acceso de lectura a tu carpeta personal (copias de seguridad, clientes de sincronización, malware) podría recuperar los secretos. Usa «Almacenar redactado» a menos que entiendas el riesgo.',
       storeFullConfirm:
         '¿Almacenar los secretos en texto plano? La base de datos no está cifrada; los secretos en bruto serán recuperables desde el disco y desde cualquier copia de seguridad que incluya el directorio de datos.',
-      regexDenylistFixHint:
-        'Corrige las entradas resaltadas de la lista de regex denegados antes de guardar.',
+      regexDenylistAutosaveHint:
+        'Los cambios se guardan automáticamente cuando se corrigen los errores de regex resaltados.',
       regexErrors: {
         lineLabel: 'Línea {line}:',
         tooLong:

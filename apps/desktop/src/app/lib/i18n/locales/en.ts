@@ -126,8 +126,9 @@ export type Messages = {
     title: string;
     backToPalette: string;
     loading: string;
-    saving: string;
-    save: string;
+    statusSaving: string;
+    statusSaved: string;
+    statusError: string;
     tauriRequired: string;
     tabs: {
       general: string;
@@ -183,7 +184,7 @@ export type Messages = {
       };
       storeFullWarning: string;
       storeFullConfirm: string;
-      regexDenylistFixHint: string;
+      regexDenylistAutosaveHint: string;
       regexErrors: {
         lineLabel: string;
         tooLong: string;
@@ -416,8 +417,9 @@ export const en: Messages = {
     title: 'Settings',
     backToPalette: 'Back to palette',
     loading: 'Loading…',
-    saving: 'Saving…',
-    save: 'Save',
+    statusSaving: 'Saving…',
+    statusSaved: 'Saved',
+    statusError: 'Save failed: {error}',
     tauriRequired: 'Saving settings requires the Tauri runtime.',
     tabs: {
       general: 'General',
@@ -481,7 +483,7 @@ export const en: Messages = {
         "Warning: 'Store full' keeps raw API keys, JWTs, and private keys in the local SQLite DB. The DB is not encrypted at rest, so anyone with read access to your home directory (backups, sync clients, malware) can recover the secrets. Prefer 'Store redacted' unless you understand the risk.",
       storeFullConfirm:
         'Store secrets in plaintext? The DB is not encrypted; raw secrets will be recoverable from disk and from any backup that includes the data directory.',
-      regexDenylistFixHint: 'Fix the highlighted regex denylist entries before saving.',
+      regexDenylistAutosaveHint: 'Changes auto-save once the highlighted errors are fixed.',
       regexErrors: {
         lineLabel: 'Line {line}:',
         tooLong:

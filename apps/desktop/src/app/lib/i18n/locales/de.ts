@@ -128,8 +128,9 @@ export const de: Messages = {
     title: 'Einstellungen',
     backToPalette: 'Zurück zur Palette',
     loading: 'Wird geladen …',
-    saving: 'Wird gespeichert …',
-    save: 'Speichern',
+    statusSaving: 'Wird gespeichert …',
+    statusSaved: 'Gespeichert',
+    statusError: 'Speichern fehlgeschlagen: {error}',
     tauriRequired: 'Zum Speichern der Einstellungen wird die Tauri-Laufzeit benötigt.',
     tabs: {
       general: 'Allgemein',
@@ -194,8 +195,8 @@ export const de: Messages = {
         'Warnung: „Vollständig speichern“ behält API-Schlüssel, JWTs und private Schlüssel im lokalen SQLite-DB. Die Datenbank ist nicht im Ruhezustand verschlüsselt – jeder mit Lesezugriff auf Ihr Home-Verzeichnis (Backups, Sync-Clients, Schadsoftware) kann die Geheimnisse wiederherstellen. Wählen Sie „Geschwärzt speichern“, sofern Sie das Risiko nicht eingeschätzt haben.',
       storeFullConfirm:
         'Geheimnisse im Klartext speichern? Die Datenbank ist unverschlüsselt; rohe Geheimnisse sind von der Festplatte und aus jedem Backup mit dem Datenverzeichnis rekonstruierbar.',
-      regexDenylistFixHint:
-        'Bitte die markierten Regex-Sperrlisten-Einträge vor dem Speichern korrigieren.',
+      regexDenylistAutosaveHint:
+        'Sobald die markierten Regex-Fehler behoben sind, wird automatisch gespeichert.',
       regexErrors: {
         lineLabel: 'Zeile {line}:',
         tooLong:

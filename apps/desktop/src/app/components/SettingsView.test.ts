@@ -165,13 +165,18 @@ beforeEach(() => {
   vi.mocked(getCapabilities).mockResolvedValue(macosCapabilities());
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('SettingsView', () => {
   it('loads settings on mount and hydrates the form fields', async () => {
-    const { findByText, findByRole, container } = render(SettingsView);
+    const { findByRole, container } = render(SettingsView);
 
-    expect(await findByText('Save')).toBeTruthy();
+    // Wait for the form to render — proxied for "hydration complete" by
+    // the appearance of the Back-to-palette button.
+    await findByRole('button', { name: 'Back to palette' });
     expect(getSettings).toHaveBeenCalled();
     // The hotkey input on the General tab reflects the loaded settings.
     const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
@@ -195,18 +200,14 @@ describe('SettingsView', () => {
     expect(privacyTab.getAttribute('aria-selected')).toBe('true');
   });
 
-  it('submits changes via updateSettings on save', async () => {
+  it('auto-saves a checkbox change with no debounce', async () => {
     vi.mocked(updateSettings).mockResolvedValue();
-    const { findByText, container } = render(SettingsView);
+    const { findByRole, container } = render(SettingsView);
 
-    await findByText('Save');
+    await findByRole('button', { name: 'Back to palette' });
     const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
     expect(captureCheckbox.checked).toBe(true);
     await fireEvent.click(captureCheckbox);
-
-    const form = container.querySelector('form');
-    expect(form).toBeTruthy();
-    await fireEvent.submit(form as HTMLFormElement);
 
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalled();
@@ -215,32 +216,54 @@ describe('SettingsView', () => {
     expect(sent?.captureEnabled).toBe(false);
   });
 
-  it('requires confirmation before switching to store_full', async () => {
-    const { findByRole, getByDisplayValue } = render(SettingsView);
-    const privacyTab = await findByRole('tab', { name: 'Privacy' });
-    await fireEvent.click(privacyTab);
+  it('coalesces a burst of number-input edits into a single update_settings call', async () => {
+    // The Advanced tab's "Max bytes per entry" / "Paste delay (ms)" inputs
+    // debounce on `oninput` so rapid typing doesn't fan out into one
+    // round-trip per keystroke. The exact delay is an implementation
+    // detail; advancing the fake clock past the upper bound (350 ms text
+    // input + slack) proves the debounce fires exactly once after the
+    // burst settles.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container } = render(SettingsView);
+    const advanced = await findByRole('tab', { name: 'Advanced' });
+    await fireEvent.click(advanced);
 
-    const select = getByDisplayValue('Store redacted (default)') as HTMLSelectElement;
+    const numberInputs = container.querySelectorAll('input[type="number"]');
+    const maxBytes = numberInputs[0] as HTMLInputElement;
+    expect(maxBytes).toBeTruthy();
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await fireEvent.change(select, { target: { value: 'store_full' } });
-    expect(confirmSpy).toHaveBeenCalled();
-    // Cancelled confirm reverts the dropdown to the previous value.
-    expect(select.value).toBe('store_redacted');
-    confirmSpy.mockRestore();
+    // Three rapid edits — only the final value should reach the backend.
+    await fireEvent.input(maxBytes, { target: { value: '2048' } });
+    await fireEvent.input(maxBytes, { target: { value: '3072' } });
+    await fireEvent.input(maxBytes, { target: { value: '4096' } });
+
+    // Before the debounce window elapses, no save has fired.
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    // Advance past the textarea-class window (covers number debounce too).
+    await vi.advanceTimersByTimeAsync(600);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.maxEntrySizeBytes).toBe(4096);
   });
 
-  it('blocks save and renders inline guidance when a regex denylist entry is invalid', async () => {
-    // The privacy view runs the same preflight `compile_user_regex` does in
-    // `nagori-core::policy`, so users see an actionable hint *before* the
-    // backend rejects the save with a single opaque `invalid_input` string.
+  it('does not save while a regex denylist entry is invalid', async () => {
+    // The privacy preflight runs the same `compile_user_regex` checks
+    // the daemon would; surfacing per-line inline guidance is more
+    // actionable than letting the daemon round-trip a single opaque
+    // `invalid_input`. When the user has only edited the broken regex
+    // textarea, the snapshot we'd ship is identical to what's on disk
+    // (we substitute the last valid list) and the equality check in
+    // `commitSave` short-circuits the round-trip.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container, queryByRole } = render(SettingsView);
     const privacyTab = await findByRole('tab', { name: 'Privacy' });
     await fireEvent.click(privacyTab);
 
-    // The privacy fieldset has two textareas (app denylist, regex denylist);
-    // the regex one is the second.
     const textareas = container.querySelectorAll('textarea');
     expect(textareas.length).toBeGreaterThanOrEqual(2);
     const regexTextarea = textareas[1] as HTMLTextAreaElement;
@@ -255,12 +278,503 @@ describe('SettingsView', () => {
       expect(alert?.textContent ?? '').toMatch(/invalid regex/i);
     });
 
-    const form = container.querySelector('form');
-    if (form) await fireEvent.submit(form);
-
-    // Save must short-circuit before reaching the backend so the user
-    // doesn't get a generic "Invalid input." round-trip.
+    await vi.advanceTimersByTimeAsync(600);
     expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('saves other-tab edits with the last valid regex while the textarea is broken', async () => {
+    // The earlier silent-skip blocked every tab's save behind a broken
+    // regex line — confusing if the user toggled a checkbox on General
+    // and "Saved" never showed. Now `buildSnapshotPayload` substitutes
+    // the last valid regex list (here: the loaded `[]`), so unrelated
+    // edits still reach disk while the user is mid-fix on Privacy.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const regexTextarea = container.querySelectorAll('textarea')[1] as HTMLTextAreaElement;
+    await fireEvent.input(regexTextarea, { target: { value: '(' } });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    const generalTab = await findByRole('tab', { name: 'General' });
+    await fireEvent.click(generalTab);
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(captureCheckbox.checked).toBe(true);
+    await fireEvent.click(captureCheckbox);
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.captureEnabled).toBe(false);
+    // The persisted regex list is the last-valid one (the loaded `[]`),
+    // not the broken `["("]` currently in the textarea.
+    expect(sent?.regexDenylist).toEqual([]);
+  });
+
+  it('flushes a pending debounced edit when the component unmounts', async () => {
+    // The user types into a debounced field (textarea / number) then
+    // navigates away (Escape -> palette) before the 350/500 ms window
+    // elapses. Without the unmount flush, the in-memory edit is dropped
+    // when `pendingTimer` is cleared. The webview context outlives the
+    // Svelte component so a fire-and-forget `updateSettings` still
+    // lands.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container, unmount } = render(SettingsView);
+    const advanced = await findByRole('tab', { name: 'Advanced' });
+    await fireEvent.click(advanced);
+
+    const maxBytes = container.querySelectorAll('input[type="number"]')[0] as HTMLInputElement;
+    await fireEvent.input(maxBytes, { target: { value: '8192' } });
+    // Mid-debounce: nothing has reached the backend yet.
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    unmount();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.maxEntrySizeBytes).toBe(8192);
+  });
+
+  it('flushes a hotkey edit on unmount even without a blur event', async () => {
+    // Hotkey fields commit on `onblur` because partial accelerator
+    // strings ("Cmd+Sh…") would churn the OS-level shortcut. But
+    // Escape -> palette tears the focused input off the DOM without
+    // firing `blur`, so an unmount flush is the only thing keeping the
+    // edit alive.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await fireEvent.input(hotkeyInput, { target: { value: 'Ctrl+Alt+P' } });
+    // No blur fired — without the unmount flush this would silently
+    // vanish.
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    unmount();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.globalHotkey).toBe('Ctrl+Alt+P');
+  });
+
+  it('defers the unmount flush until any in-flight save resolves', async () => {
+    // Without serialisation, the flush would fire a second
+    // `update_settings` in parallel with the still-pending first call.
+    // The daemon's SQLite store uses a connection pool, so two writes
+    // dispatched concurrently can settle out of order — the older
+    // snapshot landing last would clobber the user's most recent edit.
+    let resolveFirst: (() => void) | undefined;
+    const firstCall = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(() => firstCall)
+      .mockImplementationOnce(async () => {});
+
+    const { findByRole, container, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    // Two distinct checkbox edits so the snapshots differ.
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const capture = checkboxes[0] as HTMLInputElement;
+    const autoPaste = checkboxes[1] as HTMLInputElement;
+
+    // First edit starts the in-flight save (controlled by `firstCall`).
+    await fireEvent.click(capture);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Second edit lands while the first call is still pending.
+    await fireEvent.click(autoPaste);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Unmount — the flush is chained behind `firstCall`, so the
+    // backend must still see exactly one in-flight call.
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Resolving the first call lets the chained flush fire.
+    resolveFirst?.();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const second = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(second?.captureEnabled).toBe(false);
+    expect(second?.autoPasteEnabled).toBe(false);
+  });
+
+  it('retries a failed snapshot on unmount', async () => {
+    // After `updateSettings` rejects the UI surfaces "save error", but
+    // there's no Save button to drive a manual retry — we removed it
+    // going macOS-style silent-autosave. The unmount flush is the
+    // safety net: it must compare against the *persisted* baseline (not
+    // the optimistically-advanced `lastSentJson`) so a failed save gets
+    // one more shot on the way out instead of being silently dropped.
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(async () => {
+        throw new Error('backend transient');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+    // First call rejects; UI flips to status="error".
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Closing Settings retries the failed snapshot.
+    unmount();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(retried?.captureEnabled).toBe(false);
+  });
+
+  it('retries a failed save when a follow-up edit lands', async () => {
+    // Same setup as the unmount retry, but the user keeps editing
+    // instead of leaving. The follow-up edit changes the snapshot, so
+    // the equality short-circuit lets the new combined payload through
+    // and the previously-failed fields ride along.
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(async () => {
+        throw new Error('backend transient');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const capture = checkboxes[0] as HTMLInputElement;
+    const autoPaste = checkboxes[1] as HTMLInputElement;
+
+    await fireEvent.click(capture);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // A second, distinct edit must trigger a new IPC carrying both
+    // changes — the first edit was sent but never persisted.
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const second = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(second?.captureEnabled).toBe(false);
+    expect(second?.autoPasteEnabled).toBe(false);
+  });
+
+  it('retries a failed save automatically after a cool-down', async () => {
+    // The two retry paths above ride on either a follow-up edit or
+    // unmount. If the user does neither — common after a transient IPC
+    // blip — the error pill would stay up indefinitely and the edit
+    // would be stranded. The cool-down timer is the third leg: it
+    // re-submits the same snapshot from the background.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(async () => {
+        throw new Error('backend transient');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Push past the cool-down without any further user input. The
+    // identical snapshot must be re-submitted automatically — that
+    // requires rewinding `lastSentJson` in the failure branch so the
+    // dedup short-circuit lets the retry through.
+    await vi.advanceTimersByTimeAsync(5000);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(retried?.captureEnabled).toBe(false);
+  });
+
+  it('does not leak live state when a retry collides with an inflight queued drain', async () => {
+    // Race that round-6 codex caught: save A is in-flight, edit B is
+    // queued behind it, A fails (arms the retry), the queued drain
+    // sends B from live state. In the broken design the retry's
+    // `commitSave(overrideA)` would queue behind B, lose its override
+    // on the `queued` flag, and the post-B drain would rebuild from
+    // live state — leaking a mid-typed hotkey. Chaining via
+    // `inflight.finally` keeps the retry off the queue; B's success
+    // then clears the pending retry (its snapshot subsumes A's). The
+    // contract this asserts: no IPC ever carries the partial hotkey.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    let rejectA: ((err: Error) => void) | undefined;
+    const callA = new Promise<void>((_, reject) => {
+      rejectA = reject;
+    });
+    let resolveB: (() => void) | undefined;
+    const callB = new Promise<void>((resolve) => {
+      resolveB = resolve;
+    });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(() => callA)
+      .mockImplementationOnce(() => callB)
+      // Safety net: an accidental third IPC would land here and the
+      // count assertion below would catch it.
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const capture = checkboxes[0] as HTMLInputElement;
+    const autoPaste = checkboxes[1] as HTMLInputElement;
+
+    // Save A starts in-flight (controlled by `callA`).
+    await fireEvent.click(capture);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    // Edit B lands while A is still pending — queued behind A.
+    await fireEvent.click(autoPaste);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Reject A: catch arms the retry, finally drains B from live state.
+    rejectA?.(new Error('backend transient'));
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+
+    // Mid-flight: the user types a partial accelerator. Live state
+    // mutates per-keystroke; the bug was this leaking into a post-B
+    // drain.
+    const hotkey = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await fireEvent.input(hotkey, { target: { value: 'Cmd+Sh' } });
+
+    // Cool-down elapses; retry chains off B and waits for it to settle.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+
+    // B resolves; its success branch clears `pendingRetryJson` (B's
+    // snapshot already subsumes A's intent), so the chained
+    // `fireRetry` bails. Crucially, no third IPC ever fires with the
+    // partial hotkey.
+    resolveB?.();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+
+    const callsArgs = vi.mocked(updateSettings).mock.calls;
+    // Both committed snapshots carry the base hotkey — the partial
+    // "Cmd+Sh" must never reach the backend.
+    expect(callsArgs[0]?.[0]?.globalHotkey).toBe('Cmd+Shift+V');
+    expect(callsArgs[1]?.[0]?.globalHotkey).toBe('Cmd+Shift+V');
+  });
+
+  it('does not leak a mid-typed hotkey into the retry payload', async () => {
+    // `bind:value={settings.globalHotkey}` updates live state on every
+    // keystroke; the save trigger is `onblur` so partial accelerators
+    // like "Cmd+Sh" never reach the OS-level hotkey registration. The
+    // retry has to honor that contract — replaying the snapshot
+    // captured at failure time, not whatever the live state holds when
+    // the timer fires.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(async () => {
+        throw new Error('backend transient');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Type a partial accelerator without blurring. Live state advances
+    // per-keystroke; the failed payload must not be rebuilt from it.
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Sh' } });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(retried?.captureEnabled).toBe(false);
+    expect(retried?.globalHotkey).toBe('Cmd+Shift+V');
+  });
+
+  it('cancels a pending retry when the user makes a fresh edit', async () => {
+    // A user edit during the retry cool-down would otherwise produce
+    // two near-simultaneous IPCs: the retry firing 5 s after the
+    // failure and the edit firing immediately. The edit naturally
+    // re-commits the latest snapshot, so the retry is redundant —
+    // `scheduleSave` clears the timer to keep the IPC count honest.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(async () => {
+        throw new Error('backend transient');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const capture = checkboxes[0] as HTMLInputElement;
+    const autoPaste = checkboxes[1] as HTMLInputElement;
+
+    await fireEvent.click(capture);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Edit lands inside the cool-down window — should immediately
+    // supersede the retry instead of letting both fire.
+    await vi.advanceTimersByTimeAsync(1000);
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+
+    // Push well past the original cool-down deadline; no third IPC.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips the unmount flush when nothing has changed', async () => {
+    // The flush guard is an equality check against the persisted
+    // baseline. Without it, every navigation back to the palette would
+    // burn an idempotent IPC even when the user only opened Settings to
+    // read.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    unmount();
+    // Give any deferred call a chance to land before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('resumes auto-save once the regex denylist is fixed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const regexTextarea = container.querySelectorAll('textarea')[1] as HTMLTextAreaElement;
+    await fireEvent.input(regexTextarea, { target: { value: '(' } });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    // Repair the pattern; the next debounce tick should commit it.
+    await fireEvent.input(regexTextarea, { target: { value: 'foo' } });
+    await vi.advanceTimersByTimeAsync(600);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.regexDenylist).toEqual(['foo']);
+  });
+
+  it('does not save the global hotkey on every keystroke, but commits on blur', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Shift+Z' } });
+    // Even past the longest debounce, oninput on a hotkey field never
+    // schedules a save — the registration churn cost is too high.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    await fireEvent.blur(hotkeyInput);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.globalHotkey).toBe('Cmd+Shift+Z');
+  });
+
+  it('coalesces edits that arrive while a save is in flight', async () => {
+    // Single in-flight + queued-flag pattern: the second edit must wait
+    // for the first round-trip to land, then commit one follow-up with
+    // the latest snapshot. We control the first resolve manually so we
+    // can interleave a second edit before it lands.
+    let resolveFirst: (() => void) | undefined;
+    const firstCall = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let secondCallResolved = false;
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(() => firstCall)
+      .mockImplementationOnce(async () => {
+        secondCallResolved = true;
+      });
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    // First edit kicks off the in-flight call.
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Second edit lands while the first is still pending; it should be
+    // coalesced into a single follow-up call once the first resolves.
+    await fireEvent.click(captureCheckbox);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    resolveFirst?.();
+    await waitFor(() => {
+      expect(secondCallResolved).toBe(true);
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('requires confirmation before switching to store_full and skips save on cancel', async () => {
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, getByDisplayValue } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const select = getByDisplayValue('Store redacted (default)') as HTMLSelectElement;
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await fireEvent.change(select, { target: { value: 'store_full' } });
+    expect(confirmSpy).toHaveBeenCalled();
+    // Cancelled confirm reverts the dropdown to the previous value and
+    // must not reach the backend — declining the confirm is the explicit
+    // "do not store secrets in plaintext" signal.
+    expect(select.value).toBe('store_redacted');
+    expect(updateSettings).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it('reports the original textarea row when blank lines precede the bad regex', async () => {
@@ -285,6 +799,7 @@ describe('SettingsView', () => {
   });
 
   it('commits the store_full switch when the user accepts the warning', async () => {
+    vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, getByDisplayValue, queryByRole } = render(SettingsView);
     const privacyTab = await findByRole('tab', { name: 'Privacy' });
     await fireEvent.click(privacyTab);
@@ -297,6 +812,11 @@ describe('SettingsView', () => {
     await waitFor(() => {
       expect(queryByRole('alert')).toBeTruthy();
     });
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalled();
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.secretHandling).toBe('store_full');
     confirmSpy.mockRestore();
   });
 
@@ -312,18 +832,16 @@ describe('SettingsView', () => {
     expect(await findByText('backend offline')).toBeTruthy();
   });
 
-  it('renders the CLI tab fieldset and toggles the IPC flag', async () => {
+  it('renders the CLI tab fieldset and saves the IPC toggle', async () => {
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container } = render(SettingsView);
     const cliTab = await findByRole('tab', { name: 'CLI' });
     await fireEvent.click(cliTab);
 
-    const cliCheckbox = container.querySelector('input[type="checkbox"]');
+    const cliCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
     expect(cliCheckbox).toBeTruthy();
-    if (cliCheckbox) await fireEvent.click(cliCheckbox);
+    await fireEvent.click(cliCheckbox);
 
-    const form = container.querySelector('form');
-    if (form) await fireEvent.submit(form);
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalled();
     });
@@ -331,29 +849,29 @@ describe('SettingsView', () => {
     expect(sent?.cliIpcEnabled).toBe(false);
   });
 
-  it('writes max-bytes / paste-delay edits from the Advanced tab', async () => {
+  it('debounces max-bytes / paste-delay edits from the Advanced tab', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container } = render(SettingsView);
     const advanced = await findByRole('tab', { name: 'Advanced' });
     await fireEvent.click(advanced);
 
     const numberInputs = container.querySelectorAll('input[type="number"]');
-    expect(numberInputs.length).toBeGreaterThanOrEqual(2);
     const [maxBytes, pasteDelay] = Array.from(numberInputs);
     if (maxBytes) await fireEvent.input(maxBytes, { target: { value: '4096' } });
     if (pasteDelay) await fireEvent.input(pasteDelay, { target: { value: '120' } });
 
-    const form = container.querySelector('form');
-    if (form) await fireEvent.submit(form);
+    await vi.advanceTimersByTimeAsync(600);
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalled();
     });
-    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.maxEntrySizeBytes).toBe(4096);
-    expect(sent?.pasteDelayMs).toBe(120);
+    const last = vi.mocked(updateSettings).mock.calls.at(-1)?.[0];
+    expect(last?.maxEntrySizeBytes).toBe(4096);
+    expect(last?.pasteDelayMs).toBe(120);
   });
 
   it('updates the active locale when the language picker changes', async () => {
+    vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container } = render(SettingsView);
     await findByRole('tab', { name: 'General' });
     const select = Array.from(container.querySelectorAll('select')).find((candidate) =>
@@ -367,6 +885,10 @@ describe('SettingsView', () => {
     // After the change the back-to-palette button reflects Japanese copy.
     await waitFor(() => {
       expect(container.textContent).toMatch(/パレット|戻る/);
+    });
+    // Locale change is a select onchange so it commits immediately.
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalled();
     });
   });
 
@@ -383,9 +905,10 @@ describe('SettingsView', () => {
     try {
       const { findByText, container } = render(SettingsView);
 
-      // The Save button renders the German label, proving setLocale('system')
-      // routed through navigator.languages to the de dictionary.
-      expect(await findByText('Speichern')).toBeTruthy();
+      // The back-to-palette button renders the German label, proving
+      // setLocale('system') routed through navigator.languages to the
+      // de dictionary.
+      expect(await findByText('Zurück zur Palette')).toBeTruthy();
 
       // The dropdown keeps the 'system' preference selected rather than
       // collapsing into the concrete resolved locale.
@@ -394,15 +917,6 @@ describe('SettingsView', () => {
       );
       expect(localeSelect).toBeTruthy();
       expect(localeSelect?.value).toBe('system');
-
-      const form = container.querySelector('form');
-      expect(form).toBeTruthy();
-      await fireEvent.submit(form as HTMLFormElement);
-      await waitFor(() => {
-        expect(updateSettings).toHaveBeenCalled();
-      });
-      const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-      expect(sent?.locale).toBe('system');
     } finally {
       if (originalLanguages) {
         Object.defineProperty(window.navigator, 'languages', originalLanguages);

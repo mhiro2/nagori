@@ -118,8 +118,9 @@ export const zhHans: Messages = {
     title: '设置',
     backToPalette: '返回面板',
     loading: '加载中…',
-    saving: '保存中…',
-    save: '保存',
+    statusSaving: '保存中…',
+    statusSaved: '已保存',
+    statusError: '保存失败：{error}',
     tauriRequired: '保存设置需要 Tauri 运行时。',
     tabs: {
       general: '常规',
@@ -182,7 +183,7 @@ export const zhHans: Messages = {
         '警告：选择「原文保存」会把 API 密钥、JWT、私钥等机密以明文保存在本地 SQLite 数据库。数据库未加密，任何能读取主目录的进程（备份、同步客户端、恶意软件等）都可能恢复这些机密。如未充分理解相关风险，请使用「以脱敏形式保存」。',
       storeFullConfirm:
         '确定要以明文保存机密吗？数据库未加密，磁盘和包含数据目录的备份都将能还原原文。',
-      regexDenylistFixHint: '请先修正高亮的正则表达式拒绝列表项后再保存。',
+      regexDenylistAutosaveHint: '修正高亮的正则表达式错误后将自动保存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',
         tooLong: '过长（{bytes} 字节 > {limit}）。请拆成多行或删除用不到的分支。',

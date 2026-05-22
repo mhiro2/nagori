@@ -121,8 +121,9 @@ export const ja: Messages = {
     title: '設定',
     backToPalette: 'パレットへ戻る',
     loading: '読み込み中…',
-    saving: '保存中…',
-    save: '保存',
+    statusSaving: '保存中…',
+    statusSaved: '保存しました',
+    statusError: '保存に失敗しました: {error}',
     tauriRequired: '設定の保存には Tauri ランタイムが必要です。',
     tabs: {
       general: '一般',
@@ -186,8 +187,7 @@ export const ja: Messages = {
         '警告: 「そのまま保存」を選ぶと、API キー・JWT・秘密鍵などのシークレットがローカル SQLite に平文で残ります。DB は暗号化されていないため、ホームディレクトリへの読み取りアクセス（バックアップ、同期クライアント、マルウェアなど）から復元される恐れがあります。リスクを理解できない限り「マスク済みで保存」を推奨します。',
       storeFullConfirm:
         'シークレットを平文で保存しますか？ DB は暗号化されておらず、データディレクトリのバックアップを含めディスク上から原文を取り出せる状態になります。',
-      regexDenylistFixHint:
-        '保存する前に、強調表示された正規表現拒否リストのエントリを修正してください。',
+      regexDenylistAutosaveHint: '強調表示された正規表現エラーを修正すると自動保存されます。',
       regexErrors: {
         lineLabel: '{line} 行目:',
         tooLong:

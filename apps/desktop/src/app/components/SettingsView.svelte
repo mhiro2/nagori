@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { describeError } from "../lib/errors";
   import { checkForUpdates, getCapabilities, getSettings, updateSettings } from "../lib/commands";
   import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
@@ -28,6 +28,7 @@
   import { showPalette } from "../stores/view.svelte";
 
   type HotkeyFailurePayload = { hotkey: string; error: string };
+  type SaveStatus = "idle" | "saving" | "saved" | "error";
 
   type Tab = "general" | "privacy" | "cli" | "advanced";
 
@@ -45,16 +46,36 @@
     "clear-history",
   ];
 
+  // Debounce profiles per control class. Checkbox / select edits commit in
+  // a single discrete event, so 0 ms keeps the on-disk file in lock-step
+  // with the toggle. Free-form text inputs fire `oninput` per keystroke,
+  // so a window lets bursts coalesce into one `update_settings` call.
+  const DEBOUNCE_NUMBER_MS = 350;
+  const DEBOUNCE_TEXTAREA_MS = 500;
+  // How long the "Saved" pill lingers after a successful round-trip
+  // before the header collapses back to `idle`. Long enough to register
+  // visually, short enough to stay out of the way of the next edit.
+  const SAVED_HOLD_MS = 1500;
+  // Cool-down between automatic retries after a failed save. The user
+  // has no manual retry button (we deleted Save going macOS-style
+  // silent-autosave), so without this a transient backend hiccup would
+  // leave the snapshot stranded until the user edits again or closes
+  // Settings. 5 s is long enough to absorb a brief IPC blip without
+  // hammering, short enough to recover before the user wanders off.
+  const RETRY_DELAY_MS = 5000;
+
   const onLocaleChange = (next: LocaleSetting): void => {
     if (!settings) return;
     settings.locale = next;
     setLocale(next);
+    scheduleSave(0);
   };
 
   const onAppearanceChange = (next: Appearance): void => {
     if (!settings) return;
     settings.appearance = next;
     applyAppearance(next);
+    scheduleSave(0);
   };
 
   const toggleCaptureKind = (kind: ContentKind, enabled: boolean): void => {
@@ -63,11 +84,15 @@
     if (enabled) next.add(kind);
     else next.delete(kind);
     settings.captureKinds = CONTENT_KINDS.filter((candidate) => next.has(candidate));
+    scheduleSave(0);
   };
 
   // Hotkey override editors store the trimmed accelerator string back onto
   // the settings map; an empty value drops the override so the palette
-  // falls back to the default binding declared in `keybindings.ts`.
+  // falls back to the default binding declared in `keybindings.ts`. State
+  // updates fire on every keystroke; the backend round-trip waits for
+  // `onblur` so partial accelerator strings ("Cmd+Sh…") don't churn the
+  // OS-level shortcut registration.
   const setOverride = <Action extends string, Field extends "paletteHotkeys" | "secondaryHotkeys">(
     field: Field,
     action: Action,
@@ -107,17 +132,72 @@
   let capabilities: PlatformCapabilities | null = $state(null);
   let activeTab: Tab = $state("general");
   let loading = $state(false);
-  let saving = $state(false);
   let error: string | undefined = $state(undefined);
   let appDenylistText = $state("");
   let regexDenylistText = $state("");
+  // `hydrated` flips true only after `get_settings` resolves *and* the
+  // derived textarea state is in sync. Auto-save gates on this flag so
+  // the initial render — which assigns `settings`, `appDenylistText`,
+  // and `regexDenylistText` in sequence — cannot accidentally feed the
+  // defaults straight back to disk.
+  let hydrated = $state(false);
+  let saveStatus = $state<SaveStatus>("idle");
+  let saveError: string | undefined = $state(undefined);
+  // Single shared debounce timer — any new edit cancels the pending
+  // tick so we coalesce bursts into one `update_settings` round-trip.
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+  // At most one in-flight save; concurrent edits set `queued` and the
+  // post-commit hook drains it. Full-snapshot semantics mean last-write
+  // wins, so a single follow-up flag replaces a proper queue.
+  let inflight: Promise<void> | null = null;
+  let queued = false;
+  let savedTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set in the `updateSettings` failure branch and cleared on success
+  // or unmount. Fires `commitSave` again so the snapshot keeps trying
+  // even when the user makes no further edits — the only other retry
+  // triggers are a new edit or the unmount flush, neither of which
+  // covers "user opened Settings, save failed, user does nothing".
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // The exact JSON payload that failed, captured at the moment of
+  // failure. The retry re-sends this verbatim instead of re-reading
+  // live state — `bind:value` on the hotkey textbox updates
+  // `settings.globalHotkey` on every keystroke (the save trigger is
+  // `onblur`), so building a fresh snapshot at retry-fire time would
+  // leak a half-typed accelerator like "Cmd+Sh…" into the IPC and
+  // defeat the "no partial hotkeys" design.
+  let pendingRetryJson: string | null = null;
+  // Mirrors the most recent regex denylist that passed preflight. When
+  // the textarea contains a half-typed pattern that fails validation,
+  // `buildSnapshotPayload` substitutes this list so a checkbox toggle on
+  // General / a hotkey edit elsewhere can still reach disk instead of
+  // silently stalling behind the broken Privacy entry.
+  let lastValidRegexList: string[] = [];
+  // JSON-serialised form of the last payload we handed to
+  // `updateSettings`, set *before* the IPC is dispatched. Used by
+  // `commitSave` to suppress idempotent IPC — typing in a broken regex
+  // textarea keeps re-emitting the previous valid list, so without an
+  // equality short-circuit the header pill flashes for nothing. Also
+  // covers the "rapid undo" case: if the user toggles a checkbox while
+  // an earlier in-flight save is still settling, the next snapshot may
+  // equal the *pre-inflight* state, so comparing only against the
+  // persisted baseline would skip the corrective write the in-flight
+  // save's resolution will need.
+  let lastSentJson = "";
+  // JSON-serialised form of the last payload the backend acknowledged.
+  // Advances only inside the success branch of `updateSettings`, never
+  // optimistically. The unmount flush keys off this so a failed save
+  // (`lastSentJson` advances but `lastPersistedJson` does not) gets
+  // retried on the way out — without this the failure would be both
+  // muted in the UI (status is "error", but no Save button to retry)
+  // *and* lost on disk if the user simply closes Settings.
+  let lastPersistedJson = "";
   // Live preflight against the same limits `compile_user_regex` enforces in
   // `nagori-core::policy`. Rendered inline next to the textarea so the user
   // sees per-line guidance ("too long", "nested too deep", "invalid syntax")
-  // before they hit Save, and `save()` short-circuits if anything still fails.
-  // The validator's `index` is set to the textarea's 1-based row number minus
-  // one so the rendered `Line N` label matches the row the user is editing,
-  // even when blank lines sit between entries.
+  // before the daemon would otherwise reject the save. The validator's
+  // `index` is set to the textarea's 1-based row number minus one so the
+  // rendered `Line N` label matches the row the user is editing, even when
+  // blank lines sit between entries.
   let regexDenylistErrors = $derived.by<UserRegexError[]>(() =>
     regexDenylistText
       .split(/\r?\n/)
@@ -189,8 +269,22 @@
         settings = s;
         appDenylistText = s.appDenylist.join("\n");
         regexDenylistText = s.regexDenylist.join("\n");
+        lastValidRegexList = [...s.regexDenylist];
         setLocale(s.locale);
         applyAppearance(s.appearance);
+        // All form-bound state is now in sync with the backend snapshot;
+        // arming `hydrated` here means handlers fired during the initial
+        // bindings (e.g. Svelte's two-way binding pass) cannot trigger
+        // a spurious save.
+        hydrated = true;
+        // The freshly-loaded form already matches what's on disk, so
+        // seed both baselines from the same snapshot. This suppresses a
+        // no-op save on the first commit after hydration and keeps the
+        // unmount flush quiet when the user only opened Settings to
+        // read.
+        const initialJson = JSON.stringify(buildSnapshotPayload());
+        lastSentJson = initialJson;
+        lastPersistedJson = initialJson;
       } catch (err: unknown) {
         error = describeError(err);
       } finally {
@@ -264,29 +358,185 @@
     }
   };
 
-  const save = async (): Promise<void> => {
-    if (!isTauri() || !settings) return;
-    // Block the round-trip when any regex denylist entry already fails the
-    // policy limits — the backend would return a single opaque
-    // `invalid_input` string, but the inline list of per-line hints below
-    // the textarea is far more actionable. The preflight mirrors
-    // `nagori_core::policy::compile_user_regex`, so we never deny a save
-    // the daemon would have accepted.
-    if (regexDenylistErrors.length > 0) {
-      error = t.settings.privacy.regexDenylistFixHint;
+  // Assemble the settings payload from the current form state. Splitting
+  // the payload out from the JSON round-trip lets `commitSave` and
+  // `onDestroy` compare candidate snapshots against `lastSentJson` /
+  // `lastPersistedJson` without cloning first. Textarea -> list
+  // flattening happens here (not on every keystroke) so intermediate
+  // states like a trailing blank line don't reshape the stored array.
+  // While the regex textarea is mid-edit and fails preflight we
+  // substitute the last valid list so a checkbox toggle on General
+  // isn't held hostage by a half-typed pattern on Privacy.
+  const buildSnapshotPayload = (): AppSettings => ({
+    ...(settings as AppSettings),
+    appDenylist: linesToList(appDenylistText),
+    regexDenylist:
+      regexDenylistErrors.length === 0
+        ? linesToList(regexDenylistText)
+        : lastValidRegexList,
+  });
+
+  // Promote each clean version of the regex textarea to the "last valid"
+  // baseline. `commitSave` and the unmount flush read this when the
+  // current textarea fails preflight so other-tab edits still ship the
+  // most recent regex set the backend successfully accepted.
+  $effect(() => {
+    if (!hydrated) return;
+    if (regexDenylistErrors.length === 0) {
+      lastValidRegexList = linesToList(regexDenylistText);
+    }
+  });
+
+  const clearRetryTimer = (): void => {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    pendingRetryJson = null;
+  };
+
+  // Send the captured retry payload, deferring if a save is already in
+  // flight. Riding the `queued` drain instead would lose the override
+  // — the drain calls `commitSave()` with no argument, which rebuilds
+  // the snapshot from live state and could leak a mid-typed hotkey
+  // accelerator. Chaining off `inflight.finally` keeps the retry
+  // payload pinned across an arbitrarily long save chain.
+  const fireRetry = (): void => {
+    if (destroyed) return;
+    const payload = pendingRetryJson;
+    if (payload === null) return;
+    if (inflight) {
+      // `.finally` callbacks run in registration order: the original
+      // `await inflight` continuation (the outer `finally` that
+      // potentially starts a drain) fires first, so by the time our
+      // handler runs the next `inflight` is either set (drain
+      // started) or null. Re-evaluate from scratch.
+      void inflight.finally(() => {
+        fireRetry();
+      });
       return;
     }
-    settings.appDenylist = linesToList(appDenylistText);
-    settings.regexDenylist = linesToList(regexDenylistText);
-    saving = true;
-    error = undefined;
-    hotkeyError = undefined;
+    void commitSave(payload);
+  };
+
+  const scheduleSave = (delay: number): void => {
+    if (!hydrated || !settings || destroyed) return;
+    // A fresh user edit supersedes any cooled-down auto-retry. The edit
+    // path will call `commitSave` anyway, so leaving the retry armed
+    // would just produce a duplicate IPC moments later.
+    clearRetryTimer();
+    if (pendingTimer !== null) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    if (delay === 0) {
+      void commitSave();
+      return;
+    }
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      void commitSave();
+    }, delay);
+  };
+
+  // `overrideJson` is supplied by the retry timer to re-submit the
+  // exact payload that failed earlier, bypassing the live-state read
+  // in `buildSnapshotPayload`. Without it the retry would pick up a
+  // mid-typed hotkey accelerator from the textbox's two-way binding.
+  const commitSave = async (overrideJson?: string): Promise<void> => {
+    if (!hydrated || !settings || destroyed) return;
+
+    if (inflight) {
+      // Full-snapshot semantics give us last-write-wins — a single
+      // follow-up flag replaces a proper queue. The post-commit hook
+      // re-invokes once and the latest snapshot wins.
+      queued = true;
+      return;
+    }
+
+    // Skip a backend round-trip when the payload matches what we just
+    // sent. The JSON round-trip also detaches the IPC payload from the
+    // live `$state` proxy so a follow-up edit while `updateSettings` is
+    // in flight can't mutate the snapshot mid-call; `structuredClone`
+    // is unsuitable because jsdom (vitest) refuses to clone Svelte's
+    // reactive Array proxy.
+    const snapshotJson = overrideJson ?? JSON.stringify(buildSnapshotPayload());
+    if (snapshotJson === lastSentJson) return;
+    const snapshot = JSON.parse(snapshotJson) as AppSettings;
+    // Record the send *before* awaiting so a follow-up commit during
+    // the in-flight window can short-circuit if it ends up emitting the
+    // same payload.
+    lastSentJson = snapshotJson;
+
+    saveStatus = "saving";
+    if (savedTimer !== null) {
+      clearTimeout(savedTimer);
+      savedTimer = null;
+    }
+
+    inflight = (async () => {
+      try {
+        await updateSettings(snapshot);
+        // Advance the persisted baseline before the destroyed check so
+        // a successful save that lands during teardown still updates the
+        // record the unmount flush would otherwise re-send.
+        lastPersistedJson = snapshotJson;
+        if (destroyed) return;
+        // If another edit was already queued while we were in flight
+        // skip the "Saved" pill — the next commit will flip the header
+        // back to "Saving…" within the same tick anyway.
+        if (!queued) {
+          saveStatus = "saved";
+          saveError = undefined;
+          error = undefined;
+          savedTimer = setTimeout(() => {
+            savedTimer = null;
+            if (saveStatus === "saved") saveStatus = "idle";
+          }, SAVED_HOLD_MS);
+        }
+        // A retry timer left over from an earlier failure is now moot —
+        // the most recent snapshot has landed.
+        clearRetryTimer();
+      } catch (err: unknown) {
+        // Leave `lastPersistedJson` untouched. The unmount flush keys
+        // off this baseline to ship the failed snapshot one more time
+        // on the way out. We also rewind `lastSentJson` so the cool-
+        // down retry below can re-submit the exact same payload — the
+        // dedup short-circuit at the top of `commitSave` would
+        // otherwise skip it.
+        lastSentJson = lastPersistedJson;
+        if (destroyed) return;
+        saveStatus = "error";
+        saveError = describeError(err);
+        // Re-fire the save after a brief cool-down. Without this the
+        // failed snapshot would be stranded until the user either
+        // edits again or closes Settings — a transient IPC blip would
+        // appear as a permanent error pill. Each retry that also fails
+        // hits this branch again and reschedules, giving an indefinite
+        // 5 s poll until the backend recovers or the user navigates
+        // away. We accept the trade-off of polling against a
+        // permanently broken backend for the simpler state machine.
+        // Capture the snapshot the backend just rejected and feed it
+        // back into `commitSave` verbatim — re-reading live state in
+        // the timer callback would pull in any mid-typed hotkey value
+        // the user has tapped out since the failure landed.
+        clearRetryTimer();
+        pendingRetryJson = snapshotJson;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          fireRetry();
+        }, RETRY_DELAY_MS);
+      }
+    })();
+
     try {
-      await updateSettings(settings);
-    } catch (err: unknown) {
-      error = describeError(err);
+      await inflight;
     } finally {
-      saving = false;
+      inflight = null;
+      if (queued && !destroyed) {
+        queued = false;
+        void commitSave();
+      }
     }
   };
 
@@ -308,19 +558,94 @@
     }
   };
 
+  const saveStatusLabel = $derived.by(() => {
+    switch (saveStatus) {
+      case "saving":
+        return t.settings.statusSaving;
+      case "saved":
+        return t.settings.statusSaved;
+      case "error":
+        return t.settings.statusError.replace("{error}", saveError ?? "");
+      case "idle":
+        return "";
+    }
+  });
+
+  let destroyed = false;
+
   onMount(() =>
     subscribe<HotkeyFailurePayload>(TAURI_EVENTS.hotkeyRegisterFailed, (payload) => {
       hotkeyError = payload.error || payload.hotkey;
     }),
   );
+
+  onDestroy(() => {
+    if (pendingTimer !== null) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    if (savedTimer !== null) {
+      clearTimeout(savedTimer);
+      savedTimer = null;
+    }
+    clearRetryTimer();
+    // Flush any in-memory edits the user hasn't given the debounce / blur
+    // path a chance to commit. Covers three loss paths: a textarea or
+    // number input still inside its debounce window when the user
+    // navigates away, a queued snapshot waiting on the post-commit drain
+    // (won't fire once `destroyed` is set), and a hotkey field that was
+    // edited via `setOverride` but never blurred (Escape -> palette
+    // tears the focused input off the DOM without firing `blur`). The
+    // webview context outlives the Svelte component, so a fire-and-forget
+    // `updateSettings` reaches Tauri even though the UI is already gone.
+    if (hydrated && settings) {
+      const snapshotJson = JSON.stringify(buildSnapshotPayload());
+      // Compare against the persisted baseline, not what's been sent.
+      // A failed save advances `lastSentJson` but leaves
+      // `lastPersistedJson` behind, so checking the latter lets the
+      // unmount flush retry the failed snapshot. Without that, the
+      // failure would be muted on the way out (no Save button to
+      // retry) and the edit would never land.
+      if (snapshotJson !== lastPersistedJson) {
+        const snapshot = JSON.parse(snapshotJson) as AppSettings;
+        // Swallow the error: the component is unmounting, so the status
+        // pill is already gone and there's no surface left to render a
+        // failure on. The next session reloads from disk anyway.
+        const dispatchFinal = (): void => {
+          void updateSettings(snapshot).catch(() => {});
+        };
+        lastSentJson = snapshotJson;
+        if (inflight) {
+          // Chain after the in-flight save instead of firing in
+          // parallel. The backend's SQLite pool uses multiple
+          // connections, so two `update_settings` calls dispatched in
+          // parallel can settle in arbitrary order — the older
+          // snapshot landing last would clobber the user's most recent
+          // edit. Serialising them here keeps the on-disk file in
+          // intent order.
+          void inflight.finally(dispatchFinal);
+        } else {
+          dispatchFinal();
+        }
+      }
+    }
+    destroyed = true;
+  });
 </script>
 
 <section class="settings">
   <header class="head">
     <h1>{t.settings.title}</h1>
-    <button type="button" class="close" onclick={showPalette}>
-      {t.settings.backToPalette}
-    </button>
+    <div class="head-trailing">
+      {#if saveStatus !== "idle"}
+        <span class="save-status" data-status={saveStatus} aria-live="polite">
+          {saveStatusLabel}
+        </span>
+      {/if}
+      <button type="button" class="close" onclick={showPalette}>
+        {t.settings.backToPalette}
+      </button>
+    </div>
   </header>
 
   {#if loading}
@@ -345,21 +670,24 @@
       {/each}
     </div>
 
-    <form
-      onsubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
+    <form onsubmit={(e) => e.preventDefault()}>
     {#if activeTab === "general"}
       <fieldset>
         <legend>{t.settings.capture.legend}</legend>
         <label>
-          <input type="checkbox" bind:checked={settings.captureEnabled} />
+          <input
+            type="checkbox"
+            bind:checked={settings.captureEnabled}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.capture.enabled}
         </label>
         <label>
-          <input type="checkbox" bind:checked={settings.autoPasteEnabled} />
+          <input
+            type="checkbox"
+            bind:checked={settings.autoPasteEnabled}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.capture.autoPaste}
         </label>
         <label>
@@ -369,6 +697,7 @@
             onchange={(e) => {
               if (!settings) return;
               settings.pasteFormatDefault = (e.target as HTMLSelectElement).value as PasteFormat;
+              scheduleSave(0);
             }}
           >
             <option value="preserve">{t.settings.capture.pasteFormatOptions.preserve}</option>
@@ -377,14 +706,22 @@
         </label>
         <label>
           {t.settings.capture.hotkey}
-          <input type="text" bind:value={settings.globalHotkey} />
+          <input
+            type="text"
+            bind:value={settings.globalHotkey}
+            onblur={() => scheduleSave(0)}
+          />
         </label>
         {#if hotkeyError}
           <p class="status error">{hotkeyError}</p>
         {/if}
         <label class="stack">
           <span>
-            <input type="checkbox" bind:checked={settings.captureInitialClipboardOnLaunch} />
+            <input
+              type="checkbox"
+              bind:checked={settings.captureInitialClipboardOnLaunch}
+              onchange={() => scheduleSave(0)}
+            />
             {t.settings.capture.captureInitialClipboard}
           </span>
           <span class="help">{t.settings.capture.captureInitialClipboardHelp}</span>
@@ -406,13 +743,18 @@
               settings.paletteRowCount = clampRowCount(
                 Number((e.target as HTMLInputElement).value),
               );
+              scheduleSave(DEBOUNCE_NUMBER_MS);
             }}
           />
         </label>
         <span class="help">{t.settings.display.rowCountHelp}</span>
         <label class="stack">
           <span>
-            <input type="checkbox" bind:checked={settings.showPreviewPane} />
+            <input
+              type="checkbox"
+              bind:checked={settings.showPreviewPane}
+              onchange={() => scheduleSave(0)}
+            />
             {t.settings.display.previewPane}
           </span>
           <span class="help">{t.settings.display.previewPaneHelp}</span>
@@ -433,6 +775,7 @@
                 value={settings.paletteHotkeys[action] ?? ""}
                 oninput={(e) =>
                   setOverride("paletteHotkeys", action, (e.target as HTMLInputElement).value)}
+                onblur={() => scheduleSave(0)}
               />
             </label>
           {/each}
@@ -449,6 +792,7 @@
                 value={settings.secondaryHotkeys[action] ?? ""}
                 oninput={(e) =>
                   setOverride("secondaryHotkeys", action, (e.target as HTMLInputElement).value)}
+                onblur={() => scheduleSave(0)}
               />
             </label>
           {/each}
@@ -486,6 +830,7 @@
             onchange={(e) => {
               if (!settings) return;
               settings.recentOrder = (e.target as HTMLSelectElement).value as RecentOrder;
+              scheduleSave(0);
             }}
           >
             <option value="by_recency">{t.settings.appearance.recentOrderOptions.by_recency}</option>
@@ -502,17 +847,29 @@
       <fieldset>
         <legend>{t.settings.integration.legend}</legend>
         <label>
-          <input type="checkbox" bind:checked={settings.autoLaunch} />
+          <input
+            type="checkbox"
+            bind:checked={settings.autoLaunch}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.integration.autoLaunch}
         </label>
         <p class="help">{t.settings.integration.autoLaunchHelp}</p>
         <label>
-          <input type="checkbox" bind:checked={settings.showInMenuBar} />
+          <input
+            type="checkbox"
+            bind:checked={settings.showInMenuBar}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.integration.menuBar}
         </label>
         <p class="help">{t.settings.integration.menuBarHelp}</p>
         <label>
-          <input type="checkbox" bind:checked={settings.clearOnQuit} />
+          <input
+            type="checkbox"
+            bind:checked={settings.clearOnQuit}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.integration.clearOnQuit}
         </label>
         <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
@@ -524,7 +881,11 @@
         <legend>{t.settings.privacy.legend}</legend>
         <label class="stack">
           {t.settings.privacy.appDenylist}
-          <textarea rows="4" bind:value={appDenylistText}></textarea>
+          <textarea
+            rows="4"
+            bind:value={appDenylistText}
+            oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
+          ></textarea>
           <span class="help">{t.settings.privacy.appDenylistHelp}</span>
         </label>
         <label class="stack">
@@ -532,10 +893,11 @@
           <textarea
             rows="4"
             bind:value={regexDenylistText}
+            oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
             aria-invalid={regexDenylistErrors.length > 0 || undefined}
             aria-describedby={regexDenylistErrors.length > 0
-              ? "regex-denylist-help regex-denylist-errors"
-              : "regex-denylist-help"}
+              ? "regex-denylist-help regex-denylist-errors regex-denylist-autosave"
+              : "regex-denylist-help regex-denylist-autosave"}
           ></textarea>
           <span class="help" id="regex-denylist-help">
             {t.settings.privacy.regexDenylistHelp}
@@ -554,6 +916,11 @@
                 </li>
               {/each}
             </ul>
+            <span class="help" id="regex-denylist-autosave">
+              {t.settings.privacy.regexDenylistAutosaveHint}
+            </span>
+          {:else}
+            <span class="help" id="regex-denylist-autosave" hidden></span>
           {/if}
         </label>
         <label class="stack">
@@ -578,6 +945,7 @@
                 }
               }
               settings.secretHandling = next;
+              scheduleSave(0);
             }}
           >
             <option value="block">{t.settings.privacy.secretHandlingOptions.block}</option>
@@ -622,6 +990,7 @@
             min="0"
             step="100"
             bind:value={settings.historyRetentionCount}
+            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
           />
         </label>
         <label class="stack">
@@ -636,6 +1005,7 @@
               if (!settings) return;
               const next = Number((e.target as HTMLInputElement).value);
               settings.historyRetentionDays = Number.isFinite(next) && next > 0 ? next : null;
+              scheduleSave(DEBOUNCE_NUMBER_MS);
             }}
           />
           <span class="help">{t.settings.retention.maxDaysHelp}</span>
@@ -652,6 +1022,7 @@
               if (!settings) return;
               const next = Number((e.target as HTMLInputElement).value);
               settings.maxTotalBytes = Number.isFinite(next) && next > 0 ? next : null;
+              scheduleSave(DEBOUNCE_NUMBER_MS);
             }}
           />
           <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
@@ -663,7 +1034,11 @@
       <fieldset>
         <legend>{t.settings.cli.legend}</legend>
         <label>
-          <input type="checkbox" bind:checked={settings.cliIpcEnabled} />
+          <input
+            type="checkbox"
+            bind:checked={settings.cliIpcEnabled}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.cli.ipcEnabled}
         </label>
       </fieldset>
@@ -679,6 +1054,7 @@
             min="0"
             step="1024"
             bind:value={settings.maxEntrySizeBytes}
+            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
           />
         </label>
         <label>
@@ -689,6 +1065,7 @@
             max="1000"
             step="10"
             bind:value={settings.pasteDelayMs}
+            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
           />
         </label>
       </fieldset>
@@ -734,7 +1111,11 @@
       <fieldset>
         <legend>{t.settings.updates.legend}</legend>
         <label>
-          <input type="checkbox" bind:checked={settings.autoUpdateCheck} />
+          <input
+            type="checkbox"
+            bind:checked={settings.autoUpdateCheck}
+            onchange={() => scheduleSave(0)}
+          />
           {t.settings.updates.autoCheck}
         </label>
         <p class="help">{t.settings.updates.autoCheckHelp}</p>
@@ -765,12 +1146,6 @@
         {/if}
       </fieldset>
     {/if}
-
-      <div class="actions">
-        <button type="submit" disabled={saving || !isTauri()}>
-          {saving ? t.settings.saving : t.settings.save}
-        </button>
-      </div>
     </form>
   {:else if !loading && !error}
     <p class="status hint">{t.settings.tauriRequired}</p>
@@ -808,6 +1183,26 @@
   .head h1 {
     margin: 0;
     font-size: 1.125rem;
+  }
+  .head-trailing {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  /* Right-aligned status pill in the header. Reserving a min-width keeps
+     the back-to-palette button locked in place when the label flickers
+     between "Saving…" / "Saved" / hidden between edits. */
+  .save-status {
+    font-size: 0.75rem;
+    color: var(--muted, rgba(255, 255, 255, 0.55));
+    min-width: 9rem;
+    text-align: right;
+  }
+  .save-status[data-status="saved"] {
+    color: #4ade80;
+  }
+  .save-status[data-status="error"] {
+    color: var(--danger, #f87171);
   }
   .close {
     padding: 0.45rem 0.9rem;
@@ -860,8 +1255,7 @@
   }
   /* Fieldsets are direct children of the form; without an explicit gap they
      stack flush against each other. A column flex layout adds vertical
-     breathing room between CAPTURE / PALETTE DISPLAY / HOTKEYS / … and also
-     separates the trailing `.actions` row from the last fieldset. */
+     breathing room between CAPTURE / PALETTE DISPLAY / HOTKEYS / … */
   form {
     display: flex;
     flex-direction: column;
@@ -1015,13 +1409,6 @@
        `align-items: stretch`. */
     align-self: flex-start;
   }
-  /* Form-level Save action belongs in the bottom-right per conventional
-     OS dialog layout — only the submit/Save row is repositioned; inline
-     `.actions` rows inside fieldsets (e.g. Check for updates) stay
-     left-aligned alongside the field they belong to. */
-  form > .actions {
-    align-self: flex-end;
-  }
   .actions button {
     padding: 0.45rem 1.2rem;
     border: 1px solid transparent;
@@ -1034,7 +1421,7 @@
   }
   /* Lower-emphasis variant used by maintenance actions like "Check for
      update" — same footprint, but reads as a secondary control rather
-     than competing with the primary Save button for attention. */
+     than competing with the primary action for attention. */
   .actions button.secondary {
     background: transparent;
     color: inherit;
