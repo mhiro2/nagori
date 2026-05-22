@@ -199,11 +199,11 @@
   let lastSentJson = "";
   // JSON-serialised form of the last payload the backend acknowledged.
   // Advances only inside the success branch of `updateSettings`, never
-  // optimistically. The unmount flush keys off this so a failed save
-  // (`lastSentJson` advances but `lastPersistedJson` does not) gets
-  // retried on the way out — without this the failure would be both
-  // muted in the UI (status is "error", but no Save button to retry)
-  // *and* lost on disk if the user simply closes Settings.
+  // optimistically. The failure branch rewinds `lastSentJson` to this
+  // value so the cool-down retry / unmount flush can re-send the
+  // payload the backend rejected — without that the dedup
+  // short-circuit at the top of `commitSave` would silently drop the
+  // retry.
   let lastPersistedJson = "";
   // Live preflight against the same limits `compile_user_regex` enforces in
   // `nagori-core::policy`. Rendered inline next to the textarea so the user
@@ -521,12 +521,12 @@
         // the most recent snapshot has landed.
         clearRetryTimer();
       } catch (err: unknown) {
-        // Leave `lastPersistedJson` untouched. The unmount flush keys
-        // off this baseline to ship the failed snapshot one more time
-        // on the way out. We also rewind `lastSentJson` so the cool-
-        // down retry below can re-submit the exact same payload — the
-        // dedup short-circuit at the top of `commitSave` would
-        // otherwise skip it.
+        // Leave `lastPersistedJson` untouched and rewind `lastSentJson`
+        // to it. The cool-down retry below and the unmount flush both
+        // rebuild a snapshot from live state and compare against
+        // `lastSentJson`; without the rewind the dedup short-circuit
+        // at the top of `commitSave` would silently skip the retry of
+        // the exact same payload.
         lastSentJson = lastPersistedJson;
         if (destroyed) return;
         saveStatus = "error";
@@ -633,33 +633,41 @@
       lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
       lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
       const snapshotJson = JSON.stringify(buildSnapshotPayload());
-      // Compare against the persisted baseline, not what's been sent.
-      // A failed save advances `lastSentJson` but leaves
-      // `lastPersistedJson` behind, so checking the latter lets the
-      // unmount flush retry the failed snapshot. Without that, the
-      // failure would be muted on the way out (no Save button to
-      // retry) and the edit would never land.
-      if (snapshotJson !== lastPersistedJson) {
-        const snapshot = JSON.parse(snapshotJson) as AppSettings;
-        // Swallow the error: the component is unmounting, so the status
-        // pill is already gone and there's no surface left to render a
-        // failure on. The next session reloads from disk anyway.
-        const dispatchFinal = (): void => {
-          void updateSettings(snapshot).catch(() => {});
-        };
-        lastSentJson = snapshotJson;
-        if (inflight) {
-          // Chain after the in-flight save instead of firing in
-          // parallel. The backend's SQLite pool uses multiple
-          // connections, so two `update_settings` calls dispatched in
-          // parallel can settle in arbitrary order — the older
-          // snapshot landing last would clobber the user's most recent
-          // edit. Serialising them here keeps the on-disk file in
-          // intent order.
-          void inflight.finally(dispatchFinal);
-        } else {
-          dispatchFinal();
-        }
+      const snapshot = JSON.parse(snapshotJson) as AppSettings;
+      // Swallow the error: the component is unmounting, so the status
+      // pill is already gone and there's no surface left to render a
+      // failure on. The next session reloads from disk anyway.
+      const dispatchFinal = (): void => {
+        void updateSettings(snapshot).catch(() => {});
+      };
+      if (inflight) {
+        // Defer the decision until the in-flight save settles. Comparing
+        // the live snapshot to `lastPersistedJson` at settle-time covers
+        // every interleaving:
+        //   • in-flight succeeds at the same payload → snapshot ==
+        //     lastPersistedJson, skip (no duplicate IPC),
+        //   • in-flight succeeds but the user reverted / followed up so
+        //     the queued drain would have fired (gated off by
+        //     `destroyed`) → snapshot != lastPersistedJson, dispatch,
+        //   • in-flight fails entirely → its catch rewinds
+        //     `lastSentJson` and bails on `destroyed` before arming
+        //     the retry timer, leaving `lastPersistedJson` at the
+        //     pre-edit baseline → snapshot != lastPersistedJson,
+        //     dispatch (the only path left for the edit to survive).
+        // Chaining off `.finally` instead of firing in parallel
+        // serialises against the in-flight save: the backend's SQLite
+        // pool uses multiple connections, so two parallel
+        // `update_settings` could settle out of order.
+        void inflight.finally(() => {
+          if (snapshotJson !== lastPersistedJson) dispatchFinal();
+        });
+      } else if (snapshotJson !== lastSentJson) {
+        // No in-flight: an earlier failure may have rewound
+        // `lastSentJson` to the persisted baseline (and we just
+        // cleared its retry timer above), or this is the first save
+        // attempt. Either way, snapshot ≠ lastSentJson means there's
+        // an unflushed edit that needs to land.
+        dispatchFinal();
       }
     }
     destroyed = true;

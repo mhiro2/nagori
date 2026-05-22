@@ -662,6 +662,100 @@ describe('SettingsView', () => {
     expect(updateSettings).toHaveBeenCalledTimes(2);
   });
 
+  it('flushes a revert-to-baseline edit when a save was still in flight', async () => {
+    // Race the round-8 codex review caught: edit A->B starts the
+    // in-flight save (lastSentJson advances to B); before it resolves
+    // the user reverts back to A; then closes Settings. With an
+    // unmount-flush comparison against the persisted baseline, the
+    // snapshot (= A) equals lastPersistedJson, the flush is skipped,
+    // and the queued drain is then gated off by `destroyed`. The
+    // in-flight B lands last, clobbering the user's revert. Comparing
+    // against lastSentJson (= B) lets the unmount ship the corrective
+    // A, chained behind the in-flight save.
+    let resolveFirst: (() => void) | undefined;
+    const firstCall = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(() => firstCall)
+      .mockImplementationOnce(async () => {});
+
+    const { findByRole, container, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    // First edit kicks off the in-flight save.
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    expect(vi.mocked(updateSettings).mock.calls[0]?.[0]?.captureEnabled).toBe(false);
+
+    // Revert: toggle back to the persisted state while the first save
+    // is still pending. Snapshot now matches the persisted baseline.
+    await fireEvent.click(captureCheckbox);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Unmount: the queued drain is gated off by `destroyed`, so the
+    // unmount flush must carry the corrective payload (the revert).
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The chained flush waits for the in-flight save to settle.
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    resolveFirst?.();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    // Disk ends at the user's intent: the revert, not the orphaned B.
+    const second = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(second?.captureEnabled).toBe(true);
+  });
+
+  it('retries when an in-flight save fails after unmount', async () => {
+    // Edge case the round-9 codex review caught: the user makes an
+    // edit and closes Settings while the save is still in flight, and
+    // the in-flight save then fails after `destroyed` is set. The
+    // failure branch rewinds `lastSentJson` and bails on `destroyed`
+    // before arming the retry timer, so the edit would be stranded
+    // — there's no follow-up edit and no surface left for a manual
+    // retry. Chaining the unmount flush off `inflight.finally` and
+    // checking against `lastPersistedJson` at settle time ensures one
+    // final dispatch goes out.
+    let rejectFirst: ((err: Error) => void) | undefined;
+    const firstCall = new Promise<void>((_, reject) => {
+      rejectFirst = reject;
+    });
+    vi.mocked(updateSettings)
+      .mockImplementationOnce(() => firstCall)
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container, unmount } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Unmount while the save is still in flight. The flush is
+    // deferred until the in-flight settles.
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // The in-flight save rejects post-unmount. The catch branch sees
+    // `destroyed` and skips the retry arm; the chained finally is the
+    // only thing keeping the edit alive.
+    rejectFirst?.(new Error('backend transient'));
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(retried?.captureEnabled).toBe(false);
+  });
+
   it('does not leak a mid-typed hotkey into an unrelated autosave', async () => {
     // The hotkey contract is "no save until blur" — partial
     // accelerators like "Cmd+Sh…" must never reach the OS-level
