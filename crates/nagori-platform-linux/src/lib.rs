@@ -10,6 +10,11 @@
 //! The crate compiles on every host so workspace `cargo check` from
 //! macOS / Windows still succeeds; non-Linux targets get inert stubs
 //! that return `Unsupported`.
+//!
+//! The clipboard module wraps `libc::poll(2)` to bound a hung publisher
+//! pipe; the FFI block is tight and lives behind safe helpers, so the
+//! workspace-wide `unsafe_code = "deny"` lint is overridden here.
+#![allow(unsafe_code)]
 
 mod capability;
 mod clipboard;

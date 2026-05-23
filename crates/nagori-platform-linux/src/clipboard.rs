@@ -11,7 +11,11 @@ use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 #[cfg(target_os = "linux")]
-use std::io::Read;
+use std::io::{self, Read};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsFd, AsRawFd};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use time::OffsetDateTime;
 #[cfg(target_os = "linux")]
@@ -505,6 +509,16 @@ struct MultiPipePass {
 #[cfg(target_os = "linux")]
 const PIPE_CHUNK: usize = 8 * 1024;
 
+/// Upper bound on a single MIME's pipe-read time. A healthy publisher
+/// streams the body in milliseconds; a hung one (compositor stuck mid-
+/// transfer, source app frozen) would otherwise wedge the blocking
+/// worker until the pipe is closed by the kernel — which can take
+/// indefinitely long if the writer never drops its end. We cap at 3s
+/// so a single misbehaving capture costs at most one blocking worker
+/// for that interval, then we drop the snapshot and emit a warn.
+#[cfg(target_os = "linux")]
+const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass> {
     // When the caller asks for buffering, the buffer cap also doubles as
@@ -615,7 +629,8 @@ fn read_specific_mime(mime: &str, state: &mut MultiReadState) -> Result<Option<V
     ) {
         Ok((mut pipe, _mime)) => {
             state.begin_rep(mime);
-            state.read_pipe(&mut pipe)
+            let mut timed = TimeoutPipeReader::new(&mut pipe, PIPE_READ_TIMEOUT);
+            state.read_pipe(&mut timed)
         }
         // `NoMimeType` races with a publisher that retracted between the
         // initial enumeration and the specific request — treat as absent.
@@ -641,7 +656,8 @@ fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
     ) {
         Ok((mut pipe, _mime)) => {
             state.begin_rep("text/plain");
-            state.read_pipe(&mut pipe)
+            let mut timed = TimeoutPipeReader::new(&mut pipe, PIPE_READ_TIMEOUT);
+            state.read_pipe(&mut timed)
         }
         Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType) => {
             Ok(None)
@@ -649,6 +665,114 @@ fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
         Err(err) => Err(AppError::Platform(format!(
             "wl-clipboard paste text failed: {err}"
         ))),
+    }
+}
+
+/// `Read` adapter that polls the underlying pipe fd with `poll(2)` before
+/// every chunk read so a hung publisher cannot pin a blocking worker
+/// indefinitely. `deadline` is the absolute moment the *current* MIME
+/// read must finish by — exceeding it surfaces as
+/// `io::ErrorKind::TimedOut`, which `MultiReadState::read_pipe` treats as
+/// a sticky abort that drops the snapshot.
+#[cfg(target_os = "linux")]
+struct TimeoutPipeReader<'a, P: Read + AsFd> {
+    pipe: &'a mut P,
+    deadline: Instant,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a, P: Read + AsFd> TimeoutPipeReader<'a, P> {
+    fn new(pipe: &'a mut P, timeout: Duration) -> Self {
+        Self {
+            pipe,
+            deadline: Instant::now() + timeout,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<P: Read + AsFd> Read for TimeoutPipeReader<'_, P> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let now = Instant::now();
+        if now >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "clipboard pipe read deadline exceeded",
+            ));
+        }
+        let remaining = self.deadline - now;
+        let fd = self.pipe.as_fd().as_raw_fd();
+        if !poll_fd_readable(fd, remaining)? {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "clipboard pipe read deadline exceeded",
+            ));
+        }
+        self.pipe.read(buf)
+    }
+}
+
+/// Wait up to `timeout` for `fd` to become readable.
+///
+/// Returns `Ok(true)` when the kernel reports either data ready
+/// (`POLLIN`) or peer hang-up (`POLLHUP`) — the latter is the kernel's
+/// "writer closed; the next `read()` will see EOF" signal, so the
+/// caller must still proceed to `read()` rather than treat it as a
+/// timeout. `Ok(false)` is the genuine deadline-elapsed case, and
+/// `POLLERR` / `POLLNVAL` are surfaced as real I/O errors. `EINTR`
+/// loops within the remaining budget instead of bailing out as a
+/// timeout, so a stray signal does not collapse the per-read deadline.
+#[cfg(target_os = "linux")]
+fn poll_fd_readable(fd: std::os::fd::RawFd, timeout: Duration) -> io::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        // Clamp to `i32::MAX` ms; the deadline is bounded by `PIPE_READ_TIMEOUT`
+        // so this branch is a defensive guard rather than a real ceiling.
+        let timeout_ms = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(0);
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is a single, fully-initialised `pollfd` whose `fd`
+        // borrow lives for the duration of the call (the borrow is rooted in
+        // `pipe.as_fd()` upstream). `poll` only writes back into `revents`,
+        // which we read after the call.
+        let rc = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if rc == 0 {
+            return Ok(false);
+        }
+        // `POLLERR` and `POLLNVAL` mean the descriptor is broken (peer
+        // wrote into a closed pipe / fd was already closed). Surface
+        // them as I/O errors so the caller drops the snapshot rather
+        // than spinning on a doomed read.
+        if (pfd.revents & (libc::POLLERR | libc::POLLNVAL)) != 0 {
+            return Err(io::Error::other(format!(
+                "clipboard pipe poll revents=0x{:x}",
+                pfd.revents,
+            )));
+        }
+        // `POLLHUP` alone (writer closed, no pending data) is the EOF
+        // case — `read()` will return 0. Treat it as "readable" so the
+        // caller observes the natural end of stream.
+        if (pfd.revents & (libc::POLLIN | libc::POLLHUP)) != 0 {
+            return Ok(true);
+        }
+        // Spurious wake (no relevant revents): loop and re-arm `poll`
+        // within whatever time budget remains.
     }
 }
 
@@ -721,6 +845,11 @@ struct MultiReadState {
     /// further reads short-circuit so a malicious owner cannot pin the
     /// blocking worker by feeding bytes indefinitely.
     ceiling_hit: bool,
+    /// Sticky once `TimeoutPipeReader` reports a deadline miss. The
+    /// snapshot is dropped (representations = None) and the sequence
+    /// is locked to the oversized sentinel so the next changed clip
+    /// still bumps it.
+    read_timeout: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -733,6 +862,7 @@ impl MultiReadState {
             read_ceiling,
             buffer_overflow: false,
             ceiling_hit: false,
+            read_timeout: false,
         }
     }
 
@@ -777,9 +907,30 @@ impl MultiReadState {
         };
         let mut chunk = [0u8; PIPE_CHUNK];
         loop {
-            let n = pipe.read(&mut chunk).map_err(|err| {
-                AppError::Platform(format!("reading clipboard pipe failed: {err}"))
-            })?;
+            let n = match pipe.read(&mut chunk) {
+                Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+                    // A publisher (or compositor) stopped writing mid
+                    // transfer. Treat the snapshot as dropped — set the
+                    // sticky abort so the outer `finalize_sequence` emits
+                    // the oversized sentinel and the capture loop will
+                    // re-poll on the next clipboard change. Logging at
+                    // warn lets the doctor surface the count without
+                    // failing the whole poll cycle.
+                    tracing::warn!(
+                        observed_total = self.observed_total,
+                        "clipboard_pipe_read_timeout"
+                    );
+                    self.read_timeout = true;
+                    self.ceiling_hit = true;
+                    return Ok(None);
+                }
+                Err(err) => {
+                    return Err(AppError::Platform(format!(
+                        "reading clipboard pipe failed: {err}"
+                    )));
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -839,9 +990,20 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, oversized_sequence, parse_uri_list,
-        pick_image_mime, serialize_uri_list,
+        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, TimeoutPipeReader, oversized_sequence,
+        parse_uri_list, pick_image_mime, serialize_uri_list,
     };
+
+    /// `Read` impl that always returns `TimedOut` — lets us exercise
+    /// `MultiReadState::read_pipe`'s timeout branch without spinning up
+    /// a real pipe and waiting on the deadline.
+    struct AlwaysTimesOut;
+
+    impl Read for AlwaysTimesOut {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "synthetic timeout"))
+        }
+    }
 
     struct CountingChunks {
         chunk: Vec<u8>,
@@ -934,6 +1096,49 @@ mod tests {
         let second_body = state.read_pipe(&mut second).unwrap();
         assert!(second_body.is_none());
         assert!(state.observed_total > prior);
+    }
+
+    #[test]
+    fn read_pipe_drops_snapshot_on_reader_timeout() {
+        // A hung Wayland publisher surfaces through the wrapper as a
+        // `TimedOut` error on the very first read. The state must treat
+        // that as a sticky abort (no buffered body returned, ceiling
+        // sentinel locked) so the snapshot is dropped rather than left
+        // pinning a blocking worker.
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let body = state.read_pipe(&mut AlwaysTimesOut).unwrap();
+
+        assert!(body.is_none());
+        assert!(state.read_timeout, "read_timeout flag must latch");
+        assert!(
+            state.ceiling_hit,
+            "timed-out reads must lock the oversized sentinel so the sequence reflects the drop"
+        );
+
+        // Subsequent reads must short-circuit so the loop cannot keep
+        // touching the wedged pipe across MIME types.
+        let mut subsequent = io::Cursor::new(b"ignored".to_vec());
+        let after = state.read_pipe(&mut subsequent).unwrap();
+        assert!(after.is_none());
+    }
+
+    #[test]
+    fn timeout_pipe_reader_times_out_when_publisher_silent() {
+        // Real pipe with no writer activity: poll(2) must fire after the
+        // configured timeout and surface a `TimedOut` error rather than
+        // blocking the test thread on `read(2)`. The writer end stays
+        // open so the kernel does not deliver EOF instead.
+        let (mut reader, _writer) = std::io::pipe().expect("pipe");
+        let mut timed = TimeoutPipeReader::new(&mut reader, std::time::Duration::from_millis(50));
+
+        let mut buf = [0u8; 16];
+        let started = std::time::Instant::now();
+        let err = timed.read(&mut buf).expect_err("must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        // Generous upper bound for the 50ms deadline so this stays
+        // stable on CI scheduling variance — we just need to confirm
+        // the read returned promptly rather than hanging on `read(2)`.
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
