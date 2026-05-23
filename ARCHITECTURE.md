@@ -1256,6 +1256,20 @@ change.
   or re-shows the tray icon at runtime. Install failures on Linux
   sessions without `StatusNotifierItem` support are logged and the rest
   of the app stays usable through the in-window controls.
+- **macOS activation policy** — when `tray::install` succeeds,
+  `setup()` calls `app.set_activation_policy(ActivationPolicy::Accessory)`
+  on macOS so no Dock icon ever appears and the app is hidden from
+  Cmd+Tab, matching the per-window `skipTaskbar: true` intent. The
+  Dock entry is controlled per-process by NSApp's activation policy
+  (not per-window), so without `Accessory` it would flicker in and
+  out every time the palette is shown / hidden. The flip is gated on
+  tray install actually succeeding: a session that has neither tray
+  nor Dock icon would leave the (hidden) main window reachable only
+  through the palette hotkey, which is a poor recovery path if the
+  hotkey itself failed to register. The fallback branch returns
+  early before this call, leaving the default `Regular` policy in
+  place so the error window stays reachable via the Dock and
+  Cmd+Tab even though tray installation is skipped there.
 - **Auto-launch (`tauri-plugin-autostart`)** — wires the platform-native
   launcher: a `LaunchAgent` plist under `~/Library/LaunchAgents` on
   macOS, an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`

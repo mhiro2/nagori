@@ -140,3 +140,20 @@ Known limitations:
   non-elevated Nagori process: `SendInput` is blocked by UIPI when
   the target window runs at a higher integrity level. Run Nagori at
   the same level as the apps you paste into.
+
+## macOS notes
+
+The desktop shell runs as an `NSApplicationActivationPolicyAccessory`
+application: the menu-bar tray is the primary entry point and no Dock
+icon is shown, matching the per-window `skipTaskbar: true` intent of
+the palette window. The Dock icon is controlled per-process by NSApp's
+activation policy on macOS (not per-window), so without `Accessory`
+the icon would flicker in and out of the Dock every time the palette
+is shown or hidden, and the app would appear in Cmd+Tab. The flip is
+applied only after tray installation succeeds — if the tray cannot be
+installed, the default `Regular` policy stays in place so the user
+still has the Dock and Cmd+Tab as a way back to the (hidden) main
+window. The startup fallback window (shown when `AppState::try_new`
+fails) also keeps the default `Regular` policy so the error window
+remains reachable even though tray installation is skipped in that
+branch.

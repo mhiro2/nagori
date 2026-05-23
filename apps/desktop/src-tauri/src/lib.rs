@@ -188,9 +188,35 @@ pub fn run() {
             // Settings / Quit) are platform-agnostic. If creation fails
             // (e.g. Linux session without StatusNotifierItem support) we
             // log and continue so the rest of the app stays usable.
-            if let Err(err) = tray::install(app.handle()) {
+            let tray_install_result = tray::install(app.handle());
+            if let Err(err) = &tray_install_result {
                 tracing::warn!(error = %err, "tray_install_failed");
             }
+
+            // macOS: switch to the `Accessory` activation policy so no Dock
+            // icon ever appears, matching the per-window `skipTaskbar: true`
+            // intent and the tray-only UX (the menu-bar tray is the
+            // primary entry point). The Dock icon is controlled per-process
+            // by NSApp's activation policy, not per-window — without this,
+            // the icon flickers in/out of the Dock every time the palette
+            // is shown/hidden, and the app shows up in Cmd+Tab. Windows
+            // and Linux honour `skipTaskbar` directly, so this is macOS-only.
+            // Applied only on the success path: the fallback branch
+            // returns early above, so a startup-error session keeps the
+            // default `Regular` policy and stays Dock/Cmd+Tab-visible —
+            // important because fallback mode skips tray install, leaving
+            // the Dock as the sole way back to the error window. We also
+            // only flip the policy when tray install actually succeeded:
+            // a fresh macOS session with no tray *and* no Dock icon would
+            // leave the user with the palette hotkey as the sole way to
+            // reach the (hidden) main window, which is a poor recovery
+            // path if the hotkey itself failed to register.
+            #[cfg(target_os = "macos")]
+            if tray_install_result.is_ok() {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = tray_install_result;
 
             spawn_settings_subscribers(app.handle());
             // Periodically refresh the tray tooltip from `CaptureHealth`
