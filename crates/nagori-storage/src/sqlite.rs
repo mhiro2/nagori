@@ -1044,15 +1044,75 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         .optional()
         .map_err(|err| storage_err(&err))?;
     let stored_id_str = if let Some(existing) = existing {
-        // Refresh both `created_at` and `updated_at` so a re-copy of the
-        // same content moves the entry back to the top of the recency
-        // list — list/search ORDER BY `created_at DESC` and would otherwise
-        // leave the duplicate buried in the original position.
+        // Refresh source/content/sensitivity/representation columns and
+        // bump `created_at`/`updated_at` so the dedupe record reflects the
+        // most recent copy. Without this the search_documents row (which
+        // is upserted from the new entry below) would diverge from the
+        // entries row's source/content/sensitivity/representation, leaving
+        // copy-back and source_app filters acting on stale data.
+        // Lifecycle flags (`pinned`, `archived`, `use_count`,
+        // `last_used_at`, `expires_at`, `deleted_at`) belong to the
+        // original row and are intentionally preserved.
         tx.execute(
-            "UPDATE entries SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
-            params![updated_at, existing],
+            "UPDATE entries SET
+                content_kind = ?1,
+                text_content = ?2,
+                content_json = ?3,
+                source_app_name = ?4,
+                source_bundle_id = ?5,
+                source_executable_path = ?6,
+                representation_set_hash = ?7,
+                sensitivity = ?8,
+                created_at = ?9,
+                updated_at = ?9
+             WHERE id = ?10",
+            params![
+                kind_to_str(entry.content_kind()),
+                content_for_storage.plain_text(),
+                serde_json::to_string(&content_for_storage).map_err(|err| json_err(&err))?,
+                entry
+                    .metadata
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.name.as_deref()),
+                entry
+                    .metadata
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.bundle_id.as_deref()),
+                entry
+                    .metadata
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.executable_path.as_deref()),
+                representation_set_hash,
+                sensitivity_to_str(entry.sensitivity),
+                updated_at,
+                existing,
+            ],
         )
         .map_err(|err| storage_err(&err))?;
+        // Replace the representation set so HTML/RTF/file-list alternatives
+        // from the new copy survive copy-back. Otherwise stale alternatives
+        // (or a missing primary, if classification cleared them) would
+        // remain attached to the dedupe row.
+        tx.execute(
+            "DELETE FROM entry_representations WHERE entry_id = ?1",
+            params![existing],
+        )
+        .map_err(|err| storage_err(&err))?;
+        if entry.pending_representations.is_empty() {
+            if let Some(payload) = primary_payload.as_ref() {
+                insert_primary_representation(&tx, &existing, payload, &updated_at)?;
+            }
+        } else {
+            insert_pending_representations(
+                &tx,
+                &existing,
+                &entry.pending_representations,
+                &updated_at,
+            )?;
+        }
         existing
     } else {
         tx.execute(
@@ -2616,6 +2676,79 @@ mod tests {
         let results = store.search(query).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry_id, first_id);
+    }
+
+    #[tokio::test]
+    async fn duplicate_insert_refreshes_source_and_representations() {
+        // Re-copying the same content from a different source app must
+        // refresh the entries row's source columns and replace the
+        // representation set so the source_app filter and copy-back both
+        // see the latest copy — not the first one. Without this the
+        // search_documents row (which IS upserted from the new entry)
+        // would diverge from the entries row.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, SourceApp,
+        };
+
+        let store = SqliteStore::open_memory().unwrap();
+
+        let make_snapshot = |bundle: &str, html: &str| ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("dedupe-rewrite"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: Some(SourceApp {
+                bundle_id: Some(bundle.to_owned()),
+                name: Some(bundle.to_owned()),
+                executable_path: None,
+            }),
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text(html.to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("shared body".to_owned()),
+                },
+            ],
+        };
+
+        let first = EntryFactory::from_snapshot(make_snapshot("com.example.editor", "<p>v1</p>"))
+            .expect("first snapshot");
+        let first_id = store.insert(first).await.unwrap();
+
+        let second =
+            EntryFactory::from_snapshot(make_snapshot("com.example.terminal", "<p>v2</p>"))
+                .expect("second snapshot");
+        let second_id = store.insert(second).await.unwrap();
+        assert_eq!(second_id, first_id, "dedupe should reuse the row");
+
+        let fetched = store.get(first_id).await.unwrap().expect("row exists");
+        let source = fetched.metadata.source.as_ref().expect("source preserved");
+        assert_eq!(source.bundle_id.as_deref(), Some("com.example.terminal"));
+
+        let reps = store.list_representations(first_id).await.unwrap();
+        let html_rep = reps
+            .iter()
+            .find(|r| r.mime_type == "text/html")
+            .expect("html rep present after dedupe");
+        match &html_rep.data {
+            nagori_core::RepresentationDataRef::InlineText(text) => {
+                assert_eq!(
+                    text, "<p>v2</p>",
+                    "html alternative must reflect newer copy"
+                );
+            }
+            other => panic!("expected inline text rep, got {other:?}"),
+        }
+
+        let mut query = SearchQuery::new("shared", normalize_text("shared"), 10);
+        query.filters = SearchFilters {
+            source_app: Some("com.example.terminal".to_owned()),
+            ..Default::default()
+        };
+        let hits = store.search(query).await.unwrap();
+        assert_eq!(hits.len(), 1, "source filter must hit the new source");
+        assert_eq!(hits[0].entry_id, first_id);
     }
 
     #[tokio::test]
