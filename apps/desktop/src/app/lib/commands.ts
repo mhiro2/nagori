@@ -71,8 +71,25 @@ export const runAiAction = (action: AiActionId, entryId: string): Promise<AiActi
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 
-export const updateSettings = (settings: AppSettings): Promise<void> =>
-  invoke('update_settings', { settings });
+// Serialize `update_settings` IPC at the module level. `save_settings`
+// inside the daemon writes through a multi-connection SQLite pool, so two
+// in-flight calls can settle out of order — fine when one SettingsView
+// owns the conversation, but two overlapping instances (a window
+// unmounting while another opens) race the SQLite writes and the later
+// dispatch can land first. Chaining each call off the tail of the
+// previous IPC enforces submission-order writes globally, without
+// requiring backend cooperation. Last-write-wins is preserved because
+// the backend accepts full snapshots. The `.catch` after `next` detaches
+// the queue tail from any rejection so a single failed save (e.g. an
+// invalid hotkey) does not poison subsequent callers — they still chain
+// off a resolved tail and dispatch normally.
+let updateSettingsTail: Promise<unknown> = Promise.resolve();
+
+export const updateSettings = (settings: AppSettings): Promise<void> => {
+  const next = updateSettingsTail.then(() => invoke<void>('update_settings', { settings }));
+  updateSettingsTail = next.catch(() => undefined);
+  return next;
+};
 
 export const togglePalette = (): Promise<void> => invoke('toggle_palette');
 

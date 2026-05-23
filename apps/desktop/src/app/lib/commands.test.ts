@@ -246,3 +246,86 @@ describe('command wrappers', () => {
     });
   }
 });
+
+type Deferred = { promise: Promise<void>; resolve: () => void; reject: (e: unknown) => void };
+const deferred = (): Deferred => {
+  let resolve!: () => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+describe('updateSettings module-level FIFO', () => {
+  // `save_settings` writes through a multi-connection SQLite pool, so two
+  // concurrent `update_settings` IPCs can settle out of order. Tail-chain
+  // at the module scope guarantees the second IPC does not even *dispatch*
+  // until the first resolves, even when two SettingsView lifecycles overlap
+  // (one unmounting, another opening). The unit under test is the chaining
+  // itself — verify that we never have more than one in-flight invoke from
+  // the wrapper's perspective.
+
+  it('queues a second updateSettings until the first IPC resolves', async () => {
+    const first = deferred();
+    const second = deferred();
+    let callIndex = 0;
+    vi.mocked(invoke).mockImplementation(async () => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) return first.promise;
+      if (idx === 1) return second.promise;
+      throw new Error('unexpected extra invoke');
+    });
+
+    const p1 = commands.updateSettings(baseSettings());
+    const p2 = commands.updateSettings({ ...baseSettings(), captureEnabled: false });
+
+    // Yield once so `Promise.resolve().then(...)` chains can run; the
+    // first invoke should have dispatched but not the second.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    // Settle the first; the queue tail unblocks and the second dispatches.
+    first.resolve();
+    await p1;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    second.resolve();
+    await p2;
+  });
+
+  it('isolates a queued caller from an earlier rejection', async () => {
+    // A rejected `updateSettings` (e.g. invalid hotkey) must not poison
+    // the tail — subsequent callers should still dispatch. Verify by
+    // having the first call fail, then awaiting the second succeeds.
+    const first = deferred();
+    const second = deferred();
+    let callIndex = 0;
+    vi.mocked(invoke).mockImplementation(async () => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) return first.promise;
+      if (idx === 1) return second.promise;
+      throw new Error('unexpected extra invoke');
+    });
+
+    const p1 = commands.updateSettings(baseSettings());
+    const p2 = commands.updateSettings({ ...baseSettings(), autoLaunch: true });
+
+    first.reject(new Error('invalid hotkey'));
+    await expect(p1).rejects.toThrow('invalid hotkey');
+
+    // The second IPC must still dispatch after the rejection drains the tail.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    second.resolve();
+    await expect(p2).resolves.toBeUndefined();
+  });
+});
