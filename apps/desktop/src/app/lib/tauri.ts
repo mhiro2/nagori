@@ -7,14 +7,32 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 
 import type { CommandError } from './types';
 
+type TauriInternals = {
+  metadata?: { currentWindow?: { label?: string } };
+  currentWindow?: { label?: string };
+};
+
 declare global {
   interface Window {
-    __TAURI_INTERNALS__?: unknown;
+    __TAURI_INTERNALS__?: TauriInternals;
   }
 }
 
 export const isTauri = (): boolean =>
   typeof window !== 'undefined' && window.__TAURI_INTERNALS__ !== undefined;
+
+// Resolve the synchronous label of the current Tauri webview, used by
+// `App.svelte` to pick which route to mount without paying a
+// dynamic-import await on every load. `__TAURI_METADATA__.currentWindow`
+// is populated by Tauri 1.x; Tauri 2 exposes the label on
+// `window.__TAURI_INTERNALS__.metadata.currentWindow` instead. Falling
+// back to `undefined` keeps non-Tauri test / dev-browser contexts on
+// the existing in-process `viewState` route.
+export const currentWindowLabel = (): string | undefined => {
+  if (typeof window === 'undefined') return undefined;
+  const internals = window.__TAURI_INTERNALS__;
+  return internals?.metadata?.currentWindow?.label ?? internals?.currentWindow?.label;
+};
 
 export class TauriBridgeError extends Error {
   readonly code: string;

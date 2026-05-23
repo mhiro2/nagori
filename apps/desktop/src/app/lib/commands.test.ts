@@ -198,6 +198,18 @@ describe('command wrappers', () => {
       args: undefined,
     },
     {
+      name: 'openSettingsWindow',
+      run: () => commands.openSettingsWindow(),
+      cmd: 'open_settings',
+      args: undefined,
+    },
+    {
+      name: 'closeSettingsWindow',
+      run: () => commands.closeSettingsWindow(),
+      cmd: 'close_settings',
+      args: undefined,
+    },
+    {
       name: 'getPermissions',
       run: () => commands.getPermissions(),
       cmd: 'get_permissions',

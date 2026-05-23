@@ -95,6 +95,14 @@ export const togglePalette = (): Promise<void> => invoke('toggle_palette');
 
 export const hidePalette = (): Promise<void> => invoke('hide_palette');
 
+// Show / hide the standalone Settings window. The window is declared
+// with native decorations in `tauri.conf.json`, so the OS supplies the
+// close button, title-bar drag, and Cmd+Tab / Alt+Tab membership — these
+// commands only flip its visibility.
+export const openSettingsWindow = (): Promise<void> => invoke('open_settings');
+
+export const closeSettingsWindow = (): Promise<void> => invoke('close_settings');
+
 export const getPermissions = (): Promise<PermissionStatus[]> => invoke('get_permissions');
 
 export const getCapabilities = (): Promise<PlatformCapabilities> => invoke('get_capabilities');

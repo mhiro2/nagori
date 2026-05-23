@@ -272,6 +272,8 @@ pub fn run() {
             commands::open_url_external,
             commands::toggle_palette,
             commands::hide_palette,
+            commands::open_settings,
+            commands::close_settings,
             commands::check_for_updates,
         ])
         .build(tauri::generate_context!())
@@ -344,6 +346,20 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
             }
             if let Some(state) = handle.try_state::<AppState>() {
                 state.clear_previous_frontmost();
+            }
+        }
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "settings" => {
+            // Match the palette: intercept the OS close (red traffic-light
+            // on macOS, Alt+F4 on Windows/Linux) and hide instead of
+            // destroying, so re-opening Settings from the tray reuses the
+            // already-loaded webview instead of paying the cold-load cost.
+            api.prevent_close();
+            if let Some(window) = handle.get_webview_window("settings") {
+                let _ = window.hide();
             }
         }
         tauri::RunEvent::WindowEvent {

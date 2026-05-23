@@ -1,6 +1,6 @@
 <script lang="ts">
   import { buildBindings, resolveAction } from "../lib/keybindings";
-  import { closePalette } from "../lib/commands";
+  import { closePalette, openSettingsWindow } from "../lib/commands";
   import { isTauri } from "../lib/tauri";
   import { quickLookAvailable, refreshCapabilities } from "../stores/capabilities.svelte";
   import {
@@ -152,7 +152,12 @@
         if (quickLookAvailable()) void previewSelection();
         break;
       case "open-settings":
-        showSettings();
+        // Settings is a separate native window under Tauri (own
+        // decorations, no always-on-top). Fall back to the in-process
+        // viewState toggle in non-Tauri dev/test contexts so the unit
+        // tests that spy on `showSettings` still pass.
+        if (isTauri()) void openSettingsWindow();
+        else showSettings();
         break;
       case "multi-toggle": {
         const id = currentSelection()?.id;

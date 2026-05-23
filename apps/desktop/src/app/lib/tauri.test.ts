@@ -10,10 +10,10 @@ import { TauriBridgeError, invoke, isTauri } from './tauri';
 
 const setTauriInternals = (value: unknown): void => {
   if (value === undefined) {
-    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     return;
   }
-  (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = value;
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = value;
 };
 
 beforeEach(() => {

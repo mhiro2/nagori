@@ -9,7 +9,7 @@
     validateUserRegex,
     type UserRegexError,
   } from "../lib/policyValidation";
-  import { TAURI_EVENTS, isTauri, subscribe } from "../lib/tauri";
+  import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from "../lib/tauri";
   import { applyAppearance } from "../lib/theme";
   import {
     CONTENT_KINDS,
@@ -31,6 +31,12 @@
   type SaveStatus = "idle" | "saving" | "saved" | "error";
 
   type Tab = "general" | "privacy" | "cli" | "advanced";
+
+  // Standalone Settings window: the OS supplies the close button via its
+  // native title bar, so the in-app "Back to palette" affordance is
+  // redundant and hidden. The in-window route (dev/test fallback) still
+  // shows the button.
+  const isStandaloneSettingsWindow = currentWindowLabel() === "settings";
 
   const TABS: readonly Tab[] = ["general", "privacy", "cli", "advanced"];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
@@ -903,9 +909,11 @@
           {saveStatusLabel}
         </span>
       {/if}
-      <button type="button" class="close" onclick={showPalette}>
-        {t.settings.backToPalette}
-      </button>
+      {#if !isStandaloneSettingsWindow}
+        <button type="button" class="close" onclick={showPalette}>
+          {t.settings.backToPalette}
+        </button>
+      {/if}
     </div>
   </header>
 

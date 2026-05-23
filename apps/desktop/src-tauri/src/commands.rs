@@ -692,6 +692,48 @@ fn hide_main_palette(app: &AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+/// Show + focus the standalone Settings window. The window is declared in
+/// `tauri.conf.json` with native decorations, so it gets an OS title bar
+/// (drag, close button, no always-on-top) — this command only flips its
+/// visibility. The palette is hidden as a side effect so the two windows
+/// don't fight over focus on hotkey-driven open paths.
+pub(crate) fn show_settings_window(app: &AppHandle) -> CommandResult<()> {
+    let target = app.get_webview_window("settings").ok_or_else(|| {
+        CommandError::internal("settings window is not registered in tauri.conf.json".to_string())
+    })?;
+    target
+        .show()
+        .and_then(|()| target.unminimize())
+        .and_then(|()| target.set_focus())
+        .map_err(|err| CommandError::internal(err.to_string()))?;
+    if let Some(palette) = app.get_webview_window("main") {
+        let _ = palette.hide();
+    }
+    Ok(())
+}
+
+fn hide_settings_window(app: &AppHandle) -> CommandResult<()> {
+    let target = app.get_webview_window("settings").ok_or_else(|| {
+        CommandError::internal("settings window is not registered in tauri.conf.json".to_string())
+    })?;
+    target
+        .hide()
+        .map_err(|err| CommandError::internal(err.to_string()))?;
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn open_settings(window: WebviewWindow) -> CommandResult<()> {
+    show_settings_window(window.app_handle())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn close_settings(window: WebviewWindow) -> CommandResult<()> {
+    hide_settings_window(window.app_handle())
+}
+
 /// Returns the current OS-level permission status. Used by the onboarding
 /// view to surface "auto-paste OFF because Accessibility is missing" hints
 /// without requiring the user to dive into the diagnostics CLI.

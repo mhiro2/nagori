@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./lib/tauri', () => ({
   isTauri: vi.fn(() => false),
+  currentWindowLabel: vi.fn(() => undefined),
   subscribe: vi.fn(() => () => {}),
   TAURI_EVENTS: {
     navigate: 'nagori://navigate',

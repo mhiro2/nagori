@@ -7,6 +7,7 @@ vi.mock('../lib/tauri', () => ({
 
 vi.mock('../lib/commands', () => ({
   closePalette: vi.fn(async () => undefined),
+  openSettingsWindow: vi.fn(async () => undefined),
   // PreviewPane / OnboardingBanner / settings store reach the same module.
   openAccessibilitySettings: vi.fn(),
   getEntryPreview: vi.fn(),
@@ -89,7 +90,7 @@ vi.mock('../stores/view.svelte', () => ({
   viewState: { current: 'palette' as const },
 }));
 
-import { closePalette } from '../lib/commands';
+import { closePalette, openSettingsWindow } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import { quickLookAvailable } from '../stores/capabilities.svelte';
 import {
@@ -203,6 +204,15 @@ describe('Palette', () => {
       spy();
     });
   }
+
+  it('opens the standalone settings window on Cmd+, inside the Tauri runtime', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: ',', metaKey: true });
+    expect(openSettingsWindow).toHaveBeenCalled();
+    expect(showSettings).not.toHaveBeenCalled();
+  });
 
   it('closes the palette on Escape inside the Tauri runtime', async () => {
     vi.mocked(isTauri).mockReturnValue(true);

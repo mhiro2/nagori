@@ -16,8 +16,9 @@
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Manager, Wry};
 
+use crate::commands::show_settings_window;
 use crate::state::AppState;
 use crate::toggle_main_palette;
 
@@ -207,11 +208,13 @@ fn toggle_capture(app: &AppHandle) {
 }
 
 fn open_settings(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-        // The frontend listens for this event and switches the route.
-        let _ = app.emit("nagori://navigate", "settings");
+    // Settings lives in its own native window (declared in
+    // `tauri.conf.json` with `decorations: true` and `alwaysOnTop: false`)
+    // so the OS supplies a close button, drag-by-titlebar, and standard
+    // Cmd+Tab / Alt+Tab membership. The tray entry just brings that
+    // window forward.
+    if let Err(err) = show_settings_window(app) {
+        tracing::warn!(error = %err.message, "tray_open_settings_failed");
     }
 }
 

@@ -26,6 +26,25 @@
         "visible": false,
         "center": true,
         "focus": true
+      },
+      {
+        "label": "settings",
+        "title": "Nagori",
+        "width": 760,
+        "height": 620,
+        "minWidth": 540,
+        "minHeight": 420,
+        "resizable": true,
+        "maximizable": false,
+        "minimizable": false,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visible": false,
+        "center": true,
+        "focus": false
       }
     ],
     "security": {
