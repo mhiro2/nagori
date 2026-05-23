@@ -15,6 +15,13 @@ use tracing::{info, warn};
 
 use crate::{CaptureLoop, MaintenanceService, NagoriRuntime, ShutdownHandle};
 
+/// Initial delay between unexpected accept-loop exits before retrying. Doubles
+/// on each consecutive failure up to [`IPC_RESTART_BACKOFF_MAX`].
+const IPC_RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+/// Cap so a persistently-failing bind doesn't blow out the supervisor's
+/// retry interval into hours.
+const IPC_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// On Unix this is a filesystem path for the Unix-domain socket. On
@@ -89,6 +96,11 @@ fn default_token_path_local() -> PathBuf {
 /// instead of leaving a half-alive process. The auth token is written to a
 /// sibling `0o600` file; only callers who can read that file
 /// (== same user ownership as the daemon) will authenticate.
+///
+/// We also capture a fingerprint of every runtime file we own (inode for the
+/// Unix socket, plain content for the token file) so [`stage_runtime_files`]
+/// can refuse to unlink an entry that's been replaced by a fresh daemon
+/// running concurrently.
 async fn spawn_ipc_server(
     runtime: NagoriRuntime,
     config: &DaemonConfig,
@@ -98,8 +110,10 @@ async fn spawn_ipc_server(
     #[cfg(unix)]
     {
         let listener = bind_unix(&config.socket_path).await?;
+        let socket_fingerprint = SocketFingerprint::capture(&config.socket_path);
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
+        let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
@@ -124,7 +138,14 @@ async fn spawn_ipc_server(
                 warn!(error = %err, "ipc_server_terminated");
             }
         });
-        Ok(IpcServerTask { handle, stop_tx })
+        Ok(IpcServerTask {
+            handle,
+            stop_tx,
+            fingerprints: RuntimeFingerprints {
+                socket: socket_fingerprint,
+                token: token_fingerprint,
+            },
+        })
     }
     #[cfg(windows)]
     {
@@ -139,6 +160,7 @@ async fn spawn_ipc_server(
         let first_instance = bind_pipe(&pipe_name)?;
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
+        let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
@@ -164,7 +186,14 @@ async fn spawn_ipc_server(
                 warn!(error = %err, "ipc_server_terminated");
             }
         });
-        Ok(IpcServerTask { handle, stop_tx })
+        Ok(IpcServerTask {
+            handle,
+            stop_tx,
+            fingerprints: RuntimeFingerprints {
+                socket: SocketFingerprint,
+                token: token_fingerprint,
+            },
+        })
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -178,11 +207,70 @@ async fn spawn_ipc_server(
 struct IpcServerTask {
     handle: tokio::task::JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
+    fingerprints: RuntimeFingerprints,
 }
 
 impl IpcServerTask {
     fn request_stop(&self) {
         let _ = self.stop_tx.send_replace(true);
+    }
+}
+
+/// Identifiers captured at create time so [`stage_runtime_files`] can
+/// verify the on-disk entry still belongs to *this* daemon before unlinking.
+/// Without it a stale shutdown path could race a freshly-launched daemon and
+/// remove its socket / token file moments after the new daemon claimed them.
+#[derive(Debug, Clone)]
+struct RuntimeFingerprints {
+    socket: SocketFingerprint,
+    token: TokenFingerprint,
+}
+
+/// `(dev, ino)` on Unix — the smallest pair that uniquely identifies a
+/// filesystem entry across remount. Zero-sized on Windows because the pipe
+/// namespace isn't a filesystem and there's nothing to unlink.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct SocketFingerprint {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl SocketFingerprint {
+    fn capture(path: &std::path::Path) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(path) {
+            Ok(meta) => Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            },
+            Err(err) => {
+                // We just successfully bound the listener — losing the inode
+                // right afterwards is exotic enough to warn about, but it
+                // shouldn't take the daemon down. Zero/zero won't match any
+                // real entry so cleanup will skip rather than mis-delete.
+                warn!(error = %err, path = %path.display(), "socket_fingerprint_capture_failed");
+                Self { dev: 0, ino: 0 }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy)]
+struct SocketFingerprint;
+
+/// The exact bytes we wrote into the token file. Comparing content is
+/// portable across Unix/Windows and naturally distinguishes "our file" from
+/// "a file another daemon happened to overwrite the same path with" because
+/// every launch mints a fresh 32-byte random token.
+#[derive(Debug, Clone)]
+struct TokenFingerprint(String);
+
+impl From<&AuthToken> for TokenFingerprint {
+    fn from(token: &AuthToken) -> Self {
+        Self(token.as_str().to_owned())
     }
 }
 
@@ -207,8 +295,25 @@ async fn supervise_ipc_server(
     mut shutdown: ShutdownHandle,
     mut server: Option<IpcServerTask>,
 ) {
+    let mut backoff = IPC_RESTART_BACKOFF_INITIAL;
+    let mut restart_pending = false;
     loop {
+        // The restart timer is only active when we've observed an unexpected
+        // accept-loop exit and IPC is still enabled. Encoding it as a future
+        // that's `pending()` otherwise lets the select arm coexist with the
+        // shutdown / settings / join branches without splitting the loop.
+        let restart_timer = async {
+            if restart_pending {
+                tokio::time::sleep(backoff).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
         tokio::select! {
+            // `biased` so a real shutdown beats a coincident accept-loop exit
+            // and we don't try to restart a server we're about to tear down.
+            biased;
             () = shutdown.cancelled() => {
                 if let Some(server) = server.take() {
                     stop_ipc_server(server, &config).await;
@@ -223,28 +328,118 @@ async fn supervise_ipc_server(
                     return;
                 }
                 let enabled = settings_rx.borrow().cli_ipc_enabled;
-                match (enabled, server.is_some()) {
-                    (true, false) => match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
-                        Ok(next) => {
-                            info!(socket = %config.socket_path.display(), "ipc_server_started");
-                            server = Some(next);
-                        }
-                        Err(err) => warn!(error = %err, "ipc_server_start_failed"),
-                    },
-                    (false, true) => {
+                if !enabled {
+                    // Settings flipped to disabled. Make sure both the live
+                    // server *and* any pending restart get cancelled —
+                    // otherwise a respawn that was waiting on the backoff
+                    // timer would still fire and resurrect IPC against the
+                    // user's preference.
+                    if server.is_some() {
                         info!("ipc_disabled_by_settings");
                         if let Some(current) = server.take() {
                             stop_ipc_server(current, &config).await;
                         }
+                    } else if restart_pending {
+                        info!("ipc_restart_cancelled_by_settings");
                     }
-                    _ => {}
+                    restart_pending = false;
+                    backoff = IPC_RESTART_BACKOFF_INITIAL;
+                } else if server.is_none() && !restart_pending {
+                    // User just turned IPC on while no server was running
+                    // and no restart was pending. Start one immediately;
+                    // the restart-timer arm will handle the post-failure
+                    // backoff path on its own.
+                    match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
+                        Ok(next) => {
+                            info!(socket = %config.socket_path.display(), "ipc_server_started");
+                            server = Some(next);
+                            backoff = IPC_RESTART_BACKOFF_INITIAL;
+                        }
+                        Err(err) => warn!(error = %err, "ipc_server_start_failed"),
+                    }
+                }
+            }
+            // Detect the accept loop dying on its own. `stop_ipc_server`
+            // takes the handle out of `server` before awaiting it, so this
+            // arm only fires for *unexpected* exits.
+            //
+            // We deliberately do NOT call `cleanup_runtime_files` here even
+            // though the accept-loop task (and therefore the listener) is
+            // already gone. The next `spawn_ipc_server` below safely
+            // replaces both files atomically: `bind_unix` removes a stale
+            // socket entry it can't connect to and rebinds; `write_token_file`
+            // writes to a sibling temp and renames over the target. Adding
+            // a fingerprint-check + rename here would re-introduce a
+            // listener-less TOCTOU window — a concurrent fresh daemon
+            // (which is no longer blocked at bind because our listener is
+            // dead) could write its token between our check and our rename
+            // and we'd rename *its* file out from under it. Leaving the
+            // stale entries in place until the next spawn is the safer
+            // choice.
+            join_result = ipc_server_exit(&mut server) => {
+                let dead = server.take().expect("ipc_server_exit only fires when server is Some");
+                match join_result {
+                    Ok(()) => warn!("ipc_server_task_exited_unexpectedly"),
+                    Err(err) if err.is_panic() => warn!(error = %err, "ipc_server_task_panicked"),
+                    Err(err) => warn!(error = %err, "ipc_server_task_join_failed"),
+                }
+                drop(dead);
+                restart_pending = runtime.current_settings().cli_ipc_enabled;
+            }
+            // Fires when `restart_pending` is true after a backoff interval.
+            // We use a separate branch (instead of an inline sleep inside the
+            // join-result handler) so a respawn failure keeps the timer
+            // arm active for the next iteration — without this the loop
+            // would bail to the other arms after a single failed retry and
+            // never recover.
+            () = restart_timer => {
+                match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
+                    Ok(next) => {
+                        info!(
+                            socket = %config.socket_path.display(),
+                            backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                            "ipc_server_restarted_after_unexpected_exit",
+                        );
+                        server = Some(next);
+                        restart_pending = false;
+                        backoff = IPC_RESTART_BACKOFF_INITIAL;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "ipc_server_restart_failed");
+                        backoff = backoff.saturating_mul(2).min(IPC_RESTART_BACKOFF_MAX);
+                        // restart_pending stays true; we retry after the
+                        // new (longer) backoff on the next iteration.
+                    }
                 }
             }
         }
     }
 }
 
+/// Wait for the accept-loop task to exit. When `server` is `None` returns a
+/// future that never resolves — this lets us use [`supervise_ipc_server`]'s
+/// `tokio::select!` without splitting the loop into "have server" / "no
+/// server" branches.
+async fn ipc_server_exit(
+    server: &mut Option<IpcServerTask>,
+) -> std::result::Result<(), tokio::task::JoinError> {
+    match server {
+        Some(s) => (&mut s.handle).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Tear down a running IPC server.
+///
+/// We stage the cleanup *before* signalling the accept loop to stop: while
+/// the accept loop is still alive the listener holds the socket inode (Unix)
+/// or pipe name (Windows), and any concurrent daemon attempting to claim the
+/// same endpoint is blocked at `bind_unix` / `bind_pipe`. That makes the
+/// rename-to-private-name step race-free in the common shutdown path —
+/// after the rename the public path is unmapped, so the eventual `unlink`
+/// can only touch the file we just moved, not a fresh daemon's entry.
 async fn stop_ipc_server(server: IpcServerTask, config: &DaemonConfig) {
+    let staged = stage_runtime_files(config, &server.fingerprints);
     server.request_stop();
     drain_one(
         "ipc_serve",
@@ -252,7 +447,7 @@ async fn stop_ipc_server(server: IpcServerTask, config: &DaemonConfig) {
         config.shutdown_grace + Duration::from_secs(1),
     )
     .await;
-    cleanup_runtime_files(config);
+    staged.remove();
 }
 
 fn spawn_ipc_supervisor(
@@ -409,7 +604,11 @@ where
         config.shutdown_grace,
     )
     .await;
-    cleanup_runtime_files(&config);
+    // The IPC supervisor's shutdown branch calls `stop_ipc_server`, which
+    // verifies fingerprints before unlinking the socket / token file. We
+    // deliberately do NOT add a final unconditional `cleanup_runtime_files`
+    // here — that would race a freshly-launched daemon that re-claimed the
+    // path between our shutdown signal and this point.
     Ok(())
 }
 
@@ -470,24 +669,122 @@ async fn drain_one(name: &'static str, mut handle: tokio::task::JoinHandle<()>, 
     }
 }
 
-fn cleanup_runtime_files(config: &DaemonConfig) {
-    // On Windows `socket_path` is a pipe name and `exists()` will report
-    // false (the pipe namespace isn't a filesystem); the check + remove
-    // become harmless no-ops. On Unix this unlinks the lingering socket
-    // inode (we held the listener open until shutdown).
-    if config.socket_path.exists()
-        && let Err(err) = std::fs::remove_file(&config.socket_path)
-    {
-        warn!(error = %err, path = %config.socket_path.display(), "socket_cleanup_failed");
+/// Files moved aside in preparation for cleanup. Holding the `PathBuf`
+/// values keeps them ready for a later `remove_file`. The struct is `must_use`
+/// so we don't accidentally rename a file aside and then drop the staging
+/// info on the floor (which would leave a `.cleanup` orphan behind).
+#[must_use = "staged runtime files must be removed or explicitly forgotten"]
+struct StagedRuntimeFiles {
+    socket: Option<PathBuf>,
+    token: Option<PathBuf>,
+}
+
+impl StagedRuntimeFiles {
+    fn remove(self) {
+        if let Some(path) = self.socket
+            && let Err(err) = std::fs::remove_file(&path)
+        {
+            warn!(error = %err, path = %path.display(), "socket_cleanup_failed");
+        }
+        if let Some(path) = self.token
+            && let Err(err) = std::fs::remove_file(&path)
+        {
+            warn!(error = %err, path = %path.display(), "token_cleanup_failed");
+        }
     }
-    // Remove the token file on shutdown so a CLI launched after the daemon
-    // exits gets a clean "no daemon running" error instead of trying a
-    // stale token against a fresh process.
-    if config.token_path.exists()
-        && let Err(err) = std::fs::remove_file(&config.token_path)
-    {
-        warn!(error = %err, path = %config.token_path.display(), "token_cleanup_failed");
+}
+
+/// Rename the socket / token files out from under their public paths into
+/// per-daemon staging names *if and only if* they still match the captured
+/// fingerprints. Returning a [`StagedRuntimeFiles`] hands the actual unlink
+/// to the caller, which can defer it until after the accept loop has
+/// drained.
+///
+/// **Order matters.** We stage the token *first* and the socket *second*.
+/// While the socket path is still occupied, any concurrent daemon B is
+/// blocked at [`nagori_ipc::bind_unix`] (Unix) / [`nagori_ipc::bind_pipe`]
+/// (Windows), which means B has not yet reached `write_token_file` and
+/// cannot have planted a fresh token to be rename-stolen by our `rename`.
+/// If we staged the socket first the path would free up immediately, B
+/// could bind and write its token, and our subsequent token stage would
+/// snatch B's freshly written file.
+fn stage_runtime_files(
+    config: &DaemonConfig,
+    fingerprints: &RuntimeFingerprints,
+) -> StagedRuntimeFiles {
+    let token = stage_token(&config.token_path, &fingerprints.token);
+    let socket = stage_socket(&config.socket_path, &fingerprints.socket);
+    StagedRuntimeFiles { socket, token }
+}
+
+/// Build a sibling path like `.nagori.sock.<pid>.<nanos>.cleanup` for
+/// staging. Random-ish enough that two concurrent stagings in the same
+/// process don't collide; if they ever do, `rename(2)` reports the error
+/// and the caller logs and moves on.
+fn cleanup_staging_path(path: &std::path::Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_string_lossy();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    Some(parent.join(format!(".{name}.{}.{nanos:x}.cleanup", std::process::id())))
+}
+
+#[cfg(unix)]
+fn stage_socket(path: &std::path::Path, fingerprint: &SocketFingerprint) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(error = %err, path = %path.display(), "socket_cleanup_stat_failed");
+            return None;
+        }
+    };
+    if meta.dev() != fingerprint.dev || meta.ino() != fingerprint.ino {
+        warn!(
+            path = %path.display(),
+            "socket_cleanup_skipped_fingerprint_mismatch",
+        );
+        return None;
     }
+    let staged = cleanup_staging_path(path)?;
+    if let Err(err) = std::fs::rename(path, &staged) {
+        warn!(error = %err, path = %path.display(), "socket_cleanup_rename_failed");
+        return None;
+    }
+    Some(staged)
+}
+
+#[cfg(not(unix))]
+fn stage_socket(_path: &std::path::Path, _fingerprint: &SocketFingerprint) -> Option<PathBuf> {
+    // The Windows pipe namespace isn't a filesystem: closing the listener
+    // already removes the endpoint. Nothing to stage or unlink.
+    None
+}
+
+fn stage_token(path: &std::path::Path, fingerprint: &TokenFingerprint) -> Option<PathBuf> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(error = %err, path = %path.display(), "token_cleanup_read_failed");
+            return None;
+        }
+    };
+    if content.trim() != fingerprint.0 {
+        warn!(
+            path = %path.display(),
+            "token_cleanup_skipped_fingerprint_mismatch",
+        );
+        return None;
+    }
+    let staged = cleanup_staging_path(path)?;
+    if let Err(err) = std::fs::rename(path, &staged) {
+        warn!(error = %err, path = %path.display(), "token_cleanup_rename_failed");
+        return None;
+    }
+    Some(staged)
 }
 
 #[cfg(all(test, unix))]
