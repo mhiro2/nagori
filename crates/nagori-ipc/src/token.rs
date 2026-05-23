@@ -220,67 +220,112 @@ impl Drop for Win32FileGuard {
     }
 }
 
+/// Write `token` to `path` with an explicit DACL.
+///
+/// `CreateFileW(..., CREATE_ALWAYS, ...)` only applies the supplied
+/// `SECURITY_ATTRIBUTES` when it actually *creates* the file — when the
+/// target already exists, it truncates the contents but leaves the
+/// existing security descriptor untouched. So writing straight into
+/// `path` would re-emit our token under whatever (potentially permissive)
+/// DACL a previous build or crash recovery left behind.
+///
+/// To force the new DACL onto every launch we mirror the Unix flow:
+///
+/// 1. Build the security descriptor up front so a failure here can't
+///    leave a half-written file.
+/// 2. `CreateFileW` a sibling temp file with `CREATE_NEW` and the DACL
+///    attached. `CREATE_NEW` defeats a planted temp file in the parent
+///    (which only matters if the parent isn't already 0o700-equivalent,
+///    but defence in depth is cheap).
+/// 3. `WriteFile` / `FlushFileBuffers`, close the handle.
+/// 4. `MoveFileExW(temp, path, REPLACE_EXISTING | WRITE_THROUGH)` to swap
+///    the freshly-DACL'd file over the previous entry. The old file is
+///    deleted, taking its descriptor with it.
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::too_many_lines)]
 pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
 
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
-        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, WriteFile,
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FlushFileBuffers,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
     };
 
     use crate::windows_security::{GENERIC_READ, GENERIC_WRITE};
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| AppError::Platform(err.to_string()))?;
-    }
+    let parent = path.parent().ok_or_else(|| {
+        AppError::Platform(format!("token path has no parent: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|err| AppError::Platform(err.to_string()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AppError::Platform(format!("token path has no name: {}", path.display())))?;
 
-    // Build the DACL once before opening the file so a failure here does
-    // not leave a partially-written token behind under a default ACL.
+    // Random tail so two concurrent daemon launches can't collide on the
+    // temp file name. `CREATE_NEW` would catch the collision, but the
+    // random suffix lets each launch make progress instead of needing
+    // a retry loop.
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random)
+        .map_err(|err| AppError::Platform(format!("token tmp rng failure: {err}")))?;
+    let tmp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        hex::encode(random),
+    ));
+
+    // Build the DACL up front so a failure here can't leave the temp
+    // file behind under a permissive default ACL.
     let mut security = crate::windows_security::SecurityHandle::current_user_admins_system(
         GENERIC_READ | GENERIC_WRITE,
     )
     .map_err(|err| AppError::Platform(format!("token security descriptor: {err}")))?;
 
-    let wide_path: Vec<u16> = path
+    let wide_tmp: Vec<u16> = tmp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let wide_dst: Vec<u16> = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
-    // SAFETY: `wide_path` is a NUL-terminated UTF-16 buffer that lives for
-    // the duration of the call. `security.as_mut_ptr()` returns a valid
-    // SECURITY_ATTRIBUTES owned by `security`; Windows captures the DACL
-    // before CreateFileW returns. CREATE_ALWAYS replaces any existing
-    // file, applying the new DACL we hand in.
+    // SAFETY: `wide_tmp` is NUL-terminated and lives for the call.
+    // `security.as_mut_ptr()` is a valid SECURITY_ATTRIBUTES pointer
+    // owned by `security`. CREATE_NEW fails (rather than opens) if the
+    // path already exists, so we only ever attach the DACL to a file we
+    // just created — never inherit an existing descriptor.
     let handle = unsafe {
         CreateFileW(
-            wide_path.as_ptr(),
+            wide_tmp.as_ptr(),
             GENERIC_WRITE,
             FILE_SHARE_READ,
             security.as_mut_ptr().cast(),
-            CREATE_ALWAYS,
+            CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
             ptr::null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
         return Err(AppError::Platform(format!(
-            "CreateFileW for token file failed: {}",
+            "CreateFileW for token temp file failed: {}",
             std::io::Error::last_os_error(),
         )));
     }
-    let _close = Win32FileGuard(handle);
+    let close_guard = Win32FileGuard(handle);
 
     let bytes = token.as_str().as_bytes();
     let len = u32::try_from(bytes.len()).map_err(|_| {
         AppError::Platform("token bytes exceed DWORD bounds (impossible: 64 hex chars)".to_owned())
     })?;
     let mut written: u32 = 0;
-    // SAFETY: handle is valid; bytes is a valid pointer-length pair into
-    // owned memory; `written` is a writable u32.
+    // SAFETY: handle is valid; `bytes` is a valid pointer-length pair
+    // into owned memory; `written` is a writable u32.
     let ok = unsafe {
         WriteFile(
             handle,
@@ -291,14 +336,49 @@ pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
         )
     };
     if ok == 0 || written != len {
+        let err = std::io::Error::last_os_error();
+        drop(close_guard);
+        // Best-effort cleanup so a write failure doesn't leak a stray
+        // temp file into the daemon's data dir.
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(AppError::Platform(format!(
-            "WriteFile for token file failed: {}",
-            std::io::Error::last_os_error(),
+            "WriteFile for token temp file failed: {err}",
         )));
     }
-    // `security` is kept alive until after the descriptor has been
-    // captured by CreateFileW. Dropping it now releases the buffers.
+    // SAFETY: handle is still valid; FlushFileBuffers takes no other args.
+    let flush_ok = unsafe { FlushFileBuffers(handle) };
+    if flush_ok == 0 {
+        let err = std::io::Error::last_os_error();
+        drop(close_guard);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::Platform(format!(
+            "FlushFileBuffers for token temp file failed: {err}",
+        )));
+    }
+    // Release the handle before MoveFileExW so the rename target isn't
+    // held open by us.
+    drop(close_guard);
+    // `security` was captured by CreateFileW; safe to drop now that the
+    // file is closed.
     drop(security);
+
+    // SAFETY: both wide buffers are NUL-terminated and live for the
+    // call. MOVEFILE_REPLACE_EXISTING swaps over `path` atomically (on
+    // NTFS) and the old file — including its old DACL — is deleted.
+    let move_ok = unsafe {
+        MoveFileExW(
+            wide_tmp.as_ptr(),
+            wide_dst.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if move_ok == 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::Platform(format!(
+            "MoveFileExW for token file failed: {err}",
+        )));
+    }
     Ok(())
 }
 
