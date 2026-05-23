@@ -21,8 +21,8 @@ catalogs:
     jsdom: 29.1.1
     vitest: 4.1.6
   tooling:
-    "@types/node": 24.12.4
-    "@typescript/native-preview": 7.0.0-dev.20260514.1
+    "@types/node": 25.8.0
+    "@typescript/native-preview": 7.0.0-dev.20260516.1
     esbuild: 0.28.0
     oxfmt: 0.50.0
     oxlint: 1.65.0
