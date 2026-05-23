@@ -130,7 +130,7 @@ export const zhHans: Messages = {
     },
     capture: {
       legend: '捕获',
-      enabled: '保存剪贴板历史',
+      enabled: '启用剪贴板捕获',
       autoPaste: '按 Enter 自动粘贴',
       pasteFormatDefault: '默认粘贴格式',
       pasteFormatOptions: {
@@ -206,7 +206,7 @@ export const zhHans: Messages = {
         light: '浅色',
         dark: '深色',
       },
-      recentOrder: '空查询排序',
+      recentOrder: '历史排序',
       recentOrderOptions: {
         by_recency: '最近优先',
         by_use_count: '常用优先',
@@ -254,10 +254,8 @@ export const zhHans: Messages = {
     updates: {
       legend: '更新',
       autoCheck: '自动检查更新',
-      autoCheckHelp:
-        '定期检查发布源，发现新版本时提示。未经确认不会自动安装。这是 Nagori 自行发起的唯一一次网络调用——关闭后守护进程将完全离线运行。',
       channel: '通道',
-      checkNow: '立即检查更新',
+      checkNow: '立即检查',
       checking: '检查中…',
       upToDate: '已是最新版本。',
       available: '有可用更新：{version}',
@@ -265,6 +263,34 @@ export const zhHans: Messages = {
         '有可用更新：{version}。当前安装形式不支持自动更新，请从 GitHub 下载新版本。',
       viewRelease: '查看版本',
       downloadManual: '从 GitHub 下载',
+    },
+    capabilities: {
+      legend: '平台功能',
+      help: '列出 Nagori 在当前操作系统中可用的功能。显示为「需要权限」的功能，需要在操作系统的系统设置中授权后才能使用。',
+      platform: '平台',
+      tier: '层级',
+      columns: { capability: '功能', status: '状态', detail: '详情' },
+      statuses: {
+        available: '可用',
+        unsupported: '不支持',
+        requiresPermission: '需要权限',
+        requiresExternalTool: '外部工具',
+        experimental: '实验性',
+      },
+      rows: {
+        captureText: '捕获文本',
+        captureImage: '捕获图片',
+        captureFiles: '捕获文件',
+        writeText: '写入文本',
+        writeImage: '写入图片',
+        clipboardMultiRepresentationWrite: '多表示写回',
+        autoPaste: '自动粘贴',
+        globalHotkey: '全局快捷键',
+        frontmostApp: '最前置应用',
+        permissionsUi: '权限设置 UI',
+        updateCheck: '更新检查',
+        previewQuickLook: '预览 (Quick Look)',
+      },
     },
   },
   keybindings: {

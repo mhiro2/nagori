@@ -133,7 +133,7 @@ export const ja: Messages = {
     },
     capture: {
       legend: 'キャプチャ',
-      enabled: 'クリップボード履歴を保存する',
+      enabled: 'クリップボードの取り込みを有効にする',
       autoPaste: 'Enter で自動ペーストする',
       pasteFormatDefault: '既定のペースト形式',
       pasteFormatOptions: {
@@ -212,7 +212,7 @@ export const ja: Messages = {
         light: 'ライト',
         dark: 'ダーク',
       },
-      recentOrder: '空検索時の並び順',
+      recentOrder: '履歴の並び順',
       recentOrderOptions: {
         by_recency: '新しい順',
         by_use_count: '使用回数順',
@@ -262,8 +262,6 @@ export const ja: Messages = {
     updates: {
       legend: 'アップデート',
       autoCheck: '自動でアップデートを確認',
-      autoCheckHelp:
-        'リリースフィードを定期的に確認し、新しいビルドが見つかったら通知します。確認なしにインストールはされません。これは Nagori が自発的に行う唯一のネットワーク通信なので、オフにするとデーモンは完全にオフラインで動作します。',
       channel: 'チャネル',
       checkNow: '今すぐ確認',
       checking: '確認中…',
@@ -273,6 +271,34 @@ export const ja: Messages = {
         '新しいバージョンがあります: {version}。現在のインストール形態では自動更新ができないため、GitHub から新しいビルドをダウンロードしてください。',
       viewRelease: 'リリースを表示',
       downloadManual: 'GitHub からダウンロード',
+    },
+    capabilities: {
+      legend: 'プラットフォーム機能',
+      help: 'Nagori が現在の OS で利用できる機能の一覧です。「要許可」と表示されている機能は、OS のシステム設定でアクセスを許可すると使えるようになります。',
+      platform: 'プラットフォーム',
+      tier: 'ティア',
+      columns: { capability: '機能', status: '状態', detail: '詳細' },
+      statuses: {
+        available: '利用可能',
+        unsupported: '非対応',
+        requiresPermission: '要許可',
+        requiresExternalTool: '外部ツール',
+        experimental: '実験的',
+      },
+      rows: {
+        captureText: 'テキストを取り込み',
+        captureImage: '画像を取り込み',
+        captureFiles: 'ファイルを取り込み',
+        writeText: 'テキストを書き込み',
+        writeImage: '画像を書き込み',
+        clipboardMultiRepresentationWrite: '複数表現での書き戻し',
+        autoPaste: '自動ペースト',
+        globalHotkey: 'グローバルホットキー',
+        frontmostApp: '最前面アプリの取得',
+        permissionsUi: '権限設定 UI',
+        updateCheck: 'アップデート確認',
+        previewQuickLook: 'プレビュー (Quick Look)',
+      },
     },
   },
   keybindings: {

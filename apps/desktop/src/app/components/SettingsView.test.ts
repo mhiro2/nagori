@@ -1614,7 +1614,7 @@ const CAPABILITY_LABELS = [
 const STATUS_BADGE = {
   available: 'Available',
   unsupported: 'Unsupported',
-  requiresPermission: 'Permission',
+  requiresPermission: 'Needs permission',
   requiresExternalTool: 'External tool',
   experimental: 'Experimental',
 } as const;

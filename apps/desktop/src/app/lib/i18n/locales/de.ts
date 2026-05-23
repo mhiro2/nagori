@@ -140,7 +140,7 @@ export const de: Messages = {
     },
     capture: {
       legend: 'Erfassung',
-      enabled: 'Zwischenablage-Verlauf speichern',
+      enabled: 'Zwischenablage-Erfassung aktivieren',
       autoPaste: 'Mit Enter automatisch einfügen',
       pasteFormatDefault: 'Standard-Einfügeformat',
       pasteFormatOptions: {
@@ -221,7 +221,7 @@ export const de: Messages = {
         light: 'Hell',
         dark: 'Dunkel',
       },
-      recentOrder: 'Reihenfolge bei leerer Suche',
+      recentOrder: 'Verlaufsreihenfolge',
       recentOrderOptions: {
         by_recency: 'Neueste zuerst',
         by_use_count: 'Häufigste zuerst',
@@ -273,10 +273,8 @@ export const de: Messages = {
     updates: {
       legend: 'Updates',
       autoCheck: 'Automatisch nach Updates suchen',
-      autoCheckHelp:
-        'Prüft regelmäßig den Release-Feed und zeigt ein Banner, sobald ein neuer Build verfügbar ist. Der Download wird niemals ohne Ihre Bestätigung installiert. Dies ist der einzige Netzwerkaufruf, den Nagori von sich aus tätigt — deaktivieren Sie ihn, damit der Daemon vollständig offline bleibt.',
       channel: 'Kanal',
-      checkNow: 'Jetzt nach Updates suchen',
+      checkNow: 'Jetzt prüfen',
       checking: 'Wird geprüft …',
       upToDate: 'Sie verwenden die neueste Version.',
       available: 'Update verfügbar: {version}',
@@ -284,6 +282,34 @@ export const de: Messages = {
         'Update verfügbar: {version}. Die Installationsart unterstützt kein In-place-Update — bitte den neuen Build von GitHub herunterladen.',
       viewRelease: 'Release anzeigen',
       downloadManual: 'Von GitHub herunterladen',
+    },
+    capabilities: {
+      legend: 'Plattformfähigkeiten',
+      help: 'Was Nagori auf deinem aktuellen Betriebssystem nutzen kann. Funktionen mit dem Status „Berechtigung erforderlich" werden verfügbar, sobald du in den Systemeinstellungen deines Betriebssystems den Zugriff erlaubst.',
+      platform: 'Plattform',
+      tier: 'Stufe',
+      columns: { capability: 'Fähigkeit', status: 'Status', detail: 'Details' },
+      statuses: {
+        available: 'Verfügbar',
+        unsupported: 'Nicht unterstützt',
+        requiresPermission: 'Berechtigung erforderlich',
+        requiresExternalTool: 'Externes Werkzeug',
+        experimental: 'Experimentell',
+      },
+      rows: {
+        captureText: 'Text erfassen',
+        captureImage: 'Bild erfassen',
+        captureFiles: 'Dateien erfassen',
+        writeText: 'Text schreiben',
+        writeImage: 'Bild schreiben',
+        clipboardMultiRepresentationWrite: 'Mehrfachdarstellung beim Zurückschreiben',
+        autoPaste: 'Automatisches Einfügen',
+        globalHotkey: 'Globales Tastenkürzel',
+        frontmostApp: 'Vordergrund-App',
+        permissionsUi: 'Berechtigungs-UI',
+        updateCheck: 'Updateprüfung',
+        previewQuickLook: 'Vorschau (Quick Look)',
+      },
     },
   },
   keybindings: {

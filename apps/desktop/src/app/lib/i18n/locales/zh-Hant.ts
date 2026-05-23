@@ -131,7 +131,7 @@ export const zhHant: Messages = {
     },
     capture: {
       legend: '擷取',
-      enabled: '儲存剪貼簿歷史',
+      enabled: '啟用剪貼簿擷取',
       autoPaste: '按 Enter 自動貼上',
       pasteFormatDefault: '預設貼上格式',
       pasteFormatOptions: {
@@ -206,7 +206,7 @@ export const zhHant: Messages = {
         light: '淺色',
         dark: '深色',
       },
-      recentOrder: '空查詢排序',
+      recentOrder: '歷史排序',
       recentOrderOptions: {
         by_recency: '最近優先',
         by_use_count: '常用優先',
@@ -254,10 +254,8 @@ export const zhHant: Messages = {
     updates: {
       legend: '更新',
       autoCheck: '自動檢查更新',
-      autoCheckHelp:
-        '定期檢查發行來源，發現新版本時提示。未經確認不會自動安裝。這是 Nagori 自行發起的唯一一次網路呼叫——關閉後守護程式將完全離線運作。',
       channel: '通道',
-      checkNow: '立即檢查更新',
+      checkNow: '立即檢查',
       checking: '檢查中…',
       upToDate: '已是最新版本。',
       available: '有可用的更新：{version}',
@@ -265,6 +263,34 @@ export const zhHant: Messages = {
         '有可用的更新：{version}。目前的安裝形式不支援自動更新，請從 GitHub 下載新版本。',
       viewRelease: '檢視版本',
       downloadManual: '從 GitHub 下載',
+    },
+    capabilities: {
+      legend: '平台功能',
+      help: '列出 Nagori 在目前作業系統中可用的功能。顯示為「需要權限」的功能，須在作業系統的系統設定中授權後才能使用。',
+      platform: '平台',
+      tier: '層級',
+      columns: { capability: '功能', status: '狀態', detail: '詳細' },
+      statuses: {
+        available: '可用',
+        unsupported: '不支援',
+        requiresPermission: '需要權限',
+        requiresExternalTool: '外部工具',
+        experimental: '實驗性',
+      },
+      rows: {
+        captureText: '擷取文字',
+        captureImage: '擷取圖片',
+        captureFiles: '擷取檔案',
+        writeText: '寫入文字',
+        writeImage: '寫入圖片',
+        clipboardMultiRepresentationWrite: '多表示寫回',
+        autoPaste: '自動貼上',
+        globalHotkey: '全域快速鍵',
+        frontmostApp: '最前景應用程式',
+        permissionsUi: '權限設定 UI',
+        updateCheck: '更新檢查',
+        previewQuickLook: '預覽 (Quick Look)',
+      },
     },
   },
   keybindings: {

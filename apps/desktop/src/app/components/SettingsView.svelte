@@ -3,6 +3,7 @@
   import { describeError } from "../lib/errors";
   import { checkForUpdates, getCapabilities, getSettings, updateSettings } from "../lib/commands";
   import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
+  import type { Messages } from "../lib/i18n/locales/en";
   import {
     MAX_USER_REGEX_LEN,
     MAX_USER_REGEX_NESTING,
@@ -333,44 +334,54 @@
     })();
   });
 
+  type CapabilityRowKey = keyof Messages["settings"]["capabilities"]["rows"];
+
   type CapabilityRow = {
+    key: CapabilityRowKey;
     label: string;
     capability: Capability;
   };
 
   const capabilityRows = $derived.by<CapabilityRow[]>(() => {
     if (!capabilities) return [];
+    const rows = t.settings.capabilities.rows;
     return [
-      { label: "Capture text", capability: capabilities.captureText },
-      { label: "Capture image", capability: capabilities.captureImage },
-      { label: "Capture files", capability: capabilities.captureFiles },
-      { label: "Write text", capability: capabilities.writeText },
-      { label: "Write image", capability: capabilities.writeImage },
+      { key: "captureText", label: rows.captureText, capability: capabilities.captureText },
+      { key: "captureImage", label: rows.captureImage, capability: capabilities.captureImage },
+      { key: "captureFiles", label: rows.captureFiles, capability: capabilities.captureFiles },
+      { key: "writeText", label: rows.writeText, capability: capabilities.writeText },
+      { key: "writeImage", label: rows.writeImage, capability: capabilities.writeImage },
       {
-        label: "Multi-representation copy-back",
+        key: "clipboardMultiRepresentationWrite",
+        label: rows.clipboardMultiRepresentationWrite,
         capability: capabilities.clipboardMultiRepresentationWrite,
       },
-      { label: "Auto-paste", capability: capabilities.autoPaste },
-      { label: "Global hotkey", capability: capabilities.globalHotkey },
-      { label: "Frontmost app", capability: capabilities.frontmostApp },
-      { label: "Permissions UI", capability: capabilities.permissionsUi },
-      { label: "Update check", capability: capabilities.updateCheck },
-      { label: "Preview (Quick Look)", capability: capabilities.previewQuickLook },
+      { key: "autoPaste", label: rows.autoPaste, capability: capabilities.autoPaste },
+      { key: "globalHotkey", label: rows.globalHotkey, capability: capabilities.globalHotkey },
+      { key: "frontmostApp", label: rows.frontmostApp, capability: capabilities.frontmostApp },
+      { key: "permissionsUi", label: rows.permissionsUi, capability: capabilities.permissionsUi },
+      { key: "updateCheck", label: rows.updateCheck, capability: capabilities.updateCheck },
+      {
+        key: "previewQuickLook",
+        label: rows.previewQuickLook,
+        capability: capabilities.previewQuickLook,
+      },
     ];
   });
 
   const capabilityStatusLabel = (capability: Capability): string => {
+    const statuses = t.settings.capabilities.statuses;
     switch (capability.status) {
       case "available":
-        return "Available";
+        return statuses.available;
       case "unsupported":
-        return "Unsupported";
+        return statuses.unsupported;
       case "requiresPermission":
-        return "Permission";
+        return statuses.requiresPermission;
       case "requiresExternalTool":
-        return "External tool";
+        return statuses.requiresExternalTool;
       case "experimental":
-        return "Experimental";
+        return statuses.experimental;
     }
   };
 
@@ -1352,26 +1363,22 @@
       </fieldset>
       {#if capabilities}
         <fieldset>
-          <legend>Platform capabilities</legend>
-          <p class="help">
-            What this OS build can do, independent of the live permission state.
-            Use the Privacy/Permissions section above to grant access for items
-            marked “Permission”.
-          </p>
+          <legend>{t.settings.capabilities.legend}</legend>
+          <p class="help">{t.settings.capabilities.help}</p>
           <div class="capability-meta">
-            <span><strong>Platform:</strong> {capabilities.platform}</span>
-            <span><strong>Tier:</strong> {capabilities.tier}</span>
+            <span><strong>{t.settings.capabilities.platform}:</strong> {capabilities.platform}</span>
+            <span><strong>{t.settings.capabilities.tier}:</strong> {capabilities.tier}</span>
           </div>
           <table class="capability-table">
             <thead>
               <tr>
-                <th scope="col">Capability</th>
-                <th scope="col">Status</th>
-                <th scope="col">Detail</th>
+                <th scope="col">{t.settings.capabilities.columns.capability}</th>
+                <th scope="col">{t.settings.capabilities.columns.status}</th>
+                <th scope="col">{t.settings.capabilities.columns.detail}</th>
               </tr>
             </thead>
             <tbody>
-              {#each capabilityRows as row (row.label)}
+              {#each capabilityRows as row (row.key)}
                 <tr>
                   <th scope="row" class="capability-label">{row.label}</th>
                   <td>
@@ -1399,7 +1406,6 @@
           />
           {t.settings.updates.autoCheck}
         </label>
-        <p class="help">{t.settings.updates.autoCheckHelp}</p>
         <p class="help">
           {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
         </p>
@@ -1734,6 +1740,7 @@
     border-collapse: collapse;
     width: 100%;
     font-size: 0.8125rem;
+    table-layout: auto;
   }
   .capability-table th,
   .capability-table td {
@@ -1741,6 +1748,16 @@
     text-align: left;
     font-weight: normal;
     vertical-align: baseline;
+  }
+  .capability-table thead th:nth-child(1),
+  .capability-table tbody th {
+    white-space: nowrap;
+    width: 1%;
+  }
+  .capability-table thead th:nth-child(2),
+  .capability-table tbody td:nth-child(2) {
+    white-space: nowrap;
+    width: 1%;
   }
   .capability-table thead th {
     font-size: 0.6875rem;
@@ -1756,12 +1773,11 @@
     color: var(--fg, #f5f5f5);
   }
   .capability-status {
-    justify-self: start;
-    padding: 0.1rem 0.5rem;
+    display: inline-block;
+    white-space: nowrap;
+    padding: 0.1rem 0.55rem;
     border-radius: 999px;
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 0.75rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
     background: rgba(255, 255, 255, 0.04);
     color: var(--muted, rgba(255, 255, 255, 0.7));

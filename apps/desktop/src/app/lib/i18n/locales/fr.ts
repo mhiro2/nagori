@@ -142,7 +142,7 @@ export const fr: Messages = {
     },
     capture: {
       legend: 'Capture',
-      enabled: 'Enregistrer l’historique du presse-papiers',
+      enabled: 'Activer la capture du presse-papiers',
       autoPaste: 'Coller automatiquement avec Entrée',
       pasteFormatDefault: 'Format de collage par défaut',
       pasteFormatOptions: {
@@ -223,7 +223,7 @@ export const fr: Messages = {
         light: 'Clair',
         dark: 'Sombre',
       },
-      recentOrder: 'Ordre quand la recherche est vide',
+      recentOrder: 'Ordre de l’historique',
       recentOrderOptions: {
         by_recency: 'Plus récents',
         by_use_count: 'Plus utilisés',
@@ -274,10 +274,8 @@ export const fr: Messages = {
     updates: {
       legend: 'Mises à jour',
       autoCheck: 'Vérifier automatiquement les mises à jour',
-      autoCheckHelp:
-        'Interroge le flux de versions régulièrement et affiche une bannière quand une nouvelle build est disponible. Le téléchargement n’est jamais installé sans votre confirmation. C’est le seul appel réseau que Nagori effectue de lui-même — désactivez-le pour que le démon reste totalement hors ligne.',
       channel: 'Canal',
-      checkNow: 'Vérifier maintenant',
+      checkNow: 'Vérifier',
       checking: 'Vérification…',
       upToDate: 'Vous utilisez la dernière version.',
       available: 'Mise à jour disponible : {version}',
@@ -285,6 +283,34 @@ export const fr: Messages = {
         'Mise à jour disponible : {version}. Votre mode d’installation ne permet pas la mise à jour en place — téléchargez la nouvelle build depuis GitHub.',
       viewRelease: 'Voir la version',
       downloadManual: 'Télécharger depuis GitHub',
+    },
+    capabilities: {
+      legend: 'Capacités de la plateforme',
+      help: 'Ce que Nagori peut utiliser sur votre système d’exploitation actuel. Les fonctionnalités marquées « Autorisation requise » deviennent disponibles une fois l’accès accordé dans les réglages système de votre OS.',
+      platform: 'Plateforme',
+      tier: 'Niveau',
+      columns: { capability: 'Capacité', status: 'Statut', detail: 'Détail' },
+      statuses: {
+        available: 'Disponible',
+        unsupported: 'Non pris en charge',
+        requiresPermission: 'Autorisation requise',
+        requiresExternalTool: 'Outil externe',
+        experimental: 'Expérimental',
+      },
+      rows: {
+        captureText: 'Capturer le texte',
+        captureImage: 'Capturer l’image',
+        captureFiles: 'Capturer les fichiers',
+        writeText: 'Écrire le texte',
+        writeImage: 'Écrire l’image',
+        clipboardMultiRepresentationWrite: 'Réécriture multi-représentation',
+        autoPaste: 'Collage automatique',
+        globalHotkey: 'Raccourci global',
+        frontmostApp: 'Application au premier plan',
+        permissionsUi: 'Interface des autorisations',
+        updateCheck: 'Vérification des mises à jour',
+        previewQuickLook: 'Aperçu (Quick Look)',
+      },
     },
   },
   keybindings: {

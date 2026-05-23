@@ -141,7 +141,7 @@ export const es: Messages = {
     },
     capture: {
       legend: 'Captura',
-      enabled: 'Guardar historial del portapapeles',
+      enabled: 'Activar la captura del portapapeles',
       autoPaste: 'Pegar automáticamente con Intro',
       pasteFormatDefault: 'Formato de pegado por defecto',
       pasteFormatOptions: {
@@ -223,7 +223,7 @@ export const es: Messages = {
         light: 'Claro',
         dark: 'Oscuro',
       },
-      recentOrder: 'Orden con búsqueda vacía',
+      recentOrder: 'Orden del historial',
       recentOrderOptions: {
         by_recency: 'Más recientes',
         by_use_count: 'Más usados',
@@ -274,10 +274,8 @@ export const es: Messages = {
     updates: {
       legend: 'Actualizaciones',
       autoCheck: 'Buscar actualizaciones automáticamente',
-      autoCheckHelp:
-        'Consulta el canal de versiones periódicamente y muestra un aviso cuando hay una nueva. La descarga nunca se instala sin tu confirmación. Es la única llamada de red que Nagori realiza por sí mismo: desactívala para que el daemon trabaje totalmente sin conexión.',
       channel: 'Canal',
-      checkNow: 'Buscar ahora',
+      checkNow: 'Buscar',
       checking: 'Buscando…',
       upToDate: 'Estás usando la última versión.',
       available: 'Actualización disponible: {version}',
@@ -285,6 +283,34 @@ export const es: Messages = {
         'Actualización disponible: {version}. Tu modo de instalación no admite la actualización en sitio: descarga la nueva compilación desde GitHub.',
       viewRelease: 'Ver la versión',
       downloadManual: 'Descargar desde GitHub',
+    },
+    capabilities: {
+      legend: 'Capacidades de la plataforma',
+      help: 'Lo que Nagori puede usar en tu sistema operativo actual. Las funciones marcadas como «Permiso necesario» quedan disponibles tras conceder acceso en los ajustes del sistema operativo.',
+      platform: 'Plataforma',
+      tier: 'Nivel',
+      columns: { capability: 'Capacidad', status: 'Estado', detail: 'Detalle' },
+      statuses: {
+        available: 'Disponible',
+        unsupported: 'No compatible',
+        requiresPermission: 'Permiso necesario',
+        requiresExternalTool: 'Herramienta externa',
+        experimental: 'Experimental',
+      },
+      rows: {
+        captureText: 'Capturar texto',
+        captureImage: 'Capturar imagen',
+        captureFiles: 'Capturar archivos',
+        writeText: 'Escribir texto',
+        writeImage: 'Escribir imagen',
+        clipboardMultiRepresentationWrite: 'Reescritura multi-representación',
+        autoPaste: 'Pegado automático',
+        globalHotkey: 'Atajo global',
+        frontmostApp: 'Aplicación en primer plano',
+        permissionsUi: 'IU de permisos',
+        updateCheck: 'Comprobación de actualizaciones',
+        previewQuickLook: 'Vista previa (Quick Look)',
+      },
     },
   },
   keybindings: {

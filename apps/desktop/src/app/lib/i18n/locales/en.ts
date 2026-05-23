@@ -245,7 +245,6 @@ export type Messages = {
     updates: {
       legend: string;
       autoCheck: string;
-      autoCheckHelp: string;
       channel: string;
       checkNow: string;
       checking: string;
@@ -254,6 +253,34 @@ export type Messages = {
       availableManual: string;
       viewRelease: string;
       downloadManual: string;
+    };
+    capabilities: {
+      legend: string;
+      help: string;
+      platform: string;
+      tier: string;
+      columns: { capability: string; status: string; detail: string };
+      statuses: {
+        available: string;
+        unsupported: string;
+        requiresPermission: string;
+        requiresExternalTool: string;
+        experimental: string;
+      };
+      rows: {
+        captureText: string;
+        captureImage: string;
+        captureFiles: string;
+        writeText: string;
+        writeImage: string;
+        clipboardMultiRepresentationWrite: string;
+        autoPaste: string;
+        globalHotkey: string;
+        frontmostApp: string;
+        permissionsUi: string;
+        updateCheck: string;
+        previewQuickLook: string;
+      };
     };
   };
   keybindings: {
@@ -429,7 +456,7 @@ export const en: Messages = {
     },
     capture: {
       legend: 'Capture',
-      enabled: 'Save clipboard history',
+      enabled: 'Enable clipboard capture',
       autoPaste: 'Auto-paste on Enter',
       pasteFormatDefault: 'Default paste format',
       pasteFormatOptions: {
@@ -508,7 +535,7 @@ export const en: Messages = {
         light: 'Light',
         dark: 'Dark',
       },
-      recentOrder: 'Empty-query order',
+      recentOrder: 'History order',
       recentOrderOptions: {
         by_recency: 'Most recent',
         by_use_count: 'Most used',
@@ -558,10 +585,8 @@ export const en: Messages = {
     updates: {
       legend: 'Updates',
       autoCheck: 'Check for updates automatically',
-      autoCheckHelp:
-        'Probe the release feed periodically and surface a banner when a new build is available. The download is never installed without your confirmation. This is the only network call Nagori makes on its own — turn it off to keep the daemon fully offline.',
       channel: 'Channel',
-      checkNow: 'Check for updates now',
+      checkNow: 'Check now',
       checking: 'Checking…',
       upToDate: 'You are running the latest release.',
       available: 'Update available: {version}',
@@ -569,6 +594,34 @@ export const en: Messages = {
         'Update available: {version}. Your install medium does not support in-app upgrade — download the new build from GitHub.',
       viewRelease: 'View release',
       downloadManual: 'Download from GitHub',
+    },
+    capabilities: {
+      legend: 'Platform capabilities',
+      help: 'What Nagori can use on your current OS. Features shown as "Needs permission" become available after you grant access in your operating system’s settings.',
+      platform: 'Platform',
+      tier: 'Tier',
+      columns: { capability: 'Capability', status: 'Status', detail: 'Detail' },
+      statuses: {
+        available: 'Available',
+        unsupported: 'Unsupported',
+        requiresPermission: 'Needs permission',
+        requiresExternalTool: 'External tool',
+        experimental: 'Experimental',
+      },
+      rows: {
+        captureText: 'Capture text',
+        captureImage: 'Capture image',
+        captureFiles: 'Capture files',
+        writeText: 'Write text',
+        writeImage: 'Write image',
+        clipboardMultiRepresentationWrite: 'Multi-representation copy-back',
+        autoPaste: 'Auto-paste',
+        globalHotkey: 'Global hotkey',
+        frontmostApp: 'Frontmost app',
+        permissionsUi: 'Permissions UI',
+        updateCheck: 'Update check',
+        previewQuickLook: 'Preview (Quick Look)',
+      },
     },
   },
   keybindings: {

@@ -132,7 +132,7 @@ export const ko: Messages = {
     },
     capture: {
       legend: '캡처',
-      enabled: '클립보드 기록 저장',
+      enabled: '클립보드 캡처 사용',
       autoPaste: 'Enter에서 자동 붙여넣기',
       pasteFormatDefault: '기본 붙여넣기 형식',
       pasteFormatOptions: {
@@ -210,7 +210,7 @@ export const ko: Messages = {
         light: '라이트',
         dark: '다크',
       },
-      recentOrder: '빈 검색 정렬',
+      recentOrder: '기록 정렬',
       recentOrderOptions: {
         by_recency: '최근순',
         by_use_count: '사용 횟수순',
@@ -259,10 +259,8 @@ export const ko: Messages = {
     updates: {
       legend: '업데이트',
       autoCheck: '자동으로 업데이트 확인',
-      autoCheckHelp:
-        '릴리스 피드를 주기적으로 확인하고 새 빌드가 있을 때 배너를 표시합니다. 확인 없이 설치되지는 않습니다. Nagori 가 스스로 호출하는 유일한 네트워크 통신이므로, 끄면 데몬은 완전히 오프라인으로 동작합니다.',
       channel: '채널',
-      checkNow: '지금 업데이트 확인',
+      checkNow: '지금 확인',
       checking: '확인 중…',
       upToDate: '최신 릴리스를 사용 중입니다.',
       available: '업데이트 사용 가능: {version}',
@@ -270,6 +268,34 @@ export const ko: Messages = {
         '업데이트 사용 가능: {version}. 현재 설치 형식에서는 자동 업데이트를 사용할 수 없습니다. GitHub에서 새 빌드를 다운로드하세요.',
       viewRelease: '릴리스 보기',
       downloadManual: 'GitHub에서 다운로드',
+    },
+    capabilities: {
+      legend: '플랫폼 기능',
+      help: 'Nagori가 현재 OS에서 사용할 수 있는 기능 목록입니다. "권한 필요"로 표시된 기능은 OS의 시스템 설정에서 액세스를 허용하면 사용할 수 있습니다.',
+      platform: '플랫폼',
+      tier: '계층',
+      columns: { capability: '기능', status: '상태', detail: '세부 정보' },
+      statuses: {
+        available: '사용 가능',
+        unsupported: '미지원',
+        requiresPermission: '권한 필요',
+        requiresExternalTool: '외부 도구',
+        experimental: '실험적',
+      },
+      rows: {
+        captureText: '텍스트 캡처',
+        captureImage: '이미지 캡처',
+        captureFiles: '파일 캡처',
+        writeText: '텍스트 쓰기',
+        writeImage: '이미지 쓰기',
+        clipboardMultiRepresentationWrite: '다중 표현 쓰기',
+        autoPaste: '자동 붙여넣기',
+        globalHotkey: '전역 단축키',
+        frontmostApp: '최전면 앱 감지',
+        permissionsUi: '권한 UI',
+        updateCheck: '업데이트 확인',
+        previewQuickLook: '미리보기 (Quick Look)',
+      },
     },
   },
   keybindings: {
