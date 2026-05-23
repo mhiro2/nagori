@@ -970,8 +970,8 @@
           />
           {t.settings.capture.autoPaste}
         </label>
-        <label>
-          {t.settings.capture.pasteFormatDefault}
+        <label class="field-row">
+          <span>{t.settings.capture.pasteFormatDefault}</span>
           <select
             bind:value={settings.pasteFormatDefault}
             onchange={(e) => {
@@ -984,8 +984,8 @@
             <option value="plain_text">{t.settings.capture.pasteFormatOptions.plain_text}</option>
           </select>
         </label>
-        <label>
-          {t.settings.capture.hotkey}
+        <label class="field-row">
+          <span>{t.settings.capture.hotkey}</span>
           <input
             type="text"
             bind:value={settings.globalHotkey}
@@ -1014,8 +1014,8 @@
 
       <fieldset>
         <legend>{t.settings.display.legend}</legend>
-        <label>
-          {t.settings.display.rowCount}
+        <label class="field-row">
+          <span>{t.settings.display.rowCount}</span>
           <input
             type="number"
             min="3"
@@ -1093,8 +1093,8 @@
 
       <fieldset>
         <legend>{t.settings.appearance.legend}</legend>
-        <label>
-          {t.settings.appearance.locale}
+        <label class="field-row">
+          <span>{t.settings.appearance.locale}</span>
           <select
             bind:value={settings.locale}
             onchange={(e) => onLocaleChange((e.target as HTMLSelectElement).value as LocaleSetting)}
@@ -1104,8 +1104,8 @@
             {/each}
           </select>
         </label>
-        <label>
-          {t.settings.appearance.theme}
+        <label class="field-row">
+          <span>{t.settings.appearance.theme}</span>
           <select
             bind:value={settings.appearance}
             onchange={(e) => onAppearanceChange((e.target as HTMLSelectElement).value as Appearance)}
@@ -1115,8 +1115,8 @@
             <option value="dark">{t.settings.appearance.themeOptions.dark}</option>
           </select>
         </label>
-        <label>
-          {t.settings.appearance.recentOrder}
+        <label class="field-row">
+          <span>{t.settings.appearance.recentOrder}</span>
           <select
             bind:value={settings.recentOrder}
             onchange={(e) => {
@@ -1412,7 +1412,7 @@
         <div class="actions">
           <button
             type="button"
-            class="secondary"
+            class="secondary compact"
             disabled={updateChecking}
             onclick={runUpdateCheck}
           >
@@ -1592,6 +1592,22 @@
     display: flex;
     font-size: 0.875rem;
   }
+  /* Two-column grid for labeled controls in the General tab: keeps the
+     label width fixed so adjacent rows' inputs line up vertically, and
+     caps the control width so selects/text inputs don't stretch to the
+     fieldset edge. */
+  label.field-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 12rem) minmax(8rem, 14rem);
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+  }
+  label.field-row > input,
+  label.field-row > select {
+    width: 100%;
+    max-width: none;
+  }
   .checkbox-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
@@ -1714,6 +1730,10 @@
     color: inherit;
     border-color: var(--border, rgba(255, 255, 255, 0.18));
     font-weight: 500;
+  }
+  .actions button.compact {
+    padding: 0.25rem 0.7rem;
+    font-size: 0.8rem;
   }
   .actions button:not(:disabled):hover {
     filter: brightness(1.08);
