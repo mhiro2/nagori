@@ -8,6 +8,7 @@ vi.mock('../lib/tauri', () => ({
     navigate: 'nagori://navigate',
     pasteFailed: 'nagori://paste_failed',
     hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+    settingsChanged: 'nagori://settings_changed',
   },
 }));
 
@@ -25,7 +26,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import { getCapabilities, getSettings, updateSettings } from '../lib/commands';
-import { isTauri } from '../lib/tauri';
+import { isTauri, subscribe } from '../lib/tauri';
 import type { AppSettings, PlatformCapabilities } from '../lib/types';
 import SettingsView from './SettingsView.svelte';
 
@@ -1046,6 +1047,544 @@ describe('SettingsView', () => {
         Object.defineProperty(window.navigator, 'languages', originalLanguages);
       }
     }
+  });
+
+  // ---------------- settings_changed merge (external mutations) ----------------
+
+  // Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
+  // event into the SettingsView listener. The Settings view registers two
+  // subscriptions (hotkey-failed and settings-changed); the routing keeps
+  // hotkey failures wired to a noop unless a test cares about them.
+  const captureSettingsChangedHandler = (): {
+    fire: (snapshot: AppSettings) => void;
+  } => {
+    const slot: { handler?: (payload: AppSettings) => void } = {};
+    vi.mocked(subscribe).mockImplementation((event, handler) => {
+      if (event === 'nagori://settings_changed') {
+        slot.handler = handler as (payload: AppSettings) => void;
+      }
+      return () => {};
+    });
+    return {
+      fire: (snapshot) => {
+        if (!slot.handler) throw new Error('settings_changed handler not registered');
+        slot.handler(snapshot);
+      },
+    };
+  };
+
+  it('adopts an external captureEnabled toggle from a settings_changed event', async () => {
+    // The tray's "Pause Capture" menu item bypasses SettingsView and writes
+    // through `set_capture_enabled`. The backend then broadcasts the new
+    // snapshot via `nagori://settings_changed`; without merging, an open
+    // Settings window would silently revert the tray edit on its next
+    // autosave (full-snapshot semantics). The merge keeps the local view
+    // in sync.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(captureCheckbox.checked).toBe(true);
+
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    await waitFor(() => {
+      const cb = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      expect(cb.checked).toBe(false);
+    });
+    // The event itself must not trigger an autosave — only the user's
+    // edits do. Adopting remote here would otherwise echo the value
+    // straight back to the backend.
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('preserves a user-edited field when an external settings_changed event arrives', async () => {
+    // Scenario: the user is mid-edit on the global hotkey (commits on
+    // blur, not on every keystroke) when the tray flips capture from
+    // another window. The merge must adopt the remote `captureEnabled`
+    // change (user hasn't touched it) without clobbering the
+    // user's in-progress hotkey edit.
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    expect(hotkeyInput).toBeTruthy();
+    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Alt+V' } });
+    // No save has fired — the hotkey commits on `onblur`, not `oninput`.
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    // Adopted: capture flipped to false in the UI.
+    await waitFor(() => {
+      const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      expect(captureCheckbox.checked).toBe(false);
+    });
+    // Preserved: the user's hotkey edit is untouched (the remote
+    // `globalHotkey` value differs from local, so the merge classifies
+    // the field as user-edited and skips the overwrite).
+    expect(hotkeyInput.value).toBe('Cmd+Alt+V');
+    // And no autosave fires from the merge itself.
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('treats an echo of our own write as confirmation, not as an external change', async () => {
+    // After a successful save the backend re-emits the full snapshot.
+    // The echo arrives with `remoteJson === lastSentJson`; the handler
+    // must not adopt or re-render — adopting a field would clobber any
+    // local edits the user has started since the IPC went out.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // Mid-flight, the user starts editing the global hotkey. The echo
+    // for the just-sent payload arrives afterwards. If the merge ran
+    // for the echo and adopted `globalHotkey` from the snapshot, it
+    // would overwrite the user's in-progress text — verify the echo
+    // path leaves the input alone.
+    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
+    expect(hotkeyInput).toBeTruthy();
+    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Shift+H' } });
+
+    // Fire the echo (matches what we sent — captureEnabled false, original hotkey).
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    expect(hotkeyInput.value).toBe('Cmd+Shift+H');
+  });
+
+  it('preserves a mid-typed denylist textarea when an external settings_changed event arrives', async () => {
+    // Denylist fields live in textarea state (`appDenylistText`) and only
+    // roll into `settings.appDenylist` at save time. A naive merge that
+    // compares `settings.appDenylist` against the baseline would classify
+    // the field as clean while the user is mid-typing and silently
+    // overwrite the textarea on the next remote event. The merge must
+    // consult the textarea-derived value for the dirty check.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const appDenylistTextarea = container.querySelectorAll('textarea')[0] as HTMLTextAreaElement;
+    expect(appDenylistTextarea).toBeTruthy();
+    // The user types a new entry — debounce is pending, no save has fired.
+    await fireEvent.input(appDenylistTextarea, { target: { value: 'KeePassXC' } });
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    // External event arrives with a different appDenylist (and a different
+    // captureEnabled). The merge should adopt the unrelated captureEnabled
+    // change but preserve the user's in-progress textarea content.
+    events.fire({
+      ...baseSettings(),
+      captureEnabled: false,
+      appDenylist: ['Bitwarden'],
+    });
+
+    // Textarea is untouched (user-edited).
+    expect(appDenylistTextarea.value).toBe('KeePassXC');
+
+    // Let the textarea debounce fire — the snapshot dispatched should
+    // carry the user's typed value, not the remote's `appDenylist`.
+    await vi.advanceTimersByTimeAsync(600);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.appDenylist).toEqual(['KeePassXC']);
+    // And the adopted captureEnabled went out on the same snapshot.
+    expect(sent?.captureEnabled).toBe(false);
+  });
+
+  it('dispatches the debounced edit after a remote merge advances the dedup baseline', async () => {
+    // Regression: `applyRemoteSettings` used to realign `lastSentJson` to
+    // `buildSnapshotPayload()`, which folds in the user's debounce-pending
+    // edits. When the debounce timer fired, the dedup check at the top of
+    // `commitSave` would short-circuit because the snapshot it built now
+    // equalled the (incorrectly advanced) `lastSentJson`, silently
+    // dropping the edit. The fix realigns to the *remote* snapshot so a
+    // preserved-dirty field still diverges from the dedup baseline.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    const advanced = await findByRole('tab', { name: 'Advanced' });
+    await fireEvent.click(advanced);
+
+    // Edit the first number input (debounce ~350 ms). Stay short of the
+    // debounce window so the save has not fired yet.
+    const maxBytes = container.querySelector('input[type="number"]') as HTMLInputElement;
+    expect(maxBytes).toBeTruthy();
+    await fireEvent.input(maxBytes, { target: { value: '4096' } });
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    // External event mid-debounce. The merge preserves the dirty number
+    // field and adopts the unrelated `captureEnabled` flip.
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    // Now let the debounce window elapse — the save must fire with the
+    // user's typed number, even though the merge moved the dedup baseline.
+    await vi.advanceTimersByTimeAsync(600);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.maxEntrySizeBytes).toBe(4096);
+    expect(sent?.captureEnabled).toBe(false);
+  });
+
+  it('fires a follow-up commit when an external merge lands during an in-flight save', async () => {
+    // Before this fix, the success branch of `commitSave` unconditionally
+    // restored `lastPersistedJson` to the in-flight snapshot, clobbering
+    // the merge baseline that `applyRemoteSettings` had just advanced to
+    // the remote value. The follow-up event would then be classified as
+    // an echo and silently dropped, and the user's local view would
+    // diverge from the backend with no IPC to reconcile.
+    let firstResolve!: () => void;
+    let firstCallCaptured: AppSettings | undefined;
+    let secondCallCaptured: AppSettings | undefined;
+    let callIndex = 0;
+    vi.mocked(updateSettings).mockImplementation((s: AppSettings) => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) {
+        firstCallCaptured = s;
+        return new Promise<void>((resolve) => {
+          firstResolve = resolve;
+        });
+      }
+      secondCallCaptured = s;
+      return Promise.resolve();
+    });
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    // Trigger the first save (autoPasteEnabled is the second checkbox).
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[];
+    const autoPaste = checkboxes[1];
+    if (!autoPaste) throw new Error('expected at least two checkboxes');
+    await fireEvent.click(autoPaste);
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    expect(firstCallCaptured?.autoPasteEnabled).toBe(false);
+
+    // External event arrives while the first save is still in flight.
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    // Resolve the in-flight save; the finally hook must dispatch a
+    // follow-up that carries both the original local edit and the
+    // adopted remote field.
+    firstResolve();
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    expect(secondCallCaptured?.autoPasteEnabled).toBe(false);
+    expect(secondCallCaptured?.captureEnabled).toBe(false);
+  });
+
+  it('dispatches a follow-up commit when an in-flight save fails after an external merge', async () => {
+    // Failure-path counterpart to the success follow-up: when the merged
+    // live snapshot happens to equal the failed dispatch (e.g. a no-op
+    // external event arrives during the in-flight window, so all the
+    // user's preserved-dirty fields are unchanged), leaving `lastSentJson`
+    // at the failed payload would short-circuit the follow-up commit's
+    // dedup check and silently drop the user's edit. The catch realigns
+    // `lastSentJson` to `lastPersistedJson` (the merged remote baseline)
+    // unconditionally so the follow-up still dispatches.
+    let firstReject!: (e: Error) => void;
+    let callIndex = 0;
+    let secondCallCaptured: AppSettings | undefined;
+    vi.mocked(updateSettings).mockImplementation((s: AppSettings) => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) {
+        return new Promise<void>((_resolve, reject) => {
+          firstReject = reject;
+        });
+      }
+      secondCallCaptured = s;
+      return Promise.resolve();
+    });
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[];
+    const autoPaste = checkboxes[1];
+    if (!autoPaste) throw new Error('expected at least two checkboxes');
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // No-op external merge while the first save is in flight: the user's
+    // preserved-dirty field stays at its edited value and every other
+    // field already matched the baseline, so the post-merge live
+    // snapshot equals the dispatched (and about-to-fail) payload L.
+    events.fire(baseSettings());
+
+    firstReject(new Error('boom'));
+    // Without the fix, `lastSentJson` would still be L; the follow-up
+    // commit would build a snapshot equal to L and dedup. With the fix,
+    // `lastSentJson` is realigned to the merged baseline and the
+    // follow-up dispatches.
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    expect(secondCallCaptured?.autoPasteEnabled).toBe(false);
+  });
+
+  it('still classifies a later external update correctly after the success follow-up dedups', async () => {
+    // When an in-flight save succeeds but the post-merge follow-up
+    // dedups (live snapshot equalled the dispatched payload, e.g. after
+    // a no-op external merge), `lastPersistedJson` is intentionally left
+    // at the merged remote baseline R rather than advanced to the
+    // succeeded payload L. The merge algorithm is robust to this
+    // divergence: user-edited fields stay dirty against R (preserved),
+    // and clean fields stay clean against R (adopted from any later
+    // external T). Lock that in so a future "advance to L for safety"
+    // refactor cannot silently regress the preserved-dirty contract.
+    let firstResolve!: () => void;
+    let callIndex = 0;
+    vi.mocked(updateSettings).mockImplementation(() => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) {
+        return new Promise<void>((resolve) => {
+          firstResolve = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[];
+    const autoPaste = checkboxes[1];
+    if (!autoPaste) throw new Error('expected at least two checkboxes');
+    // User flips autoPaste (dirty edit). Dispatched as L.
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // No-op external merge during the in-flight L. Local snapshot is
+    // unchanged so the follow-up will dedup.
+    events.fire(baseSettings());
+    firstResolve();
+    // Drain finally + the dedup'd follow-up.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Now a real external T flips captureEnabled. With baseline still
+    // at the no-op R (=base), captureEnabled is clean (local=true=R)
+    // and gets adopted; autoPaste is still dirty (local=false vs
+    // R=true) and stays preserved at the user's value.
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await waitFor(() => {
+      expect(captureCheckbox.checked).toBe(false);
+    });
+    expect(autoPaste.checked).toBe(false);
+  });
+
+  it('preserves an invalid mid-typed regex denylist when an external event arrives', async () => {
+    // When the regex textarea is invalid the snapshot wire format
+    // substitutes `lastValidRegexList`, so an "effective value" based
+    // dirty check (the original fix's first attempt) would see local
+    // equal to baseline and overwrite the user's broken-but-in-progress
+    // textarea on the next remote event. The fix compares raw textarea
+    // text instead, so a half-typed regex like `(` is correctly
+    // classified as user-edited and preserved.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(updateSettings).mockResolvedValue();
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const textareas = container.querySelectorAll('textarea');
+    const regexTextarea = textareas[1] as HTMLTextAreaElement;
+    await fireEvent.input(regexTextarea, { target: { value: '(' } });
+
+    // External event with a different `regexDenylist` value. The merge
+    // must keep the user's invalid in-progress text intact.
+    events.fire({
+      ...baseSettings(),
+      captureEnabled: false,
+      regexDenylist: ['valid.*pattern'],
+    });
+
+    expect(regexTextarea.value).toBe('(');
+    // The captureEnabled flip is adopted into local state — verify it on
+    // the General tab. Privacy doesn't render the captureEnabled
+    // checkbox so we can't assert on it without switching back.
+    const generalTab = await findByRole('tab', { name: 'General' });
+    await fireEvent.click(generalTab);
+    await waitFor(() => {
+      const cb = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      expect(cb.checked).toBe(false);
+    });
+    // The invalid regex never reaches the backend — even if the debounce
+    // window elapses, the snapshot dedup short-circuits because the
+    // wire-format value (substituted `lastValidRegexList` = `[]`) matches
+    // what was last sent.
+    await vi.advanceTimersByTimeAsync(600);
+    // captureEnabled toggle adopted from remote does not re-emit either
+    // (the merge only mutates local state).
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it('schedules a fresh commit after an external merge cancels a retry timer', async () => {
+    // If a previous save failed and a retry is armed (`pendingRetryJson`
+    // captured the rejected snapshot), an external event must not just
+    // cancel the timer — the user's preserved-dirty edit would then sit
+    // unflushed until the next manual edit or unmount. The merge path
+    // schedules an immediate follow-up commit so the merged live state
+    // still reaches the backend.
+    let callIndex = 0;
+    let secondCallCaptured: AppSettings | undefined;
+    vi.mocked(updateSettings).mockImplementation((s: AppSettings) => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) return Promise.reject(new Error('boom'));
+      secondCallCaptured = s;
+      return Promise.resolve();
+    });
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    // First save fails — autoPasteEnabled flip dispatches and rejects.
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[];
+    const autoPaste = checkboxes[1];
+    if (!autoPaste) throw new Error('expected at least two checkboxes');
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+    // The catch branch arms a retry timer with the failed snapshot.
+
+    // External event arrives before the retry fires. The merge cancels
+    // the retry and schedules a fresh commit from current live state
+    // (which still has the user's autoPasteEnabled flip).
+    events.fire({ ...baseSettings(), captureEnabled: false });
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    // The follow-up snapshot carries both the user's original flip and
+    // the adopted remote field — not the stale failed snapshot.
+    expect(secondCallCaptured?.autoPasteEnabled).toBe(false);
+    expect(secondCallCaptured?.captureEnabled).toBe(false);
+  });
+
+  it('keeps the merged baseline when a pre-merge echo arrives after an in-flight external merge', async () => {
+    // After [in-flight L] → [external merge R1 advances `lastPersistedJson`]
+    // → [echo of L lands] the echo handler used to rewind
+    // `lastPersistedJson` to the pre-merge snapshot. A subsequent
+    // external R2 then evaluated against a stale baseline and could
+    // mis-classify already-adopted fields as user-edited (preserving
+    // them and silently dropping R2's update). The fix skips the echo
+    // baseline-advance while `externalMergeDuringInflight` is set.
+    let firstResolve!: () => void;
+    let callIndex = 0;
+    vi.mocked(updateSettings).mockImplementation(() => {
+      const idx = callIndex;
+      callIndex += 1;
+      if (idx === 0) {
+        return new Promise<void>((resolve) => {
+          firstResolve = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    const events = captureSettingsChangedHandler();
+    const { findByRole, container } = render(SettingsView);
+
+    await findByRole('button', { name: 'Back to palette' });
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[];
+    const autoPaste = checkboxes[1];
+    if (!autoPaste) throw new Error('expected at least two checkboxes');
+    // L = post-click snapshot (autoPasteEnabled = false).
+    await fireEvent.click(autoPaste);
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    // R1 flips captureEnabled externally. Merge adopts capture, preserves
+    // autoPaste (user edited). Baseline advances to R1.
+    events.fire({ ...baseSettings(), captureEnabled: false });
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await waitFor(() => {
+      expect(captureCheckbox.checked).toBe(false);
+    });
+
+    // Echo of L (matches `lastSentJson`) lands before the IPC resolves.
+    // Without the fix, this would rewind `lastPersistedJson` to L.
+    events.fire({ ...baseSettings(), autoPasteEnabled: false });
+
+    // R2 arrives. It flips captureEnabled back to true and autoPasteEnabled
+    // back to true. With the correct baseline (R1), `captureEnabled` is
+    // local==baseline==false → clean → adopt R2's true. `autoPasteEnabled`
+    // is local(false)==baseline(true)? No, baseline R1 has autoPaste=true
+    // (R1 didn't change it), local has autoPaste=false (user) → dirty →
+    // preserve. With a rewound baseline (L), captureEnabled would be
+    // local(false) vs baseline(true) → dirty → preserved at false.
+    events.fire({ ...baseSettings(), captureEnabled: true, autoPasteEnabled: true });
+
+    // Adopted: captureEnabled flipped back to true (proves baseline was
+    // R1, not the stale L).
+    await waitFor(() => {
+      expect(captureCheckbox.checked).toBe(true);
+    });
+    // Preserved: autoPaste stays at the user's edited value.
+    expect(autoPaste.checked).toBe(false);
+
+    // Drain the in-flight save so the test doesn't leak a pending
+    // promise into the next case. The follow-up commit scheduled by
+    // `externalMergeDuringInflight` may dedup (post-merge local state
+    // can equal the pre-merge dispatch — here it does, since R2's
+    // adoption of `captureEnabled` cancels the user's `autoPaste` edit
+    // back to the L snapshot net of both fields) and that is correct:
+    // the wire-format equality short-circuit is the whole point of
+    // `lastSentJson`. The behavioural assertion above (captureCheckbox
+    // adopted R2's value) already proves the baseline was R1, not the
+    // stale L, which is what this test is gating against.
+    firstResolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 });
 

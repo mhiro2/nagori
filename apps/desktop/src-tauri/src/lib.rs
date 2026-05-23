@@ -17,6 +17,15 @@ use tauri::Manager;
 /// `SettingsView.test.ts` (mocks the same string).
 const HOTKEY_REGISTER_FAILED_EVENT: &str = "nagori://hotkey_register_failed";
 
+/// Event name emitted after every persisted settings change. The payload
+/// is the full `AppSettingsDto`. The Settings view subscribes via
+/// `TAURI_EVENTS.settingsChanged` so an external mutation (the tray's
+/// "Pause capture" toggle, another window, an IPC client) merges into the
+/// in-memory view instead of being silently clobbered by the next
+/// full-snapshot autosave. Keep the literal in lockstep with
+/// `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts`.
+const SETTINGS_CHANGED_EVENT: &str = "nagori://settings_changed";
+
 /// Which side of the hotkey wiring produced a registration failure.
 /// The emitted payload includes a `kind: "secondary"` tag for secondary
 /// accelerators and omits the field for the primary palette shortcut,
@@ -450,6 +459,17 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 
         while settings_rx.changed().await.is_ok() {
             let snapshot = settings_rx.borrow().clone();
+
+            // Broadcast the full snapshot to any open SettingsView so it
+            // can merge external mutations (tray toggle, IPC client) into
+            // its in-memory copy instead of silently overwriting them on
+            // the next autosave. Serialized via `Into<AppSettingsDto>` so
+            // the wire shape matches `get_settings`. Failures here are
+            // best-effort — the receiving window may have just closed.
+            let _ = app.emit(
+                SETTINGS_CHANGED_EVENT,
+                dto::AppSettingsDto::from(snapshot.clone()),
+            );
 
             if snapshot.global_hotkey != current_hotkey {
                 let next = snapshot.global_hotkey.clone();
@@ -1873,8 +1893,8 @@ mod image_scheme_tests {
 #[cfg(test)]
 mod hotkey_tests {
     use super::{
-        HOTKEY_REGISTER_FAILED_EVENT, HotkeyFailureKind, SecondaryHotkeyDiff,
-        build_hotkey_failure_payload, compute_secondary_hotkey_diff,
+        HOTKEY_REGISTER_FAILED_EVENT, HotkeyFailureKind, SETTINGS_CHANGED_EVENT,
+        SecondaryHotkeyDiff, build_hotkey_failure_payload, compute_secondary_hotkey_diff,
     };
     use nagori_core::SecondaryHotkeyAction;
     use std::collections::BTreeMap;
@@ -1896,6 +1916,16 @@ mod hotkey_tests {
             HOTKEY_REGISTER_FAILED_EVENT,
             "nagori://hotkey_register_failed"
         );
+    }
+
+    #[test]
+    fn settings_changed_event_name_matches_frontend_contract() {
+        // Same lockstep as above for the settings-broadcast channel —
+        // `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts` subscribes to
+        // this literal. Drift would silently break the SettingsView
+        // merge path that keeps a tray-toggled `captureEnabled` from
+        // being clobbered by an open Settings window's next autosave.
+        assert_eq!(SETTINGS_CHANGED_EVENT, "nagori://settings_changed");
     }
 
     #[test]

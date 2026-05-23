@@ -69,6 +69,12 @@ export const TAURI_EVENTS = {
   navigate: 'nagori://navigate',
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+  // Broadcast after every persisted settings change. The Settings view
+  // subscribes so an external mutation (the tray's "Pause capture"
+  // toggle, another window, an IPC client) merges into the in-memory
+  // view instead of being silently overwritten by the next full-snapshot
+  // autosave. Wire shape: `AppSettings` (`get_settings` payload).
+  settingsChanged: 'nagori://settings_changed',
 } as const;
 
 export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];

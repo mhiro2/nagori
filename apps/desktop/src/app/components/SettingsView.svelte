@@ -151,6 +151,16 @@
   // wins, so a single follow-up flag replaces a proper queue.
   let inflight: Promise<void> | null = null;
   let queued = false;
+  // Raised by `applyRemoteSettings` when an external `settings_changed`
+  // event lands while a save is in flight. The commitSave success/catch
+  // branches use this to skip writing back `lastPersistedJson` (the merge
+  // already advanced it to the remote snapshot), and the finally hook
+  // fires a follow-up commit so the merged local state — which may now
+  // diverge from the snapshot the backend just accepted — actually
+  // reaches disk. Without this, a tray toggle that races against an
+  // in-flight save can be silently overwritten when the success branch
+  // restores `lastPersistedJson` to the pre-merge snapshot.
+  let externalMergeDuringInflight = false;
   let savedTimer: ReturnType<typeof setTimeout> | null = null;
   // Set in the `updateSettings` failure branch and cleared on success
   // or unmount. Fires `commitSave` again so the snapshot keeps trying
@@ -498,12 +508,19 @@
     }
 
     inflight = (async () => {
+      externalMergeDuringInflight = false;
       try {
         await updateSettings(snapshot);
         // Advance the persisted baseline before the destroyed check so
         // a successful save that lands during teardown still updates the
-        // record the unmount flush would otherwise re-send.
-        lastPersistedJson = snapshotJson;
+        // record the unmount flush would otherwise re-send. Skip when an
+        // external merge happened mid-flight — `applyRemoteSettings`
+        // already advanced `lastPersistedJson` to the merged remote
+        // snapshot, and clobbering it with the pre-merge `snapshotJson`
+        // here would let the next echo silently revert the merge.
+        if (!externalMergeDuringInflight) {
+          lastPersistedJson = snapshotJson;
+        }
         if (destroyed) return;
         // If another edit was already queued while we were in flight
         // skip the "Saved" pill — the next commit will flip the header
@@ -527,28 +544,49 @@
         // `lastSentJson`; without the rewind the dedup short-circuit
         // at the top of `commitSave` would silently skip the retry of
         // the exact same payload.
+        //
+        // Apply the rewind unconditionally — including when an external
+        // merge happened mid-flight. In that case `lastPersistedJson`
+        // is the merged remote snapshot R; aligning `lastSentJson` to R
+        // lets the follow-up commit in `finally` dispatch whenever the
+        // merged live snapshot still diverges from R (the common case
+        // when the user has preserved-dirty fields), and dedup only
+        // when it doesn't. Skipping the rewind here used to leave
+        // `lastSentJson` at the failed pre-merge dispatch L; if the
+        // merge net-cancelled the in-flight edits the follow-up
+        // snapshot would equal L and the dedup check would silently
+        // drop the user's intent.
         lastSentJson = lastPersistedJson;
         if (destroyed) return;
         saveStatus = "error";
         saveError = describeError(err);
-        // Re-fire the save after a brief cool-down. Without this the
-        // failed snapshot would be stranded until the user either
-        // edits again or closes Settings — a transient IPC blip would
-        // appear as a permanent error pill. Each retry that also fails
-        // hits this branch again and reschedules, giving an indefinite
-        // 5 s poll until the backend recovers or the user navigates
-        // away. We accept the trade-off of polling against a
-        // permanently broken backend for the simpler state machine.
-        // Capture the snapshot the backend just rejected and feed it
-        // back into `commitSave` verbatim — re-reading live state in
-        // the timer callback would pull in any mid-typed hotkey value
-        // the user has tapped out since the failure landed.
-        clearRetryTimer();
-        pendingRetryJson = snapshotJson;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          fireRetry();
-        }, RETRY_DELAY_MS);
+        if (externalMergeDuringInflight) {
+          // The follow-up commit triggered from `finally` will dispatch
+          // the merged state; if it also fails its own catch branch
+          // will arm a fresh retry. Re-arming the timer here would
+          // double-fire and risks the pre-merge snapshot landing after
+          // the merge follow-up.
+          clearRetryTimer();
+        } else {
+          // Re-fire the save after a brief cool-down. Without this the
+          // failed snapshot would be stranded until the user either
+          // edits again or closes Settings — a transient IPC blip would
+          // appear as a permanent error pill. Each retry that also fails
+          // hits this branch again and reschedules, giving an indefinite
+          // 5 s poll until the backend recovers or the user navigates
+          // away. We accept the trade-off of polling against a
+          // permanently broken backend for the simpler state machine.
+          // Capture the snapshot the backend just rejected and feed it
+          // back into `commitSave` verbatim — re-reading live state in
+          // the timer callback would pull in any mid-typed hotkey value
+          // the user has tapped out since the failure landed.
+          clearRetryTimer();
+          pendingRetryJson = snapshotJson;
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            fireRetry();
+          }, RETRY_DELAY_MS);
+        }
       }
     })();
 
@@ -556,7 +594,14 @@
       await inflight;
     } finally {
       inflight = null;
-      if (queued && !destroyed) {
+      // Drain order: a queued local edit and a pending external-merge
+      // follow-up both want to fire a fresh commit. Either one alone is
+      // enough — `commitSave` will rebuild from the current settings,
+      // which already reflects both signals. So OR them into a single
+      // dispatch instead of firing twice and chasing our own tail.
+      const needsExternalMergeFollowUp = externalMergeDuringInflight;
+      externalMergeDuringInflight = false;
+      if ((queued || needsExternalMergeFollowUp) && !destroyed) {
         queued = false;
         void commitSave();
       }
@@ -596,11 +641,186 @@
 
   let destroyed = false;
 
-  onMount(() =>
-    subscribe<HotkeyFailurePayload>(TAURI_EVENTS.hotkeyRegisterFailed, (payload) => {
-      hotkeyError = payload.error || payload.hotkey;
-    }),
-  );
+  // Order-independent value equality for the leaf shapes that show up
+  // inside `AppSettings`: primitives compare by `===`, arrays element-
+  // wise, and plain objects (palette/secondary hotkey records, the
+  // `{ remote: { name } }` AI-provider variant) by key set + recursive
+  // value compare. `paletteHotkeys` and friends are serialized from a
+  // Rust BTreeMap (sorted-key order) but `setOverride` re-spreads them
+  // locally so the key order can drift between local and remote —
+  // comparing by `JSON.stringify` would then mis-classify a structurally
+  // identical record as "user edited" and drop the remote update.
+  const fieldEqual = (a: unknown, b: unknown): boolean => {
+    if (a === b) return true;
+    if (a === null || b === null) return false;
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b)) return false;
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i += 1) {
+        if (!fieldEqual(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    if (typeof a !== "object" || typeof b !== "object") return false;
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const ak = Object.keys(ao);
+    const bk = Object.keys(bo);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+      if (!Object.hasOwn(bo, k)) return false;
+      if (!fieldEqual(ao[k], bo[k])) return false;
+    }
+    return true;
+  };
+
+  // Merge a backend-published `settings_changed` snapshot into the in-
+  // memory view. Each top-level field is treated independently: a field
+  // still equal to the last persisted baseline has not been touched
+  // locally since the last sync — adopt remote's value. Any divergent
+  // field is the user's in-progress edit; keep it so the next autosave
+  // still flushes their change. Without this merge, an external mutation
+  // (tray's "Pause Capture" toggle, another window, an IPC client) is
+  // silently overwritten the next time SettingsView autosaves the full
+  // snapshot.
+  const applyRemoteSettings = (remote: AppSettings): void => {
+    if (!hydrated || destroyed || !settings) return;
+    const remoteJson = JSON.stringify(remote);
+    // Echo of our own most-recent dispatch — the backend has confirmed
+    // the write landed. Advance the persisted baseline so subsequent
+    // remote events evaluate against reality, but leave local state
+    // alone: anything the user has typed since we sent the snapshot
+    // stays as an unflushed edit.
+    if (remoteJson === lastSentJson) {
+      // While `externalMergeDuringInflight` is set, an external merge
+      // has already advanced `lastPersistedJson` to the remote snapshot;
+      // an echo of our pre-merge dispatch that lands afterwards would
+      // otherwise rewind the baseline to the stale snapshot and let a
+      // follow-up remote event be misclassified as dirty. Leave the
+      // baseline alone here — the follow-up commit will re-sync it.
+      if (!externalMergeDuringInflight) {
+        lastPersistedJson = remoteJson;
+      }
+      return;
+    }
+    const baseline = JSON.parse(lastPersistedJson) as AppSettings;
+    const local = settings;
+    // Denylist fields live in textarea state (`appDenylistText` /
+    // `regexDenylistText`), not in `settings` directly — `settings`
+    // only catches up when `buildSnapshotPayload` runs at save time.
+    // Compare the *raw textarea text* against the baseline's stringified
+    // form for the dirty check. Using `linesToList` for the comparison
+    // would drop trailing newlines a user has typed but not yet finished
+    // a line on, and for the regex case substituting `lastValidRegexList`
+    // when the textarea is invalid would falsely classify a mid-typed
+    // broken regex as clean and let `remote` overwrite the user's input.
+    const baselineAppText = baseline.appDenylist.join("\n");
+    const baselineRegexText = baseline.regexDenylist.join("\n");
+    const appDenylistDirty = appDenylistText !== baselineAppText;
+    const regexDenylistDirty = regexDenylistText !== baselineRegexText;
+    type Key = keyof AppSettings;
+    for (const key of Object.keys(remote) as Key[]) {
+      let dirty: boolean;
+      if (key === 'appDenylist') {
+        dirty = appDenylistDirty;
+      } else if (key === 'regexDenylist') {
+        dirty = regexDenylistDirty;
+      } else {
+        dirty = !fieldEqual(local[key], baseline[key]);
+      }
+      if (!dirty) {
+        (local as unknown as Record<string, unknown>)[key] =
+          remote[key] as unknown;
+      }
+    }
+    // Re-derive UI state for adopted fields. Reuse the dirty flags from
+    // the loop above so a textarea we just classified as user-edited
+    // keeps its in-progress content (and `lastValidRegexList`) intact.
+    if (!appDenylistDirty) {
+      appDenylistText = remote.appDenylist.join("\n");
+    }
+    if (!regexDenylistDirty) {
+      regexDenylistText = remote.regexDenylist.join("\n");
+      lastValidRegexList = [...remote.regexDenylist];
+    } else if (regexDenylistErrors.length > 0) {
+      // User is mid-edit on an invalid pattern. `buildSnapshotPayload`
+      // substitutes `lastValidRegexList` when the textarea fails the
+      // preflight; without a sync here the next autosave would ship the
+      // stale pre-merge regex list and silently clobber the just-merged
+      // remote value. For the dirty+valid case the `$effect` below has
+      // already promoted the user's textarea to `lastValidRegexList` so
+      // skipping it here preserves their unsaved intent.
+      lastValidRegexList = [...remote.regexDenylist];
+    }
+    if (local.globalHotkey === remote.globalHotkey) {
+      lastBlurredGlobalHotkey = remote.globalHotkey;
+    }
+    if (fieldEqual(local.paletteHotkeys, remote.paletteHotkeys)) {
+      lastBlurredPaletteHotkeys = { ...remote.paletteHotkeys };
+    }
+    if (fieldEqual(local.secondaryHotkeys, remote.secondaryHotkeys)) {
+      lastBlurredSecondaryHotkeys = { ...remote.secondaryHotkeys };
+    }
+    if (local.locale === remote.locale) setLocale(remote.locale);
+    if (local.appearance === remote.appearance) applyAppearance(remote.appearance);
+
+    // Backend is now authoritative at `remote`. Advance the merge
+    // baseline so the next event re-evaluates against the latest
+    // persisted state. When no save is in flight we can also realign
+    // `lastSentJson` to `remoteJson` — the dedup check at the top of
+    // `commitSave` then short-circuits when the user has no unflushed
+    // edits, but a divergent next snapshot (e.g. a debounce-pending
+    // number input that the merge preserved) still dispatches.
+    //
+    // Using `remoteJson` instead of `buildSnapshotPayload()` is
+    // load-bearing: the latter folds preserved-dirty fields into the
+    // baseline, so the next commit would dedup against state that has
+    // not actually been sent and the user's edit would be silently
+    // dropped.
+    //
+    // Skip the realignment while a save is in flight: the in-flight
+    // dispatch is still the source of truth for `lastSentJson`, and
+    // the `finally` hook will fire a follow-up commit (via
+    // `externalMergeDuringInflight`) that re-syncs both pointers.
+    lastPersistedJson = remoteJson;
+    if (inflight === null) {
+      lastSentJson = remoteJson;
+    } else {
+      externalMergeDuringInflight = true;
+    }
+
+    // A retry timer armed against a pre-merge failure would re-send the
+    // stale snapshot and silently undo the external mutation. Cancel it
+    // and immediately schedule a fresh commit from the merged live state
+    // — if the user's preserved-dirty fields still diverge from `remote`
+    // the new dispatch ships them, and otherwise the dedup check
+    // short-circuits without an IPC. Skip when a save is already in
+    // flight: the `finally` hook will fire the follow-up commit via
+    // `externalMergeDuringInflight` and we do not want to double-dispatch.
+    if (pendingRetryJson !== null) {
+      clearRetryTimer();
+      if (inflight === null) {
+        scheduleSave(0);
+      }
+    }
+  };
+
+  onMount(() => {
+    const offHotkey = subscribe<HotkeyFailurePayload>(
+      TAURI_EVENTS.hotkeyRegisterFailed,
+      (payload) => {
+        hotkeyError = payload.error || payload.hotkey;
+      },
+    );
+    const offSettings = subscribe<AppSettings>(
+      TAURI_EVENTS.settingsChanged,
+      applyRemoteSettings,
+    );
+    return () => {
+      offHotkey();
+      offSettings();
+    };
+  });
 
   onDestroy(() => {
     if (pendingTimer !== null) {
