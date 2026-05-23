@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages } from "../lib/i18n/index.svelte";
+  import { messages } from '../lib/i18n/index.svelte';
 
   type Props = {
     value: string;

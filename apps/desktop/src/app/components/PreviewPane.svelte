@@ -1,16 +1,16 @@
 <script lang="ts">
-  import { openUrlExternal } from "../lib/commands";
-  import { formatByteCount, formatRelativeTime } from "../lib/formatting";
-  import { messages } from "../lib/i18n/index.svelte";
-  import { dedupedRepresentationLabels } from "../lib/representations";
-  import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from "../lib/types";
-  import { tokenize, type Span } from "./tokenize";
+  import { openUrlExternal } from '../lib/commands';
+  import { formatByteCount, formatRelativeTime } from '../lib/formatting';
+  import { messages } from '../lib/i18n/index.svelte';
+  import { dedupedRepresentationLabels } from '../lib/representations';
+  import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from '../lib/types';
+  import { tokenize, type Span } from './tokenize';
 
   // Renderer-side mirror of the backend `URL_SCHEME_ALLOWLIST`. The
   // `open_url_external` command re-validates this server-side so a
   // forged invoke can't escape — keeping the list here lets us hide
   // the trigger entirely when the user couldn't act on it anyway.
-  const URL_OPEN_SCHEMES = new Set(["https", "http"]);
+  const URL_OPEN_SCHEMES = new Set(['https', 'http']);
 
   // Comma-joined "preserved formats" footer line. Only shown when an entry
   // kept more than its primary representation so single-format clips don't
@@ -19,16 +19,16 @@
     summary: readonly RepresentationSummary[] | undefined,
   ): string | undefined => {
     const labels = dedupedRepresentationLabels(summary);
-    return labels.length > 1 ? labels.join(", ") : undefined;
+    return labels.length > 1 ? labels.join(', ') : undefined;
   };
 
   // `image/png` → `PNG`. Strip the `+xml` / `+json` structured-syntax suffix
   // so `image/svg+xml` renders as `SVG`. Used by the head summary chip.
   const formatImageMime = (mime: string | null | undefined): string | null => {
     if (!mime) return null;
-    const slash = mime.indexOf("/");
+    const slash = mime.indexOf('/');
     let subtype = slash < 0 ? mime : mime.slice(slash + 1);
-    const plus = subtype.indexOf("+");
+    const plus = subtype.indexOf('+');
     if (plus > 0) subtype = subtype.slice(0, plus);
     if (!subtype) return null;
     return subtype.toUpperCase();
@@ -41,15 +41,15 @@
   // trailing separator before splitting and return it in `trailing` so the
   // template can re-attach it to the basename (`foo/` rather than `foo`).
   const splitPath = (path: string): { dir: string; base: string; trailing: string } => {
-    const lastChar = path.length > 0 ? path[path.length - 1] : "";
-    const isDir = lastChar === "/" || lastChar === "\\";
+    const lastChar = path.length > 0 ? path[path.length - 1] : '';
+    const isDir = lastChar === '/' || lastChar === '\\';
     const body = isDir ? path.slice(0, -1) : path;
-    const lastSlash = Math.max(body.lastIndexOf("/"), body.lastIndexOf("\\"));
-    if (lastSlash < 0) return { dir: "", base: body, trailing: isDir ? lastChar : "" };
+    const lastSlash = Math.max(body.lastIndexOf('/'), body.lastIndexOf('\\'));
+    if (lastSlash < 0) return { dir: '', base: body, trailing: isDir ? lastChar : '' };
     return {
       dir: body.slice(0, lastSlash + 1),
       base: body.slice(lastSlash + 1),
-      trailing: isDir ? lastChar : "",
+      trailing: isDir ? lastChar : '',
     };
   };
 
@@ -60,10 +60,9 @@
   // the entry can render under that header without becoming an empty row.
   const dirEndOf = (s: string): number => {
     const len = s.length;
-    const limit =
-      len > 0 && (s[len - 1] === "/" || s[len - 1] === "\\") ? len - 1 : len;
+    const limit = len > 0 && (s[len - 1] === '/' || s[len - 1] === '\\') ? len - 1 : len;
     const trunc = s.slice(0, limit);
-    const last = Math.max(trunc.lastIndexOf("/"), trunc.lastIndexOf("\\"));
+    const last = Math.max(trunc.lastIndexOf('/'), trunc.lastIndexOf('\\'));
     return last < 0 ? 0 : last + 1;
   };
 
@@ -71,7 +70,7 @@
   // is too noisy to surface as a common-parent header — every row would
   // still need its own absolute prefix to be readable. Collapse to `''`.
   const isRootOnlyPrefix = (s: string): boolean =>
-    s === "/" || s === "\\" || /^[A-Za-z]:[\\/]$/.test(s);
+    s === '/' || s === '\\' || /^[A-Za-z]:[\\/]$/.test(s);
 
   // Longest common directory prefix shared by every path in the list. We
   // compare each entry's *parent-directory candidate* (`dirEndOf`-trimmed
@@ -81,7 +80,7 @@
   // Operates on character ranges between separators so we never split
   // inside a path segment.
   const findCommonParent = (paths: readonly string[]): string => {
-    if (paths.length < 2) return "";
+    if (paths.length < 2) return '';
     const parents = paths.map((p) => p.slice(0, dirEndOf(p)));
     let prefix = parents[0]!;
     for (let i = 1; i < parents.length && prefix.length > 0; i += 1) {
@@ -93,47 +92,103 @@
         prefix = trimmed.slice(0, dirEndOf(trimmed));
       }
     }
-    if (isRootOnlyPrefix(prefix)) return "";
+    if (isRootOnlyPrefix(prefix)) return '';
     return prefix;
   };
 
   // Map filename extensions to a small set of categories so the row can
   // sport a colour-coded dot without pulling in icon fonts. A path ending
   // in a separator is treated as a directory regardless of extension.
-  const EXT_CATEGORY: Record<
-    string,
-    "image" | "code" | "archive" | "document"
-  > = {
-    png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
-    svg: "image", bmp: "image", ico: "image", heic: "image", tiff: "image",
-    tif: "image", avif: "image",
-    ts: "code", tsx: "code", js: "code", jsx: "code", mjs: "code", cjs: "code",
-    rs: "code", go: "code", py: "code", rb: "code", java: "code", kt: "code",
-    swift: "code", c: "code", cpp: "code", cc: "code", h: "code", hpp: "code",
-    cs: "code", php: "code", sh: "code", bash: "code", zsh: "code", sql: "code",
-    json: "code", xml: "code", yaml: "code", yml: "code", toml: "code",
-    html: "code", htm: "code", css: "code", scss: "code", sass: "code",
-    less: "code", vue: "code", svelte: "code", md: "code", rst: "code",
-    zip: "archive", tar: "archive", gz: "archive", tgz: "archive", bz2: "archive",
-    xz: "archive", "7z": "archive", rar: "archive", dmg: "archive", iso: "archive",
-    pdf: "document", doc: "document", docx: "document", xls: "document",
-    xlsx: "document", ppt: "document", pptx: "document", txt: "document",
-    rtf: "document", odt: "document", ods: "document", odp: "document",
-    csv: "document", tsv: "document",
+  const EXT_CATEGORY: Record<string, 'image' | 'code' | 'archive' | 'document'> = {
+    png: 'image',
+    jpg: 'image',
+    jpeg: 'image',
+    gif: 'image',
+    webp: 'image',
+    svg: 'image',
+    bmp: 'image',
+    ico: 'image',
+    heic: 'image',
+    tiff: 'image',
+    tif: 'image',
+    avif: 'image',
+    ts: 'code',
+    tsx: 'code',
+    js: 'code',
+    jsx: 'code',
+    mjs: 'code',
+    cjs: 'code',
+    rs: 'code',
+    go: 'code',
+    py: 'code',
+    rb: 'code',
+    java: 'code',
+    kt: 'code',
+    swift: 'code',
+    c: 'code',
+    cpp: 'code',
+    cc: 'code',
+    h: 'code',
+    hpp: 'code',
+    cs: 'code',
+    php: 'code',
+    sh: 'code',
+    bash: 'code',
+    zsh: 'code',
+    sql: 'code',
+    json: 'code',
+    xml: 'code',
+    yaml: 'code',
+    yml: 'code',
+    toml: 'code',
+    html: 'code',
+    htm: 'code',
+    css: 'code',
+    scss: 'code',
+    sass: 'code',
+    less: 'code',
+    vue: 'code',
+    svelte: 'code',
+    md: 'code',
+    rst: 'code',
+    zip: 'archive',
+    tar: 'archive',
+    gz: 'archive',
+    tgz: 'archive',
+    bz2: 'archive',
+    xz: 'archive',
+    '7z': 'archive',
+    rar: 'archive',
+    dmg: 'archive',
+    iso: 'archive',
+    pdf: 'document',
+    doc: 'document',
+    docx: 'document',
+    xls: 'document',
+    xlsx: 'document',
+    ppt: 'document',
+    pptx: 'document',
+    txt: 'document',
+    rtf: 'document',
+    odt: 'document',
+    ods: 'document',
+    odp: 'document',
+    csv: 'document',
+    tsv: 'document',
   };
 
   const classifyPath = (
     path: string,
-  ): "image" | "code" | "archive" | "document" | "unknown" | "directory" => {
-    const last = path.length > 0 ? path[path.length - 1] : "";
-    if (last === "/" || last === "\\") return "directory";
-    const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    const dot = path.lastIndexOf(".");
+  ): 'image' | 'code' | 'archive' | 'document' | 'unknown' | 'directory' => {
+    const last = path.length > 0 ? path[path.length - 1] : '';
+    if (last === '/' || last === '\\') return 'directory';
+    const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    const dot = path.lastIndexOf('.');
     // Leading-dot files (`.env`) and dots that live inside a parent dir
     // (`/some.dir/Makefile`) don't expose an extension worth colouring.
-    if (dot <= lastSlash + 1) return "unknown";
-    if (dot === path.length - 1) return "unknown";
-    return EXT_CATEGORY[path.slice(dot + 1).toLowerCase()] ?? "unknown";
+    if (dot <= lastSlash + 1) return 'unknown';
+    if (dot === path.length - 1) return 'unknown';
+    return EXT_CATEGORY[path.slice(dot + 1).toLowerCase()] ?? 'unknown';
   };
 
   type Props = {
@@ -158,15 +213,15 @@
     onExpandBody,
   }: Props = $props();
   const t = $derived(messages());
-  const bodyText = $derived(preview?.previewText ?? item?.preview ?? "");
+  const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
   const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
-  const showHighlighting = $derived(preview !== undefined && preview.body.type === "code");
+  const showHighlighting = $derived(preview !== undefined && preview.body.type === 'code');
   const tokens = $derived(
     showHighlighting ? tokenize(bodyText, preview?.metadata.language ?? null) : [],
   );
   // Line numbers only make sense for the multi-line code body. The url body
   // shares the highlighter for inline URL colouring but stays single-line.
-  const showLineNumbers = $derived(preview?.body.type === "code" && tokens.length > 0);
+  const showLineNumbers = $derived(preview?.body.type === 'code' && tokens.length > 0);
   const tokenLines = $derived<Span[][]>(showLineNumbers ? splitTokensByLine(tokens) : []);
 
   // Walk the token stream and break each token at every `\n`. Newlines become
@@ -177,7 +232,7 @@
   function splitTokensByLine(allTokens: Span[]): Span[][] {
     const lines: Span[][] = [[]];
     for (const tok of allTokens) {
-      const parts = tok.text.split("\n");
+      const parts = tok.text.split('\n');
       for (let idx = 0; idx < parts.length; idx += 1) {
         if (idx > 0) lines.push([]);
         const part = parts[idx];
@@ -210,12 +265,12 @@
   let imageAttempt = $state(0);
   let retryTimer: number | undefined = undefined;
   const imageSrc = $derived.by((): string | undefined => {
-    if (preview?.body.type !== "image") return undefined;
+    if (preview?.body.type !== 'image') return undefined;
     const useThumb = !expanded && imageAttempt < 2;
     return buildImageUrl(preview.id, useThumb, imageAttempt);
   });
   const imageDimensions = $derived.by(() => {
-    if (preview?.body.type !== "image") return undefined;
+    if (preview?.body.type !== 'image') return undefined;
     const { width, height } = preview.body;
     return width && height ? { width, height } : undefined;
   });
@@ -271,15 +326,15 @@
     if (!preview) return undefined;
     const body = preview.body;
     switch (body.type) {
-      case "text":
-      case "code":
-      case "richText":
-      case "unknown": {
+      case 'text':
+      case 'code':
+      case 'richText':
+      case 'unknown': {
         const lines = t.preview.summary.lines(preview.metadata.lineCount);
         const bytes = formatByteCount(preview.metadata.byteCount);
         return `${lines} · ${bytes}`;
       }
-      case "image": {
+      case 'image': {
         return t.preview.summary.image({
           dimensions:
             body.width != null && body.height != null ? `${body.width}×${body.height}` : null,
@@ -287,10 +342,10 @@
           bytes: formatByteCount(body.byteCount),
         });
       }
-      case "fileList": {
+      case 'fileList': {
         return t.preview.fileList.summary(body.paths.length, body.total);
       }
-      case "url": {
+      case 'url': {
         // The dedicated URL layout already shows the host on its own row,
         // so the chip is redundant for URL kinds — leave it blank.
         return undefined;
@@ -350,14 +405,14 @@
   // Number of paths hidden by the 50-row cap that the backend applies before
   // the DTO crosses the IPC boundary.
   const fileListOverflow = $derived.by((): number => {
-    if (preview?.body.type !== "fileList") return 0;
+    if (preview?.body.type !== 'fileList') return 0;
     return Math.max(0, preview.body.total - preview.body.paths.length);
   });
 
   // URL-kind derived state. Each of these is `undefined` for non-URL
   // bodies; the template guards with `body.type === "url"` so the
   // values never reach the renderer in that case.
-  const urlBody = $derived(preview?.body.type === "url" ? preview.body : undefined);
+  const urlBody = $derived(preview?.body.type === 'url' ? preview.body : undefined);
   // Show the punycode badge when the backend signals an IDN mismatch
   // (display Unicode host differs from the ASCII xn-- form). The hover
   // title carries the raw ASCII so the user can verify against an
@@ -368,7 +423,7 @@
   // hidden when the action would just bounce.
   const urlCanOpen = $derived.by((): boolean => {
     if (!urlBody) return false;
-    if (item?.sensitivity !== "Public") return false;
+    if (item?.sensitivity !== 'Public') return false;
     const scheme = urlBody.scheme?.toLowerCase();
     return scheme !== undefined && URL_OPEN_SCHEMES.has(scheme);
   });
@@ -411,15 +466,15 @@
   // component, so a window-scoped listener is safe.
   $effect(() => {
     if (!expanded || !urlCanOpen) return;
-    if (typeof window === "undefined") return;
+    if (typeof window === 'undefined') return;
     const handler = (event: KeyboardEvent): void => {
-      if (event.key !== "Enter") return;
+      if (event.key !== 'Enter') return;
       if (confirmOpenUrl) return;
       event.preventDefault();
       confirmOpenUrl = true;
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   });
 
   function buildImageUrl(entryId: string, useThumb: boolean, attempt: number): string {
@@ -428,17 +483,15 @@
     // We pick the platform-specific form so the webview's Origin matches the
     // fetched URL (otherwise SecurityError on Win/Android).
     const isWinAndroid =
-      typeof navigator !== "undefined" && /Windows|Android/i.test(navigator.userAgent);
-    const origin = isWinAndroid
-      ? "http://nagori-image.localhost"
-      : "nagori-image://localhost";
+      typeof navigator !== 'undefined' && /Windows|Android/i.test(navigator.userAgent);
+    const origin = isWinAndroid ? 'http://nagori-image.localhost' : 'nagori-image://localhost';
     const segment = useThumb ? `thumb/${entryId}` : entryId;
     // The cache-buster only matters for the post-503 retry: without a
     // unique URL the webview may short-circuit the second fetch even
     // though the response was `Cache-Control: no-store`. The Rust
     // handler ignores the query string (`parse_image_entry_id` reads
     // only the path), so this is a free no-op for the first attempt.
-    const suffix = attempt > 0 ? `?v=${attempt}` : "";
+    const suffix = attempt > 0 ? `?v=${attempt}` : '';
     return `${origin}/${segment}${suffix}`;
   }
 </script>
@@ -476,7 +529,7 @@
             <p class="url-path" data-testid="preview-url-path">
               {#if urlBody.scheme}<span class="dim">{urlBody.scheme}://</span>{/if}
               <span title={urlBody.pathAndQuery ?? urlBody.url}>
-                {urlBody.pathAndQuery ?? ""}
+                {urlBody.pathAndQuery ?? ''}
               </span>
             </p>
           {/if}
@@ -493,7 +546,7 @@
             </button>
           {/if}
         </div>
-      {:else if preview?.body.type === "image"}
+      {:else if preview?.body.type === 'image'}
         {#if imageSrc && !imageFailed}
           <div class="image-frame" class:loaded={imageLoaded}>
             <img
@@ -511,14 +564,10 @@
         {:else}
           <p class="state" role="status">{t.preview.image.unavailable}</p>
         {/if}
-      {:else if preview?.body.type === "fileList"}
+      {:else if preview?.body.type === 'fileList'}
         {@const commonParent = findCommonParent(preview.body.paths)}
         {#if commonParent}
-          <p
-            class="common-parent"
-            data-testid="preview-files-common-parent"
-            title={commonParent}
-          >
+          <p class="common-parent" data-testid="preview-files-common-parent" title={commonParent}>
             {t.preview.fileList.inFolder(commonParent)}
           </p>
         {/if}
@@ -535,20 +584,23 @@
             </li>
           {/each}
           {#if fileListOverflow > 0}
-            <li class="more" aria-live="polite">{t.preview.fileList.moreFiles(fileListOverflow)}</li>
+            <li class="more" aria-live="polite">
+              {t.preview.fileList.moreFiles(fileListOverflow)}
+            </li>
           {/if}
         </ul>
       {:else if showLineNumbers}
-        <pre class="body code with-lines"
-          ><code>{#each tokenLines as line, lineIdx (lineIdx)}<span
-              class="line"
-              ><span class="lineno" aria-hidden="true"
-              ></span>{#each line as tok, idx (idx)}<span class={tok.kind}
-                >{tok.text}</span
-              >{/each}</span
-            >{/each}</code></pre>
+        <pre class="body code with-lines"><code
+            >{#each tokenLines as line, lineIdx (lineIdx)}<span class="line"
+                ><span class="lineno" aria-hidden="true"></span>{#each line as tok, idx (idx)}<span
+                    class={tok.kind}>{tok.text}</span
+                  >{/each}</span
+              >{/each}</code
+          ></pre>
       {:else if showHighlighting}
-        <pre class="body code"><code>{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code></pre>
+        <pre class="body code"><code
+            >{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code
+          ></pre>
       {:else}
         <pre class="body">{bodyText}</pre>
       {/if}
@@ -580,7 +632,8 @@
     <footer class="foot">
       {#if expanded && urlCanOpen}
         <p class="kbd-hint" data-testid="preview-url-open-hint">
-          <kbd>Enter</kbd> {t.preview.url.openHint}
+          <kbd>Enter</kbd>
+          {t.preview.url.openHint}
         </p>
       {/if}
       <dl>
@@ -597,7 +650,7 @@
           <dd>{formatByteCount(preview.metadata.byteCount)}</dd>
         {/if}
         <dt>{t.preview.fields.rank}</dt>
-        <dd>{item.rankReasons.join(", ") || t.preview.none}</dd>
+        <dd>{item.rankReasons.join(', ') || t.preview.none}</dd>
         {#if preservedFormats}
           <dt>{t.preview.fields.formats}</dt>
           <dd>{preservedFormats}</dd>
@@ -627,7 +680,7 @@
         // into the palette behind. Escape closes the dialog first; the
         // global Escape handler in App.svelte would otherwise close
         // the whole preview window.
-        if (e.key === "Escape") {
+        if (e.key === 'Escape') {
           e.stopPropagation();
           if (!openingUrl) {
             confirmOpenUrl = false;
@@ -641,7 +694,7 @@
         // through so the browser's native button activation runs and
         // the Cancel path is honoured. The Enter window-listener
         // short-circuits when `confirmOpenUrl` is already true.
-        if (e.key === "Enter" && !openingUrl && e.target === confirmDialogEl) {
+        if (e.key === 'Enter' && !openingUrl && e.target === confirmDialogEl) {
           e.stopPropagation();
           e.preventDefault();
           void performOpenUrl();
@@ -727,11 +780,7 @@
     margin: 0;
     padding: 0.5rem;
     color: var(--fg, #f5f5f5);
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8125rem;
     white-space: pre-wrap;
     word-break: break-word;
@@ -792,7 +841,7 @@
   /* Checkerboard placeholder shown until the lazy <img> finishes decoding.
      Pure CSS so we never reference an external skeleton image (CSP-safe). */
   .image-frame:not(.loaded)::before {
-    content: "";
+    content: '';
     position: absolute;
     inset: 0;
     background-color: rgba(0, 0, 0, 0.2);
@@ -835,11 +884,7 @@
     margin: 0;
     padding: 0.5rem 0.75rem 0.25rem;
     color: var(--muted, rgba(255, 255, 255, 0.55));
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.75rem;
     white-space: nowrap;
     overflow: hidden;
@@ -849,11 +894,7 @@
     margin: 0;
     padding: 0.5rem 0.75rem;
     color: var(--fg, #f5f5f5);
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8125rem;
     overflow-wrap: anywhere;
     list-style: none;
@@ -980,11 +1021,7 @@
   .url-host {
     margin: 0;
     color: var(--fg, #f5f5f5);
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 1rem;
     font-weight: 600;
     overflow-wrap: anywhere;
@@ -992,11 +1029,7 @@
   .url-path {
     margin: 0;
     color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8125rem;
     overflow-wrap: anywhere;
   }

@@ -1,6 +1,7 @@
 {
   "singleQuote": true,
   "sortImports": true,
+  "svelte": true,
   "ignorePatterns": [
     "**/dist/**",
     "**/node_modules/**",

@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { openAccessibilitySettings } from "../lib/commands";
-  import { messages } from "../lib/i18n/index.svelte";
-  import { isTauri } from "../lib/tauri";
+  import { openAccessibilitySettings } from '../lib/commands';
+  import { messages } from '../lib/i18n/index.svelte';
+  import { isTauri } from '../lib/tauri';
   import {
     accessibilityGranted,
     accessibilityState,
     settingsState,
-  } from "../stores/settings.svelte";
+  } from '../stores/settings.svelte';
 
   // Open the macOS Privacy → Accessibility pane via the backend `open(1)`
   // shim. Webview navigation can't follow `x-apple.systempreferences:` URLs.
@@ -24,7 +24,10 @@
   // Show the banner once permissions have been loaded and accessibility
   // is not granted. Re-evaluates if `refreshSettings` repopulates the store.
   const visible = $derived(
-    settingsState.loaded && !dismissed && accessibilityState() !== undefined && !accessibilityGranted(),
+    settingsState.loaded &&
+      !dismissed &&
+      accessibilityState() !== undefined &&
+      !accessibilityGranted(),
   );
 </script>
 
@@ -32,9 +35,7 @@
   <aside class="onboarding" role="status" aria-live="polite">
     <div class="head">
       <strong>{t.onboarding.title}</strong>
-      <button type="button" class="close" onclick={() => (dismissed = true)}>
-        ×
-      </button>
+      <button type="button" class="close" onclick={() => (dismissed = true)}> × </button>
     </div>
     <p class="desc">{t.onboarding.description}</p>
     <ul class="items">

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { messages } from "../lib/i18n/index.svelte";
-  import type { SearchResultDto } from "../lib/types";
-  import ResultItem from "./ResultItem.svelte";
+  import { messages } from '../lib/i18n/index.svelte';
+  import type { SearchResultDto } from '../lib/types';
+  import ResultItem from './ResultItem.svelte';
 
   type Props = {
     items: SearchResultDto[];
@@ -21,8 +21,8 @@
 
   $effect(() => {
     if (!listEl) return;
-    const nodes = listEl.querySelectorAll<HTMLElement>(".result-item");
-    nodes[selectedIndex]?.scrollIntoView({ block: "nearest" });
+    const nodes = listEl.querySelectorAll<HTMLElement>('.result-item');
+    nodes[selectedIndex]?.scrollIntoView({ block: 'nearest' });
   });
 </script>
 

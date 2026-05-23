@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { messages } from "../lib/i18n/index.svelte";
-  import { captureEnabled } from "../stores/settings.svelte";
+  import { messages } from '../lib/i18n/index.svelte';
+  import { captureEnabled } from '../stores/settings.svelte';
 
   type Props = {
     entryCount: number;

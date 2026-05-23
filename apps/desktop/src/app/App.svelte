@@ -1,16 +1,17 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { hidePalette, openSettingsWindow } from "./lib/commands";
-  import { messages } from "./lib/i18n/index.svelte";
-  import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from "./lib/tauri";
-  import PaletteRoute from "./routes/PaletteRoute.svelte";
-  import SettingsRoute from "./routes/SettingsRoute.svelte";
-  import { showPalette, showSettings, viewState } from "./stores/view.svelte";
+  import { onMount } from 'svelte';
+
+  import { hidePalette, openSettingsWindow } from './lib/commands';
+  import { messages } from './lib/i18n/index.svelte';
+  import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
+  import PaletteRoute from './routes/PaletteRoute.svelte';
+  import SettingsRoute from './routes/SettingsRoute.svelte';
+  import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
   // Settings runs in its own native window (`label: "settings"` in
   // `tauri.conf.json`). The palette window keeps using the in-process
   // `viewState` toggle so dev/test contexts without Tauri still work.
-  const isSettingsWindow = currentWindowLabel() === "settings";
+  const isSettingsWindow = currentWindowLabel() === 'settings';
 
   const t = $derived(messages());
 
@@ -21,8 +22,8 @@
   // through native decorations), so these handlers only run for the
   // palette window.
   const handleEscape = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape" || event.defaultPrevented) return;
-    if (viewState.current === "settings") {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    if (viewState.current === 'settings') {
       showPalette();
       return;
     }
@@ -33,7 +34,7 @@
     // When the user clicks away the palette is no longer useful — hide it so
     // the next hotkey press feels like a fresh invocation. Settings stays
     // visible because the user explicitly navigated there.
-    if (viewState.current !== "palette") return;
+    if (viewState.current !== 'palette') return;
     void hidePalette();
   };
 
@@ -50,16 +51,16 @@
       };
     }
 
-    window.addEventListener("keydown", handleEscape);
-    window.addEventListener("blur", handleBlur);
+    window.addEventListener('keydown', handleEscape);
+    window.addEventListener('blur', handleBlur);
 
     // Legacy in-window navigation. The tray now opens Settings as a
     // standalone window via the `open_settings` IPC, but we keep this
     // handler so a future caller emitting the event still lands somewhere
     // reasonable (palette dev mode, non-Tauri tests).
     const offNavigate = subscribe<string>(TAURI_EVENTS.navigate, (payload) => {
-      if (payload === "settings") showSettings();
-      else if (payload === "palette") showPalette();
+      if (payload === 'settings') showSettings();
+      else if (payload === 'palette') showPalette();
     });
     // Accessibility loss / paste failure: surface a toast that nudges the
     // user into Settings, where they can re-grant the permission.
@@ -68,8 +69,8 @@
     });
 
     return () => {
-      window.removeEventListener("keydown", handleEscape);
-      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener('keydown', handleEscape);
+      window.removeEventListener('blur', handleBlur);
       offNavigate();
       offPasteFailed();
     };
@@ -94,7 +95,7 @@
 <main class="app-shell" class:settings-window={isSettingsWindow}>
   {#if isSettingsWindow}
     <SettingsRoute />
-  {:else if viewState.current === "palette"}
+  {:else if viewState.current === 'palette'}
     <PaletteRoute />
   {:else}
     <SettingsRoute />

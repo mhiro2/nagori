@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
-  import { describeError } from "../lib/errors";
-  import { checkForUpdates, getCapabilities, getSettings, updateSettings } from "../lib/commands";
-  import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from "../lib/i18n/index.svelte";
-  import type { Messages } from "../lib/i18n/locales/en";
+  import { onDestroy, onMount } from 'svelte';
+
+  import { checkForUpdates, getCapabilities, getSettings, updateSettings } from '../lib/commands';
+  import { describeError } from '../lib/errors';
+  import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from '../lib/i18n/index.svelte';
+  import type { Messages } from '../lib/i18n/locales/en';
   import {
     MAX_USER_REGEX_LEN,
     MAX_USER_REGEX_NESTING,
     validateUserRegex,
     type UserRegexError,
-  } from "../lib/policyValidation";
-  import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from "../lib/tauri";
-  import { applyAppearance } from "../lib/theme";
+  } from '../lib/policyValidation';
+  import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from '../lib/tauri';
+  import { applyAppearance } from '../lib/theme';
   import {
     CONTENT_KINDS,
     type Appearance,
@@ -25,32 +26,32 @@
     type RecentOrder,
     type SecondaryHotkeyAction,
     type SecretHandling,
-  } from "../lib/types";
-  import { showPalette } from "../stores/view.svelte";
+  } from '../lib/types';
+  import { showPalette } from '../stores/view.svelte';
 
   type HotkeyFailurePayload = { hotkey: string; error: string };
-  type SaveStatus = "idle" | "saving" | "saved" | "error";
+  type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
-  type Tab = "general" | "privacy" | "cli" | "advanced";
+  type Tab = 'general' | 'privacy' | 'cli' | 'advanced';
 
   // Standalone Settings window: the OS supplies the close button via its
   // native title bar, so the in-app "Back to palette" affordance is
   // redundant and hidden. The in-window route (dev/test fallback) still
   // shows the button.
-  const isStandaloneSettingsWindow = currentWindowLabel() === "settings";
+  const isStandaloneSettingsWindow = currentWindowLabel() === 'settings';
 
-  const TABS: readonly Tab[] = ["general", "privacy", "cli", "advanced"];
+  const TABS: readonly Tab[] = ['general', 'privacy', 'cli', 'advanced'];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
-    "pin",
-    "delete",
-    "paste-as-plain",
-    "copy-without-paste",
-    "clear",
-    "open-preview",
+    'pin',
+    'delete',
+    'paste-as-plain',
+    'copy-without-paste',
+    'clear',
+    'open-preview',
   ];
   const SECONDARY_HOTKEY_ACTIONS: readonly SecondaryHotkeyAction[] = [
-    "repaste-last",
-    "clear-history",
+    'repaste-last',
+    'clear-history',
   ];
 
   // Debounce profiles per control class. Checkbox / select edits commit in
@@ -100,7 +101,7 @@
   // updates fire on every keystroke; the backend round-trip waits for
   // `onblur` so partial accelerator strings ("Cmd+Sh…") don't churn the
   // OS-level shortcut registration.
-  const setOverride = <Action extends string, Field extends "paletteHotkeys" | "secondaryHotkeys">(
+  const setOverride = <Action extends string, Field extends 'paletteHotkeys' | 'secondaryHotkeys'>(
     field: Field,
     action: Action,
     raw: string,
@@ -137,18 +138,18 @@
   // Best-effort: failure to load is silently ignored — the section
   // hides rather than spamming the user with a non-actionable error.
   let capabilities: PlatformCapabilities | null = $state(null);
-  let activeTab: Tab = $state("general");
+  let activeTab: Tab = $state('general');
   let loading = $state(false);
   let error: string | undefined = $state(undefined);
-  let appDenylistText = $state("");
-  let regexDenylistText = $state("");
+  let appDenylistText = $state('');
+  let regexDenylistText = $state('');
   // `hydrated` flips true only after `get_settings` resolves *and* the
   // derived textarea state is in sync. Auto-save gates on this flag so
   // the initial render — which assigns `settings`, `appDenylistText`,
   // and `regexDenylistText` in sequence — cannot accidentally feed the
   // defaults straight back to disk.
   let hydrated = $state(false);
-  let saveStatus = $state<SaveStatus>("idle");
+  let saveStatus = $state<SaveStatus>('idle');
   let saveError: string | undefined = $state(undefined);
   // Single shared debounce timer — any new edit cancels the pending
   // tick so we coalesce bursts into one `update_settings` round-trip.
@@ -200,7 +201,7 @@
   // in before scheduling the save; the unmount flush also syncs so a
   // hotkey edit that never saw `blur` (Escape -> palette tears the
   // input off the DOM) still reaches disk on the way out.
-  let lastBlurredGlobalHotkey = "";
+  let lastBlurredGlobalHotkey = '';
   let lastBlurredPaletteHotkeys: Partial<Record<PaletteHotkeyAction, string>> = {};
   let lastBlurredSecondaryHotkeys: Partial<Record<SecondaryHotkeyAction, string>> = {};
   // JSON-serialised form of the last payload we handed to
@@ -213,7 +214,7 @@
   // equal the *pre-inflight* state, so comparing only against the
   // persisted baseline would skip the corrective write the in-flight
   // save's resolution will need.
-  let lastSentJson = "";
+  let lastSentJson = '';
   // JSON-serialised form of the last payload the backend acknowledged.
   // Advances only inside the success branch of `updateSettings`, never
   // optimistically. The failure branch rewinds `lastSentJson` to this
@@ -221,7 +222,7 @@
   // payload the backend rejected — without that the dedup
   // short-circuit at the top of `commitSave` would silently drop the
   // retry.
-  let lastPersistedJson = "";
+  let lastPersistedJson = '';
   // Live preflight against the same limits `compile_user_regex` enforces in
   // `nagori-core::policy`. Rendered inline next to the textarea so the user
   // sees per-line guidance ("too long", "nested too deep", "invalid syntax")
@@ -230,14 +231,12 @@
   // rendered `Line N` label matches the row the user is editing, even when
   // blank lines sit between entries.
   let regexDenylistErrors = $derived.by<UserRegexError[]>(() =>
-    regexDenylistText
-      .split(/\r?\n/)
-      .flatMap((line, idx) => {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) return [];
-        const err = validateUserRegex(trimmed, idx);
-        return err ? [err] : [];
-      }),
+    regexDenylistText.split(/\r?\n/).flatMap((line, idx) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return [];
+      const err = validateUserRegex(trimmed, idx);
+      return err ? [err] : [];
+    }),
   );
   // Populated when the backend fails to register the configured global
   // hotkey at startup or after a save — surfaces the conflict to the user
@@ -246,7 +245,7 @@
 
   let updateChecking = $state(false);
   let updateStatus: string | undefined = $state(undefined);
-  let updateStatusKind: "info" | "error" = $state("info");
+  let updateStatusKind: 'info' | 'error' = $state('info');
   // Populated when `runUpdateCheck` finds a newer release. The MVP
   // surface is read-only — instead of wiring `download_and_install`
   // we send the user to the published release so they can download
@@ -262,7 +261,7 @@
     updateReleaseUrl = undefined;
     try {
       const info = await checkForUpdates();
-      updateStatusKind = "info";
+      updateStatusKind = 'info';
       if (info) {
         updateDownloadSupported = info.downloadSupported;
         // Whether the install medium supports in-place replacement
@@ -271,15 +270,15 @@
         // new package manually. We always link to the GitHub release
         // page; the difference is the surrounding copy.
         updateStatus = info.downloadSupported
-          ? t.settings.updates.available.replace("{version}", info.version)
-          : t.settings.updates.availableManual.replace("{version}", info.version);
+          ? t.settings.updates.available.replace('{version}', info.version)
+          : t.settings.updates.availableManual.replace('{version}', info.version);
         // Always-current redirect — never needs to be edited per release.
         updateReleaseUrl = `https://github.com/mhiro2/nagori/releases/tag/v${info.version}`;
       } else {
         updateStatus = t.settings.updates.upToDate;
       }
     } catch (err) {
-      updateStatusKind = "error";
+      updateStatusKind = 'error';
       updateStatus = describeError(err);
     } finally {
       updateChecking = false;
@@ -298,8 +297,8 @@
       try {
         const s = await getSettings();
         settings = s;
-        appDenylistText = s.appDenylist.join("\n");
-        regexDenylistText = s.regexDenylist.join("\n");
+        appDenylistText = s.appDenylist.join('\n');
+        regexDenylistText = s.regexDenylist.join('\n');
         lastValidRegexList = [...s.regexDenylist];
         lastBlurredGlobalHotkey = s.globalHotkey;
         lastBlurredPaletteHotkeys = { ...s.paletteHotkeys };
@@ -334,7 +333,7 @@
     })();
   });
 
-  type CapabilityRowKey = keyof Messages["settings"]["capabilities"]["rows"];
+  type CapabilityRowKey = keyof Messages['settings']['capabilities']['rows'];
 
   type CapabilityRow = {
     key: CapabilityRowKey;
@@ -346,23 +345,23 @@
     if (!capabilities) return [];
     const rows = t.settings.capabilities.rows;
     return [
-      { key: "captureText", label: rows.captureText, capability: capabilities.captureText },
-      { key: "captureImage", label: rows.captureImage, capability: capabilities.captureImage },
-      { key: "captureFiles", label: rows.captureFiles, capability: capabilities.captureFiles },
-      { key: "writeText", label: rows.writeText, capability: capabilities.writeText },
-      { key: "writeImage", label: rows.writeImage, capability: capabilities.writeImage },
+      { key: 'captureText', label: rows.captureText, capability: capabilities.captureText },
+      { key: 'captureImage', label: rows.captureImage, capability: capabilities.captureImage },
+      { key: 'captureFiles', label: rows.captureFiles, capability: capabilities.captureFiles },
+      { key: 'writeText', label: rows.writeText, capability: capabilities.writeText },
+      { key: 'writeImage', label: rows.writeImage, capability: capabilities.writeImage },
       {
-        key: "clipboardMultiRepresentationWrite",
+        key: 'clipboardMultiRepresentationWrite',
         label: rows.clipboardMultiRepresentationWrite,
         capability: capabilities.clipboardMultiRepresentationWrite,
       },
-      { key: "autoPaste", label: rows.autoPaste, capability: capabilities.autoPaste },
-      { key: "globalHotkey", label: rows.globalHotkey, capability: capabilities.globalHotkey },
-      { key: "frontmostApp", label: rows.frontmostApp, capability: capabilities.frontmostApp },
-      { key: "permissionsUi", label: rows.permissionsUi, capability: capabilities.permissionsUi },
-      { key: "updateCheck", label: rows.updateCheck, capability: capabilities.updateCheck },
+      { key: 'autoPaste', label: rows.autoPaste, capability: capabilities.autoPaste },
+      { key: 'globalHotkey', label: rows.globalHotkey, capability: capabilities.globalHotkey },
+      { key: 'frontmostApp', label: rows.frontmostApp, capability: capabilities.frontmostApp },
+      { key: 'permissionsUi', label: rows.permissionsUi, capability: capabilities.permissionsUi },
+      { key: 'updateCheck', label: rows.updateCheck, capability: capabilities.updateCheck },
       {
-        key: "previewQuickLook",
+        key: 'previewQuickLook',
         label: rows.previewQuickLook,
         capability: capabilities.previewQuickLook,
       },
@@ -372,32 +371,32 @@
   const capabilityStatusLabel = (capability: Capability): string => {
     const statuses = t.settings.capabilities.statuses;
     switch (capability.status) {
-      case "available":
+      case 'available':
         return statuses.available;
-      case "unsupported":
+      case 'unsupported':
         return statuses.unsupported;
-      case "requiresPermission":
+      case 'requiresPermission':
         return statuses.requiresPermission;
-      case "requiresExternalTool":
+      case 'requiresExternalTool':
         return statuses.requiresExternalTool;
-      case "experimental":
+      case 'experimental':
         return statuses.experimental;
     }
   };
 
   const capabilityDetail = (capability: Capability): string => {
     switch (capability.status) {
-      case "available":
-        return "";
-      case "unsupported":
+      case 'available':
+        return '';
+      case 'unsupported':
         return capability.reason;
-      case "requiresPermission":
+      case 'requiresPermission':
         return `${capability.permission} — ${capability.message}`;
-      case "requiresExternalTool":
+      case 'requiresExternalTool':
         return capability.installHint
           ? `${capability.tool} (${capability.installHint})`
           : capability.tool;
-      case "experimental":
+      case 'experimental':
         return capability.message;
     }
   };
@@ -421,9 +420,7 @@
     secondaryHotkeys: lastBlurredSecondaryHotkeys,
     appDenylist: linesToList(appDenylistText),
     regexDenylist:
-      regexDenylistErrors.length === 0
-        ? linesToList(regexDenylistText)
-        : lastValidRegexList,
+      regexDenylistErrors.length === 0 ? linesToList(regexDenylistText) : lastValidRegexList,
   });
 
   // Promote each clean version of the regex textarea to the "last valid"
@@ -518,7 +515,7 @@
     // same payload.
     lastSentJson = snapshotJson;
 
-    saveStatus = "saving";
+    saveStatus = 'saving';
     if (savedTimer !== null) {
       clearTimeout(savedTimer);
       savedTimer = null;
@@ -543,12 +540,12 @@
         // skip the "Saved" pill — the next commit will flip the header
         // back to "Saving…" within the same tick anyway.
         if (!queued) {
-          saveStatus = "saved";
+          saveStatus = 'saved';
           saveError = undefined;
           error = undefined;
           savedTimer = setTimeout(() => {
             savedTimer = null;
-            if (saveStatus === "saved") saveStatus = "idle";
+            if (saveStatus === 'saved') saveStatus = 'idle';
           }, SAVED_HOLD_MS);
         }
         // A retry timer left over from an earlier failure is now moot —
@@ -575,7 +572,7 @@
         // drop the user's intent.
         lastSentJson = lastPersistedJson;
         if (destroyed) return;
-        saveStatus = "error";
+        saveStatus = 'error';
         saveError = describeError(err);
         if (externalMergeDuringInflight) {
           // The follow-up commit triggered from `finally` will dispatch
@@ -645,14 +642,14 @@
 
   const saveStatusLabel = $derived.by(() => {
     switch (saveStatus) {
-      case "saving":
+      case 'saving':
         return t.settings.statusSaving;
-      case "saved":
+      case 'saved':
         return t.settings.statusSaved;
-      case "error":
-        return t.settings.statusError.replace("{error}", saveError ?? "");
-      case "idle":
-        return "";
+      case 'error':
+        return t.settings.statusError.replace('{error}', saveError ?? '');
+      case 'idle':
+        return '';
     }
   });
 
@@ -678,7 +675,7 @@
       }
       return true;
     }
-    if (typeof a !== "object" || typeof b !== "object") return false;
+    if (typeof a !== 'object' || typeof b !== 'object') return false;
     const ao = a as Record<string, unknown>;
     const bo = b as Record<string, unknown>;
     const ak = Object.keys(ao);
@@ -731,8 +728,8 @@
     // a line on, and for the regex case substituting `lastValidRegexList`
     // when the textarea is invalid would falsely classify a mid-typed
     // broken regex as clean and let `remote` overwrite the user's input.
-    const baselineAppText = baseline.appDenylist.join("\n");
-    const baselineRegexText = baseline.regexDenylist.join("\n");
+    const baselineAppText = baseline.appDenylist.join('\n');
+    const baselineRegexText = baseline.regexDenylist.join('\n');
     const appDenylistDirty = appDenylistText !== baselineAppText;
     const regexDenylistDirty = regexDenylistText !== baselineRegexText;
     type Key = keyof AppSettings;
@@ -746,18 +743,17 @@
         dirty = !fieldEqual(local[key], baseline[key]);
       }
       if (!dirty) {
-        (local as unknown as Record<string, unknown>)[key] =
-          remote[key] as unknown;
+        (local as unknown as Record<string, unknown>)[key] = remote[key] as unknown;
       }
     }
     // Re-derive UI state for adopted fields. Reuse the dirty flags from
     // the loop above so a textarea we just classified as user-edited
     // keeps its in-progress content (and `lastValidRegexList`) intact.
     if (!appDenylistDirty) {
-      appDenylistText = remote.appDenylist.join("\n");
+      appDenylistText = remote.appDenylist.join('\n');
     }
     if (!regexDenylistDirty) {
-      regexDenylistText = remote.regexDenylist.join("\n");
+      regexDenylistText = remote.regexDenylist.join('\n');
       lastValidRegexList = [...remote.regexDenylist];
     } else if (regexDenylistErrors.length > 0) {
       // User is mid-edit on an invalid pattern. `buildSnapshotPayload`
@@ -829,10 +825,7 @@
         hotkeyError = payload.error || payload.hotkey;
       },
     );
-    const offSettings = subscribe<AppSettings>(
-      TAURI_EVENTS.settingsChanged,
-      applyRemoteSettings,
-    );
+    const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, applyRemoteSettings);
     return () => {
       offHotkey();
       offSettings();
@@ -915,7 +908,7 @@
   <header class="head">
     <h1>{t.settings.title}</h1>
     <div class="head-trailing">
-      {#if saveStatus !== "idle"}
+      {#if saveStatus !== 'idle'}
         <span class="save-status" data-status={saveStatus} aria-live="polite">
           {saveStatusLabel}
         </span>
@@ -951,488 +944,492 @@
     </div>
 
     <form onsubmit={(e) => e.preventDefault()}>
-    {#if activeTab === "general"}
-      <fieldset>
-        <legend>{t.settings.capture.legend}</legend>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.captureEnabled}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.capture.enabled}
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.autoPasteEnabled}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.capture.autoPaste}
-        </label>
-        <label class="field-row">
-          <span>{t.settings.capture.pasteFormatDefault}</span>
-          <select
-            bind:value={settings.pasteFormatDefault}
-            onchange={(e) => {
-              if (!settings) return;
-              settings.pasteFormatDefault = (e.target as HTMLSelectElement).value as PasteFormat;
-              scheduleSave(0);
-            }}
-          >
-            <option value="preserve">{t.settings.capture.pasteFormatOptions.preserve}</option>
-            <option value="plain_text">{t.settings.capture.pasteFormatOptions.plain_text}</option>
-          </select>
-        </label>
-        <label class="field-row">
-          <span>{t.settings.capture.hotkey}</span>
-          <input
-            type="text"
-            bind:value={settings.globalHotkey}
-            onblur={() => {
-              if (!settings) return;
-              lastBlurredGlobalHotkey = settings.globalHotkey;
-              scheduleSave(0);
-            }}
-          />
-        </label>
-        {#if hotkeyError}
-          <p class="status error">{hotkeyError}</p>
-        {/if}
-        <label class="stack">
-          <span>
+      {#if activeTab === 'general'}
+        <fieldset>
+          <legend>{t.settings.capture.legend}</legend>
+          <label>
             <input
               type="checkbox"
-              bind:checked={settings.captureInitialClipboardOnLaunch}
+              bind:checked={settings.captureEnabled}
               onchange={() => scheduleSave(0)}
             />
-            {t.settings.capture.captureInitialClipboard}
-          </span>
-          <span class="help">{t.settings.capture.captureInitialClipboardHelp}</span>
-        </label>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t.settings.display.legend}</legend>
-        <label class="field-row">
-          <span>{t.settings.display.rowCount}</span>
-          <input
-            type="number"
-            min="3"
-            max="20"
-            step="1"
-            value={settings.paletteRowCount}
-            oninput={(e) => {
-              if (!settings) return;
-              settings.paletteRowCount = clampRowCount(
-                Number((e.target as HTMLInputElement).value),
-              );
-              scheduleSave(DEBOUNCE_NUMBER_MS);
-            }}
-          />
-        </label>
-        <span class="help">{t.settings.display.rowCountHelp}</span>
-        <label class="stack">
-          <span>
+            {t.settings.capture.enabled}
+          </label>
+          <label>
             <input
               type="checkbox"
-              bind:checked={settings.showPreviewPane}
+              bind:checked={settings.autoPasteEnabled}
               onchange={() => scheduleSave(0)}
             />
-            {t.settings.display.previewPane}
-          </span>
-          <span class="help">{t.settings.display.previewPaneHelp}</span>
-        </label>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t.settings.hotkeys.legend}</legend>
-        <p class="subhead">{t.settings.hotkeys.paletteHeading}</p>
-        <p class="help">{t.settings.hotkeys.paletteHelp}</p>
-        <div class="hotkey-grid">
-          {#each PALETTE_HOTKEY_ACTIONS as action (action)}
-            <label class="hotkey-row">
-              <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
-              <input
-                type="text"
-                placeholder={t.settings.hotkeys.placeholder}
-                value={settings.paletteHotkeys[action] ?? ""}
-                oninput={(e) =>
-                  setOverride("paletteHotkeys", action, (e.target as HTMLInputElement).value)}
-                onblur={() => {
-                  if (!settings) return;
-                  lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
-                  scheduleSave(0);
-                }}
-              />
-            </label>
-          {/each}
-        </div>
-        <p class="subhead">{t.settings.hotkeys.secondaryHeading}</p>
-        <p class="help">{t.settings.hotkeys.secondaryHelp}</p>
-        <div class="hotkey-grid">
-          {#each SECONDARY_HOTKEY_ACTIONS as action (action)}
-            <label class="hotkey-row">
-              <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
-              <input
-                type="text"
-                placeholder={t.settings.hotkeys.placeholder}
-                value={settings.secondaryHotkeys[action] ?? ""}
-                oninput={(e) =>
-                  setOverride("secondaryHotkeys", action, (e.target as HTMLInputElement).value)}
-                onblur={() => {
-                  if (!settings) return;
-                  lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
-                  scheduleSave(0);
-                }}
-              />
-            </label>
-          {/each}
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t.settings.appearance.legend}</legend>
-        <label class="field-row">
-          <span>{t.settings.appearance.locale}</span>
-          <select
-            bind:value={settings.locale}
-            onchange={(e) => onLocaleChange((e.target as HTMLSelectElement).value as LocaleSetting)}
-          >
-            {#each LOCALE_PREFERENCES as code (code)}
-              <option value={code}>{t.locales[code]}</option>
-            {/each}
-          </select>
-        </label>
-        <label class="field-row">
-          <span>{t.settings.appearance.theme}</span>
-          <select
-            bind:value={settings.appearance}
-            onchange={(e) => onAppearanceChange((e.target as HTMLSelectElement).value as Appearance)}
-          >
-            <option value="system">{t.settings.appearance.themeOptions.system}</option>
-            <option value="light">{t.settings.appearance.themeOptions.light}</option>
-            <option value="dark">{t.settings.appearance.themeOptions.dark}</option>
-          </select>
-        </label>
-        <label class="field-row">
-          <span>{t.settings.appearance.recentOrder}</span>
-          <select
-            bind:value={settings.recentOrder}
-            onchange={(e) => {
-              if (!settings) return;
-              settings.recentOrder = (e.target as HTMLSelectElement).value as RecentOrder;
-              scheduleSave(0);
-            }}
-          >
-            <option value="by_recency">{t.settings.appearance.recentOrderOptions.by_recency}</option>
-            <option value="by_use_count"
-              >{t.settings.appearance.recentOrderOptions.by_use_count}</option
+            {t.settings.capture.autoPaste}
+          </label>
+          <label class="field-row">
+            <span>{t.settings.capture.pasteFormatDefault}</span>
+            <select
+              bind:value={settings.pasteFormatDefault}
+              onchange={(e) => {
+                if (!settings) return;
+                settings.pasteFormatDefault = (e.target as HTMLSelectElement).value as PasteFormat;
+                scheduleSave(0);
+              }}
             >
-            <option value="pinned_first_then_recency"
-              >{t.settings.appearance.recentOrderOptions.pinned_first_then_recency}</option
-            >
-          </select>
-        </label>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t.settings.integration.legend}</legend>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.autoLaunch}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.integration.autoLaunch}
-        </label>
-        <p class="help">{t.settings.integration.autoLaunchHelp}</p>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.showInMenuBar}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.integration.menuBar}
-        </label>
-        <p class="help">{t.settings.integration.menuBarHelp}</p>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.clearOnQuit}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.integration.clearOnQuit}
-        </label>
-        <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
-      </fieldset>
-    {/if}
-
-    {#if activeTab === "privacy"}
-      <fieldset>
-        <legend>{t.settings.privacy.legend}</legend>
-        <label class="stack">
-          {t.settings.privacy.appDenylist}
-          <textarea
-            rows="4"
-            bind:value={appDenylistText}
-            oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
-          ></textarea>
-          <span class="help">{t.settings.privacy.appDenylistHelp}</span>
-        </label>
-        <label class="stack">
-          {t.settings.privacy.regexDenylist}
-          <textarea
-            rows="4"
-            bind:value={regexDenylistText}
-            oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
-            aria-invalid={regexDenylistErrors.length > 0 || undefined}
-            aria-describedby={regexDenylistErrors.length > 0
-              ? "regex-denylist-help regex-denylist-errors regex-denylist-autosave"
-              : "regex-denylist-help regex-denylist-autosave"}
-          ></textarea>
-          <span class="help" id="regex-denylist-help">
-            {t.settings.privacy.regexDenylistHelp}
-          </span>
-          {#if regexDenylistErrors.length > 0}
-            <ul id="regex-denylist-errors" class="status error regex-errors" role="alert">
-              {#each regexDenylistErrors as err (`${err.index}:${err.kind}`)}
-                <li>
-                  <strong>
-                    {t.settings.privacy.regexErrors.lineLabel.replace(
-                      '{line}',
-                      String(err.index + 1),
-                    )}
-                  </strong>
-                  {describeRegexError(err)}
-                </li>
-              {/each}
-            </ul>
-            <span class="help" id="regex-denylist-autosave">
-              {t.settings.privacy.regexDenylistAutosaveHint}
+              <option value="preserve">{t.settings.capture.pasteFormatOptions.preserve}</option>
+              <option value="plain_text">{t.settings.capture.pasteFormatOptions.plain_text}</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>{t.settings.capture.hotkey}</span>
+            <input
+              type="text"
+              bind:value={settings.globalHotkey}
+              onblur={() => {
+                if (!settings) return;
+                lastBlurredGlobalHotkey = settings.globalHotkey;
+                scheduleSave(0);
+              }}
+            />
+          </label>
+          {#if hotkeyError}
+            <p class="status error">{hotkeyError}</p>
+          {/if}
+          <label class="stack">
+            <span>
+              <input
+                type="checkbox"
+                bind:checked={settings.captureInitialClipboardOnLaunch}
+                onchange={() => scheduleSave(0)}
+              />
+              {t.settings.capture.captureInitialClipboard}
             </span>
-          {:else}
-            <span class="help" id="regex-denylist-autosave" hidden></span>
-          {/if}
-        </label>
-        <label class="stack">
-          {t.settings.privacy.secretHandling}
-          <select
-            value={settings.secretHandling}
-            onchange={(e) => {
-              if (!settings) return;
-              const select = e.currentTarget as HTMLSelectElement;
-              const next = select.value as SecretHandling;
-              if (next === "store_full" && settings.secretHandling !== "store_full") {
-                // Plaintext storage is irreversible against a compromised
-                // disk image — gate it behind an explicit confirm so a
-                // misclick or muscle memory in a long settings session
-                // can't silently flip the durable copy from redacted to
-                // raw. The DB has no encryption-at-rest, so the cost of
-                // an unintentional toggle is recoverable secrets.
-                const ok = window.confirm(t.settings.privacy.storeFullConfirm);
-                if (!ok) {
-                  select.value = settings.secretHandling;
-                  return;
-                }
-              }
-              settings.secretHandling = next;
-              scheduleSave(0);
-            }}
-          >
-            <option value="block">{t.settings.privacy.secretHandlingOptions.block}</option>
-            <option value="store_redacted"
-              >{t.settings.privacy.secretHandlingOptions.store_redacted}</option
-            >
-            <option value="store_full">{t.settings.privacy.secretHandlingOptions.store_full}</option
-            >
-          </select>
-          <span class="help">{t.settings.privacy.secretHandlingHelp}</span>
-          {#if settings.secretHandling === "store_full"}
-            <p class="status warning" role="alert">
-              {t.settings.privacy.storeFullWarning}
-            </p>
-          {/if}
-        </label>
-        <div class="stack">
-          <span>{t.settings.privacy.captureKinds}</span>
-          <div class="checkbox-grid">
-            {#each CONTENT_KINDS as kind (kind)}
-              <label>
+            <span class="help">{t.settings.capture.captureInitialClipboardHelp}</span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>{t.settings.display.legend}</legend>
+          <label class="field-row">
+            <span>{t.settings.display.rowCount}</span>
+            <input
+              type="number"
+              min="3"
+              max="20"
+              step="1"
+              value={settings.paletteRowCount}
+              oninput={(e) => {
+                if (!settings) return;
+                settings.paletteRowCount = clampRowCount(
+                  Number((e.target as HTMLInputElement).value),
+                );
+                scheduleSave(DEBOUNCE_NUMBER_MS);
+              }}
+            />
+          </label>
+          <span class="help">{t.settings.display.rowCountHelp}</span>
+          <label class="stack">
+            <span>
+              <input
+                type="checkbox"
+                bind:checked={settings.showPreviewPane}
+                onchange={() => scheduleSave(0)}
+              />
+              {t.settings.display.previewPane}
+            </span>
+            <span class="help">{t.settings.display.previewPaneHelp}</span>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>{t.settings.hotkeys.legend}</legend>
+          <p class="subhead">{t.settings.hotkeys.paletteHeading}</p>
+          <p class="help">{t.settings.hotkeys.paletteHelp}</p>
+          <div class="hotkey-grid">
+            {#each PALETTE_HOTKEY_ACTIONS as action (action)}
+              <label class="hotkey-row">
+                <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
                 <input
-                  type="checkbox"
-                  checked={settings.captureKinds.includes(kind)}
-                  onchange={(e) =>
-                    toggleCaptureKind(kind, (e.target as HTMLInputElement).checked)}
+                  type="text"
+                  placeholder={t.settings.hotkeys.placeholder}
+                  value={settings.paletteHotkeys[action] ?? ''}
+                  oninput={(e) =>
+                    setOverride('paletteHotkeys', action, (e.target as HTMLInputElement).value)}
+                  onblur={() => {
+                    if (!settings) return;
+                    lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
+                    scheduleSave(0);
+                  }}
                 />
-                {t.settings.privacy.captureKindOptions[kind]}
               </label>
             {/each}
           </div>
-          <span class="help">{t.settings.privacy.captureKindsHelp}</span>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>{t.settings.retention.legend}</legend>
-        <label>
-          {t.settings.retention.maxCount}
-          <input
-            type="number"
-            min="0"
-            step="100"
-            bind:value={settings.historyRetentionCount}
-            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-          />
-        </label>
-        <label class="stack">
-          {t.settings.retention.maxDays}
-          <input
-            type="number"
-            min="0"
-            step="1"
-            placeholder={t.settings.retention.maxDaysPlaceholder}
-            value={settings.historyRetentionDays ?? 0}
-            oninput={(e) => {
-              if (!settings) return;
-              const next = Number((e.target as HTMLInputElement).value);
-              settings.historyRetentionDays = Number.isFinite(next) && next > 0 ? next : null;
-              scheduleSave(DEBOUNCE_NUMBER_MS);
-            }}
-          />
-          <span class="help">{t.settings.retention.maxDaysHelp}</span>
-        </label>
-        <label class="stack">
-          {t.settings.retention.maxTotalBytes}
-          <input
-            type="number"
-            min="0"
-            step="1048576"
-            placeholder={t.settings.retention.maxTotalBytesPlaceholder}
-            value={settings.maxTotalBytes ?? 0}
-            oninput={(e) => {
-              if (!settings) return;
-              const next = Number((e.target as HTMLInputElement).value);
-              settings.maxTotalBytes = Number.isFinite(next) && next > 0 ? next : null;
-              scheduleSave(DEBOUNCE_NUMBER_MS);
-            }}
-          />
-          <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
-        </label>
-      </fieldset>
-    {/if}
-
-    {#if activeTab === "cli"}
-      <fieldset>
-        <legend>{t.settings.cli.legend}</legend>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.cliIpcEnabled}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.cli.ipcEnabled}
-        </label>
-      </fieldset>
-    {/if}
-
-    {#if activeTab === "advanced"}
-      <fieldset>
-        <legend>{t.settings.retention.legend}</legend>
-        <label>
-          {t.settings.retention.maxBytes}
-          <input
-            type="number"
-            min="0"
-            step="1024"
-            bind:value={settings.maxEntrySizeBytes}
-            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-          />
-        </label>
-        <label>
-          {t.settings.retention.pasteDelayMs}
-          <input
-            type="number"
-            min="0"
-            max="1000"
-            step="10"
-            bind:value={settings.pasteDelayMs}
-            oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-          />
-        </label>
-      </fieldset>
-      {#if capabilities}
-        <fieldset>
-          <legend>{t.settings.capabilities.legend}</legend>
-          <p class="help">{t.settings.capabilities.help}</p>
-          <div class="capability-meta">
-            <span><strong>{t.settings.capabilities.platform}:</strong> {capabilities.platform}</span>
-            <span><strong>{t.settings.capabilities.tier}:</strong> {capabilities.tier}</span>
+          <p class="subhead">{t.settings.hotkeys.secondaryHeading}</p>
+          <p class="help">{t.settings.hotkeys.secondaryHelp}</p>
+          <div class="hotkey-grid">
+            {#each SECONDARY_HOTKEY_ACTIONS as action (action)}
+              <label class="hotkey-row">
+                <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
+                <input
+                  type="text"
+                  placeholder={t.settings.hotkeys.placeholder}
+                  value={settings.secondaryHotkeys[action] ?? ''}
+                  oninput={(e) =>
+                    setOverride('secondaryHotkeys', action, (e.target as HTMLInputElement).value)}
+                  onblur={() => {
+                    if (!settings) return;
+                    lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
+                    scheduleSave(0);
+                  }}
+                />
+              </label>
+            {/each}
           </div>
-          <table class="capability-table">
-            <thead>
-              <tr>
-                <th scope="col">{t.settings.capabilities.columns.capability}</th>
-                <th scope="col">{t.settings.capabilities.columns.status}</th>
-                <th scope="col">{t.settings.capabilities.columns.detail}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each capabilityRows as row (row.key)}
-                <tr>
-                  <th scope="row" class="capability-label">{row.label}</th>
-                  <td>
-                    <span
-                      class="capability-status"
-                      data-status={row.capability.status}
-                    >
-                      {capabilityStatusLabel(row.capability)}
-                    </span>
-                  </td>
-                  <td class="capability-detail">{capabilityDetail(row.capability)}</td>
-                </tr>
+        </fieldset>
+
+        <fieldset>
+          <legend>{t.settings.appearance.legend}</legend>
+          <label class="field-row">
+            <span>{t.settings.appearance.locale}</span>
+            <select
+              bind:value={settings.locale}
+              onchange={(e) =>
+                onLocaleChange((e.target as HTMLSelectElement).value as LocaleSetting)}
+            >
+              {#each LOCALE_PREFERENCES as code (code)}
+                <option value={code}>{t.locales[code]}</option>
               {/each}
-            </tbody>
-          </table>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>{t.settings.appearance.theme}</span>
+            <select
+              bind:value={settings.appearance}
+              onchange={(e) =>
+                onAppearanceChange((e.target as HTMLSelectElement).value as Appearance)}
+            >
+              <option value="system">{t.settings.appearance.themeOptions.system}</option>
+              <option value="light">{t.settings.appearance.themeOptions.light}</option>
+              <option value="dark">{t.settings.appearance.themeOptions.dark}</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>{t.settings.appearance.recentOrder}</span>
+            <select
+              bind:value={settings.recentOrder}
+              onchange={(e) => {
+                if (!settings) return;
+                settings.recentOrder = (e.target as HTMLSelectElement).value as RecentOrder;
+                scheduleSave(0);
+              }}
+            >
+              <option value="by_recency"
+                >{t.settings.appearance.recentOrderOptions.by_recency}</option
+              >
+              <option value="by_use_count"
+                >{t.settings.appearance.recentOrderOptions.by_use_count}</option
+              >
+              <option value="pinned_first_then_recency"
+                >{t.settings.appearance.recentOrderOptions.pinned_first_then_recency}</option
+              >
+            </select>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>{t.settings.integration.legend}</legend>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.autoLaunch}
+              onchange={() => scheduleSave(0)}
+            />
+            {t.settings.integration.autoLaunch}
+          </label>
+          <p class="help">{t.settings.integration.autoLaunchHelp}</p>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.showInMenuBar}
+              onchange={() => scheduleSave(0)}
+            />
+            {t.settings.integration.menuBar}
+          </label>
+          <p class="help">{t.settings.integration.menuBarHelp}</p>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.clearOnQuit}
+              onchange={() => scheduleSave(0)}
+            />
+            {t.settings.integration.clearOnQuit}
+          </label>
+          <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
         </fieldset>
       {/if}
-      <fieldset>
-        <legend>{t.settings.updates.legend}</legend>
-        <label>
-          <input
-            type="checkbox"
-            bind:checked={settings.autoUpdateCheck}
-            onchange={() => scheduleSave(0)}
-          />
-          {t.settings.updates.autoCheck}
-        </label>
-        <p class="help">
-          {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
-        </p>
-        <div class="actions">
-          <button
-            type="button"
-            class="secondary compact"
-            disabled={updateChecking}
-            onclick={runUpdateCheck}
-          >
-            {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
-          </button>
-        </div>
-        {#if updateStatus}
-          <p class="status" class:error={updateStatusKind === "error"}>
-            {updateStatus}
-            {#if updateReleaseUrl}
-              <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
-                {updateDownloadSupported
-                  ? t.settings.updates.viewRelease
-                  : t.settings.updates.downloadManual}
-              </a>
+
+      {#if activeTab === 'privacy'}
+        <fieldset>
+          <legend>{t.settings.privacy.legend}</legend>
+          <label class="stack">
+            {t.settings.privacy.appDenylist}
+            <textarea
+              rows="4"
+              bind:value={appDenylistText}
+              oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
+            ></textarea>
+            <span class="help">{t.settings.privacy.appDenylistHelp}</span>
+          </label>
+          <label class="stack">
+            {t.settings.privacy.regexDenylist}
+            <textarea
+              rows="4"
+              bind:value={regexDenylistText}
+              oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
+              aria-invalid={regexDenylistErrors.length > 0 || undefined}
+              aria-describedby={regexDenylistErrors.length > 0
+                ? 'regex-denylist-help regex-denylist-errors regex-denylist-autosave'
+                : 'regex-denylist-help regex-denylist-autosave'}
+            ></textarea>
+            <span class="help" id="regex-denylist-help">
+              {t.settings.privacy.regexDenylistHelp}
+            </span>
+            {#if regexDenylistErrors.length > 0}
+              <ul id="regex-denylist-errors" class="status error regex-errors" role="alert">
+                {#each regexDenylistErrors as err (`${err.index}:${err.kind}`)}
+                  <li>
+                    <strong>
+                      {t.settings.privacy.regexErrors.lineLabel.replace(
+                        '{line}',
+                        String(err.index + 1),
+                      )}
+                    </strong>
+                    {describeRegexError(err)}
+                  </li>
+                {/each}
+              </ul>
+              <span class="help" id="regex-denylist-autosave">
+                {t.settings.privacy.regexDenylistAutosaveHint}
+              </span>
+            {:else}
+              <span class="help" id="regex-denylist-autosave" hidden></span>
             {/if}
-          </p>
+          </label>
+          <label class="stack">
+            {t.settings.privacy.secretHandling}
+            <select
+              value={settings.secretHandling}
+              onchange={(e) => {
+                if (!settings) return;
+                const select = e.currentTarget as HTMLSelectElement;
+                const next = select.value as SecretHandling;
+                if (next === 'store_full' && settings.secretHandling !== 'store_full') {
+                  // Plaintext storage is irreversible against a compromised
+                  // disk image — gate it behind an explicit confirm so a
+                  // misclick or muscle memory in a long settings session
+                  // can't silently flip the durable copy from redacted to
+                  // raw. The DB has no encryption-at-rest, so the cost of
+                  // an unintentional toggle is recoverable secrets.
+                  const ok = window.confirm(t.settings.privacy.storeFullConfirm);
+                  if (!ok) {
+                    select.value = settings.secretHandling;
+                    return;
+                  }
+                }
+                settings.secretHandling = next;
+                scheduleSave(0);
+              }}
+            >
+              <option value="block">{t.settings.privacy.secretHandlingOptions.block}</option>
+              <option value="store_redacted"
+                >{t.settings.privacy.secretHandlingOptions.store_redacted}</option
+              >
+              <option value="store_full"
+                >{t.settings.privacy.secretHandlingOptions.store_full}</option
+              >
+            </select>
+            <span class="help">{t.settings.privacy.secretHandlingHelp}</span>
+            {#if settings.secretHandling === 'store_full'}
+              <p class="status warning" role="alert">
+                {t.settings.privacy.storeFullWarning}
+              </p>
+            {/if}
+          </label>
+          <div class="stack">
+            <span>{t.settings.privacy.captureKinds}</span>
+            <div class="checkbox-grid">
+              {#each CONTENT_KINDS as kind (kind)}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={settings.captureKinds.includes(kind)}
+                    onchange={(e) =>
+                      toggleCaptureKind(kind, (e.target as HTMLInputElement).checked)}
+                  />
+                  {t.settings.privacy.captureKindOptions[kind]}
+                </label>
+              {/each}
+            </div>
+            <span class="help">{t.settings.privacy.captureKindsHelp}</span>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>{t.settings.retention.legend}</legend>
+          <label>
+            {t.settings.retention.maxCount}
+            <input
+              type="number"
+              min="0"
+              step="100"
+              bind:value={settings.historyRetentionCount}
+              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
+            />
+          </label>
+          <label class="stack">
+            {t.settings.retention.maxDays}
+            <input
+              type="number"
+              min="0"
+              step="1"
+              placeholder={t.settings.retention.maxDaysPlaceholder}
+              value={settings.historyRetentionDays ?? 0}
+              oninput={(e) => {
+                if (!settings) return;
+                const next = Number((e.target as HTMLInputElement).value);
+                settings.historyRetentionDays = Number.isFinite(next) && next > 0 ? next : null;
+                scheduleSave(DEBOUNCE_NUMBER_MS);
+              }}
+            />
+            <span class="help">{t.settings.retention.maxDaysHelp}</span>
+          </label>
+          <label class="stack">
+            {t.settings.retention.maxTotalBytes}
+            <input
+              type="number"
+              min="0"
+              step="1048576"
+              placeholder={t.settings.retention.maxTotalBytesPlaceholder}
+              value={settings.maxTotalBytes ?? 0}
+              oninput={(e) => {
+                if (!settings) return;
+                const next = Number((e.target as HTMLInputElement).value);
+                settings.maxTotalBytes = Number.isFinite(next) && next > 0 ? next : null;
+                scheduleSave(DEBOUNCE_NUMBER_MS);
+              }}
+            />
+            <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
+          </label>
+        </fieldset>
+      {/if}
+
+      {#if activeTab === 'cli'}
+        <fieldset>
+          <legend>{t.settings.cli.legend}</legend>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.cliIpcEnabled}
+              onchange={() => scheduleSave(0)}
+            />
+            {t.settings.cli.ipcEnabled}
+          </label>
+        </fieldset>
+      {/if}
+
+      {#if activeTab === 'advanced'}
+        <fieldset>
+          <legend>{t.settings.retention.legend}</legend>
+          <label>
+            {t.settings.retention.maxBytes}
+            <input
+              type="number"
+              min="0"
+              step="1024"
+              bind:value={settings.maxEntrySizeBytes}
+              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
+            />
+          </label>
+          <label>
+            {t.settings.retention.pasteDelayMs}
+            <input
+              type="number"
+              min="0"
+              max="1000"
+              step="10"
+              bind:value={settings.pasteDelayMs}
+              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
+            />
+          </label>
+        </fieldset>
+        {#if capabilities}
+          <fieldset>
+            <legend>{t.settings.capabilities.legend}</legend>
+            <p class="help">{t.settings.capabilities.help}</p>
+            <div class="capability-meta">
+              <span
+                ><strong>{t.settings.capabilities.platform}:</strong> {capabilities.platform}</span
+              >
+              <span><strong>{t.settings.capabilities.tier}:</strong> {capabilities.tier}</span>
+            </div>
+            <table class="capability-table">
+              <thead>
+                <tr>
+                  <th scope="col">{t.settings.capabilities.columns.capability}</th>
+                  <th scope="col">{t.settings.capabilities.columns.status}</th>
+                  <th scope="col">{t.settings.capabilities.columns.detail}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each capabilityRows as row (row.key)}
+                  <tr>
+                    <th scope="row" class="capability-label">{row.label}</th>
+                    <td>
+                      <span class="capability-status" data-status={row.capability.status}>
+                        {capabilityStatusLabel(row.capability)}
+                      </span>
+                    </td>
+                    <td class="capability-detail">{capabilityDetail(row.capability)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </fieldset>
         {/if}
-      </fieldset>
-    {/if}
+        <fieldset>
+          <legend>{t.settings.updates.legend}</legend>
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={settings.autoUpdateCheck}
+              onchange={() => scheduleSave(0)}
+            />
+            {t.settings.updates.autoCheck}
+          </label>
+          <p class="help">
+            {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
+          </p>
+          <div class="actions">
+            <button
+              type="button"
+              class="secondary compact"
+              disabled={updateChecking}
+              onclick={runUpdateCheck}
+            >
+              {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
+            </button>
+          </div>
+          {#if updateStatus}
+            <p class="status" class:error={updateStatusKind === 'error'}>
+              {updateStatus}
+              {#if updateReleaseUrl}
+                <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
+                  {updateDownloadSupported
+                    ? t.settings.updates.viewRelease
+                    : t.settings.updates.downloadManual}
+                </a>
+              {/if}
+            </p>
+          {/if}
+        </fieldset>
+      {/if}
     </form>
   {:else if !loading && !error}
     <p class="status hint">{t.settings.tauriRequired}</p>
@@ -1485,10 +1482,10 @@
     min-width: 9rem;
     text-align: right;
   }
-  .save-status[data-status="saved"] {
+  .save-status[data-status='saved'] {
     color: #4ade80;
   }
-  .save-status[data-status="error"] {
+  .save-status[data-status='error'] {
     color: var(--danger, #f87171);
   }
   .close {
@@ -1636,8 +1633,8 @@
     align-self: center;
     font-size: 0.875rem;
   }
-  input[type="text"],
-  input[type="number"],
+  input[type='text'],
+  input[type='number'],
   textarea,
   select {
     flex: 1;
@@ -1652,7 +1649,7 @@
   /* Cap fixed-width-feeling controls with max-width (not flex-basis) so
      they behave correctly inside both row and column flex containers —
      basis would otherwise be interpreted as height in `.stack` rows. */
-  input[type="number"] {
+  input[type='number'] {
     max-width: 9rem;
   }
   select {
@@ -1666,7 +1663,7 @@
      SVG drawn in `--bg` so it pops against the accent fill.
      CSP note: `img-src` already allows `data:`, so the inline SVG
      loads without a manifest change. */
-  input[type="checkbox"] {
+  input[type='checkbox'] {
     appearance: none;
     -webkit-appearance: none;
     width: 1rem;
@@ -1682,25 +1679,21 @@
     flex-shrink: 0;
     vertical-align: middle;
   }
-  input[type="checkbox"]:checked {
+  input[type='checkbox']:checked {
     background-color: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3.5 3.5L13 5.5'/></svg>");
   }
-  input[type="checkbox"]:focus-visible {
+  input[type='checkbox']:focus-visible {
     outline: 2px solid var(--accent, #6c8dff);
     outline-offset: 1px;
   }
-  input[type="checkbox"]:disabled {
+  input[type='checkbox']:disabled {
     opacity: 0.55;
     cursor: not-allowed;
   }
   textarea {
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     resize: vertical;
   }
   .actions {
@@ -1802,19 +1795,19 @@
     background: rgba(255, 255, 255, 0.04);
     color: var(--muted, rgba(255, 255, 255, 0.7));
   }
-  .capability-status[data-status="available"] {
+  .capability-status[data-status='available'] {
     color: #4ade80;
     border-color: rgba(74, 222, 128, 0.4);
     background: rgba(74, 222, 128, 0.08);
   }
-  .capability-status[data-status="unsupported"] {
+  .capability-status[data-status='unsupported'] {
     color: var(--danger, #f87171);
     border-color: rgba(248, 113, 113, 0.4);
     background: rgba(248, 113, 113, 0.08);
   }
-  .capability-status[data-status="requiresPermission"],
-  .capability-status[data-status="requiresExternalTool"],
-  .capability-status[data-status="experimental"] {
+  .capability-status[data-status='requiresPermission'],
+  .capability-status[data-status='requiresExternalTool'],
+  .capability-status[data-status='experimental'] {
     color: var(--warning, #f59e0b);
     border-color: rgba(245, 158, 11, 0.4);
     background: rgba(245, 158, 11, 0.08);

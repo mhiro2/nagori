@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { buildBindings, resolveAction } from "../lib/keybindings";
-  import { closePalette, openSettingsWindow } from "../lib/commands";
-  import { isTauri } from "../lib/tauri";
-  import { quickLookAvailable, refreshCapabilities } from "../stores/capabilities.svelte";
+  import { closePalette, openSettingsWindow } from '../lib/commands';
+  import { buildBindings, resolveAction } from '../lib/keybindings';
+  import { isTauri } from '../lib/tauri';
+  import { quickLookAvailable, refreshCapabilities } from '../stores/capabilities.svelte';
   import {
     confirmSelection,
     confirmSelectionWithAlternateFormat,
@@ -12,16 +12,16 @@
     deleteSelection,
     previewSelection,
     togglePinSelection,
-  } from "../stores/searchActions";
+  } from '../stores/searchActions';
   import {
     clearMultiSelect,
     multiSelectState,
     rangeSelectMulti,
     selectAllMulti,
     toggleMultiSelect,
-  } from "../stores/searchMultiSelect.svelte";
-  import { expandPreview, hydratePreview, previewState } from "../stores/searchPreview.svelte";
-  import { refreshRecent, scheduleQuery, searchState } from "../stores/searchQuery.svelte";
+  } from '../stores/searchMultiSelect.svelte';
+  import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
+  import { refreshRecent, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
   import {
     currentSelection,
     selectByIndex,
@@ -29,16 +29,16 @@
     selectLast,
     selectNext,
     selectPrev,
-  } from "../stores/searchSelection";
-  import { refreshSettings, settingsState } from "../stores/settings.svelte";
-  import { showSettings } from "../stores/view.svelte";
-  import ActionMenu from "./ActionMenu.svelte";
-  import FilterChips from "./FilterChips.svelte";
-  import OnboardingBanner from "./OnboardingBanner.svelte";
-  import PreviewPane from "./PreviewPane.svelte";
-  import ResultList from "./ResultList.svelte";
-  import SearchBox from "./SearchBox.svelte";
-  import StatusBar from "./StatusBar.svelte";
+  } from '../stores/searchSelection';
+  import { refreshSettings, settingsState } from '../stores/settings.svelte';
+  import { showSettings } from '../stores/view.svelte';
+  import ActionMenu from './ActionMenu.svelte';
+  import FilterChips from './FilterChips.svelte';
+  import OnboardingBanner from './OnboardingBanner.svelte';
+  import PreviewPane from './PreviewPane.svelte';
+  import ResultList from './ResultList.svelte';
+  import SearchBox from './SearchBox.svelte';
+  import StatusBar from './StatusBar.svelte';
 
   let actionMenuOpen = $state(false);
 
@@ -108,50 +108,50 @@
     if (!action) return;
     event.preventDefault();
     switch (action) {
-      case "select-next":
+      case 'select-next':
         selectNext();
         break;
-      case "select-prev":
+      case 'select-prev':
         selectPrev();
         break;
-      case "select-first":
+      case 'select-first':
         selectFirst();
         break;
-      case "select-last":
+      case 'select-last':
         selectLast();
         break;
-      case "confirm":
+      case 'confirm':
         if (multiSelectState.selected.size > 0) void copyMultiSelection();
         else void confirmSelection();
         break;
-      case "confirm-alternate-format":
+      case 'confirm-alternate-format':
         if (multiSelectState.selected.size > 0) void copyMultiSelection();
         else void confirmSelectionWithAlternateFormat();
         break;
-      case "copy":
+      case 'copy':
         if (multiSelectState.selected.size > 0) void copyMultiSelection();
         else void copySelection();
         break;
-      case "open-actions":
+      case 'open-actions':
         actionMenuOpen = true;
         break;
-      case "toggle-pin":
+      case 'toggle-pin':
         void togglePinSelection();
         break;
-      case "delete":
+      case 'delete':
         if (multiSelectState.selected.size > 0) void deleteMultiSelection();
         else void deleteSelection();
         break;
-      case "clear-query":
-        scheduleQuery("");
+      case 'clear-query':
+        scheduleQuery('');
         break;
-      case "open-preview":
+      case 'open-preview':
         previewExpanded = !previewExpanded;
         break;
-      case "preview-quick-look":
+      case 'preview-quick-look':
         if (quickLookAvailable()) void previewSelection();
         break;
-      case "open-settings":
+      case 'open-settings':
         // Settings is a separate native window under Tauri (own
         // decorations, no always-on-top). Fall back to the in-process
         // viewState toggle in non-Tauri dev/test contexts so the unit
@@ -159,15 +159,15 @@
         if (isTauri()) void openSettingsWindow();
         else showSettings();
         break;
-      case "multi-toggle": {
+      case 'multi-toggle': {
         const id = currentSelection()?.id;
         if (id !== undefined) toggleMultiSelect(id);
         break;
       }
-      case "multi-select-all":
+      case 'multi-select-all':
         selectAllMulti(resultIds);
         break;
-      case "close":
+      case 'close':
         if (actionMenuOpen) actionMenuOpen = false;
         else if (multiSelectState.selected.size > 0) clearMultiSelect();
         else if (previewExpanded) previewExpanded = false;
@@ -181,7 +181,11 @@
   <SearchBox value={searchState.query} onInput={handleInput} onKeydown={handleKeydown} />
   <FilterChips />
   <OnboardingBanner />
-  <div class="body" class:single-column={!showPreviewPane && !previewExpanded} class:preview-only={previewExpanded}>
+  <div
+    class="body"
+    class:single-column={!showPreviewPane && !previewExpanded}
+    class:preview-only={previewExpanded}
+  >
     {#if !previewExpanded}
       <ResultList
         items={searchState.results}
@@ -213,11 +217,7 @@
   />
 </section>
 
-<ActionMenu
-  open={actionMenuOpen}
-  target={selected}
-  onClose={() => (actionMenuOpen = false)}
-/>
+<ActionMenu open={actionMenuOpen} target={selected} onClose={() => (actionMenuOpen = false)} />
 
 <style>
   .palette {

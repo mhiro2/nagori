@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { runAiAction, saveAiResult } from "../lib/commands";
-  import { describeError } from "../lib/errors";
-  import { messages } from "../lib/i18n/index.svelte";
-  import { isTauri } from "../lib/tauri";
-  import type { SearchResultDto } from "../lib/types";
+  import { runAiAction, saveAiResult } from '../lib/commands';
+  import { describeError } from '../lib/errors';
+  import { messages } from '../lib/i18n/index.svelte';
+  import { isTauri } from '../lib/tauri';
+  import type { SearchResultDto } from '../lib/types';
 
   type Props = {
     target: SearchResultDto | undefined;
@@ -16,12 +16,12 @@
   // Narrowed to the four quick-action variants the UI surfaces. The
   // `AiActionId` enum still carries legacy LLM-only variants for
   // backend compatibility, but those are not addressable here.
-  type QuickActionId = "Summarize" | "FormatJson" | "ExtractTasks" | "RedactSecrets";
+  type QuickActionId = 'Summarize' | 'FormatJson' | 'ExtractTasks' | 'RedactSecrets';
   const ACTION_IDS: readonly QuickActionId[] = [
-    "Summarize",
-    "FormatJson",
-    "ExtractTasks",
-    "RedactSecrets",
+    'Summarize',
+    'FormatJson',
+    'ExtractTasks',
+    'RedactSecrets',
   ];
 
   const t = $derived(messages());
@@ -159,7 +159,7 @@
     role="presentation"
     onclick={onClose}
     onkeydown={(e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === 'Escape') onClose();
     }}
   >
     <div
@@ -173,7 +173,7 @@
         // The dialog stops keydown from leaking out so action button
         // shortcuts don't bubble into the palette behind. Escape still
         // has to close the menu, so handle it here directly.
-        if (e.key === "Escape") {
+        if (e.key === 'Escape') {
           e.stopPropagation();
           onClose();
           return;
@@ -351,11 +351,7 @@
     padding: 0.75rem;
     background: var(--bg-code, rgba(0, 0, 0, 0.25));
     color: var(--fg, #f5f5f5);
-    font-family:
-      ui-monospace,
-      SFMono-Regular,
-      Menlo,
-      monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8125rem;
     white-space: pre-wrap;
     word-break: break-word;

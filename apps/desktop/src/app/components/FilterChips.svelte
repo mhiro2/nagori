@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { messages } from "../lib/i18n/index.svelte";
-  import { type FilterPreset, filterState, setFilterPreset } from "../stores/searchFilters.svelte";
-  import { runQuery, searchState } from "../stores/searchQuery.svelte";
+  import { messages } from '../lib/i18n/index.svelte';
+  import { type FilterPreset, filterState, setFilterPreset } from '../stores/searchFilters.svelte';
+  import { runQuery, searchState } from '../stores/searchQuery.svelte';
 
   const presets: { key: FilterPreset; label: () => string }[] = [
-    { key: "today", label: () => messages().palette.filters.today },
-    { key: "last7days", label: () => messages().palette.filters.last7days },
-    { key: "pinned", label: () => messages().palette.filters.pinned },
+    { key: 'today', label: () => messages().palette.filters.today },
+    { key: 'last7days', label: () => messages().palette.filters.last7days },
+    { key: 'pinned', label: () => messages().palette.filters.pinned },
   ];
 
   const handleClick = async (preset: FilterPreset): Promise<void> => {
