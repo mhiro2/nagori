@@ -2,6 +2,8 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 pub mod token;
+#[cfg(windows)]
+pub(crate) mod windows_security;
 
 pub use client::IpcClient;
 pub use protocol::*;

@@ -202,7 +202,107 @@ pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// RAII guard that closes a Win32 file handle on drop. Defined at module
+/// scope (rather than inside `write_token_file`) so clippy's
+/// `items_after_statements` is satisfied.
+#[cfg(windows)]
+struct Win32FileGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+impl Drop for Win32FileGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard is only constructed with a non-`INVALID_HANDLE_VALUE`
+        // handle, which is the precondition `CloseHandle` requires.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, WriteFile,
+    };
+
+    use crate::windows_security::{GENERIC_READ, GENERIC_WRITE};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| AppError::Platform(err.to_string()))?;
+    }
+
+    // Build the DACL once before opening the file so a failure here does
+    // not leave a partially-written token behind under a default ACL.
+    let mut security = crate::windows_security::SecurityHandle::current_user_admins_system(
+        GENERIC_READ | GENERIC_WRITE,
+    )
+    .map_err(|err| AppError::Platform(format!("token security descriptor: {err}")))?;
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `wide_path` is a NUL-terminated UTF-16 buffer that lives for
+    // the duration of the call. `security.as_mut_ptr()` returns a valid
+    // SECURITY_ATTRIBUTES owned by `security`; Windows captures the DACL
+    // before CreateFileW returns. CREATE_ALWAYS replaces any existing
+    // file, applying the new DACL we hand in.
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            security.as_mut_ptr().cast(),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(AppError::Platform(format!(
+            "CreateFileW for token file failed: {}",
+            std::io::Error::last_os_error(),
+        )));
+    }
+    let _close = Win32FileGuard(handle);
+
+    let bytes = token.as_str().as_bytes();
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        AppError::Platform("token bytes exceed DWORD bounds (impossible: 64 hex chars)".to_owned())
+    })?;
+    let mut written: u32 = 0;
+    // SAFETY: handle is valid; bytes is a valid pointer-length pair into
+    // owned memory; `written` is a writable u32.
+    let ok = unsafe {
+        WriteFile(
+            handle,
+            bytes.as_ptr(),
+            len,
+            ptr::addr_of_mut!(written),
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 || written != len {
+        return Err(AppError::Platform(format!(
+            "WriteFile for token file failed: {}",
+            std::io::Error::last_os_error(),
+        )));
+    }
+    // `security` is kept alive until after the descriptor has been
+    // captured by CreateFileW. Dropping it now releases the buffers.
+    drop(security);
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| AppError::Platform(err.to_string()))?;

@@ -387,13 +387,10 @@ where
 
 /// Default named-pipe name used by the Windows daemon.
 ///
-/// Auth is enforced via the sibling token file rather than a custom DACL: the
-/// pipe is created with the default named-pipe security descriptor inherited
-/// from the daemon process, so any local caller who can also read the
-/// `%LOCALAPPDATA%\nagori\nagori.token` file (written by the daemon under a
-/// per-user roaming-equivalent directory) can authenticate. A future
-/// hardening pass can attach an explicit `SECURITY_ATTRIBUTES` to restrict
-/// the pipe to the current SID.
+/// Authentication is enforced both by an explicit DACL on the pipe
+/// (current-user SID only — see [`pipe_security_handle`]) and by the
+/// sibling token file. The token file ACL similarly restricts read access
+/// to the current user, BUILTIN\Administrators, and NT AUTHORITY\SYSTEM.
 #[cfg(windows)]
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\nagori";
 
@@ -410,10 +407,48 @@ fn pipe_server_options() -> tokio::net::windows::named_pipe::ServerOptions {
     // `reject_remote_clients(true)` closes the UNC-path surface: without
     // it, a domain-joined peer could open `\\<host>\pipe\nagori` over
     // SMB and park a connection slot until the timeout elapses. Local
-    // callers (which the default pipe DACL still admits) are bounded by
-    // the read timeouts above instead.
+    // callers are additionally restricted by the explicit DACL applied
+    // through `create_with_security_attributes_raw` below.
     opts.reject_remote_clients(true);
     opts
+}
+
+/// Build a [`SecurityHandle`] suitable for a Windows named-pipe server:
+/// DACL with a single ACE that grants the current user `GENERIC_READ |
+/// GENERIC_WRITE` (and nothing to anyone else, including other local users
+/// on the same desktop session).
+#[cfg(windows)]
+fn pipe_security_handle() -> Result<crate::windows_security::SecurityHandle> {
+    crate::windows_security::SecurityHandle::current_user_only(
+        crate::windows_security::GENERIC_READ | crate::windows_security::GENERIC_WRITE,
+    )
+    .map_err(|err| AppError::Platform(format!("pipe security descriptor: {err}")))
+}
+
+/// Create a pipe instance bound to `pipe_name` with the current-user-only
+/// DACL applied. `first` selects whether `first_pipe_instance(true)` is set,
+/// which the initial instance must use to fail closed if another process is
+/// already publishing the name.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn create_pipe_instance(
+    pipe_name: &str,
+    first: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    let mut opts = pipe_server_options();
+    if first {
+        opts.first_pipe_instance(true);
+    }
+    let mut security = pipe_security_handle()?;
+    let attrs_ptr = security.as_mut_ptr().cast::<std::ffi::c_void>();
+    // SAFETY: `attrs_ptr` points at a valid SECURITY_ATTRIBUTES owned by
+    // `security` for the duration of this call. Windows captures a copy
+    // of the descriptor during `CreateNamedPipeW`, so `security` is safe
+    // to drop right after the call returns.
+    let server = unsafe { opts.create_with_security_attributes_raw(pipe_name, attrs_ptr) }
+        .map_err(|err| AppError::Platform(err.to_string()))?;
+    drop(security);
+    Ok(server)
 }
 
 /// Create the first instance of `pipe_name` synchronously.
@@ -425,10 +460,7 @@ fn pipe_server_options() -> tokio::net::windows::named_pipe::ServerOptions {
 /// of silently chaining onto somebody else's pipe.
 #[cfg(windows)]
 pub fn bind_pipe(pipe_name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    pipe_server_options()
-        .first_pipe_instance(true)
-        .create(pipe_name)
-        .map_err(|err| AppError::Platform(err.to_string()))
+    create_pipe_instance(pipe_name, true)
 }
 
 /// Three-stage graceful shutdown variant of the named-pipe accept loop,
@@ -481,11 +513,13 @@ where
                 // create the next listener so we keep accepting while
                 // the worker runs.
                 let connected = server.take().expect("connect resolved on an owned instance");
-                // Every chained instance reuses the same baseline so the
-                // remote-rejection bit can't drift between instances.
-                server = match pipe_server_options().create(pipe_name) {
+                // Every chained instance reuses the same baseline + the
+                // explicit DACL so neither the remote-rejection bit nor
+                // the per-user access restriction can drift between
+                // instances.
+                server = match create_pipe_instance(pipe_name, false) {
                     Ok(next) => Some(next),
-                    Err(err) => break Err(AppError::Platform(err.to_string())),
+                    Err(err) => break Err(err),
                 };
                 let permit = tokio::select! {
                     biased;
