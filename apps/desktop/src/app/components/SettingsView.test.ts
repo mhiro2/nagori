@@ -172,6 +172,40 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
+// event into the SettingsView listener. The Settings view registers two
+// subscriptions (hotkey-failed and settings-changed); the routing keeps
+// hotkey failures wired to a noop unless a test cares about them.
+const captureSettingsChangedHandler = (): {
+  fire: (snapshot: AppSettings) => void;
+} => {
+  const slot: { handler?: (payload: AppSettings) => void } = {};
+  vi.mocked(subscribe).mockImplementation((event, handler) => {
+    if (event === 'nagori://settings_changed') {
+      slot.handler = handler as (payload: AppSettings) => void;
+    }
+    return () => {};
+  });
+  return {
+    fire: (snapshot) => {
+      if (!slot.handler) throw new Error('settings_changed handler not registered');
+      slot.handler(snapshot);
+    },
+  };
+};
+
+const openAdvancedTab = async (capabilities: PlatformCapabilities) => {
+  vi.mocked(getCapabilities).mockResolvedValue(capabilities);
+  const view = render(SettingsView);
+  const advanced = await view.findByRole('tab', { name: 'Advanced' });
+  await fireEvent.click(advanced);
+  // Wait for the capability table to mount — `getCapabilities` is
+  // resolved off the main render path, so the fieldset only appears
+  // once the promise settles.
+  await view.findByText('Platform capabilities');
+  return view;
+};
+
 describe('SettingsView', () => {
   it('loads settings on mount and hydrates the form fields', async () => {
     const { findByRole, container } = render(SettingsView);
@@ -1052,28 +1086,6 @@ describe('SettingsView', () => {
 
   // ---------------- settings_changed merge (external mutations) ----------------
 
-  // Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
-  // event into the SettingsView listener. The Settings view registers two
-  // subscriptions (hotkey-failed and settings-changed); the routing keeps
-  // hotkey failures wired to a noop unless a test cares about them.
-  const captureSettingsChangedHandler = (): {
-    fire: (snapshot: AppSettings) => void;
-  } => {
-    const slot: { handler?: (payload: AppSettings) => void } = {};
-    vi.mocked(subscribe).mockImplementation((event, handler) => {
-      if (event === 'nagori://settings_changed') {
-        slot.handler = handler as (payload: AppSettings) => void;
-      }
-      return () => {};
-    });
-    return {
-      fire: (snapshot) => {
-        if (!slot.handler) throw new Error('settings_changed handler not registered');
-        slot.handler(snapshot);
-      },
-    };
-  };
-
   it('adopts an external captureEnabled toggle from a settings_changed event', async () => {
     // The tray's "Pause Capture" menu item bypasses SettingsView and writes
     // through `set_capture_enabled`. The backend then broadcasts the new
@@ -1640,18 +1652,6 @@ const readCapabilityTable = (
 };
 
 describe('SettingsView Advanced tab — capability table', () => {
-  const openAdvancedTab = async (capabilities: PlatformCapabilities) => {
-    vi.mocked(getCapabilities).mockResolvedValue(capabilities);
-    const view = render(SettingsView);
-    const advanced = await view.findByRole('tab', { name: 'Advanced' });
-    await fireEvent.click(advanced);
-    // Wait for the capability table to mount — `getCapabilities` is
-    // resolved off the main render path, so the fieldset only appears
-    // once the promise settles.
-    await view.findByText('Platform capabilities');
-    return view;
-  };
-
   it('renders macOS capabilities — every cap available except Accessibility-gated auto-paste', async () => {
     const { container } = await openAdvancedTab(macosCapabilities());
     const table = readCapabilityTable(container);

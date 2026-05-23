@@ -7,11 +7,12 @@ beforeEach(() => {
   setLocale('en');
 });
 
+// Codes are part of the Rust error contract — any drift between the backend
+// and these branches results in users seeing the bare message instead of a
+// localized hint, so the table is pinned by name.
+const t = (): ReturnType<typeof messages>['errors'] => messages().errors;
+
 describe('describeError', () => {
-  // Codes are part of the Rust error contract — any drift between the backend
-  // and these branches results in users seeing the bare message instead of a
-  // localized hint, so the table is pinned by name.
-  const t = (): ReturnType<typeof messages>['errors'] => messages().errors;
   const codes: Array<[string, () => string]> = [
     ['storage_error', () => t().storage],
     ['search_error', () => t().search],
