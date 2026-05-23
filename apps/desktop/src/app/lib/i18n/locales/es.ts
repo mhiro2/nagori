@@ -115,11 +115,18 @@ export const es: Messages = {
   onboarding: {
     title: 'Termina la configuración de Nagori',
     description: 'Algunas funciones necesitan permisos adicionales de macOS para ejecutarse.',
+    descriptionLinux:
+      'El pegado automático necesita una herramienta Linux adicional para ejecutarse.',
     accessibilityRequired: 'Se requiere permiso de Accesibilidad',
+    accessibilityRequiredLinux: 'Se requiere asistente de pegado automático',
     accessibilityHint:
       'Concede acceso a Accesibilidad en Ajustes del Sistema → Privacidad y seguridad para que Nagori pueda pegar en la app activa.',
+    accessibilityHintLinux:
+      'Instala el paquete `wtype` en una sesión Wayland para que Nagori pueda sintetizar Ctrl+V en la app activa.',
     autoPasteDisabled:
       'El pegado automático está DESACTIVADO — Intro solo copia al portapapeles hasta que concedas Accesibilidad.',
+    autoPasteDisabledLinux:
+      'El pegado automático está DESACTIVADO — Intro solo copia al portapapeles hasta que `wtype` esté disponible.',
     notificationsHint:
       'Permite las notificaciones para recibir alertas de captura en pausa y de pegado automático fallido.',
     openSettings: 'Abrir Ajustes del Sistema',

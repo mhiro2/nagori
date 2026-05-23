@@ -114,11 +114,17 @@ export const de: Messages = {
   onboarding: {
     title: 'Nagori-Einrichtung abschließen',
     description: 'Einige Funktionen benötigen zusätzliche macOS-Berechtigungen.',
+    descriptionLinux: 'Automatisches Einfügen benötigt ein zusätzliches Linux-Tool.',
     accessibilityRequired: 'Berechtigung „Bedienungshilfen“ erforderlich',
+    accessibilityRequiredLinux: 'Hilfsprogramm für automatisches Einfügen erforderlich',
     accessibilityHint:
       'Erteilen Sie unter „Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen“ Zugriff für Nagori, damit es in die aktive App einfügen kann.',
+    accessibilityHintLinux:
+      'Installieren Sie das Paket `wtype` in einer Wayland-Sitzung, damit Nagori Strg+V in die aktive App senden kann.',
     autoPasteDisabled:
       'Automatisches Einfügen ist derzeit AUS – Enter kopiert nur in die Zwischenablage, bis die Bedienungshilfen freigegeben sind.',
+    autoPasteDisabledLinux:
+      'Automatisches Einfügen ist derzeit AUS – Enter kopiert nur in die Zwischenablage, bis `wtype` verfügbar ist.',
     notificationsHint:
       'Mitteilungen erlauben, um Hinweise zu pausierter Erfassung und fehlgeschlagenem Einfügen zu erhalten.',
     openSettings: 'Systemeinstellungen öffnen',

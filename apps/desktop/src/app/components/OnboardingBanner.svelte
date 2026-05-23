@@ -2,6 +2,7 @@
   import { openAccessibilitySettings } from '../lib/commands';
   import { messages } from '../lib/i18n/index.svelte';
   import { isTauri } from '../lib/tauri';
+  import { capabilitiesState } from '../stores/capabilities.svelte';
   import {
     accessibilityGranted,
     accessibilityState,
@@ -21,6 +22,30 @@
 
   let dismissed = $state(false);
   const t = $derived(messages());
+  // Linux Wayland gates auto-paste on the `wtype` helper instead of an
+  // OS-level Accessibility toggle. Branch the copy and hide the
+  // "Open System Settings" button — there is no equivalent pane.
+  const platform = $derived(capabilitiesState.capabilities?.platform);
+  const isLinux = $derived(platform === 'linuxWayland');
+  // `open_accessibility_settings` only lands the user on a real pane on
+  // macOS; the Windows/Linux backends return `Unsupported`. Gate the
+  // CTA on `'macos'` (rather than `!isLinux`) so the button never
+  // points at a no-op.
+  const showOpenSettings = $derived(platform === 'macos');
+  const description = $derived(isLinux ? t.onboarding.descriptionLinux : t.onboarding.description);
+  const requiredLabel = $derived(
+    isLinux ? t.onboarding.accessibilityRequiredLinux : t.onboarding.accessibilityRequired,
+  );
+  // Prefer the backend's permission `message` (carries the live wtype
+  // probe error / install hint); fall back to the localised default so
+  // the banner still reads sensibly when the field is empty.
+  const hint = $derived(
+    accessibilityState()?.message ??
+      (isLinux ? t.onboarding.accessibilityHintLinux : t.onboarding.accessibilityHint),
+  );
+  const autoPasteDisabled = $derived(
+    isLinux ? t.onboarding.autoPasteDisabledLinux : t.onboarding.autoPasteDisabled,
+  );
   // Show the banner once permissions have been loaded and accessibility
   // is not granted. Re-evaluates if `refreshSettings` repopulates the store.
   const visible = $derived(
@@ -37,21 +62,25 @@
       <strong>{t.onboarding.title}</strong>
       <button type="button" class="close" onclick={() => (dismissed = true)}> × </button>
     </div>
-    <p class="desc">{t.onboarding.description}</p>
+    <p class="desc">{description}</p>
     <ul class="items">
       <li>
-        <span class="label">{t.onboarding.accessibilityRequired}</span>
-        <p class="hint">{t.onboarding.accessibilityHint}</p>
-        <p class="hint warn">{t.onboarding.autoPasteDisabled}</p>
+        <span class="label">{requiredLabel}</span>
+        <p class="hint">{hint}</p>
+        <p class="hint warn">{autoPasteDisabled}</p>
       </li>
-      <li class="muted">
-        <p class="hint">{t.onboarding.notificationsHint}</p>
-      </li>
+      {#if !isLinux}
+        <li class="muted">
+          <p class="hint">{t.onboarding.notificationsHint}</p>
+        </li>
+      {/if}
     </ul>
     <div class="actions">
-      <button type="button" class="primary" onclick={() => void openSettings()}>
-        {t.onboarding.openSettings}
-      </button>
+      {#if showOpenSettings}
+        <button type="button" class="primary" onclick={() => void openSettings()}>
+          {t.onboarding.openSettings}
+        </button>
+      {/if}
       <button type="button" class="link" onclick={() => (dismissed = true)}>
         {t.onboarding.dismiss}
       </button>

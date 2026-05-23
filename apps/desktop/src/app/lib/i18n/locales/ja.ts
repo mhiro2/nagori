@@ -107,11 +107,17 @@ export const ja: Messages = {
   onboarding: {
     title: 'Nagori のセットアップを完了する',
     description: '一部の機能は macOS の追加権限が必要です。',
+    descriptionLinux: '自動ペーストには Linux 用の追加ツールが必要です。',
     accessibilityRequired: 'アクセシビリティ権限が必要です',
+    accessibilityRequiredLinux: '自動ペースト用のヘルパーが必要です',
     accessibilityHint:
       'システム設定 → プライバシーとセキュリティ → アクセシビリティ で Nagori を許可するとアクティブなアプリへ自動ペーストできます。',
+    accessibilityHintLinux:
+      'Wayland セッションで `wtype` パッケージをインストールすると、Nagori がフォーカス中のアプリへ Ctrl+V を合成できます。',
     autoPasteDisabled:
       'アクセシビリティ未許可のため自動ペーストは無効です。Enter ではクリップボードへコピーのみ行います。',
+    autoPasteDisabledLinux:
+      '`wtype` が利用できないため自動ペーストは無効です。Enter ではクリップボードへコピーのみ行います。',
     notificationsHint:
       '取り込み一時停止や自動ペースト失敗の通知を受け取るには通知を許可してください。',
     openSettings: 'システム設定を開く',

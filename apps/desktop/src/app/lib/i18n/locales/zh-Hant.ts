@@ -107,10 +107,15 @@ export const zhHant: Messages = {
   onboarding: {
     title: '完成 Nagori 設定',
     description: '部分功能需要 macOS 的額外權限才能執行。',
+    descriptionLinux: '自動貼上需要額外的 Linux 工具才能執行。',
     accessibilityRequired: '需要輔助使用權限',
+    accessibilityRequiredLinux: '需要自動貼上輔助工具',
     accessibilityHint:
       '在「系統設定 → 隱私權與安全性 → 輔助使用」中允許 Nagori，以便貼上到目前的應用程式。',
+    accessibilityHintLinux:
+      '在 Wayland 工作階段中安裝 `wtype` 套件，Nagori 便可向目前焦點的應用程式合成 Ctrl+V。',
     autoPasteDisabled: '尚未授予輔助使用權限，自動貼上已關閉——按 Enter 僅會複製到剪貼簿。',
+    autoPasteDisabledLinux: '`wtype` 無法使用，自動貼上已關閉——按 Enter 僅會複製到剪貼簿。',
     notificationsHint: '允許通知以接收擷取暫停與自動貼上失敗的提示。',
     openSettings: '開啟系統設定',
     dismiss: '暫不啟用',

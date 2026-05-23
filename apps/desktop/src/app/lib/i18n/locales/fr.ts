@@ -116,11 +116,17 @@ export const fr: Messages = {
   onboarding: {
     title: 'Terminer la configuration de Nagori',
     description: 'Certaines fonctionnalités nécessitent des autorisations macOS supplémentaires.',
+    descriptionLinux: 'Le collage automatique requiert un outil Linux supplémentaire.',
     accessibilityRequired: 'Autorisation d’accessibilité requise',
+    accessibilityRequiredLinux: 'Outil de collage automatique requis',
     accessibilityHint:
       'Accordez l’accès à Accessibilité dans Réglages Système → Confidentialité et sécurité pour que Nagori puisse coller dans l’application active.',
+    accessibilityHintLinux:
+      'Installez le paquet `wtype` dans une session Wayland pour que Nagori puisse synthétiser Ctrl+V dans l’application active.',
     autoPasteDisabled:
       'Le collage automatique est désactivé — Entrée se contente de copier dans le presse-papiers tant que l’Accessibilité n’est pas accordée.',
+    autoPasteDisabledLinux:
+      'Le collage automatique est désactivé — Entrée se contente de copier dans le presse-papiers tant que `wtype` n’est pas disponible.',
     notificationsHint:
       'Autorisez les notifications pour recevoir les alertes de capture en pause et d’échec de collage automatique.',
     openSettings: 'Ouvrir les Réglages Système',

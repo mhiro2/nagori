@@ -107,11 +107,17 @@ export const ko: Messages = {
   onboarding: {
     title: 'Nagori 설정 마무리하기',
     description: '일부 기능은 macOS 권한이 추가로 필요합니다.',
+    descriptionLinux: '자동 붙여넣기에 Linux 추가 도구가 필요합니다.',
     accessibilityRequired: '접근성 권한이 필요합니다',
+    accessibilityRequiredLinux: '자동 붙여넣기 도구가 필요합니다',
     accessibilityHint:
       '시스템 설정 → 개인 정보 보호 및 보안 → 접근성에서 Nagori를 허용하면 활성 앱에 자동으로 붙여넣을 수 있습니다.',
+    accessibilityHintLinux:
+      'Wayland 세션에서 `wtype` 패키지를 설치하면 Nagori가 포커스된 앱에 Ctrl+V를 합성할 수 있습니다.',
     autoPasteDisabled:
       '접근성 권한이 없어 자동 붙여넣기가 꺼져 있습니다. Enter는 클립보드에 복사만 합니다.',
+    autoPasteDisabledLinux:
+      '`wtype`을 사용할 수 없어 자동 붙여넣기가 꺼져 있습니다. Enter는 클립보드에 복사만 합니다.',
     notificationsHint: '캡처 일시 중지와 자동 붙여넣기 실패 알림을 받으려면 알림을 허용하세요.',
     openSettings: '시스템 설정 열기',
     dismiss: '나중에 설정',

@@ -115,9 +115,13 @@ export type Messages = {
   onboarding: {
     title: string;
     description: string;
+    descriptionLinux: string;
     accessibilityRequired: string;
+    accessibilityRequiredLinux: string;
     accessibilityHint: string;
+    accessibilityHintLinux: string;
     autoPasteDisabled: string;
+    autoPasteDisabledLinux: string;
     notificationsHint: string;
     openSettings: string;
     dismiss: string;
@@ -430,11 +434,17 @@ export const en: Messages = {
   onboarding: {
     title: 'Finish setting up Nagori',
     description: 'Some features need additional macOS permissions before they can run.',
+    descriptionLinux: 'Auto-paste needs an extra Linux tool before it can run.',
     accessibilityRequired: 'Accessibility permission required',
+    accessibilityRequiredLinux: 'Auto-paste helper required',
     accessibilityHint:
       'Grant Accessibility access in System Settings → Privacy & Security so Nagori can paste into the focused app.',
+    accessibilityHintLinux:
+      'Install the `wtype` package on a Wayland session so Nagori can synthesize Ctrl+V into the focused app.',
     autoPasteDisabled:
       'Auto-paste is currently OFF — Enter copies to clipboard until you grant Accessibility.',
+    autoPasteDisabledLinux:
+      'Auto-paste is currently OFF — Enter copies to clipboard until `wtype` is available.',
     notificationsHint:
       'Allow notifications to receive capture-paused and auto-paste failure alerts.',
     openSettings: 'Open System Settings',

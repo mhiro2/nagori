@@ -14,7 +14,8 @@ vi.mock('../lib/commands', () => ({
 
 import { openAccessibilitySettings } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
-import type { AppSettings, PermissionStatus } from '../lib/types';
+import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
+import { capabilitiesState } from '../stores/capabilities.svelte';
 import { settingsState } from '../stores/settings.svelte';
 import OnboardingBanner from './OnboardingBanner.svelte';
 
@@ -52,10 +53,34 @@ const baseSettings = (): AppSettings => ({
   maxThumbnailTotalBytes: 64 * 1024 * 1024,
 });
 
-const accessibility = (state: PermissionStatus['state']): PermissionStatus => ({
+const accessibility = (state: PermissionStatus['state'], message?: string): PermissionStatus => ({
   kind: 'accessibility',
   state,
+  ...(message !== undefined ? { message } : {}),
 });
+
+// Minimal capability snapshot whose `platform` flips the banner between the
+// macOS and Linux copy. Other fields don't influence the component, so we
+// stub them as `unsupported` to satisfy the type.
+const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapabilities => {
+  const cap = { status: 'unsupported', reason: 'test stub' } as const;
+  return {
+    platform,
+    tier: 'supported',
+    captureText: cap,
+    captureImage: cap,
+    captureFiles: cap,
+    writeText: cap,
+    writeImage: cap,
+    clipboardMultiRepresentationWrite: cap,
+    autoPaste: cap,
+    globalHotkey: cap,
+    frontmostApp: cap,
+    permissionsUi: cap,
+    updateCheck: cap,
+    previewQuickLook: cap,
+  };
+};
 
 // Pre-populate the store directly so the test stays decoupled from how
 // `refreshSettings` short-circuits outside the Tauri runtime.
@@ -73,6 +98,8 @@ beforeEach(() => {
   settingsState.permissions = [];
   settingsState.loaded = false;
   settingsState.errorMessage = undefined;
+  capabilitiesState.capabilities = capabilities('macos');
+  capabilitiesState.loaded = true;
 });
 
 afterEach(cleanup);
@@ -124,5 +151,29 @@ describe('OnboardingBanner', () => {
     const { getByText } = render(OnboardingBanner);
     await user.click(getByText('Open System Settings'));
     expect(openAccessibilitySettings).not.toHaveBeenCalled();
+  });
+
+  it('on Linux Wayland shows the wtype install hint and hides the settings button', () => {
+    capabilitiesState.capabilities = capabilities('linuxWayland');
+    seedStore(
+      accessibility(
+        'denied',
+        'wtype was not found on PATH (No such file); auto-paste will fall back to copy-only.',
+      ),
+    );
+    const { queryByText, getByText } = render(OnboardingBanner);
+    // Linux-flavoured copy is shown; the macOS settings button is gone.
+    expect(getByText('Auto-paste helper required')).toBeTruthy();
+    expect(getByText(/wtype was not found on PATH/)).toBeTruthy();
+    expect(queryByText('Open System Settings')).toBeNull();
+    // Dismiss still works as a sanity check.
+    expect(getByText('Continue without it')).toBeTruthy();
+  });
+
+  it('falls back to the localised hint when no permission message is supplied', () => {
+    capabilitiesState.capabilities = capabilities('linuxWayland');
+    seedStore(accessibility('denied'));
+    const { getByText } = render(OnboardingBanner);
+    expect(getByText(/Install the `wtype` package on a Wayland session/)).toBeTruthy();
   });
 });
