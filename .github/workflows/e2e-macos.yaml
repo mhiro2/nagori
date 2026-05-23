@@ -28,7 +28,7 @@ permissions:
 jobs:
   clipboard:
     name: Clipboard E2E
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 15
     steps:
       - name: Checkout

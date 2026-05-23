@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -52,7 +52,7 @@ jobs:
       - name: Run tests
         run: make rust-test-coverage
       - name: Coverage analysis
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-26'
         uses: k1LoW/octocov-action@b3b6ee60482a667950f87553abf1df63217235d9 # v1.5.1
         with:
           config: .octocov.yaml
@@ -120,7 +120,7 @@ jobs:
 
   release-build:
     name: Release build (macOS)
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - name: Checkout
