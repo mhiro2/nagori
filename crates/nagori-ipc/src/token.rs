@@ -253,7 +253,7 @@ pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
     };
 
-    use crate::windows_security::{GENERIC_READ, GENERIC_WRITE};
+    use crate::windows_security::{DELETE, GENERIC_READ, GENERIC_WRITE};
 
     let parent = path.parent().ok_or_else(|| {
         AppError::Platform(format!("token path has no parent: {}", path.display()))
@@ -278,9 +278,12 @@ pub fn write_token_file(path: &Path, token: &AuthToken) -> Result<()> {
     ));
 
     // Build the DACL up front so a failure here can't leave the temp
-    // file behind under a permissive default ACL.
+    // file behind under a permissive default ACL. `DELETE` is included
+    // so the next launch can `MoveFileExW` over (and `remove_file` clean
+    // up) this entry without relying on the parent directory granting
+    // `FILE_DELETE_CHILD`.
     let mut security = crate::windows_security::SecurityHandle::current_user_admins_system(
-        GENERIC_READ | GENERIC_WRITE,
+        GENERIC_READ | GENERIC_WRITE | DELETE,
     )
     .map_err(|err| AppError::Platform(format!("token security descriptor: {err}")))?;
 

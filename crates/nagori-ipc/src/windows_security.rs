@@ -41,6 +41,11 @@ const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 pub const GENERIC_READ: u32 = 0x8000_0000;
 /// `GENERIC_WRITE` access right (`0x4000_0000`).
 pub const GENERIC_WRITE: u32 = 0x4000_0000;
+/// `DELETE` standard access right (`0x0001_0000`). Required on the token
+/// file so `MoveFileExW(..., REPLACE_EXISTING)` and `remove_file` can
+/// rename or unlink the entry even when the parent directory's ACL does
+/// not grant `FILE_DELETE_CHILD` to the daemon.
+pub const DELETE: u32 = 0x0001_0000;
 
 /// Opaque-sized `SECURITY_DESCRIPTOR` storage. Windows guarantees the
 /// "absolute" form fits in `SECURITY_DESCRIPTOR_MIN_LENGTH` (20) bytes;
