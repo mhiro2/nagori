@@ -26,6 +26,7 @@
     "@testing-library/jest-dom": "catalog:testing",
     "@testing-library/svelte": "catalog:testing",
     "@testing-library/user-event": "catalog:testing",
+    "@types/node": "catalog:tooling",
     "@typescript/native-preview": "catalog:tooling",
     "@vitest/coverage-v8": "catalog:testing",
     "esbuild": "catalog:tooling",

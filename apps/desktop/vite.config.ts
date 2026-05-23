@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { ServerOptions } from 'vite';
 import { defineConfig } from 'vite';
