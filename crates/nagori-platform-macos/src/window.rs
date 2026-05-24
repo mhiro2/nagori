@@ -191,18 +191,22 @@ fn frontmost_focused_is_secure_sync() -> Option<bool> {
         let subrole = copy_string_attribute(focused, "AXSubrole");
         CFRelease(focused.cast());
 
-        // If both attributes came back null the AX result is genuinely
-        // unknown: a non-AX-aware focused element, or a transient framework
-        // error. Treat that as "unknown" so the counter advances on
-        // sustained outages. Apps that intentionally don't expose either
-        // slot will still ship `Some(false)` after the role/subrole copy
-        // returns a non-secure value, which is the steady-state path.
-        match (role.as_deref(), subrole.as_deref()) {
-            (Some(role), Some(subrole)) => Some(role == SECURE || subrole == SECURE),
-            (Some(role), None) => Some(role == SECURE),
-            (None, Some(subrole)) => Some(subrole == SECURE),
-            (None, None) => None,
-        }
+        // We already cleared the AX-permission gate above by retrieving
+        // `AXFocusedUIElement` — that fetch fails fast when Accessibility
+        // is revoked, so reaching this point means the system handed us a
+        // valid focused element. A `(None, None)` role/subrole result
+        // here is therefore *not* a permission failure: it means the
+        // focused app is genuinely thin on AX exposure (Electron windows
+        // with broken AX, GPU-rendered games, custom Cocoa controls that
+        // never set `accessibilityRole`). Treating that as `None` would
+        // tick `consecutive_secure_ax_failures` on every poll spent in
+        // such an app and eventually trip the fail-closed threshold for
+        // a user who simply prefers a non-AX text editor. Surface it as
+        // `Some(false)` so the secret detector + bundle override still
+        // run downstream, and leave `None` for the genuine permission/
+        // framework failures that the gate above already filters for.
+        let secure = role.as_deref() == Some(SECURE) || subrole.as_deref() == Some(SECURE);
+        Some(secure)
     }
 }
 
