@@ -5,7 +5,7 @@
 // Human-readable labels for each action live in the i18n dictionaries
 // (`palette.hints.*` and `keybindings.*`) and are looked up by the consumer.
 
-import type { PaletteHotkeyAction } from './types';
+import type { PaletteHotkeyAction, Platform } from './types';
 
 export type PaletteAction =
   | 'select-next'
@@ -142,22 +142,47 @@ const NAMED_KEYS: ReadonlySet<string> = new Set([
   'F20',
 ]);
 
+// `CmdOrCtrl` is the canonical wire format used by tauri-plugin-global-shortcut
+// and the AppSettings layer (`crates/nagori-core/src/settings.rs`). The shortcut
+// plugin resolves it to Cmd on macOS and Ctrl elsewhere; the frontend must do
+// the same so user overrides actually fire on Windows/Linux. `Cmd` / `Meta`
+// stay bound to the Meta key on all platforms because users who type those
+// names are asking for that specific physical key.
+const macOsLikePlatform = (platform: Platform | undefined): boolean =>
+  // Default to macOS semantics when the capability snapshot hasn't loaded yet
+  // (e.g. Storybook / browser preview). The desktop shell hydrates this before
+  // any user-supplied accelerator is parsed.
+  platform === undefined || platform === 'macos';
+
 /// Parse an accelerator string like `Cmd+Shift+P` into a `Binding`. Returns
 /// `null` for accelerators with no key segment, with unsupported tokens, or
 /// with multiple key segments — the caller falls back to defaults in that
 /// case rather than rendering a silently broken hotkey.
-export const parseAccelerator = (action: PaletteAction, accelerator: string): Binding | null => {
+export const parseAccelerator = (
+  action: PaletteAction,
+  accelerator: string,
+  platform?: Platform,
+): Binding | null => {
   const tokens = accelerator
     .split('+')
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
   if (tokens.length === 0) return null;
   const binding: Binding = { action, key: '' };
+  const cmdOrCtrlIsMeta = macOsLikePlatform(platform);
   for (const token of tokens) {
     const lower = token.toLowerCase();
-    if (lower === 'cmd' || lower === 'meta' || lower === 'cmdorctrl') {
+    if (lower === 'cmd' || lower === 'meta') {
       if (binding.meta) return null;
       binding.meta = true;
+    } else if (lower === 'cmdorctrl') {
+      if (cmdOrCtrlIsMeta) {
+        if (binding.meta) return null;
+        binding.meta = true;
+      } else {
+        if (binding.ctrl) return null;
+        binding.ctrl = true;
+      }
     } else if (lower === 'ctrl' || lower === 'control') {
       if (binding.ctrl) return null;
       binding.ctrl = true;
@@ -197,12 +222,13 @@ export const parseAccelerator = (action: PaletteAction, accelerator: string): Bi
 /// as a single mysterious gap.
 export const buildBindings = (
   overrides: Partial<Record<PaletteHotkeyAction, string>>,
+  platform?: Platform,
 ): readonly Binding[] => {
   const parsed = new Map<PaletteAction, Binding>();
   for (const [override, accel] of Object.entries(overrides)) {
     if (!accel || !isPaletteHotkeyAction(override)) continue;
     const action = ACTION_FROM_OVERRIDE[override];
-    const binding = parseAccelerator(action, accel);
+    const binding = parseAccelerator(action, accel, platform);
     if (binding) parsed.set(action, binding);
   }
   const parsedBindings = Array.from(parsed.values());

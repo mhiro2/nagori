@@ -2,7 +2,11 @@
   import { closePalette, openSettingsWindow } from '../lib/commands';
   import { buildBindings, resolveAction } from '../lib/keybindings';
   import { isTauri } from '../lib/tauri';
-  import { quickLookAvailable, refreshCapabilities } from '../stores/capabilities.svelte';
+  import {
+    capabilitiesState,
+    quickLookAvailable,
+    refreshCapabilities,
+  } from '../stores/capabilities.svelte';
   import {
     confirmSelection,
     confirmSelectionWithAlternateFormat,
@@ -100,7 +104,16 @@
 
   const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
-  const paletteBindings = $derived(buildBindings(settingsState.settings?.paletteHotkeys ?? {}));
+  // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
+  // wire format from AppSettings) bind to the right physical modifier — Cmd on
+  // macOS, Ctrl on Windows/Linux. Falls back to macOS semantics until the
+  // capability snapshot hydrates.
+  const paletteBindings = $derived(
+    buildBindings(
+      settingsState.settings?.paletteHotkeys ?? {},
+      capabilitiesState.capabilities?.platform,
+    ),
+  );
   let previewExpanded = $state(false);
 
   const handleKeydown = (event: KeyboardEvent): void => {

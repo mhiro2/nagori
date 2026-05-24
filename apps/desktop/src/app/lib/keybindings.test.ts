@@ -121,4 +121,37 @@ describe('buildBindings', () => {
     expect(resolveAction(event({ key: 'p', metaKey: true }), overlaid)).toBe('toggle-pin');
     expect(resolveAction(event({ key: 'Backspace', metaKey: true }), overlaid)).toBe('delete');
   });
+
+  it('expands CmdOrCtrl to Meta on macOS', () => {
+    const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' }, 'macos');
+    expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBe('toggle-pin');
+    expect(resolveAction(event({ key: 'i', ctrlKey: true }), overlaid)).toBeUndefined();
+  });
+
+  it('expands CmdOrCtrl to Ctrl on Windows', () => {
+    const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' }, 'windows');
+    expect(resolveAction(event({ key: 'i', ctrlKey: true }), overlaid)).toBe('toggle-pin');
+    expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBeUndefined();
+  });
+
+  it('expands CmdOrCtrl to Ctrl on Linux Wayland', () => {
+    const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' }, 'linuxWayland');
+    expect(resolveAction(event({ key: 'i', ctrlKey: true }), overlaid)).toBe('toggle-pin');
+  });
+
+  it('keeps explicit Cmd as Meta even on non-macOS platforms', () => {
+    // Users who type `Cmd` are asking for the physical Meta/Win key; only
+    // the portable `CmdOrCtrl` alias should swap modifiers per platform.
+    const overlaid = buildBindings({ pin: 'Cmd+I' }, 'windows');
+    expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBe('toggle-pin');
+    expect(resolveAction(event({ key: 'i', ctrlKey: true }), overlaid)).toBeUndefined();
+  });
+
+  it('defaults to macOS semantics when platform is undefined', () => {
+    // Capability snapshot is hydrated asynchronously; before it lands we keep
+    // the historical default (Meta) so the macOS-focused default bindings
+    // still parse correctly.
+    const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' });
+    expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBe('toggle-pin');
+  });
 });
