@@ -108,6 +108,12 @@ report:
   before polling (typically a settings-load error) and is the same
   signal the desktop app reads when deciding whether to surface a
   "Nagori is running" notification.
+- `ipc\tpanic_count=N[\t<last panic>]` — total IPC handler tasks the
+  accept loop has observed to panic over this daemon's lifetime, plus
+  the last panic message for one-glance triage. A non-zero count is a
+  hint to grep the daemon log for the matching stack trace; it does not
+  flip the top-level `ok` flag because a single panic does not have the
+  same operational impact as a wedged retention loop.
 
 `nagori doctor` also prints a thumbnail cache row in both
 daemon-driven and direct-DB reports:

@@ -1049,6 +1049,19 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                 .thumbnail_budget_bytes
                 .map_or_else(|| "disabled".to_owned(), |b| b.to_string());
             println!("thumbnails\tused={thumb_used}\tcap={thumb_cap}");
+            // IPC accept-loop health: per-process panic counter so an
+            // operator can correlate "auto-paste sometimes stalls" with
+            // a handler that crashed and got silently restarted by the
+            // JoinSet. A non-zero count surfaces the last panic message
+            // for one-glance triage; the top-level `ok` flag is not
+            // flipped because a one-shot panic is not the same class of
+            // failure as a wedged retention loop.
+            let ipc = &report.ipc;
+            let ipc_suffix = ipc
+                .last_panic_message
+                .as_deref()
+                .map_or_else(String::new, |msg| format!("\t{msg}"));
+            println!("ipc\tpanic_count={}{ipc_suffix}", ipc.handler_panic_count);
         }
     }
     Ok(())

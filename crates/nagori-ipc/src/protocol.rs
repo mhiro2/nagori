@@ -177,6 +177,12 @@ pub struct DoctorReport {
     /// loop is visible in `nagori doctor` without grepping logs.
     #[serde(default)]
     pub capture: CaptureHealthReport,
+    /// Health snapshot of the IPC server's per-connection handlers.
+    /// Mirrors the field on `HealthResponse` so operators running
+    /// `nagori doctor` get the same panic visibility as automated
+    /// `nagori health` probes.
+    #[serde(default)]
+    pub ipc: IpcHealthReport,
     /// Outcome of desktop startup's settings-load gate. Covers both the
     /// capture loop's pre-poll initialisation and the settings subscriber's
     /// initial `get_settings()` — either one aborting on a failed load
@@ -289,6 +295,26 @@ pub struct CaptureHealthReport {
     pub last_event_at: Option<OffsetDateTime>,
 }
 
+/// Wire-format snapshot of IPC server-side handler outcomes.
+///
+/// The IPC dispatcher runs per-connection handlers on a `JoinSet`; without
+/// an explicit observer, the `join_next()` reap drops the `Result`, so a
+/// panicking handler would otherwise be invisible to operators. This
+/// report exposes the cumulative panic count (and most-recent panic
+/// message) so a degraded IPC surface is visible in `nagori health` and
+/// `nagori doctor` without grepping logs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpcHealthReport {
+    /// Cumulative count of IPC handler tasks observed to panic since the
+    /// daemon started. Saturating add so a permanent panic loop plateaus
+    /// at `u64::MAX` instead of wrapping back to zero.
+    pub handler_panic_count: u64,
+    /// Most recent panic message (Display of `tokio::task::JoinError`).
+    /// Sticky after the first panic so transient log pressure cannot
+    /// erase it — a follow-up panic overwrites with the latest message.
+    pub last_panic_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaintenanceHealthReport {
     /// Consecutive failed runs of the maintenance loop. Resets to zero
@@ -348,6 +374,13 @@ pub struct HealthResponse {
     /// clip is being dropped" without a second IPC roundtrip.
     #[serde(default)]
     pub capture: CaptureHealthReport,
+    /// Health snapshot of the IPC server's per-connection handlers.
+    /// Surfaces handler panics that would otherwise be silently dropped
+    /// by `JoinSet::join_next()` so dashboards can distinguish a healthy
+    /// daemon from one whose IPC dispatchers are panicking on a hot
+    /// request shape.
+    #[serde(default)]
+    pub ipc: IpcHealthReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

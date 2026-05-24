@@ -10,9 +10,9 @@ use nagori_core::{
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
     DeleteEntryRequest, DoctorPermission, DoctorReport, EntryDto, GetEntryRequest, HealthResponse,
-    IpcError, IpcRequest, IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest,
-    PinEntryRequest, RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
-    UpdateSettingsRequest,
+    IpcError, IpcRequest, IpcResponse, IpcServerHealth, ListPinnedRequest, ListRecentRequest,
+    PasteEntryRequest, PinEntryRequest, RunAiActionRequest, SearchRequest, SearchResponse,
+    SearchResultDto, UpdateSettingsRequest,
 };
 use nagori_platform::{
     ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionChecker,
@@ -65,6 +65,13 @@ pub struct NagoriRuntime {
     /// and `Doctor` handlers so dashboards can distinguish "retention is
     /// wedged" from "every clip is being dropped".
     capture_health: CaptureHealth,
+    /// Shared handle for the IPC server's per-handler panic counter.
+    /// The accept loop in `serve.rs` increments it via
+    /// `IpcServerHealth::record_panic` (through `observe_handler_outcome`);
+    /// the IPC `Health` and `Doctor` handlers read it so a panicking
+    /// dispatcher is visible in `nagori doctor` / `nagori health`
+    /// instead of silently swallowed by `JoinSet::join_next()`.
+    ipc_health: IpcServerHealth,
     /// Static report of what the host adapter can do. Populated by the
     /// caller (typically `nagori-platform-native::build_native_runtime`)
     /// so the daemon doesn't have to take a dep on the per-OS crates;
@@ -128,6 +135,14 @@ impl NagoriRuntime {
     /// `nagori doctor` without grepping logs.
     pub fn capture_health(&self) -> CaptureHealth {
         self.capture_health.clone()
+    }
+
+    /// Shared handle to the IPC server's handler-panic counter. The
+    /// daemon's `serve.rs` wires this into the accept loops so any
+    /// panic surfaced by `JoinSet::join_next()` increments the counter
+    /// and updates the most-recent panic message.
+    pub fn ipc_health(&self) -> IpcServerHealth {
+        self.ipc_health.clone()
     }
 
     /// Snapshot of the host adapter's capability matrix.
@@ -357,15 +372,22 @@ impl NagoriRuntime {
             IpcRequest::Health => {
                 let maintenance = self.maintenance_health.report();
                 let capture = self.capture_health.report();
+                let ipc = self.ipc_health.report();
                 // `ok` flips to false once *either* retention or steady-
                 // state capture is wedged so simple health probes (load
                 // balancers, oncall checks) light up without needing to
-                // inspect the nested struct.
+                // inspect the nested struct. IPC handler panics are
+                // tracked but do *not* gate `ok`: a one-shot panic on a
+                // pathological request is not the same level of
+                // degradation as a wedged retention loop, and we'd
+                // rather have probes flip on sustained outages than on
+                // a single fluke.
                 Ok(IpcResponse::Health(HealthResponse {
                     ok: !maintenance.degraded && !capture.degraded,
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                     maintenance,
                     capture,
+                    ipc,
                 }))
             }
             IpcRequest::Shutdown => {
@@ -430,6 +452,7 @@ impl NagoriRuntime {
             permissions,
             maintenance: self.maintenance_health.report(),
             capture: self.capture_health.report(),
+            ipc: self.ipc_health.report(),
             startup: self.startup_health.report(),
             update_channel: settings.update_channel.as_str().to_owned(),
             latest_version,
@@ -955,6 +978,7 @@ impl NagoriRuntimeBuilder {
             maintenance_health: MaintenanceHealth::new(),
             startup_health: StartupHealth::new(),
             capture_health: CaptureHealth::new(),
+            ipc_health: IpcServerHealth::new(),
             capabilities,
             thumbnail_gate: ThumbnailGate::default(),
         }

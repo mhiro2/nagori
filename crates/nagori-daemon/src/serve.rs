@@ -115,6 +115,7 @@ async fn spawn_ipc_server(
         write_token_file(&config.token_path, &token)?;
         let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
+        let ipc_health = runtime.ipc_health();
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
             let mut stop_rx = stop_rx;
@@ -132,6 +133,7 @@ async fn spawn_ipc_server(
                     }
                 },
                 grace,
+                ipc_health,
             )
             .await;
             if let Err(err) = result {
@@ -162,6 +164,7 @@ async fn spawn_ipc_server(
         write_token_file(&config.token_path, &token)?;
         let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
+        let ipc_health = runtime.ipc_health();
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
             let mut stop_rx = stop_rx;
@@ -180,6 +183,7 @@ async fn spawn_ipc_server(
                     }
                 },
                 grace,
+                ipc_health,
             )
             .await;
             if let Err(err) = result {

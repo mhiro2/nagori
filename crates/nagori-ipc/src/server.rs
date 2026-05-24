@@ -3,8 +3,9 @@ use std::{future::Future, path::Path};
 use nagori_core::{AppError, Result};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-#[cfg(any(unix, windows))]
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 #[cfg(unix)]
@@ -21,7 +22,104 @@ use tracing::warn;
 
 #[cfg(any(unix, windows))]
 use crate::AuthToken;
-use crate::{IpcEnvelope, IpcRequest, IpcResponse};
+use crate::{IpcEnvelope, IpcHealthReport, IpcRequest, IpcResponse};
+
+/// Cloneable observer for IPC server-side handler outcomes.
+///
+/// Per-connection handlers run on a `JoinSet`. Without an explicit
+/// observer the `join_next()` reap drops the `Result`, so a panicking
+/// handler is invisible in logs and in `nagori doctor` / `nagori health`.
+/// `IpcServerHealth` lets the daemon thread a shared counter through the
+/// accept loops so panics are both warned and surfaced in the health
+/// report.
+#[derive(Debug, Default, Clone)]
+pub struct IpcServerHealth {
+    inner: Arc<IpcServerHealthInner>,
+}
+
+#[derive(Debug, Default)]
+struct IpcServerHealthInner {
+    handler_panics: AtomicU64,
+    last_panic_message: Mutex<Option<String>>,
+}
+
+impl IpcServerHealth {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Total number of IPC handler tasks observed to panic over this
+    /// server's lifetime. Backed by a `fetch_add(Relaxed)` so the counter
+    /// wraps at `u64::MAX`; in practice the daemon will exit long before
+    /// that ever happens, so we accept the wrap instead of paying for a
+    /// CAS loop on every panic record.
+    #[must_use]
+    pub fn handler_panic_count(&self) -> u64 {
+        self.inner.handler_panics.load(Ordering::Relaxed)
+    }
+
+    /// Most recent panic message, if any. Cloned so the lock is held
+    /// briefly enough that an async caller can read it without yielding
+    /// through the std mutex.
+    #[must_use]
+    pub fn last_panic_message(&self) -> Option<String> {
+        let guard = match self.inner.last_panic_message.lock() {
+            Ok(guard) => guard,
+            // A panic while holding the mutex must not silence the
+            // health surface forever — recover the inner value and keep
+            // serving snapshots, matching `MaintenanceHealth`.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.clone()
+    }
+
+    /// Wire-format snapshot suitable for inclusion in `HealthResponse`
+    /// and `DoctorReport`.
+    #[must_use]
+    pub fn report(&self) -> IpcHealthReport {
+        IpcHealthReport {
+            handler_panic_count: self.handler_panic_count(),
+            last_panic_message: self.last_panic_message(),
+        }
+    }
+
+    fn record_panic(&self, message: String) {
+        self.inner.handler_panics.fetch_add(1, Ordering::Relaxed);
+        let mut guard = match self.inner.last_panic_message.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(message);
+    }
+}
+
+/// Inspect a reaped `JoinSet` result and route panics to `health`
+/// (with a structured warn) while still surfacing non-panic join errors.
+///
+/// `abort()` during the drain stage generates `is_cancelled()` errors —
+/// those are intentional and skipped here so a graceful shutdown does
+/// not inflate the panic counter.
+#[cfg(any(unix, windows))]
+fn observe_handler_outcome(
+    health: &IpcServerHealth,
+    result: std::result::Result<(), tokio::task::JoinError>,
+) {
+    match result {
+        Ok(()) => {}
+        Err(err) if err.is_panic() => {
+            let message = err.to_string();
+            warn!(error = %message, "ipc_handler_panicked");
+            health.record_panic(message);
+        }
+        Err(err) if err.is_cancelled() => {
+            // Drain-stage `abort_all` is intentional; nothing to surface.
+        }
+        Err(err) => {
+            warn!(error = %err, "ipc_handler_join_failed");
+        }
+    }
+}
 
 #[cfg(any(unix, windows))]
 const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
@@ -150,6 +248,7 @@ where
         handler,
         std::future::pending::<()>(),
         Duration::from_secs(0),
+        IpcServerHealth::default(),
     )
     .await
 }
@@ -171,6 +270,7 @@ pub async fn accept_loop_with_shutdown<F, Fut, S>(
     handler: F,
     shutdown: S,
     drain_grace: Duration,
+    server_health: IpcServerHealth,
 ) -> Result<()>
 where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
@@ -223,8 +323,12 @@ where
                 tasks.spawn(handle_connection(stream, permit, handler, token));
             }
             // Reap completed handlers so the `JoinSet` doesn't grow without
-            // bound for the lifetime of the daemon.
-            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            // bound for the lifetime of the daemon. Route the result through
+            // `observe_handler_outcome` so a panicking handler is logged and
+            // counted in `IpcServerHealth` instead of being silently dropped.
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                observe_handler_outcome(&server_health, result);
+            }
         }
     };
 
@@ -234,7 +338,11 @@ where
 
     // Stage 2: wait up to `drain_grace` for in-flight handlers to commit.
     if !tasks.is_empty() {
-        let drain = async { while tasks.join_next().await.is_some() {} };
+        let drain = async {
+            while let Some(result) = tasks.join_next().await {
+                observe_handler_outcome(&server_health, result);
+            }
+        };
         if timeout(drain_grace, drain).await.is_err() {
             // Stage 3: anything still running has had its grace period;
             // abort and reap so the JoinSet drops cleanly.
@@ -243,7 +351,9 @@ where
                 "ipc_drain_timeout_aborting_inflight",
             );
             tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            while let Some(result) = tasks.join_next().await {
+                observe_handler_outcome(&server_health, result);
+            }
         }
     }
 
@@ -336,6 +446,32 @@ where
 {
     let listener = bind_unix(path).await?;
     accept_loop(listener, token, handler).await
+}
+
+/// `serve_unix` variant that threads through a caller-supplied
+/// `IpcServerHealth` so per-connection handler panics are counted and
+/// surfaced via `nagori health` / `nagori doctor`.
+#[cfg(unix)]
+pub async fn serve_unix_with_health<F, Fut>(
+    path: impl AsRef<Path>,
+    token: AuthToken,
+    handler: F,
+    server_health: IpcServerHealth,
+) -> Result<()>
+where
+    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+{
+    let listener = bind_unix(path).await?;
+    accept_loop_with_shutdown(
+        listener,
+        token,
+        handler,
+        std::future::pending::<()>(),
+        Duration::from_secs(0),
+        server_health,
+    )
+    .await
 }
 
 #[cfg(any(unix, windows))]
@@ -479,6 +615,7 @@ pub async fn accept_loop_pipe_with_shutdown<F, Fut, S>(
     handler: F,
     shutdown: S,
     drain_grace: Duration,
+    server_health: IpcServerHealth,
 ) -> Result<()>
 where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
@@ -538,7 +675,9 @@ where
                 let token = token.clone();
                 tasks.spawn(handle_connection(connected, permit, handler, token));
             }
-            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                observe_handler_outcome(&server_health, result);
+            }
         }
     };
 
@@ -547,14 +686,20 @@ where
     drop(server);
 
     if !tasks.is_empty() {
-        let drain = async { while tasks.join_next().await.is_some() {} };
+        let drain = async {
+            while let Some(result) = tasks.join_next().await {
+                observe_handler_outcome(&server_health, result);
+            }
+        };
         if timeout(drain_grace, drain).await.is_err() {
             warn!(
                 grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX),
                 "ipc_drain_timeout_aborting_inflight",
             );
             tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            while let Some(result) = tasks.join_next().await {
+                observe_handler_outcome(&server_health, result);
+            }
         }
     }
     accept_result
@@ -574,6 +719,7 @@ where
         handler,
         std::future::pending::<()>(),
         Duration::from_secs(0),
+        IpcServerHealth::default(),
     )
     .await
 }
@@ -654,6 +800,7 @@ mod tests {
                 version: "test-version".to_owned(),
                 maintenance: crate::MaintenanceHealthReport::default(),
                 capture: crate::CaptureHealthReport::default(),
+                ipc: crate::IpcHealthReport::default(),
             })
         })
         .await;
@@ -850,6 +997,7 @@ mod tests {
                 },
                 async move { shutdown_for_server.notified().await },
                 Duration::from_secs(2),
+                IpcServerHealth::default(),
             )
             .await
         });
@@ -923,6 +1071,7 @@ mod tests {
                 },
                 async move { shutdown_for_server.notified().await },
                 Duration::from_secs(5),
+                IpcServerHealth::default(),
             )
             .await
         });
@@ -1010,6 +1159,66 @@ mod tests {
         }
         let _ = blocked.await;
     }
+
+    #[tokio::test]
+    async fn handler_panic_increments_ipc_server_health() {
+        // Regression: before the fix, a panic inside a per-connection
+        // handler was silently dropped by `JoinSet::join_next()` — no
+        // log line, no health counter. Verify the panic now lands in
+        // `IpcServerHealth` and is logged so dashboards can see it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("panic.sock");
+        let token = test_token();
+        let listener = bind_unix(&path).await.expect("bind");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_server = shutdown.clone();
+        let server_token = token.clone();
+        let health = IpcServerHealth::new();
+        let server_health = health.clone();
+        let server = tokio::spawn(async move {
+            accept_loop_with_shutdown(
+                listener,
+                server_token,
+                |_request| async move {
+                    panic!("induced panic");
+                },
+                async move { shutdown_for_server.notified().await },
+                Duration::from_secs(1),
+                server_health,
+            )
+            .await
+        });
+
+        // Drive a request so the handler runs and panics.
+        let client_path = path.clone();
+        let client_token = token.clone();
+        let request = tokio::spawn(async move {
+            let client = IpcClient::new(client_path.to_string_lossy().to_string(), client_token);
+            client.send(IpcRequest::Health).await
+        });
+        // Client side will see EOF (the handler panic drops the
+        // stream); just await without asserting the response shape.
+        let _ = tokio::time::timeout(Duration::from_secs(1), request).await;
+
+        // Give the JoinSet a beat to reap the panicked task.
+        for _ in 0..50 {
+            if health.handler_panic_count() >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            health.handler_panic_count() >= 1,
+            "handler panic should be reflected in IpcServerHealth"
+        );
+        assert!(
+            health.last_panic_message().is_some(),
+            "last_panic_message should be populated after a panic"
+        );
+
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1071,6 +1280,7 @@ mod tests_windows {
                     version: "pipe-test".to_owned(),
                     maintenance: crate::MaintenanceHealthReport::default(),
                     capture: crate::CaptureHealthReport::default(),
+                    ipc: crate::IpcHealthReport::default(),
                 })
             })
             .await;
