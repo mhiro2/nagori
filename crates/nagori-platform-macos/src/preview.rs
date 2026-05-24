@@ -84,13 +84,14 @@ fn spawn_qlmanage(paths: &[PathBuf]) -> Result<()> {
             "could not launch Quick Look (`{QLMANAGE_PATH} -p`): {err}"
         ))
     })?;
-    // Reap the child off-thread so a long-lived Quick Look session does
-    // not leave a zombie behind. `qlmanage -p` outlives the spawn call
-    // (the panel stays up until the user dismisses it), so we cannot
-    // block the tokio worker on `wait`; a detached OS thread is the
-    // standard way to keep the zombie table clean without joining the
-    // async runtime.
-    std::thread::spawn(move || {
+    // Reap the child on tokio's blocking pool so a long-lived Quick Look
+    // session does not leave a zombie behind. `qlmanage -p` outlives the
+    // spawn call (the panel stays up until the user dismisses it), so we
+    // cannot block the async worker on `wait`. Going through
+    // `spawn_blocking` instead of a raw `std::thread::spawn` lets the
+    // runtime cap how many OS threads accumulate when the user opens
+    // previews in rapid succession.
+    tokio::task::spawn_blocking(move || {
         let _ = child.wait();
     });
     Ok(())
