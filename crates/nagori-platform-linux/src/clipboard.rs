@@ -558,17 +558,29 @@ async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass
     // since we cannot surface those bytes anyway, and reading them only
     // gives a malicious publisher more time to occupy the blocking worker.
     let read_ceiling = buffer_cap.unwrap_or(INTERNAL_BODY_CEILING_BYTES);
-    pipe_read_multi_pass_internal(buffer_cap, read_ceiling).await
+    // Cap the sequence hash at the smaller of `SEQUENCE_FINGERPRINT_CEILING`
+    // and the actual read budget so the fingerprint matches the
+    // sequence-only path even when the snapshot keeps buffering past
+    // 256 KiB toward `max_entry_size_bytes`. The `.min` guard covers the
+    // rare test/embedded case where `buffer_cap < SEQUENCE_FINGERPRINT_CEILING`.
+    let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
+    pipe_read_multi_pass_internal(buffer_cap, sequence_ceiling, read_ceiling).await
 }
 
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipePass> {
-    pipe_read_multi_pass_internal(None, read_ceiling).await
+    // No-buffer paths always run from `current_sequence*`, which already
+    // chose 256 KiB (or a smaller `max_bytes`) as the read ceiling. Re-cap
+    // here so a future caller passing a larger `read_ceiling` still gets
+    // the canonical 256 KiB fingerprint.
+    let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
+    pipe_read_multi_pass_internal(None, sequence_ceiling, read_ceiling).await
 }
 
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass_internal(
     buffer_cap: Option<usize>,
+    sequence_ceiling: usize,
     read_ceiling: usize,
 ) -> Result<MultiPipePass> {
     tokio::task::spawn_blocking(move || -> Result<MultiPipePass> {
@@ -591,7 +603,7 @@ async fn pipe_read_multi_pass_internal(
             }
         };
 
-        let mut state = MultiReadState::new(buffer_cap, read_ceiling);
+        let mut state = MultiReadState::new(buffer_cap, sequence_ceiling, read_ceiling);
         let mut representations: Vec<ClipboardRepresentation> = Vec::new();
 
         if let Some(image_mime) = pick_image_mime(&available)
@@ -868,11 +880,27 @@ struct MultiReadState {
     hasher: Sha256,
     observed_total: usize,
     buffer_cap: Option<usize>,
+    /// Bytes-from-pipe budget for the hasher. Once `observed_total`
+    /// crosses this, further body bytes (and inter-rep framing) are
+    /// dropped from the hash and the sequence finalises to the
+    /// `oversized-over:{sequence_ceiling}:{prefix_hash}` sentinel. Held
+    /// separately from `read_ceiling` so the snapshot and sequence-only
+    /// paths can buffer different amounts but still produce identical
+    /// sequence strings for the same clip — without that, every
+    /// over-256-KiB clip would mismatch on the very next tick and the
+    /// capture loop would re-read it forever.
+    sequence_ceiling: usize,
     read_ceiling: usize,
     /// Sticky once total payload exceeds `buffer_cap`; subsequent rep
     /// reads still hash bytes (so the sequence is content-stable) but
     /// drop the buffered Vec.
     buffer_overflow: bool,
+    /// Sticky once total payload exceeds `sequence_ceiling`. Further
+    /// hash updates (body bytes and framing) are skipped so the
+    /// finalised hash is a deterministic function of the first
+    /// `sequence_ceiling` bytes regardless of how far the snapshot
+    /// path keeps reading.
+    sequence_overflow: bool,
     /// Sticky once total payload exceeds `read_ceiling`; once set,
     /// further reads short-circuit so a malicious owner cannot pin the
     /// blocking worker by feeding bytes indefinitely.
@@ -886,13 +914,19 @@ struct MultiReadState {
 
 #[cfg(target_os = "linux")]
 impl MultiReadState {
-    fn new(buffer_cap: Option<usize>, read_ceiling: usize) -> Self {
+    fn new(buffer_cap: Option<usize>, sequence_ceiling: usize, read_ceiling: usize) -> Self {
+        debug_assert!(
+            sequence_ceiling <= read_ceiling,
+            "sequence_ceiling must be ≤ read_ceiling so the hash truncates before the pipe close"
+        );
         Self {
             hasher: Sha256::new(),
             observed_total: 0,
             buffer_cap,
+            sequence_ceiling,
             read_ceiling,
             buffer_overflow: false,
+            sequence_overflow: false,
             ceiling_hit: false,
             read_timeout: false,
         }
@@ -914,7 +948,7 @@ impl MultiReadState {
     /// in a stored representation so they should not push the snapshot
     /// over the user's `max_entry_size_bytes` budget.
     fn begin_rep(&mut self, mime: &str) {
-        if self.ceiling_hit {
+        if self.ceiling_hit || self.sequence_overflow {
             return;
         }
         // NUL is forbidden in MIME types so the framing is unambiguous.
@@ -969,21 +1003,36 @@ impl MultiReadState {
             let previous = self.observed_total;
             self.observed_total = self.observed_total.saturating_add(n);
 
-            // Ceiling check is the hard limit — hash whatever prefix
-            // still fits, mark sticky, and bail.
-            if self.observed_total > self.read_ceiling {
-                let prefix_remaining = self.read_ceiling.saturating_sub(previous).min(n);
-                if prefix_remaining > 0 {
-                    self.hasher.update(&chunk[..prefix_remaining]);
+            // Sequence-fingerprint cap: hash the prefix that still fits
+            // and mark the sticky overflow. We do NOT stop reading here
+            // — the snapshot path still needs the remaining bytes to
+            // buffer the full body. The sequence-only path crosses this
+            // and `read_ceiling` simultaneously (both 256 KiB), so the
+            // hard read-abort below fires on the same tick.
+            if !self.sequence_overflow {
+                if self.observed_total > self.sequence_ceiling {
+                    let prefix_remaining = self.sequence_ceiling.saturating_sub(previous).min(n);
+                    if prefix_remaining > 0 {
+                        self.hasher.update(&chunk[..prefix_remaining]);
+                    }
+                    self.sequence_overflow = true;
+                } else {
+                    self.hasher.update(&chunk[..n]);
                 }
+            }
+
+            // Read ceiling: hard pipe-close so a malicious or runaway
+            // publisher cannot keep a blocking worker occupied past the
+            // configured budget.
+            if self.observed_total > self.read_ceiling {
                 self.ceiling_hit = true;
                 return Ok(None);
             }
-            self.hasher.update(&chunk[..n]);
 
-            // Buffer check is the soft cap. We keep hashing past it so
-            // a change to any rep bumps the sequence, but the bytes are
-            // dropped from memory.
+            // Buffer check is the soft cap. We keep reading past it so
+            // we still observe rep boundaries (and bump `observed_total`
+            // for ceiling checks on later reps), but the buffered Vec is
+            // dropped.
             if let Some(cap) = self.buffer_cap
                 && self.observed_total > cap
             {
@@ -997,8 +1046,15 @@ impl MultiReadState {
     }
 
     fn finalize_sequence(self) -> String {
-        if self.ceiling_hit {
-            oversized_sequence(self.read_ceiling, &hex::encode(self.hasher.finalize()))
+        // Use `sequence_ceiling` (not `read_ceiling`) as the sentinel key
+        // so the snapshot path (which may keep reading past
+        // `sequence_ceiling` toward `read_ceiling`) finalises to the same
+        // string the sequence-only path produces for the same clip. A
+        // `ceiling_hit` without `sequence_overflow` only happens on
+        // pipe-read timeout, where the partial-hash result is still
+        // captured under the same sentinel form.
+        if self.sequence_overflow || self.ceiling_hit {
+            oversized_sequence(self.sequence_ceiling, &hex::encode(self.hasher.finalize()))
         } else {
             hex::encode(self.hasher.finalize())
         }
@@ -1069,7 +1125,7 @@ mod tests {
     #[test]
     fn read_pipe_closes_at_configured_ceiling() {
         let mut reader = CountingChunks::new(PIPE_CHUNK, 8);
-        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
         let body = state.read_pipe(&mut reader).unwrap();
 
         assert_eq!(reader.reads, 2);
@@ -1087,7 +1143,7 @@ mod tests {
     #[test]
     fn read_pipe_buffers_within_ceiling() {
         let mut reader = io::Cursor::new(b"clipboard".to_vec());
-        let mut state = MultiReadState::new(Some(64), 64);
+        let mut state = MultiReadState::new(Some(64), 64, 64);
         let body = state.read_pipe(&mut reader).unwrap();
 
         assert_eq!(body.as_deref(), Some(&b"clipboard"[..]));
@@ -1100,9 +1156,9 @@ mod tests {
         let mut first_reader = io::Cursor::new([b'a'; PIPE_CHUNK + 1]);
         let mut second_reader = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
 
-        let mut s1 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let mut s1 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
         let _ = s1.read_pipe(&mut first_reader).unwrap();
-        let mut s2 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let mut s2 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
         let _ = s2.read_pipe(&mut second_reader).unwrap();
 
         assert_ne!(s1.finalize_sequence(), s2.finalize_sequence());
@@ -1116,7 +1172,7 @@ mod tests {
         let mut first = io::Cursor::new([b'a'; PIPE_CHUNK + 1]);
         let mut second = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
 
-        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK * 8);
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK * 8, PIPE_CHUNK * 8);
         let first_body = state.read_pipe(&mut first).unwrap();
         // First rep exceeds the cap → its buffer dropped.
         assert!(first_body.is_none());
@@ -1131,13 +1187,55 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_and_sequence_only_paths_agree_on_oversized_clip() {
+        // Regression: the snapshot path used to hash the full body while
+        // current_sequence_with_max capped at SEQUENCE_FINGERPRINT_CEILING,
+        // so over-256-KiB clips produced different sequences every tick and
+        // the capture loop re-read them forever. The two configs must
+        // collapse to the same oversized-over: sentinel for the same
+        // bytes.
+        let body: Vec<u8> = (0..PIPE_CHUNK * 4)
+            .map(|i| u8::try_from(i % 251).expect("251 fits u8"))
+            .collect();
+
+        // Snapshot: full-body buffer (way past sequence_ceiling) with the
+        // 256-KiB-equivalent fingerprint cap.
+        let mut snapshot = MultiReadState::new(Some(body.len()), PIPE_CHUNK, body.len());
+        let _ = snapshot
+            .read_pipe(&mut io::Cursor::new(body.clone()))
+            .unwrap();
+
+        // Sequence-only: matches `current_sequence_with_max` shape — no
+        // buffer, read_ceiling = sequence_ceiling.
+        let mut seq_only = MultiReadState::new(None, PIPE_CHUNK, PIPE_CHUNK);
+        let _ = seq_only.read_pipe(&mut io::Cursor::new(body)).unwrap();
+
+        assert_eq!(snapshot.finalize_sequence(), seq_only.finalize_sequence());
+    }
+
+    #[test]
+    fn snapshot_and_sequence_only_paths_agree_on_small_clip() {
+        let body = b"under the cap".to_vec();
+        let mut snapshot = MultiReadState::new(Some(1024), PIPE_CHUNK, 1024);
+        let _ = snapshot
+            .read_pipe(&mut io::Cursor::new(body.clone()))
+            .unwrap();
+        let mut seq_only = MultiReadState::new(None, PIPE_CHUNK, PIPE_CHUNK);
+        let _ = seq_only.read_pipe(&mut io::Cursor::new(body)).unwrap();
+        let snapshot_seq = snapshot.finalize_sequence();
+        assert_eq!(snapshot_seq, seq_only.finalize_sequence());
+        // Small clip: neither path should land in the sentinel form.
+        assert!(!snapshot_seq.starts_with("oversized-over:"));
+    }
+
+    #[test]
     fn read_pipe_drops_snapshot_on_reader_timeout() {
         // A hung Wayland publisher surfaces through the wrapper as a
         // `TimedOut` error on the very first read. The state must treat
         // that as a sticky abort (no buffered body returned, ceiling
         // sentinel locked) so the snapshot is dropped rather than left
         // pinning a blocking worker.
-        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK);
+        let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
         let body = state.read_pipe(&mut AlwaysTimesOut).unwrap();
 
         assert!(body.is_none());
@@ -1178,7 +1276,7 @@ mod tests {
         // Two clips with the same total bytes but different per-rep
         // boundaries must hash differently. Without `begin_rep` the two
         // sequences would collide.
-        let mut s_two = MultiReadState::new(Some(64), 64);
+        let mut s_two = MultiReadState::new(Some(64), 64, 64);
         s_two.begin_rep("image/png");
         let _ = s_two
             .read_pipe(&mut io::Cursor::new(b"AB".to_vec()))
@@ -1188,7 +1286,7 @@ mod tests {
             .read_pipe(&mut io::Cursor::new(b"CD".to_vec()))
             .unwrap();
 
-        let mut s_one = MultiReadState::new(Some(64), 64);
+        let mut s_one = MultiReadState::new(Some(64), 64, 64);
         s_one.begin_rep("text/plain");
         let _ = s_one
             .read_pipe(&mut io::Cursor::new(b"ABCD".to_vec()))
