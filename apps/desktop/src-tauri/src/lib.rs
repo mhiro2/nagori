@@ -34,6 +34,12 @@ const HOTKEY_REGISTER_RESOLVED_EVENT: &str = "nagori://hotkey_register_resolved"
 /// lockstep with the frontend constant in `lib/tauri.ts`.
 pub(crate) const PASTE_FAILED_EVENT: &str = "nagori://paste_failed";
 
+/// Event emitted after the capture loop stores a new clipboard entry.
+/// The palette subscribes via `TAURI_EVENTS.clipboardChanged` and refreshes
+/// the active result set so a visible window does not wait for another
+/// user-driven query/filter change before showing the newest row.
+pub(crate) const CLIPBOARD_CHANGED_EVENT: &str = "nagori://clipboard_changed";
+
 /// Event name emitted after every persisted settings change. The payload
 /// is the full `AppSettingsDto`. The Settings view subscribes via
 /// `TAURI_EVENTS.settingsChanged` so an external mutation (the tray's
@@ -387,7 +393,8 @@ pub fn run() {
                 }
             };
             app.manage(state);
-            app.state::<AppState>().spawn_background_tasks();
+            app.state::<AppState>()
+                .spawn_background_tasks(app.handle().clone());
 
             // Tray icon is installed on every platform. macOS exposes it in
             // the menu bar, Windows in the system notification area, and
@@ -2176,10 +2183,10 @@ mod image_scheme_tests {
 #[cfg(test)]
 mod hotkey_tests {
     use super::{
-        HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT, HotkeyFailureKind,
-        SETTINGS_CHANGED_EVENT, SecondaryHotkeyDiff, build_hotkey_failure_payload,
-        build_hotkey_failure_record, build_hotkey_resolved_payload, compute_secondary_hotkey_diff,
-        should_clear_secondary_cache,
+        CLIPBOARD_CHANGED_EVENT, HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT,
+        HotkeyFailureKind, SETTINGS_CHANGED_EVENT, SecondaryHotkeyDiff,
+        build_hotkey_failure_payload, build_hotkey_failure_record, build_hotkey_resolved_payload,
+        compute_secondary_hotkey_diff, should_clear_secondary_cache,
     };
     use nagori_core::SecondaryHotkeyAction;
     use std::collections::BTreeMap;
@@ -2275,6 +2282,13 @@ mod hotkey_tests {
         // merge path that keeps a tray-toggled `captureEnabled` from
         // being clobbered by an open Settings window's next autosave.
         assert_eq!(SETTINGS_CHANGED_EVENT, "nagori://settings_changed");
+    }
+
+    #[test]
+    fn clipboard_changed_event_name_matches_frontend_contract() {
+        // `TAURI_EVENTS.clipboardChanged` in `lib/tauri.ts` subscribes to
+        // this literal so the palette can refresh after background capture.
+        assert_eq!(CLIPBOARD_CHANGED_EVENT, "nagori://clipboard_changed");
     }
 
     #[test]

@@ -258,6 +258,10 @@ pub struct CaptureLoop<R, E, A> {
     /// loop. `None` in unit tests keeps the loop independent of the
     /// daemon's shared-state plumbing.
     capture_health: Option<CaptureHealth>,
+    /// Optional hook invoked after a new entry has been durably inserted.
+    /// Desktop uses this to wake the palette without coupling the daemon
+    /// crate to Tauri; CLI/server callers leave it unset.
+    capture_notifier: Option<Arc<dyn Fn(EntryId) + Send + Sync>>,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -285,6 +289,7 @@ where
             force_content_check: false,
             secure_focus_fail_closed_enabled: true,
             capture_health: None,
+            capture_notifier: None,
         }
     }
 
@@ -401,6 +406,13 @@ where
     #[must_use]
     pub fn with_capture_health(mut self, health: CaptureHealth) -> Self {
         self.capture_health = Some(health);
+        self
+    }
+
+    /// Wire a callback that runs after every successful capture insert.
+    #[must_use]
+    pub fn with_capture_notifier(mut self, notifier: Arc<dyn Fn(EntryId) + Send + Sync>) -> Self {
+        self.capture_notifier = Some(notifier);
         self
     }
 
@@ -752,6 +764,16 @@ where
         if let Some(cache) = &self.search_cache {
             lock_or_recover(cache).invalidate();
         }
+        if let Some(notifier) = &self.capture_notifier {
+            // A panic from the desktop-side hook (e.g. a Tauri emit on a
+            // torn-down app handle) must not kill the capture loop —
+            // notification is auxiliary; durable insert already succeeded.
+            let notifier = Arc::clone(notifier);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || notifier(id))).is_err()
+            {
+                tracing::warn!(entry_id = %id, "capture_notifier_panicked");
+            }
+        }
         Ok(Some(id))
     }
 
@@ -857,6 +879,61 @@ mod tests {
 
         let entries = store.list_recent(10).await.unwrap();
         assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn capture_once_notifies_after_successful_insert() {
+        use std::sync::Mutex;
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let captured_ids = Arc::new(Mutex::new(Vec::new()));
+        let captured_ids_for_hook = captured_ids.clone();
+        let notify_capture = Arc::new(move |id| {
+            captured_ids_for_hook
+                .lock()
+                .expect("notifier lock")
+                .push(id);
+        });
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), AppSettings::default())
+            .with_capture_notifier(notify_capture);
+
+        clipboard
+            .write_text("notify me after insert")
+            .await
+            .expect("clipboard write");
+        let id = loop_
+            .capture_once()
+            .await
+            .unwrap()
+            .expect("capture should insert");
+
+        assert_eq!(
+            captured_ids.lock().expect("notifier lock").as_slice(),
+            &[id]
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_once_survives_panicking_notifier() {
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let store = SqliteStore::open_memory().expect("memory store");
+        let notify_capture = Arc::new(|_id| panic!("hook torn down"));
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), AppSettings::default())
+            .with_capture_notifier(notify_capture);
+
+        clipboard
+            .write_text("notifier panics, insert still succeeds")
+            .await
+            .expect("clipboard write");
+        let id = loop_
+            .capture_once()
+            .await
+            .expect("capture_once must not propagate hook panic")
+            .expect("capture should still insert despite hook panic");
+
+        let entries = store.list_recent(10).await.unwrap();
+        assert!(entries.iter().any(|e| e.id == id));
     }
 
     #[tokio::test]

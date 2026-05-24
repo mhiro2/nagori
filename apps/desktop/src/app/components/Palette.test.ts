@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => false),
+  subscribe: vi.fn(() => () => undefined),
+  TAURI_EVENTS: {
+    clipboardChanged: 'nagori://clipboard_changed',
+  },
 }));
 
 vi.mock('../lib/commands', () => ({
@@ -49,6 +53,7 @@ vi.mock('../stores/searchPreview.svelte', () => ({
 }));
 
 vi.mock('../stores/searchQuery.svelte', () => ({
+  refreshCurrent: vi.fn(async () => undefined),
   refreshRecent: vi.fn(async () => undefined),
   scheduleQuery: vi.fn(),
   searchState: {
@@ -91,7 +96,7 @@ vi.mock('../stores/view.svelte', () => ({
 }));
 
 import { closePalette, openSettingsWindow } from '../lib/commands';
-import { isTauri } from '../lib/tauri';
+import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
 import { quickLookAvailable } from '../stores/capabilities.svelte';
 import {
   confirmSelection,
@@ -101,7 +106,7 @@ import {
   previewSelection,
   togglePinSelection,
 } from '../stores/searchActions';
-import { scheduleQuery } from '../stores/searchQuery.svelte';
+import { refreshCurrent, scheduleQuery } from '../stores/searchQuery.svelte';
 import { selectFirst, selectLast, selectNext, selectPrev } from '../stores/searchSelection';
 import { showSettings } from '../stores/view.svelte';
 import Palette from './Palette.svelte';
@@ -132,6 +137,37 @@ describe('Palette', () => {
       await fireEvent.input(input, { target: { value: 'q' } });
     }
     expect(scheduleQuery).toHaveBeenCalledWith('q');
+  });
+
+  it('refreshes the active query when capture stores a new entry', () => {
+    let handler: ((payload: { entryId: string }) => void) | undefined;
+    vi.mocked(subscribe).mockImplementation((event, next) => {
+      if (event === TAURI_EVENTS.clipboardChanged) {
+        handler = next as (payload: { entryId: string }) => void;
+      }
+      return () => undefined;
+    });
+
+    render(Palette);
+    handler?.({ entryId: 'entry-id' });
+
+    expect(refreshCurrent).toHaveBeenCalled();
+  });
+
+  it('backfills via onReady so emits during attach are not lost', () => {
+    let onReady: (() => void) | undefined;
+    vi.mocked(subscribe).mockImplementation((event, _next, ready) => {
+      if (event === TAURI_EVENTS.clipboardChanged) {
+        onReady = ready;
+      }
+      return () => undefined;
+    });
+
+    render(Palette);
+    vi.mocked(refreshCurrent).mockClear();
+    onReady?.();
+
+    expect(refreshCurrent).toHaveBeenCalled();
   });
 
   // The keybinding contract is:

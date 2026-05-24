@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   import { closePalette, openSettingsWindow } from '../lib/commands';
   import { buildBindings, resolveAction } from '../lib/keybindings';
-  import { isTauri } from '../lib/tauri';
+  import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
     capabilitiesState,
     quickLookAvailable,
@@ -25,7 +27,12 @@
     toggleMultiSelect,
   } from '../stores/searchMultiSelect.svelte';
   import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
-  import { refreshRecent, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
+  import {
+    refreshCurrent,
+    refreshRecent,
+    scheduleQuery,
+    searchState,
+  } from '../stores/searchQuery.svelte';
   import {
     currentSelection,
     selectByIndex,
@@ -45,6 +52,24 @@
   import StatusBar from './StatusBar.svelte';
 
   let actionMenuOpen = $state(false);
+
+  onMount(() => {
+    const offClipboardChanged = subscribe<{ entryId: string }>(
+      TAURI_EVENTS.clipboardChanged,
+      () => {
+        void refreshCurrent();
+      },
+      // Backfill any capture that landed between palette mount and
+      // `listen()` resolving; without this the first emit after open
+      // can slip through the attach gap.
+      () => {
+        void refreshCurrent();
+      },
+    );
+    return () => {
+      offClipboardChanged();
+    };
+  });
 
   $effect(() => {
     void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);

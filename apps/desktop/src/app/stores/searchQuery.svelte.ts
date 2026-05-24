@@ -146,3 +146,7 @@ export const runQuery = async (raw: string): Promise<void> => {
   }
   await runSearch({ query: raw, mode: 'Auto', limit: 50 });
 };
+
+export const refreshCurrent = async (): Promise<void> => {
+  await runQuery(searchState.query);
+};

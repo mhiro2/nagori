@@ -85,6 +85,9 @@ const normalizeError = (raw: unknown): CommandError => {
 // side of the bridge is a single edit, not a treasure hunt.
 export const TAURI_EVENTS = {
   navigate: 'nagori://navigate',
+  // Emitted after the capture loop inserts a new clipboard entry. Payload:
+  // `{ entryId: string }`.
+  clipboardChanged: 'nagori://clipboard_changed',
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
   // Emitted after a previously failed global-shortcut binds successfully

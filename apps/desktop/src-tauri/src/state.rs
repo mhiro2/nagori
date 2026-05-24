@@ -307,7 +307,7 @@ impl AppState {
 
     /// Spawns the in-process capture loop and a low-frequency maintenance
     /// loop. Call once after `manage(state)` so a Tokio runtime is available.
-    pub fn spawn_background_tasks(&self) {
+    pub fn spawn_background_tasks(&self, app: tauri::AppHandle) {
         let mut tasks_slot = self.background_tasks_slot();
         if tasks_slot.is_some() {
             tracing::warn!("background_tasks_already_started");
@@ -331,10 +331,20 @@ impl AppState {
             }
             let store = runtime.store().clone();
             let settings = runtime.current_settings();
+            let app_for_capture_event = app.clone();
+            let capture_notifier = Arc::new(move |entry_id: EntryId| {
+                use tauri::Emitter;
+
+                let _ = app_for_capture_event.emit(
+                    crate::CLIPBOARD_CHANGED_EVENT,
+                    serde_json::json!({ "entryId": entry_id.to_string() }),
+                );
+            });
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_window(window)
                 .with_search_cache(search_cache)
-                .with_capture_health(capture_health);
+                .with_capture_health(capture_health)
+                .with_capture_notifier(capture_notifier);
             let mut shutdown = runtime.shutdown_handle();
             let shutdown_signal = async move { shutdown.cancelled().await };
             if let Err(err) = capture
