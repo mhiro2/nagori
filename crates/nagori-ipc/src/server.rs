@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::{future::Future, path::Path};
 
 use nagori_core::{AppError, Result};
@@ -5,7 +7,7 @@ use nagori_core::{AppError, Result};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 #[cfg(unix)]
@@ -24,6 +26,71 @@ use tracing::warn;
 use crate::AuthToken;
 use crate::{IpcEnvelope, IpcHealthReport, IpcRequest, IpcResponse};
 
+/// Tunables for the IPC server.
+///
+/// Carried separately from [`IpcServerHealth`] so a single struct can be
+/// passed through startup paths (daemon `serve.rs`, integration tests,
+/// doctor) without coupling tuning knobs to the observer counters.
+#[derive(Debug, Clone, Copy)]
+pub struct IpcServerConfig {
+    /// Maximum number of per-connection handlers in flight at once.
+    /// Backed by an in-process [`tokio::sync::Semaphore`]; the 33rd
+    /// concurrent client waits on `acquire_owned` until a handler frees
+    /// a permit. Sized as a `NonZeroUsize` so an accidental `0` (which
+    /// would deadlock every connection) is rejected at construction.
+    pub max_concurrent_connections: NonZeroUsize,
+}
+
+impl IpcServerConfig {
+    /// Default ceiling for in-flight IPC handlers. Sized for the local
+    /// CLI / desktop workload where a handful of concurrent connections
+    /// is typical and a saturated pool is more likely a sign of a wedged
+    /// handler than legitimate fan-out.
+    pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 32;
+}
+
+impl Default for IpcServerConfig {
+    fn default() -> Self {
+        // `NonZeroUsize::new` is `Option`; the const guarantees the
+        // unwrap is infallible.
+        Self {
+            max_concurrent_connections: NonZeroUsize::new(Self::DEFAULT_MAX_CONCURRENT_CONNECTIONS)
+                .expect("DEFAULT_MAX_CONCURRENT_CONNECTIONS must be non-zero"),
+        }
+    }
+}
+
+/// Capacity of the message-history ring buffer carried by
+/// [`IpcServerHealth`]. The latest 8 redacted panic messages are kept for
+/// `nagori doctor` triage; the time-window count is tracked separately so
+/// it doesn't saturate at this capacity.
+const PANIC_RING_CAPACITY: usize = 8;
+
+/// Window used by [`IpcServerHealth::panics_last_5m`]. Operators reading
+/// `nagori health` care less about the per-process total (which a panic
+/// loop saturates within seconds) and more about whether new panics are
+/// still landing right now.
+const PANICS_WINDOW: Duration = Duration::from_mins(5);
+
+/// Upper bound on the panic-timestamp window deque. Sized to swallow ~13
+/// panics/second over the full [`PANICS_WINDOW`] before the head starts
+/// evicting; well beyond any realistic panic-loop rate (each panic carries
+/// at least a connection setup + tokio task teardown), so the saturation
+/// path is reserved for outright pathology. Without this cap, a runaway
+/// panic loop would inflate the deque without bound between probes.
+const PANIC_WINDOW_MAX: usize = 4096;
+
+/// One entry in the recent-panics message ring. The string has already
+/// been routed through [`redact_panic_message`] so token-like hex runs
+/// never reach the wire. Timestamps for the 5-minute rate live in
+/// `panic_window` rather than alongside the message — keeping them
+/// separate lets the window grow past the message-ring's small capacity
+/// without dragging every redacted string with it.
+#[derive(Debug, Clone)]
+struct PanicEntry {
+    message: String,
+}
+
 /// Cloneable observer for IPC server-side handler outcomes.
 ///
 /// Per-connection handlers run on a `JoinSet`. Without an explicit
@@ -32,15 +99,20 @@ use crate::{IpcEnvelope, IpcHealthReport, IpcRequest, IpcResponse};
 /// `IpcServerHealth` lets the daemon thread a shared counter through the
 /// accept loops so panics are both warned and surfaced in the health
 /// report.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct IpcServerHealth {
     inner: Arc<IpcServerHealthInner>,
+}
+
+impl Default for IpcServerHealth {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Default)]
 struct IpcServerHealthInner {
     handler_panics: AtomicU64,
-    last_panic_message: Mutex<Option<String>>,
     /// Wall-clock millis-since-epoch of the most recent `listener.accept()`
     /// (Unix) / `NamedPipeServer::connect()` (Windows) completion. Zero
     /// when no accept has been observed yet. The daemon's supervisor uses
@@ -51,12 +123,34 @@ struct IpcServerHealthInner {
     /// supervisor only respawns on task exit, not on silent input
     /// starvation.
     last_accept_at_ms: AtomicU64,
+    /// Snapshot of the active [`IpcServerConfig::max_concurrent_connections`].
+    /// `0` until the accept loop initialises it, which lets readers
+    /// (`nagori doctor`, `nagori health`) render "(unknown)" when the
+    /// daemon has not yet finished startup. Atomic so the loop can
+    /// stamp it before recording the first accept without taking a
+    /// lock; the value is otherwise immutable for the loop's lifetime.
+    max_concurrent_connections: AtomicUsize,
+    /// Bounded ring of the most recent panic messages for `nagori doctor`
+    /// triage. Each entry stores a redacted message (see
+    /// [`redact_panic_message`]). Strictly the most recent
+    /// [`PANIC_RING_CAPACITY`] panics — the 5-minute count lives in
+    /// `panic_window` so it can exceed this ring's capacity.
+    panic_ring: Mutex<VecDeque<PanicEntry>>,
+    /// Timestamps (millis-since-epoch) of every panic observed in the
+    /// last [`PANICS_WINDOW`], capped at [`PANIC_WINDOW_MAX`]. Pruned by
+    /// timestamp on every push and every read so the deque size tracks
+    /// the active panic rate. Separate from `panic_ring` so a tight
+    /// panic loop with more than [`PANIC_RING_CAPACITY`] hits inside the
+    /// window doesn't get under-reported by `panics_last_5m`.
+    panic_window: Mutex<VecDeque<u64>>,
 }
 
 impl IpcServerHealth {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(IpcServerHealthInner::default()),
+        }
     }
 
     /// Total number of IPC handler tasks observed to panic over this
@@ -69,19 +163,51 @@ impl IpcServerHealth {
         self.inner.handler_panics.load(Ordering::Relaxed)
     }
 
-    /// Most recent panic message, if any. Cloned so the lock is held
-    /// briefly enough that an async caller can read it without yielding
-    /// through the std mutex.
+    /// Most recent panic message, if any. Reads the back of the ring
+    /// buffer so the "latest" view and the recent-window count can never
+    /// drift; cloned so the lock is held only long enough to copy out.
     #[must_use]
     pub fn last_panic_message(&self) -> Option<String> {
-        let guard = match self.inner.last_panic_message.lock() {
+        let guard = match self.inner.panic_ring.lock() {
             Ok(guard) => guard,
             // A panic while holding the mutex must not silence the
             // health surface forever — recover the inner value and keep
             // serving snapshots, matching `MaintenanceHealth`.
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.clone()
+        guard.back().map(|entry| entry.message.clone())
+    }
+
+    /// Count of panic events recorded within the last [`PANICS_WINDOW`].
+    /// A non-zero value here is the actionable signal for operators:
+    /// the cumulative `handler_panic_count` plateaus quickly under a
+    /// panic loop, while this window slides so dashboards can show
+    /// "still failing right now" vs. "one fluke an hour ago".
+    #[must_use]
+    pub fn panics_last_5m(&self) -> u32 {
+        let cutoff_ms = window_cutoff_ms();
+        let mut guard = match self.inner.panic_window.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Prune on read so readers see a current count even between writes
+        // (e.g. a panic burst followed by a quiet stretch).
+        while guard.front().is_some_and(|ts| *ts < cutoff_ms) {
+            guard.pop_front();
+        }
+        u32::try_from(guard.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Snapshot of the configured `max_concurrent_connections` ceiling.
+    /// `0` until the accept loop calls [`Self::record_config`] for the
+    /// first time — readers (`nagori doctor`, dashboards) interpret
+    /// `0` as "daemon has not yet initialised", which is honest about
+    /// the race between startup and the first probe.
+    #[must_use]
+    pub fn max_concurrent_connections(&self) -> usize {
+        self.inner
+            .max_concurrent_connections
+            .load(Ordering::Relaxed)
     }
 
     /// Wire-format snapshot suitable for inclusion in `HealthResponse`
@@ -91,16 +217,55 @@ impl IpcServerHealth {
         IpcHealthReport {
             handler_panic_count: self.handler_panic_count(),
             last_panic_message: self.last_panic_message(),
+            panics_last_5m: self.panics_last_5m(),
+            max_concurrent_connections: u32::try_from(self.max_concurrent_connections())
+                .unwrap_or(u32::MAX),
         }
     }
 
-    fn record_panic(&self, message: String) {
+    /// Stamp the active [`IpcServerConfig`] onto the shared health
+    /// snapshot. Called once by each accept loop before it starts
+    /// accepting so `nagori doctor` / `nagori health` can show the
+    /// active connection ceiling without an extra IPC roundtrip.
+    pub fn record_config(&self, config: IpcServerConfig) {
+        self.inner
+            .max_concurrent_connections
+            .store(config.max_concurrent_connections.get(), Ordering::Relaxed);
+    }
+
+    fn record_panic(&self, message: &str) {
+        // Redact before storing so the wire / log surfaces never carry
+        // raw token-like hex runs. The message ring backs both the latest
+        // panic view and the doctor history; the timestamp window backs
+        // the 5-minute count separately so it can grow past the ring.
+        let redacted = redact_panic_message(message);
+        let timestamp_ms = now_unix_ms();
         self.inner.handler_panics.fetch_add(1, Ordering::Relaxed);
-        let mut guard = match self.inner.last_panic_message.lock() {
+        {
+            let mut ring = match self.inner.panic_ring.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if ring.len() == PANIC_RING_CAPACITY {
+                ring.pop_front();
+            }
+            ring.push_back(PanicEntry { message: redacted });
+        }
+        let cutoff_ms = window_cutoff_ms();
+        let mut window = match self.inner.panic_window.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        *guard = Some(message);
+        while window.front().is_some_and(|ts| *ts < cutoff_ms) {
+            window.pop_front();
+        }
+        if window.len() == PANIC_WINDOW_MAX {
+            // Saturation only kicks in under a runaway panic loop; drop
+            // the oldest entry so the window keeps tracking the head of
+            // the loop rather than freezing at the first burst.
+            window.pop_front();
+        }
+        window.push_back(timestamp_ms);
     }
 
     /// Record that the accept loop just observed a new connection. Called
@@ -124,6 +289,38 @@ impl IpcServerHealth {
     }
 }
 
+/// Replace runs of >= 32 ASCII hex characters with `<redacted-hex>`.
+///
+/// Panic payloads can quote auth tokens, content hashes, or other
+/// high-entropy hex values. The health surface is read by `nagori doctor`
+/// and `nagori health`, both of which can land in logs and dashboards
+/// outside the daemon's trust boundary; masking long hex runs gives a
+/// cheap defence against accidental leakage without depending on a regex
+/// crate just for this one redactor.
+fn redact_panic_message(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut hex_run = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_hexdigit() {
+            hex_run.push(ch);
+        } else {
+            flush_hex_run(&mut out, &mut hex_run);
+            out.push(ch);
+        }
+    }
+    flush_hex_run(&mut out, &mut hex_run);
+    out
+}
+
+fn flush_hex_run(out: &mut String, run: &mut String) {
+    if run.len() >= 32 {
+        out.push_str("<redacted-hex>");
+    } else {
+        out.push_str(run);
+    }
+    run.clear();
+}
+
 /// Best-effort UNIX millis-since-epoch. A pre-1970 system clock collapses
 /// to `0`, which the supervisor treats as "no accept observed yet" — the
 /// same fallback we use before the first accept actually fires.
@@ -131,6 +328,12 @@ fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Earliest timestamp still considered "inside" [`PANICS_WINDOW`]. Older
+/// entries should be dropped from `panic_window` before reading its length.
+fn window_cutoff_ms() -> u64 {
+    now_unix_ms().saturating_sub(u64::try_from(PANICS_WINDOW.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Inspect a reaped `JoinSet` result and route panics to `health`
@@ -149,7 +352,7 @@ fn observe_handler_outcome(
         Err(err) if err.is_panic() => {
             let message = err.to_string();
             warn!(error = %message, "ipc_handler_panicked");
-            health.record_panic(message);
+            health.record_panic(&message);
         }
         Err(err) if err.is_cancelled() => {
             // Drain-stage `abort_all` is intentional; nothing to surface.
@@ -288,6 +491,7 @@ where
         std::future::pending::<()>(),
         Duration::from_secs(0),
         IpcServerHealth::default(),
+        IpcServerConfig::default(),
     )
     .await
 }
@@ -310,6 +514,7 @@ pub async fn accept_loop_with_shutdown<F, Fut, S>(
     shutdown: S,
     drain_grace: Duration,
     server_health: IpcServerHealth,
+    config: IpcServerConfig,
 ) -> Result<()>
 where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
@@ -318,8 +523,13 @@ where
 {
     let handler = Arc::new(handler);
     let token = Arc::new(expected_token);
-    let semaphore = Arc::new(Semaphore::new(32));
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections.get()));
     let mut tasks: JoinSet<()> = JoinSet::new();
+    // Stamp the active tuning onto the health snapshot so `nagori
+    // doctor` / `nagori health` can show the active connection ceiling
+    // without an extra IPC roundtrip. Done before the first accept so a
+    // probe that lands during startup never observes a `0` placeholder.
+    server_health.record_config(config);
     // Seed the liveness clock so an idle daemon doesn't look wedged.
     // Without this the supervisor would observe a `0` timestamp on its
     // first probe and immediately escalate to restart — record once
@@ -508,6 +718,7 @@ pub async fn serve_unix_with_health<F, Fut>(
     token: AuthToken,
     handler: F,
     server_health: IpcServerHealth,
+    config: IpcServerConfig,
 ) -> Result<()>
 where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
@@ -521,6 +732,7 @@ where
         std::future::pending::<()>(),
         Duration::from_secs(0),
         server_health,
+        config,
     )
     .await
 }
@@ -667,6 +879,7 @@ pub async fn accept_loop_pipe_with_shutdown<F, Fut, S>(
     shutdown: S,
     drain_grace: Duration,
     server_health: IpcServerHealth,
+    config: IpcServerConfig,
 ) -> Result<()>
 where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
@@ -675,8 +888,12 @@ where
 {
     let handler = Arc::new(handler);
     let token = Arc::new(expected_token);
-    let semaphore = Arc::new(Semaphore::new(32));
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections.get()));
     let mut tasks: JoinSet<()> = JoinSet::new();
+    // Stamp the active tuning onto the health snapshot (see Unix path
+    // for the same rationale): doctor / health consumers should see the
+    // active connection ceiling without an extra IPC roundtrip.
+    server_health.record_config(config);
     // See `accept_loop_with_shutdown` (Unix path) for the rationale —
     // seed the liveness clock so the supervisor's wedge probe doesn't
     // measure against the UNIX epoch on an idle daemon.
@@ -780,6 +997,7 @@ where
         std::future::pending::<()>(),
         Duration::from_secs(0),
         IpcServerHealth::default(),
+        IpcServerConfig::default(),
     )
     .await
 }
@@ -799,6 +1017,46 @@ mod tests {
 
     fn test_token() -> AuthToken {
         AuthToken::generate().expect("token should generate")
+    }
+
+    #[test]
+    fn panics_last_5m_counts_past_ring_capacity() {
+        // The message ring caps at PANIC_RING_CAPACITY (8); the timestamp
+        // window must keep growing past it so the 5-minute rate reflects
+        // a real panic loop rather than saturating at the ring's limit.
+        let health = IpcServerHealth::new();
+        for i in 0..(PANIC_RING_CAPACITY + 5) {
+            health.record_panic(&format!("boom {i}"));
+        }
+        assert_eq!(
+            u32::try_from(PANIC_RING_CAPACITY + 5).expect("usize fits u32"),
+            health.panics_last_5m()
+        );
+        // The message ring stays at its cap and exposes the latest.
+        assert_eq!(
+            health.last_panic_message().as_deref(),
+            Some(format!("boom {}", PANIC_RING_CAPACITY + 4).as_str()),
+        );
+    }
+
+    #[test]
+    fn record_panic_redacts_long_hex_runs() {
+        let health = IpcServerHealth::new();
+        // 32+ ascii-hex run should be masked; "boom" survives verbatim.
+        health.record_panic(
+            "boom: token=deadbeefcafebabe1234567890abcdef0fedcba98765432100ff at row 7",
+        );
+        let last = health
+            .last_panic_message()
+            .expect("a panic was just recorded");
+        assert!(
+            last.contains("<redacted-hex>"),
+            "redactor should mask the long hex run: {last}",
+        );
+        assert!(
+            last.contains("boom"),
+            "non-hex prose should survive: {last}"
+        );
     }
 
     #[tokio::test]
@@ -1058,6 +1316,7 @@ mod tests {
                 async move { shutdown_for_server.notified().await },
                 Duration::from_secs(2),
                 IpcServerHealth::default(),
+                IpcServerConfig::default(),
             )
             .await
         });
@@ -1132,6 +1391,7 @@ mod tests {
                 async move { shutdown_for_server.notified().await },
                 Duration::from_secs(5),
                 IpcServerHealth::default(),
+                IpcServerConfig::default(),
             )
             .await
         });
@@ -1245,6 +1505,7 @@ mod tests {
                 async move { shutdown_for_server.notified().await },
                 Duration::from_secs(1),
                 server_health,
+                IpcServerConfig::default(),
             )
             .await
         });

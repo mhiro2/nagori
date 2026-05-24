@@ -1,8 +1,9 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(not(any(unix, windows)))]
 use nagori_core::AppError;
 use nagori_core::Result;
+use nagori_ipc::IpcServerConfig;
 #[cfg(windows)]
 use nagori_ipc::{AuthToken, accept_loop_pipe_with_shutdown, bind_pipe, write_token_file};
 #[cfg(unix)]
@@ -70,6 +71,11 @@ pub struct DaemonConfig {
     /// Accessibility programmatically flip it to `false`. See
     /// `CaptureLoop::without_secure_focus_fail_closed`.
     pub secure_focus_fail_closed: bool,
+    /// Upper bound on concurrent IPC handlers — forwarded into
+    /// [`IpcServerConfig`] at startup so the CLI / doctor / regression
+    /// tests can tune the in-flight ceiling instead of relying on the
+    /// IPC crate's hardcoded default.
+    pub max_concurrent_connections: NonZeroUsize,
 }
 
 impl Default for DaemonConfig {
@@ -81,6 +87,19 @@ impl Default for DaemonConfig {
             maintenance_interval: Duration::from_mins(30),
             shutdown_grace: Duration::from_secs(5),
             secure_focus_fail_closed: true,
+            max_concurrent_connections: IpcServerConfig::default().max_concurrent_connections,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Project the daemon's tunables onto the [`IpcServerConfig`] surface
+    /// the IPC crate consumes. Keeps the accept-loop call sites in
+    /// `spawn_ipc_server` to a single line each so the function stays
+    /// inside clippy's `too_many_lines` budget.
+    const fn ipc_server_config(&self) -> IpcServerConfig {
+        IpcServerConfig {
+            max_concurrent_connections: self.max_concurrent_connections,
         }
     }
 }
@@ -143,6 +162,7 @@ async fn spawn_ipc_server(
         let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
         let ipc_health = runtime.ipc_health();
+        let ipc_config = config.ipc_server_config();
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
             let mut stop_rx = stop_rx;
@@ -161,6 +181,7 @@ async fn spawn_ipc_server(
                 },
                 grace,
                 ipc_health,
+                ipc_config,
             )
             .await;
             if let Err(err) = result {
@@ -192,6 +213,7 @@ async fn spawn_ipc_server(
         let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
         let ipc_health = runtime.ipc_health();
+        let ipc_config = config.ipc_server_config();
         let handle = tokio::spawn(async move {
             let mut shutdown = shutdown;
             let mut stop_rx = stop_rx;
@@ -211,6 +233,7 @@ async fn spawn_ipc_server(
                 },
                 grace,
                 ipc_health,
+                ipc_config,
             )
             .await;
             if let Err(err) = result {

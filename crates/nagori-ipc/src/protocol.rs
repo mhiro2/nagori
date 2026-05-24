@@ -309,10 +309,25 @@ pub struct IpcHealthReport {
     /// daemon started. Saturating add so a permanent panic loop plateaus
     /// at `u64::MAX` instead of wrapping back to zero.
     pub handler_panic_count: u64,
-    /// Most recent panic message (Display of `tokio::task::JoinError`).
-    /// Sticky after the first panic so transient log pressure cannot
-    /// erase it — a follow-up panic overwrites with the latest message.
+    /// Most recent panic message (Display of `tokio::task::JoinError`),
+    /// already routed through the daemon's hex-token redactor so
+    /// auth-token-shaped substrings never surface here. Sticky after
+    /// the first panic so transient log pressure cannot erase it — a
+    /// follow-up panic overwrites with the latest message.
     pub last_panic_message: Option<String>,
+    /// Number of IPC handler panics observed inside the most recent
+    /// 5-minute window. Lets dashboards distinguish "panic loop still
+    /// firing" from "one fluke an hour ago" — the cumulative
+    /// `handler_panic_count` alone collapses both into a single number.
+    #[serde(default)]
+    pub panics_last_5m: u32,
+    /// Active ceiling on concurrent IPC handlers (the semaphore size
+    /// the daemon was started with). `0` indicates a legacy daemon
+    /// that did not populate this field, or that the local accept loop
+    /// has not yet stamped its config — readers should render that as
+    /// "(unknown)" rather than treating it as a real limit.
+    #[serde(default)]
+    pub max_concurrent_connections: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::ExitCode,
     str::FromStr,
@@ -155,6 +156,12 @@ struct DaemonRunArgs {
     capture_interval_ms: u64,
     #[arg(long, default_value_t = 30)]
     maintenance_interval_min: u64,
+    /// Cap on concurrent IPC handlers. Defaults to the IPC crate's
+    /// built-in ceiling; tune down in regression tests or up when the
+    /// daemon serves many automated probes simultaneously. Must be
+    /// non-zero — `0` is rejected at parse time.
+    #[arg(long)]
+    ipc_max_connections: Option<NonZeroUsize>,
 }
 
 #[tokio::main]
@@ -477,13 +484,18 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
     // (and vice versa). The CLI's `run_ipc_command` mirrors this derivation
     // so client and daemon agree on the path.
     let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
+    let defaults = DaemonConfig::default();
+    let max_concurrent_connections = args
+        .ipc_max_connections
+        .unwrap_or(defaults.max_concurrent_connections);
     let config = DaemonConfig {
         socket_path,
         token_path,
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
         maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
         secure_focus_fail_closed,
-        ..DaemonConfig::default()
+        max_concurrent_connections,
+        ..defaults
     };
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -1061,7 +1073,19 @@ fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()
                 .last_panic_message
                 .as_deref()
                 .map_or_else(String::new, |msg| format!("\t{msg}"));
-            println!("ipc\tpanic_count={}{ipc_suffix}", ipc.handler_panic_count);
+            // `max_concurrent_connections == 0` means the daemon predates
+            // the config-on-wire change; show `(unknown)` rather than `0`
+            // so operators don't read it as "the daemon refuses every
+            // handler".
+            let max_conns = if ipc.max_concurrent_connections == 0 {
+                "(unknown)".to_owned()
+            } else {
+                ipc.max_concurrent_connections.to_string()
+            };
+            println!(
+                "ipc\tpanic_count={}\tpanics_last_5m={}\tmax_connections={max_conns}{ipc_suffix}",
+                ipc.handler_panic_count, ipc.panics_last_5m,
+            );
         }
     }
     Ok(())
