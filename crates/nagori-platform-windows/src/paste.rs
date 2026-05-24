@@ -24,9 +24,25 @@ impl PasteController for WindowsPasteController {
                 pasted: true,
                 message: None,
             }),
-            Err(err) => Err(AppError::Platform(format!(
-                "auto-paste failed via SendInput: {err}"
-            ))),
+            Err(SendInputError { reason, cleanup }) => {
+                // `release_ctrl_v` itself uses `SendInput`, so when UIPI or
+                // an elevated foreground window blocks the press batch the
+                // cleanup batch is just as likely to be dropped. In that
+                // case Ctrl stays virtually held down from the OS's point
+                // of view until the user taps it themselves — surface the
+                // hint rather than letting the next keystroke arrive as
+                // Ctrl+<whatever>.
+                let message = match cleanup {
+                    CleanupOutcome::Released => {
+                        format!("auto-paste failed via SendInput: {reason}")
+                    }
+                    CleanupOutcome::Stuck { release_error } => format!(
+                        "auto-paste failed via SendInput: {reason}. Ctrl key may still appear \
+                         held — press Ctrl once to release it. Cleanup error: {release_error}"
+                    ),
+                };
+                Err(AppError::Platform(message))
+            }
         }
     }
 
@@ -38,8 +54,29 @@ impl PasteController for WindowsPasteController {
     }
 }
 
+/// Outcome of the press-batch attempt, threaded through to the
+/// `PasteController` caller so a stuck-Ctrl scenario can surface a
+/// dedicated hint instead of being collapsed into a generic `SendInput`
+/// failure message.
 #[cfg(windows)]
-fn synthesize_ctrl_v() -> std::result::Result<(), String> {
+struct SendInputError {
+    reason: String,
+    cleanup: CleanupOutcome,
+}
+
+#[cfg(windows)]
+enum CleanupOutcome {
+    /// `release_ctrl_v` injected every key-up it intended — the
+    /// virtual key state is consistent with "user never held Ctrl".
+    Released,
+    /// `release_ctrl_v` was also dropped by `SendInput`. The OS still
+    /// believes Ctrl is held, so the user's next keystroke arrives as a
+    /// modified one until they tap Ctrl manually.
+    Stuck { release_error: String },
+}
+
+#[cfg(windows)]
+fn synthesize_ctrl_v() -> std::result::Result<(), SendInputError> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
@@ -85,33 +122,66 @@ fn synthesize_ctrl_v() -> std::result::Result<(), String> {
     // returns the number of events successfully injected.
     let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
     if sent as usize == inputs.len() {
-        Ok(())
-    } else {
-        let last_error = unsafe { GetLastError() };
-        release_ctrl_v(input_size, key_input);
-        Err(format!(
-            "SendInput injected {sent} of {} events; GetLastError={last_error}",
-            inputs.len()
-        ))
+        return Ok(());
     }
+
+    let last_error = unsafe { GetLastError() };
+    // How many of the press-batch events actually landed determines what
+    // we need to undo. Ctrl-down is event 0; if `sent == 0` no key-down
+    // landed and nothing needs releasing. Otherwise we must replay the
+    // matching key-ups so the OS doesn't think Ctrl (and/or V) is still
+    // pressed — re-using the same `SendInput` API the press used.
+    let cleanup = release_ctrl_v(sent as usize, input_size, key_input);
+    let reason = format!(
+        "SendInput injected {sent} of {} events; GetLastError={last_error}",
+        inputs.len()
+    );
+    Err(SendInputError { reason, cleanup })
 }
 
 #[cfg(windows)]
 fn release_ctrl_v(
+    sent: usize,
     input_size: i32,
     key_input: impl Fn(
         u16,
         windows_sys::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
     ) -> windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT,
-) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, SendInput, VK_CONTROL};
+) -> CleanupOutcome {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL,
+    };
 
     const VK_V: u16 = b'V' as u16;
-    let releases = [
-        key_input(VK_V, KEYEVENTF_KEYUP),
-        key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-    ];
+
+    // Mirror only the key-downs that actually went through so we don't
+    // re-release V when V-down was never injected (which would surface
+    // as a spurious key-up on the foreground window). The press batch
+    // order is Ctrl-down, V-down, V-up, Ctrl-up.
+    let mut releases: Vec<INPUT> = Vec::with_capacity(2);
+    if sent >= 2 {
+        releases.push(key_input(VK_V, KEYEVENTF_KEYUP));
+    }
+    if sent >= 1 {
+        releases.push(key_input(VK_CONTROL, KEYEVENTF_KEYUP));
+    }
+    if releases.is_empty() {
+        return CleanupOutcome::Released;
+    }
     let release_count = u32::try_from(releases.len()).expect("INPUT batch length fits in u32");
-    // SAFETY: `releases` is a fixed-size array of valid key-up INPUT values.
-    let _ = unsafe { SendInput(release_count, releases.as_ptr(), input_size) };
+    // SAFETY: `releases` is a non-empty Vec of valid key-up INPUT values
+    // that lives until the call returns.
+    let cleaned = unsafe { SendInput(release_count, releases.as_ptr(), input_size) };
+    if cleaned as usize == releases.len() {
+        CleanupOutcome::Released
+    } else {
+        let last_error = unsafe { GetLastError() };
+        CleanupOutcome::Stuck {
+            release_error: format!(
+                "SendInput released {cleaned} of {} cleanup events; GetLastError={last_error}",
+                releases.len()
+            ),
+        }
+    }
 }
