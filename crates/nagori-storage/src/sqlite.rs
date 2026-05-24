@@ -288,8 +288,15 @@ impl SqliteStore {
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
             let changed = tx
                 .execute(
+                    // Mirror `clear_older_than` and the per-entry delete by
+                    // bumping `updated_at` alongside `deleted_at`. Without
+                    // this, retention-evicted rows look like they were last
+                    // touched at insert time even though the soft-delete
+                    // itself is a mutation, and downstream consumers that
+                    // watch `updated_at` for change detection (sync,
+                    // analytics, audit replays) miss the eviction.
                     "UPDATE entries
-                 SET deleted_at = ?1
+                 SET deleted_at = ?1, updated_at = ?1
                  WHERE deleted_at IS NULL
                    AND pinned = 0
                    AND id IN (
@@ -2968,6 +2975,55 @@ mod tests {
 
         // Idempotent: a second call with the same cap removes nothing.
         assert_eq!(store.enforce_retention_count(2).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn enforce_retention_count_bumps_updated_at_on_evicted_rows() {
+        // Regression: `enforce_retention_count` previously updated only
+        // `deleted_at`, leaving `updated_at` frozen at insert time. That
+        // diverged from `clear_older_than` / `delete_entry` (both bump
+        // both columns) and broke downstream consumers (sync, audit
+        // replays) that watch `updated_at` for change detection.
+        let store = SqliteStore::open_memory().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let oldest = insert_text(&store, "oldest entry").await;
+        let _middle = insert_text(&store, "middle entry").await;
+        let _newest = insert_text(&store, "newest entry").await;
+        // Backdate created_at *and* updated_at so we can detect the
+        // retention-driven bump. `backdate_entry` only touches
+        // `created_at`, which would leave `updated_at` at insert-now —
+        // an order of magnitude smaller gap that masks the regression.
+        let backdated = now - time::Duration::days(3);
+        let formatted = backdated.format(&Rfc3339).expect("rfc3339 format");
+        let conn = store.conn().expect("lock conn");
+        conn.execute(
+            "UPDATE entries SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![formatted, oldest.to_string()],
+        )
+        .expect("backdate updated_at");
+        drop(conn);
+
+        let removed = store.enforce_retention_count(2).await.unwrap();
+        assert_eq!(removed, 1);
+
+        let conn = store.conn().expect("lock conn");
+        let (deleted_at, updated_at): (Option<String>, String) = conn
+            .query_row(
+                "SELECT deleted_at, updated_at FROM entries WHERE id = ?1",
+                params![oldest.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("fetch evicted row");
+        assert!(deleted_at.is_some(), "evicted row must carry deleted_at");
+        assert_eq!(
+            deleted_at.as_deref(),
+            Some(updated_at.as_str()),
+            "updated_at should be bumped in lockstep with deleted_at on retention eviction (was: deleted_at={deleted_at:?}, updated_at={updated_at:?})",
+        );
+        assert_ne!(
+            updated_at, formatted,
+            "updated_at must move forward past the backdated insert time"
+        );
     }
 
     #[tokio::test]
