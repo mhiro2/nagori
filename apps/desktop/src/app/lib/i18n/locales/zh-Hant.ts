@@ -343,6 +343,8 @@ export const zhHant: Messages = {
   toasts: {
     autoPasteFailedTitle: '自動貼上失敗',
     autoPasteFailedFallback: '自動貼上失敗。',
+    hotkeyRegisterFailedTitle: '快捷鍵無法使用',
+    hotkeyRegisterFailedFallback: '註冊設定的全域快捷鍵失敗。',
     openSettings: '開啟設定',
     dismiss: '關閉',
   },

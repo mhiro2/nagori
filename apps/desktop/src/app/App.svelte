@@ -6,6 +6,11 @@
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
+  import {
+    dismissHotkeyFailure,
+    hotkeyFailureState,
+    startHotkeyFailureWatcher,
+  } from './stores/hotkeyFailure.svelte';
   import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
   // Settings runs in its own native window (`label: "settings"` in
@@ -39,6 +44,14 @@
   };
 
   onMount(() => {
+    // Hotkey registration failures are subscribed at App level — startup
+    // races (the backend can emit before any window's listener has
+    // attached) leak past a SettingsView-only subscription, and the
+    // toast / banner needs to survive Settings being closed and
+    // re-opened. The watcher also queries the backend's cache on mount
+    // so a missed live emit is recovered.
+    const offHotkeyFailure = startHotkeyFailureWatcher();
+
     if (isSettingsWindow) {
       // Surface paste-failed toasts even when only the Settings window is
       // foregrounded — the permission prompt link inside the toast lives
@@ -48,6 +61,7 @@
       });
       return () => {
         offPasteFailed();
+        offHotkeyFailure();
       };
     }
 
@@ -73,10 +87,17 @@
       window.removeEventListener('blur', handleBlur);
       offNavigate();
       offPasteFailed();
+      offHotkeyFailure();
     };
   });
 
   let pasteFailureMessage = $state<string | null>(null);
+
+  const hotkeyFailureMessage = $derived.by<string | null>(() => {
+    const failure = hotkeyFailureState.failure;
+    if (!failure) return null;
+    return failure.error || failure.hotkey || messages().toasts.hotkeyRegisterFailedFallback;
+  });
 
   const dismissToast = (): void => {
     pasteFailureMessage = null;
@@ -90,6 +111,15 @@
     }
     pasteFailureMessage = null;
   };
+
+  const openSettingsFromHotkeyToast = (): void => {
+    if (isTauri()) {
+      void openSettingsWindow();
+    } else {
+      showSettings();
+    }
+    dismissHotkeyFailure();
+  };
 </script>
 
 <main class="app-shell" class:settings-window={isSettingsWindow}>
@@ -100,16 +130,34 @@
   {:else}
     <SettingsRoute />
   {/if}
-  {#if pasteFailureMessage}
-    <div class="toast" role="status">
-      <div class="toast-body">
-        <strong>{t.toasts.autoPasteFailedTitle}</strong>
-        <span class="toast-detail">{pasteFailureMessage}</span>
-      </div>
-      <div class="toast-actions">
-        <button type="button" onclick={openSettingsFromToast}>{t.toasts.openSettings}</button>
-        <button type="button" onclick={dismissToast}>{t.toasts.dismiss}</button>
-      </div>
+  {#if pasteFailureMessage || hotkeyFailureMessage}
+    <div class="toast-stack">
+      {#if hotkeyFailureMessage}
+        <div class="toast toast-hotkey" role="status">
+          <div class="toast-body">
+            <strong>{t.toasts.hotkeyRegisterFailedTitle}</strong>
+            <span class="toast-detail">{hotkeyFailureMessage}</span>
+          </div>
+          <div class="toast-actions">
+            <button type="button" onclick={openSettingsFromHotkeyToast}>
+              {t.toasts.openSettings}
+            </button>
+            <button type="button" onclick={dismissHotkeyFailure}>{t.toasts.dismiss}</button>
+          </div>
+        </div>
+      {/if}
+      {#if pasteFailureMessage}
+        <div class="toast" role="status">
+          <div class="toast-body">
+            <strong>{t.toasts.autoPasteFailedTitle}</strong>
+            <span class="toast-detail">{pasteFailureMessage}</span>
+          </div>
+          <div class="toast-actions">
+            <button type="button" onclick={openSettingsFromToast}>{t.toasts.openSettings}</button>
+            <button type="button" onclick={dismissToast}>{t.toasts.dismiss}</button>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 </main>
@@ -130,11 +178,16 @@
   .app-shell.settings-window {
     border-radius: 0;
   }
-  .toast {
+  .toast-stack {
     position: absolute;
     bottom: 0.75rem;
     right: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
     max-width: 22rem;
+  }
+  .toast {
     padding: 0.6rem 0.75rem;
     border-radius: 8px;
     background: rgba(40, 16, 16, 0.92);
@@ -145,6 +198,14 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+  }
+  .toast-hotkey {
+    background: rgba(40, 32, 16, 0.92);
+    color: #ffe9c8;
+    border-color: rgba(255, 180, 90, 0.5);
+  }
+  .toast-hotkey .toast-detail {
+    color: rgba(255, 233, 200, 0.85);
   }
   .toast-body {
     display: flex;

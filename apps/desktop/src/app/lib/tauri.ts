@@ -87,6 +87,14 @@ export const TAURI_EVENTS = {
   navigate: 'nagori://navigate',
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+  // Emitted after a previously failed global-shortcut binds successfully
+  // on a later reconcile. The frontend store uses this to drop the
+  // stale failure banner/toast without waiting for a manual dismiss.
+  // Payload mirrors the failure event's `kind` discriminator
+  // (`{ kind: "secondary" }` for secondaries, empty object for primary)
+  // so the store only clears when the resolved side matches the
+  // currently displayed failure.
+  hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
   // Broadcast after every persisted settings change. The Settings view
   // subscribes so an external mutation (the tray's "Pause capture"
   // toggle, another window, an IPC client) merges into the in-memory
@@ -100,20 +108,32 @@ export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];
 // Subscribe to a Tauri event without leaking listeners across the dynamic
 // import await. If the consumer cleans up before `listen()` resolves we
 // immediately unsubscribe instead of pushing the late unlisten into a list
-// the caller has already drained.
+// the caller has already drained. `onReady` (when provided) fires *after*
+// the underlying `listen()` has attached, so callers that need to defer
+// follow-up work — e.g. querying a backend cache for any emit that fired
+// in the gap between `subscribe()` returning and `listen()` resolving —
+// can wait on a real attach signal instead of guessing.
 // oxlint-disable-next-line no-unnecessary-type-parameters
 export const subscribe = <T>(
   event: TauriEventName,
   handler: (payload: T) => void,
+  onReady?: () => void,
 ): (() => void) => {
-  if (!isTauri()) return () => {};
+  if (!isTauri()) {
+    onReady?.();
+    return () => {};
+  }
   let cancelled = false;
   let unlisten: (() => void) | undefined;
   void (async () => {
     const { listen } = await import('@tauri-apps/api/event');
     const off = await listen<T>(event, (e) => handler(e.payload));
-    if (cancelled) off();
-    else unlisten = off;
+    if (cancelled) {
+      off();
+      return;
+    }
+    unlisten = off;
+    onReady?.();
   })();
   return () => {
     cancelled = true;

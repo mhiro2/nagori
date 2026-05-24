@@ -343,6 +343,8 @@ export const zhHans: Messages = {
   toasts: {
     autoPasteFailedTitle: '自动粘贴失败',
     autoPasteFailedFallback: '自动粘贴失败。',
+    hotkeyRegisterFailedTitle: '快捷键不可用',
+    hotkeyRegisterFailedFallback: '注册配置的全局快捷键失败。',
     openSettings: '打开设置',
     dismiss: '关闭',
   },

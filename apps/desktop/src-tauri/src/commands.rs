@@ -10,7 +10,7 @@ use nagori_search::normalize_text;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{
-    AiActionResultDto, AppSettingsDto, EntryDto, EntryPreviewDto, PasteFormatDto,
+    AiActionResultDto, AppSettingsDto, EntryDto, EntryPreviewDto, HotkeyFailureDto, PasteFormatDto,
     PermissionStatusDto, PlatformCapabilitiesDto, SearchRequestDto, SearchResponseDto,
     SearchResultDto,
 };
@@ -780,6 +780,20 @@ pub async fn get_capabilities(
     state: State<'_, AppState>,
 ) -> CommandResult<PlatformCapabilitiesDto> {
     Ok(state.runtime.capabilities().into())
+}
+
+/// Latest global-hotkey registration failure cached by the backend, or
+/// `None` if the most recent (re-)registration succeeded. Used by the
+/// always-on App-level subscriber to re-hydrate after a startup-race
+/// emit: if the listener attached after the emit fired, the live event
+/// is lost but the cached state survives. `nagori://hotkey_register_failed`
+/// still fires for live updates.
+#[allow(clippy::unused_async)]
+#[tauri::command]
+pub async fn last_hotkey_failure(
+    state: State<'_, AppState>,
+) -> CommandResult<Option<HotkeyFailureDto>> {
+    Ok(state.current_hotkey_failure().map(Into::into))
 }
 
 /// Toggle `capture_enabled` without round-tripping the entire settings

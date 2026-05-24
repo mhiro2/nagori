@@ -363,6 +363,9 @@ export const de: Messages = {
   toasts: {
     autoPasteFailedTitle: 'Automatisches Einfügen fehlgeschlagen',
     autoPasteFailedFallback: 'Automatisches Einfügen fehlgeschlagen.',
+    hotkeyRegisterFailedTitle: 'Tastenkürzel nicht verfügbar',
+    hotkeyRegisterFailedFallback:
+      'Registrierung des konfigurierten globalen Tastenkürzels fehlgeschlagen.',
     openSettings: 'Einstellungen',
     dismiss: 'Schließen',
   },

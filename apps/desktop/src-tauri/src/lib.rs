@@ -17,6 +17,23 @@ use tauri::Manager;
 /// `SettingsView.test.ts` (mocks the same string).
 const HOTKEY_REGISTER_FAILED_EVENT: &str = "nagori://hotkey_register_failed";
 
+/// Event name emitted when a previously failed global-shortcut binds
+/// successfully on a later reconcile, so the live frontend store can
+/// drop the stale toast/banner instead of waiting for a manual dismiss.
+/// Payload mirrors the failure event's `kind` field (`Some("secondary")`
+/// for secondaries, omitted for the primary), plus an `action`
+/// discriminator for secondaries so the frontend can route a resolve to
+/// the exact failing action rather than wiping every cached secondary.
+/// Keep in lockstep with `TAURI_EVENTS.hotkeyRegisterResolved` in
+/// `lib/tauri.ts`.
+const HOTKEY_REGISTER_RESOLVED_EVENT: &str = "nagori://hotkey_register_resolved";
+
+/// Event name emitted when an auto-paste path fails after the originating
+/// window has already been hidden. The frontend subscribes via
+/// `TAURI_EVENTS.pasteFailed` (App.svelte renders a toast). Keep in
+/// lockstep with the frontend constant in `lib/tauri.ts`.
+pub(crate) const PASTE_FAILED_EVENT: &str = "nagori://paste_failed";
+
 /// Event name emitted after every persisted settings change. The payload
 /// is the full `AppSettingsDto`. The Settings view subscribes via
 /// `TAURI_EVENTS.settingsChanged` so an external mutation (the tray's
@@ -42,22 +59,213 @@ enum HotkeyFailureKind {
 /// Build the JSON envelope emitted on `nagori://hotkey_register_failed`.
 /// Extracted so the wire shape is locked down by unit tests without
 /// needing a Tauri runtime — the desktop UI parses these fields on
-/// every emit.
+/// every emit. Secondary payloads carry the action wire value so a
+/// frontend store displaying a single secondary can match the eventual
+/// resolved event by action identity rather than guessing.
 fn build_hotkey_failure_payload(
     accelerator: &str,
     error: &str,
     kind: HotkeyFailureKind,
+    action: Option<&str>,
 ) -> serde_json::Value {
-    match kind {
-        HotkeyFailureKind::Primary => serde_json::json!({
+    match (kind, action) {
+        (HotkeyFailureKind::Primary, _) => serde_json::json!({
             "hotkey": accelerator,
             "error": error,
         }),
-        HotkeyFailureKind::Secondary => serde_json::json!({
+        (HotkeyFailureKind::Secondary, Some(action)) => serde_json::json!({
+            "hotkey": accelerator,
+            "error": error,
+            "kind": "secondary",
+            "action": action,
+        }),
+        (HotkeyFailureKind::Secondary, None) => serde_json::json!({
             "hotkey": accelerator,
             "error": error,
             "kind": "secondary",
         }),
+    }
+}
+
+/// Mirror of `build_hotkey_failure_payload` that returns a typed
+/// `HotkeyFailureRecord` for caching on `AppState`. Sharing the same
+/// kind discriminator keeps the cached snapshot and the live emit
+/// envelope structurally identical, so the frontend store can normalise
+/// the two paths with one branch. Caller passes `None` for primary
+/// registrations and the kebab-case wire value for secondaries — the
+/// cache keys secondaries by action so two secondaries failing at once
+/// don't clobber each other.
+fn build_hotkey_failure_record(
+    accelerator: &str,
+    error: &str,
+    kind: HotkeyFailureKind,
+    action: Option<&str>,
+) -> state::HotkeyFailureRecord {
+    state::HotkeyFailureRecord {
+        hotkey: accelerator.to_owned(),
+        error: error.to_owned(),
+        kind: match kind {
+            HotkeyFailureKind::Primary => None,
+            HotkeyFailureKind::Secondary => Some("secondary".to_owned()),
+        },
+        action: action.map(str::to_owned),
+    }
+}
+
+/// Emit `nagori://hotkey_register_failed` and cache the failure on
+/// `AppState` so a later-attached listener can re-hydrate via the
+/// `last_hotkey_failure` command. Called from both initial registration
+/// and reconciliation paths.
+fn record_and_emit_hotkey_failure(
+    app: &tauri::AppHandle,
+    accelerator: &str,
+    error: &str,
+    kind: HotkeyFailureKind,
+    action: Option<&str>,
+) {
+    use tauri::Emitter;
+    let state = app.state::<AppState>();
+    let record = build_hotkey_failure_record(accelerator, error, kind, action);
+    state.record_hotkey_failure(record);
+    let _ = app.emit(
+        HOTKEY_REGISTER_FAILED_EVENT,
+        build_hotkey_failure_payload(accelerator, error, kind, action),
+    );
+}
+
+/// JSON envelope for the resolved event. The shape mirrors the failure
+/// payload's `kind` discriminator so the frontend can route resolves
+/// against the currently displayed failure (primary/secondary) and not
+/// clear an unrelated banner. Secondary resolves additionally carry the
+/// action wire value so a sibling secondary failure isn't dropped when
+/// an unrelated secondary action resolves.
+fn build_hotkey_resolved_payload(
+    kind: HotkeyFailureKind,
+    action: Option<&str>,
+) -> serde_json::Value {
+    match (kind, action) {
+        (HotkeyFailureKind::Primary, _) => serde_json::json!({}),
+        (HotkeyFailureKind::Secondary, Some(action)) => {
+            serde_json::json!({ "kind": "secondary", "action": action })
+        }
+        (HotkeyFailureKind::Secondary, None) => serde_json::json!({ "kind": "secondary" }),
+    }
+}
+
+/// Drop any cached failures that no longer reflect reality after a
+/// settings tick. The user can resolve a failure three ways: rebind the
+/// offending shortcut so the next register attempt succeeds, remove the
+/// binding entirely, or — for a secondary — bind the same accelerator
+/// to a *different* action whose register call succeeds. The plain
+/// register path only emits a resolved event for the binding it just
+/// touched, so without this reconciliation a stale cache (and the
+/// banner riding on it) outlives every other resolution path.
+///
+/// Secondary clears require *both* "in desired snapshot" *and* "in the
+/// active bound set" for the cached action: a cached failure is stale
+/// only when *its own* action is desired with that accelerator and now
+/// successfully bound. Walking the cache per-action is what stops a
+/// sibling action's success from silently dropping a still-failing
+/// secondary's banner.
+fn reconcile_cached_hotkey_failures(
+    app: &tauri::AppHandle,
+    snapshot: &nagori_core::AppSettings,
+    active_secondary: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+) {
+    let state = app.state::<AppState>();
+    let cache = state.hotkey_failure_cache_snapshot();
+    if let Some(primary) = cache.primary
+        && primary.hotkey != snapshot.global_hotkey
+    {
+        clear_and_notify_hotkey_failure(app, HotkeyFailureKind::Primary, None);
+    }
+    for (action_wire, record) in &cache.secondary {
+        if should_clear_secondary_cache(
+            &record.hotkey,
+            action_wire,
+            &snapshot.secondary_hotkeys,
+            active_secondary,
+        ) {
+            clear_and_notify_hotkey_failure(
+                app,
+                HotkeyFailureKind::Secondary,
+                Some(action_wire.as_str()),
+            );
+        }
+    }
+}
+
+/// Decide whether a cached secondary failure is stale. Pure over the
+/// desired and active accelerator sets so the predicate is directly
+/// testable without spinning up a `tauri::AppHandle`. Stale means
+/// "the binding no longer fails" for *this exact action*: the cached
+/// action is no longer mapped to `accel` in the desired snapshot, or
+/// it is mapped to `accel` and now sits in the active bound set. A
+/// sibling action sharing the accelerator binding successfully does
+/// not resolve the cached failure — only the failing action's own
+/// register success does. An unrecognised cached action (e.g. a future
+/// enum variant unknown to this binary) is treated conservatively as
+/// "not stale" so its banner survives until the user resolves it
+/// manually. Kept un-public — only the reconcile path should read this.
+fn should_clear_secondary_cache(
+    accel: &str,
+    cached_action_wire: &str,
+    desired: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+    active: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
+) -> bool {
+    let Some(action) = parse_secondary_action_wire(cached_action_wire) else {
+        return false;
+    };
+    let still_desired = desired.get(&action).map(String::as_str) == Some(accel);
+    let now_bound = active.get(&action).map(String::as_str) == Some(accel);
+    !still_desired || now_bound
+}
+
+/// Kebab-case wire value for a `SecondaryHotkeyAction`. Matches the
+/// `#[serde(rename_all = "kebab-case")]` representation on the enum,
+/// without paying a `serde_json` round trip on every call.
+const fn secondary_action_wire(action: SecondaryHotkeyAction) -> &'static str {
+    match action {
+        SecondaryHotkeyAction::RepasteLast => "repaste-last",
+        SecondaryHotkeyAction::ClearHistory => "clear-history",
+    }
+}
+
+/// Inverse of `secondary_action_wire`. Returns `None` for unknown
+/// values so the caller can fall back to a looser match rather than
+/// panicking on cache entries written by a future revision.
+fn parse_secondary_action_wire(s: &str) -> Option<SecondaryHotkeyAction> {
+    match s {
+        "repaste-last" => Some(SecondaryHotkeyAction::RepasteLast),
+        "clear-history" => Some(SecondaryHotkeyAction::ClearHistory),
+        _ => None,
+    }
+}
+
+/// Drop the cached failure for `(kind, action)` and emit
+/// `nagori://hotkey_register_resolved` when a clear actually happened.
+/// The clear is gated per-action so a primary success does not silently
+/// drop any secondary failure, and a secondary success only drops its
+/// own action's cached entry — sibling secondaries keep their banner.
+/// The single-slot live store on the frontend uses the emitted kind +
+/// action to scope its reset; passing `action` for secondaries lets it
+/// keep an unrelated still-failing secondary on screen.
+fn clear_and_notify_hotkey_failure(
+    app: &tauri::AppHandle,
+    kind: HotkeyFailureKind,
+    action: Option<&str>,
+) {
+    use tauri::Emitter;
+    let state = app.state::<AppState>();
+    let kind_tag = match kind {
+        HotkeyFailureKind::Primary => None,
+        HotkeyFailureKind::Secondary => Some("secondary"),
+    };
+    if state.clear_hotkey_failure_for_kind_action(kind_tag, action) {
+        let _ = app.emit(
+            HOTKEY_REGISTER_RESOLVED_EVENT,
+            build_hotkey_resolved_payload(kind, action),
+        );
     }
 }
 
@@ -268,6 +476,7 @@ pub fn run() {
             commands::set_capture_enabled,
             commands::get_permissions,
             commands::get_capabilities,
+            commands::last_hotkey_failure,
             commands::open_accessibility_settings,
             commands::open_url_external,
             commands::toggle_palette,
@@ -456,15 +665,24 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             tracing::warn!(error = %err, "global_shortcut_register_failed");
             // Surface to the UI so the settings page can prompt the user to
             // pick a different hotkey rather than silently leaving the
-            // feature disabled.
-            let _ = app.emit(
-                HOTKEY_REGISTER_FAILED_EVENT,
-                build_hotkey_failure_payload(
-                    current_hotkey.as_str(),
-                    &err.to_string(),
-                    HotkeyFailureKind::Primary,
-                ),
+            // feature disabled. Caching on `AppState` covers the startup
+            // race where the desktop webview attaches its listener after
+            // this emit fires; the frontend re-hydrates via
+            // `last_hotkey_failure`.
+            record_and_emit_hotkey_failure(
+                &app,
+                current_hotkey.as_str(),
+                &err.to_string(),
+                HotkeyFailureKind::Primary,
+                None,
             );
+        } else {
+            // Clear any prior cached failure so a stale toast doesn't
+            // outlive a successful binding (e.g. a transient compositor
+            // hiccup at first attempt followed by a clean rebind). The
+            // emit on the resolved event also nudges any live frontend
+            // store to drop its banner without waiting for dismiss.
+            clear_and_notify_hotkey_failure(&app, HotkeyFailureKind::Primary, None);
         }
 
         // Reconcile auto-launch on startup so the LaunchAgent matches the
@@ -522,17 +740,21 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                         new = %next,
                         "global_shortcut_reregister_failed"
                     );
-                    let _ = app.emit(
-                        HOTKEY_REGISTER_FAILED_EVENT,
-                        build_hotkey_failure_payload(
-                            next.as_str(),
-                            &err.to_string(),
-                            HotkeyFailureKind::Primary,
-                        ),
+                    record_and_emit_hotkey_failure(
+                        &app,
+                        next.as_str(),
+                        &err.to_string(),
+                        HotkeyFailureKind::Primary,
+                        None,
                     );
                     let _ = register_primary_hotkey(&app, current_hotkey.as_str());
                 } else {
                     current_hotkey = next;
+                    // Successful rebind — drop any cached failure so the
+                    // toast/banner does not linger past the resolved
+                    // conflict. The accompanying resolved event clears
+                    // a live frontend store too.
+                    clear_and_notify_hotkey_failure(&app, HotkeyFailureKind::Primary, None);
                 }
             }
 
@@ -584,6 +806,14 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                 );
             }
 
+            // Clear any cached failure whose accelerator is no longer
+            // current after this tick — either because the user edited
+            // the binding away (no register call would run to emit a
+            // resolved event) or because the *same* accelerator just
+            // bound successfully under a different action. Without
+            // this, the toast/banner outlives both resolution paths.
+            reconcile_cached_hotkey_failures(&app, &snapshot, &current_secondary);
+
             // Refresh the tray menu so the "Pause Capture" / "Resume
             // Capture" label tracks the current state. Runs on every OS so
             // Windows / Linux trays stay in sync with the persisted
@@ -629,7 +859,6 @@ fn register_secondary_hotkeys(
     previous: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
     next: &std::collections::BTreeMap<SecondaryHotkeyAction, String>,
 ) -> std::collections::BTreeMap<SecondaryHotkeyAction, String> {
-    use tauri::Emitter;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     let diff = compute_secondary_hotkey_diff(previous, next);
@@ -656,19 +885,31 @@ fn register_secondary_hotkeys(
                 action = ?action,
                 "secondary_hotkey_register_failed",
             );
-            let _ = app.emit(
-                HOTKEY_REGISTER_FAILED_EVENT,
-                build_hotkey_failure_payload(
-                    accel.as_str(),
-                    &err.to_string(),
-                    HotkeyFailureKind::Secondary,
-                ),
+            record_and_emit_hotkey_failure(
+                app,
+                accel.as_str(),
+                &err.to_string(),
+                HotkeyFailureKind::Secondary,
+                Some(secondary_action_wire(*action)),
             );
         } else {
             active.insert(*action, accel.clone());
+            // Per-action resolve: this exact action's binding just
+            // succeeded, so drop only its cached failure. Sibling
+            // actions' cached failures stay intact — they have their
+            // own register attempts and their own resolve path.
+            clear_and_notify_hotkey_failure(
+                app,
+                HotkeyFailureKind::Secondary,
+                Some(secondary_action_wire(*action)),
+            );
         }
     }
 
+    // `reconcile_cached_hotkey_failures` runs after settings apply and
+    // catches the remaining resolution paths (user clears a binding,
+    // user remaps the failing action elsewhere) that don't produce a
+    // successful register call here.
     active
 }
 
@@ -688,7 +929,7 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
                     Err(err) => {
                         tracing::warn!(error = %err, "repaste_last_paste_failed");
                         let _ = app.emit(
-                            "nagori://paste_failed",
+                            PASTE_FAILED_EVENT,
                             serde_json::json!({ "error": err.to_string() }),
                         );
                     }
@@ -1935,8 +2176,10 @@ mod image_scheme_tests {
 #[cfg(test)]
 mod hotkey_tests {
     use super::{
-        HOTKEY_REGISTER_FAILED_EVENT, HotkeyFailureKind, SETTINGS_CHANGED_EVENT,
-        SecondaryHotkeyDiff, build_hotkey_failure_payload, compute_secondary_hotkey_diff,
+        HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT, HotkeyFailureKind,
+        SETTINGS_CHANGED_EVENT, SecondaryHotkeyDiff, build_hotkey_failure_payload,
+        build_hotkey_failure_record, build_hotkey_resolved_payload, compute_secondary_hotkey_diff,
+        should_clear_secondary_cache,
     };
     use nagori_core::SecondaryHotkeyAction;
     use std::collections::BTreeMap;
@@ -1961,6 +2204,70 @@ mod hotkey_tests {
     }
 
     #[test]
+    fn resolved_event_name_matches_frontend_contract() {
+        // Paired with `hotkeyRegisterResolved` in `lib/tauri.ts`. Drift
+        // here means the live frontend store never sees backend
+        // success notifications and stale toasts outlive the resolved
+        // conflict.
+        assert_eq!(
+            HOTKEY_REGISTER_RESOLVED_EVENT,
+            "nagori://hotkey_register_resolved"
+        );
+    }
+
+    #[test]
+    fn resolved_payload_omits_kind_for_primary() {
+        // Mirror the failure envelope: primary success carries no
+        // `kind` discriminator so the frontend store only clears the
+        // currently displayed primary failure. Including a "primary"
+        // literal would change client routing.
+        let payload = build_hotkey_resolved_payload(HotkeyFailureKind::Primary, None);
+        assert!(
+            payload.get("kind").is_none(),
+            "primary resolved envelope must omit kind, got {payload}",
+        );
+        assert!(
+            payload.get("action").is_none(),
+            "primary resolved envelope must omit action, got {payload}",
+        );
+    }
+
+    #[test]
+    fn resolved_payload_tags_secondary_kind_and_action() {
+        // The frontend needs to scope a resolve to the displayed
+        // failure: a primary success should not silently wipe a
+        // secondary banner. The action tag additionally lets the store
+        // ignore a sibling secondary's resolve so two simultaneously
+        // failing secondaries don't drop each other's banners.
+        let payload =
+            build_hotkey_resolved_payload(HotkeyFailureKind::Secondary, Some("repaste-last"));
+        assert_eq!(payload["kind"], "secondary");
+        assert_eq!(payload["action"], "repaste-last");
+    }
+
+    #[test]
+    fn failure_record_kind_round_trips_via_build_helpers() {
+        // Lock the relationship between the typed kind enum and the
+        // wire-string discriminator the cache stores. The frontend
+        // matches a resolve event against the cached `kind`, so a
+        // drift between `build_hotkey_failure_record` and
+        // `build_hotkey_resolved_payload` would silently break the
+        // "clear my banner" path.
+        let primary_record =
+            build_hotkey_failure_record("Cmd+Shift+V", "boom", HotkeyFailureKind::Primary, None);
+        assert_eq!(primary_record.kind, None);
+        assert_eq!(primary_record.action, None);
+        let secondary_record = build_hotkey_failure_record(
+            "Cmd+Shift+R",
+            "boom",
+            HotkeyFailureKind::Secondary,
+            Some("repaste-last"),
+        );
+        assert_eq!(secondary_record.kind.as_deref(), Some("secondary"));
+        assert_eq!(secondary_record.action.as_deref(), Some("repaste-last"));
+    }
+
+    #[test]
     fn settings_changed_event_name_matches_frontend_contract() {
         // Same lockstep as above for the settings-broadcast channel —
         // `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts` subscribes to
@@ -1980,6 +2287,7 @@ mod hotkey_tests {
             "Cmd+Shift+V",
             "already in use",
             HotkeyFailureKind::Primary,
+            None,
         );
         assert_eq!(payload["hotkey"], "Cmd+Shift+V");
         assert_eq!(payload["error"], "already in use");
@@ -1987,22 +2295,31 @@ mod hotkey_tests {
             payload.get("kind").is_none(),
             "primary failure envelope must not include a kind tag, got {payload}",
         );
+        assert!(
+            payload.get("action").is_none(),
+            "primary failure envelope must not include an action tag, got {payload}",
+        );
     }
 
     #[test]
-    fn secondary_failure_payload_tags_kind() {
+    fn secondary_failure_payload_tags_kind_and_action() {
         // Secondary failures land in the same channel but the frontend
         // routes them differently — the `kind: "secondary"` tag is how
         // it distinguishes "your repaste hotkey clashed" from "the main
-        // palette shortcut is broken". Round-trip the exact string.
+        // palette shortcut is broken". The `action` tag additionally
+        // pins which secondary action's binding broke, so the eventual
+        // resolved event can scope its banner clear by action and not
+        // wipe a sibling secondary still in failure.
         let payload = build_hotkey_failure_payload(
             "Cmd+Shift+R",
             "shortcut already registered",
             HotkeyFailureKind::Secondary,
+            Some("repaste-last"),
         );
         assert_eq!(payload["hotkey"], "Cmd+Shift+R");
         assert_eq!(payload["error"], "shortcut already registered");
         assert_eq!(payload["kind"], "secondary");
+        assert_eq!(payload["action"], "repaste-last");
     }
 
     #[test]
@@ -2090,6 +2407,136 @@ mod hotkey_tests {
             diff.register,
             vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
         );
+    }
+
+    #[test]
+    fn reconcile_keeps_cache_while_accel_still_desired_and_unbound() {
+        // The failing action is still in the desired map and never made
+        // it into the active (bound) set. The cached failure is the
+        // current state of the world — reconcile must leave it alone or
+        // the toast will silently disappear while the user is still
+        // locked out of the binding.
+        let desired = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let active = map(&[]);
+        assert!(!should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_clears_cache_when_user_removes_failing_binding() {
+        // The user gave up on the conflicting accelerator and cleared
+        // it. No register call ever ran for the removed action, so
+        // without reconcile the cache (and the banner riding on it)
+        // would persist forever.
+        let desired = map(&[]);
+        let active = map(&[]);
+        assert!(should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_clears_cache_when_same_action_now_binds_successfully() {
+        // The failing action retried (e.g. the conflicting external
+        // process released the accelerator) and the same binding now
+        // sits in the active map. Cache is stale; clear it.
+        let desired = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        assert!(should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_keeps_cache_when_sibling_shares_accel_but_failing_action_unbound() {
+        // Regression guard for the codex-flagged duplicate-accel
+        // scenario: two secondary actions are both assigned the same
+        // accelerator. One register succeeds (`clear-history`), the
+        // other fails (`repaste-last`). Without action-aware matching
+        // `active.values().any()` would see the bound sibling and
+        // clear the cache, silently hiding the real failure. With
+        // action identity, the cache stays put.
+        let desired = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R"),
+        ]);
+        let active = map(&[(SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R")]);
+        assert!(!should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_keeps_cache_when_unrelated_sibling_succeeds() {
+        // Regression guard for the blanket-clear bug: the user adds a
+        // brand new secondary binding that registers successfully, but
+        // a *different* accelerator is still cached as a failure. The
+        // success of the new binding must not wipe the still-failing
+        // sibling's cache.
+        let desired = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
+        ]);
+        let active = map(&[(SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X")]);
+        assert!(!should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_clears_cache_when_failing_action_remapped_even_if_sibling_holds_old_accel() {
+        // Regression for the desired-side accelerator-only check.
+        // Cached failure: `repaste-last` / Cmd+Shift+R. User moves
+        // `repaste-last` to Cmd+Shift+P (and that succeeds), while
+        // `clear-history` independently keeps Cmd+Shift+R. The cached
+        // record is now stale — `repaste-last` no longer wants that
+        // accel — even though Cmd+Shift+R is still desired by some
+        // other action. Action-aware matching on both halves catches
+        // this; a values-only `still_desired` would miss it.
+        let desired = map(&[
+            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+P"),
+            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R"),
+        ]);
+        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+P")]);
+        assert!(should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "repaste-last",
+            &desired,
+            &active,
+        ));
+    }
+
+    #[test]
+    fn reconcile_keeps_cache_when_cached_action_wire_value_is_unknown() {
+        // Forward-compatibility: a future binary could write a cache
+        // entry with an action wire value this build doesn't recognise.
+        // We treat that as "not stale" so the banner survives on
+        // upgrades — losing a still-current failure silently would be
+        // worse than holding a stale one, which the user can dismiss.
+        let desired = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        assert!(!should_clear_secondary_cache(
+            "Cmd+Shift+R",
+            "future-action",
+            &desired,
+            &active,
+        ));
     }
 
     #[test]

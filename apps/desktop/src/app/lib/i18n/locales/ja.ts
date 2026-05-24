@@ -352,6 +352,8 @@ export const ja: Messages = {
   toasts: {
     autoPasteFailedTitle: '自動ペーストに失敗しました',
     autoPasteFailedFallback: '自動ペーストに失敗しました。',
+    hotkeyRegisterFailedTitle: 'ホットキーを利用できません',
+    hotkeyRegisterFailedFallback: '設定されたグローバルホットキーの登録に失敗しました。',
     openSettings: '設定を開く',
     dismiss: '閉じる',
   },

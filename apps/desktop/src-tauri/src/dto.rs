@@ -811,6 +811,42 @@ pub struct PermissionStatusDto {
     pub message: Option<String>,
 }
 
+/// Wire-shape mirror of `state::HotkeyFailureRecord`. Returned by the
+/// `last_hotkey_failure` command so the always-on App-level subscriber
+/// can re-hydrate the toast/banner if the live event fired before its
+/// listener attached. The field shape matches the
+/// `nagori://hotkey_register_failed` emit envelope so the frontend
+/// store can share a single normaliser between the two paths.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyFailureDto {
+    pub hotkey: String,
+    pub error: String,
+    /// `Some("secondary")` for secondary accelerators; absent for the
+    /// primary palette shortcut — mirrors `build_hotkey_failure_payload`
+    /// in `lib.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Kebab-case wire value of the secondary action whose register
+    /// failed (`repaste-last`, `clear-history`). Absent for primary
+    /// failures. The frontend store reads this so a later resolved
+    /// event targeting a *different* secondary action can be ignored
+    /// instead of wiping the displayed banner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+impl From<crate::state::HotkeyFailureRecord> for HotkeyFailureDto {
+    fn from(value: crate::state::HotkeyFailureRecord) -> Self {
+        Self {
+            hotkey: value.hotkey,
+            error: value.error,
+            kind: value.kind,
+            action: value.action,
+        }
+    }
+}
+
 impl From<PermissionStatus> for PermissionStatusDto {
     fn from(value: PermissionStatus) -> Self {
         Self {

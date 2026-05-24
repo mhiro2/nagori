@@ -27,9 +27,9 @@
     type SecondaryHotkeyAction,
     type SecretHandling,
   } from '../lib/types';
+  import { hotkeyFailureState } from '../stores/hotkeyFailure.svelte';
   import { showPalette } from '../stores/view.svelte';
 
-  type HotkeyFailurePayload = { hotkey: string; error: string };
   type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
   type Tab = 'general' | 'privacy' | 'cli' | 'advanced';
@@ -240,8 +240,14 @@
   );
   // Populated when the backend fails to register the configured global
   // hotkey at startup or after a save — surfaces the conflict to the user
-  // rather than letting the feature silently break.
-  let hotkeyError: string | undefined = $state(undefined);
+  // rather than letting the feature silently break. Driven by the shared
+  // App-level store so a startup-time failure (emitted before this view
+  // mounted) is still visible after the user opens Settings later.
+  const hotkeyError = $derived.by<string | undefined>(() => {
+    const failure = hotkeyFailureState.failure;
+    if (!failure) return undefined;
+    return failure.error || failure.hotkey || undefined;
+  });
 
   let updateChecking = $state(false);
   let updateStatus: string | undefined = $state(undefined);
@@ -819,15 +825,13 @@
   };
 
   onMount(() => {
-    const offHotkey = subscribe<HotkeyFailurePayload>(
-      TAURI_EVENTS.hotkeyRegisterFailed,
-      (payload) => {
-        hotkeyError = payload.error || payload.hotkey;
-      },
-    );
+    // Hotkey-failure subscription has moved to App.svelte (always-on,
+    // also re-hydrates from the backend's cached snapshot via
+    // `last_hotkey_failure`). This view now derives `hotkeyError` from
+    // `hotkeyFailureState`, so opening Settings after a startup-time
+    // failure still shows the conflict.
     const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, applyRemoteSettings);
     return () => {
-      offHotkey();
       offSettings();
     };
   });

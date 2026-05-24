@@ -332,6 +332,8 @@ export type Messages = {
   toasts: {
     autoPasteFailedTitle: string;
     autoPasteFailedFallback: string;
+    hotkeyRegisterFailedTitle: string;
+    hotkeyRegisterFailedFallback: string;
     openSettings: string;
     dismiss: string;
   };
@@ -679,6 +681,8 @@ export const en: Messages = {
   toasts: {
     autoPasteFailedTitle: 'Auto-paste failed',
     autoPasteFailedFallback: 'Auto-paste failed.',
+    hotkeyRegisterFailedTitle: 'Hotkey unavailable',
+    hotkeyRegisterFailedFallback: 'Failed to register the configured global hotkey.',
     openSettings: 'Settings',
     dismiss: 'Dismiss',
   },

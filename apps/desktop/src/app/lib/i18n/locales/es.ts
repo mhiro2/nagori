@@ -365,6 +365,8 @@ export const es: Messages = {
   toasts: {
     autoPasteFailedTitle: 'Pegado automático fallido',
     autoPasteFailedFallback: 'El pegado automático falló.',
+    hotkeyRegisterFailedTitle: 'Atajo no disponible',
+    hotkeyRegisterFailedFallback: 'No se pudo registrar el atajo global configurado.',
     openSettings: 'Ajustes',
     dismiss: 'Cerrar',
   },

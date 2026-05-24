@@ -8,6 +8,7 @@ import type {
   AppSettings,
   EntryDto,
   EntryPreviewDto,
+  HotkeyFailure,
   PasteFormat,
   PermissionStatus,
   PlatformCapabilities,
@@ -125,3 +126,9 @@ export const previewEntry = (entryId: string): Promise<void> =>
   invoke('preview_entry', { entryId });
 
 export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');
+
+// Backend cache mirror of the latest `nagori://hotkey_register_failed`
+// emit. Returns `null` when the most recent (re-)registration succeeded
+// — used by the always-on App-level subscriber on mount to recover from
+// a startup race where the live emit fires before the listener attaches.
+export const lastHotkeyFailure = (): Promise<HotkeyFailure | null> => invoke('last_hotkey_failure');

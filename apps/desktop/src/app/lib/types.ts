@@ -241,6 +241,21 @@ export type PermissionStatus = {
   message?: string;
 };
 
+// Mirrors the `nagori://hotkey_register_failed` emit envelope and the
+// `last_hotkey_failure` query response. `kind` is absent for the primary
+// palette shortcut and `"secondary"` for repaste-last / clear-history
+// accelerators — the UI collapses both into a single error surface but
+// the tag is preserved for future routing. `action` carries the
+// kebab-case wire value of the failing secondary action (absent for
+// primaries); the store reads it so a later resolved event scoped to a
+// different secondary action doesn't wipe the displayed banner.
+export type HotkeyFailure = {
+  hotkey: string;
+  error: string;
+  kind?: string;
+  action?: string;
+};
+
 export type Platform = 'macos' | 'windows' | 'linuxWayland' | 'unsupported';
 
 export type SupportTier = 'supported' | 'experimental' | 'unsupported';

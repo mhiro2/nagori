@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -64,6 +65,101 @@ pub struct AppState {
     /// drives TTL expiry — see `LAST_PASTED_TTL` — so a paste recorded
     /// hours ago doesn't silently resurface in a new working context.
     pub last_pasted_id: Mutex<Option<(EntryId, Instant)>>,
+    /// Latest global-hotkey registration failures, split per `kind`.
+    /// Persisted so the always-on App-level subscriber can re-hydrate
+    /// the toast/banner after a window opens past the live emit (startup
+    /// race) or after `SettingsView` is re-mounted later. A primary and
+    /// a secondary failure are tracked independently so a primary
+    /// success (or vice versa) doesn't silently wipe an unresolved
+    /// failure on the other side. The frontend reads via
+    /// `last_hotkey_failure` and subscribes to the live
+    /// `nagori://hotkey_register_failed` / `_resolved` events for
+    /// updates.
+    pub last_hotkey_failure: Mutex<HotkeyFailureCache>,
+}
+
+/// Snapshot of a global-hotkey registration failure shared across the
+/// emit (`nagori://hotkey_register_failed`) and the cached state queried
+/// by `last_hotkey_failure`. Kept in `state.rs` so it can be referenced
+/// from both `lib.rs` (emit site) and `commands.rs` (query command)
+/// without dragging the kind enum across module boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyFailureRecord {
+    pub hotkey: String,
+    pub error: String,
+    /// `Some("secondary")` for secondary accelerators, `None` for the
+    /// primary palette shortcut — mirrors the wire shape emitted on
+    /// `nagori://hotkey_register_failed`.
+    pub kind: Option<String>,
+    /// Identifier of the secondary action whose register failed (the
+    /// kebab-case wire value mirroring `SecondaryHotkeyAction`'s serde
+    /// representation). `None` for primary failures, where the binding
+    /// is global. Carried on the wire too: the frontend's single-slot
+    /// store uses it to discriminate "this exact action resolved" from
+    /// "a sibling action sharing the accelerator resolved", so a
+    /// secondary resolve cannot wipe an unrelated still-failing
+    /// secondary.
+    pub action: Option<String>,
+}
+
+/// Cache of hotkey registration failures keyed for independent
+/// resolution. The primary slot is single-slot (there is only one
+/// palette shortcut), but secondaries are keyed by *action* — two
+/// secondary actions can fail at the same time (or share the same
+/// accelerator), and resolving one must not silently lose the other
+/// from cache + hydration. The action key is the kebab-case wire value
+/// (`repaste-last`, `clear-history`); cached secondary records without
+/// an action identifier are skipped on insert because there would be
+/// no way to address them on a later resolve.
+#[derive(Debug, Default, Clone)]
+pub struct HotkeyFailureCache {
+    pub primary: Option<HotkeyFailureRecord>,
+    pub secondary: BTreeMap<String, HotkeyFailureRecord>,
+}
+
+impl HotkeyFailureCache {
+    /// Route a new failure to the matching slot. Primary records (and
+    /// any record missing `kind`) land in the single primary slot; a
+    /// secondary record is keyed by its `action` wire value. A
+    /// secondary record without an action identifier is dropped — the
+    /// per-action cache has no way to address it on a later resolve,
+    /// so caching it would only produce permanently-stuck entries.
+    pub fn record(&mut self, record: HotkeyFailureRecord) {
+        match record.kind.as_deref() {
+            Some("secondary") => {
+                if let Some(action) = record.action.clone() {
+                    self.secondary.insert(action, record);
+                }
+            }
+            _ => self.primary = Some(record),
+        }
+    }
+
+    /// Clear the slot identified by `kind` (+ `action` for secondaries).
+    /// Returns whether anything was actually cleared so the caller can
+    /// skip emitting a paired resolved event when the cache was empty.
+    /// A secondary clear without an action is a no-op — a blanket clear
+    /// would wipe sibling actions that share the kind, which is exactly
+    /// the bug the per-action cache exists to prevent.
+    pub fn clear_for_kind_action(&mut self, kind: Option<&str>, action: Option<&str>) -> bool {
+        match (kind, action) {
+            (None, _) => self.primary.take().is_some(),
+            (Some("secondary"), Some(a)) => self.secondary.remove(a).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Most-relevant cached failure for a single-slot consumer. Primary
+    /// wins over secondary — the palette toggle being broken is
+    /// strictly more disruptive than a missing secondary action. With
+    /// no primary failure, returns an arbitrary-but-deterministic
+    /// secondary (`BTreeMap` first entry — alphabetical by action wire
+    /// value).
+    pub fn most_relevant(&self) -> Option<&HotkeyFailureRecord> {
+        self.primary
+            .as_ref()
+            .or_else(|| self.secondary.values().next())
+    }
 }
 
 struct BackgroundTasks {
@@ -309,7 +405,57 @@ impl AppState {
             background_tasks: Mutex::new(None),
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
+            last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
         })
+    }
+
+    /// Record a hotkey registration failure so a later-mounted listener
+    /// can re-hydrate it. Primary lands in the single slot; secondaries
+    /// are keyed by action wire value so two simultaneously-failing
+    /// secondaries don't overwrite each other.
+    pub fn record_hotkey_failure(&self, record: HotkeyFailureRecord) {
+        if let Ok(mut cache) = self.last_hotkey_failure.lock() {
+            cache.record(record);
+        }
+    }
+
+    /// Clear the cached hotkey failure for the slot matching
+    /// `(kind, action)`. Returns `true` if a record was actually cleared
+    /// so the caller can emit a paired resolved event without a redundant
+    /// poll. `(None, _)` clears the primary slot; `(Some("secondary"),
+    /// Some(action))` clears that exact secondary entry. A primary
+    /// success cannot wipe any secondary (and vice versa), and a
+    /// secondary success only wipes its own action's entry — sibling
+    /// actions sharing the kind keep their cached failures.
+    pub fn clear_hotkey_failure_for_kind_action(
+        &self,
+        kind: Option<&str>,
+        action: Option<&str>,
+    ) -> bool {
+        match self.last_hotkey_failure.lock() {
+            Ok(mut cache) => cache.clear_for_kind_action(kind, action),
+            Err(_) => false,
+        }
+    }
+
+    /// Read the most-relevant cached hotkey failure for hydration on a
+    /// late-mounted listener. The frontend store is single-slot, so
+    /// when both kinds are failing simultaneously we prioritise
+    /// primary — the palette toggle being broken is strictly more
+    /// disruptive than a missing secondary action.
+    pub fn current_hotkey_failure(&self) -> Option<HotkeyFailureRecord> {
+        let cache = self.last_hotkey_failure.lock().ok()?;
+        cache.most_relevant().cloned()
+    }
+
+    /// Snapshot the full cache (both kinds) so callers reconciling
+    /// against current settings can decide which slots are now stale
+    /// without holding the mutex across the comparison.
+    pub fn hotkey_failure_cache_snapshot(&self) -> HotkeyFailureCache {
+        self.last_hotkey_failure
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -404,6 +550,168 @@ mod tests {
     };
 
     use super::*;
+
+    fn primary_record(hotkey: &str) -> HotkeyFailureRecord {
+        HotkeyFailureRecord {
+            hotkey: hotkey.to_owned(),
+            error: "boom".to_owned(),
+            kind: None,
+            action: None,
+        }
+    }
+
+    fn secondary_record(hotkey: &str, action: &str) -> HotkeyFailureRecord {
+        HotkeyFailureRecord {
+            hotkey: hotkey.to_owned(),
+            error: "boom".to_owned(),
+            kind: Some("secondary".to_owned()),
+            action: Some(action.to_owned()),
+        }
+    }
+
+    #[test]
+    fn hotkey_cache_keeps_primary_and_secondary_independently() {
+        // A secondary failure cached first must survive a primary
+        // failure landing next — a single-slot cache would silently
+        // overwrite it, hiding an unresolved binding from any later
+        // hydration.
+        let mut cache = HotkeyFailureCache::default();
+        cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
+        cache.record(primary_record("Cmd+Shift+V"));
+        assert_eq!(
+            cache.primary.as_ref().map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+V")
+        );
+        assert_eq!(
+            cache
+                .secondary
+                .get("repaste-last")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+R")
+        );
+    }
+
+    #[test]
+    fn hotkey_cache_keeps_two_secondaries_independently() {
+        // Two secondary actions failing simultaneously is the bug a
+        // single-slot secondary cache silently hides: the later record
+        // overwrites the first and the user only ever sees one banner,
+        // with the other failure permanently absent from hydration.
+        let mut cache = HotkeyFailureCache::default();
+        cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
+        cache.record(secondary_record("Cmd+Shift+K", "clear-history"));
+        assert_eq!(
+            cache
+                .secondary
+                .get("repaste-last")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+R")
+        );
+        assert_eq!(
+            cache
+                .secondary
+                .get("clear-history")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+K")
+        );
+    }
+
+    #[test]
+    fn hotkey_cache_drops_secondary_record_missing_action() {
+        // The per-action map needs an addressable key. A secondary
+        // record with no action identifier would be permanently
+        // unclearable, so we drop it on insert rather than caching a
+        // stuck entry. This shape is not produced by current emit
+        // sites but guards against future regressions.
+        let mut cache = HotkeyFailureCache::default();
+        cache.record(HotkeyFailureRecord {
+            hotkey: "Cmd+Shift+R".to_owned(),
+            error: "boom".to_owned(),
+            kind: Some("secondary".to_owned()),
+            action: None,
+        });
+        assert!(cache.secondary.is_empty());
+    }
+
+    #[test]
+    fn hotkey_cache_clear_for_kind_action_only_touches_matching_slot() {
+        // Clearing primary must leave secondary alone (and vice versa)
+        // so a primary success cannot silently wipe a still-failing
+        // secondary from cache + hydration. Likewise, clearing one
+        // secondary action must not affect a sibling action's entry.
+        let mut cache = HotkeyFailureCache::default();
+        cache.record(primary_record("Cmd+Shift+V"));
+        cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
+        cache.record(secondary_record("Cmd+Shift+K", "clear-history"));
+
+        assert!(cache.clear_for_kind_action(None, None));
+        assert!(cache.primary.is_none());
+        assert_eq!(
+            cache
+                .secondary
+                .get("repaste-last")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+R")
+        );
+        assert_eq!(
+            cache
+                .secondary
+                .get("clear-history")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+K")
+        );
+
+        // Second primary clear is a no-op (already empty) — caller
+        // uses this to decide whether to emit a resolved event.
+        assert!(!cache.clear_for_kind_action(None, None));
+
+        assert!(cache.clear_for_kind_action(Some("secondary"), Some("repaste-last")));
+        assert!(!cache.secondary.contains_key("repaste-last"));
+        assert_eq!(
+            cache
+                .secondary
+                .get("clear-history")
+                .map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+K")
+        );
+        assert!(!cache.clear_for_kind_action(Some("secondary"), Some("repaste-last")));
+
+        // A blanket secondary clear (no action) must be a no-op — the
+        // bug we are guarding against.
+        assert!(!cache.clear_for_kind_action(Some("secondary"), None));
+        assert!(cache.secondary.contains_key("clear-history"));
+    }
+
+    #[test]
+    fn hotkey_cache_most_relevant_prefers_primary() {
+        // The hydration path returns a single failure to a single-slot
+        // frontend store. Primary takes priority because the palette
+        // toggle being broken is strictly more disruptive than a
+        // missing secondary action.
+        let mut cache = HotkeyFailureCache::default();
+        assert!(cache.most_relevant().is_none());
+
+        cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
+        assert_eq!(
+            cache.most_relevant().map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+R")
+        );
+
+        cache.record(primary_record("Cmd+Shift+V"));
+        assert_eq!(
+            cache.most_relevant().map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+V")
+        );
+
+        // After primary resolves, hydration falls through to a still
+        // unresolved secondary — the failure isn't lost to the next
+        // window mount.
+        assert!(cache.clear_for_kind_action(None, None));
+        assert_eq!(
+            cache.most_relevant().map(|r| r.hotkey.as_str()),
+            Some("Cmd+Shift+R")
+        );
+    }
 
     struct DropFlag(Arc<AtomicBool>);
 

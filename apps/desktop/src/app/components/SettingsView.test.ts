@@ -4,11 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => true),
   currentWindowLabel: vi.fn(() => undefined),
-  subscribe: vi.fn(() => () => {}),
+  subscribe: vi.fn((_event, _handler, onReady) => {
+    onReady?.();
+    return () => {};
+  }),
   TAURI_EVENTS: {
     navigate: 'nagori://navigate',
     pasteFailed: 'nagori://paste_failed',
     hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+    hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
     settingsChanged: 'nagori://settings_changed',
   },
 }));
@@ -173,9 +177,10 @@ afterEach(() => {
 });
 
 // Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
-// event into the SettingsView listener. The Settings view registers two
-// subscriptions (hotkey-failed and settings-changed); the routing keeps
-// hotkey failures wired to a noop unless a test cares about them.
+// event into the SettingsView listener. The Settings view now only
+// subscribes to `settings_changed`; hotkey-failure subscription lives at
+// the App level (see `App.test.ts`), driven through the shared
+// `hotkeyFailureState` store this view derives `hotkeyError` from.
 const captureSettingsChangedHandler = (): {
   fire: (snapshot: AppSettings) => void;
 } => {

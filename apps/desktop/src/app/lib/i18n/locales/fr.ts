@@ -365,6 +365,8 @@ export const fr: Messages = {
   toasts: {
     autoPasteFailedTitle: 'Échec du collage automatique',
     autoPasteFailedFallback: 'Échec du collage automatique.',
+    hotkeyRegisterFailedTitle: 'Raccourci indisponible',
+    hotkeyRegisterFailedFallback: 'Échec de l’enregistrement du raccourci global configuré.',
     openSettings: 'Paramètres',
     dismiss: 'Fermer',
   },

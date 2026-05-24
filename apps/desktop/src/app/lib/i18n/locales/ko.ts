@@ -349,6 +349,8 @@ export const ko: Messages = {
   toasts: {
     autoPasteFailedTitle: '자동 붙여넣기에 실패했습니다',
     autoPasteFailedFallback: '자동 붙여넣기에 실패했습니다.',
+    hotkeyRegisterFailedTitle: '단축키를 사용할 수 없습니다',
+    hotkeyRegisterFailedFallback: '설정된 글로벌 단축키 등록에 실패했습니다.',
     openSettings: '설정 열기',
     dismiss: '닫기',
   },

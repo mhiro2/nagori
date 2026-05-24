@@ -4,11 +4,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => false),
   currentWindowLabel: vi.fn(() => undefined),
-  subscribe: vi.fn(() => () => {}),
+  subscribe: vi.fn((_event, _handler, onReady) => {
+    onReady?.();
+    return () => {};
+  }),
   TAURI_EVENTS: {
     navigate: 'nagori://navigate',
     pasteFailed: 'nagori://paste_failed',
     hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
+    hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
   },
 }));
 
