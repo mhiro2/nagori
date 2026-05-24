@@ -1472,7 +1472,7 @@ impl SearchCandidateProvider for SqliteStore {
         limit: usize,
     ) -> Result<Vec<ClipboardEntry>> {
         let filter = build_filter_fragment(filters);
-        let limit_i64 = limit as i64;
+        let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             fetch_recent_entries(&conn, &filter, order, limit_i64)
@@ -1489,7 +1489,7 @@ impl SearchCandidateProvider for SqliteStore {
     ) -> Result<Vec<ClipboardEntry>> {
         let filter = build_filter_fragment(filters);
         let like = format!("%{}%", escape_like(normalized));
-        let limit_i64 = limit as i64;
+        let limit_i64 = clamp_limit(limit);
         let scan_window = SUBSTRING_SCAN_WINDOW;
         self.run_blocking(move |store| {
             let conn = store.conn()?;
@@ -1570,7 +1570,7 @@ impl SearchCandidateProvider for SqliteStore {
             return Ok(Vec::new());
         }
         let filter = build_filter_fragment(filters);
-        let limit_i64 = limit as i64;
+        let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             let sql = format!(
@@ -1625,7 +1625,7 @@ impl SearchCandidateProvider for SqliteStore {
             return Ok(Vec::new());
         }
         let filter = build_filter_fragment(filters);
-        let limit_i64 = limit as i64;
+        let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             let placeholders = std::iter::repeat_n("?", query_grams.len())
@@ -1717,6 +1717,27 @@ fn escape_like(input: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// Hard ceiling for any candidate-provider `LIMIT` regardless of caller.
+///
+/// The `SearchService` already clamps its result limit to 200 and
+/// over-samples by 8x, so a legitimate candidate request tops out at
+/// 1600. Going an order of magnitude above that absorbs any future
+/// growth while still bounding direct callers (FFI, tests, future
+/// extensions) that bypass the service. Without this cap a pathological
+/// `usize` would either wrap to a negative `LIMIT` (which `SQLite`
+/// treats as unbounded) or, if non-negative, force a multi-million-row
+/// scan and Vec allocation per keystroke.
+const MAX_CANDIDATE_LIMIT: i64 = 10_000;
+
+/// Clamp a `usize` candidate limit down to a safe `i64` for `SQLite`'s
+/// `LIMIT` clause. See [`MAX_CANDIDATE_LIMIT`] for the upper bound
+/// rationale.
+fn clamp_limit(limit: usize) -> i64 {
+    i64::try_from(limit)
+        .unwrap_or(MAX_CANDIDATE_LIMIT)
+        .clamp(0, MAX_CANDIDATE_LIMIT)
 }
 
 #[cfg(unix)]
