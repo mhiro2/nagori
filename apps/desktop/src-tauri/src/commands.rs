@@ -187,7 +187,20 @@ pub async fn paste_entry(
     // means the clipboard never received the entry, so telling the
     // user to "paste manually" would just paste whatever was there
     // before.
-    let settings = state.runtime.get_settings().await?;
+    // `get_settings` runs after the palette is hidden, so a settings-load
+    // failure would otherwise strand inside the invisible webview. Emit
+    // `nagori://paste_failed` first so the App-level toast (Settings
+    // window or palette on re-open) still surfaces the failure.
+    let settings = match state.runtime.get_settings().await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(error = %err, "paste_entry_settings_failed");
+            let message = format!("paste failed: could not load settings — {err}");
+            emit_paste_failed(&app, &message);
+            let cmd_err: CommandError = err.into();
+            return Err(CommandError { message, ..cmd_err });
+        }
+    };
     let paste_format = format.map_or(settings.paste_format_default, Into::into);
     if let Err(err) = state
         .runtime
