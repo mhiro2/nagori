@@ -730,8 +730,31 @@ fn read_text(args: AddArgs) -> Result<String> {
     }
 }
 
+/// Environment variable that overrides the default DB path resolution.
+///
+/// Mirrors the desktop shell's startup-error recovery hint
+/// (`apps/desktop/src-tauri/src/state.rs::annotate_startup_error`): if
+/// the platform-default directory is unwritable the user can redirect
+/// nagori to a path they control. Honoured here so the CLI and desktop
+/// processes line up on the same store when both consult the variable.
+const NAGORI_DB_PATH_ENV: &str = "NAGORI_DB_PATH";
+
 fn default_db_path() -> PathBuf {
-    dirs::data_local_dir()
+    resolve_default_db_path(std::env::var_os(NAGORI_DB_PATH_ENV), dirs::data_local_dir())
+}
+
+/// Pure path-resolution helper so unit tests don't have to mutate the
+/// process environment (which is `unsafe` and races with parallel tests).
+fn resolve_default_db_path(
+    override_env: Option<std::ffi::OsString>,
+    data_local_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(value) = override_env
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    data_local_dir
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nagori")
         .join("nagori.sqlite")
@@ -1423,5 +1446,33 @@ mod tests {
         let wrapped = ipc_error_to_anyhow(&err);
         assert!(wrapped.downcast_ref::<AppError>().is_none());
         assert_eq!(exit_code_for(&wrapped), 8);
+    }
+
+    /// The CLI tells users in `--help` and the desktop's startup error
+    /// hint that `NAGORI_DB_PATH` redirects the store. Keep the resolver
+    /// honest so that promise actually holds at runtime.
+    #[test]
+    fn resolve_default_db_path_honours_env_override() {
+        let override_path = PathBuf::from("/custom/path/to/nagori.sqlite");
+        let resolved = resolve_default_db_path(
+            Some(override_path.as_os_str().to_owned()),
+            Some(PathBuf::from("/should/be/ignored")),
+        );
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn resolve_default_db_path_treats_empty_env_as_unset() {
+        let resolved = resolve_default_db_path(
+            Some(std::ffi::OsString::new()),
+            Some(PathBuf::from("/data/local")),
+        );
+        assert_eq!(resolved, PathBuf::from("/data/local/nagori/nagori.sqlite"));
+    }
+
+    #[test]
+    fn resolve_default_db_path_uses_platform_default_when_env_unset() {
+        let resolved = resolve_default_db_path(None, Some(PathBuf::from("/data/local")));
+        assert_eq!(resolved, PathBuf::from("/data/local/nagori/nagori.sqlite"));
     }
 }

@@ -906,10 +906,66 @@ mod tests {
         assert!(!report.ready, "subscriber failure must remain sticky");
         assert!(report.last_error.is_some());
     }
+
+    /// `NAGORI_DB_PATH` is advertised in the startup-failure hint
+    /// (`annotate_startup_error`). The resolver must actually honour it,
+    /// otherwise the recovery instructions point at a no-op.
+    #[test]
+    fn resolve_default_db_path_honours_env_override() {
+        let override_path = PathBuf::from("/custom/path/to/nagori.sqlite");
+        let resolved = resolve_default_db_path(
+            Some(override_path.as_os_str().to_owned()),
+            Some(PathBuf::from("/should/be/ignored")),
+        );
+        assert_eq!(resolved, override_path);
+    }
+
+    /// Empty env value is treated as unset so a user who runs
+    /// `NAGORI_DB_PATH= nagori` (intending to clear the override) doesn't
+    /// end up writing the DB to a relative empty path under cwd.
+    #[test]
+    fn resolve_default_db_path_treats_empty_env_as_unset() {
+        let resolved = resolve_default_db_path(
+            Some(std::ffi::OsString::new()),
+            Some(PathBuf::from("/data/local")),
+        );
+        assert_eq!(resolved, PathBuf::from("/data/local/nagori/nagori.sqlite"));
+    }
+
+    /// Falls back to the platform default when the env var is unset.
+    #[test]
+    fn resolve_default_db_path_uses_platform_default_when_env_unset() {
+        let resolved = resolve_default_db_path(None, Some(PathBuf::from("/data/local")));
+        assert_eq!(resolved, PathBuf::from("/data/local/nagori/nagori.sqlite"));
+    }
 }
 
+/// Environment variable that overrides the default DB path resolution.
+///
+/// Mirrors the recovery hint baked into [`annotate_startup_error`]: when
+/// the platform default directory is unwritable, the user can point
+/// nagori at a path they control without rebuilding. The same variable
+/// is honoured by `crates/nagori-cli/src/main.rs::default_db_path` so
+/// the CLI and desktop processes target the same store when both are
+/// configured against it.
+pub const NAGORI_DB_PATH_ENV: &str = "NAGORI_DB_PATH";
+
 pub fn default_db_path() -> PathBuf {
-    dirs::data_local_dir()
+    resolve_default_db_path(std::env::var_os(NAGORI_DB_PATH_ENV), dirs::data_local_dir())
+}
+
+/// Pure path-resolution helper so unit tests don't have to mutate the
+/// process environment (which is `unsafe` and races with parallel tests).
+fn resolve_default_db_path(
+    override_env: Option<std::ffi::OsString>,
+    data_local_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(value) = override_env
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    data_local_dir
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nagori")
         .join("nagori.sqlite")

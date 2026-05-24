@@ -19,6 +19,10 @@ Defaults:
 * **Windows** — DB under `%LOCALAPPDATA%\nagori\nagori.sqlite`, named pipe
   at `\\.\pipe\nagori`. Pass `--ipc \\.\pipe\<name>` to override.
 
+Set `NAGORI_DB_PATH=/path/to/nagori.sqlite` to redirect the store away
+from the platform default. The desktop shell honours the same variable,
+so both processes target the same DB when launched with it.
+
 ## Output formats
 
 Every read command supports both human and machine output:
