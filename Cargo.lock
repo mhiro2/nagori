@@ -3036,6 +3036,7 @@ dependencies = [
  "async-trait",
  "core-foundation",
  "enigo",
+ "image",
  "nagori-core",
  "nagori-platform",
  "objc2",

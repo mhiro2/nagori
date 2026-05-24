@@ -1,10 +1,14 @@
+#[cfg(target_os = "macos")]
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use arboard::Clipboard;
 use async_trait::async_trait;
+#[cfg(target_os = "macos")]
+use image::{ImageEncoder, ImageReader, codecs::png::PngEncoder};
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
+    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
     StoredClipboardRepresentation,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
@@ -675,10 +679,10 @@ fn collect_macos_extras(
                 });
             }
 
-            // Prefer PNG when both PNG and TIFF are present — the bytes are
-            // smaller and every webview can render them directly. We still fall
-            // back to TIFF so screenshots from older macOS apps that only push
-            // TIFF make it into the history.
+            // Prefer PNG when both PNG and TIFF are present. macOS screenshot
+            // shortcuts commonly publish TIFF only; normalize that to PNG
+            // before the entry-size gate so the uncompressed pasteboard form
+            // does not make ordinary screenshots look oversized.
             if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
                 && let Some(bytes) = ns_data_to_vec(&data)
             {
@@ -688,15 +692,81 @@ fn collect_macos_extras(
                 });
             } else if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
                 && let Some(bytes) = ns_data_to_vec(&data)
+                && let Some((mime_type, bytes)) = prepare_tiff_capture(bytes)
             {
+                if let Some(limit) = max_file_url_bytes
+                    && bytes.len() > limit
+                {
+                    return Some(bytes.len());
+                }
                 out.push(ClipboardRepresentation {
-                    mime_type: "image/tiff".to_owned(),
+                    mime_type,
                     data: ClipboardData::Bytes(bytes),
                 });
             }
         }
         None
     })
+}
+
+/// Probe the TIFF dimensions before letting `normalize_tiff_capture`
+/// invoke `to_rgba8` — without this a 65535×65535 TIFF would force a
+/// multi-GB allocation well before the snapshot's byte-budget check
+/// runs. Drop the image rep entirely (rest of the snapshot still flows
+/// through) when:
+///   * dimensions exceed `MAX_DECODED_IMAGE_PIXELS`, or
+///   * dimensions are unreadable — `image` could not sniff the TIFF
+///     header, so a subsequent `decode()` would not succeed either and
+///     saving an opaque blob serves no UI purpose.
+#[cfg(target_os = "macos")]
+fn prepare_tiff_capture(bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
+    let dimensions = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    let Some((width, height)) = dimensions else {
+        tracing::warn!(
+            byte_count = bytes.len(),
+            "tiff_capture_dropped reason=dimensions_unreadable"
+        );
+        return None;
+    };
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels > MAX_DECODED_IMAGE_PIXELS {
+        tracing::warn!(
+            pixels,
+            max_pixels = MAX_DECODED_IMAGE_PIXELS,
+            "tiff_capture_dropped reason=decoded_pixels_exceed_cap"
+        );
+        return None;
+    }
+    Some(normalize_tiff_capture(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_tiff_capture(bytes: Vec<u8>) -> (String, Vec<u8>) {
+    let png = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.decode().ok())
+        .and_then(|decoded| {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            let mut png = Vec::new();
+            PngEncoder::new(&mut png)
+                .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+                .ok()?;
+            Some(png)
+        });
+    if let Some(png) = png {
+        ("image/png".to_owned(), png)
+    } else {
+        tracing::warn!(
+            byte_count = bytes.len(),
+            "tiff_to_png_failed_using_original"
+        );
+        ("image/tiff".to_owned(), bytes)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -767,11 +837,6 @@ fn oversized_payload(max_bytes: usize) -> Option<usize> {
                 return Some(observed);
             }
             if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
-                && data.length() > max_bytes
-            {
-                return Some(data.length());
-            }
-            if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
                 && data.length() > max_bytes
             {
                 return Some(data.length());
@@ -926,6 +991,38 @@ mod tests {
                 (ClipboardData::Bytes(bytes), m) if m == mime => Some(bytes.clone()),
                 _ => None,
             })
+    }
+
+    #[test]
+    fn tiff_capture_is_normalized_to_png() {
+        let (mime, bytes) = normalize_tiff_capture(TINY_TIFF.to_vec());
+
+        assert_eq!(mime, "image/png");
+        assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    }
+
+    #[test]
+    fn prepare_tiff_capture_accepts_small_dimensions() {
+        let prepared = prepare_tiff_capture(TINY_TIFF.to_vec());
+
+        let (mime, _) = prepared.expect("tiny tiff is well under the pixel cap");
+        assert_eq!(mime, "image/png");
+    }
+
+    #[test]
+    fn prepare_tiff_capture_rejects_unparseable_tiff() {
+        // A TIFF whose IFD declares 65535x65535 (well over the pixel cap)
+        // but whose internal strip metadata is inconsistent. The `image`
+        // crate's tiff decoder refuses to surface dimensions, so
+        // `prepare_tiff_capture` drops the rep instead of letting
+        // `decode()` panic or allocate against a corrupt header.
+        let mut tiff = TINY_TIFF.to_vec();
+        tiff[18] = 0xFF; // ImageWidth low byte
+        tiff[19] = 0xFF; // ImageWidth high byte
+        tiff[30] = 0xFF; // ImageLength low byte
+        tiff[31] = 0xFF; // ImageLength high byte
+
+        assert!(prepare_tiff_capture(tiff).is_none());
     }
 
     /// Bypass `current_snapshot` and read the raw `NSPasteboardTypeTIFF`
