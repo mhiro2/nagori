@@ -157,7 +157,8 @@ pub async fn paste_entry(
     // `native_handle`, so `activate_restore_target` re-foregrounds the
     // exact window the user came from via `SetForegroundWindow` instead
     // of relying on the OS to guess.
-    if let Some(target) = window.app_handle().get_webview_window("main") {
+    let app = window.app_handle().clone();
+    if let Some(target) = app.get_webview_window("main") {
         let _ = target.hide();
     }
     if let Some(prev) = state.take_previous_frontmost() {
@@ -172,12 +173,38 @@ pub async fn paste_entry(
     // and the compositor's focus handoff is already synchronous.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-    state
+    // The palette window was hidden above so a returned `Err` would
+    // strand the error inside the now-invisible `searchState.errorMessage`
+    // — emit `nagori://paste_failed` first so the App-level toast can
+    // surface it on the next open / Settings window, matching the
+    // palette path's behaviour.
+    if let Err(err) = state
         .runtime
         .paste_entry(entry_id, format.map(Into::into))
-        .await?;
+        .await
+    {
+        tracing::warn!(error = %err, "paste_entry_failed");
+        let message = format!("auto-paste failed — paste manually. Underlying error: {err}");
+        emit_paste_failed(&app, &message);
+        let cmd_err: CommandError = err.into();
+        return Err(CommandError { message, ..cmd_err });
+    }
     state.record_last_pasted(entry_id);
     Ok(())
+}
+
+/// Emit the `nagori://paste_failed` toast event with a curated message.
+///
+/// Both `paste_entry` and `paste_entry_from_palette` hide the originating
+/// window before performing the paste, so a returned `Err` alone strands
+/// the message inside an invisible store. The App-level subscriber
+/// (mounted on every webview) renders this event as a toast and the
+/// Settings window re-hydrates the live error on focus.
+fn emit_paste_failed(app: &AppHandle, message: &str) {
+    let _ = app.emit(
+        crate::PASTE_FAILED_EVENT,
+        serde_json::json!({ "error": message }),
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -247,10 +274,7 @@ pub async fn paste_entry_from_palette(
         let message = format!(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"
         );
-        let _ = app.emit(
-            "nagori://paste_failed",
-            serde_json::json!({ "error": message }),
-        );
+        emit_paste_failed(&app, &message);
         return Err(CommandError::internal(message));
     }
 
@@ -276,10 +300,7 @@ pub async fn paste_entry_from_palette(
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         let message =
             format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {err}");
-        let _ = app.emit(
-            "nagori://paste_failed",
-            serde_json::json!({ "error": message }),
-        );
+        emit_paste_failed(&app, &message);
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
         // but swap the user-facing message in for the "copy succeeded"
