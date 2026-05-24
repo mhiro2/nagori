@@ -808,6 +808,13 @@ async fn drain_workers(
     );
 }
 
+/// Hard cap on the post-abort join: a wedged worker (e.g. blocked in
+/// `spawn_blocking` on a syscall that ignores cancellation) would
+/// otherwise leave shutdown awaiting `handle.await` forever after
+/// `abort()` is called. Two seconds is generous for the cancellation
+/// signal to land while still keeping the daemon's exit path bounded.
+const POST_ABORT_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Borrow-then-abort drain. We `&mut handle` so the timeout doesn't move
 /// the handle out of scope: on the timeout branch we still have it to
 /// call `abort()` on, then await again so the cancellation completes
@@ -821,11 +828,13 @@ async fn drain_one(name: &'static str, mut handle: tokio::task::JoinHandle<()>, 
             handle.abort();
             // The post-abort await yields a `JoinError(cancelled)` on the
             // common path; treat both Ok and Err as "task is done" and
-            // only log unexpected panics.
-            match handle.await {
-                Ok(()) => {}
-                Err(err) if err.is_cancelled() => {}
-                Err(err) => warn!(error = %err, worker = name, "drain_abort_join_failed"),
+            // only log unexpected panics. Bound it so a wedged worker
+            // cannot stall shutdown indefinitely.
+            match tokio::time::timeout(POST_ABORT_JOIN_TIMEOUT, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) if err.is_cancelled() => {}
+                Ok(Err(err)) => warn!(error = %err, worker = name, "drain_abort_join_failed"),
+                Err(_) => warn!(worker = name, "worker_drain_timeout"),
             }
         }
     }
