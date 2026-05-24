@@ -41,6 +41,16 @@ pub struct IpcServerHealth {
 struct IpcServerHealthInner {
     handler_panics: AtomicU64,
     last_panic_message: Mutex<Option<String>>,
+    /// Wall-clock millis-since-epoch of the most recent `listener.accept()`
+    /// (Unix) / `NamedPipeServer::connect()` (Windows) completion. Zero
+    /// when no accept has been observed yet. The daemon's supervisor uses
+    /// this — combined with periodic self-probes — to detect an accept
+    /// loop that wedged on the OS side (handler deadlock, kernel-level
+    /// resource exhaustion) without exiting the spawned task. Daemon
+    /// liveness alone would miss that class of failure because the
+    /// supervisor only respawns on task exit, not on silent input
+    /// starvation.
+    last_accept_at_ms: AtomicU64,
 }
 
 impl IpcServerHealth {
@@ -92,6 +102,35 @@ impl IpcServerHealth {
         };
         *guard = Some(message);
     }
+
+    /// Record that the accept loop just observed a new connection. Called
+    /// from inside the per-platform accept loops so the daemon supervisor
+    /// can distinguish a healthy-but-idle loop (probe drives a fresh bump)
+    /// from a wedged loop (probe succeeds at the kernel level but the
+    /// timestamp never advances).
+    pub fn record_accept(&self) {
+        self.inner
+            .last_accept_at_ms
+            .store(now_unix_ms(), Ordering::Relaxed);
+    }
+
+    /// Wall-clock millis-since-epoch of the most recent successful accept.
+    /// Zero means the loop has not accepted anything yet — the supervisor
+    /// seeds an initial value at spawn time so this is only ever `0`
+    /// before the first `record_accept` lands.
+    #[must_use]
+    pub fn last_accept_at_ms(&self) -> u64 {
+        self.inner.last_accept_at_ms.load(Ordering::Relaxed)
+    }
+}
+
+/// Best-effort UNIX millis-since-epoch. A pre-1970 system clock collapses
+/// to `0`, which the supervisor treats as "no accept observed yet" — the
+/// same fallback we use before the first accept actually fires.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Inspect a reaped `JoinSet` result and route panics to `health`
@@ -281,6 +320,12 @@ where
     let token = Arc::new(expected_token);
     let semaphore = Arc::new(Semaphore::new(32));
     let mut tasks: JoinSet<()> = JoinSet::new();
+    // Seed the liveness clock so an idle daemon doesn't look wedged.
+    // Without this the supervisor would observe a `0` timestamp on its
+    // first probe and immediately escalate to restart — record once
+    // before we begin accepting so the wedge check measures elapsed
+    // time relative to the loop becoming ready, not the UNIX epoch.
+    server_health.record_accept();
 
     tokio::pin!(shutdown);
     let accept_result = loop {
@@ -292,6 +337,12 @@ where
                     Ok(accepted) => accepted,
                     Err(err) => break Err(AppError::Platform(err.to_string())),
                 };
+                // Bump the liveness timestamp before we touch the
+                // semaphore. The supervisor's wedge probe relies on this
+                // landing per accept; running it before the permit await
+                // means even a saturated handler pool keeps the timestamp
+                // advancing as long as accept() itself is still firing.
+                server_health.record_accept();
                 // Race permit acquisition against shutdown. Without this
                 // arm, a saturated handler pool (32 in flight) would pin
                 // the loop on `acquire_owned().await` and we would not
@@ -626,6 +677,10 @@ where
     let token = Arc::new(expected_token);
     let semaphore = Arc::new(Semaphore::new(32));
     let mut tasks: JoinSet<()> = JoinSet::new();
+    // See `accept_loop_with_shutdown` (Unix path) for the rationale —
+    // seed the liveness clock so the supervisor's wedge probe doesn't
+    // measure against the UNIX epoch on an idle daemon.
+    server_health.record_accept();
 
     // We hold the in-flight "next" instance behind `Option` so the
     // borrow checker accepts the move-then-replace pattern inside the
@@ -646,6 +701,11 @@ where
                 if let Err(err) = result {
                     break Err(AppError::Platform(err.to_string()));
                 }
+                // Same liveness-bump rationale as the Unix path: record
+                // before allocating the next instance / permit so the
+                // supervisor's wedge probe sees fresh accepts even when
+                // the handler pool is saturated.
+                server_health.record_accept();
                 // Move the now-connected handle out and immediately
                 // create the next listener so we keep accepting while
                 // the worker runs.

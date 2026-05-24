@@ -22,6 +22,33 @@ const IPC_RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
 /// retry interval into hours.
 const IPC_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// How often the supervisor self-probes the IPC endpoint to confirm the
+/// accept loop is still firing. Kept well above the per-connection
+/// `READ_TIMEOUT` so a probe never collides with an in-flight handler's
+/// own teardown, but small enough that a wedge surfaces within a couple
+/// of minutes rather than waiting for the next external client.
+const IPC_LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum age of `IpcServerHealth::last_accept_at_ms` before the
+/// supervisor treats the accept loop as wedged and aborts the server
+/// task. Chosen as three probe intervals so a single slow probe (or one
+/// transient connect failure) does not trigger a restart by itself.
+const IPC_LIVENESS_WEDGE_THRESHOLD: Duration = Duration::from_secs(90);
+
+/// Bound on the supervisor's self-probe so a wedged listener (or a
+/// kernel that hung the connect itself) cannot park the supervisor for
+/// the full probe interval. One second is plenty of slack for a local
+/// `connect()`; the wedge detector measures freshness of accept rather
+/// than the probe's own success, so a timed-out probe still lets the
+/// staleness check decide whether to abort.
+const IPC_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Grace window between issuing the probe and re-reading
+/// `last_accept_at_ms`. The accept arm bumps the timestamp before it
+/// touches the semaphore, so a healthy loop lands the update inside
+/// this window even when the handler pool is saturated.
+const IPC_LIVENESS_PROBE_SETTLE: Duration = Duration::from_millis(200);
+
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// On Unix this is a filesystem path for the Unix-domain socket. On
@@ -314,6 +341,13 @@ async fn supervise_ipc_server(
             }
         };
 
+        // Snapshot before constructing the select arms: `ipc_server_exit`
+        // takes `&mut server` for the entire poll, so `server.is_some()`
+        // cannot be evaluated inline against any other arm. The boolean
+        // is only read by `liveness_tick` to gate its own pending vs.
+        // sleep behaviour.
+        let have_server = server.is_some();
+
         tokio::select! {
             // `biased` so a real shutdown beats a coincident accept-loop exit
             // and we don't try to restart a server we're about to tear down.
@@ -390,6 +424,30 @@ async fn supervise_ipc_server(
                 drop(dead);
                 restart_pending = runtime.current_settings().cli_ipc_enabled;
             }
+            // Periodic liveness probe so a wedged accept loop (handler
+            // deadlock, kernel-level resource exhaustion) is force-restarted
+            // even when the spawned task is still alive. Without this the
+            // supervisor only ever respawns on task exit — an accept that
+            // simply stops firing would leave IPC silently dead.
+            () = liveness_tick(have_server) => {
+                if server.is_some()
+                    && let Some(age) = wedged_accept_age(&runtime, &config).await
+                {
+                    warn!(
+                        age_ms = u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+                        "ipc_accept_loop_wedged_aborting",
+                    );
+                    // Abort the task in place; the join_result arm next
+                    // iteration reaps it (observes is_cancelled) and the
+                    // existing restart flow respawns. Going through the
+                    // normal exit path keeps runtime-file fingerprinting
+                    // and backoff state machine identical to the
+                    // "task exited on its own" case.
+                    if let Some(dead) = server.as_ref() {
+                        dead.handle.abort();
+                    }
+                }
+            }
             // Fires when `restart_pending` is true after a backoff interval.
             // We use a separate branch (instead of an inline sleep inside the
             // join-result handler) so a respawn failure keeps the timer
@@ -418,6 +476,83 @@ async fn supervise_ipc_server(
             }
         }
     }
+}
+
+/// Periodic timer that gates the liveness probe. Mirrors the `restart_timer`
+/// idiom of returning a `pending()` future when the supervisor has no
+/// server to probe — keeps the wedge arm coexisting in the `tokio::select!`
+/// without splitting the loop into "have server" / "no server" branches.
+async fn liveness_tick(have_server: bool) {
+    if have_server {
+        tokio::time::sleep(IPC_LIVENESS_PROBE_INTERVAL).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Issue a self-probe and report the staleness of
+/// `IpcServerHealth::last_accept_at_ms` if it exceeds
+/// [`IPC_LIVENESS_WEDGE_THRESHOLD`]. `None` means the loop is healthy
+/// (or the probe could not establish a reliable measurement, in which
+/// case we conservatively wait for the next tick rather than restart).
+async fn wedged_accept_age(runtime: &NagoriRuntime, config: &DaemonConfig) -> Option<Duration> {
+    // Probe success vs failure is informational — the wedge check below
+    // measures whether the accept arm bumped the timestamp, which is a
+    // stricter test than "the socket file resolves to a listener" (a
+    // listener can be present yet its accept future stuck).
+    let _ = tokio::time::timeout(IPC_LIVENESS_PROBE_TIMEOUT, probe_ipc_endpoint(config)).await;
+    // Give the accept arm a beat to land the timestamp update before we
+    // sample it. Without this an immediate sample races the bump and
+    // produces false positives on slow machines.
+    tokio::time::sleep(IPC_LIVENESS_PROBE_SETTLE).await;
+    let now_ms = now_unix_ms();
+    let last_ms = runtime.ipc_health().last_accept_at_ms();
+    if last_ms == 0 {
+        // Pre-seed didn't land yet (vanishingly rare in practice — the
+        // accept loop bumps before its first await). Skip this tick.
+        return None;
+    }
+    let age_ms = now_ms.saturating_sub(last_ms);
+    if u128::from(age_ms) > IPC_LIVENESS_WEDGE_THRESHOLD.as_millis() {
+        Some(Duration::from_millis(age_ms))
+    } else {
+        None
+    }
+}
+
+/// Connect to the IPC endpoint as a liveness signal. We drop the stream
+/// immediately on success — the per-connection handler enforces its own
+/// `FIRST_READ_TIMEOUT`, so a probe that never sends bytes tears down
+/// inside ~1s and doesn't park a handler permit.
+async fn probe_ipc_endpoint(config: &DaemonConfig) -> bool {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(&config.socket_path)
+            .await
+            .is_ok()
+    }
+    #[cfg(windows)]
+    {
+        let name = config.socket_path.to_string_lossy().into_owned();
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&name)
+            .is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = config;
+        false
+    }
+}
+
+/// UNIX millis-since-epoch helper mirroring the one in `nagori-ipc`'s
+/// `IpcServerHealth`. A pre-1970 clock collapses to `0`, which the wedge
+/// check treats as "no measurement yet" so we never flag a restart on
+/// the back of a missing baseline.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Wait for the accept-loop task to exit. When `server` is `None` returns a
