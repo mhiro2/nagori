@@ -187,27 +187,58 @@ fn frontmost_focused_is_secure_sync() -> Option<bool> {
         };
         CFRelease(systemwide.cast());
 
-        let role = copy_string_attribute(focused, "AXRole");
-        let subrole = copy_string_attribute(focused, "AXSubrole");
+        let role_outcome = copy_string_attribute(focused, "AXRole");
+        let subrole_outcome = copy_string_attribute(focused, "AXSubrole");
         CFRelease(focused.cast());
 
-        // We already cleared the AX-permission gate above by retrieving
-        // `AXFocusedUIElement` — that fetch fails fast when Accessibility
-        // is revoked, so reaching this point means the system handed us a
-        // valid focused element. A `(None, None)` role/subrole result
-        // here is therefore *not* a permission failure: it means the
-        // focused app is genuinely thin on AX exposure (Electron windows
-        // with broken AX, GPU-rendered games, custom Cocoa controls that
-        // never set `accessibilityRole`). Treating that as `None` would
-        // tick `consecutive_secure_ax_failures` on every poll spent in
-        // such an app and eventually trip the fail-closed threshold for
-        // a user who simply prefers a non-AX text editor. Surface it as
-        // `Some(false)` so the secret detector + bundle override still
-        // run downstream, and leave `None` for the genuine permission/
-        // framework failures that the gate above already filters for.
-        let secure = role.as_deref() == Some(SECURE) || subrole.as_deref() == Some(SECURE);
-        Some(secure)
+        // `AXFocusedUIElement` already cleared the AX-permission gate,
+        // so reaching here means the system handed us a valid focused
+        // element. The role/subrole calls can still fail in two
+        // qualitatively different ways:
+        //
+        //   * `AttrOutcome::Unsupported` — AX answered "this element
+        //     doesn't expose this attribute" (kAXErrorAttributeUnsupported
+        //     or kAXErrorNoValue). This is the thin-AX surface: an
+        //     Electron window without proper AX wiring, a GPU-rendered
+        //     game, a custom Cocoa control that never set
+        //     `accessibilityRole`. A secure text field, by contrast, must
+        //     vend AXRole = "AXSecureTextField"; the only safe reading is
+        //     "not a secure field" — `Some(false)`. Anything else would
+        //     tick `consecutive_secure_ax_failures` on every poll spent
+        //     in a perfectly safe non-AX app.
+        //
+        //   * `AttrOutcome::Failed` — AX returned a transient error
+        //     (kAXErrorCannotComplete timeout, kAXErrorInvalidUIElement
+        //     stale handle, kAXErrorAPIDisabled mid-call, downcast
+        //     mismatch). The element exists and *could* be secure;
+        //     surfacing `None` lets the capture loop's fail-closed
+        //     threshold absorb the failure.
+        match (role_outcome, subrole_outcome) {
+            (AttrOutcome::Failed, _) | (_, AttrOutcome::Failed) => None,
+            (role, subrole) => {
+                let role_secure = matches!(role, AttrOutcome::Value(ref s) if s == SECURE);
+                let subrole_secure = matches!(subrole, AttrOutcome::Value(ref s) if s == SECURE);
+                Some(role_secure || subrole_secure)
+            }
+        }
     }
+}
+
+/// String-attribute fetch outcome that preserves the distinction between
+/// "AX said the attribute is unavailable" and "AX hit a transient error".
+/// Collapsing both into `None` would force the caller to choose between
+/// fail-open (drift the secret detector past every AX-poor regular app)
+/// and fail-closed (escalate genuine permission flickers into snapshots
+/// dropped at the threshold). The split lets the caller pick per case.
+enum AttrOutcome {
+    Value(String),
+    /// AX reported the attribute is structurally unavailable on this
+    /// element (`kAXErrorAttributeUnsupported` or `kAXErrorNoValue`).
+    /// Read as "definitely not this attribute" for the SECURE check.
+    Unsupported,
+    /// AX returned a transient or coding error (timeout, stale element,
+    /// API disabled, type mismatch). Treat as "unknown" upstream.
+    Failed,
 }
 
 /// Copy a child `AXUIElementRef` attribute, transferring the +1 retain
@@ -238,10 +269,16 @@ unsafe fn copy_element_attribute(
     Some(raw.cast_mut())
 }
 
-/// Copy a string-valued AX attribute. The result is auto-released via
-/// `core_foundation::base::CFType`'s `Drop`, so callers don't need to
-/// remember to free it.
-unsafe fn copy_string_attribute(element: ax_ffi::AXUIElementRef, name: &str) -> Option<String> {
+/// Copy a string-valued AX attribute, classifying the result so the
+/// caller can tell a thin-AX surface from a transient AX failure.
+///
+/// `AttrOutcome::Unsupported` fires on `kAXErrorAttributeUnsupported`
+/// and `kAXErrorNoValue` (and on success-with-null-pointer, which is
+/// the same shape). `AttrOutcome::Failed` covers every other non-zero
+/// AX error code plus the case where AX returned a non-string value.
+/// The result is auto-released via `core_foundation::base::CFType`'s
+/// `Drop`, so callers don't need to remember to free it.
+unsafe fn copy_string_attribute(element: ax_ffi::AXUIElementRef, name: &str) -> AttrOutcome {
     let attr = CFString::new(name);
     let mut raw: ax_ffi::CFTypeRef = std::ptr::null();
     let err = unsafe {
@@ -251,13 +288,23 @@ unsafe fn copy_string_attribute(element: ax_ffi::AXUIElementRef, name: &str) -> 
             &raw mut raw,
         )
     };
-    if err != ax_ffi::AX_ERROR_SUCCESS || raw.is_null() {
-        return None;
+    match err {
+        ax_ffi::AX_ERROR_SUCCESS => {
+            if raw.is_null() {
+                return AttrOutcome::Unsupported;
+            }
+            // Take ownership of the +1 retain so the value drops at the
+            // end of this scope no matter which arm runs.
+            let value = unsafe { CFType::wrap_under_create_rule(raw) };
+            value
+                .downcast::<CFString>()
+                .map_or(AttrOutcome::Failed, |s| AttrOutcome::Value(s.to_string()))
+        }
+        ax_ffi::AX_ERROR_ATTRIBUTE_UNSUPPORTED | ax_ffi::AX_ERROR_NO_VALUE => {
+            AttrOutcome::Unsupported
+        }
+        _ => AttrOutcome::Failed,
     }
-    // Take ownership of the +1 retain so the value drops at the end of
-    // this scope no matter which return path runs.
-    let value = unsafe { CFType::wrap_under_create_rule(raw) };
-    value.downcast::<CFString>().map(|s| s.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -270,6 +317,12 @@ mod ax_ffi {
     pub type AXError = c_int;
 
     pub const AX_ERROR_SUCCESS: AXError = 0;
+    /// `kAXErrorAttributeUnsupported`: element is well-formed but does
+    /// not advertise this attribute.
+    pub const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
+    /// `kAXErrorNoValue`: attribute is recognised but currently has no
+    /// value (e.g. `AXFocusedUIElement` on a window with nothing focused).
+    pub const AX_ERROR_NO_VALUE: AXError = -25212;
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
