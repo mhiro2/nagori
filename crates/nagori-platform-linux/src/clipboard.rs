@@ -35,6 +35,30 @@ use wl_clipboard_rs::{
 #[cfg(target_os = "linux")]
 const INTERNAL_BODY_CEILING_BYTES: usize = 256 * 1024 * 1024;
 
+/// Per-call ceiling applied to sequence-only paths
+/// (`current_sequence`, `current_sequence_with_max`).
+///
+/// Wayland's data-control protocols do not expose an offer-level serial
+/// that `wl-clipboard-rs` could surface as a cheap signal, so detecting
+/// "did the clipboard change since last poll?" otherwise requires
+/// streaming every mime payload through SHA-256 every tick — a
+/// multi-megabyte image clip pays its read cost over and over for the
+/// entire time it sits on the clipboard. Capping the sequence-only
+/// hash at 256 KiB makes a single poll cost bounded regardless of
+/// payload size: anything bigger collapses to the `oversized-over:`
+/// sentinel keyed on the first 256 KiB, which still differs across
+/// distinct clips that share a mime set (image headers, text prefixes,
+/// uri-list rows all differ inside the first 256 KiB in practice).
+///
+/// The trade-off is a theoretical false negative when two distinct
+/// clips share an identical first 256 KiB and differ only past it —
+/// vanishingly rare for natural clipboard data. The full-body read
+/// still runs through `current_snapshot_with_max` once a change *is*
+/// detected, and storage-layer content-hash dedupe catches accidental
+/// re-publishes regardless of what this fingerprint reports.
+#[cfg(target_os = "linux")]
+const SEQUENCE_FINGERPRINT_CEILING: usize = 256 * 1024;
+
 /// Image MIME types we will capture, in priority order. Mirrors the
 /// `nagori-core` factory's `is_allowlisted_image_mime` allowlist
 /// (PNG / JPEG / GIF / WebP / TIFF) — capturing a MIME the factory
@@ -156,13 +180,15 @@ impl ClipboardReader for LinuxClipboard {
         // serial, but `wl-clipboard-rs` does not surface it. Stream the
         // body through SHA-256 with a small buffer so that even
         // multi-megabyte clipboards do not pin memory in the daemon
-        // address space. Clips above `INTERNAL_BODY_CEILING_BYTES`
-        // fall back to a ceiling/prefix-keyed sentinel and close the pipe
-        // immediately so a malicious owner cannot keep a blocking
-        // worker occupied by streaming forever.
+        // address space. Per-tick reads cap at
+        // `SEQUENCE_FINGERPRINT_CEILING` so the poll cost stays bounded
+        // for big clips: anything past the cap collapses to the
+        // `oversized-over:` sentinel keyed on the prefix hash, and the
+        // pipe is closed immediately so a malicious owner cannot keep a
+        // blocking worker occupied by streaming forever.
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass_no_buffer(INTERNAL_BODY_CEILING_BYTES).await?;
+            let pass = pipe_read_multi_pass_no_buffer(SEQUENCE_FINGERPRINT_CEILING).await?;
             Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
@@ -173,9 +199,15 @@ impl ClipboardReader for LinuxClipboard {
 
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
+        // Use the smaller of the caller's `max_bytes` and the
+        // sequence-fingerprint ceiling — the caller's cap still wins
+        // when they want a tighter budget than 256 KiB, but a 256 MiB
+        // `max_entry_size_bytes` does not turn every poll into a
+        // multi-megabyte SHA-256 stream.
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass_no_buffer(max_bytes).await?;
+            let pass =
+                pipe_read_multi_pass_no_buffer(SEQUENCE_FINGERPRINT_CEILING.min(max_bytes)).await?;
             Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
