@@ -710,44 +710,24 @@ mod win {
                     return Some(observed);
                 }
             }
-            // CF_DIBV5 is the canonical format apps publish today; CF_DIB
-            // remains for compatibility with older sources. Prefer V5 first
-            // so the size reported is the one arboard will actually pull
-            // when it decodes the image. The raw DIB blob is uncompressed
-            // (~width*height*4 bytes), which is an over-estimate compared
-            // to the PNG we eventually push into storage, but that bias is
-            // the safe direction: we reject before allocating an RGBA copy
-            // rather than learning the payload is huge only after decode.
-            if let Some(image_bytes) = image_format_size() {
-                observed = observed.saturating_add(image_bytes);
-                if observed > max_bytes {
-                    return Some(observed);
-                }
-            }
-            None
-        }
-    }
-
-    unsafe fn image_format_size() -> Option<usize> {
-        // arboard prefers a registered `"PNG"` format if it is offered
-        // (then `CF_DIBV5`, then `CF_DIB`). If we only probed the standard
-        // bitmap formats, a publisher that registers PNG without also
-        // offering DIB would slip past the size guard and force the
-        // capture path to read a multi-MB blob before failing further
-        // along. Mirror arboard's lookup order so the probe matches the
-        // bytes the reader is actually about to materialise.
-        unsafe {
+            // Skip CF_DIB / CF_DIBV5 here. Raw DIB is uncompressed
+            // (~width*height*4 bytes) and routinely several MiB for
+            // ordinary screenshots that fit comfortably under the entry
+            // cap once we RGBA -> PNG encode in `capture_snapshot`. The
+            // post-encode `total_payload_bytes` check is the authoritative
+            // limit, and `image_pixel_overflow` still rejects pathological
+            // dimensions before the RGBA allocation. The registered "PNG"
+            // format, however, is *already* encoded, so its raw size is a
+            // truthful preview of what will land in storage — keep that
+            // probe so a small-dimensioned but multi-MB PNG bails out
+            // before arboard reads the full payload into an RGBA buffer.
             if let Some(png_id) = png_format_id()
                 && IsClipboardFormatAvailable(png_id) != 0
-                && let Some(bytes) = global_data_size(png_id)
+                && let Some(png_bytes) = global_data_size(png_id)
             {
-                return Some(bytes);
-            }
-            for format in [CF_DIBV5, CF_DIB] {
-                if IsClipboardFormatAvailable(u32::from(format)) != 0
-                    && let Some(bytes) = global_data_size(u32::from(format))
-                {
-                    return Some(bytes);
+                observed = observed.saturating_add(png_bytes);
+                if observed > max_bytes {
+                    return Some(observed);
                 }
             }
             None
