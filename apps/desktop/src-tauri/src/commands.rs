@@ -178,13 +178,34 @@ pub async fn paste_entry(
     // — emit `nagori://paste_failed` first so the App-level toast can
     // surface it on the next open / Settings window, matching the
     // palette path's behaviour.
+    //
+    // `runtime.paste_entry` collapses copy + synthesis into one call,
+    // which makes a `NotFound` / blocked / clipboard-write failure look
+    // identical to a synthesis failure to the caller. Inline the two
+    // steps here so we can scope the "auto-paste failed — paste
+    // manually" hint to genuine synthesis failures: a copy failure
+    // means the clipboard never received the entry, so telling the
+    // user to "paste manually" would just paste whatever was there
+    // before.
+    let settings = state.runtime.get_settings().await?;
+    let paste_format = format.map_or(settings.paste_format_default, Into::into);
     if let Err(err) = state
         .runtime
-        .paste_entry(entry_id, format.map(Into::into))
+        .copy_entry_with_format(entry_id, paste_format)
         .await
     {
-        tracing::warn!(error = %err, "paste_entry_failed");
-        let message = format!("auto-paste failed — paste manually. Underlying error: {err}");
+        tracing::warn!(error = %err, "paste_entry_copy_failed");
+        let message = format!("copy failed: {err}");
+        emit_paste_failed(&app, &message);
+        let cmd_err: CommandError = err.into();
+        return Err(CommandError { message, ..cmd_err });
+    }
+    if settings.auto_paste_enabled
+        && let Err(err) = state.runtime.paste_frontmost().await
+    {
+        tracing::warn!(error = %err, "paste_entry_synth_failed");
+        let message =
+            format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {err}");
         emit_paste_failed(&app, &message);
         let cmd_err: CommandError = err.into();
         return Err(CommandError { message, ..cmd_err });
