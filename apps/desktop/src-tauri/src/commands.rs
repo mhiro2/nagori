@@ -7,7 +7,7 @@ use nagori_core::{
 };
 use nagori_platform::PreviewItem;
 use nagori_search::normalize_text;
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{
     AiActionResultDto, AppSettingsDto, EntryDto, EntryPreviewDto, PasteFormatDto,
@@ -238,12 +238,20 @@ pub async fn paste_entry_from_palette(
     {
         // Surface restore failure to the UI: the entry was copied but we
         // never refocused the originating app, so the synthesised paste
-        // would land in nagori itself. Returning an error lets the
-        // palette toast tell the user "copied, please paste manually".
+        // would land in nagori itself. The palette window is already
+        // hidden above, so a returned `Err` only reaches the now-invisible
+        // `searchState.errorMessage` — emit `nagori://paste_failed` so
+        // the App-level toast (Settings window or palette on re-open)
+        // shows the failure with the "copy succeeded" framing.
         tracing::warn!(error = %err, "palette_previous_app_restore_failed");
-        return Err(CommandError::internal(format!(
+        let message = format!(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"
-        )));
+        );
+        let _ = app.emit(
+            "nagori://paste_failed",
+            serde_json::json!({ "error": message }),
+        );
+        return Err(CommandError::internal(message));
     }
 
     // Defensive clamp at the use site: `save_settings` already rejects values
@@ -259,9 +267,26 @@ pub async fn paste_entry_from_palette(
     // as silent successes which made "auto-paste did nothing" undebuggable
     // for users. The clipboard write itself already succeeded above, so
     // the user can still ⌘V manually after dismissing the error toast.
+    // The palette window is hidden by this point, so a returned `Err`
+    // alone strands the error inside the now-invisible
+    // `searchState.errorMessage`. Emit `nagori://paste_failed` so the
+    // App-level toast surfaces it on re-open (or in the open Settings
+    // window) with the "copy succeeded" framing intact.
     if let Err(err) = state.runtime.paste_frontmost().await {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
-        return Err(err.into());
+        let message =
+            format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {err}");
+        let _ = app.emit(
+            "nagori://paste_failed",
+            serde_json::json!({ "error": message }),
+        );
+        // Preserve the original `code`/`recoverable` so the frontend's
+        // i18n routing and retry policy still see the underlying cause,
+        // but swap the user-facing message in for the "copy succeeded"
+        // framing — the bare `AppError` text strands the user without
+        // hint that the clipboard write already landed.
+        let cmd_err: CommandError = err.into();
+        return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);
     Ok(())
