@@ -155,15 +155,22 @@ fn release_ctrl_v(
 
     const VK_V: u16 = b'V' as u16;
 
-    // Mirror only the key-downs that actually went through so we don't
-    // re-release V when V-down was never injected (which would surface
-    // as a spurious key-up on the foreground window). The press batch
-    // order is Ctrl-down, V-down, V-up, Ctrl-up.
+    // The press batch order is Ctrl-down (0), V-down (1), V-up (2),
+    // Ctrl-up (3). We undo only the key-downs that actually landed and
+    // were not already paired with their key-up in the same batch:
+    //   sent == 1: Ctrl-down only → release Ctrl.
+    //   sent == 2: Ctrl-down + V-down → release V and Ctrl.
+    //   sent == 3: Ctrl-down + V-down + V-up landed → V is already up,
+    //              we only need Ctrl-up. Re-sending V-up here would burn
+    //              a slot on a redundant event (and could be the only
+    //              slot cleanup gets, leaving Ctrl stuck), plus surface
+    //              an unrequested key-up on the foreground window.
+    //   sent == 4: full success, never reaches this function.
     let mut releases: Vec<INPUT> = Vec::with_capacity(2);
-    if sent >= 2 {
+    if sent == 2 {
         releases.push(key_input(VK_V, KEYEVENTF_KEYUP));
     }
-    if sent >= 1 {
+    if (1..=3).contains(&sent) {
         releases.push(key_input(VK_CONTROL, KEYEVENTF_KEYUP));
     }
     if releases.is_empty() {
