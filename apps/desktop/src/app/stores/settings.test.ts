@@ -67,6 +67,9 @@ beforeEach(() => {
   settingsState.permissions = [];
   settingsState.loaded = false;
   settingsState.errorMessage = undefined;
+  settingsState.partial = false;
+  settingsState.settingsErrorMessage = undefined;
+  settingsState.permissionsErrorMessage = undefined;
 });
 
 describe('refreshSettings', () => {
@@ -88,12 +91,47 @@ describe('refreshSettings', () => {
     expect(settingsState.loaded).toBe(true);
   });
 
-  it('surfaces a localized errorMessage when an IPC call rejects', async () => {
+  it('keeps the successful leg when only the other leg rejects', async () => {
     vi.mocked(getSettings).mockRejectedValue(new Error('backend offline'));
-    vi.mocked(getPermissions).mockResolvedValue([]);
+    vi.mocked(getPermissions).mockResolvedValue([accessibilityPerm('granted')]);
     await refreshSettings();
-    expect(settingsState.errorMessage).toBe('backend offline');
+    // Partial failure must not blanket-clear the side that succeeded —
+    // the permissions list is what onboarding keys off, and surfacing
+    // defaults here would mis-render the accessibility banner.
+    expect(settingsState.permissions).toHaveLength(1);
+    expect(settingsState.settings).toBeUndefined();
+    expect(settingsState.errorMessage).toBeUndefined();
+    expect(settingsState.partial).toBe(true);
+    expect(settingsState.settingsErrorMessage).toBe('backend offline');
+    expect(settingsState.permissionsErrorMessage).toBeUndefined();
     expect(settingsState.loaded).toBe(true);
+  });
+
+  it('surfaces the global errorMessage only when both legs reject', async () => {
+    vi.mocked(getSettings).mockRejectedValue(new Error('settings offline'));
+    vi.mocked(getPermissions).mockRejectedValue(new Error('permissions offline'));
+    await refreshSettings();
+    expect(settingsState.errorMessage).toBe('settings offline');
+    expect(settingsState.partial).toBe(false);
+    expect(settingsState.settingsErrorMessage).toBe('settings offline');
+    expect(settingsState.permissionsErrorMessage).toBe('permissions offline');
+    expect(settingsState.loaded).toBe(true);
+  });
+
+  it('clears stale per-leg errors after a fully successful refresh', async () => {
+    vi.mocked(getSettings).mockRejectedValueOnce(new Error('boom'));
+    vi.mocked(getPermissions).mockResolvedValueOnce([]);
+    await refreshSettings();
+    expect(settingsState.partial).toBe(true);
+    expect(settingsState.settingsErrorMessage).toBe('boom');
+
+    vi.mocked(getSettings).mockResolvedValueOnce(baseSettings());
+    vi.mocked(getPermissions).mockResolvedValueOnce([accessibilityPerm('granted')]);
+    await refreshSettings();
+    expect(settingsState.partial).toBe(false);
+    expect(settingsState.errorMessage).toBeUndefined();
+    expect(settingsState.settingsErrorMessage).toBeUndefined();
+    expect(settingsState.permissionsErrorMessage).toBeUndefined();
   });
 });
 
