@@ -1,4 +1,12 @@
-use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 #[cfg(not(any(unix, windows)))]
 use nagori_core::AppError;
@@ -888,17 +896,32 @@ fn stage_runtime_files(
     StagedRuntimeFiles { socket, token }
 }
 
-/// Build a sibling path like `.nagori.sock.<pid>.<nanos>.cleanup` for
-/// staging. Random-ish enough that two concurrent stagings in the same
-/// process don't collide; if they ever do, `rename(2)` reports the error
-/// and the caller logs and moves on.
+/// Monotonic counter appended to staging filenames so two near-simultaneous
+/// stagings (socket + token in [`stage_runtime_files`], or back-to-back
+/// shutdown/respawn cycles within the same `as_nanos()` tick) never produce
+/// the same suffix. Without it the previous `pid.nanos` form could collide
+/// on hosts whose monotonic clock resolution lags the `SystemTime` granularity
+/// — extremely rare in practice, but a collision means `rename(2)` clobbers
+/// the earlier staging entry. Combined with the still-included `pid` and
+/// `nanos` the resulting suffix is unique within the process and unlikely
+/// to collide across daemons.
+static STAGING_SUFFIX_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Build a sibling path like `.nagori.sock.<pid>.<nanos>.<seq>.cleanup` for
+/// staging. The atomic `<seq>` guarantees no collision between concurrent
+/// stagings in the same process; `<pid>.<nanos>` keeps the suffix unique
+/// across daemons started in the same monotonic tick.
 fn cleanup_staging_path(path: &std::path::Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let name = path.file_name()?.to_string_lossy();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    Some(parent.join(format!(".{name}.{}.{nanos:x}.cleanup", std::process::id())))
+    let seq = STAGING_SUFFIX_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Some(parent.join(format!(
+        ".{name}.{}.{nanos:x}.{seq:x}.cleanup",
+        std::process::id(),
+    )))
 }
 
 #[cfg(unix)]
