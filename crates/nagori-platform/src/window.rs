@@ -25,6 +25,16 @@ pub struct RestoreTarget {
     ///   left auto-paste landing in Nagori's own webview.
     /// - Linux Wayland: always `None`.
     pub native_handle: Option<u64>,
+    /// Owning process id captured alongside [`Self::native_handle`].
+    /// Windows recycles HWNDs aggressively, so a snapshot taken at
+    /// palette-open may resolve to a *different* process by the time we
+    /// try to restore — verifying the current PID (and re-deriving the
+    /// executable path) against the captured ones prevents auto-paste
+    /// from landing in an unrelated window that happened to inherit
+    /// the same HWND value. Always `None` on macOS / Linux because
+    /// neither platform reuses its restore key in a way the foreground
+    /// API can mask.
+    pub snapshot_pid: Option<u32>,
 }
 
 #[async_trait]

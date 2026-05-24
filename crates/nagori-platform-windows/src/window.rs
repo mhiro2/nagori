@@ -80,10 +80,14 @@ impl WindowBehavior for WindowsWindowBehavior {
         let Some(handle) = target.native_handle else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || activate_hwnd_sync(handle))
-            .await
-            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
-        Ok(())
+        let snapshot_pid = target.snapshot_pid;
+        let snapshot_exe = target.source.executable_path.clone();
+        tokio::task::spawn_blocking(move || {
+            activate_hwnd_sync(handle, snapshot_pid, snapshot_exe.as_deref())
+        })
+        .await
+        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?
+        .map_err(nagori_core::AppError::Platform)
     }
 }
 
@@ -139,7 +143,7 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
     // SAFETY: GetForegroundWindow has no parameters and returns a HWND;
     // GetWindowThreadProcessId writes the owning PID through the out
     // pointer to our stack-owned `u32`.
-    let (hwnd, executable_path, window_title) = unsafe {
+    let (hwnd, pid, executable_path, window_title) = unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
             return None;
@@ -150,6 +154,7 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
         }
         (
             hwnd,
+            pid,
             query_process_image_path(pid),
             query_window_title(hwnd),
         )
@@ -177,6 +182,7 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
             executable_path,
         },
         native_handle,
+        snapshot_pid: Some(pid),
     })
 }
 
@@ -186,10 +192,14 @@ const fn capture_restore_target_sync() -> Option<RestoreTarget> {
 }
 
 #[cfg(windows)]
-fn activate_hwnd_sync(handle: u64) {
+fn activate_hwnd_sync(
+    handle: u64,
+    snapshot_pid: Option<u32>,
+    snapshot_exe: Option<&str>,
+) -> std::result::Result<(), String> {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
 
     // SAFETY: round-trip via usize keeps the conversion lossless on
@@ -208,7 +218,43 @@ fn activate_hwnd_sync(handle: u64) {
     unsafe {
         let hwnd = handle as usize as HWND;
         if hwnd.is_null() || IsWindow(hwnd) == 0 {
-            return;
+            return Err("restore target window no longer exists".into());
+        }
+        // Windows recycles HWNDs: the saved handle may now belong to an
+        // unrelated process by the time the user picks an entry. Re-resolve
+        // the owning PID and re-derive the executable path; if either
+        // disagrees with the snapshot, abort instead of pasting into the
+        // wrong process. (Same-process HWND reuse — a new top-level window
+        // taking the same numeric handle within the *same* PID — would
+        // slip past these two checks; the operator-visible payoff would
+        // be the rare case where the original window already closed *and*
+        // the OS happened to hand the integer back to the same process
+        // before the user dismissed the palette. We accept that residual
+        // risk rather than capture window-title / creation-time too, both
+        // of which are themselves volatile mid-session.)
+        if let Some(expected_pid) = snapshot_pid {
+            let mut current_pid: u32 = 0;
+            if GetWindowThreadProcessId(hwnd, &raw mut current_pid) == 0 || current_pid == 0 {
+                return Err("could not resolve restore target owner".into());
+            }
+            if current_pid != expected_pid {
+                return Err(format!(
+                    "restore target hwnd reassigned to a different process (expected pid {expected_pid}, found {current_pid})"
+                ));
+            }
+            if let Some(expected_exe) = snapshot_exe {
+                match query_process_image_path(current_pid) {
+                    Some(current_exe) if current_exe == expected_exe => {}
+                    Some(current_exe) => {
+                        return Err(format!(
+                            "restore target executable changed (expected {expected_exe}, found {current_exe})"
+                        ));
+                    }
+                    None => {
+                        return Err("could not re-resolve restore target executable path".into());
+                    }
+                }
+            }
         }
         // Minimised windows refuse `SetForegroundWindow`; restore first
         // so the user's paste actually lands somewhere visible. We check
@@ -222,10 +268,18 @@ fn activate_hwnd_sync(handle: u64) {
         }
         let _ = SetForegroundWindow(hwnd);
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]
-const fn activate_hwnd_sync(_handle: u64) {}
+#[allow(clippy::unnecessary_wraps)] // signature must match the windows variant
+const fn activate_hwnd_sync(
+    _handle: u64,
+    _snapshot_pid: Option<u32>,
+    _snapshot_exe: Option<&str>,
+) -> std::result::Result<(), String> {
+    Ok(())
+}
 
 #[cfg(windows)]
 unsafe fn query_process_image_path(pid: u32) -> Option<String> {

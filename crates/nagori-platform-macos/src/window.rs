@@ -50,6 +50,7 @@ impl MacosWindowBehavior {
         frontmost_app_sync().map(|front| RestoreTarget {
             source: front.source,
             native_handle: None,
+            snapshot_pid: None,
         })
     }
 }
