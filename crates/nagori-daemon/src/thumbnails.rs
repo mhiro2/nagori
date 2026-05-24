@@ -25,6 +25,8 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
 use image::{
     DynamicImage, ImageEncoder, ImageReader, codecs::jpeg::JpegEncoder, codecs::png::PngEncoder,
     imageops::FilterType,
@@ -47,21 +49,59 @@ pub const MAX_THUMBNAIL_DIMENSION: u32 = 512;
 /// can't dominate the LRU budget.
 pub const MAX_THUMBNAIL_BYTES: usize = 256 * 1024;
 
-/// Concurrency gate for in-flight thumbnail generation.
+/// Default ceiling for simultaneously running thumbnail decodes.
 ///
-/// Frontend layouts that pre-render preview rows can fire several
-/// `nagori-image://thumb/<id>` requests for the same entry within a few
-/// ms. Without de-duplication every miss spawns its own decode, wastes
-/// blocking-pool slots, and may write the same row N times. The gate is
-/// a cheap `HashSet<EntryId>`; insertion returns `true` only for the
-/// first waiter, who owns the generation. Drop guards keep the set
-/// honest across error paths.
-#[derive(Default, Clone)]
-pub(crate) struct ThumbnailGate(Arc<Mutex<HashSet<EntryId>>>);
+/// Each decode can materialise an RGBA buffer up to
+/// `MAX_DECODED_IMAGE_PIXELS` (64M px → ~256 MiB) before the resize +
+/// re-encode step trims it. Capping the global concurrency keeps a
+/// burst of distinct-entry misses (e.g. scrolling an image-heavy
+/// history) from starving the blocking pool or pushing peak RSS into
+/// the gigabyte range. The value is intentionally conservative; raising
+/// it past the host CPU count yields little throughput because the
+/// per-decode work is CPU-bound.
+pub(crate) const DEFAULT_THUMBNAIL_CONCURRENCY: usize = 4;
+
+/// Concurrency control for in-flight thumbnail generation.
+///
+/// Combines two distinct limits because they fail differently:
+///
+/// * **Per-entry dedupe.** Frontend layouts that pre-render preview rows
+///   can fire several `nagori-image://thumb/<id>` requests for the same
+///   entry within a few ms. The `HashSet<EntryId>` returns success only
+///   for the first waiter, who owns the generation; subsequent callers
+///   skip the spawn entirely and pick up the cached row on the next
+///   fetch.
+/// * **Global decode cap.** Per-entry dedupe does nothing when the
+///   misses target *different* entries (image-heavy scroll, prefetch).
+///   The `Semaphore` bounds the total number of concurrent decoders so
+///   a burst can't pile up unbounded `tokio::spawn` tasks each ready to
+///   allocate hundreds of MiB.
+#[derive(Clone)]
+pub(crate) struct ThumbnailGate {
+    in_flight: Arc<Mutex<HashSet<EntryId>>>,
+    permits: Arc<Semaphore>,
+}
+
+impl Default for ThumbnailGate {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_THUMBNAIL_CONCURRENCY)
+    }
+}
 
 impl ThumbnailGate {
+    pub(crate) fn with_capacity(max_concurrent: usize) -> Self {
+        // A zero-capacity semaphore would deadlock every acquire, which
+        // is never what the caller wants for a derived cache. Clamp to
+        // at least one decoder.
+        let permits = max_concurrent.max(1);
+        Self {
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+            permits: Arc::new(Semaphore::new(permits)),
+        }
+    }
+
     pub(crate) fn try_acquire(&self, id: EntryId) -> Option<ThumbnailGateGuard> {
-        let mut set = self.0.lock().ok()?;
+        let mut set = self.in_flight.lock().ok()?;
         if set.insert(id) {
             Some(ThumbnailGateGuard {
                 gate: self.clone(),
@@ -70,6 +110,19 @@ impl ThumbnailGate {
         } else {
             None
         }
+    }
+
+    /// Wait for a slot in the global decode pool. The permit is released
+    /// when dropped, so callers hold it for the duration of decode +
+    /// `put_thumbnail` and not a moment longer.
+    ///
+    /// The semaphore is never closed, so `acquire_owned` cannot fail in
+    /// practice; the error variant is mapped onto `AppError::Storage` so
+    /// the rare cancellation case still surfaces in the spawn-site log.
+    pub(crate) async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.permits.clone().acquire_owned().await.map_err(|err| {
+            AppError::Storage(format!("thumbnail concurrency semaphore closed: {err}"))
+        })
     }
 }
 
@@ -80,7 +133,7 @@ pub(crate) struct ThumbnailGateGuard {
 
 impl Drop for ThumbnailGateGuard {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.gate.0.lock() {
+        if let Ok(mut set) = self.gate.in_flight.lock() {
             set.remove(&self.id);
         }
     }
@@ -281,6 +334,40 @@ fn fit_within(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The global decode cap and the per-entry dedupe gate are
+    /// independent: a single semaphore permit must still be honoured
+    /// even if the caller already holds a dedupe guard for a distinct
+    /// entry id. This guards against a future refactor that confuses
+    /// the two acquire paths.
+    #[tokio::test]
+    async fn thumbnail_gate_serialises_decodes_past_capacity() {
+        let gate = ThumbnailGate::with_capacity(2);
+        let p1 = gate.acquire_permit().await.unwrap();
+        let p2 = gate.acquire_permit().await.unwrap();
+        // Third acquire must block until one of the held permits drops.
+        let pending = gate.acquire_permit();
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
+                .await
+                .is_err(),
+            "third permit must wait while two are outstanding",
+        );
+        drop(p1);
+        let p3 = pending.await.expect("permit becomes available");
+        drop(p2);
+        drop(p3);
+    }
+
+    /// Passing `0` for `max_concurrent` would otherwise deadlock every
+    /// generator forever; the clamp keeps at least one decoder slot.
+    #[tokio::test]
+    async fn thumbnail_gate_clamps_zero_capacity_to_one() {
+        let gate = ThumbnailGate::with_capacity(0);
+        let permit = gate.acquire_permit().await.unwrap();
+        drop(permit);
+    }
 
     #[test]
     fn fit_within_preserves_aspect_ratio() {

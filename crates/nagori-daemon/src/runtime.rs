@@ -671,11 +671,25 @@ impl NagoriRuntime {
         };
         let store = self.store.clone();
         let settings_rx = self.settings_rx.clone();
+        let gate = self.thumbnail_gate.clone();
         tokio::spawn(async move {
             // Hold the gate guard across the whole generation so a
             // second request that beats us to the cache lookup still
             // observes the in-flight slot.
             let _guard = guard;
+            // Bound the global decode concurrency before pulling bytes
+            // off disk or touching the blocking pool. Per-entry dedupe
+            // (the gate guard above) does nothing for misses that span
+            // distinct entries — a prefetch sweep or image-heavy scroll
+            // would otherwise pile up `tokio::spawn` tasks each ready to
+            // allocate hundreds of MiB for the decode buffer.
+            let _permit = match gate.acquire_permit().await {
+                Ok(permit) => permit,
+                Err(err) => {
+                    tracing::warn!(error = %err, entry_id = %id, "thumbnail_permit_unavailable");
+                    return;
+                }
+            };
             match thumbnails::generate_thumbnail(&store, id).await {
                 Ok(Some(_)) => {
                     let budget = settings_rx.borrow().max_thumbnail_total_bytes;
