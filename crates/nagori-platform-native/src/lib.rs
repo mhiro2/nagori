@@ -14,10 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nagori_ai::{AiProvider, LocalAiProvider};
-#[cfg(any(
-    target_os = "linux",
-    not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
-))]
 use nagori_core::AppError;
 use nagori_core::Result;
 use nagori_daemon::NagoriRuntime;
@@ -119,7 +115,10 @@ fn build_native_runtime_inner(
         MacosWindowBehavior,
     };
 
-    let clipboard = Arc::new(MacosClipboard::new()?);
+    // Annotate the platform error with macOS-specific doctor guidance.
+    // Symmetric to the Linux / Windows branches so every host target funnels
+    // clipboard-init failures through the same diagnostic hint.
+    let clipboard = Arc::new(MacosClipboard::new().map_err(annotate_macos_clipboard_error)?);
     let clipboard_reader: Arc<dyn ClipboardReader> = clipboard.clone();
     let window: Arc<dyn WindowBehavior> = Arc::new(MacosWindowBehavior::new());
     let preview: Arc<dyn PreviewController> = Arc::new(MacosPreviewController::new());
@@ -148,7 +147,10 @@ fn build_native_runtime_inner(
         WindowsPreviewController, WindowsWindowBehavior,
     };
 
-    let clipboard = Arc::new(WindowsClipboard::new()?);
+    // Annotate the platform error with Windows-specific doctor guidance.
+    // Symmetric to the Linux / macOS branches so every host target funnels
+    // clipboard-init failures through the same diagnostic hint.
+    let clipboard = Arc::new(WindowsClipboard::new().map_err(annotate_windows_clipboard_error)?);
     let clipboard_reader: Arc<dyn ClipboardReader> = clipboard.clone();
     let window: Arc<dyn WindowBehavior> = Arc::new(WindowsWindowBehavior::new());
     let preview: Arc<dyn PreviewController> = Arc::new(WindowsPreviewController::default());
@@ -249,13 +251,53 @@ fn annotate_linux_clipboard_error(err: AppError) -> AppError {
     const HINT: &str = "Nagori requires a Wayland session whose compositor supports the \
          `wl_data_control` protocol (wlroots-based compositors such as \
          sway/Hyprland qualify; GNOME Wayland currently does not). \
-         X11 is not supported.";
+         X11 is not supported. Run `nagori doctor` for a diagnostic dump.";
     match err {
         AppError::Unsupported(message) => AppError::Unsupported(format!(
             "could not initialise the Linux clipboard adapter: {message}. {HINT}"
         )),
         other => AppError::Platform(format!(
             "could not initialise the Linux clipboard adapter: {other}. {HINT}"
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn annotate_macos_clipboard_error(err: AppError) -> AppError {
+    // Symmetric with the Linux annotator: keep the original `AppError`
+    // variant so the CLI's exit-code mapping (`Unsupported` → 7,
+    // `Platform` → 8) survives the wrap, and tack on a uniform doctor
+    // pointer so the user sees the same actionable hint regardless of
+    // host. The macOS pasteboard initialiser rarely fails in practice,
+    // so the hint stays generic — the doctor surface is the canonical
+    // place to dig further.
+    const HINT: &str = "Run `nagori doctor` for a diagnostic dump of the macOS pasteboard \
+         adapter (accessibility, automation, login-item state).";
+    match err {
+        AppError::Unsupported(message) => AppError::Unsupported(format!(
+            "could not initialise the macOS clipboard adapter: {message}. {HINT}"
+        )),
+        other => AppError::Platform(format!(
+            "could not initialise the macOS clipboard adapter: {other}. {HINT}"
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn annotate_windows_clipboard_error(err: AppError) -> AppError {
+    // Symmetric with the Linux / macOS annotators: preserve the original
+    // `AppError` variant so the CLI's exit-code mapping stays stable,
+    // and append the same doctor pointer the other host targets emit.
+    // Windows clipboard-open failures are usually UIPI / elevated-target
+    // collisions; the doctor surface dumps the relevant diagnostics.
+    const HINT: &str = "Run `nagori doctor` for a diagnostic dump of the Windows clipboard \
+         adapter (UIPI, sequence-number access, foreground-app probe).";
+    match err {
+        AppError::Unsupported(message) => AppError::Unsupported(format!(
+            "could not initialise the Windows clipboard adapter: {message}. {HINT}"
+        )),
+        other => AppError::Platform(format!(
+            "could not initialise the Windows clipboard adapter: {other}. {HINT}"
         )),
     }
 }
