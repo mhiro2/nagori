@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use core_foundation::base::{CFType, TCFType};
+use core_foundation::base::{CFRelease, CFType, TCFType};
 use core_foundation::string::CFString;
 use nagori_core::{Result, SourceApp};
 use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
@@ -346,12 +346,4 @@ mod ax_ffi {
             timeout_in_seconds: f32,
         ) -> AXError;
     }
-}
-
-// `CFRelease` is declared inline rather than pulled from `core-foundation-sys`
-// to keep the explicit dependency surface to the higher-level
-// `core-foundation` crate already used above for safe CFType handling.
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(cf: *const core::ffi::c_void);
 }
