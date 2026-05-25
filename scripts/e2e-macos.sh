@@ -347,11 +347,29 @@ step "file-list round-trip via NSPasteboardTypeFileURL"
 URI_FILE="${WORK_DIR}/file url-a.txt"
 printf "macos-furl-content" > "${URI_FILE}"
 # No pre-step sentinel: the previous "image copy-back" step already pushed a
-# distinct change-count onto the pasteboard, and `osascript "set the
-# clipboard to ..."` will land its own change-count whether or not the slot
-# is currently text. The copy-back sentinel below is what actually proves
-# `nagori copy` was not a no-op.
-osascript -e "set the clipboard to (POSIX file \"${URI_FILE}\")"
+# distinct change-count onto the pasteboard, and writing a file URL via
+# NSPasteboard will land its own change-count regardless of the prior slot
+# type. The copy-back sentinel below is what actually proves `nagori copy`
+# was not a no-op. Drive AppKit directly from Swift instead of
+# `osascript "set the clipboard to (POSIX file ...)"` because the
+# AppleScript path goes Apple Events -> System Events -> pasteboard, which
+# has been observed to race the daemon's capture loop on macos-26 runners.
+PUSH_FURL_SWIFT="${WORK_DIR}/push_furl.swift"
+cat > "${PUSH_FURL_SWIFT}" <<'SWIFT'
+import AppKit
+guard CommandLine.arguments.count == 2 else {
+    FileHandle.standardError.write(Data("expected <path> arg\n".utf8))
+    exit(2)
+}
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+let pb = NSPasteboard.general
+pb.clearContents()
+exit(pb.writeObjects([url as NSURL]) ? 0 : 1)
+SWIFT
+if ! swift "${PUSH_FURL_SWIFT}" "${URI_FILE}" >/dev/null 2>&1; then
+  echo "failed to push file URL onto NSPasteboard via swift" >&2
+  exit 1
+fi
 
 FURL_ENTRY_ID=""
 FURL_LIST_JSON=""
