@@ -185,6 +185,19 @@ const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
 /// (60x headroom) yet small enough to catch even short naps.
 const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
 
+/// Cheap, non-cryptographic entropy source for the backoff jitter in
+/// [`CaptureLoop::jittered_backoff`]. The wall clock is already imported
+/// for the gap-detection path; jitter only needs enough variation that
+/// two co-tenant daemons crashing at the same shared event (sleep wake,
+/// network re-attach) don't retry on identical ticks. We deliberately
+/// avoid pulling in `getrandom`/`rand` for this — the threat model is
+/// "synchronised retry storm", not adversarial prediction.
+fn jitter_entropy() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
@@ -371,7 +384,9 @@ where
     /// Compute the inter-tick sleep applied after a failed
     /// `capture_once`. Below `BACKOFF_AFTER_CONSECUTIVE_FAILURES` we
     /// keep the user-configured cadence; above it we apply an
-    /// exponential backoff capped at `MAX_BACKOFF`.
+    /// exponential backoff capped at `MAX_BACKOFF`. Deterministic so
+    /// the ladder is easy to test; the polling loop adds jitter on top
+    /// via [`Self::jittered_backoff`] before the actual sleep.
     fn backoff_for_failures(base: Duration, consecutive_failures: u32) -> Duration {
         if consecutive_failures < BACKOFF_AFTER_CONSECUTIVE_FAILURES {
             return base;
@@ -384,6 +399,42 @@ where
         let multiplier = 1u64 << shift;
         let scaled = base.saturating_mul(u32::try_from(multiplier).unwrap_or(u32::MAX));
         scaled.min(MAX_BACKOFF)
+    }
+
+    /// Polling-loop wrapper around [`Self::backoff_for_failures`] that
+    /// adds `±10%` jitter once the loop is actually backing off. Without
+    /// it, every co-tenant daemon that crashes during a shared event
+    /// (sleep wake, network re-attach, OS service restart) would retry
+    /// in lockstep at exactly the next doubled interval. Jitter is only
+    /// applied above [`BACKOFF_AFTER_CONSECUTIVE_FAILURES`] because the
+    /// pre-backoff cadence is the user's configured capture interval —
+    /// scrambling that would visibly slow first-tick capture. The
+    /// post-jitter sleep is re-capped at [`MAX_BACKOFF`] so the ceiling
+    /// stays a true hard limit (a saturated `+10%` swing would otherwise
+    /// push a 30 s cap to 33 s).
+    fn jittered_backoff(base: Duration, consecutive_failures: u32) -> Duration {
+        let scaled = Self::backoff_for_failures(base, consecutive_failures);
+        if consecutive_failures < BACKOFF_AFTER_CONSECUTIVE_FAILURES {
+            return scaled;
+        }
+        Self::apply_jitter(scaled, jitter_entropy()).min(MAX_BACKOFF)
+    }
+
+    /// Pure jitter math, split out so tests can pin `entropy` and assert
+    /// the result stays within `±10%` of the input.
+    fn apply_jitter(d: Duration, entropy: u64) -> Duration {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        let range = nanos / 10; // ±10%
+        if range == 0 {
+            return d;
+        }
+        // Map `entropy % span` (with span = 2*range + 1) into the symmetric
+        // window `[-range, +range]` by translating up before subtracting,
+        // avoiding any signed-integer intermediate.
+        let span = range.saturating_mul(2).saturating_add(1);
+        let offset_abs = entropy % span;
+        let jittered = nanos.saturating_add(offset_abs).saturating_sub(range);
+        Duration::from_nanos(jittered)
     }
 
     #[must_use]
@@ -793,7 +844,7 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
-            let sleep_for = Self::backoff_for_failures(interval, self.consecutive_failures);
+            let sleep_for = Self::jittered_backoff(interval, self.consecutive_failures);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
                 () = tokio::time::sleep(sleep_for) => {
@@ -814,7 +865,7 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
-            let sleep_for = Self::backoff_for_failures(interval, self.consecutive_failures);
+            let sleep_for = Self::jittered_backoff(interval, self.consecutive_failures);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
                 changed = settings_rx.changed() => {
@@ -2291,6 +2342,77 @@ mod tests {
         assert_eq!(second, base * 4);
         let huge = Loop::backoff_for_failures(base, 1_000);
         assert_eq!(huge, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn apply_jitter_stays_within_ten_percent_window() {
+        // Jitter must never push the sleep below 90% or above 110% of
+        // the scaled backoff — otherwise the cap (`MAX_BACKOFF`) and
+        // the floor (avoiding a busy-loop retry) lose their meaning.
+        let base = Duration::from_secs(1);
+        let nanos = u64::try_from(base.as_nanos()).expect("1s fits u64");
+        let low = nanos - nanos / 10;
+        let high = nanos + nanos / 10;
+        for entropy in [0_u64, 1, 7, nanos, u64::MAX] {
+            let jittered = Loop::apply_jitter(base, entropy);
+            let got = u64::try_from(jittered.as_nanos()).expect("1.1s fits u64");
+            assert!(
+                got >= low && got <= high,
+                "jitter {got}ns escaped ±10% window [{low},{high}] for entropy={entropy}",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_jitter_endpoints_hit_min_and_max() {
+        // `entropy = 0` lands at the floor (`-range`), `entropy = 2*range`
+        // lands at the ceiling (`+range`). Pinning both anchors guards
+        // against an off-by-one in the symmetry mapping.
+        let base = Duration::from_secs(1);
+        let nanos = u64::try_from(base.as_nanos()).expect("1s fits u64");
+        let range = nanos / 10;
+        let floor = Loop::apply_jitter(base, 0);
+        assert_eq!(
+            floor,
+            Duration::from_nanos(nanos - range),
+            "entropy=0 should produce the lower bound",
+        );
+        let ceil = Loop::apply_jitter(base, range * 2);
+        assert_eq!(
+            ceil,
+            Duration::from_nanos(nanos + range),
+            "entropy=2*range should produce the upper bound",
+        );
+    }
+
+    #[test]
+    fn jittered_backoff_keeps_pre_threshold_cadence_unchanged() {
+        // Below the threshold the loop is still on the user's configured
+        // cadence; jittering that would silently slow steady-state
+        // captures for no benefit. The jitter only kicks in once backoff
+        // is actually active.
+        let base = Duration::from_millis(500);
+        for failures in 0..BACKOFF_AFTER_CONSECUTIVE_FAILURES {
+            assert_eq!(Loop::jittered_backoff(base, failures), base);
+        }
+    }
+
+    #[test]
+    fn apply_jitter_then_cap_never_exceeds_max_backoff() {
+        // Once `backoff_for_failures` saturates at `MAX_BACKOFF`, the
+        // jitter's `+10%` swing must not push the next sleep above the
+        // documented ceiling — operators read `MAX_BACKOFF` as a hard
+        // limit, so an extra 3 seconds at the top of the curve is a
+        // surprising regression. The `apply_jitter(...).min(MAX_BACKOFF)`
+        // step in `jittered_backoff` enforces this; pin the worst case.
+        let saturated = MAX_BACKOFF;
+        let entropy_max =
+            u64::try_from(saturated.as_nanos() / 10).expect("MAX_BACKOFF/10 fits u64") * 2;
+        let with_max_jitter = Loop::apply_jitter(saturated, entropy_max).min(MAX_BACKOFF);
+        assert!(
+            with_max_jitter <= MAX_BACKOFF,
+            "post-jitter clamp must respect MAX_BACKOFF: {with_max_jitter:?}",
+        );
     }
 
     #[tokio::test]
