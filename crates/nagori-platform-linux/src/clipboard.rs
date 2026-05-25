@@ -1216,7 +1216,7 @@ mod tests {
     #[test]
     fn snapshot_and_sequence_only_paths_agree_on_small_clip() {
         let body = b"under the cap".to_vec();
-        let mut snapshot = MultiReadState::new(Some(1024), PIPE_CHUNK, 1024);
+        let mut snapshot = MultiReadState::new(Some(1024), 1024, 1024);
         let _ = snapshot
             .read_pipe(&mut io::Cursor::new(body.clone()))
             .unwrap();
