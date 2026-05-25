@@ -10,7 +10,7 @@ desktop shell mirrors the same matrix under
 
 | Platform               | Desktop app | CLI daemon | Capture   | Copy back | Auto-paste        | Release bundle                                |
 | ---------------------- | ----------- | ---------- | --------- | --------- | ----------------- | --------------------------------------------- |
-| macOS (arm64 / x86_64) | Supported   | Supported  | Supported | Supported | Supported         | Yes (`.app` / `.dmg`, in-app update probe)    |
+| macOS (arm64 / x86_64) | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned `.app` / `.dmg`, in-app update probe) |
 | Windows (x86_64)       | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned NSIS, in-app update probe)      |
 | Linux Wayland (x86_64) | Supported   | Supported  | Supported | Supported | Supported (note*) | Yes (`deb` + `AppImage`, in-app update probe) |
 | Linux X11              | Unsupported | Unsupported | —        | —         | —                 | n/a                                           |
@@ -37,8 +37,10 @@ read-only — users upgrade by following the GitHub release link — and
 the wording differs by install medium: bundles that the updater could
 swap in place (`.app` / `.dmg`, NSIS, `AppImage`) show "View release",
 while `deb` installs show "Download manually" to reflect that the
-GitHub artefact has to be re-installed by hand. The NSIS bundle is not
-yet Authenticode-signed, so SmartScreen warns on first launch.
+GitHub artefact has to be re-installed by hand. The macOS `.app` /
+`.dmg` are not codesigned (Gatekeeper warns on first launch) and the
+NSIS bundle is not Authenticode-signed (SmartScreen warns on first
+launch).
 
 ## Linux requirements
 
@@ -143,6 +145,18 @@ Known limitations:
 
 ## macOS notes
 
+Supported environment:
+
+- macOS 26 (Tahoe) or later on Apple Silicon and Intel. The bundle
+  declares `LSMinimumSystemVersion = 26.0` via
+  `bundle.macOS.minimumSystemVersion` in `tauri.conf.json`, so the
+  installer refuses to launch on earlier releases. The 0.0.x line is
+  validated only against Tahoe — auto-paste in particular routes its
+  ⌘V synthesis around `TSMGetInputSourceProperty`, which trips
+  `dispatch_assert_queue(main)` and aborts from non-main threads on
+  macOS 26+, so the workaround is required there but unnecessary on
+  earlier releases.
+
 The desktop shell runs as an `NSApplicationActivationPolicyAccessory`
 application: the menu-bar tray is the primary entry point and no Dock
 icon is shown, matching the per-window `skipTaskbar: true` intent of
@@ -157,3 +171,11 @@ window. The startup fallback window (shown when `AppState::try_new`
 fails) also keeps the default `Regular` policy so the error window
 remains reachable even though tray installation is skipped in that
 branch.
+
+Known limitations:
+
+- The release workflow ships unsigned `.app` / `.dmg` bundles.
+  Gatekeeper warns on first launch — right-click → **Open**, or run
+  `xattr -d com.apple.quarantine /Applications/Nagori.app` to clear
+  the quarantine attribute. Codesigning and notarization are not on
+  the roadmap.

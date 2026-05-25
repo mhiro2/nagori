@@ -1,9 +1,9 @@
 # Release process
 
 This document captures the workflow `.github/workflows/release.yaml`
-expects to run against and the one-time setup needed for an end-to-end
-signed release. The user-facing surface — install media, platform
-support, the in-app updater — is described in
+expects to run against and the one-time setup needed for a release
+with signed updater artifacts. The user-facing surface — install
+media, platform support, the in-app updater — is described in
 [`docs/platforms.md`](./platforms.md) and in
 [ARCHITECTURE.md §16 → Updater](../ARCHITECTURE.md#16-desktop-shell-integration).
 
@@ -13,6 +13,10 @@ When a `v*` tag is pushed, `release.yaml` builds one bundle row per
 matrix entry and uploads each artifact (plus an entry in the shared
 `latest.json` updater manifest) to a GitHub draft release. After every
 row finishes, the `publish` job flips the draft to a public release.
+`0.0.x` tags are marked as GitHub pre-releases — the workflow inspects
+the tag name and passes `prerelease: true` to `tauri-action` while
+`0.0.*` is in effect, then switches back to `false` once `>= 0.1.0`
+tags ship.
 
 | Target                          | Bundles        | Probe verdict shown in Settings → Advanced     |
 | ------------------------------- | -------------- | ---------------------------------------------- |
@@ -72,10 +76,9 @@ variables → Actions**:
 | -------------------------------------- | ------------------------------------------- | --------------------------- |
 | `TAURI_SIGNING_PRIVATE_KEY`            | Private half of the updater keypair         | Every target (mandatory)    |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`   | Password used when generating the keypair   | Every target (mandatory)    |
-| `APPLE_CERTIFICATE`                    | Base64 Developer ID `.p12`                  | macOS signing               |
-| `APPLE_CERTIFICATE_PASSWORD`           | Password for the `.p12`                     | macOS signing               |
-| `APPLE_SIGNING_IDENTITY`               | Developer ID identity string                | macOS signing               |
-| `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | Notarization credentials           | macOS notarization          |
+
+macOS code signing & notarization is intentionally not wired up — the
+`.app` / `.dmg` ship unsigned and Gatekeeper warns on first launch.
 
 Windows Authenticode signing is not wired up yet — until an EV cert
 lands, SmartScreen warns on first launch.

@@ -31,16 +31,47 @@
 
 ## Install
 
-| Platform               | Bundle                                                       |
-| ---------------------- | ------------------------------------------------------------ |
-| macOS (arm64 / x86_64) | `.app` / `.dmg` from [GitHub Releases](https://github.com/mhiro2/nagori/releases) |
-| Windows (x86_64)       | Unsigned NSIS installer (SmartScreen warns on first launch)  |
-| Linux Wayland (x86_64) | `.deb` and `AppImage`                                        |
+> **Canary / pre-1.0.** The `0.0.x` line is a dogfooding canary. Bundles
+> are published as GitHub pre-releases and the in-app updater only
+> probes for new versions — it does not auto-install. Expect rough
+> edges; see [Known limitations](#known-limitations) before installing.
 
-Linux additionally requires the `wtype` binary on `$PATH` for auto-paste and a
-Wayland compositor that exposes `wlr_data_control` or `ext_data_control` (sway,
-Hyprland, KDE Plasma 5.27+, …). See [`docs/platforms.md`](./docs/platforms.md)
-for the full compatibility matrix and troubleshooting.
+| Platform                  | Bundle                                                       |
+| ------------------------- | ------------------------------------------------------------ |
+| macOS 26+ (arm64 / x86_64) | Unsigned `.app` / `.dmg` from [GitHub Releases](https://github.com/mhiro2/nagori/releases) (Gatekeeper warns on first launch) |
+| Windows 10 1809+ / 11 (x86_64) | Unsigned NSIS installer (SmartScreen warns on first launch) |
+| Linux Wayland (x86_64)    | `.deb` and `AppImage`                                        |
+
+macOS bundles declare `LSMinimumSystemVersion = 26.0` and the installer
+refuses to launch on earlier releases — the 0.0.x line is validated
+only against Tahoe. Linux additionally requires the `wtype` binary on
+`$PATH` for auto-paste and a Wayland compositor that exposes
+`wlr_data_control` or `ext_data_control` (sway, Hyprland, KDE Plasma
+5.27+, …). See [`docs/platforms.md`](./docs/platforms.md) for the full
+compatibility matrix and troubleshooting.
+
+### Known limitations
+
+- **macOS `.app` / `.dmg` are unsigned.** Gatekeeper warns on first
+  launch; right-click → **Open** (or `xattr -d com.apple.quarantine`)
+  to proceed.
+- **Windows NSIS bundle is unsigned.** SmartScreen warns on first
+  launch until an Authenticode EV certificate is in place; choose
+  **More info → Run anyway** to proceed.
+- **Linux GNOME Wayland is not supported.** GNOME exposes neither
+  `wlr_data_control` nor `ext_data_control`, so the clipboard cannot
+  be captured. X11 sessions are also out of scope.
+- **Linux global hotkeys do not register on pure Wayland.**
+  `tauri-plugin-global-shortcut` is X11-only upstream — toggle the
+  palette from the tray icon instead.
+- **In-app updater is read-only.** The desktop shell probes
+  `latest.json` and surfaces "View release" / "Download manually"
+  copy, but does not call `download_and_install`. Upgrade by
+  downloading the bundle from the GitHub release page.
+- **Auto-paste fallback is manual.** When the synthesised Cmd/Ctrl+V
+  fails (Accessibility revoked, `wtype` missing, restore-target lost,
+  …), the entry is still copied to the clipboard and a `paste_failed`
+  toast prompts you to paste manually — there is no automatic retry.
 
 ## Usage
 

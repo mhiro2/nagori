@@ -1376,9 +1376,11 @@ change.
   half lives in the GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY`
   / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the public half is committed
   into `tauri.conf.json`. `release.yaml` fails fast when that pubkey
-  is empty so an unverifiable bundle never ships. The Windows NSIS
-  bundle is not yet Authenticode-signed; SmartScreen warns on first
-  launch even though the Tauri-side `minisign` signature verifies.
+  is empty so an unverifiable bundle never ships. The macOS `.app` /
+  `.dmg` are not codesigned (Gatekeeper warns on first launch) and the
+  Windows NSIS bundle is not Authenticode-signed (SmartScreen warns on
+  first launch), even though the Tauri-side `minisign` signature
+  verifies on every platform.
 
 ---
 

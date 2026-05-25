@@ -48,7 +48,7 @@ jobs:
           - os: macos-26
             target: aarch64-apple-darwin
             bundles: app,dmg
-          - os: macos-26
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             bundles: app,dmg
           - os: ubuntu-latest
@@ -60,6 +60,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
+      - name: Decide pre-release flag
+        # `0.0.x` is the dogfooding canary line — mark the GitHub
+        # release as a pre-release so tooling that follows
+        # "latest stable" doesn't pick it up. Anything `>=0.1.0` is
+        # treated as a regular release.
+        id: prerelease
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          case "${TAG}" in
+            0.0.*) echo "value=true" >> "${GITHUB_OUTPUT}" ;;
+            *)     echo "value=false" >> "${GITHUB_OUTPUT}" ;;
+          esac
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install Rust toolchain
@@ -125,22 +137,21 @@ jobs:
           # and add as repo secrets to enable signed updates.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing & notarization. Leave any unset to ship an
-          # unsigned bundle for that platform — Gatekeeper will warn on first
-          # launch. See docs/release.md for the full secret list.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
+          # `tauri-action` defaults to `npm run tauri` but this repo is
+          # pnpm-only (`pnpm-workspace.yaml` at the root, no per-package
+          # lockfile under `apps/desktop`), so the auto-detected manager
+          # falls back to npm and `npm run tauri` fails with
+          # `Missing script: "tauri"`. Invoke the CLI through pnpm exec
+          # directly so the binary resolves via the workspace install
+          # the previous step already populated.
+          tauriScript: pnpm exec tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.value }}
           includeRelease: true
           includeUpdaterJson: true
 
