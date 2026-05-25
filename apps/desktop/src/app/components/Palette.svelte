@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
 
   import { closePalette, openSettingsWindow } from '../lib/commands';
   import { buildBindings, resolveAction } from '../lib/keybindings';
@@ -81,22 +81,34 @@
   // Debounce so rapid arrow-key navigation across a 50-row list doesn't fire
   // a `get_entry_preview` IPC per row. Only the row the user settles on
   // crosses the bridge.
+  //
+  // Cleanup lives in `onDestroy`, not in the effect's return: the effect can
+  // re-run on unrelated reactive ticks (e.g. `currentSelection()` returning
+  // a fresh object with the same id), and tying the cleanup to the effect
+  // would clear the in-flight timer before bailing on the unchanged key —
+  // leaving no pending hydrate at all. With the effect-scoped cleanup
+  // moved out, an unchanged `(id, query)` is a no-op and the previously
+  // armed timer keeps running.
   const PREVIEW_DEBOUNCE_MS = 60;
   let previewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastPreviewKey: string | undefined;
   $effect(() => {
     const id = selected?.id;
     const query = searchState.query;
+    const key = `${id ?? ''}\0${query}`;
+    if (key === lastPreviewKey) return;
+    lastPreviewKey = key;
     if (previewDebounceTimer !== undefined) clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
       previewDebounceTimer = undefined;
       void hydratePreview(id, query);
     }, PREVIEW_DEBOUNCE_MS);
-    return () => {
-      if (previewDebounceTimer !== undefined) {
-        clearTimeout(previewDebounceTimer);
-        previewDebounceTimer = undefined;
-      }
-    };
+  });
+  onDestroy(() => {
+    if (previewDebounceTimer !== undefined) {
+      clearTimeout(previewDebounceTimer);
+      previewDebounceTimer = undefined;
+    }
   });
 
   const handleInput = (next: string): void => {
