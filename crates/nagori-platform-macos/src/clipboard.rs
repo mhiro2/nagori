@@ -6,9 +6,11 @@ use arboard::Clipboard;
 use async_trait::async_trait;
 #[cfg(target_os = "macos")]
 use image::{ImageEncoder, ImageReader, codecs::png::PngEncoder};
+#[cfg(target_os = "macos")]
+use nagori_core::MAX_DECODED_IMAGE_PIXELS;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
+    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
     StoredClipboardRepresentation,
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
