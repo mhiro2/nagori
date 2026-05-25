@@ -228,9 +228,15 @@ pub struct CaptureLoop<R, E, A> {
     /// `CLOCK_UPTIME_RAW` and freezes during sleep — see the
     /// `RESYNC_GAP_THRESHOLD` doc comment for details.
     last_tick_at: Option<SystemTime>,
-    /// Content hash of the most recent snapshot we observed (captured or
-    /// otherwise). Used to confirm a post-resync sequence collision is a
-    /// genuine duplicate before re-inserting the same content.
+    /// Representation-set hash of the most recent snapshot we observed
+    /// (captured or otherwise). Used to confirm a post-resync sequence
+    /// collision is a genuine duplicate before re-inserting the same
+    /// content. Mirrors the storage dedupe key (`representation_set_hash`
+    /// in `entries`), with a fallback to the primary content hash for
+    /// snapshot-less entries — so a wake-gap that lands two snapshots
+    /// with the same primary text but different HTML/RTF alternatives
+    /// is not silently squelched here before storage gets to record
+    /// them as distinct rows.
     last_content_hash: Option<String>,
     /// One-shot flag that survives across one tick boundary. When set, the
     /// next `capture_once` invocation bypasses the cheap sequence-based
@@ -517,7 +523,7 @@ where
             let snapshot = self.reader.current_snapshot().await?;
             self.last_sequence = Some(snapshot.sequence.clone());
             if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                self.last_content_hash = Some(entry.metadata.content_hash.value);
+                self.last_content_hash = Some(effective_dedupe_hash(&entry));
             }
             self.pristine = false;
             return Ok(None);
@@ -644,14 +650,17 @@ where
         // Wake-gap content cross-check: if a sleep gap forced the body read
         // and the resulting hash matches the last captured content, treat
         // the changeCount nudge as spurious and skip without inserting.
-        // Refresh `last_content_hash` either way so subsequent gaps still
-        // have something to compare against.
-        if force_content_check
-            && self.last_content_hash.as_deref() == Some(entry.metadata.content_hash.value.as_str())
-        {
+        // Compare via the same representation-set hash the storage layer
+        // uses for dedupe so a snapshot whose primary text matches the
+        // last copy but whose HTML/RTF alternatives differ is still
+        // forwarded — otherwise storage never gets a chance to record
+        // it as a distinct row. Refresh `last_content_hash` either way
+        // so subsequent gaps still have something to compare against.
+        let dedupe_hash = effective_dedupe_hash(&entry);
+        if force_content_check && self.last_content_hash.as_deref() == Some(dedupe_hash.as_str()) {
             return Ok(None);
         }
-        self.last_content_hash = Some(entry.metadata.content_hash.value.clone());
+        self.last_content_hash = Some(dedupe_hash);
         if !settings.capture_kinds.contains(&entry.content_kind()) {
             info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
             let _ = self
@@ -824,6 +833,32 @@ where
             }
         }
     }
+}
+
+/// Effective dedupe key for the wake-gap cross-check.
+///
+/// Approximates the storage layer's `representation_set_hash` dedupe:
+/// when the entry has a captured representation set, use its set hash;
+/// otherwise (CLI `add_text`, synthesised rows) fall back to the
+/// primary content hash. Without this fallback agreement, the loop
+/// would key on `content_hash` while storage keys on
+/// `representation_set_hash` and a snapshot whose alternatives differ
+/// from the last copy would be silently skipped before storage saw it.
+///
+/// The hash is sampled before downstream secret-classification (which
+/// may clear alternatives and reset `representation_set_hash` back to
+/// `content_hash`) and the budget trim (which recomputes the set
+/// hash). That's intentional for the wake-gap check — we want to
+/// detect "the snapshot the user actually copied looks identical to
+/// the last one we captured" using the as-captured representation set,
+/// not the post-policy projection. The persisted dedupe key in storage
+/// may therefore differ for Secret / over-budget entries; the storage
+/// layer's own dedupe handles the persisted side.
+fn effective_dedupe_hash(entry: &nagori_core::ClipboardEntry) -> String {
+    entry.metadata.representation_set_hash.as_ref().map_or_else(
+        || entry.metadata.content_hash.value.clone(),
+        |hash| hash.value.clone(),
+    )
 }
 
 #[cfg(test)]
