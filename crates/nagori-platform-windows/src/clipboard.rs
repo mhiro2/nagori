@@ -336,12 +336,25 @@ fn dib_pixel_count_from_header(bytes: &[u8]) -> Option<u64> {
 /// decode error the platform path produces.
 #[cfg(any(windows, test))]
 fn png_pixel_count_from_ihdr(bytes: &[u8]) -> Option<u64> {
+    // PNG byte layout we rely on (RFC 2083 §3.2, §4.1.1). The IHDR
+    // chunk is mandated to be the *first* chunk, with a fixed payload
+    // length and shape, so the first 24 bytes of any spec-compliant
+    // stream are deterministic:
+    //
+    //   bytes[0..8]   PNG signature magic (\x89 P N G \r \n \x1a \n)
+    //   bytes[8..12]  first chunk length, big-endian u32 — must be 13 for IHDR
+    //   bytes[12..16] first chunk type — must be the ASCII "IHDR"
+    //   bytes[16..20] IHDR width, big-endian u32
+    //   bytes[20..24] IHDR height, big-endian u32
+    //
+    // We reject anything that breaks this contract rather than try to
+    // recover, because the only callers that hit this function are the
+    // pixel-cap probes — falling through to `decode()` is safer than
+    // returning a fabricated pixel count.
     const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     if bytes.len() < 24 || bytes[..8] != PNG_SIGNATURE {
         return None;
     }
-    // bytes[8..12] = chunk length, bytes[12..16] = chunk type. PNG spec
-    // requires the very first chunk to be IHDR with payload length 13.
     let length = u32::from_be_bytes(bytes[8..12].try_into().ok()?);
     if length != 13 || &bytes[12..16] != b"IHDR" {
         return None;
