@@ -690,11 +690,12 @@ impl NagoriRuntime {
     /// The generator is gated by [`ThumbnailGate`] so concurrent requests
     /// for the same entry collapse to a single decoder, and re-asserts
     /// the sensitivity check inside [`thumbnails::generate_thumbnail`]
-    /// (defence-in-depth — the public API does not commit a thumbnail
-    /// for non-Public rows even if a caller bypasses the dispatch gate).
-    /// The sensitivity gate is re-read from storage inside the generator
-    /// so a stale caller-supplied classification cannot persist a
-    /// derived row that the dispatch layer would have refused.
+    /// as a best-effort application-layer guard — that re-read narrows
+    /// the TOCTOU window so a caller bypassing the dispatch gate with a
+    /// stale classification typically loses the race before
+    /// `put_thumbnail` runs. The window is not closed at this layer;
+    /// see `generate_thumbnail` for the storage-side invariant that
+    /// would be required for a hard guarantee.
     /// Once generation completes, [`SqliteStore::enforce_thumbnail_budget`]
     /// is invoked to apply the LRU sweep if the operator configured one.
     pub fn kick_thumbnail_generation(&self, id: EntryId) {

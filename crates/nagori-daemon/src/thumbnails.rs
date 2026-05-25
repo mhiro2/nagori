@@ -9,10 +9,14 @@
 //!
 //! The pipeline is deliberately a derived cache, not a representation:
 //!
-//! * Only `Public` (or `Unknown`-defaulted-Public) entries produce a
-//!   thumbnail. Anything classified as Private / Secret / Blocked is
-//!   skipped — the cached copy must not become a side-channel that
-//!   reveals classified content the rest of the system gates.
+//! * The pipeline aims to derive thumbnails only for `Public` (or
+//!   `Unknown`-defaulted-Public) entries. The generator re-reads the
+//!   live `entries` row and skips Private / Secret / Blocked
+//!   classifications as a best-effort application-layer guard, so the
+//!   cached copy does not become a side-channel for classified content
+//!   under the common case. The check narrows the TOCTOU window but
+//!   does not close it; a hard guarantee would require a storage-side
+//!   invariant (see `generate_thumbnail`).
 //! * The cache is regenerable from the original, so eviction is safe.
 //!   A separate LRU sweep (`enforce_thumbnail_budget`) keeps total
 //!   bytes inside `AppSettings::max_thumbnail_total_bytes`.
@@ -148,13 +152,18 @@ impl Drop for ThumbnailGateGuard {
 /// caller should log.
 ///
 /// The sensitivity gate is re-read from the live `entries` row inside
-/// this function rather than trusting a caller-supplied value. A future
-/// caller that passes the wrong classification, or a classification
-/// transition that happens between the dispatch-layer check and the
-/// derived-row write, must not be able to persist a `Private` / `Secret`
-/// / `Blocked` thumbnail. If the entry has been soft-deleted by the
-/// time we look it up the row is missing, so we also skip — there is no
-/// reason to spend cycles deriving cached data for a tombstoned row.
+/// this function rather than trusting a caller-supplied value. This is
+/// a best-effort application-layer guard: it narrows the TOCTOU window
+/// between the dispatch-layer check and the derived-row write so that
+/// a stale caller-supplied classification, or a reclassification that
+/// lands before this read, won't persist a `Private` / `Secret` /
+/// `Blocked` thumbnail. It does not close the window — the
+/// classification can still flip between this read and `put_thumbnail`,
+/// and a hard invariant would have to live storage-side (e.g. a
+/// conditional write keyed on the row's current sensitivity). If the
+/// entry has been soft-deleted by the time we look it up the row is
+/// missing, so we also skip — there is no reason to spend cycles
+/// deriving cached data for a tombstoned row.
 pub async fn generate_thumbnail(
     store: &SqliteStore,
     id: EntryId,
@@ -162,6 +171,17 @@ pub async fn generate_thumbnail(
     let Some(entry) = store.get(id).await? else {
         return Ok(None);
     };
+    // Best-effort sensitivity re-check at the application layer. The
+    // dispatch path already gated this entry at enqueue time, but the
+    // classification can flip (re-scan, manual reclassification, settings
+    // change) between that check and the derived-row write below.
+    // Re-reading the live row narrows the TOCTOU window — it does not
+    // close it, since the row can still flip between this read and
+    // `put_thumbnail`, and a true invariant would have to live on the
+    // storage side (e.g. a conditional write keyed on sensitivity). Do
+    // not remove this gate without moving the guarantee somewhere
+    // stricter; the alternative is a derived-row side-channel for
+    // `Private` / `Secret` / `Blocked` content.
     if !is_text_safe_for_default_output(entry.sensitivity) {
         return Ok(None);
     }
@@ -511,13 +531,16 @@ mod tests {
         !crc
     }
 
-    /// Defence-in-depth assertion for the write-side sensitivity gate
-    /// (see `generate_thumbnail`). The dispatch layer already short-
-    /// circuits non-Public entries before this function runs, but we
-    /// re-read the stored sensitivity here so a stale caller-supplied
-    /// classification — or a classification transition that happens
-    /// between the dispatch check and the derived-row write — can't
-    /// persist a `Private` / `Secret` / `Blocked` thumbnail to disk.
+    /// Pin the entry-time half of the write-side sensitivity gate (see
+    /// `generate_thumbnail`). The dispatch layer already short-circuits
+    /// non-Public entries before this function runs; this test verifies
+    /// the best-effort re-read at the start of `generate_thumbnail`
+    /// also short-circuits when the live row already says non-Public,
+    /// so a stale caller-supplied classification doesn't persist a
+    /// `Private` / `Secret` / `Blocked` thumbnail on the entry path.
+    /// The remaining TOCTOU window between this read and the actual
+    /// `put_thumbnail` would need a storage-side invariant to close —
+    /// out of scope for this assertion.
     #[tokio::test]
     async fn generate_thumbnail_skips_non_public_entries() {
         use nagori_core::{
