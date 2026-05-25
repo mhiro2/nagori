@@ -326,12 +326,15 @@ impl SqliteStore {
             // for text-shaped entries the same text already appears in
             // `entry_representations.text_content`. Counting both would
             // double-charge text rows and trigger over-eager eviction.
+            //
+            // `entries.total_byte_count` is materialised by the
+            // `entry_representations_ai/ad/au_total` triggers, so the
+            // budget total is a single-table aggregate.
             let total_i64: i64 = tx
                 .query_row(
-                    "SELECT COALESCE(SUM(r.byte_count), 0)
-                     FROM entry_representations r
-                     JOIN entries e ON e.id = r.entry_id
-                     WHERE e.deleted_at IS NULL",
+                    "SELECT COALESCE(SUM(total_byte_count), 0)
+                     FROM entries
+                     WHERE deleted_at IS NULL",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -347,13 +350,7 @@ impl SqliteStore {
             let candidates = {
                 let mut stmt = tx
                     .prepare(
-                        "SELECT id,
-                                COALESCE(
-                                    (SELECT SUM(byte_count)
-                                     FROM entry_representations
-                                     WHERE entry_id = entries.id),
-                                    0
-                                ) AS entry_bytes
+                        "SELECT id, total_byte_count AS entry_bytes
                          FROM entries
                          WHERE deleted_at IS NULL AND pinned = 0
                          ORDER BY created_at ASC, entry_bytes DESC",
@@ -418,7 +415,7 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             conn.query_row(
-                "SELECT r.payload_blob, r.payload_mime
+                "SELECT r.payload_blob, r.mime_type
                  FROM entry_representations r
                  JOIN entries e ON e.id = r.entry_id
                  WHERE e.id = ?1
@@ -1039,44 +1036,39 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     let mut conn = store.conn()?;
     let tx = conn.transaction().map_err(|err| storage_err(&err))?;
     // Resolve dedupe explicitly via SELECT-then-INSERT/UPDATE rather than
-    // `INSERT ... ON CONFLICT(content_hash) WHERE deleted_at IS NULL`,
+    // `INSERT ... ON CONFLICT(representation_set_hash) WHERE deleted_at IS NULL`,
     // because conflict resolution against a partial unique index is
     // SQLite-version dependent.
+    //
+    // Key the lookup on `representation_set_hash` rather than `content_hash`
+    // so two snapshots with the same primary text but different
+    // HTML/RTF/file-list alternatives land in distinct rows. Otherwise the
+    // later capture would silently overwrite the earlier row's alternatives.
     let existing = tx
         .query_row(
-            "SELECT id FROM entries WHERE content_hash = ?1 AND deleted_at IS NULL",
-            params![content_hash],
+            "SELECT id FROM entries WHERE representation_set_hash = ?1 AND deleted_at IS NULL",
+            params![representation_set_hash],
             |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(|err| storage_err(&err))?;
     let stored_id_str = if let Some(existing) = existing {
-        // Refresh source/content/sensitivity/representation columns and
-        // bump `created_at`/`updated_at` so the dedupe record reflects the
-        // most recent copy. Without this the search_documents row (which
-        // is upserted from the new entry below) would diverge from the
-        // entries row's source/content/sensitivity/representation, leaving
-        // copy-back and source_app filters acting on stale data.
-        // Lifecycle flags (`pinned`, `archived`, `use_count`,
-        // `last_used_at`, `expires_at`, `deleted_at`) belong to the
-        // original row and are intentionally preserved.
+        // Identical `representation_set_hash` implies the rep set is
+        // byte-for-byte identical, so the reps don't need to be replaced.
+        // Refresh source/sensitivity and bump timestamps so the dedupe
+        // record reflects the most recent capture. Lifecycle flags
+        // (`pinned`, `archived`, `use_count`, `last_used_at`, `expires_at`,
+        // `deleted_at`) belong to the original row and are preserved.
         tx.execute(
             "UPDATE entries SET
-                content_kind = ?1,
-                text_content = ?2,
-                content_json = ?3,
-                source_app_name = ?4,
-                source_bundle_id = ?5,
-                source_executable_path = ?6,
-                representation_set_hash = ?7,
-                sensitivity = ?8,
-                created_at = ?9,
-                updated_at = ?9
-             WHERE id = ?10",
+                source_app_name = ?1,
+                source_bundle_id = ?2,
+                source_executable_path = ?3,
+                sensitivity = ?4,
+                created_at = ?5,
+                updated_at = ?5
+             WHERE id = ?6",
             params![
-                kind_to_str(entry.content_kind()),
-                content_for_storage.plain_text(),
-                serde_json::to_string(&content_for_storage).map_err(|err| json_err(&err))?,
                 entry
                     .metadata
                     .source
@@ -1092,39 +1084,17 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
                     .source
                     .as_ref()
                     .and_then(|s| s.executable_path.as_deref()),
-                representation_set_hash,
                 sensitivity_to_str(entry.sensitivity),
                 updated_at,
                 existing,
             ],
         )
         .map_err(|err| storage_err(&err))?;
-        // Replace the representation set so HTML/RTF/file-list alternatives
-        // from the new copy survive copy-back. Otherwise stale alternatives
-        // (or a missing primary, if classification cleared them) would
-        // remain attached to the dedupe row.
-        tx.execute(
-            "DELETE FROM entry_representations WHERE entry_id = ?1",
-            params![existing],
-        )
-        .map_err(|err| storage_err(&err))?;
-        if entry.pending_representations.is_empty() {
-            if let Some(payload) = primary_payload.as_ref() {
-                insert_primary_representation(&tx, &existing, payload, &updated_at)?;
-            }
-        } else {
-            insert_pending_representations(
-                &tx,
-                &existing,
-                &entry.pending_representations,
-                &updated_at,
-            )?;
-        }
         existing
     } else {
         tx.execute(
             "INSERT INTO entries (
-                id, content_kind, text_content, content_json, source_app_name,
+                id, content_kind, content_json, source_app_name,
                 source_bundle_id, source_executable_path, content_hash,
                 representation_set_hash, sensitivity, pinned, archived,
                 use_count, created_at, updated_at, last_used_at, expires_at,
@@ -1132,12 +1102,11 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
              )
              VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18
+                ?15, ?16, ?17
              )",
             params![
                 requested_id.to_string(),
                 kind_to_str(entry.content_kind()),
-                content_for_storage.plain_text(),
                 serde_json::to_string(&content_for_storage).map_err(|err| json_err(&err))?,
                 entry
                     .metadata
@@ -1222,11 +1191,10 @@ fn insert_primary_representation(
             tx.execute(
                 "INSERT INTO entry_representations (
                     id, entry_id, role, mime_type, platform_format, ordinal,
-                    text_content, payload_blob, payload_ref, payload_mime,
-                    byte_count, created_at
+                    text_content, payload_blob, byte_count, created_at
                  )
                  VALUES (?1, ?2, 'primary', 'text/plain', NULL, 0,
-                         ?3, NULL, NULL, NULL, ?4, ?5)",
+                         ?3, NULL, ?4, ?5)",
                 params![representation_id, entry_id, text, byte_count, created_at],
             )
             .map_err(|err| storage_err(&err))?;
@@ -1238,11 +1206,10 @@ fn insert_primary_representation(
             tx.execute(
                 "INSERT INTO entry_representations (
                     id, entry_id, role, mime_type, platform_format, ordinal,
-                    text_content, payload_blob, payload_ref, payload_mime,
-                    byte_count, created_at
+                    text_content, payload_blob, byte_count, created_at
                  )
                  VALUES (?1, ?2, 'primary', ?3, NULL, 0,
-                         NULL, ?4, NULL, ?3, ?5, ?6)",
+                         NULL, ?4, ?5, ?6)",
                 params![
                     representation_id,
                     entry_id,
@@ -1276,11 +1243,10 @@ fn insert_pending_representations(
                 tx.execute(
                     "INSERT INTO entry_representations (
                         id, entry_id, role, mime_type, platform_format, ordinal,
-                        text_content, payload_blob, payload_ref, payload_mime,
-                        byte_count, created_at
+                        text_content, payload_blob, byte_count, created_at
                      )
                      VALUES (?1, ?2, ?3, ?4, NULL, ?5,
-                             ?6, NULL, NULL, NULL, ?7, ?8)",
+                             ?6, NULL, ?7, ?8)",
                     params![
                         representation_id,
                         entry_id,
@@ -1298,11 +1264,10 @@ fn insert_pending_representations(
                 tx.execute(
                     "INSERT INTO entry_representations (
                         id, entry_id, role, mime_type, platform_format, ordinal,
-                        text_content, payload_blob, payload_ref, payload_mime,
-                        byte_count, created_at
+                        text_content, payload_blob, byte_count, created_at
                      )
                      VALUES (?1, ?2, ?3, ?4, NULL, ?5,
-                             NULL, ?6, NULL, ?4, ?7, ?8)",
+                             NULL, ?6, ?7, ?8)",
                     params![
                         representation_id,
                         entry_id,
@@ -1325,11 +1290,10 @@ fn insert_pending_representations(
                 tx.execute(
                     "INSERT INTO entry_representations (
                         id, entry_id, role, mime_type, platform_format, ordinal,
-                        text_content, payload_blob, payload_ref, payload_mime,
-                        byte_count, created_at
+                        text_content, payload_blob, byte_count, created_at
                      )
                      VALUES (?1, ?2, ?3, ?4, NULL, ?5,
-                             ?6, NULL, NULL, NULL, ?7, ?8)",
+                             ?6, NULL, ?7, ?8)",
                     params![
                         representation_id,
                         entry_id,
@@ -1350,6 +1314,9 @@ fn insert_pending_representations(
 
 fn upsert_document_blocking(tx: &rusqlite::Transaction<'_>, doc: &SearchDocument) -> Result<()> {
     let entry_id = doc.entry_id.to_string();
+    // `search_fts` is an external-content FTS5 over `search_documents`;
+    // the ai/ad/au triggers keep it in sync, so we only upsert the
+    // content row here.
     tx.execute(
         "INSERT INTO search_documents (entry_id, title, preview, normalized_text, language)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1367,18 +1334,6 @@ fn upsert_document_blocking(tx: &rusqlite::Transaction<'_>, doc: &SearchDocument
         ],
     )
     .map_err(|err| storage_err(&err))?;
-    tx.execute(
-        "DELETE FROM search_fts WHERE entry_id = ?1",
-        params![entry_id],
-    )
-    .map_err(|err| storage_err(&err))?;
-    tx.execute(
-        "INSERT INTO search_fts (entry_id, title, preview, normalized_text)
-         SELECT entry_id, title, preview, normalized_text
-         FROM search_documents WHERE entry_id = ?1",
-        params![entry_id],
-    )
-    .map_err(|err| storage_err(&err))?;
     tx.execute("DELETE FROM ngrams WHERE entry_id = ?1", params![entry_id])
         .map_err(|err| storage_err(&err))?;
     let mut stmt = tx
@@ -1392,13 +1347,10 @@ fn upsert_document_blocking(tx: &rusqlite::Transaction<'_>, doc: &SearchDocument
 }
 
 fn delete_search_rows(tx: &rusqlite::Transaction<'_>, entry_id: &str) -> Result<()> {
+    // `search_fts` is an external-content FTS5 over `search_documents`;
+    // its ad trigger fires on the search_documents delete below.
     tx.execute(
         "DELETE FROM search_documents WHERE entry_id = ?1",
-        params![entry_id],
-    )
-    .map_err(|err| storage_err(&err))?;
-    tx.execute(
-        "DELETE FROM search_fts WHERE entry_id = ?1",
         params![entry_id],
     )
     .map_err(|err| storage_err(&err))?;
@@ -1573,12 +1525,16 @@ impl SearchCandidateProvider for SqliteStore {
         let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
+            // `search_fts` is an external-content FTS5 over
+            // `search_documents`, so it has no `entry_id` column — join via
+            // `search_fts.rowid = search_documents.doc_id` (the explicit
+            // INTEGER PRIMARY KEY that aliases the source rowid).
             let sql = format!(
                 "SELECT e.*, d.title, d.preview, d.normalized_text, d.language,
                         bm25(search_fts) AS fts_score
-                 FROM search_fts f
-                 JOIN entries e ON e.id = f.entry_id
-                 JOIN search_documents d ON d.entry_id = e.id
+                 FROM search_fts
+                 JOIN search_documents d ON d.doc_id = search_fts.rowid
+                 JOIN entries e ON e.id = d.entry_id
                  WHERE search_fts MATCH ?
                    AND e.deleted_at IS NULL
                    AND e.sensitivity != 'blocked'
@@ -1879,8 +1835,16 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // cheap. 64 MiB is small enough that we don't fight other tenants
     // for address space on 32-bit CI runners while still covering a
     // typical ~50k-row history.
+    //
+    // `recursive_triggers = ON` makes FK CASCADE deletes fire the AFTER
+    // DELETE triggers on the cascaded child table. The
+    // `search_documents_ad_fts` trigger relies on this so a hard
+    // `DELETE FROM entries` (or any path that purges an entry row)
+    // walks the FK cascade into `search_documents` and then drops the
+    // matching `search_fts` row instead of leaking the FTS index entry.
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
+         PRAGMA recursive_triggers = ON;
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -1906,15 +1870,12 @@ fn clamp_read_limit(limit: usize) -> usize {
 }
 
 fn prune_deleted_search_rows(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // `search_fts` is an external-content FTS5 over `search_documents`;
+    // the ad trigger fires on each search_documents row that this DELETE
+    // removes, so we don't prune `search_fts` directly.
     tx.execute(
         "DELETE FROM search_documents
          WHERE entry_id IN (SELECT id FROM entries WHERE deleted_at IS NOT NULL)",
-        [],
-    )
-    .map_err(|err| storage_err(&err))?;
-    tx.execute(
-        "DELETE FROM search_fts
-         WHERE entry_id NOT IN (SELECT id FROM entries WHERE deleted_at IS NULL)",
         [],
     )
     .map_err(|err| storage_err(&err))?;
@@ -2032,19 +1993,21 @@ impl nagori_core::SettingsRepository for SqliteStore {
 /// Ordered list of schema migrations.
 ///
 /// Each entry is `(target_version, sql)`. `target_version` must be strictly
-/// greater than the previous entry's, contiguous, and monotonic — never
-/// renumber, never reorder, never edit a published migration. To change
-/// existing schema, append a new migration with a higher version that
-/// performs the alter step. `run_migrations` plays each pending migration
-/// in its own transaction and bumps `user_version` so partial application
-/// can never leave the DB at a half-migrated state.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, SCHEMA_V1),
-    (2, SCHEMA_V2),
-    (3, SCHEMA_V3),
-    (4, SCHEMA_V4),
-    (5, SCHEMA_V5),
-];
+/// greater than the previous entry's, contiguous, and monotonic. Once the
+/// project ships, future schema changes must append a new migration rather
+/// than editing the existing entry — partial application is gated on
+/// `user_version` so renumbering would silently re-run statements on
+/// already-migrated databases. Pre-release we keep a single consolidated
+/// migration so a fresh install sees the final shape directly.
+///
+/// The pre-release schema lives at `user_version = 100` so any
+/// pre-existing dev database at a pre-consolidation version (the
+/// legacy 1..=5 line, or any other value below the first migration)
+/// trips the explicit pre-consolidation guard in [`run_migrations`]
+/// and fails loud at startup rather than silently running the new
+/// code against an old shape. Operators are expected to delete the
+/// local DB and let it be recreated on next launch.
+const MIGRATIONS: &[(i64, &str)] = &[(100, SCHEMA_V1)];
 
 /// Highest schema version supported by this binary. A DB whose
 /// `user_version` already exceeds this is from a newer build and we refuse
@@ -2074,7 +2037,24 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
             "database schema version {current} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
         )));
     }
-    let mut last_applied = current;
+    // Fresh databases sit at `user_version = 0`. Pre-release we keep a
+    // single consolidated migration at version 100, so a fresh install
+    // bootstraps directly to that version. Any DB at a pre-consolidation
+    // version (`0 < current < first_version`) is a stale dev DB whose
+    // shape predates the consolidated schema — fail loud rather than
+    // silently re-running the CREATE TABLE IF NOT EXISTS statements
+    // against a structurally different table.
+    let first_version = MIGRATIONS.first().map_or(0, |(version, _)| *version);
+    if current > 0 && current < first_version {
+        return Err(AppError::Storage(format!(
+            "database schema version {current} predates the consolidated pre-release schema ({first_version}); delete the local DB and let it be recreated",
+        )));
+    }
+    let mut last_applied = if current == 0 {
+        first_version - 1
+    } else {
+        current
+    };
     for (version, sql) in MIGRATIONS {
         if *version <= current {
             continue;
@@ -2102,64 +2082,262 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// Single consolidated schema. Connection-level PRAGMAs
+/// (`foreign_keys`, `journal_mode`, …) are asserted in
+/// `configure_connection` for every pool slot, so we don't repeat them
+/// here.
+///
+/// Dedupe is keyed on `representation_set_hash`: two snapshots with the
+/// same primary text but different HTML/RTF/file-list alternatives hash
+/// to different values and therefore land in different rows, so the
+/// later copy can't silently overwrite the earlier row's alternatives.
+/// Entries built without a `pending_representations` set (CLI `add_text`,
+/// synthesised rows) fall back to `content_hash` for this column at
+/// insert time so identical-primary inserts still collide.
+///
+/// `search_fts` is an external-content FTS5 over `search_documents`,
+/// with sync triggers below. The previous shape stored `entry_id` as an
+/// UNINDEXED column, which forced per-entry deletes to scan every
+/// posting list; external content keys FTS rows by source `rowid`, so
+/// the trigger-driven deletes are rowid-equality lookups.
+///
+/// `entries.total_byte_count` is maintained by triggers on
+/// `entry_representations` so the retention / byte-budget paths can
+/// read a single column instead of recomputing `SUM(byte_count)` over
+/// the dependent table on every pass.
 const SCHEMA_V1: &str = r"
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS entries (
     id TEXT PRIMARY KEY,
-    content_kind TEXT NOT NULL,
-    text_content TEXT,
+    content_kind TEXT NOT NULL
+        CHECK (content_kind IN (
+            'text', 'url', 'code', 'image', 'file_list', 'rich_text', 'unknown'
+        )),
     content_json TEXT NOT NULL,
-    payload_ref TEXT,
     source_app_name TEXT,
     source_bundle_id TEXT,
     source_executable_path TEXT,
     content_hash TEXT NOT NULL,
-    sensitivity TEXT NOT NULL,
-    pinned INTEGER NOT NULL DEFAULT 0,
-    archived INTEGER NOT NULL DEFAULT 0,
-    use_count INTEGER NOT NULL DEFAULT 0,
+    representation_set_hash TEXT NOT NULL,
+    sensitivity TEXT NOT NULL
+        CHECK (sensitivity IN (
+            'unknown', 'public', 'private', 'secret', 'blocked'
+        )),
+    pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (pinned IN (0, 1)),
+    archived INTEGER NOT NULL DEFAULT 0
+        CHECK (archived IN (0, 1)),
+    use_count INTEGER NOT NULL DEFAULT 0
+        CHECK (use_count >= 0),
+    -- Materialised total of `entry_representations.byte_count` for this
+    -- entry. Updated by triggers on the representation table so the
+    -- retention / byte-budget paths read a single column instead of
+    -- joining + summing each pass.
+    total_byte_count INTEGER NOT NULL DEFAULT 0
+        CHECK (total_byte_count >= 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_used_at TEXT,
     expires_at TEXT,
-    deleted_at TEXT,
-    payload_blob BLOB,
-    payload_mime TEXT
+    deleted_at TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_content_hash
-ON entries(content_hash)
-WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_representation_set_hash
+    ON entries(representation_set_hash)
+    WHERE deleted_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at);
-CREATE INDEX IF NOT EXISTS idx_entries_pinned ON entries(pinned);
+-- `recent_entries` with RecentOrder::ByRecency walks `created_at DESC`
+-- alone; a `(pinned, created_at)` composite can't satisfy that without
+-- a sort.
+CREATE INDEX IF NOT EXISTS idx_entries_live_created_at
+    ON entries(created_at DESC)
+    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
+
+-- `recent_entries` with PinnedFirstThenRecency and the
+-- `recent_live` CTE in `substring_candidates` both order by
+-- (pinned DESC, created_at DESC). A composite over live, non-blocked
+-- rows lets the planner walk the index forward and stop after LIMIT.
+CREATE INDEX IF NOT EXISTS idx_entries_recent_live
+    ON entries(pinned DESC, created_at DESC)
+    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
+
+-- `recent_entries` with RecentOrder::ByUseCount orders by
+-- (use_count DESC, COALESCE(last_used_at, created_at) DESC, created_at DESC).
+-- The expression key matches the ORDER BY exactly so the index can be
+-- walked forward without a sort step.
+CREATE INDEX IF NOT EXISTS idx_entries_use_count_live
+    ON entries(
+        use_count DESC,
+        COALESCE(last_used_at, created_at) DESC,
+        created_at DESC
+    )
+    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
+
+-- `list_pinned` orders pinned-only live rows by `updated_at DESC`.
+-- Pinned rows get pin-toggled or relabelled long after creation, so
+-- `updated_at` (not `created_at`) is the ordering the UI wants.
+CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
+    ON entries(updated_at DESC)
+    WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
+
+-- Retention / byte-budget candidate selection over unpinned live rows.
+-- `enforce_retention_count` walks DESC + OFFSET; `enforce_total_bytes`
+-- walks ASC (oldest first). A single DESC index covers both because
+-- SQLite can walk it in reverse for the ASC case.
+CREATE INDEX IF NOT EXISTS idx_entries_unpinned_live
+    ON entries(created_at DESC)
+    WHERE deleted_at IS NULL AND pinned = 0;
+
+-- UI filter shortcuts. The desktop palette filters by content_kind and
+-- source_app on every keystroke; without the partial indexes those
+-- branches fall back to scanning the live partition.
+CREATE INDEX IF NOT EXISTS idx_entries_content_kind_live
+    ON entries(content_kind, created_at DESC)
+    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
+
+CREATE INDEX IF NOT EXISTS idx_entries_source_bundle_live
+    ON entries(source_bundle_id, created_at DESC)
+    WHERE deleted_at IS NULL
+      AND sensitivity != 'blocked'
+      AND source_bundle_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entries_source_app_name_live
+    ON entries(source_app_name, created_at DESC)
+    WHERE deleted_at IS NULL
+      AND sensitivity != 'blocked'
+      AND source_app_name IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS entry_representations (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    role TEXT NOT NULL
+        CHECK (role IN ('primary', 'plain_fallback', 'alternative')),
+    mime_type TEXT NOT NULL,
+    platform_format TEXT,
+    ordinal INTEGER NOT NULL
+        CHECK (ordinal >= 0),
+    text_content TEXT,
+    payload_blob BLOB,
+    byte_count INTEGER NOT NULL
+        CHECK (byte_count >= 0),
+    created_at TEXT NOT NULL,
+    -- Each row carries exactly one of text_content or payload_blob.
+    -- The capture pipeline relies on this to pick the right preview
+    -- path without re-inspecting the bytes.
+    CHECK (
+        (text_content IS NOT NULL AND payload_blob IS NULL)
+     OR (text_content IS NULL AND payload_blob IS NOT NULL)
+    ),
+    UNIQUE (entry_id, role, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_representations_entry
+    ON entry_representations(entry_id, ordinal);
+
+-- Maintain `entries.total_byte_count` for the retention path. The
+-- triggers handle every byte_count delta path: new rep, dropped rep,
+-- replaced rep (UPDATE OF byte_count or entry_id).
+CREATE TRIGGER IF NOT EXISTS entry_representations_ai_total
+AFTER INSERT ON entry_representations
+BEGIN
+    UPDATE entries
+       SET total_byte_count = total_byte_count + NEW.byte_count
+     WHERE id = NEW.entry_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS entry_representations_ad_total
+AFTER DELETE ON entry_representations
+BEGIN
+    UPDATE entries
+       SET total_byte_count = total_byte_count - OLD.byte_count
+     WHERE id = OLD.entry_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS entry_representations_au_total
+AFTER UPDATE OF byte_count, entry_id ON entry_representations
+BEGIN
+    UPDATE entries
+       SET total_byte_count = total_byte_count - OLD.byte_count
+     WHERE id = OLD.entry_id;
+    UPDATE entries
+       SET total_byte_count = total_byte_count + NEW.byte_count
+     WHERE id = NEW.entry_id;
+END;
 
 CREATE TABLE IF NOT EXISTS search_documents (
-    entry_id TEXT PRIMARY KEY,
+    -- Explicit `INTEGER PRIMARY KEY` aliases the SQLite rowid into a
+    -- stable column. `VACUUM` is documented to renumber rowids of
+    -- tables without an INTEGER PRIMARY KEY, which would invalidate
+    -- the FTS5 external-content pointer (`content_rowid = 'doc_id'`)
+    -- and silently corrupt search hits. Pinning the rowid to `doc_id`
+    -- keeps `search_fts` consistent across `VACUUM`.
+    doc_id INTEGER PRIMARY KEY,
+    entry_id TEXT NOT NULL UNIQUE REFERENCES entries(id) ON DELETE CASCADE,
     title TEXT,
     preview TEXT NOT NULL,
     normalized_text TEXT NOT NULL,
-    language TEXT,
-    FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+    language TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
-    entry_id UNINDEXED,
     title,
     preview,
     normalized_text,
+    content = 'search_documents',
+    content_rowid = 'doc_id',
     tokenize = 'unicode61'
 );
 
+CREATE TRIGGER IF NOT EXISTS search_documents_ai_fts
+AFTER INSERT ON search_documents
+BEGIN
+    INSERT INTO search_fts(rowid, title, preview, normalized_text)
+    VALUES (NEW.doc_id, NEW.title, NEW.preview, NEW.normalized_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_documents_ad_fts
+AFTER DELETE ON search_documents
+BEGIN
+    INSERT INTO search_fts(search_fts, rowid, title, preview, normalized_text)
+    VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_documents_au_fts
+AFTER UPDATE ON search_documents
+BEGIN
+    INSERT INTO search_fts(search_fts, rowid, title, preview, normalized_text)
+    VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
+    INSERT INTO search_fts(rowid, title, preview, normalized_text)
+    VALUES (NEW.doc_id, NEW.title, NEW.preview, NEW.normalized_text);
+END;
+
 CREATE TABLE IF NOT EXISTS ngrams (
     gram TEXT NOT NULL,
-    entry_id TEXT NOT NULL,
-    position INTEGER NOT NULL,
+    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL
+        CHECK (position >= 0),
     PRIMARY KEY (gram, entry_id, position)
 );
 
+-- `idx_ngrams_gram_entry` is for the ngram fan-out: `WHERE n.gram IN (…)`
+-- then `GROUP BY entry_id`. `idx_ngrams_entry_id` is for per-entry
+-- deletes (the soft-delete prune path).
+CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry ON ngrams(gram, entry_id);
 CREATE INDEX IF NOT EXISTS idx_ngrams_entry_id ON ngrams(entry_id);
+
+CREATE TABLE IF NOT EXISTS entry_thumbnails (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    payload_blob BLOB NOT NULL,
+    mime_type TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    byte_count INTEGER NOT NULL
+        CHECK (byte_count >= 0),
+    created_at TEXT NOT NULL,
+    last_accessed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_thumbnails_last_accessed_at
+    ON entry_thumbnails(last_accessed_at);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -2174,214 +2352,6 @@ CREATE TABLE IF NOT EXISTS audit_events (
     message TEXT,
     created_at TEXT NOT NULL
 );
-
--- Composite indexes for the substring / recent_entries / ngram hot paths.
---
--- `recent_entries` and `substring_candidates` both filter on
--- `deleted_at IS NULL AND sensitivity != 'blocked'` and order by
--- `pinned DESC, created_at DESC`. Without a covering composite the planner
--- either sorts a tablescan (`idx_entries_created_at` doesn't include
--- `pinned`) or sorts the result of `idx_entries_pinned`. A partial index
--- over the live, non-blocked rows in the same order lets SQLite walk the
--- index forward and stop after `LIMIT`. The partial predicate also keeps
--- the index from carrying soft-deleted history we never query.
---
--- `idx_ngrams_gram_entry` is for the ngram fan-out: the candidate query
--- filters `WHERE n.gram IN (...)` then groups by `entry_id`, so a
--- `(gram, entry_id)` composite gets us straight to the matching rows
--- without scanning each gram's full posting list.
-CREATE INDEX IF NOT EXISTS idx_entries_recent_live
-    ON entries(pinned DESC, created_at DESC)
-    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
-
--- Partial index dedicated to `list_pinned`, which orders by
--- `updated_at DESC` rather than `created_at DESC` (pinned rows are
--- often pin-toggled or relabelled long after creation, so `updated_at`
--- is the order the UI actually wants). Without this, the planner has
--- to load every pinned row and sort it; with the index it walks the
--- partial index forward and stops after `LIMIT`. The predicate keeps
--- the index small — typically a handful of rows — and excludes
--- blocked / soft-deleted history we never query in this branch.
-CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
-    ON entries(updated_at DESC)
-    WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
-
-CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry
-    ON ngrams(gram, entry_id);
-";
-
-/// Backfill the substring / ngram hot-path indexes for databases that were
-/// created before they shipped.
-///
-/// Fresh installs already get these via `SCHEMA_V1`; the `IF NOT EXISTS`
-/// guards make this migration a no-op for them. Pre-existing v1 databases
-/// (the ones the storage rewrite was actually motivated by — large
-/// histories that the bounded substring scan and the gram-entry composite
-/// were designed to keep snappy) need a separate migration step because
-/// the migration runner only re-runs scripts whose `target_version` is
-/// strictly greater than the stored `user_version`.
-const SCHEMA_V2: &str = r"
-CREATE INDEX IF NOT EXISTS idx_entries_recent_live
-    ON entries(pinned DESC, created_at DESC)
-    WHERE deleted_at IS NULL AND sensitivity != 'blocked';
-
-CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry
-    ON ngrams(gram, entry_id);
-";
-
-/// Backfill the `list_pinned`-ordered index for pre-v3 databases. Same
-/// reasoning as `SCHEMA_V2`: the index is shipped inline in `SCHEMA_V1`
-/// for fresh installs, but existing databases at `user_version = 2` need
-/// an explicit migration step because the runner only re-runs scripts
-/// whose `target_version` is strictly greater.
-const SCHEMA_V3: &str = r"
-CREATE INDEX IF NOT EXISTS idx_entries_pinned_updated_live
-    ON entries(updated_at DESC)
-    WHERE pinned = 1 AND deleted_at IS NULL AND sensitivity != 'blocked';
-";
-
-/// Break payload ownership out of `entries` into a dedicated
-/// `entry_representations` table.
-///
-/// `entries` previously owned the image bytes (`payload_blob`/`payload_mime`)
-/// and a `payload_ref` that was never written. That shape can only hold one
-/// representation per clipboard event, so a copy that exposed both `text/html`
-/// and `text/plain` (or RTF + plain text, image + file URL, …) lost everything
-/// except the factory's primary pick. Moving payloads to a dependent table
-/// lets a later phase stash every preserved representation under a single
-/// entry without churning `entries` again.
-///
-/// The migration:
-/// 1. Creates `entry_representations` with the same column shape the runtime
-///    write path will use (text payloads in `text_content`, byte payloads in
-///    `payload_blob` with a recorded `payload_mime`).
-/// 2. Adds `entries.representation_set_hash NOT NULL` — used by copy-back in a
-///    later phase to detect representation drift. Phase 1 just backfills it
-///    from `content_hash`, so dedupe stays a primary-content concept until
-///    the multi-rep capture path lands.
-/// 3. Lifts each existing entry's primary payload into a single
-///    `role = 'primary'` representation row: image bytes from the legacy
-///    `payload_blob`/`payload_mime` columns; text-shaped entries from the
-///    pre-extracted `text_content` column. Image rows with no preserved
-///    bytes (pre-validation imports, deleted blobs) produce zero rows,
-///    matching the previous behaviour of `get_payload`.
-/// 4. Drops `entries.payload_blob`, `entries.payload_mime`, and the unused
-///    `entries.payload_ref` so the schema can only express the new model.
-const SCHEMA_V4: &str = r"
-CREATE TABLE IF NOT EXISTS entry_representations (
-    id TEXT PRIMARY KEY,
-    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    platform_format TEXT,
-    ordinal INTEGER NOT NULL,
-    text_content TEXT,
-    payload_blob BLOB,
-    payload_ref TEXT,
-    payload_mime TEXT,
-    byte_count INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    -- Phase 1 invariant: a representation row carries exactly one of
-    -- text_content or payload_blob (never both, never neither). The
-    -- capture pipeline will lean on this to reason about which preview
-    -- path applies without re-inspecting the bytes.
-    CHECK (
-        (text_content IS NOT NULL AND payload_blob IS NULL)
-     OR (text_content IS NULL AND payload_blob IS NOT NULL)
-    ),
-    -- One row per (entry, role, ordinal). The seam for multi-rep entries
-    -- ranks fallbacks by ordinal within a role; collisions would make
-    -- ordering ambiguous.
-    UNIQUE (entry_id, role, ordinal)
-);
-
-CREATE INDEX IF NOT EXISTS idx_entry_representations_entry
-    ON entry_representations(entry_id, ordinal);
-
-ALTER TABLE entries ADD COLUMN representation_set_hash TEXT NOT NULL DEFAULT '';
-
-INSERT INTO entry_representations (
-    id, entry_id, role, mime_type, platform_format, ordinal,
-    text_content, payload_blob, payload_ref, payload_mime,
-    byte_count, created_at
-)
-SELECT
-    id || '#primary',
-    id,
-    'primary',
-    COALESCE(payload_mime, 'application/octet-stream'),
-    NULL,
-    0,
-    NULL,
-    payload_blob,
-    NULL,
-    payload_mime,
-    LENGTH(payload_blob),
-    created_at
-FROM entries
-WHERE content_kind = 'image' AND payload_blob IS NOT NULL;
-
--- Only migrate non-image rows that actually carry inline text. This
--- mirrors the insert path's guard: entries without a primary payload
--- (e.g. Unknown rows whose `plain_text` is None) do not get a primary
--- representation row.
-INSERT INTO entry_representations (
-    id, entry_id, role, mime_type, platform_format, ordinal,
-    text_content, payload_blob, payload_ref, payload_mime,
-    byte_count, created_at
-)
-SELECT
-    id || '#primary',
-    id,
-    'primary',
-    'text/plain',
-    NULL,
-    0,
-    text_content,
-    NULL,
-    NULL,
-    NULL,
-    LENGTH(text_content),
-    created_at
-FROM entries
-WHERE content_kind != 'image' AND text_content IS NOT NULL;
-
-UPDATE entries SET representation_set_hash = content_hash;
-
-ALTER TABLE entries DROP COLUMN payload_blob;
-ALTER TABLE entries DROP COLUMN payload_mime;
-ALTER TABLE entries DROP COLUMN payload_ref;
-";
-
-/// Add a dedicated `entry_thumbnails` table for preview-side downscaled
-/// image bytes.
-///
-/// Thumbnails are an *ephemeral derived artifact* of the original image
-/// payload — they exist purely to keep `preview` pane rendering responsive
-/// on multi-MB clipboard images without having to stream the original
-/// bytes through the webview every time. Storing them outside
-/// `entry_representations` is deliberate: that table is the input to the
-/// copy-back path (`PasteFormat::Preserve`) and we never want a downscaled
-/// PNG to leak into the user's clipboard when they re-paste a row.
-///
-/// The capacity / retention budget for thumbnails is separate from the
-/// per-entry `max_total_bytes` setting; the daemon enforces a dedicated
-/// `max_thumbnail_total_bytes` LRU cap so a long history can't balloon
-/// the DB with derived imagery.
-const SCHEMA_V5: &str = r"
-CREATE TABLE IF NOT EXISTS entry_thumbnails (
-    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
-    payload_blob BLOB NOT NULL,
-    mime_type TEXT NOT NULL,
-    width INTEGER NOT NULL,
-    height INTEGER NOT NULL,
-    byte_count INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    last_accessed_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_entry_thumbnails_last_accessed_at
-    ON entry_thumbnails(last_accessed_at);
 ";
 
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
@@ -2678,6 +2648,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_migrations_rejects_legacy_prerelease_user_version() {
+        // Any pre-release dev DB whose `user_version` predates the
+        // consolidated schema (the legacy 1..=5 line, plus any
+        // intermediate value below the first migration) must fail loud
+        // at startup rather than silently running the new code path
+        // against an old schema shape.
+        for legacy in [1, 2, 3, 4, 5, 50, 99] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {legacy};"))
+                .unwrap();
+            let err = run_migrations(&mut conn).expect_err(&format!(
+                "run_migrations should reject legacy user_version = {legacy}"
+            ));
+            assert!(
+                err.to_string().contains("predates the consolidated"),
+                "error should identify the pre-consolidation version, got: {err}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn stores_and_searches_japanese_text() {
         let store = SqliteStore::open_memory().unwrap();
@@ -2707,25 +2698,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_insert_refreshes_source_and_representations() {
-        // Re-copying the same content from a different source app must
-        // refresh the entries row's source columns and replace the
-        // representation set so the source_app filter and copy-back both
-        // see the latest copy — not the first one. Without this the
-        // search_documents row (which IS upserted from the new entry)
-        // would diverge from the entries row.
+    async fn duplicate_insert_with_identical_reps_refreshes_source() {
+        // Dedupe is keyed on `representation_set_hash`, so two snapshots
+        // with the same primary AND the same alternatives collide. The
+        // dedupe path must then refresh the entries row's source/sensitivity
+        // columns and bump `created_at`/`updated_at` so the source_app
+        // filter sees the latest copy — not the first one.
         use nagori_core::{
             ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, SourceApp,
         };
 
         let store = SqliteStore::open_memory().unwrap();
 
-        let make_snapshot = |bundle: &str, html: &str| ClipboardSnapshot {
+        let make_snapshot = |bundle: &str| ClipboardSnapshot {
             sequence: ClipboardSequence::content_hash("dedupe-rewrite"),
             captured_at: OffsetDateTime::now_utc(),
             source: Some(SourceApp {
                 bundle_id: Some(bundle.to_owned()),
                 name: Some(bundle.to_owned()),
+                executable_path: None,
+            }),
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>shared</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("shared body".to_owned()),
+                },
+            ],
+        };
+
+        let first = EntryFactory::from_snapshot(make_snapshot("com.example.editor"))
+            .expect("first snapshot");
+        let first_id = store.insert(first).await.unwrap();
+
+        let second = EntryFactory::from_snapshot(make_snapshot("com.example.terminal"))
+            .expect("second snapshot");
+        let second_id = store.insert(second).await.unwrap();
+        assert_eq!(second_id, first_id, "dedupe should reuse the row");
+
+        let fetched = store.get(first_id).await.unwrap().expect("row exists");
+        let source = fetched.metadata.source.as_ref().expect("source preserved");
+        assert_eq!(source.bundle_id.as_deref(), Some("com.example.terminal"));
+
+        let mut query = SearchQuery::new("shared", normalize_text("shared"), 10);
+        query.filters = SearchFilters {
+            source_app: Some("com.example.terminal".to_owned()),
+            ..Default::default()
+        };
+        let hits = store.search(query).await.unwrap();
+        assert_eq!(hits.len(), 1, "source filter must hit the new source");
+        assert_eq!(hits[0].entry_id, first_id);
+    }
+
+    #[tokio::test]
+    async fn distinct_alternatives_produce_distinct_rows() {
+        // Two snapshots with the same primary text but different HTML
+        // alternatives must land in distinct rows, otherwise the later
+        // capture would silently overwrite the earlier row's
+        // alternatives.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, SourceApp,
+        };
+
+        let store = SqliteStore::open_memory().unwrap();
+
+        let make_snapshot = |html: &str| ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("distinct-alts"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: Some(SourceApp {
+                bundle_id: Some("com.example.editor".to_owned()),
+                name: Some("editor".to_owned()),
                 executable_path: None,
             }),
             representations: vec![
@@ -2740,43 +2785,28 @@ mod tests {
             ],
         };
 
-        let first = EntryFactory::from_snapshot(make_snapshot("com.example.editor", "<p>v1</p>"))
-            .expect("first snapshot");
+        let first =
+            EntryFactory::from_snapshot(make_snapshot("<p>v1</p>")).expect("first snapshot");
         let first_id = store.insert(first).await.unwrap();
-
         let second =
-            EntryFactory::from_snapshot(make_snapshot("com.example.terminal", "<p>v2</p>"))
-                .expect("second snapshot");
+            EntryFactory::from_snapshot(make_snapshot("<p>v2</p>")).expect("second snapshot");
         let second_id = store.insert(second).await.unwrap();
-        assert_eq!(second_id, first_id, "dedupe should reuse the row");
 
-        let fetched = store.get(first_id).await.unwrap().expect("row exists");
-        let source = fetched.metadata.source.as_ref().expect("source preserved");
-        assert_eq!(source.bundle_id.as_deref(), Some("com.example.terminal"));
-
-        let reps = store.list_representations(first_id).await.unwrap();
-        let html_rep = reps
+        assert_ne!(
+            first_id, second_id,
+            "different alternative sets must not collapse onto one row"
+        );
+        let first_reps = store.list_representations(first_id).await.unwrap();
+        let first_html = first_reps
             .iter()
             .find(|r| r.mime_type == "text/html")
-            .expect("html rep present after dedupe");
-        match &html_rep.data {
+            .expect("first html rep present");
+        match &first_html.data {
             nagori_core::RepresentationDataRef::InlineText(text) => {
-                assert_eq!(
-                    text, "<p>v2</p>",
-                    "html alternative must reflect newer copy"
-                );
+                assert_eq!(text, "<p>v1</p>", "first row keeps its original html");
             }
             other => panic!("expected inline text rep, got {other:?}"),
         }
-
-        let mut query = SearchQuery::new("shared", normalize_text("shared"), 10);
-        query.filters = SearchFilters {
-            source_app: Some("com.example.terminal".to_owned()),
-            ..Default::default()
-        };
-        let hits = store.search(query).await.unwrap();
-        assert_eq!(hits.len(), 1, "source filter must hit the new source");
-        assert_eq!(hits[0].entry_id, first_id);
     }
 
     #[tokio::test]
@@ -3776,117 +3806,32 @@ mod tests {
         }
     }
 
-    /// Apply only the migrations up to and including `up_to_version` so the
-    /// later assertions can stage v3-shaped rows before the v4 migration
-    /// rewires payload ownership.
-    fn run_migrations_through(conn: &mut Connection, up_to_version: i64) -> Result<()> {
-        let current: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(|err| storage_err(&err))?;
-        let mut last_applied = current;
-        for (version, sql) in MIGRATIONS {
-            if *version <= current || *version > up_to_version {
-                continue;
-            }
-            assert_eq!(
-                *version,
-                last_applied + 1,
-                "test helper assumes contiguous migration ordering"
-            );
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
-            let stamped = format!("{sql}\nPRAGMA user_version = {version};");
-            tx.execute_batch(&stamped)
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
-            last_applied = *version;
-        }
-        Ok(())
-    }
-
     #[test]
-    fn schema_v4_moves_image_payload_to_entry_representations() {
-        // Stage a v3 image entry whose bytes live in the legacy
-        // `entries.payload_blob` column, then run the v4 migration and
-        // assert the bytes have moved to a `role = 'primary'`
-        // representation row while the old columns disappear.
+    fn fresh_db_has_consolidated_shape() {
+        // Fresh installs apply the single consolidated migration. Probe
+        // that the user-version stamp lands at SCHEMA_VERSION, the
+        // dedupe key is the representation_set_hash column, and the
+        // legacy payload columns are absent.
         let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations_through(&mut conn, 3).unwrap();
-
-        let bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
-        let entry_id = "11111111-1111-4111-8111-111111111111";
-        let now = "2020-01-01T00:00:00Z";
-        conn.execute(
-            "INSERT INTO entries (
-                id, content_kind, text_content, content_json,
-                content_hash, sensitivity, pinned, archived, use_count,
-                created_at, updated_at,
-                payload_blob, payload_mime
-             )
-             VALUES (?1, 'image', NULL, '{\"Image\":{}}', 'hash-img',
-                     'public', 0, 0, 0, ?2, ?2, ?3, 'image/png')",
-            params![entry_id, now, &bytes],
-        )
-        .unwrap();
-
-        run_migrations_through(&mut conn, 4).unwrap();
+        run_migrations(&mut conn).unwrap();
 
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION);
 
-        #[allow(clippy::type_complexity)]
-        let (rep_id, role, mime_type, payload_mime, blob, text, byte_count, ordinal): (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<Vec<u8>>,
-            Option<String>,
-            i64,
-            i64,
-        ) = conn
-            .query_row(
-                "SELECT id, role, mime_type, payload_mime, payload_blob,
-                        text_content, byte_count, ordinal
-                 FROM entry_representations
-                 WHERE entry_id = ?1",
-                params![entry_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                },
-            )
+        let rep_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_representations", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(rep_id, format!("{entry_id}#primary"));
-        assert_eq!(role, "primary");
-        assert_eq!(mime_type, "image/png");
-        assert_eq!(payload_mime.as_deref(), Some("image/png"));
-        assert_eq!(blob.as_deref(), Some(bytes.as_slice()));
-        assert!(text.is_none());
-        assert_eq!(byte_count, bytes.len() as i64);
-        assert_eq!(ordinal, 0);
+        assert_eq!(rep_count, 0);
 
-        // Old payload columns are gone; the new hash column carries the
-        // primary content hash for Phase 1.
-        let (set_hash,): (String,) = conn
-            .query_row(
-                "SELECT representation_set_hash FROM entries WHERE id = ?1",
-                params![entry_id],
-                |row| Ok((row.get(0)?,)),
-            )
-            .unwrap();
-        assert_eq!(set_hash, "hash-img");
-
-        for column in ["payload_blob", "payload_mime", "payload_ref"] {
+        for column in [
+            "representation_set_hash",
+            "total_byte_count",
+            "content_hash",
+        ] {
             let present: bool = conn
                 .query_row(
                     "SELECT EXISTS(
@@ -3897,106 +3842,41 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(!present, "entries.{column} must be dropped by v4");
+            assert!(present, "entries.{column} should exist");
         }
-    }
 
-    #[test]
-    fn schema_v4_moves_text_entries_to_representation_row() {
-        // A v3 text-shaped entry stored `text_content` directly on
-        // `entries`. The v4 migration must surface that into a
-        // `role = 'primary', mime_type = 'text/plain'` representation row
-        // so copy-back can later re-publish it without re-parsing
-        // `content_json`.
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations_through(&mut conn, 3).unwrap();
+        for column in [
+            "payload_blob",
+            "payload_mime",
+            "payload_ref",
+            "text_content",
+        ] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('entries')
+                        WHERE name = ?1
+                    )",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!present, "entries.{column} should be absent");
+        }
 
-        let entry_id = "22222222-2222-4222-8222-222222222222";
-        let plain = "hello clipboard";
-        let now = "2020-01-02T00:00:00Z";
-        conn.execute(
-            "INSERT INTO entries (
-                id, content_kind, text_content, content_json,
-                content_hash, sensitivity, pinned, archived, use_count,
-                created_at, updated_at
-             )
-             VALUES (?1, 'text', ?2, ?3, 'hash-text',
-                     'public', 0, 0, 0, ?4, ?4)",
-            params![entry_id, plain, format!("{{\"text\":\"{plain}\"}}"), now],
-        )
-        .unwrap();
-
-        run_migrations_through(&mut conn, 4).unwrap();
-
-        let (role, mime, text, blob, byte_count): (
-            String,
-            String,
-            Option<String>,
-            Option<Vec<u8>>,
-            i64,
-        ) = conn
-            .query_row(
-                "SELECT role, mime_type, text_content, payload_blob, byte_count
-                 FROM entry_representations
-                 WHERE entry_id = ?1",
-                params![entry_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(role, "primary");
-        assert_eq!(mime, "text/plain");
-        assert_eq!(text.as_deref(), Some(plain));
-        assert!(blob.is_none());
-        assert_eq!(byte_count, plain.len() as i64);
-    }
-
-    #[test]
-    fn schema_v4_fresh_db_has_new_shape_and_no_rows() {
-        // Fresh installs play every migration in order. The end state must
-        // match what an upgraded DB looks like: `entry_representations`
-        // exists, `entries.representation_set_hash` exists, and the legacy
-        // payload columns are gone. No data should appear out of nowhere.
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations(&mut conn).unwrap();
-
-        let rep_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM entry_representations", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(rep_count, 0);
-
-        let has_set_hash: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM pragma_table_info('entries')
-                    WHERE name = 'representation_set_hash'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(has_set_hash);
-
-        let has_payload_blob: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM pragma_table_info('entries')
-                    WHERE name = 'payload_blob'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(!has_payload_blob);
+        for column in ["payload_ref", "payload_mime"] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('entry_representations')
+                        WHERE name = ?1
+                    )",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!present, "entry_representations.{column} should be absent");
+        }
     }
 
     #[tokio::test]
