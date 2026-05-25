@@ -1,8 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nagori_ipc::{
     CaptureEventCategory, CaptureHealthReport, MaintenanceHealthReport, StartupHealthReport,
 };
+use parking_lot::{Mutex, MutexGuard};
 use time::OffsetDateTime;
 
 /// After this many consecutive failed maintenance runs the loop is
@@ -34,11 +35,14 @@ pub const CAPTURE_DEGRADED_THRESHOLD: u32 = 3;
 ///
 /// Updated from `serve.rs` after each iteration and read by the IPC
 /// `Health` and `Doctor` handlers. The lock is held briefly enough that
-/// using `std::sync::Mutex` over an async lock is fine (no awaits while
-/// held); the alternative — an `AtomicU32` plus a separate string slot —
-/// would split the consecutive-failures count from the matching error
-/// message and risk reporting "degraded with no error" during the
-/// update window.
+/// using a sync mutex over an async lock is fine (no awaits while held);
+/// the alternative — an `AtomicU32` plus a separate string slot — would
+/// split the consecutive-failures count from the matching error message
+/// and risk reporting "degraded with no error" during the update window.
+/// `parking_lot::Mutex` is used so a panic inside the critical section
+/// (e.g. a future allocator failure inside `String::clone`) cannot leave
+/// the health endpoint permanently broken — there is no poison state to
+/// recover from.
 #[derive(Debug, Default, Clone)]
 pub struct MaintenanceHealth {
     inner: Arc<Mutex<Inner>>,
@@ -83,15 +87,12 @@ impl MaintenanceHealth {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        // PoisonError carries the last value, so we can recover and keep
-        // serving health snapshots even if a previous holder panicked.
-        // Doing anything else here would convert "we crashed once" into
-        // "the daemon's health endpoint is now permanently broken".
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        // `parking_lot::Mutex` has no poison state, so a previous panic
+        // inside the critical section cannot wedge later readers — every
+        // caller gets a fresh guard. Health snapshots remain available
+        // even after a transient panic during update.
+        self.inner.lock()
     }
 }
 
@@ -106,10 +107,11 @@ impl MaintenanceHealth {
 /// `nagori doctor` and the desktop notification path can branch on a
 /// real signal instead of guessing.
 ///
-/// The lock is held briefly enough that using `std::sync::Mutex` over an
-/// async lock is fine (no awaits while held). A poisoned mutex is
-/// recovered the same way `MaintenanceHealth` recovers — a previous
-/// panic must not permanently break the health endpoint.
+/// The lock is held briefly enough that using a sync mutex over an
+/// async lock is fine (no awaits while held). `parking_lot::Mutex` is
+/// used so a panic inside the critical section can't leave the health
+/// endpoint permanently broken — there is no poison state to recover
+/// from.
 #[derive(Debug, Default, Clone)]
 pub struct StartupHealth {
     inner: Arc<Mutex<StartupInner>>,
@@ -173,11 +175,8 @@ impl StartupHealth {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, StartupInner> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn lock(&self) -> MutexGuard<'_, StartupInner> {
+        self.inner.lock()
     }
 }
 
@@ -204,9 +203,10 @@ impl StartupHealth {
 /// burst of policy drops can't shadow a real adapter outage.
 ///
 /// As with the other health surfaces, the lock is held briefly enough
-/// that `std::sync::Mutex` over an async lock is fine (no awaits while
-/// held), and a poisoned mutex is recovered so a previous panic cannot
-/// permanently break the health endpoint.
+/// that a sync mutex over an async lock is fine (no awaits while held),
+/// and `parking_lot::Mutex` is used so a panic inside the critical
+/// section cannot leave the health endpoint permanently broken — there
+/// is no poison state to recover from.
 #[derive(Debug, Default, Clone)]
 pub struct CaptureHealth {
     inner: Arc<Mutex<CaptureInner>>,
@@ -284,11 +284,8 @@ impl CaptureHealth {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, CaptureInner> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn lock(&self) -> MutexGuard<'_, CaptureInner> {
+        self.inner.lock()
     }
 }
 
