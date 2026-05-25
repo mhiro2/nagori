@@ -231,11 +231,29 @@ pub async fn paste_entry(
 ///
 /// Both `paste_entry` and `paste_entry_from_palette` hide the originating
 /// window before performing the paste, so a returned `Err` alone strands
-/// the message inside an invisible store. The App-level subscriber
-/// (mounted on every webview) renders this event as a toast and the
-/// Settings window re-hydrates the live error on focus.
-fn emit_paste_failed(app: &AppHandle, message: &str) {
-    let _ = app.emit(
+/// the message inside an invisible store. The repaste-last secondary
+/// hotkey (`dispatch_secondary_hotkey` in `lib.rs`) takes the same path.
+///
+/// The App-level subscriber is mounted on every webview, so a broadcast
+/// `emit` would surface the same toast twice when the user has both the
+/// palette and the Settings window open. Route the emit to a single
+/// window instead: prefer Settings when it's visible (the user is
+/// actively looking at it and can act on the permission-prompt link in
+/// the toast), otherwise fall back to the main palette webview, which is
+/// hidden between sessions but never destroyed — the toast surfaces on
+/// the next palette open.
+pub(crate) fn emit_paste_failed(app: &AppHandle, message: &str) {
+    let target = if app
+        .get_webview_window("settings")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+    {
+        "settings"
+    } else {
+        "main"
+    };
+    let _ = app.emit_to(
+        target,
         crate::PASTE_FAILED_EVENT,
         serde_json::json!({ "error": message }),
     );

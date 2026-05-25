@@ -921,7 +921,6 @@ fn register_secondary_hotkeys(
 }
 
 fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyAction) {
-    use tauri::Emitter;
     use tauri_plugin_notification::NotificationExt;
 
     let app = handle.clone();
@@ -931,14 +930,16 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
             SecondaryHotkeyAction::RepasteLast => {
                 // Empty-history is silent; other failures surface via the
                 // toast event so the user knows their hotkey did nothing.
+                // Route through `commands::emit_paste_failed` so the
+                // scoping (settings-visible → settings, else main) stays
+                // identical across every paste-failure source — a
+                // broadcast `emit` here would double-toast when both
+                // windows are open.
                 match state.repaste_last_or_recency().await {
                     Ok(()) | Err(nagori_core::AppError::NotFound) => {}
                     Err(err) => {
                         tracing::warn!(error = %err, "repaste_last_paste_failed");
-                        let _ = app.emit(
-                            PASTE_FAILED_EVENT,
-                            serde_json::json!({ "error": err.to_string() }),
-                        );
+                        commands::emit_paste_failed(&app, &err.to_string());
                     }
                 }
             }
