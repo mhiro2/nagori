@@ -233,12 +233,21 @@ impl IpcServerHealth {
             .store(config.max_concurrent_connections.get(), Ordering::Relaxed);
     }
 
+    /// Convenience wrapper that redacts the caller's raw message before
+    /// storing it. Test-only — the production accept loops use
+    /// [`Self::record_redacted_panic`] so the same redacted string also
+    /// reaches the `tracing` warn line, not just the health surface.
+    #[cfg(test)]
     fn record_panic(&self, message: &str) {
-        // Redact before storing so the wire / log surfaces never carry
-        // raw token-like hex runs. The message ring backs both the latest
-        // panic view and the doctor history; the timestamp window backs
-        // the 5-minute count separately so it can grow past the ring.
-        let redacted = redact_panic_message(message);
+        self.record_redacted_panic(redact_panic_message(message));
+    }
+
+    /// Variant for callers that have already redacted the panic payload
+    /// (so the structured log surface and the health ring see exactly the
+    /// same string). Avoids double-redaction work on the hot path and,
+    /// more importantly, keeps a single source of truth for what an
+    /// operator sees in logs vs. in `nagori doctor`.
+    fn record_redacted_panic(&self, redacted: String) {
         let timestamp_ms = now_unix_ms();
         self.inner.handler_panics.fetch_add(1, Ordering::Relaxed);
         {
@@ -289,15 +298,30 @@ impl IpcServerHealth {
     }
 }
 
-/// Replace runs of >= 32 ASCII hex characters with `<redacted-hex>`.
+/// Mask high-entropy hex runs and absolute user-home paths.
 ///
-/// Panic payloads can quote auth tokens, content hashes, or other
-/// high-entropy hex values. The health surface is read by `nagori doctor`
-/// and `nagori health`, both of which can land in logs and dashboards
-/// outside the daemon's trust boundary; masking long hex runs gives a
-/// cheap defence against accidental leakage without depending on a regex
-/// crate just for this one redactor.
+/// Panic payloads can quote auth tokens, content hashes, or filesystem
+/// paths that reveal the operator's username or private directory layout.
+/// The health surface is read by `nagori doctor` and `nagori health`,
+/// both of which can land in logs and dashboards outside the daemon's
+/// trust boundary; the two passes below give a cheap defence against
+/// accidental leakage without depending on a regex crate just for this
+/// one redactor. Source-file paths (`crates/.../foo.rs:123`, relative
+/// `src/...`) are intentionally preserved so triage still has the call
+/// site — only paths anchored at a known home-directory prefix are
+/// scrubbed.
+///
+/// Pass ordering matters: home-path redaction runs first so that a long
+/// hex path component inside a home path (`/Users/alice/.cache/<sha>/...`)
+/// is consumed as part of the path, instead of being rewritten to
+/// `<redacted-hex>` and then leaking the trailing components because the
+/// synthesized `<` would be treated as a path terminator on the second
+/// pass.
 fn redact_panic_message(input: &str) -> String {
+    redact_hex_runs(&redact_home_paths(input))
+}
+
+fn redact_hex_runs(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut hex_run = String::new();
     for ch in input.chars() {
@@ -319,6 +343,88 @@ fn flush_hex_run(out: &mut String, run: &mut String) {
         out.push_str(run);
     }
     run.clear();
+}
+
+/// Known absolute-path prefixes that reveal the operator's username.
+/// Each entry is matched case-insensitively against the ASCII bytes that
+/// follow the prefix's anchor; the trailing path is then scrubbed until a
+/// terminator is reached. The Windows prefix appears twice on purpose:
+/// `tokio::task::JoinError::to_string()` forwards the panic payload as
+/// rendered by its `Display`, which on `panic!("{:?}", path)` (the most
+/// common `PathBuf` panic shape) escapes the backslashes into `\\`. The
+/// single-backslash form covers `path.display()`-style panic messages,
+/// and the double-backslash form covers `Debug`-formatted ones. Without
+/// the doubled variant a `Debug`-formatted Windows panic would leak the
+/// home segment verbatim. Note: longer prefixes must come first so the
+/// linear `find` in `home_prefix_len` picks the most specific match.
+const HOME_PATH_PREFIXES: &[&str] = &["C:\\\\Users\\\\", "C:\\Users\\", "/Users/", "/home/"];
+
+fn redact_home_paths(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while !rest.is_empty() {
+        if let Some(prefix_len) = home_prefix_len(rest) {
+            out.push_str("<redacted-path>");
+            let after_prefix = &rest[prefix_len..];
+            let consumed = after_prefix
+                .find(is_path_terminator)
+                .unwrap_or(after_prefix.len());
+            rest = &after_prefix[consumed..];
+        } else {
+            // `chars().next()` is `Some` while `rest` is non-empty; advance
+            // by the UTF-8 width of the leading char so multi-byte chars
+            // inside non-path prose survive intact.
+            let ch = rest
+                .chars()
+                .next()
+                .expect("rest is non-empty in this branch");
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
+fn home_prefix_len(input: &str) -> Option<usize> {
+    HOME_PATH_PREFIXES
+        .iter()
+        .find(|prefix| {
+            input.len() >= prefix.len()
+                && input.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        })
+        .map(|prefix| prefix.len())
+}
+
+/// Path characters that mark the end of an absolute path in free-form
+/// prose. Whitespace is *not* a terminator because macOS paths
+/// legitimately embed spaces (`/Users/x/Library/Application Support/...`)
+/// and a whitespace cut would leak the suffix. The trade-off is that a
+/// bare path followed by prose (`/Users/x/foo crashed at 3`) over-redacts
+/// the trailing prose, which is the safer failure mode for a privacy
+/// surface. Newlines still terminate so multi-line panic backtraces
+/// preserve their following frames. Quote / bracket / list-separator
+/// characters cover paths embedded in `Debug` output, JSON-ish prose,
+/// and quoted `Display` (`"/Users/x/Library/Application Support/y"`,
+/// `Err(/Users/x/y)`, `path=/Users/x/y, fd=3`).
+const fn is_path_terminator(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r'
+            | '\t'
+            | '\''
+            | '"'
+            | '`'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | ','
+            | ';'
+    )
 }
 
 /// Best-effort UNIX millis-since-epoch. A pre-1970 system clock collapses
@@ -350,9 +456,15 @@ fn observe_handler_outcome(
     match result {
         Ok(()) => {}
         Err(err) if err.is_panic() => {
-            let message = err.to_string();
-            warn!(error = %message, "ipc_handler_panicked");
-            health.record_panic(&message);
+            // Redact once and reuse for both the structured log line and
+            // the health surface. The `warn!` lands in `tracing`'s output,
+            // which downstream pipelines may forward to log dashboards
+            // outside the daemon's trust boundary; emitting the verbatim
+            // join-error message there would defeat the redactor that
+            // `record_panic` already applies on the health-report path.
+            let redacted = redact_panic_message(&err.to_string());
+            warn!(error = %redacted, "ipc_handler_panicked");
+            health.record_redacted_panic(redacted);
         }
         Err(err) if err.is_cancelled() => {
             // Drain-stage `abort_all` is intentional; nothing to surface.
@@ -1056,6 +1168,136 @@ mod tests {
         assert!(
             last.contains("boom"),
             "non-hex prose should survive: {last}"
+        );
+    }
+
+    #[test]
+    fn record_panic_redacts_user_home_paths() {
+        // Paths anchored under a known home prefix leak the operator's
+        // username when the panic surface is shipped to logs / dashboards;
+        // each platform's home-dir convention must scrub. Source-file
+        // paths (no home prefix) are kept verbatim so triage still has
+        // the call site to look at.
+        let cases = [
+            "panicked at /Users/alice/Library/secret reading row 5",
+            "open '/home/bob/.config/nagori/state'",
+            r"open C:\Users\carol\AppData\Roaming\nagori for write",
+            "lower-case: open /users/alice/foo",
+        ];
+        for case in cases {
+            let health = IpcServerHealth::new();
+            health.record_panic(case);
+            let last = health
+                .last_panic_message()
+                .expect("a panic was just recorded");
+            assert!(
+                last.contains("<redacted-path>"),
+                "redactor should mask the home path: input={case:?} output={last:?}",
+            );
+            for needle in ["alice", "bob", "carol"] {
+                assert!(
+                    !last.contains(needle),
+                    "redactor should strip the username component: {last:?}",
+                );
+            }
+        }
+        // Source-file references must survive so a `nagori doctor` reader
+        // can correlate panics with code.
+        let health = IpcServerHealth::new();
+        health.record_panic("panicked at crates/nagori-ipc/src/server.rs:42:13");
+        let last = health
+            .last_panic_message()
+            .expect("a panic was just recorded");
+        assert!(
+            last.contains("crates/nagori-ipc/src/server.rs"),
+            "relative source paths must survive: {last:?}",
+        );
+    }
+
+    #[test]
+    fn record_panic_redacts_paths_containing_long_hex_components() {
+        // Cache-style paths often embed a content hash as a directory
+        // component. If the hex pass ran first it would rewrite the
+        // component to `<redacted-hex>`; the synthesised `<` would then
+        // act as a path terminator on the home-path pass and leak the
+        // suffix (`/private/file`). The redactor runs home-path first
+        // specifically to defend against that ordering bug — pin it
+        // here so a future refactor that swaps the passes regresses
+        // loudly.
+        let health = IpcServerHealth::new();
+        health.record_panic(
+            "open /Users/alice/.cache/deadbeefcafebabe1234567890abcdef0fedcba98765432100ff/private/file failed",
+        );
+        let last = health
+            .last_panic_message()
+            .expect("a panic was just recorded");
+        assert!(
+            !last.contains("/private/file"),
+            "redactor must consume the suffix past the hex component: {last:?}",
+        );
+        assert!(
+            !last.contains("alice"),
+            "redactor must strip the username component: {last:?}",
+        );
+        assert!(
+            last.contains("<redacted-path>"),
+            "redactor should leave the home-path marker: {last:?}",
+        );
+    }
+
+    #[test]
+    fn record_panic_redacts_debug_formatted_windows_paths() {
+        // `panic!("{:?}", path)` is the idiomatic shape for printing a
+        // `PathBuf` in a panic message, and its Display-via-Debug escapes
+        // every backslash. The redactor must therefore recognise both
+        // `C:\Users\bob` (single-backslash, from `path.display()`) and
+        // `C:\\Users\\bob` (double-backslash, from Debug). Without the
+        // double-backslash prefix the operator's Windows username would
+        // leak verbatim into `nagori doctor`.
+        let health = IpcServerHealth::new();
+        health.record_panic(r#"open "C:\\Users\\bob\\AppData\\Roaming\\nagori" failed"#);
+        let last = health
+            .last_panic_message()
+            .expect("a panic was just recorded");
+        assert!(
+            !last.contains("bob"),
+            "Debug-escaped Windows path must be redacted: {last:?}",
+        );
+        assert!(
+            last.contains("<redacted-path>"),
+            "redactor should leave the home-path marker: {last:?}",
+        );
+        assert!(
+            last.contains("failed"),
+            "post-closing-quote prose must survive: {last:?}",
+        );
+    }
+
+    #[test]
+    fn record_panic_redacts_paths_with_embedded_spaces() {
+        // macOS path components legitimately contain spaces (`Application
+        // Support`, `Mobile Documents`), so a redactor that stops at the
+        // first whitespace would leak the suffix and defeat the goal of
+        // hiding any post-home component. Quoted forms must terminate at
+        // the closing quote so prose after the path survives intact.
+        let health = IpcServerHealth::new();
+        health.record_panic(
+            r#"open "/Users/alice/Library/Application Support/nagori/state" failed: ENOENT"#,
+        );
+        let last = health
+            .last_panic_message()
+            .expect("a panic was just recorded");
+        assert!(
+            !last.contains("Application Support"),
+            "redactor must consume the space-bearing suffix: {last:?}",
+        );
+        assert!(
+            !last.contains("alice"),
+            "redactor must strip the username: {last:?}",
+        );
+        assert!(
+            last.contains("ENOENT"),
+            "post-closing-quote prose must survive: {last:?}",
         );
     }
 
