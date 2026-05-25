@@ -31,9 +31,18 @@ impl MacosWindowBehavior {
     /// Synchronous variant of `frontmost_app` so callers running in a
     /// non-async context (e.g. the Tauri global-shortcut handler) can
     /// snapshot the previous frontmost without spinning up a runtime.
-    /// Callers must already be on a thread where blocking on `AppKit` is OK
-    /// (typically the global-shortcut callback, which runs off the main
-    /// thread but outside tokio).
+    ///
+    /// **Never call this from inside a tokio task / async fn.** The
+    /// implementation acquires `AppKit`'s internal lock, which can be
+    /// held for several ms under contention; running it on a tokio
+    /// worker thread parks that worker for the duration and starves
+    /// every other future scheduled on the same runtime (IPC handlers,
+    /// capture loop ticks). The async [`WindowBehavior::frontmost_app`]
+    /// impl deliberately hops through `spawn_blocking` for exactly this
+    /// reason — call that path instead. This blocking entry point is
+    /// intended for callers that are *already* off the tokio runtime
+    /// (e.g. the global-shortcut callback, which is dispatched on a
+    /// dedicated OS thread).
     #[must_use]
     pub fn frontmost_app_blocking() -> Option<FrontmostApp> {
         frontmost_app_sync()
