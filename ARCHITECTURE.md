@@ -210,8 +210,11 @@ ClipboardReader.current_sequence_with_max()
                                              representation_set_hash)
   → search-cache invalidate (pre)
   → EntryRepository.insert()               (single SQLite tx writes
-                                            entries + search_documents
-                                            + search_fts + ngrams)
+                                            entries + entry_representations
+                                            + search_documents + ngrams;
+                                            search_fts stays in sync via
+                                            AFTER INSERT/DELETE/UPDATE
+                                            triggers on search_documents)
   → search-cache invalidate (post)
 ```
 
@@ -230,24 +233,29 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
 - `app_denylist` is enforced inside `SensitivityClassifier::classify`
   against the snapshot's `source` (bundle id / name), not in the
   factory.
-- `EntryRepository::insert` upserts `entries`, `search_documents`, the
-  `search_fts` virtual table, and `ngrams` in one SQLite transaction,
-  so search is consistent the moment the row commits — there is no
-  separate `SearchRepository.upsert_document` step in the live path.
+- `EntryRepository::insert` upserts `entries`, `search_documents`, and
+  `ngrams` in one SQLite transaction, so search is consistent the
+  moment the row commits — there is no separate
+  `SearchRepository.upsert_document` step in the live path. The
+  `search_fts` virtual table is an FTS5 external-content index over
+  `search_documents` and is kept in sync by `AFTER INSERT/DELETE/UPDATE`
+  triggers, so application code only touches the content row.
 - The cache is invalidated on **both** sides of the insert; see
   [section 8](#8-search) for why.
 - A wall-clock gap of ≥ 30 s between two `capture_once` invocations is
   treated as a host-paused signal (sleep / suspend / lid close) and arms
-  a one-shot content-hash cross-check on the next tick: even if the
+  a one-shot dedupe-hash cross-check on the next tick: even if the
   observed sequence still matches `last_sequence`, the body is read and
-  the new content hash is compared against the last captured one before
-  any insert decision. macOS can lap the pasteboard `changeCount`
-  silently across a sleep cycle, so without this defence a fresh
-  post-wake clip whose sequence happens to collide with the pre-sleep
-  value would be skipped as a duplicate. The detector uses `SystemTime`
-  rather than `Instant` because Darwin's `Instant` is `CLOCK_UPTIME_RAW`
-  and stops while the system sleeps. The pristine launch path under
-  `capture_initial_clipboard_on_launch=false` also anchors the content
+  the new dedupe hash (the entry's `representation_set_hash` when
+  present, else `content_hash`, matching the storage layer's dedupe
+  key) is compared against the last captured one before any insert
+  decision. macOS can lap the pasteboard `changeCount` silently across
+  a sleep cycle, so without this defence a fresh post-wake clip whose
+  sequence happens to collide with the pre-sleep value would be skipped
+  as a duplicate. The detector uses `SystemTime` rather than `Instant`
+  because Darwin's `Instant` is `CLOCK_UPTIME_RAW` and stops while the
+  system sleeps. The pristine launch path under
+  `capture_initial_clipboard_on_launch=false` also anchors the dedupe
   hash so a post-wake resync without any user copy correctly recognises
   the unchanged pre-launch clipboard and does **not** promote it.
 - After frontmost is captured, the loop asks the platform whether the
@@ -308,9 +316,11 @@ domain model no longer needs a per-kind storage discriminator — the
 representation rows are the source of truth.
 
 **`EntryMetadata`** — timestamps, source app (`bundle_id`, `name`,
-`executable_path`), use count, `ContentHash` (SHA-256 — used for dedup),
-and `representation_set_hash`. The set hash is SHA-256 over a canonical
-encoding of every persisted representation
+`executable_path`), use count, `ContentHash` (SHA-256 over the primary
+body — kept as a stable fingerprint for telemetry and for entries that
+never built a representation set), and `representation_set_hash` (the
+actual dedupe key the storage layer enforces). The set hash is SHA-256
+over a canonical encoding of every persisted representation
 (`role|mime|ordinal|sha256(payload)` rows, joined with newlines after
 sorting), so dedup can recognise "same representation set" separately
 from "same primary body". Snapshot-derived entries carry a canonical set
@@ -421,12 +431,12 @@ are forward-only; downgrades are not supported.
 
 | Table | Purpose |
 |-------|---------|
-| `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column identifies the joint hash of the entry's representations so duplicate sets can be deduped without re-reading the children. |
-| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries one of `role`, `mime_type`, `platform_format`, `ordinal`, plus either inline `text_content` or `payload_blob` / `payload_mime`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. The legacy `payload_ref` column is kept for schema compatibility but always `NULL` — a future content-addressed store can opt in without a migration. |
+| `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
+| `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
-| `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. |
-| `search_fts` | FTS5 virtual table over `title` / `preview` / `normalized_text` (`unicode61`). |
-| `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. |
+| `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. |
+| `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
+| `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
 | `settings` | Key/value persistence for `AppSettings`. |
 | `audit_events` | Capture / policy events (block, redact, etc.). Never stores raw clipboard content. |
 
@@ -465,11 +475,13 @@ back to the original payload URL so the row still renders. The
 regular retention sweep, evicting the least-recently-accessed rows
 first.
 
-**Retention budget.** `enforce_total_bytes` sums every live representation's
-`byte_count` (joined to `entries` so soft-deleted rows do not consume
-budget) and evicts oldest-first when the budget is exceeded. Eviction
-soft-deletes the parent `entries` row; the cascade on
-`entry_representations` only runs on hard-delete via `purge_expired`.
+**Retention budget.** `enforce_total_bytes` sums every live entry's
+denormalised `total_byte_count` (maintained by triggers on
+`entry_representations`, so the budget total is a single-table
+aggregate over the live partition rather than a JOIN+SUM) and evicts
+oldest-first when the budget is exceeded. Eviction soft-deletes the
+parent `entries` row; the cascade on `entry_representations` only runs
+on hard-delete via `purge_expired`.
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**
