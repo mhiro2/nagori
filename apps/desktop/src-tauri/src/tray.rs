@@ -14,6 +14,7 @@
 //! controls.
 
 use std::sync::Mutex;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
@@ -21,6 +22,38 @@ use tauri::{AppHandle, Manager, Wry};
 use crate::commands::show_settings_window;
 use crate::state::AppState;
 use crate::toggle_main_palette;
+
+// PNG bytes for the menu-bar icon, embedded at compile time. We decode
+// once in `install()` and hand the RGBA buffer to Tauri — `tauri::Image`
+// only accepts pre-decoded pixels, and the `png` crate is a much
+// smaller dependency than `image` for the single format we need here.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray.png");
+
+fn decode_tray_icon() -> (Vec<u8>, u32, u32) {
+    let decoder = png::Decoder::new(TRAY_ICON_PNG);
+    let mut reader = decoder
+        .read_info()
+        .expect("embedded tray PNG header must be valid");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("embedded tray PNG frame must decode");
+    buf.truncate(info.buffer_size());
+
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(buf.len() / 3 * 4);
+            for px in buf.chunks_exact(3) {
+                out.extend_from_slice(px);
+                out.push(0xFF);
+            }
+            out
+        }
+        other => panic!("unsupported tray PNG colour type: {other:?}"),
+    };
+    (rgba, info.width, info.height)
+}
 
 pub(crate) const TRAY_ID: &str = "nagori-main";
 const ID_TOGGLE_PALETTE: &str = "tray.toggle_palette";
@@ -65,22 +98,30 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    // Tauri loads the bundle icon from `tauri.conf.json`'s `bundle.icon`
-    // list as the default window icon, which we reuse here. macOS would
-    // render the tray entry from `title` alone, but Windows' notification
-    // area and Linux' `StatusNotifierItem` need an actual image — without
-    // it the icon is invisible (or a placeholder), so we set it on every
-    // platform.
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .title("Nagori")
+    // The colourful bundle icon (used as the window/Dock icon) does not
+    // suit menu-bar surfaces: macOS expects a monochrome template image
+    // so the menubar tint applies in both light and dark mode, and the
+    // Windows / Linux notification surfaces are pixel-tight enough that
+    // detail in a full-colour icon is lost — so we use a dedicated
+    // monochrome asset here.
+    let (rgba, width, height) = decode_tray_icon();
+    let icon = Image::new_owned(rgba, width, height);
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        // No-op on Windows / Linux; on macOS this flags the image as a
+        // template so the system renders it with the menubar tint.
+        .icon_as_template(true)
+        // Intentionally no `.title(...)` — on macOS that would render a
+        // text label to the right of the icon in the menu bar, which
+        // we don't want. Windows' notification area does not surface a
+        // tray title at all and most Linux `StatusNotifierItem` hosts
+        // only show the tooltip, so dropping the title costs nothing
+        // on the other platforms.
         .tooltip("Nagori clipboard history")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| handle_menu_event(app, &event))
         .on_tray_icon_event(handle_tray_icon_event);
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
     let _tray: TrayIcon = builder.build(app)?;
 
     app.manage(Mutex::new(TrayHandles {

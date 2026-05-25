@@ -34,6 +34,7 @@ hex = "0.4"
 idna = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
 parking_lot = "0.12"
+png = "0.17"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.39", features = ["bundled"] }

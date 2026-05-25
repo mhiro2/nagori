@@ -27,6 +27,7 @@ nagori-search = { path = "../../../crates/nagori-search" }
 nagori-storage = { path = "../../../crates/nagori-storage" }
 dirs = { workspace = true }
 idna = { workspace = true }
+png = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }

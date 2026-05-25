@@ -1,6 +1,6 @@
-# nagori
-
-Local-first clipboard history for macOS, Windows, and Linux Wayland.
+<p align="center">
+  <img src="./assets/hero.jpg" alt="Nagori — Local-first clipboard history and memory" width="100%" />
+</p>
 
 ## Features
 
