@@ -25,7 +25,7 @@
 //! stacking new ones.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
 
 use async_trait::async_trait;
 use nagori_core::{AppError, Result};
@@ -59,13 +59,28 @@ impl PreviewController for MacosPreviewController {
         // `Command::spawn` is sync but fast — `qlmanage` forks and
         // returns immediately. Run on the blocking pool anyway so a
         // contended kernel can't stall the tokio worker.
-        tokio::task::spawn_blocking(move || spawn_qlmanage(&paths))
-            .await
-            .map_err(|err| AppError::Platform(format!("qlmanage spawn join failed: {err}")))?
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let child = spawn_qlmanage(&paths)?;
+            // Reap the child on a detached OS thread so a long-lived
+            // Quick Look session does not leave a zombie behind.
+            // `qlmanage -p` outlives the spawn call (the panel stays up
+            // until the user dismisses it), so the `wait` parks on
+            // `waitpid` for as long as the user keeps the preview open.
+            // Using `std::thread::spawn` rather than
+            // `tokio::task::spawn_blocking` keeps that indefinite parking
+            // off the tokio runtime — otherwise a runtime shutdown
+            // (notably a `#[tokio::test]` returning) would block on the
+            // blocking-pool worker that `waitpid` cannot be interrupted
+            // out of.
+            reap_child_detached(child);
+            Ok(())
+        })
+        .await
+        .map_err(|err| AppError::Platform(format!("qlmanage spawn join failed: {err}")))?
     }
 }
 
-fn spawn_qlmanage(paths: &[PathBuf]) -> Result<()> {
+fn spawn_qlmanage(paths: &[PathBuf]) -> Result<Child> {
     let mut command = Command::new(QLMANAGE_PATH);
     command.arg("-p");
     for path in paths {
@@ -79,22 +94,17 @@ fn spawn_qlmanage(paths: &[PathBuf]) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = command.spawn().map_err(|err| {
+    command.spawn().map_err(|err| {
         AppError::Platform(format!(
             "could not launch Quick Look (`{QLMANAGE_PATH} -p`): {err}"
         ))
-    })?;
-    // Reap the child on tokio's blocking pool so a long-lived Quick Look
-    // session does not leave a zombie behind. `qlmanage -p` outlives the
-    // spawn call (the panel stays up until the user dismisses it), so we
-    // cannot block the async worker on `wait`. Going through
-    // `spawn_blocking` instead of a raw `std::thread::spawn` lets the
-    // runtime cap how many OS threads accumulate when the user opens
-    // previews in rapid succession.
-    tokio::task::spawn_blocking(move || {
+    })
+}
+
+fn reap_child_detached(mut child: Child) {
+    std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
 }
 
 #[cfg(test)]
@@ -113,10 +123,16 @@ mod tests {
     // The happy-path call actually spawns `/usr/bin/qlmanage`. Gate it
     // on `cfg(target_os = "macos")` so a Linux/Windows CI run of the
     // workspace tests doesn't try to launch a non-existent binary —
-    // the trait stub still covers cross-target coverage.
+    // the trait stub still covers cross-target coverage. We bypass
+    // `MacosPreviewController::preview` and call `spawn_qlmanage`
+    // directly so the test owns the `Child` handle and can kill it
+    // immediately. Going through the trait would hand the child off to
+    // the detached reap thread, leaving the Quick Look panel up for the
+    // duration of the test binary (and, on a CI runner that never sends
+    // ESC, indefinitely — that was the macos-26 CI hang).
     #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn spawn_with_existing_file_succeeds() {
+    #[test]
+    fn spawn_with_existing_file_succeeds() {
         // Write a tiny temp file so qlmanage has something real to
         // open. We don't observe the preview window itself; the assert
         // is "spawn() didn't return an io::Error".
@@ -124,12 +140,10 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir creation");
         let path = dir.join("preview.txt");
         std::fs::write(&path, b"preview probe").expect("write probe");
-        let controller = MacosPreviewController::new();
-        let result = controller.preview(&[PreviewItem::new(path.clone())]).await;
-        // Best-effort cleanup; the preview window stays up for a beat
-        // after spawn but qlmanage is reading the bytes synchronously
-        // before painting so the temp file is safe to delete.
+        let result = spawn_qlmanage(std::slice::from_ref(&path));
         let _ = std::fs::remove_file(&path);
-        result.expect("qlmanage -p must spawn for an existing file");
+        let mut child = result.expect("qlmanage -p must spawn for an existing file");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
