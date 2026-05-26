@@ -124,6 +124,9 @@ jobs:
             end
 
             app "Nagori.app"
+            # Link the CLI bundled inside the .app onto Homebrew's PATH so the
+            # nagori command works from a terminal without the in-app installer.
+            binary "#{appdir}/Nagori.app/Contents/MacOS/nagori"
 
             zap trash: [
               "~/Library/Application Support/dev.nagori.desktop",
