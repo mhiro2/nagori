@@ -231,8 +231,10 @@ describe('SettingsView', () => {
     await findByRole('button', { name: 'Back to palette' });
     expect(getSettings).toHaveBeenCalled();
     // The hotkey input on the General tab reflects the loaded settings.
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    expect(hotkeyInput.value).toBe('Cmd+Shift+V');
+    // Rendered as a record-style button showing the OS-formatted accelerator
+    // (⌘⇧V on macOS) rather than the raw `Cmd+Shift+V` wire format.
+    const hotkeyButton = container.querySelector('.hotkey-input .display') as HTMLButtonElement;
+    expect(hotkeyButton.textContent?.trim()).toBe('⇧⌘V');
 
     // Switching to Privacy reveals the denylist textarea hydrated from the
     // app-denylist payload.
@@ -393,20 +395,26 @@ describe('SettingsView', () => {
     expect(sent?.maxEntrySizeBytes).toBe(8192);
   });
 
-  it('flushes a hotkey edit on unmount even without a blur event', async () => {
-    // Hotkey fields commit on `onblur` because partial accelerator
-    // strings ("Cmd+Sh…") would churn the OS-level shortcut. But
-    // Escape -> palette tears the focused input off the DOM without
-    // firing `blur`, so an unmount flush is the only thing keeping the
-    // edit alive.
+  it('flushes a textarea edit on unmount even without a blur event', async () => {
+    // Textarea fields (app denylist, regex denylist) commit on
+    // debounce-elapsed `oninput` because each keystroke fires. Escape ->
+    // palette can tear the focused control off the DOM before the debounce
+    // window closes; the unmount flush is the only thing keeping the
+    // partial-but-complete edit alive. Hotkey fields used to share this
+    // shape, but the record-style input commits on capture so they no
+    // longer rely on the unmount path.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container, unmount } = render(SettingsView);
     await findByRole('button', { name: 'Back to palette' });
 
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    await fireEvent.input(hotkeyInput, { target: { value: 'Ctrl+Alt+P' } });
-    // No blur fired — without the unmount flush this would silently
-    // vanish.
+    // Switch to Privacy so the app-denylist textarea is mounted.
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: 'NewApp' } });
+    // Inside the debounce window — without the unmount flush this would
+    // silently vanish.
     expect(updateSettings).not.toHaveBeenCalled();
 
     unmount();
@@ -414,7 +422,7 @@ describe('SettingsView', () => {
       expect(updateSettings).toHaveBeenCalledTimes(1);
     });
     const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.globalHotkey).toBe('Ctrl+Alt+P');
+    expect(sent?.appDenylist).toEqual(['NewApp']);
   });
 
   it('defers the unmount flush until any in-flight save resolves', async () => {
@@ -565,16 +573,19 @@ describe('SettingsView', () => {
     expect(retried?.captureEnabled).toBe(false);
   });
 
-  it('does not leak live state when a retry collides with an inflight queued drain', async () => {
+  it('does not fan out a third IPC when a retry collides with an inflight queued drain', async () => {
     // Race that round-6 codex caught: save A is in-flight, edit B is
-    // queued behind it, A fails (arms the retry), the queued drain
-    // sends B from live state. In the broken design the retry's
-    // `commitSave(overrideA)` would queue behind B, lose its override
-    // on the `queued` flag, and the post-B drain would rebuild from
-    // live state — leaking a mid-typed hotkey. Chaining via
+    // queued behind it, A fails (arms the retry). In the broken design
+    // the retry would chain a third call behind B's drain even though
+    // B's snapshot already subsumes A's intent. Chaining via
     // `inflight.finally` keeps the retry off the queue; B's success
-    // then clears the pending retry (its snapshot subsumes A's). The
-    // contract this asserts: no IPC ever carries the partial hotkey.
+    // then clears the pending retry. The contract asserted here is
+    // "exactly two IPCs leave the view".
+    //
+    // Historically this test also covered "no partial hotkey leaks
+    // into the retry payload"; the record-style HotkeyInput now makes
+    // mid-typed hotkey state structurally impossible at the source, so
+    // that angle moved out of the unit-test layer.
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
     let rejectA: ((err: Error) => void) | undefined;
@@ -587,10 +598,11 @@ describe('SettingsView', () => {
     });
     vi.mocked(updateSettings)
       .mockImplementationOnce(() => callA)
-      .mockImplementationOnce(() => callB)
-      // Safety net: an accidental third IPC would land here and the
-      // count assertion below would catch it.
-      .mockResolvedValueOnce(undefined);
+      .mockImplementationOnce(() => callB);
+    // A residual `mockResolvedValueOnce` would survive `clearAllMocks`
+    // (which only resets call history) and bleed into the next test's
+    // FIFO queue, so we rely on the count assertion below to catch any
+    // accidental third IPC instead of stacking another `once` stub.
 
     const { findByRole, container } = render(SettingsView);
     await findByRole('button', { name: 'Back to palette' });
@@ -614,66 +626,16 @@ describe('SettingsView', () => {
       expect(updateSettings).toHaveBeenCalledTimes(2);
     });
 
-    // Mid-flight: the user types a partial accelerator. Live state
-    // mutates per-keystroke; the bug was this leaking into a post-B
-    // drain.
-    const hotkey = container.querySelector('input[type="text"]') as HTMLInputElement;
-    await fireEvent.input(hotkey, { target: { value: 'Cmd+Sh' } });
-
     // Cool-down elapses; retry chains off B and waits for it to settle.
     await vi.advanceTimersByTimeAsync(5000);
     expect(updateSettings).toHaveBeenCalledTimes(2);
 
     // B resolves; its success branch clears `pendingRetryJson` (B's
     // snapshot already subsumes A's intent), so the chained
-    // `fireRetry` bails. Crucially, no third IPC ever fires with the
-    // partial hotkey.
+    // `fireRetry` bails. Crucially, no third IPC fires.
     resolveB?.();
     await vi.advanceTimersByTimeAsync(100);
     expect(updateSettings).toHaveBeenCalledTimes(2);
-
-    const callsArgs = vi.mocked(updateSettings).mock.calls;
-    // Both committed snapshots carry the base hotkey — the partial
-    // "Cmd+Sh" must never reach the backend.
-    expect(callsArgs[0]?.[0]?.globalHotkey).toBe('Cmd+Shift+V');
-    expect(callsArgs[1]?.[0]?.globalHotkey).toBe('Cmd+Shift+V');
-  });
-
-  it('does not leak a mid-typed hotkey into the retry payload', async () => {
-    // `bind:value={settings.globalHotkey}` updates live state on every
-    // keystroke; the save trigger is `onblur` so partial accelerators
-    // like "Cmd+Sh" never reach the OS-level hotkey registration. The
-    // retry has to honor that contract — replaying the snapshot
-    // captured at failure time, not whatever the live state holds when
-    // the timer fires.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.mocked(updateSettings)
-      .mockImplementationOnce(async () => {
-        throw new Error('backend transient');
-      })
-      .mockResolvedValueOnce(undefined);
-
-    const { findByRole, container } = render(SettingsView);
-    await findByRole('button', { name: 'Back to palette' });
-
-    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
-    await fireEvent.click(captureCheckbox);
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledTimes(1);
-    });
-
-    // Type a partial accelerator without blurring. Live state advances
-    // per-keystroke; the failed payload must not be rebuilt from it.
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Sh' } });
-
-    await vi.advanceTimersByTimeAsync(5000);
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledTimes(2);
-    });
-    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
-    expect(retried?.captureEnabled).toBe(false);
-    expect(retried?.globalHotkey).toBe('Cmd+Shift+V');
   });
 
   it('cancels a pending retry when the user makes a fresh edit', async () => {
@@ -808,36 +770,6 @@ describe('SettingsView', () => {
     expect(retried?.captureEnabled).toBe(false);
   });
 
-  it('does not leak a mid-typed hotkey into an unrelated autosave', async () => {
-    // The hotkey contract is "no save until blur" — partial
-    // accelerators like "Cmd+Sh…" must never reach the OS-level
-    // shortcut registration. A checkbox autosave fired while the user
-    // is mid-typing a hotkey would otherwise rebuild
-    // buildSnapshotPayload from live state and leak the partial
-    // accelerator into the IPC. Pinning the last blurred hotkey
-    // prevents that.
-    vi.mocked(updateSettings).mockResolvedValue();
-    const { findByRole, container } = render(SettingsView);
-    await findByRole('button', { name: 'Back to palette' });
-
-    // Type a partial accelerator without blurring.
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Sh' } });
-
-    // Unrelated edit (checkbox) triggers immediate autosave.
-    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
-    await fireEvent.click(captureCheckbox);
-
-    await waitFor(() => {
-      expect(updateSettings).toHaveBeenCalledTimes(1);
-    });
-    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.captureEnabled).toBe(false);
-    // The IPC must carry the original blurred hotkey, not the
-    // partial accelerator currently in the textbox.
-    expect(sent?.globalHotkey).toBe('Cmd+Shift+V');
-  });
-
   it('skips the unmount flush when nothing has changed', async () => {
     // The flush guard is an equality check against the persisted
     // baseline. Without it, every navigation back to the palette would
@@ -875,25 +807,38 @@ describe('SettingsView', () => {
     expect(sent?.regexDenylist).toEqual(['foo']);
   });
 
-  it('does not save the global hotkey on every keystroke, but commits on blur', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+  it('commits a captured combo as a single atomic save', async () => {
+    // The record-style HotkeyInput resolves the "partial accelerator
+    // leak" problem at the source — `settings.globalHotkey` only mutates
+    // when a complete combo is captured, so a single save fires per
+    // capture rather than per keystroke.
     vi.mocked(updateSettings).mockResolvedValue();
     const { findByRole, container } = render(SettingsView);
     await findByRole('button', { name: 'Back to palette' });
 
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Shift+Z' } });
-    // Even past the longest debounce, oninput on a hotkey field never
-    // schedules a save — the registration churn cost is too high.
-    await vi.advanceTimersByTimeAsync(1000);
+    const hotkeyButton = container.querySelector('.hotkey-input .display') as HTMLButtonElement;
+    expect(hotkeyButton).toBeTruthy();
+    await fireEvent.click(hotkeyButton);
+    // Pure-modifier press while composing — no save yet.
+    await fireEvent.keyDown(hotkeyButton, {
+      key: 'Meta',
+      code: 'MetaLeft',
+      metaKey: true,
+    });
     expect(updateSettings).not.toHaveBeenCalled();
 
-    await fireEvent.blur(hotkeyInput);
+    // Complete combo lands; capture commits and triggers exactly one save.
+    await fireEvent.keyDown(hotkeyButton, {
+      key: 'z',
+      code: 'KeyZ',
+      metaKey: true,
+      shiftKey: true,
+    });
     await waitFor(() => {
       expect(updateSettings).toHaveBeenCalledTimes(1);
     });
     const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.globalHotkey).toBe('Cmd+Shift+Z');
+    expect(sent?.globalHotkey).toBe('CmdOrCtrl+Shift+Z');
   });
 
   it('coalesces edits that arrive while a save is in flight', async () => {
@@ -1129,35 +1074,47 @@ describe('SettingsView', () => {
     expect(updateSettings).not.toHaveBeenCalled();
   });
 
-  it('preserves a user-edited field when an external settings_changed event arrives', async () => {
-    // Scenario: the user is mid-edit on the global hotkey (commits on
-    // blur, not on every keystroke) when the tray flips capture from
+  it('preserves a user-edited textarea when an external settings_changed event arrives', async () => {
+    // Scenario: the user is mid-edit on the regex-denylist textarea
+    // (debounces per keystroke) when the tray flips capture from
     // another window. The merge must adopt the remote `captureEnabled`
     // change (user hasn't touched it) without clobbering the
-    // user's in-progress hotkey edit.
+    // in-progress textarea content.
+    //
+    // (The hotkey field was the original carrier for this contract, but
+    // the record-style HotkeyInput now commits atomically — `settings.
+    // globalHotkey` never holds intermediate state, so the merge has
+    // nothing per-keystroke to protect there. The textarea path is the
+    // remaining live-binding surface that exercises the same merge
+    // logic.)
     vi.mocked(updateSettings).mockResolvedValue();
     const events = captureSettingsChangedHandler();
     const { findByRole, container } = render(SettingsView);
 
     await findByRole('button', { name: 'Back to palette' });
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
 
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    expect(hotkeyInput).toBeTruthy();
-    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Alt+V' } });
-    // No save has fired — the hotkey commits on `onblur`, not `oninput`.
+    const appDenylistTextarea = container.querySelectorAll('textarea')[0] as HTMLTextAreaElement;
+    expect(appDenylistTextarea).toBeTruthy();
+    await fireEvent.input(appDenylistTextarea, { target: { value: 'MyApp' } });
+    // Inside the debounce window — no save yet.
     expect(updateSettings).not.toHaveBeenCalled();
 
     events.fire({ ...baseSettings(), captureEnabled: false });
 
-    // Adopted: capture flipped to false in the UI.
+    // Adopted: capture flipped to false in the UI (need to flip back to
+    // General to assert, since the textarea is on Privacy).
+    const generalTab = await findByRole('tab', { name: 'General' });
+    await fireEvent.click(generalTab);
     await waitFor(() => {
       const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
       expect(captureCheckbox.checked).toBe(false);
     });
-    // Preserved: the user's hotkey edit is untouched (the remote
-    // `globalHotkey` value differs from local, so the merge classifies
-    // the field as user-edited and skips the overwrite).
-    expect(hotkeyInput.value).toBe('Cmd+Alt+V');
+    // Preserved: the user's textarea edit is untouched.
+    await fireEvent.click(privacyTab);
+    const preserved = container.querySelectorAll('textarea')[0] as HTMLTextAreaElement;
+    expect(preserved.value).toBe('MyApp');
     // And no autosave fires from the merge itself.
     expect(updateSettings).not.toHaveBeenCalled();
   });
@@ -1179,19 +1136,21 @@ describe('SettingsView', () => {
       expect(updateSettings).toHaveBeenCalledTimes(1);
     });
 
-    // Mid-flight, the user starts editing the global hotkey. The echo
-    // for the just-sent payload arrives afterwards. If the merge ran
-    // for the echo and adopted `globalHotkey` from the snapshot, it
-    // would overwrite the user's in-progress text — verify the echo
-    // path leaves the input alone.
-    const hotkeyInput = container.querySelector('input[type="text"]') as HTMLInputElement;
-    expect(hotkeyInput).toBeTruthy();
-    await fireEvent.input(hotkeyInput, { target: { value: 'Cmd+Shift+H' } });
+    // Mid-flight, the user starts editing the app-denylist textarea. The
+    // echo for the just-sent payload arrives afterwards. If the merge
+    // ran for the echo and adopted `appDenylist` from the snapshot, it
+    // would overwrite the user's in-progress edit — verify the echo
+    // path leaves the textarea alone.
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+    const appDenylistTextarea = container.querySelectorAll('textarea')[0] as HTMLTextAreaElement;
+    expect(appDenylistTextarea).toBeTruthy();
+    await fireEvent.input(appDenylistTextarea, { target: { value: 'EchoTest' } });
 
-    // Fire the echo (matches what we sent — captureEnabled false, original hotkey).
+    // Fire the echo (matches what we sent — captureEnabled false, original denylist).
     events.fire({ ...baseSettings(), captureEnabled: false });
 
-    expect(hotkeyInput.value).toBe('Cmd+Shift+H');
+    expect(appDenylistTextarea.value).toBe('EchoTest');
   });
 
   it('preserves a mid-typed denylist textarea when an external settings_changed event arrives', async () => {

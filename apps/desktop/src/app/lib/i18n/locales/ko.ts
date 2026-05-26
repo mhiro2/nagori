@@ -248,7 +248,9 @@ export const ko: Messages = {
       paletteHelp: '팔레트 내 단축키를 재정의합니다. 비워 두면 기본값이 유지됩니다.',
       secondaryHeading: '보조 전역 단축키',
       secondaryHelp: '메인 팔레트 단축키와 함께 등록되는 선택적인 시스템 전역 단축키입니다.',
-      placeholder: '예: Cmd+Shift+P',
+      placeholder: '클릭해 기록',
+      recordingHint: '단축키를 누르세요… (Esc로 취소)',
+      clearAriaLabel: '단축키 지우기',
       paletteActions: {
         pin: '선택 항목 고정/해제',
         delete: '선택 항목 삭제',

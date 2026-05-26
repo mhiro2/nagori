@@ -242,7 +242,9 @@ export const zhHans: Messages = {
       paletteHelp: '覆盖面板内的快捷键。留空则保留默认值。',
       secondaryHeading: '附加全局快捷键',
       secondaryHelp: '与主面板快捷键并行注册的可选系统级快捷键。',
-      placeholder: '例如 Cmd+Shift+P',
+      placeholder: '点击以录制',
+      recordingHint: '请按下快捷键…（Esc 取消）',
+      clearAriaLabel: '清除快捷键',
       paletteActions: {
         pin: '固定 / 取消固定',
         delete: '删除所选',

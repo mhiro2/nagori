@@ -242,7 +242,9 @@ export const zhHant: Messages = {
       paletteHelp: '覆寫面板內的快速鍵。留空則維持預設值。',
       secondaryHeading: '附加全域快速鍵',
       secondaryHelp: '與主要面板快速鍵並行註冊的可選系統層級快速鍵。',
-      placeholder: '例如 Cmd+Shift+P',
+      placeholder: '點擊以錄製',
+      recordingHint: '請按下快速鍵…（Esc 取消）',
+      clearAriaLabel: '清除快速鍵',
       paletteActions: {
         pin: '釘選 / 取消釘選',
         delete: '刪除所選',

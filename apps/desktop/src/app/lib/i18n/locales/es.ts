@@ -264,7 +264,9 @@ export const es: Messages = {
       secondaryHeading: 'Atajos globales secundarios',
       secondaryHelp:
         'Atajos opcionales a nivel de sistema registrados junto al atajo principal de la paleta.',
-      placeholder: 'p. ej. Cmd+Shift+P',
+      placeholder: 'Haz clic para grabar',
+      recordingHint: 'Pulsa el atajo… (Esc para cancelar)',
+      clearAriaLabel: 'Borrar atajo',
       paletteActions: {
         pin: 'Fijar / desfijar selección',
         delete: 'Eliminar selección',

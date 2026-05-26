@@ -258,3 +258,242 @@ export const resolveAction = (
   event: KeyboardEvent,
   bindings: readonly Binding[] = PALETTE_BINDINGS,
 ): PaletteAction | undefined => bindings.find((b) => matches(b, event))?.action;
+
+// Display glyphs follow the Apple HIG convention (Ctrl → Opt → Shift → Cmd →
+// key, no separator). On non-Apple platforms we stay with the plain
+// `Ctrl+Shift+V` rendering that menubars on those OSes already use, so the
+// pill shown in Settings matches what the rest of the system shows.
+const MAC_MODIFIER_GLYPHS = {
+  ctrl: '⌃', // ⌃
+  alt: '⌥', // ⌥
+  shift: '⇧', // ⇧
+  meta: '⌘', // ⌘
+} as const;
+
+// Display labels for multi-char keys, shared by mac glyph mode and the
+// `Ctrl+Shift+V` join mode. We map both the Tauri-style tokens (`Up`,
+// `PageUp`) and the DOM `KeyboardEvent.key` names (`ArrowUp`) the palette
+// override format uses, since the formatter renders both kinds of stored
+// strings.
+const DISPLAY_KEY_LABELS: Record<string, { mac: string; other: string }> = {
+  Space: { mac: 'Space', other: 'Space' },
+  Enter: { mac: '↩', other: 'Enter' }, // ↩
+  Return: { mac: '↩', other: 'Return' },
+  Tab: { mac: '⇥', other: 'Tab' }, // ⇥
+  Esc: { mac: '⎋', other: 'Esc' }, // ⎋
+  Escape: { mac: '⎋', other: 'Esc' },
+  Backspace: { mac: '⌫', other: 'Backspace' }, // ⌫
+  Delete: { mac: '⌦', other: 'Delete' }, // ⌦
+  Insert: { mac: 'Insert', other: 'Insert' },
+  Up: { mac: '↑', other: 'Up' }, // ↑
+  Down: { mac: '↓', other: 'Down' }, // ↓
+  Left: { mac: '←', other: 'Left' }, // ←
+  Right: { mac: '→', other: 'Right' }, // →
+  ArrowUp: { mac: '↑', other: 'Up' },
+  ArrowDown: { mac: '↓', other: 'Down' },
+  ArrowLeft: { mac: '←', other: 'Left' },
+  ArrowRight: { mac: '→', other: 'Right' },
+  Home: { mac: 'Home', other: 'Home' },
+  End: { mac: 'End', other: 'End' },
+  PageUp: { mac: 'PgUp', other: 'PgUp' },
+  PageDown: { mac: 'PgDn', other: 'PgDn' },
+};
+
+const formatKeyForDisplay = (key: string, isMac: boolean): string => {
+  if (key.length === 1) return key.toUpperCase();
+  const entry = DISPLAY_KEY_LABELS[key];
+  if (entry) return isMac ? entry.mac : entry.other;
+  return key;
+};
+
+/// Render an accelerator (Tauri wire format or palette-binding format) in the
+/// platform's idiomatic style. macOS uses contiguous glyphs (`⌘⇧V`); other
+/// platforms use `Ctrl+Shift+V`. `CmdOrCtrl` expands to the platform primary
+/// modifier (Cmd on macOS, Ctrl elsewhere), matching how the shortcut
+/// actually fires at runtime. Returns the input unchanged when parsing
+/// fails so a malformed stored value remains visible to the user instead of
+/// silently collapsing to empty.
+export const formatAccelerator = (accelerator: string, platform?: Platform): string => {
+  const tokens = accelerator
+    .split('+')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (tokens.length === 0) return '';
+  const isMac = macOsLikePlatform(platform);
+  const mods = { meta: false, ctrl: false, alt: false, shift: false };
+  let key: string | null = null;
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower === 'cmd' || lower === 'meta' || lower === 'command' || lower === 'super') {
+      mods.meta = true;
+    } else if (lower === 'win' || lower === 'windows') {
+      mods.meta = true;
+    } else if (lower === 'cmdorctrl' || lower === 'commandorcontrol') {
+      if (isMac) mods.meta = true;
+      else mods.ctrl = true;
+    } else if (lower === 'ctrl' || lower === 'control') {
+      mods.ctrl = true;
+    } else if (lower === 'shift') {
+      mods.shift = true;
+    } else if (lower === 'alt' || lower === 'option' || lower === 'opt') {
+      mods.alt = true;
+    } else if (key !== null) {
+      // Multiple key segments — malformed; surface verbatim rather than
+      // silently dropping the second key.
+      return accelerator;
+    } else {
+      key = token;
+    }
+  }
+  if (key === null) return accelerator;
+  const displayKey = formatKeyForDisplay(key, isMac);
+  if (isMac) {
+    const parts: string[] = [];
+    if (mods.ctrl) parts.push(MAC_MODIFIER_GLYPHS.ctrl);
+    if (mods.alt) parts.push(MAC_MODIFIER_GLYPHS.alt);
+    if (mods.shift) parts.push(MAC_MODIFIER_GLYPHS.shift);
+    if (mods.meta) parts.push(MAC_MODIFIER_GLYPHS.meta);
+    parts.push(displayKey);
+    return parts.join('');
+  }
+  const parts: string[] = [];
+  if (mods.ctrl) parts.push('Ctrl');
+  // On Windows/Linux, the Meta/Super key is rarely a usable shortcut modifier
+  // (the OS intercepts most Win-key combos) — render it explicitly so the
+  // user sees that the stored binding may not actually fire.
+  if (mods.meta) parts.push(platform === 'windows' ? 'Win' : 'Super');
+  if (mods.alt) parts.push('Alt');
+  if (mods.shift) parts.push('Shift');
+  parts.push(displayKey);
+  return parts.join('+');
+};
+
+// Capture target controls the wire format we emit. Tauri's global-shortcut
+// parser accepts short names like `Up` / `Esc` / `PageUp`; the in-palette
+// matcher compares against `KeyboardEvent.key` and so needs the DOM-style
+// names like `ArrowUp` / `Escape`. The two grammars overlap for letters,
+// digits, punctuation, function keys, Space/Enter/Tab/Backspace/Delete —
+// the divergence only matters for arrows / Escape / paging keys, but we
+// still have to pick one per call site.
+export type CaptureTarget = 'tauri-global' | 'palette-binding';
+
+const TAURI_KEY_FROM_CODE: Record<string, string> = {
+  Space: 'Space',
+  Enter: 'Enter',
+  NumpadEnter: 'Enter',
+  Tab: 'Tab',
+  Escape: 'Esc',
+  Backspace: 'Backspace',
+  Delete: 'Delete',
+  Insert: 'Insert',
+  ArrowUp: 'Up',
+  ArrowDown: 'Down',
+  ArrowLeft: 'Left',
+  ArrowRight: 'Right',
+  Home: 'Home',
+  End: 'End',
+  PageUp: 'PageUp',
+  PageDown: 'PageDown',
+  Comma: ',',
+  Period: '.',
+  Slash: '/',
+  Semicolon: ';',
+  Quote: "'",
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Minus: '-',
+  Equal: '=',
+  Backquote: '`',
+};
+
+const PALETTE_KEY_FROM_CODE: Record<string, string> = {
+  ...TAURI_KEY_FROM_CODE,
+  // Palette overrides are compared against `KeyboardEvent.key`, which uses
+  // the long names — swap the four divergent codes back to DOM form.
+  Escape: 'Escape',
+  ArrowUp: 'ArrowUp',
+  ArrowDown: 'ArrowDown',
+  ArrowLeft: 'ArrowLeft',
+  ArrowRight: 'ArrowRight',
+};
+
+const MODIFIER_EVENT_KEYS: ReadonlySet<string> = new Set([
+  'Meta',
+  'Control',
+  'Alt',
+  'AltGraph',
+  'Shift',
+  'OS',
+  'Hyper',
+  'Super',
+]);
+
+const keyFromCode = (event: KeyboardEvent, target: CaptureTarget): string | null => {
+  const code = event.code;
+  if (!code) return null;
+  // Palette overrides are matched against `KeyboardEvent.key`, so the stored
+  // key must be whatever `event.key` will surface at match time. For
+  // printable single-character keys we therefore record `event.key` itself
+  // (e.g. `Shift+1` → `!` on US, `Shift+/` → `?`, AZERTY `KeyA` → `q`).
+  // Named keys (arrows, Escape, function keys) fall through to the
+  // code-based map below where the matcher and the recorder agree on the
+  // long DOM name.
+  if (target === 'palette-binding') {
+    const k = event.key;
+    if (k && k.length === 1 && k !== ' ') return k;
+    return PALETTE_KEY_FROM_CODE[code] ?? null;
+  }
+  // tauri-global: bind by physical key so the OS layer registers the same
+  // accelerator regardless of which character the shifted/altGr state would
+  // produce. Tauri's parser is happy with `Shift+1` and resolves it against
+  // the physical Digit1 row on every layout.
+  // Letter keys: `KeyA`..`KeyZ` → `A`..`Z`. Storing uppercase matches both
+  // Tauri's accelerator format (case-insensitive but conventionally upper)
+  // and the palette matcher (`matches` compares case-insensitively).
+  if (code.startsWith('Key') && code.length === 4) return code.slice(3);
+  // Digits: `Digit1` → `1`. NumpadX is intentionally not folded into the
+  // top-row digit — the OS treats them as distinct physical keys for
+  // shortcut binding purposes.
+  if (code.startsWith('Digit') && code.length === 6) return code.slice(5);
+  if (/^F([1-9]|1\d|2[0-4])$/.test(code)) return code;
+  return TAURI_KEY_FROM_CODE[code] ?? null;
+};
+
+/// Build a wire-format accelerator string from a live `keydown` event. The
+/// returned value follows Tauri's `CmdOrCtrl+Shift+V` grammar so it can be
+/// persisted directly. Returns `null` for events that carry no usable key
+/// segment — pure modifier presses (Cmd alone, Shift alone) and codes we
+/// don't recognise both fall in that bucket so the caller knows to keep
+/// waiting for the next event instead of committing a half-typed combo.
+///
+/// The primary OS modifier (Cmd on macOS, Ctrl elsewhere) is folded into
+/// `CmdOrCtrl` so a binding recorded on one host stays portable when the
+/// settings file syncs to another. The non-primary modifier is preserved
+/// verbatim — explicit `Ctrl` on macOS, explicit `Win` on Windows — so a
+/// user who deliberately recorded a host-specific combo keeps it.
+export const captureFromKeyboardEvent = (
+  event: KeyboardEvent,
+  target: CaptureTarget,
+  platform?: Platform,
+): string | null => {
+  if (MODIFIER_EVENT_KEYS.has(event.key)) return null;
+  const keyToken = keyFromCode(event, target);
+  if (keyToken === null) return null;
+  const isMac = macOsLikePlatform(platform);
+  const tokens: string[] = [];
+  const primaryHeld = isMac ? event.metaKey : event.ctrlKey;
+  const nonPrimaryHeld = isMac ? event.ctrlKey : event.metaKey;
+  if (primaryHeld) tokens.push('CmdOrCtrl');
+  if (nonPrimaryHeld) {
+    // On macOS the literal Ctrl key stays as `Ctrl`; on Windows/Linux the
+    // literal Meta/Win key is rendered as `Win` because Tauri's parser
+    // accepts `Super` and `Win` interchangeably and the latter matches
+    // what users see on their keyboard.
+    tokens.push(isMac ? 'Ctrl' : 'Win');
+  }
+  if (event.altKey) tokens.push('Alt');
+  if (event.shiftKey) tokens.push('Shift');
+  tokens.push(keyToken);
+  return tokens.join('+');
+};

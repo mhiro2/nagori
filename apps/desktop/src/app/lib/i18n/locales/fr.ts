@@ -263,7 +263,9 @@ export const fr: Messages = {
       secondaryHeading: 'Raccourcis globaux secondaires',
       secondaryHelp:
         'Raccourcis système optionnels enregistrés en parallèle du raccourci principal de la palette.',
-      placeholder: 'ex. Cmd+Shift+P',
+      placeholder: 'Cliquer pour enregistrer',
+      recordingHint: 'Appuyez sur la combinaison… (Échap pour annuler)',
+      clearAriaLabel: 'Effacer le raccourci',
       paletteActions: {
         pin: 'Épingler / désépingler',
         delete: 'Supprimer la sélection',

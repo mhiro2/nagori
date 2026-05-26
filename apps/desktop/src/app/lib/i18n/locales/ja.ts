@@ -251,7 +251,9 @@ export const ja: Messages = {
       secondaryHeading: '追加グローバルホットキー',
       secondaryHelp:
         'メインのパレットホットキーと並行して登録される、任意のシステム全域ショートカットです。',
-      placeholder: '例: Cmd+Shift+P',
+      placeholder: 'クリックして記録',
+      recordingHint: 'ショートカットを押してください…（Esc でキャンセル）',
+      clearAriaLabel: 'ショートカットをクリア',
       paletteActions: {
         pin: '選択をピン留め切替',
         delete: '選択を削除',

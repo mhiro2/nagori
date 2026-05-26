@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildBindings, resolveAction } from './keybindings';
+import {
+  buildBindings,
+  captureFromKeyboardEvent,
+  formatAccelerator,
+  resolveAction,
+} from './keybindings';
 
 const event = (init: KeyboardEventInit & { key: string }): KeyboardEvent =>
+  new KeyboardEvent('keydown', init);
+
+const captureEvent = (init: KeyboardEventInit & { key: string; code?: string }): KeyboardEvent =>
   new KeyboardEvent('keydown', init);
 
 describe('resolveAction', () => {
@@ -153,5 +161,203 @@ describe('buildBindings', () => {
     // still parse correctly.
     const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' });
     expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBe('toggle-pin');
+  });
+});
+
+describe('formatAccelerator', () => {
+  it('renders CmdOrCtrl+Shift+V as glyphs on macOS', () => {
+    expect(formatAccelerator('CmdOrCtrl+Shift+V', 'macos')).toBe('⇧⌘V');
+  });
+
+  it('renders CmdOrCtrl+Shift+V as Ctrl+Shift+V on Windows', () => {
+    expect(formatAccelerator('CmdOrCtrl+Shift+V', 'windows')).toBe('Ctrl+Shift+V');
+  });
+
+  it('renders CmdOrCtrl+Shift+V as Ctrl+Shift+V on Linux Wayland', () => {
+    expect(formatAccelerator('CmdOrCtrl+Shift+V', 'linuxWayland')).toBe('Ctrl+Shift+V');
+  });
+
+  it('keeps explicit Cmd as Meta glyph / Win label across platforms', () => {
+    // The portable `CmdOrCtrl` alias swaps per host; an explicit `Cmd` token
+    // is a deliberate request for the physical Meta/Win key and must not be
+    // remapped just because the display platform differs.
+    expect(formatAccelerator('Cmd+I', 'macos')).toBe('⌘I');
+    expect(formatAccelerator('Cmd+I', 'windows')).toBe('Win+I');
+    expect(formatAccelerator('Cmd+I', 'linuxWayland')).toBe('Super+I');
+  });
+
+  it('orders mac modifiers Ctrl, Opt, Shift, Cmd to match the Apple HIG', () => {
+    expect(formatAccelerator('Cmd+Ctrl+Alt+Shift+K', 'macos')).toBe('⌃⌥⇧⌘K');
+  });
+
+  it('renders multi-char keys in their idiomatic per-OS label', () => {
+    expect(formatAccelerator('CmdOrCtrl+Backspace', 'macos')).toBe('⌘⌫');
+    expect(formatAccelerator('CmdOrCtrl+Backspace', 'windows')).toBe('Ctrl+Backspace');
+    expect(formatAccelerator('CmdOrCtrl+Up', 'macos')).toBe('⌘↑');
+    expect(formatAccelerator('CmdOrCtrl+ArrowUp', 'macos')).toBe('⌘↑');
+    expect(formatAccelerator('CmdOrCtrl+PageDown', 'windows')).toBe('Ctrl+PgDn');
+  });
+
+  it('uppercases single-letter keys regardless of stored case', () => {
+    expect(formatAccelerator('CmdOrCtrl+v', 'macos')).toBe('⌘V');
+    expect(formatAccelerator('CmdOrCtrl+v', 'windows')).toBe('Ctrl+V');
+  });
+
+  it('returns the input verbatim for malformed strings', () => {
+    // Multiple key segments is a parsing failure; surfacing the raw value
+    // lets the user see what is stored rather than wiping the field to a
+    // blank cell.
+    expect(formatAccelerator('Cmd+A+B', 'macos')).toBe('Cmd+A+B');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(formatAccelerator('', 'macos')).toBe('');
+  });
+
+  it('defaults to macOS glyph mode when platform is unknown', () => {
+    expect(formatAccelerator('CmdOrCtrl+V')).toBe('⌘V');
+  });
+});
+
+describe('captureFromKeyboardEvent', () => {
+  it('folds Cmd on macOS into CmdOrCtrl', () => {
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'v', code: 'KeyV', metaKey: true, shiftKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Shift+V');
+  });
+
+  it('folds Ctrl on Windows into CmdOrCtrl', () => {
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'v', code: 'KeyV', ctrlKey: true, shiftKey: true }),
+        'tauri-global',
+        'windows',
+      ),
+    ).toBe('CmdOrCtrl+Shift+V');
+  });
+
+  it('preserves non-primary modifier verbatim (Ctrl on macOS)', () => {
+    // Cmd+Ctrl is a deliberate, mac-specific combo — folding Cmd to
+    // `CmdOrCtrl` is fine, but Ctrl must stay as `Ctrl` so the recorded
+    // shortcut keeps firing on the macOS host where it was captured.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'k', code: 'KeyK', metaKey: true, ctrlKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Ctrl+K');
+  });
+
+  it('returns null for pure-modifier events so the caller keeps recording', () => {
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'Meta', code: 'MetaLeft', metaKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBeNull();
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'Shift', code: 'ShiftLeft', shiftKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBeNull();
+  });
+
+  it('emits Tauri-style multi-char tokens for the global target', () => {
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'ArrowUp', code: 'ArrowUp', metaKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Up');
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'Escape', code: 'Escape', metaKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Esc');
+  });
+
+  it('emits DOM-style multi-char tokens for the palette-binding target', () => {
+    // Palette overrides are matched against `KeyboardEvent.key`, so we have
+    // to keep the long DOM names — otherwise a recorded `Up` would never
+    // fire because `event.key` is `ArrowUp`.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'ArrowUp', code: 'ArrowUp', metaKey: true }),
+        'palette-binding',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+ArrowUp');
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'Escape', code: 'Escape', metaKey: true }),
+        'palette-binding',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Escape');
+  });
+
+  it('captures punctuation via the physical code, not the shifted glyph', () => {
+    // Shift+1 reports `event.key === '!'` on US keyboards; we drive off
+    // `event.code` so the stored binding stays in terms of the physical
+    // key the user pressed.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: '!', code: 'Digit1', metaKey: true, shiftKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Shift+1');
+  });
+
+  it('palette-binding captures the shifted character so the matcher fires', () => {
+    // The in-window matcher compares `binding.key` against `event.key`,
+    // and on US layouts `Shift+1` arrives as `event.key === "!"`. Storing
+    // the physical `1` here would silently never match. Save the shifted
+    // glyph instead so the recorded combo actually triggers.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: '!', code: 'Digit1', metaKey: true, shiftKey: true }),
+        'palette-binding',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+Shift+!');
+  });
+
+  it('palette-binding records the layout-specific letter via event.key', () => {
+    // AZERTY's `KeyA` physical position produces `event.key === "q"`. The
+    // matcher uses `event.key`, so storing the physical `A` would also
+    // miss. Using `event.key` keeps the recorded combo portable to the
+    // matcher on whichever layout the user is on.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: 'q', code: 'KeyA', metaKey: true }),
+        'palette-binding',
+        'macos',
+      ),
+    ).toBe('CmdOrCtrl+q');
+  });
+
+  it('returns null when the physical code has no mapped token', () => {
+    // `IntlBackslash` is a non-US layout key Tauri's parser does not
+    // accept; returning null keeps the recording UX waiting for the next
+    // press instead of persisting a value the daemon would reject.
+    expect(
+      captureFromKeyboardEvent(
+        captureEvent({ key: '\\', code: 'IntlBackslash', metaKey: true }),
+        'tauri-global',
+        'macos',
+      ),
+    ).toBeNull();
   });
 });

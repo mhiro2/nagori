@@ -233,6 +233,8 @@ export type Messages = {
       secondaryHeading: string;
       secondaryHelp: string;
       placeholder: string;
+      recordingHint: string;
+      clearAriaLabel: string;
       paletteActions: {
         pin: string;
         delete: string;
@@ -580,7 +582,9 @@ export const en: Messages = {
       secondaryHeading: 'Secondary global hotkeys',
       secondaryHelp:
         'Optional system-wide accelerators registered alongside the main palette hotkey.',
-      placeholder: 'e.g. Cmd+Shift+P',
+      placeholder: 'Click to record',
+      recordingHint: 'Press shortcut… (Esc to cancel)',
+      clearAriaLabel: 'Clear shortcut',
       paletteActions: {
         pin: 'Pin / unpin selection',
         delete: 'Delete selection',

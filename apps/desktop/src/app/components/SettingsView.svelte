@@ -30,6 +30,7 @@
   import { hotkeyFailureState } from '../stores/hotkeyFailure.svelte';
   import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
+  import HotkeyInput from './HotkeyInput.svelte';
 
   type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -1011,12 +1012,17 @@
           </label>
           <label class="field-row">
             <span>{t.settings.capture.hotkey}</span>
-            <input
-              type="text"
-              bind:value={settings.globalHotkey}
-              onblur={() => {
+            <HotkeyInput
+              value={settings.globalHotkey}
+              platform={capabilities?.platform}
+              target="tauri-global"
+              placeholder={t.settings.hotkeys.placeholder}
+              recordingLabel={t.settings.hotkeys.recordingHint}
+              clearLabel={t.settings.hotkeys.clearAriaLabel}
+              onChange={(next) => {
                 if (!settings) return;
-                lastBlurredGlobalHotkey = settings.globalHotkey;
+                settings.globalHotkey = next;
+                lastBlurredGlobalHotkey = next;
                 scheduleSave(0);
               }}
             />
@@ -1078,14 +1084,16 @@
             {#each PALETTE_HOTKEY_ACTIONS as action (action)}
               <label class="hotkey-row">
                 <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
-                <input
-                  type="text"
-                  placeholder={t.settings.hotkeys.placeholder}
+                <HotkeyInput
                   value={settings.paletteHotkeys[action] ?? ''}
-                  oninput={(e) =>
-                    setOverride('paletteHotkeys', action, (e.target as HTMLInputElement).value)}
-                  onblur={() => {
+                  platform={capabilities?.platform}
+                  target="palette-binding"
+                  placeholder={t.settings.hotkeys.placeholder}
+                  recordingLabel={t.settings.hotkeys.recordingHint}
+                  clearLabel={t.settings.hotkeys.clearAriaLabel}
+                  onChange={(next) => {
                     if (!settings) return;
+                    setOverride('paletteHotkeys', action, next);
                     lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
                     scheduleSave(0);
                   }}
@@ -1099,14 +1107,16 @@
             {#each SECONDARY_HOTKEY_ACTIONS as action (action)}
               <label class="hotkey-row">
                 <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
-                <input
-                  type="text"
-                  placeholder={t.settings.hotkeys.placeholder}
+                <HotkeyInput
                   value={settings.secondaryHotkeys[action] ?? ''}
-                  oninput={(e) =>
-                    setOverride('secondaryHotkeys', action, (e.target as HTMLInputElement).value)}
-                  onblur={() => {
+                  platform={capabilities?.platform}
+                  target="tauri-global"
+                  placeholder={t.settings.hotkeys.placeholder}
+                  recordingLabel={t.settings.hotkeys.recordingHint}
+                  clearLabel={t.settings.hotkeys.clearAriaLabel}
+                  onChange={(next) => {
                     if (!settings) return;
+                    setOverride('secondaryHotkeys', action, next);
                     lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
                     scheduleSave(0);
                   }}
@@ -1665,7 +1675,6 @@
     align-self: center;
     font-size: 0.875rem;
   }
-  input[type='text'],
   input[type='number'],
   textarea,
   select {

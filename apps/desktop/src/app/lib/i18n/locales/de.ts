@@ -262,7 +262,9 @@ export const de: Messages = {
       secondaryHeading: 'Zusätzliche globale Tastenkürzel',
       secondaryHelp:
         'Optionale systemweite Tastenkürzel, die neben dem Haupt-Hotkey der Palette registriert werden.',
-      placeholder: 'z. B. Cmd+Shift+P',
+      placeholder: 'Klicken zum Aufzeichnen',
+      recordingHint: 'Tastenkürzel drücken… (Esc zum Abbrechen)',
+      clearAriaLabel: 'Tastenkürzel löschen',
       paletteActions: {
         pin: 'Auswahl anheften / lösen',
         delete: 'Auswahl löschen',
