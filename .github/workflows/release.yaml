@@ -147,7 +147,11 @@ jobs:
           # directly so the binary resolves via the workspace install
           # the previous step already populated.
           tauriScript: pnpm exec tauri
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          # `tauri.bundle.conf.json` adds `bundle.externalBin` so the `nagori`
+          # CLI rides inside the app bundle. It is merged only here (not in the
+          # base config) so plain `cargo` workspace builds don't require the
+          # staged sidecar that tauri-build validates when externalBin is set.
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.bundle.conf.json
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
           releaseDraft: true

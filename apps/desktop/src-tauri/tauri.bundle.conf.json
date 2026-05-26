@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "//": "Bundle-only overrides merged via `tauri build --config`. Kept out of the base tauri.conf.json so plain `cargo` workspace builds (CI lint/test, contributors) do not require the `binaries/nagori-<triple>` sidecar that tauri-build validates whenever externalBin is declared. The sidecar is staged by `beforeBuildCommand` (scripts/build-cli-sidecar.mjs) only on the bundle path.",
+  "bundle": {
+    "externalBin": ["binaries/nagori"]
+  }
+}

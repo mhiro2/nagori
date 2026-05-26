@@ -3,6 +3,9 @@ coverage/
 dist/
 node_modules/
 
+# Tauri externalBin sidecars staged by scripts/build-cli-sidecar.mjs
+apps/desktop/src-tauri/binaries/
+
 # ----------------------------------------------------------
 # Based on github/gitignore: Rust.gitignore
 # https://github.com/github/gitignore/blob/main/Rust.gitignore

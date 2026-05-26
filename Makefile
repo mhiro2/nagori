@@ -124,8 +124,8 @@ rust-build: ## Build the workspace in debug mode.
 	cargo build --workspace
 
 .PHONY: desktop-build
-desktop-build: ## Bundle-build the desktop app (Tauri).
-	pnpm --filter @nagori/desktop exec tauri build
+desktop-build: ## Bundle-build the desktop app (Tauri) with the bundled nagori CLI.
+	pnpm --filter @nagori/desktop exec tauri build --config src-tauri/tauri.bundle.conf.json
 
 .PHONY: run
 run: ## Run the nagori daemon in the foreground.

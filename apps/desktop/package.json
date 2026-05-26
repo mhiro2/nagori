@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:cli-sidecar": "node ../../scripts/build-cli-sidecar.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "tsgo --noEmit",

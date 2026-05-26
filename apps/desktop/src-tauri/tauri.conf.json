@@ -4,7 +4,7 @@
   "identifier": "dev.nagori.desktop",
   "build": {
     "beforeDevCommand": "pnpm --filter @nagori/desktop dev",
-    "beforeBuildCommand": "pnpm --filter @nagori/desktop build",
+    "beforeBuildCommand": "pnpm --filter @nagori/desktop build:cli-sidecar && pnpm --filter @nagori/desktop build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
