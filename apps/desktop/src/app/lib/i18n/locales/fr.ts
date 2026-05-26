@@ -95,6 +95,8 @@ export const fr: Messages = {
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
+    autoPasteOff: '⚠ Collage automatique désactivé — Accessibilité non accordée',
+    openSetup: 'Configuration',
   },
   actionMenu: {
     title: 'Actions rapides',
@@ -112,25 +114,6 @@ export const fr: Messages = {
     saved: 'Enregistré',
     closeResult: 'Fermer',
     runFailed: 'Échec de l’action rapide.',
-  },
-  onboarding: {
-    title: 'Terminer la configuration de Nagori',
-    description: 'Certaines fonctionnalités nécessitent des autorisations macOS supplémentaires.',
-    descriptionLinux: 'Le collage automatique requiert un outil Linux supplémentaire.',
-    accessibilityRequired: 'Autorisation d’accessibilité requise',
-    accessibilityRequiredLinux: 'Outil de collage automatique requis',
-    accessibilityHint:
-      'Accordez l’accès à Accessibilité dans Réglages Système → Confidentialité et sécurité pour que Nagori puisse coller dans l’application active.',
-    accessibilityHintLinux:
-      'Installez le paquet `wtype` dans une session Wayland pour que Nagori puisse synthétiser Ctrl+V dans l’application active.',
-    autoPasteDisabled:
-      'Le collage automatique est désactivé — Entrée se contente de copier dans le presse-papiers tant que l’Accessibilité n’est pas accordée.',
-    autoPasteDisabledLinux:
-      'Le collage automatique est désactivé — Entrée se contente de copier dans le presse-papiers tant que `wtype` n’est pas disponible.',
-    notificationsHint:
-      'Autorisez les notifications pour recevoir les alertes de capture en pause et d’échec de collage automatique.',
-    openSettings: 'Ouvrir les Réglages Système',
-    dismiss: 'Continuer sans',
   },
   setup: {
     title: 'Configurer Nagori',
@@ -344,6 +327,7 @@ export const fr: Messages = {
       help: 'Ce que Nagori peut utiliser sur votre système d’exploitation actuel. Les fonctionnalités marquées « Autorisation requise » deviennent disponibles une fois l’accès accordé dans les réglages système de votre OS.',
       platform: 'Plateforme',
       tier: 'Niveau',
+      openSetup: 'Ouvrir la configuration',
       columns: { capability: 'Capacité', status: 'Statut', detail: 'Détail' },
       statuses: {
         available: 'Disponible',
@@ -418,5 +402,6 @@ export const fr: Messages = {
     hotkeyRegisterFailedFallback: 'Échec de l’enregistrement du raccourci global configuré.',
     openSettings: 'Paramètres',
     dismiss: 'Fermer',
+    accessibilityGrantedTitle: 'Accessibilité accordée',
   },
 };

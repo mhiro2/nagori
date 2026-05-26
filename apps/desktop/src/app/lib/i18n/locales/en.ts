@@ -94,6 +94,12 @@ export type Messages = {
     capturePaused: string;
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
+    // Compact accessibility indicator surfaced in the palette StatusBar
+    // when the OS permission required to drive auto-paste is missing.
+    // The label is the full warning string ("⚠ Auto-paste off …"); the
+    // CTA is the trailing chip the user clicks to land on the Setup tab.
+    autoPasteOff: string;
+    openSetup: string;
   };
   actionMenu: {
     title: string;
@@ -111,20 +117,6 @@ export type Messages = {
     saved: string;
     closeResult: string;
     runFailed: string;
-  };
-  onboarding: {
-    title: string;
-    description: string;
-    descriptionLinux: string;
-    accessibilityRequired: string;
-    accessibilityRequiredLinux: string;
-    accessibilityHint: string;
-    accessibilityHintLinux: string;
-    autoPasteDisabled: string;
-    autoPasteDisabledLinux: string;
-    notificationsHint: string;
-    openSettings: string;
-    dismiss: string;
   };
   setup: {
     title: string;
@@ -300,6 +292,7 @@ export type Messages = {
       help: string;
       platform: string;
       tier: string;
+      openSetup: string;
       columns: { capability: string; status: string; detail: string };
       statuses: {
         available: string;
@@ -373,6 +366,10 @@ export type Messages = {
     hotkeyRegisterFailedFallback: string;
     openSettings: string;
     dismiss: string;
+    // Brief confirmation surfaced on the palette when the Accessibility
+    // grant flips from not-granted to granted, so the user gets immediate
+    // feedback that the Setup flow succeeded.
+    accessibilityGrantedTitle: string;
   };
 };
 
@@ -452,6 +449,8 @@ export const en: Messages = {
     capturePaused: 'Capture paused',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
+    autoPasteOff: '⚠ Auto-paste off — Accessibility not granted',
+    openSetup: 'Setup',
   },
   actionMenu: {
     title: 'Quick actions',
@@ -469,25 +468,6 @@ export const en: Messages = {
     saved: 'Saved',
     closeResult: 'Close',
     runFailed: 'Quick action failed.',
-  },
-  onboarding: {
-    title: 'Finish setting up Nagori',
-    description: 'Some features need additional macOS permissions before they can run.',
-    descriptionLinux: 'Auto-paste needs an extra Linux tool before it can run.',
-    accessibilityRequired: 'Accessibility permission required',
-    accessibilityRequiredLinux: 'Auto-paste helper required',
-    accessibilityHint:
-      'Grant Accessibility access in System Settings → Privacy & Security so Nagori can paste into the focused app.',
-    accessibilityHintLinux:
-      'Install the `wtype` package on a Wayland session so Nagori can synthesize Ctrl+V into the focused app.',
-    autoPasteDisabled:
-      'Auto-paste is currently OFF — Enter copies to clipboard until you grant Accessibility.',
-    autoPasteDisabledLinux:
-      'Auto-paste is currently OFF — Enter copies to clipboard until `wtype` is available.',
-    notificationsHint:
-      'Allow notifications to receive capture-paused and auto-paste failure alerts.',
-    openSettings: 'Open System Settings',
-    dismiss: 'Continue without it',
   },
   setup: {
     title: 'Set up Nagori',
@@ -696,6 +676,7 @@ export const en: Messages = {
       help: 'What Nagori can use on your current OS. Features shown as "Needs permission" become available after you grant access in your operating system’s settings.',
       platform: 'Platform',
       tier: 'Tier',
+      openSetup: 'Open Setup',
       columns: { capability: 'Capability', status: 'Status', detail: 'Detail' },
       statuses: {
         available: 'Available',
@@ -769,5 +750,6 @@ export const en: Messages = {
     hotkeyRegisterFailedFallback: 'Failed to register the configured global hotkey.',
     openSettings: 'Settings',
     dismiss: 'Dismiss',
+    accessibilityGrantedTitle: 'Accessibility granted',
   },
 };

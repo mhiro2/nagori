@@ -86,6 +86,8 @@ export const zhHant: Messages = {
     capturePaused: '擷取已暫停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hant')} 項`,
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
+    autoPasteOff: '⚠ 自動貼上已關閉 — 未授予 Accessibility',
+    openSetup: '設定',
   },
   actionMenu: {
     title: '快速動作',
@@ -103,22 +105,6 @@ export const zhHant: Messages = {
     saved: '已儲存',
     closeResult: '關閉',
     runFailed: '快速動作執行失敗。',
-  },
-  onboarding: {
-    title: '完成 Nagori 設定',
-    description: '部分功能需要 macOS 的額外權限才能執行。',
-    descriptionLinux: '自動貼上需要額外的 Linux 工具才能執行。',
-    accessibilityRequired: '需要輔助使用權限',
-    accessibilityRequiredLinux: '需要自動貼上輔助工具',
-    accessibilityHint:
-      '在「系統設定 → 隱私權與安全性 → 輔助使用」中允許 Nagori，以便貼上到目前的應用程式。',
-    accessibilityHintLinux:
-      '在 Wayland 工作階段中安裝 `wtype` 套件，Nagori 便可向目前焦點的應用程式合成 Ctrl+V。',
-    autoPasteDisabled: '尚未授予輔助使用權限，自動貼上已關閉——按 Enter 僅會複製到剪貼簿。',
-    autoPasteDisabledLinux: '`wtype` 無法使用，自動貼上已關閉——按 Enter 僅會複製到剪貼簿。',
-    notificationsHint: '允許通知以接收擷取暫停與自動貼上失敗的提示。',
-    openSettings: '開啟系統設定',
-    dismiss: '暫不啟用',
   },
   setup: {
     title: '設定 Nagori',
@@ -316,6 +302,7 @@ export const zhHant: Messages = {
       help: '列出 Nagori 在目前作業系統中可用的功能。顯示為「需要權限」的功能，須在作業系統的系統設定中授權後才能使用。',
       platform: '平台',
       tier: '層級',
+      openSetup: '開啟設定',
       columns: { capability: '功能', status: '狀態', detail: '詳細' },
       statuses: {
         available: '可用',
@@ -389,5 +376,6 @@ export const zhHant: Messages = {
     hotkeyRegisterFailedFallback: '註冊設定的全域快捷鍵失敗。',
     openSettings: '開啟設定',
     dismiss: '關閉',
+    accessibilityGrantedTitle: '已授予 Accessibility',
   },
 };

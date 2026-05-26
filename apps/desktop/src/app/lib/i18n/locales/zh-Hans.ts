@@ -86,6 +86,8 @@ export const zhHans: Messages = {
     capturePaused: '捕获已暂停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hans')} 项`,
     selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
+    autoPasteOff: '⚠ 自动粘贴已关闭 — 未授予 Accessibility',
+    openSetup: '设置',
   },
   actionMenu: {
     title: '快捷操作',
@@ -103,21 +105,6 @@ export const zhHans: Messages = {
     saved: '已保存',
     closeResult: '关闭',
     runFailed: '快捷操作执行失败。',
-  },
-  onboarding: {
-    title: '完成 Nagori 设置',
-    description: '部分功能在 macOS 上需要额外权限才能运行。',
-    descriptionLinux: '自动粘贴需要额外的 Linux 工具才能运行。',
-    accessibilityRequired: '需要辅助功能权限',
-    accessibilityRequiredLinux: '需要自动粘贴辅助工具',
-    accessibilityHint: '在“系统设置 → 隐私与安全性 → 辅助功能”中启用 Nagori，以便向当前应用粘贴。',
-    accessibilityHintLinux:
-      '在 Wayland 会话中安装 `wtype` 软件包，Nagori 即可向当前焦点应用合成 Ctrl+V。',
-    autoPasteDisabled: '未授予辅助功能权限，自动粘贴已关闭——按 Enter 仅复制到剪贴板。',
-    autoPasteDisabledLinux: '`wtype` 不可用，自动粘贴已关闭——按 Enter 仅复制到剪贴板。',
-    notificationsHint: '允许通知以接收捕获暂停和自动粘贴失败提醒。',
-    openSettings: '打开系统设置',
-    dismiss: '暂不开启',
   },
   setup: {
     title: '设置 Nagori',
@@ -315,6 +302,7 @@ export const zhHans: Messages = {
       help: '列出 Nagori 在当前操作系统中可用的功能。显示为「需要权限」的功能，需要在操作系统的系统设置中授权后才能使用。',
       platform: '平台',
       tier: '层级',
+      openSetup: '打开设置',
       columns: { capability: '功能', status: '状态', detail: '详情' },
       statuses: {
         available: '可用',
@@ -388,5 +376,6 @@ export const zhHans: Messages = {
     hotkeyRegisterFailedFallback: '注册配置的全局快捷键失败。',
     openSettings: '打开设置',
     dismiss: '关闭',
+    accessibilityGrantedTitle: '已授予 Accessibility',
   },
 };

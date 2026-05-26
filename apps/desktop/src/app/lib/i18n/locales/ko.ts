@@ -86,6 +86,8 @@ export const ko: Messages = {
     capturePaused: '캡처 일시 중지',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
+    autoPasteOff: '⚠ 자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
+    openSetup: '설정',
   },
   actionMenu: {
     title: '빠른 동작',
@@ -103,24 +105,6 @@ export const ko: Messages = {
     saved: '저장됨',
     closeResult: '닫기',
     runFailed: '빠른 동작 실행에 실패했습니다.',
-  },
-  onboarding: {
-    title: 'Nagori 설정 마무리하기',
-    description: '일부 기능은 macOS 권한이 추가로 필요합니다.',
-    descriptionLinux: '자동 붙여넣기에 Linux 추가 도구가 필요합니다.',
-    accessibilityRequired: '접근성 권한이 필요합니다',
-    accessibilityRequiredLinux: '자동 붙여넣기 도구가 필요합니다',
-    accessibilityHint:
-      '시스템 설정 → 개인 정보 보호 및 보안 → 접근성에서 Nagori를 허용하면 활성 앱에 자동으로 붙여넣을 수 있습니다.',
-    accessibilityHintLinux:
-      'Wayland 세션에서 `wtype` 패키지를 설치하면 Nagori가 포커스된 앱에 Ctrl+V를 합성할 수 있습니다.',
-    autoPasteDisabled:
-      '접근성 권한이 없어 자동 붙여넣기가 꺼져 있습니다. Enter는 클립보드에 복사만 합니다.',
-    autoPasteDisabledLinux:
-      '`wtype`을 사용할 수 없어 자동 붙여넣기가 꺼져 있습니다. Enter는 클립보드에 복사만 합니다.',
-    notificationsHint: '캡처 일시 중지와 자동 붙여넣기 실패 알림을 받으려면 알림을 허용하세요.',
-    openSettings: '시스템 설정 열기',
-    dismiss: '나중에 설정',
   },
   setup: {
     title: 'Nagori 설정',
@@ -327,6 +311,7 @@ export const ko: Messages = {
       help: 'Nagori가 현재 OS에서 사용할 수 있는 기능 목록입니다. "권한 필요"로 표시된 기능은 OS의 시스템 설정에서 액세스를 허용하면 사용할 수 있습니다.',
       platform: '플랫폼',
       tier: '계층',
+      openSetup: '설정 열기',
       columns: { capability: '기능', status: '상태', detail: '세부 정보' },
       statuses: {
         available: '사용 가능',
@@ -400,5 +385,6 @@ export const ko: Messages = {
     hotkeyRegisterFailedFallback: '설정된 글로벌 단축키 등록에 실패했습니다.',
     openSettings: '설정 열기',
     dismiss: '닫기',
+    accessibilityGrantedTitle: 'Accessibility 권한이 허용되었습니다',
   },
 };

@@ -86,6 +86,8 @@ export const ja: Messages = {
     capturePaused: '取り込み一時停止',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
+    autoPasteOff: '⚠ 自動ペースト OFF — Accessibility 未許可',
+    openSetup: 'セットアップ',
   },
   actionMenu: {
     title: 'クイックアクション',
@@ -103,25 +105,6 @@ export const ja: Messages = {
     saved: '保存しました',
     closeResult: '閉じる',
     runFailed: 'クイックアクションの実行に失敗しました。',
-  },
-  onboarding: {
-    title: 'Nagori のセットアップを完了する',
-    description: '一部の機能は macOS の追加権限が必要です。',
-    descriptionLinux: '自動ペーストには Linux 用の追加ツールが必要です。',
-    accessibilityRequired: 'アクセシビリティ権限が必要です',
-    accessibilityRequiredLinux: '自動ペースト用のヘルパーが必要です',
-    accessibilityHint:
-      'システム設定 → プライバシーとセキュリティ → アクセシビリティ で Nagori を許可するとアクティブなアプリへ自動ペーストできます。',
-    accessibilityHintLinux:
-      'Wayland セッションで `wtype` パッケージをインストールすると、Nagori がフォーカス中のアプリへ Ctrl+V を合成できます。',
-    autoPasteDisabled:
-      'アクセシビリティ未許可のため自動ペーストは無効です。Enter ではクリップボードへコピーのみ行います。',
-    autoPasteDisabledLinux:
-      '`wtype` が利用できないため自動ペーストは無効です。Enter ではクリップボードへコピーのみ行います。',
-    notificationsHint:
-      '取り込み一時停止や自動ペースト失敗の通知を受け取るには通知を許可してください。',
-    openSettings: 'システム設定を開く',
-    dismiss: 'あとで設定する',
   },
   setup: {
     title: 'Nagori をセットアップ',
@@ -330,6 +313,7 @@ export const ja: Messages = {
       help: 'Nagori が現在の OS で利用できる機能の一覧です。「要許可」と表示されている機能は、OS のシステム設定でアクセスを許可すると使えるようになります。',
       platform: 'プラットフォーム',
       tier: 'ティア',
+      openSetup: 'セットアップを開く',
       columns: { capability: '機能', status: '状態', detail: '詳細' },
       statuses: {
         available: '利用可能',
@@ -403,5 +387,6 @@ export const ja: Messages = {
     hotkeyRegisterFailedFallback: '設定されたグローバルホットキーの登録に失敗しました。',
     openSettings: '設定を開く',
     dismiss: '閉じる',
+    accessibilityGrantedTitle: 'Accessibility を許可しました',
   },
 };

@@ -93,6 +93,8 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
+    autoPasteOff: '⚠ Auto-Einfügen aus — Accessibility nicht erteilt',
+    openSetup: 'Einrichtung',
   },
   actionMenu: {
     title: 'Schnellaktionen',
@@ -110,25 +112,6 @@ export const de: Messages = {
     saved: 'Gespeichert',
     closeResult: 'Schließen',
     runFailed: 'Schnellaktion fehlgeschlagen.',
-  },
-  onboarding: {
-    title: 'Nagori-Einrichtung abschließen',
-    description: 'Einige Funktionen benötigen zusätzliche macOS-Berechtigungen.',
-    descriptionLinux: 'Automatisches Einfügen benötigt ein zusätzliches Linux-Tool.',
-    accessibilityRequired: 'Berechtigung „Bedienungshilfen“ erforderlich',
-    accessibilityRequiredLinux: 'Hilfsprogramm für automatisches Einfügen erforderlich',
-    accessibilityHint:
-      'Erteilen Sie unter „Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen“ Zugriff für Nagori, damit es in die aktive App einfügen kann.',
-    accessibilityHintLinux:
-      'Installieren Sie das Paket `wtype` in einer Wayland-Sitzung, damit Nagori Strg+V in die aktive App senden kann.',
-    autoPasteDisabled:
-      'Automatisches Einfügen ist derzeit AUS – Enter kopiert nur in die Zwischenablage, bis die Bedienungshilfen freigegeben sind.',
-    autoPasteDisabledLinux:
-      'Automatisches Einfügen ist derzeit AUS – Enter kopiert nur in die Zwischenablage, bis `wtype` verfügbar ist.',
-    notificationsHint:
-      'Mitteilungen erlauben, um Hinweise zu pausierter Erfassung und fehlgeschlagenem Einfügen zu erhalten.',
-    openSettings: 'Systemeinstellungen öffnen',
-    dismiss: 'Vorerst ohne fortfahren',
   },
   setup: {
     title: 'Nagori einrichten',
@@ -343,6 +326,7 @@ export const de: Messages = {
       help: 'Was Nagori auf deinem aktuellen Betriebssystem nutzen kann. Funktionen mit dem Status „Berechtigung erforderlich" werden verfügbar, sobald du in den Systemeinstellungen deines Betriebssystems den Zugriff erlaubst.',
       platform: 'Plattform',
       tier: 'Stufe',
+      openSetup: 'Einrichtung öffnen',
       columns: { capability: 'Fähigkeit', status: 'Status', detail: 'Details' },
       statuses: {
         available: 'Verfügbar',
@@ -417,5 +401,6 @@ export const de: Messages = {
       'Registrierung des konfigurierten globalen Tastenkürzels fehlgeschlagen.',
     openSettings: 'Einstellungen',
     dismiss: 'Schließen',
+    accessibilityGrantedTitle: 'Accessibility erteilt',
   },
 };

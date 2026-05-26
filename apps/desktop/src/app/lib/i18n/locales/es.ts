@@ -94,6 +94,8 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
+    autoPasteOff: '⚠ Pegado automático desactivado — Accesibilidad no autorizada',
+    openSetup: 'Configuración',
   },
   actionMenu: {
     title: 'Acciones rápidas',
@@ -111,26 +113,6 @@ export const es: Messages = {
     saved: 'Guardado',
     closeResult: 'Cerrar',
     runFailed: 'La acción rápida falló.',
-  },
-  onboarding: {
-    title: 'Termina la configuración de Nagori',
-    description: 'Algunas funciones necesitan permisos adicionales de macOS para ejecutarse.',
-    descriptionLinux:
-      'El pegado automático necesita una herramienta Linux adicional para ejecutarse.',
-    accessibilityRequired: 'Se requiere permiso de Accesibilidad',
-    accessibilityRequiredLinux: 'Se requiere asistente de pegado automático',
-    accessibilityHint:
-      'Concede acceso a Accesibilidad en Ajustes del Sistema → Privacidad y seguridad para que Nagori pueda pegar en la app activa.',
-    accessibilityHintLinux:
-      'Instala el paquete `wtype` en una sesión Wayland para que Nagori pueda sintetizar Ctrl+V en la app activa.',
-    autoPasteDisabled:
-      'El pegado automático está DESACTIVADO — Intro solo copia al portapapeles hasta que concedas Accesibilidad.',
-    autoPasteDisabledLinux:
-      'El pegado automático está DESACTIVADO — Intro solo copia al portapapeles hasta que `wtype` esté disponible.',
-    notificationsHint:
-      'Permite las notificaciones para recibir alertas de captura en pausa y de pegado automático fallido.',
-    openSettings: 'Abrir Ajustes del Sistema',
-    dismiss: 'Continuar sin ello',
   },
   setup: {
     title: 'Configurar Nagori',
@@ -345,6 +327,7 @@ export const es: Messages = {
       help: 'Lo que Nagori puede usar en tu sistema operativo actual. Las funciones marcadas como «Permiso necesario» quedan disponibles tras conceder acceso en los ajustes del sistema operativo.',
       platform: 'Plataforma',
       tier: 'Nivel',
+      openSetup: 'Abrir configuración',
       columns: { capability: 'Capacidad', status: 'Estado', detail: 'Detalle' },
       statuses: {
         available: 'Disponible',
@@ -418,5 +401,6 @@ export const es: Messages = {
     hotkeyRegisterFailedFallback: 'No se pudo registrar el atajo global configurado.',
     openSettings: 'Ajustes',
     dismiss: 'Cerrar',
+    accessibilityGrantedTitle: 'Accesibilidad concedida',
   },
 };
