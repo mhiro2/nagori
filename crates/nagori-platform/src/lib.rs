@@ -12,6 +12,8 @@ pub use capability::{
 pub use clipboard::{CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard};
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
 pub use paste::{NoopPasteController, PasteController, PasteResult};
-pub use permissions::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
+pub use permissions::{
+    PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+};
 pub use preview::{PreviewController, PreviewItem, UnsupportedPreviewController};
 pub use window::{FrontmostApp, RestoreTarget, WindowBehavior};

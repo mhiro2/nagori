@@ -1,31 +1,18 @@
 use async_trait::async_trait;
 use nagori_core::Result;
-use nagori_platform::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
+use nagori_platform::{
+    PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+};
+
+const ACCESSIBILITY_SETUP_ROUTE: &str = "setup/accessibility";
 
 #[derive(Debug, Default)]
 pub struct MacosPermissionChecker;
 
 #[async_trait]
 impl PermissionChecker for MacosPermissionChecker {
-    async fn check(&self) -> Result<Vec<PermissionStatus>> {
-        let accessibility = if accessibility_trusted() {
-            PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Granted,
-                message: None,
-            }
-        } else {
-            PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Denied,
-                message: Some(
-                    "auto-paste requires Accessibility permission. Open System \
-                     Settings → Privacy & Security → Accessibility and enable \
-                     nagori."
-                        .to_owned(),
-                ),
-            }
-        };
+    async fn check(&self, ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
+        let accessibility = accessibility_status(ctx);
         // Clipboard: probe arboard. macOS doesn't actually gate the
         // pasteboard via TCC, but `Clipboard::new()` returns Err in some
         // sandboxed setups, which is a useful real signal.
@@ -34,11 +21,17 @@ impl PermissionChecker for MacosPermissionChecker {
                 kind: PermissionKind::Clipboard,
                 state: PermissionState::Granted,
                 message: None,
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             Err(message) => PermissionStatus {
                 kind: PermissionKind::Clipboard,
                 state: PermissionState::Denied,
                 message: Some(message),
+                reason_code: Some("clipboard_init_failed".to_owned()),
+                setup_route: None,
+                docs_url: None,
             },
         };
         Ok(vec![
@@ -54,65 +47,100 @@ impl PermissionChecker for MacosPermissionChecker {
                 kind: PermissionKind::InputMonitoring,
                 state: PermissionState::Unsupported,
                 message: Some(
-                    "InputMonitoring status cannot be probed without TCC \
-                     entitlements; check System Settings → Privacy & \
-                     Security → Input Monitoring manually."
-                        .to_owned(),
+                    "InputMonitoring status cannot be probed without TCC entitlements".to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::Notifications,
                 state: PermissionState::Unsupported,
-                message: Some(
-                    "Notification authorization is not probed; nagori does \
-                     not currently dispatch notifications."
-                        .to_owned(),
-                ),
+                message: Some("Notification authorization is not probed".to_owned()),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::AutoLaunch,
                 state: PermissionState::Unsupported,
-                message: Some(
-                    "AutoLaunch state is managed by tauri-plugin-autostart \
-                     and is not probed at the daemon layer."
-                        .to_owned(),
-                ),
+                message: Some("AutoLaunch state is managed by tauri-plugin-autostart".to_owned()),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
         ])
     }
 
-    async fn request(&self, permission: PermissionKind) -> Result<PermissionStatus> {
-        match permission {
-            PermissionKind::Accessibility => {
-                let granted = accessibility_trusted();
-                Ok(PermissionStatus {
-                    kind: permission,
-                    state: if granted {
-                        PermissionState::Granted
-                    } else {
-                        PermissionState::Denied
-                    },
-                    message: if granted {
-                        None
-                    } else {
-                        Some(
-                            "open macOS System Settings → Privacy & Security \
-                             → Accessibility to grant this permission"
-                                .to_owned(),
-                        )
-                    },
-                })
+    async fn request_accessibility(&self, prompt: bool) -> Result<PermissionStatus> {
+        let granted = accessibility_trusted_with_prompt(prompt);
+        Ok(if granted {
+            PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Granted,
+                message: None,
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             }
-            other => Ok(PermissionStatus {
-                kind: other,
-                state: PermissionState::Unsupported,
-                message: Some(
-                    "this permission cannot be requested programmatically \
-                     from the daemon; manage it in System Settings."
-                        .to_owned(),
-                ),
-            }),
-        }
+        } else {
+            // `prompt = true` and `granted = false` means either:
+            //   (a) the TCC dialog is now showing and the user has not
+            //       responded yet, or
+            //   (b) TCC has already recorded a Deny / unknown identity for
+            //       this bundle so the dialog was suppressed.
+            // Either way the actionable next step is the Setup card
+            // (which deep-links into System Settings); the message stays
+            // a terse CLI-friendly summary.
+            PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Denied,
+                message: Some("Accessibility not trusted".to_owned()),
+                reason_code: Some("accessibility_not_trusted".to_owned()),
+                setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+                docs_url: None,
+            }
+        })
+    }
+}
+
+/// Build the Accessibility row of the permission report.
+///
+/// Without prompt history, `AXIsProcessTrusted() == false` collapses to
+/// `NotDetermined` (we have never asked the OS to surface the TCC
+/// dialog, so the user cannot meaningfully be said to have "denied"
+/// anything). After the first
+/// `AXIsProcessTrustedWithOptions(prompt: true)` call we begin treating
+/// `false` as `Denied` so the Setup card switches its copy from
+/// `NotRequested` to `PromptShownNotGranted`.
+fn accessibility_status(ctx: &PermissionCheckContext) -> PermissionStatus {
+    if accessibility_trusted() {
+        return PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::Granted,
+            message: None,
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
+        };
+    }
+    if ctx.accessibility_prompted_at.is_none() {
+        return PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::NotDetermined,
+            message: Some("Accessibility not prompted".to_owned()),
+            reason_code: Some("accessibility_not_prompted".to_owned()),
+            setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+            docs_url: None,
+        };
+    }
+    PermissionStatus {
+        kind: PermissionKind::Accessibility,
+        state: PermissionState::Denied,
+        message: Some("Accessibility not trusted".to_owned()),
+        reason_code: Some("accessibility_not_trusted".to_owned()),
+        setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+        docs_url: None,
     }
 }
 
@@ -132,10 +160,108 @@ const fn accessibility_trusted() -> bool {
     false
 }
 
+/// Invoke `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt: prompt)`.
+///
+/// The macOS API does not change trust state synchronously: passing
+/// `prompt = true` asks TCC to surface its dialog (or open the
+/// Accessibility pane) on the next event-loop pass, and the function
+/// returns the *current* trust value — typically `false` the first time
+/// it is called. The runtime persists `accessibility_prompted_at`
+/// independently so subsequent probes can tell `NotDetermined` from
+/// `Denied`.
+#[cfg(target_os = "macos")]
+fn accessibility_trusted_with_prompt(prompt: bool) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    let key = unsafe { CFString::wrap_under_get_rule(ffi::kAXTrustedCheckOptionPrompt) };
+    let value = CFBoolean::from(prompt);
+    let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+    unsafe { ffi::AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) }
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn accessibility_trusted_with_prompt(_prompt: bool) -> bool {
+    false
+}
+
 #[cfg(target_os = "macos")]
 mod ffi {
+    use core_foundation::dictionary::CFDictionaryRef;
+    use core_foundation::string::CFStringRef;
+
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         pub fn AXIsProcessTrusted() -> bool;
+        pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+        pub static kAXTrustedCheckOptionPrompt: CFStringRef;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::OffsetDateTime;
+
+    fn find_accessibility(statuses: &[PermissionStatus]) -> &PermissionStatus {
+        statuses
+            .iter()
+            .find(|s| s.kind == PermissionKind::Accessibility)
+            .expect("checker reports an Accessibility row")
+    }
+
+    #[tokio::test]
+    async fn check_reports_not_determined_without_prompt_history() {
+        // This test only proves the discrimination logic — on macOS CI
+        // the `AXIsProcessTrusted()` call returns `false` (no signed
+        // bundle), so we can assert the NotDetermined path. On non-macOS
+        // hosts the stub also returns `false`, hitting the same branch.
+        let checker = MacosPermissionChecker;
+        let ctx = PermissionCheckContext::default();
+        let statuses = checker.check(&ctx).await.expect("check ok");
+        let accessibility = find_accessibility(&statuses);
+        // We can't force `AXIsProcessTrusted()` to a specific value
+        // here, but the test environment never has it granted (no
+        // signed bundle on CI), so NotDetermined is the expected
+        // outcome when prompt history is empty.
+        assert!(
+            matches!(
+                accessibility.state,
+                PermissionState::NotDetermined | PermissionState::Granted
+            ),
+            "expected NotDetermined (no history) or Granted (locally-trusted dev shell), got {:?}",
+            accessibility.state,
+        );
+        if accessibility.state == PermissionState::NotDetermined {
+            assert_eq!(
+                accessibility.reason_code.as_deref(),
+                Some("accessibility_not_prompted")
+            );
+            assert_eq!(
+                accessibility.setup_route.as_deref(),
+                Some("setup/accessibility")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn check_reports_denied_when_prompt_history_present() {
+        let checker = MacosPermissionChecker;
+        let ctx = PermissionCheckContext {
+            accessibility_prompted_at: Some(OffsetDateTime::UNIX_EPOCH),
+        };
+        let statuses = checker.check(&ctx).await.expect("check ok");
+        let accessibility = find_accessibility(&statuses);
+        // Same caveat as above: on a granted dev shell this returns
+        // Granted, but the only "Denied vs NotDetermined" discrimination
+        // we want to cover here flows through the same branch — once
+        // prompted, NotDetermined must not appear.
+        assert!(
+            !matches!(accessibility.state, PermissionState::NotDetermined),
+            "prompt history should rule out NotDetermined, got {:?}",
+            accessibility.state,
+        );
     }
 }

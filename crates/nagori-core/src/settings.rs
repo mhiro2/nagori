@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::ContentKind;
 use crate::errors::{AppError, Result};
@@ -119,6 +120,41 @@ pub struct AppSettings {
     /// added without breaking the on-disk shape.
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// Onboarding lifecycle markers. Drives the Setup tab's "have we ever
+    /// asked the user for Accessibility?" / "have we ever observed a
+    /// grant?" decisions so the UI can distinguish a real first-launch
+    /// from a previously-granted-then-revoked install.
+    #[serde(default)]
+    pub onboarding: OnboardingSettings,
+}
+
+/// Persisted onboarding state used to derive the Setup card's UI state.
+///
+/// All fields are optional so a fresh install starts with `None`s and the
+/// frontend's decision tree collapses to `NotRequested`. The canary
+/// rollout (v0.0.1, no external users) skips a `schemaIntroducedAt`
+/// migration marker — older settings files that lack the namespace fall
+/// through to `Default::default()` which is also all-`None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OnboardingSettings {
+    /// First time `AXIsProcessTrustedWithOptions(prompt: true)` was
+    /// invoked. Used to flip the Setup card from `NotRequested` to
+    /// `PromptShownNotGranted` once the user has been shown the OS
+    /// prompt at least once.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub accessibility_prompted_at: Option<OffsetDateTime>,
+    /// First time `AXIsProcessTrusted()` was observed as `true`. Sticky:
+    /// once set, the Setup card treats a later `false` as
+    /// `RevokedAfterGranted` rather than re-entering the prompt
+    /// onboarding flow.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub accessibility_first_granted_at: Option<OffsetDateTime>,
+    /// Timestamp the user (or implicit "everything granted" auto-close)
+    /// marked the Setup tab as done. The frontend uses presence to skip
+    /// auto-popping the Setup tab on subsequent launches.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +486,7 @@ impl Default for AppSettings {
             capture_initial_clipboard_on_launch: default_capture_initial_clipboard_on_launch(),
             auto_update_check: default_auto_update_check(),
             update_channel: UpdateChannel::default(),
+            onboarding: OnboardingSettings::default(),
         }
     }
 }

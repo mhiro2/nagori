@@ -26,7 +26,7 @@ pub use services::{
 };
 pub use settings::{
     AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT, MAX_PASTE_DELAY_MS,
-    MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, PaletteHotkeyAction, PasteFormat, RecentOrder,
-    SecondaryHotkeyAction, SecretHandling, UpdateChannel, validate_hotkey,
+    MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, OnboardingSettings, PaletteHotkeyAction, PasteFormat,
+    RecentOrder, SecondaryHotkeyAction, SecretHandling, UpdateChannel, validate_hotkey,
 };
 pub use text::normalize_text;

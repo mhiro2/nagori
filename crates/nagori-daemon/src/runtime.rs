@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 use nagori_ai::{AiActionRegistry, AiProvider, MockAiProvider};
 use nagori_core::{
     AiActionId, AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory,
-    EntryId, EntryRepository, PasteFormat, Result, SearchQuery, SearchResult, SecretAction,
-    Sensitivity, SensitivityClassifier, SettingsRepository, is_text_safe_for_default_output,
-    settings::AiProviderSetting,
+    EntryId, EntryRepository, OnboardingSettings, PasteFormat, Result, SearchQuery, SearchResult,
+    SecretAction, Sensitivity, SensitivityClassifier, SettingsRepository,
+    is_text_safe_for_default_output, settings::AiProviderSetting,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -16,13 +16,14 @@ use nagori_ipc::{
     SearchResultDto, UpdateSettingsRequest,
 };
 use nagori_platform::{
-    ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionChecker,
-    PermissionStatus, PlatformCapabilities, unsupported_capabilities,
+    ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionCheckContext,
+    PermissionChecker, PermissionKind, PermissionState, PermissionStatus, PlatformCapabilities,
+    unsupported_capabilities,
 };
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
 use time::OffsetDateTime;
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracing::error;
 
 use nagori_core::ThumbnailRecord;
@@ -95,6 +96,14 @@ pub struct NagoriRuntime {
     /// failures so a permanently-broken probe stops making outbound
     /// requests.
     update_probe: Arc<UpdateProbeState>,
+    /// Serializes all settings *writes* against each other so the
+    /// daemon's sticky onboarding-marker writes (stamped from
+    /// [`Self::permission_check`] / [`Self::request_accessibility`])
+    /// can't race a frontend `update_settings` IPC and lose the marker.
+    /// Reads are still lock-free via `settings_rx`/`store.get_settings`;
+    /// the lock only spans the read-modify-write sequence below in
+    /// `save_settings` and `mutate_onboarding`.
+    settings_write_lock: Arc<AsyncMutex<()>>,
 }
 
 impl NagoriRuntime {
@@ -221,11 +230,91 @@ impl NagoriRuntime {
     /// `PermissionChecker` is wired (e.g. headless tests, non-macOS desktop
     /// builds), returns an empty list rather than erroring so the UI can
     /// still render an "unsupported" hint.
+    ///
+    /// Side effect: when the checker reports `Accessibility = Granted`
+    /// for the first time on this install, the runtime stamps
+    /// `settings.onboarding.accessibility_first_granted_at`. The marker
+    /// is sticky (a later revoke does not clear it) so the Setup card
+    /// can distinguish `RevokedAfterGranted` from a fresh
+    /// `PromptShownNotGranted` state.
     pub async fn permission_check(&self) -> Result<Vec<PermissionStatus>> {
-        match &self.permissions {
-            Some(checker) => checker.check().await,
-            None => Ok(Vec::new()),
+        let Some(checker) = self.permissions.clone() else {
+            return Ok(Vec::new());
+        };
+        let current = self.current_settings();
+        let ctx = PermissionCheckContext {
+            accessibility_prompted_at: current.onboarding.accessibility_prompted_at,
+        };
+        let statuses = checker.check(&ctx).await?;
+        self.stamp_first_grant_if_observed(&statuses).await;
+        Ok(statuses)
+    }
+
+    /// Idempotently set `onboarding.accessibility_first_granted_at` the
+    /// first time we observe `Accessibility = Granted`. Persistence
+    /// failures are logged rather than propagated: the marker is
+    /// best-effort UX bookkeeping, and the checker's primary contract
+    /// is to return the current permission state.
+    async fn stamp_first_grant_if_observed(&self, statuses: &[PermissionStatus]) {
+        // Cheap guard against re-acquiring the write lock when the
+        // marker is already set — the authoritative re-check happens
+        // inside `mutate_onboarding`, but skipping the lock entirely on
+        // the steady-state hot path keeps the doctor / permission_check
+        // poll from serialising behind unrelated settings updates.
+        if self
+            .current_settings()
+            .onboarding
+            .accessibility_first_granted_at
+            .is_some()
+        {
+            return;
         }
+        let observed_grant = statuses.iter().any(|s| {
+            s.kind == PermissionKind::Accessibility && s.state == PermissionState::Granted
+        });
+        if !observed_grant {
+            return;
+        }
+        let result = self
+            .mutate_onboarding(|onboarding| {
+                // Re-check inside the lock: another writer may have set
+                // the marker between the guard above and now.
+                if onboarding.accessibility_first_granted_at.is_none() {
+                    onboarding.accessibility_first_granted_at = Some(OffsetDateTime::now_utc());
+                }
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::warn!(error = %err, "onboarding_first_grant_persist_failed");
+        }
+    }
+
+    /// Trigger the host's accessibility prompt and report the resulting
+    /// status. When `prompt = true` the runtime stamps
+    /// `onboarding.accessibility_prompted_at` so subsequent
+    /// `permission_check` calls discriminate `Denied` from
+    /// `NotDetermined`. A `Granted` result also stamps
+    /// `accessibility_first_granted_at` (sticky marker).
+    pub async fn request_accessibility(&self, prompt: bool) -> Result<PermissionStatus> {
+        let checker = self.permissions.clone().ok_or_else(|| {
+            AppError::Unsupported("no permission checker is wired in this runtime".to_owned())
+        })?;
+        let status = checker.request_accessibility(prompt).await?;
+        if prompt {
+            // Always refresh the timestamp so dashboards can see "we
+            // most recently asked at <t>" rather than the first-ever ask.
+            // The UI's NotRequested vs PromptShownNotGranted branch only
+            // cares about presence, so overwriting is safe.
+            self.mutate_onboarding(|onboarding| {
+                onboarding.accessibility_prompted_at = Some(OffsetDateTime::now_utc());
+            })
+            .await?;
+        }
+        if status.state == PermissionState::Granted {
+            self.stamp_first_grant_if_observed(std::slice::from_ref(&status))
+                .await;
+        }
+        Ok(status)
     }
 
     pub async fn handle_ipc(&self, request: IpcRequest) -> IpcResponse {
@@ -411,8 +500,17 @@ impl NagoriRuntime {
     async fn build_doctor_report(&self) -> Result<DoctorReport> {
         let settings = self.current_settings();
         let mut permissions = Vec::new();
+        // Build the context from the *just-loaded* settings rather than
+        // `permission_check()` so the doctor report's permission rows
+        // and the rest of the report observe the same settings snapshot.
+        // Skipping the side-effecting `permission_check` also avoids
+        // racing the first-grant marker write against an in-flight
+        // settings update from the desktop shell.
+        let ctx = PermissionCheckContext {
+            accessibility_prompted_at: settings.onboarding.accessibility_prompted_at,
+        };
         if let Some(checker) = &self.permissions
-            && let Ok(statuses) = checker.check().await
+            && let Ok(statuses) = checker.check(&ctx).await
         {
             for status in statuses {
                 permissions.push(DoctorPermission {
@@ -750,7 +848,34 @@ impl NagoriRuntime {
     /// Persist updated settings *and* re-publish them on the watch channel
     /// so the capture loop and other subscribers pick up the change without
     /// the caller having to remember the second step.
+    ///
+    /// The runtime owns the `onboarding` markers: any value the caller
+    /// passes in that field is silently replaced with the currently
+    /// persisted state inside the write lock, so an `update_settings`
+    /// from the desktop shell can never wipe an `accessibility_*` marker
+    /// it didn't know about. Marker writes themselves go through
+    /// [`Self::mutate_onboarding`], which acquires the same lock.
     pub async fn save_settings(&self, settings: AppSettings) -> Result<()> {
+        let _guard = self.settings_write_lock.lock().await;
+        let persisted = self.store.get_settings().await?;
+        let mut merged = settings;
+        merged.onboarding = persisted.onboarding;
+        self.store.save_settings(merged.clone()).await?;
+        self.publish_settings(merged);
+        Ok(())
+    }
+
+    /// Apply `f` to the `onboarding` namespace under the settings write
+    /// lock, reading the latest persisted state inside the critical
+    /// section so a concurrent [`Self::save_settings`] cannot lose the
+    /// marker. The other settings fields are left untouched.
+    async fn mutate_onboarding<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut OnboardingSettings),
+    {
+        let _guard = self.settings_write_lock.lock().await;
+        let mut settings = self.store.get_settings().await?;
+        f(&mut settings.onboarding);
         self.store.save_settings(settings.clone()).await?;
         self.publish_settings(settings);
         Ok(())
@@ -995,6 +1120,7 @@ impl NagoriRuntimeBuilder {
             capabilities,
             thumbnail_gate: ThumbnailGate::default(),
             update_probe: Arc::new(UpdateProbeState::default()),
+            settings_write_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 }
@@ -2125,6 +2251,290 @@ mod tests {
         assert!(
             runtime.search_cache_handle().lock().unwrap().is_empty(),
             "pin_entry must invalidate the search cache",
+        );
+    }
+
+    #[derive(Debug)]
+    struct StubPermissionChecker {
+        check_response: std::sync::Mutex<Vec<PermissionStatus>>,
+        check_observed_ctx: std::sync::Mutex<Option<PermissionCheckContext>>,
+        request_response: std::sync::Mutex<PermissionStatus>,
+        request_observed_prompt: std::sync::Mutex<Option<bool>>,
+    }
+
+    impl StubPermissionChecker {
+        fn new(initial: Vec<PermissionStatus>, request: PermissionStatus) -> Self {
+            Self {
+                check_response: std::sync::Mutex::new(initial),
+                check_observed_ctx: std::sync::Mutex::new(None),
+                request_response: std::sync::Mutex::new(request),
+                request_observed_prompt: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn set_check(&self, response: Vec<PermissionStatus>) {
+            *self.check_response.lock().unwrap() = response;
+        }
+
+        fn set_request(&self, status: PermissionStatus) {
+            *self.request_response.lock().unwrap() = status;
+        }
+
+        fn observed_ctx(&self) -> Option<PermissionCheckContext> {
+            self.check_observed_ctx.lock().unwrap().clone()
+        }
+
+        fn observed_prompt(&self) -> Option<bool> {
+            *self.request_observed_prompt.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl PermissionChecker for StubPermissionChecker {
+        async fn check(&self, ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
+            *self.check_observed_ctx.lock().unwrap() = Some(ctx.clone());
+            Ok(self.check_response.lock().unwrap().clone())
+        }
+
+        async fn request_accessibility(&self, prompt: bool) -> Result<PermissionStatus> {
+            *self.request_observed_prompt.lock().unwrap() = Some(prompt);
+            Ok(self.request_response.lock().unwrap().clone())
+        }
+    }
+
+    fn accessibility_row(state: PermissionState) -> PermissionStatus {
+        PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state,
+            message: None,
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn request_accessibility_stamps_prompted_at_when_prompt_true() {
+        // The Phase A redesign keys the "NotRequested vs PromptShownNotGranted"
+        // UI branch off `onboarding.accessibility_prompted_at`. Verify the
+        // runtime persists that timestamp the first time we ask the host
+        // to surface the TCC dialog (`prompt = true`).
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::NotDetermined)],
+            accessibility_row(PermissionState::Denied),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+        // Pre-condition: never prompted, so the context the checker sees
+        // should be empty.
+        let _ = runtime.permission_check().await.expect("permission_check");
+        let ctx = stub.observed_ctx().expect("check was invoked");
+        assert!(ctx.accessibility_prompted_at.is_none());
+
+        let _ = runtime
+            .request_accessibility(true)
+            .await
+            .expect("request_accessibility");
+        assert_eq!(stub.observed_prompt(), Some(true));
+
+        // Post-condition: the runtime persisted the prompt timestamp, and a
+        // follow-up check carries it through the context so the checker
+        // can discriminate Denied from NotDetermined.
+        let settings = runtime.current_settings();
+        assert!(
+            settings.onboarding.accessibility_prompted_at.is_some(),
+            "prompt = true must stamp accessibility_prompted_at",
+        );
+        let _ = runtime.permission_check().await.expect("permission_check");
+        let ctx_after = stub.observed_ctx().expect("check was invoked");
+        assert!(ctx_after.accessibility_prompted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn request_accessibility_skips_prompted_at_when_prompt_false() {
+        // `prompt = false` is the "just probe, don't surface UI" path
+        // (`AXIsProcessTrustedWithOptions(prompt:NO)`); it must not move
+        // the persisted prompt timestamp, otherwise a UI re-render that
+        // calls the no-prompt probe would erroneously flip NotRequested.
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::NotDetermined)],
+            accessibility_row(PermissionState::Denied),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+
+        let _ = runtime
+            .request_accessibility(false)
+            .await
+            .expect("request_accessibility");
+        assert_eq!(stub.observed_prompt(), Some(false));
+
+        let settings = runtime.current_settings();
+        assert!(
+            settings.onboarding.accessibility_prompted_at.is_none(),
+            "prompt = false must leave accessibility_prompted_at untouched",
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_check_stamps_first_granted_once() {
+        // `accessibility_first_granted_at` is a sticky onboarding marker:
+        // once stamped, it must not be overwritten on subsequent grants
+        // (the UI uses it for "you're set up" copy timing and onboarding
+        // exit). Verify both the first-grant write and the no-op on a
+        // second Granted observation.
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::Granted)],
+            accessibility_row(PermissionState::Granted),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+
+        let _ = runtime.permission_check().await.expect("first check");
+        let stamped = runtime
+            .current_settings()
+            .onboarding
+            .accessibility_first_granted_at
+            .expect("first Granted observation must stamp the marker");
+
+        // Tick the clock through a short sleep so any rewrite would
+        // produce a strictly-later timestamp.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let _ = runtime.permission_check().await.expect("second check");
+        let after = runtime
+            .current_settings()
+            .onboarding
+            .accessibility_first_granted_at
+            .expect("marker remains set on subsequent grants");
+        assert_eq!(stamped, after, "first_granted_at must be sticky");
+    }
+
+    #[tokio::test]
+    async fn permission_check_does_not_stamp_when_not_granted() {
+        // Symmetry with the sticky-marker test: a Denied / NotDetermined
+        // observation must leave the marker absent, otherwise the Setup
+        // card would skip its "Grant access" CTA and the doctor would
+        // claim onboarding completed.
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::Denied)],
+            accessibility_row(PermissionState::Denied),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+
+        let _ = runtime.permission_check().await.expect("check");
+        assert!(
+            runtime
+                .current_settings()
+                .onboarding
+                .accessibility_first_granted_at
+                .is_none(),
+        );
+
+        // Flip to Granted and re-check; the marker should now appear.
+        stub.set_check(vec![accessibility_row(PermissionState::Granted)]);
+        let _ = runtime.permission_check().await.expect("check after grant");
+        assert!(
+            runtime
+                .current_settings()
+                .onboarding
+                .accessibility_first_granted_at
+                .is_some(),
+        );
+    }
+
+    #[tokio::test]
+    async fn request_accessibility_stamps_first_granted_on_grant() {
+        // The `request_accessibility` path also has to stamp the marker on
+        // its own (rather than waiting for the next `permission_check`),
+        // because the Setup card finishes its flow as soon as the trait
+        // call resolves Granted — without this hook the marker would lag
+        // by one full check cycle.
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::NotDetermined)],
+            accessibility_row(PermissionState::Granted),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+        let _ = runtime
+            .request_accessibility(true)
+            .await
+            .expect("request_accessibility");
+        let onboarding = runtime.current_settings().onboarding;
+        assert!(
+            onboarding.accessibility_first_granted_at.is_some(),
+            "Granted result must stamp first_granted_at without an extra permission_check"
+        );
+        assert!(onboarding.accessibility_prompted_at.is_some());
+        // Flip the response back to Denied and re-call: the sticky marker
+        // must not regress, even though the new observation is not Granted.
+        stub.set_request(accessibility_row(PermissionState::Denied));
+        let before = runtime
+            .current_settings()
+            .onboarding
+            .accessibility_first_granted_at;
+        let _ = runtime
+            .request_accessibility(true)
+            .await
+            .expect("request_accessibility");
+        assert_eq!(
+            runtime
+                .current_settings()
+                .onboarding
+                .accessibility_first_granted_at,
+            before,
+            "first_granted_at must be sticky across later Denied results",
+        );
+    }
+
+    #[tokio::test]
+    async fn save_settings_preserves_persisted_onboarding_markers() {
+        // The runtime owns the `onboarding` markers; an `update_settings`
+        // IPC from the desktop shell (which round-trips a possibly-stale
+        // snapshot of the markers) must never overwrite a marker that
+        // the daemon stamped between the frontend's get_settings and
+        // its follow-up update_settings. `save_settings` re-merges the
+        // persisted `onboarding` block inside the write lock to enforce
+        // that invariant.
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let stub = Arc::new(StubPermissionChecker::new(
+            vec![accessibility_row(PermissionState::Granted)],
+            accessibility_row(PermissionState::Granted),
+        ));
+        let runtime = NagoriRuntime::builder(store)
+            .permissions(stub.clone())
+            .build_for_test();
+        // Stamp the marker via a permission_check observation.
+        let _ = runtime.permission_check().await.expect("permission_check");
+        let stamped = runtime
+            .current_settings()
+            .onboarding
+            .accessibility_first_granted_at
+            .expect("first_granted_at must be set after Granted observation");
+        // Simulate a stale frontend snapshot: read settings, zero the
+        // onboarding markers, then write back. The persisted markers
+        // must survive.
+        let mut stale = runtime.current_settings();
+        stale.onboarding = OnboardingSettings::default();
+        runtime
+            .save_settings(stale)
+            .await
+            .expect("save_settings round-trip");
+        let after = runtime.current_settings().onboarding;
+        assert_eq!(
+            after.accessibility_first_granted_at,
+            Some(stamped),
+            "save_settings must restore onboarding markers from the store",
         );
     }
 

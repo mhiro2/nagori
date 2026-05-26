@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use nagori_core::Result;
-use nagori_platform::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
+use nagori_platform::{
+    PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+};
 
 /// Reports `Granted` for kinds that Windows doesn't gate behind user prompts.
 ///
@@ -14,17 +16,23 @@ pub struct WindowsPermissionChecker;
 
 #[async_trait]
 impl PermissionChecker for WindowsPermissionChecker {
-    async fn check(&self) -> Result<Vec<PermissionStatus>> {
+    async fn check(&self, _ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
         let clipboard = match arboard::Clipboard::new() {
             Ok(_) => PermissionStatus {
                 kind: PermissionKind::Clipboard,
                 state: PermissionState::Granted,
                 message: None,
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             Err(err) => PermissionStatus {
                 kind: PermissionKind::Clipboard,
                 state: PermissionState::Denied,
                 message: Some(err.to_string()),
+                reason_code: Some("clipboard_init_failed".to_owned()),
+                setup_route: None,
+                docs_url: None,
             },
         };
         Ok(vec![
@@ -42,15 +50,20 @@ impl PermissionChecker for WindowsPermissionChecker {
                 state: PermissionState::Granted,
                 message: Some(
                     "SendInput cannot reach UAC-elevated foreground windows from a non-elevated \
-                     daemon (UIPI). If paste silently fails, run nagori at the same integrity \
-                     level as the target app."
+                     daemon (UIPI)."
                         .to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::InputMonitoring,
                 state: PermissionState::Unsupported,
                 message: Some("input monitoring permission is not modelled on Windows".to_owned()),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::Notifications,
@@ -58,6 +71,9 @@ impl PermissionChecker for WindowsPermissionChecker {
                 message: Some(
                     "notification authorization is managed by Windows Action Center".to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::AutoLaunch,
@@ -65,17 +81,29 @@ impl PermissionChecker for WindowsPermissionChecker {
                 message: Some(
                     "auto-launch is managed by tauri-plugin-autostart on Windows".to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
         ])
     }
 
-    async fn request(&self, permission: PermissionKind) -> Result<PermissionStatus> {
+    async fn request_accessibility(&self, _prompt: bool) -> Result<PermissionStatus> {
+        // Windows has no TCC-style permission gating `SendInput`; the
+        // closest analogue (UIPI) is implicit and cannot be requested.
+        // Return the same `Granted` row the regular check emits so the
+        // frontend can render a uniform "you're good" state.
         Ok(PermissionStatus {
-            kind: permission,
-            state: PermissionState::Unsupported,
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::Granted,
             message: Some(
-                "this permission cannot be requested programmatically on Windows".to_owned(),
+                "Windows has no Accessibility-style permission; if SendInput is dropped, check \
+                 whether the target window belongs to an elevated process (UIPI)."
+                    .to_owned(),
             ),
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
         })
     }
 }

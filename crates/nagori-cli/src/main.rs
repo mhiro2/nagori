@@ -29,7 +29,7 @@ use nagori_storage::SqliteStore;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use nagori_platform::PermissionChecker;
+use nagori_platform::{PermissionCheckContext, PermissionChecker};
 #[cfg(target_os = "linux")]
 use nagori_platform_linux::LinuxPermissionChecker;
 #[cfg(target_os = "macos")]
@@ -1178,10 +1178,16 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     println!("ai_enabled\t{}", settings.ai_enabled);
     println!("auto_update_check\t{}", settings.auto_update_check);
     println!("ai_provider\t{provider_label}");
+    // The macOS checker keys NotDetermined vs Denied off this timestamp;
+    // build the context once and share it across the per-OS branches.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let permission_ctx = PermissionCheckContext {
+        accessibility_prompted_at: settings.onboarding.accessibility_prompted_at,
+    };
     #[cfg(target_os = "macos")]
     {
         let checker = MacosPermissionChecker;
-        if let Ok(statuses) = checker.check().await {
+        if let Ok(statuses) = checker.check(&permission_ctx).await {
             for status in statuses {
                 let suffix = status
                     .message
@@ -1197,7 +1203,7 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let checker = WindowsPermissionChecker;
-        if let Ok(statuses) = checker.check().await {
+        if let Ok(statuses) = checker.check(&permission_ctx).await {
             for status in statuses {
                 let suffix = status
                     .message
@@ -1213,7 +1219,7 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let checker = LinuxPermissionChecker;
-        if let Ok(statuses) = checker.check().await {
+        if let Ok(statuses) = checker.check(&permission_ctx).await {
             for status in statuses {
                 let suffix = status
                     .message

@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use nagori_core::Result;
-use nagori_platform::{PermissionChecker, PermissionKind, PermissionState, PermissionStatus};
+use nagori_platform::{
+    PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+};
 #[cfg(target_os = "linux")]
 use wl_clipboard_rs::paste;
 
@@ -21,7 +23,7 @@ pub struct LinuxPermissionChecker;
 
 #[async_trait]
 impl PermissionChecker for LinuxPermissionChecker {
-    async fn check(&self) -> Result<Vec<PermissionStatus>> {
+    async fn check(&self, _ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
         Ok(vec![
             check_clipboard(),
             check_accessibility().await,
@@ -29,6 +31,9 @@ impl PermissionChecker for LinuxPermissionChecker {
                 kind: PermissionKind::InputMonitoring,
                 state: PermissionState::Unsupported,
                 message: Some("input monitoring permission is not modelled on Linux".to_owned()),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::Notifications,
@@ -36,6 +41,9 @@ impl PermissionChecker for LinuxPermissionChecker {
                 message: Some(
                     "notification authorization is brokered by the desktop environment".to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             PermissionStatus {
                 kind: PermissionKind::AutoLaunch,
@@ -43,18 +51,21 @@ impl PermissionChecker for LinuxPermissionChecker {
                 message: Some(
                     "auto-launch is managed by tauri-plugin-autostart on Linux".to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
         ])
     }
 
-    async fn request(&self, permission: PermissionKind) -> Result<PermissionStatus> {
-        Ok(PermissionStatus {
-            kind: permission,
-            state: PermissionState::Unsupported,
-            message: Some(
-                "this permission cannot be requested programmatically on Linux".to_owned(),
-            ),
-        })
+    async fn request_accessibility(&self, _prompt: bool) -> Result<PermissionStatus> {
+        // Linux Wayland gates auto-paste on `wtype` + a compositor that
+        // exposes `zwp_virtual_keyboard_v1`. Neither lives in a settings
+        // pane that we can deep-link into, so the equivalent of macOS's
+        // "request the OS prompt" is to re-run the same probe `check`
+        // uses (binary on PATH) and report what we find. The Setup card
+        // renders the install hint when this comes back Denied.
+        Ok(check_accessibility().await)
     }
 }
 
@@ -75,6 +86,9 @@ fn check_clipboard() -> PermissionStatus {
             kind: PermissionKind::Clipboard,
             state: PermissionState::Granted,
             message: None,
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
         },
         Err(paste::Error::MissingProtocol { name, version }) => PermissionStatus {
             kind: PermissionKind::Clipboard,
@@ -83,6 +97,9 @@ fn check_clipboard() -> PermissionStatus {
                 "compositor does not expose {name} v{version}. Nagori requires wlr-data-control \
                  or ext-data-control (Sway, KDE Plasma 5.27+, Hyprland, river)."
             )),
+            reason_code: Some("clipboard_missing_protocol".to_owned()),
+            setup_route: None,
+            docs_url: None,
         },
         Err(paste::Error::WaylandConnection(err)) => PermissionStatus {
             kind: PermissionKind::Clipboard,
@@ -91,11 +108,17 @@ fn check_clipboard() -> PermissionStatus {
                 "could not connect to a Wayland compositor ({err}). Linux nagori requires a \
                  Wayland session; X11 is not supported."
             )),
+            reason_code: Some("clipboard_no_wayland".to_owned()),
+            setup_route: None,
+            docs_url: None,
         },
         Err(err) => PermissionStatus {
             kind: PermissionKind::Clipboard,
             state: PermissionState::Denied,
             message: Some(format!("could not bind Wayland clipboard ({err}).")),
+            reason_code: Some("clipboard_bind_failed".to_owned()),
+            setup_route: None,
+            docs_url: None,
         },
     }
 }
@@ -106,6 +129,9 @@ fn check_clipboard() -> PermissionStatus {
         kind: PermissionKind::Clipboard,
         state: PermissionState::Unsupported,
         message: Some("LinuxPermissionChecker is only meaningful on Linux".to_owned()),
+        reason_code: None,
+        setup_route: None,
+        docs_url: None,
     }
 }
 
@@ -133,6 +159,9 @@ async fn check_accessibility() -> PermissionStatus {
                      zwp_virtual_keyboard_v1 (Sway, KDE Plasma 5.27+, Hyprland, river)."
                         .to_owned(),
                 ),
+                reason_code: None,
+                setup_route: None,
+                docs_url: None,
             },
             Err(err) => PermissionStatus {
                 kind: PermissionKind::Accessibility,
@@ -141,6 +170,9 @@ async fn check_accessibility() -> PermissionStatus {
                     "wtype was not found on PATH ({err}); auto-paste will fall back to \
                      copy-only. Install the `wtype` package to enable Ctrl+V synthesis."
                 )),
+                reason_code: Some("accessibility_wtype_missing".to_owned()),
+                setup_route: Some("setup/accessibility".to_owned()),
+                docs_url: None,
             },
         }
     }
@@ -150,6 +182,9 @@ async fn check_accessibility() -> PermissionStatus {
             kind: PermissionKind::Accessibility,
             state: PermissionState::Unsupported,
             message: Some("LinuxPermissionChecker is only meaningful on Linux".to_owned()),
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
         }
     }
 }
