@@ -122,6 +122,50 @@ export const ko: Messages = {
     openSettings: '시스템 설정 열기',
     dismiss: '나중에 설정',
   },
+  setup: {
+    title: 'Nagori 설정',
+    intro:
+      'Nagori가 다른 앱에 붙여넣기 위해 필요한 권한을 허용하세요. 시스템 설정에서 나중에 변경할 수 있습니다.',
+    accessibility: {
+      title: '접근성',
+      required: '필수',
+      description:
+        '접근성을 허용하면 Nagori가 기록을 포커스된 앱에 직접 붙여넣을 수 있습니다. “접근성 허용…”을 눌러 macOS 대화상자를 열고 Nagori 스위치를 켜세요.',
+      descriptionLinux:
+        'Wayland 세션에서 `wtype` 패키지를 설치하면 Nagori가 포커스된 앱에 Ctrl+V를 합성할 수 있습니다.',
+      screenshotAlt:
+        '시스템 설정 → 개인 정보 보호 및 보안 → 접근성에서 Nagori 토글을 강조 표시한 스크린샷.',
+      grantButton: '접근성 허용…',
+      grantButtonRetry: '시스템 설정 열기',
+      recheckButton: '다시 확인',
+      requesting: '요청 중…',
+      states: {
+        NotRequested: '요청 안 됨',
+        PromptShownNotGranted: '조치 필요',
+        Granted: '허용됨',
+        RevokedAfterGranted: '다시 활성화',
+        Unavailable: '해당 없음',
+      },
+      statusLabel: '상태',
+      messages: {
+        NotRequested:
+          'Nagori는 아직 macOS에 접근성을 요청하지 않았습니다. 아래 버튼을 누르면 시스템 대화상자가 표시됩니다.',
+        PromptShownNotGranted:
+          'macOS는 대화상자를 두 번 표시하지 않습니다. 시스템 설정을 열고 접근성 목록에서 Nagori를 켜세요.',
+        Granted: '자동 붙여넣기를 사용할 수 있습니다.',
+        RevokedAfterGranted:
+          'Nagori는 이전에 접근성 권한을 받았습니다. 시스템 설정에서 다시 활성화하면 자동 붙여넣기를 복원할 수 있습니다.',
+        UnavailableMacosFallback: '이 빌드에서는 접근성 상태를 사용할 수 없습니다.',
+        UnavailableWindows:
+          'Windows에서는 자동 붙여넣기에 접근성에 해당하는 권한이 필요하지 않습니다.',
+        UnavailableLinux:
+          'Linux의 자동 붙여넣기는 `wtype` 도우미에 의존합니다. 패키지 관리자를 통해 설치하세요.',
+      },
+      timeoutError:
+        '60초 이내에 권한 허용을 감지하지 못했습니다. 시스템 설정 → 개인 정보 보호 및 보안 → 접근성에서 Nagori 스위치를 확인한 뒤 “다시 확인”을 누르세요.',
+      requestError: '접근성 요청을 시작할 수 없습니다. 자세한 내용은 Console.app을 확인하세요.',
+    },
+  },
   settings: {
     title: '설정',
     backToPalette: '팔레트로 돌아가기',
@@ -131,6 +175,7 @@ export const ko: Messages = {
     statusError: '저장 실패: {error}',
     tauriRequired: '설정 저장에는 Tauri 런타임이 필요합니다.',
     tabs: {
+      setup: '설정 시작',
       general: '일반',
       privacy: '개인 정보',
       cli: 'CLI',

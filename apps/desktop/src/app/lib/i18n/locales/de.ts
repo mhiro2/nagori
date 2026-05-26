@@ -130,6 +130,52 @@ export const de: Messages = {
     openSettings: 'Systemeinstellungen öffnen',
     dismiss: 'Vorerst ohne fortfahren',
   },
+  setup: {
+    title: 'Nagori einrichten',
+    intro:
+      'Erteilen Sie die Berechtigungen, die Nagori zum Einfügen in andere Apps benötigt. Sie können sie später in den Systemeinstellungen ändern.',
+    accessibility: {
+      title: 'Bedienungshilfen',
+      required: 'Erforderlich',
+      description:
+        'Mit aktivierten Bedienungshilfen kann Nagori Verlaufseinträge direkt in die aktive App einfügen. Klicken Sie auf „Bedienungshilfen erteilen“, um den macOS-Dialog zu öffnen, und aktivieren Sie den Schalter für Nagori.',
+      descriptionLinux:
+        'Installieren Sie das Paket `wtype` in einer Wayland-Sitzung, damit Nagori Strg+V in die aktive App senden kann.',
+      screenshotAlt:
+        'Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen mit hervorgehobenem Nagori-Schalter.',
+      grantButton: 'Bedienungshilfen erteilen…',
+      grantButtonRetry: 'Systemeinstellungen öffnen',
+      recheckButton: 'Erneut prüfen',
+      requesting: 'Anfrage läuft…',
+      states: {
+        NotRequested: 'Nicht angefragt',
+        PromptShownNotGranted: 'Aktion erforderlich',
+        Granted: 'Erteilt',
+        RevokedAfterGranted: 'Erneut aktivieren',
+        Unavailable: 'Nicht relevant',
+      },
+      statusLabel: 'Status',
+      messages: {
+        NotRequested:
+          'Nagori hat macOS noch nicht um Bedienungshilfen gebeten. Klicken Sie auf die Schaltfläche, um den Systemdialog anzuzeigen.',
+        PromptShownNotGranted:
+          'macOS zeigt den Dialog kein zweites Mal an. Öffnen Sie die Systemeinstellungen und aktivieren Sie Nagori in der Liste der Bedienungshilfen.',
+        Granted: 'Automatisches Einfügen ist einsatzbereit.',
+        RevokedAfterGranted:
+          'Nagori wurden zuvor Bedienungshilfen erteilt. Aktivieren Sie sie in den Systemeinstellungen erneut, um das automatische Einfügen wiederherzustellen.',
+        UnavailableMacosFallback:
+          'Der Status der Bedienungshilfen ist in dieser Build-Version nicht verfügbar.',
+        UnavailableWindows:
+          'Windows benötigt für automatisches Einfügen keine vergleichbare Berechtigung.',
+        UnavailableLinux:
+          'Automatisches Einfügen unter Linux benötigt das Hilfsprogramm `wtype`. Installieren Sie es über Ihren Paketmanager.',
+      },
+      timeoutError:
+        'Innerhalb von 60 s wurde keine Freigabe erkannt. Öffnen Sie Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen, prüfen Sie den Nagori-Schalter und drücken Sie „Erneut prüfen“.',
+      requestError:
+        'Die Anfrage nach Bedienungshilfen konnte nicht gestartet werden – Details siehe Konsole.',
+    },
+  },
   settings: {
     title: 'Einstellungen',
     backToPalette: 'Zurück zur Palette',
@@ -139,6 +185,7 @@ export const de: Messages = {
     statusError: 'Speichern fehlgeschlagen: {error}',
     tauriRequired: 'Zum Speichern der Einstellungen wird die Tauri-Laufzeit benötigt.',
     tabs: {
+      setup: 'Einrichtung',
       general: 'Allgemein',
       privacy: 'Datenschutz',
       cli: 'CLI',

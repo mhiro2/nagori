@@ -119,6 +119,44 @@ export const zhHans: Messages = {
     openSettings: '打开系统设置',
     dismiss: '暂不开启',
   },
+  setup: {
+    title: '设置 Nagori',
+    intro: '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。',
+    accessibility: {
+      title: '辅助功能',
+      required: '必需',
+      description:
+        '启用辅助功能后，Nagori 可直接将历史条目粘贴到当前应用。点击“授予辅助功能…”打开 macOS 对话框，然后开启 Nagori 开关。',
+      descriptionLinux:
+        '在 Wayland 会话中安装 `wtype` 软件包，Nagori 即可向当前焦点应用合成 Ctrl+V。',
+      screenshotAlt: '“系统设置 → 隐私与安全性 → 辅助功能”中突出显示 Nagori 开关的截图。',
+      grantButton: '授予辅助功能…',
+      grantButtonRetry: '打开系统设置',
+      recheckButton: '重新检查',
+      requesting: '请求中…',
+      states: {
+        NotRequested: '未请求',
+        PromptShownNotGranted: '需要操作',
+        Granted: '已授予',
+        RevokedAfterGranted: '重新启用',
+        Unavailable: '不适用',
+      },
+      statusLabel: '状态',
+      messages: {
+        NotRequested: 'Nagori 尚未向 macOS 请求辅助功能。点击下方按钮可显示系统对话框。',
+        PromptShownNotGranted:
+          'macOS 不会再次显示对话框。请在“系统设置”中打开辅助功能列表并启用 Nagori。',
+        Granted: '自动粘贴已就绪。',
+        RevokedAfterGranted: 'Nagori 先前已被授予辅助功能。请在系统设置中重新启用以恢复自动粘贴。',
+        UnavailableMacosFallback: '此版本无法获取辅助功能状态。',
+        UnavailableWindows: 'Windows 上自动粘贴不需要类似辅助功能的权限。',
+        UnavailableLinux: 'Linux 上的自动粘贴依赖于 `wtype` 工具，请通过包管理器安装。',
+      },
+      timeoutError:
+        '60 秒内未检测到授权。请打开“系统设置 → 隐私与安全性 → 辅助功能”确认 Nagori 开关，然后按“重新检查”。',
+      requestError: '无法发起辅助功能请求，详情请查看 Console.app。',
+    },
+  },
   settings: {
     title: '设置',
     backToPalette: '返回面板',
@@ -128,6 +166,7 @@ export const zhHans: Messages = {
     statusError: '保存失败：{error}',
     tauriRequired: '保存设置需要 Tauri 运行时。',
     tabs: {
+      setup: '设置',
       general: '常规',
       privacy: '隐私',
       cli: 'CLI',

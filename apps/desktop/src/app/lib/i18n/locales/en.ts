@@ -126,6 +126,40 @@ export type Messages = {
     openSettings: string;
     dismiss: string;
   };
+  setup: {
+    title: string;
+    intro: string;
+    accessibility: {
+      title: string;
+      required: string;
+      description: string;
+      descriptionLinux: string;
+      screenshotAlt: string;
+      grantButton: string;
+      grantButtonRetry: string;
+      recheckButton: string;
+      requesting: string;
+      states: {
+        NotRequested: string;
+        PromptShownNotGranted: string;
+        Granted: string;
+        RevokedAfterGranted: string;
+        Unavailable: string;
+      };
+      statusLabel: string;
+      messages: {
+        NotRequested: string;
+        PromptShownNotGranted: string;
+        Granted: string;
+        RevokedAfterGranted: string;
+        UnavailableMacosFallback: string;
+        UnavailableWindows: string;
+        UnavailableLinux: string;
+      };
+      timeoutError: string;
+      requestError: string;
+    };
+  };
   settings: {
     title: string;
     backToPalette: string;
@@ -135,6 +169,7 @@ export type Messages = {
     statusError: string;
     tauriRequired: string;
     tabs: {
+      setup: string;
       general: string;
       privacy: string;
       cli: string;
@@ -454,6 +489,50 @@ export const en: Messages = {
     openSettings: 'Open System Settings',
     dismiss: 'Continue without it',
   },
+  setup: {
+    title: 'Set up Nagori',
+    intro:
+      'Grant the permissions Nagori needs to paste into other apps. You can change these later in System Settings.',
+    accessibility: {
+      title: 'Accessibility',
+      required: 'Required',
+      description:
+        'Enabling Accessibility lets Nagori paste history entries directly into the focused app. Click Grant Accessibility to open the macOS dialog, then turn the Nagori switch on.',
+      descriptionLinux:
+        'Install the `wtype` package on a Wayland session so Nagori can synthesize Ctrl+V into the focused app.',
+      screenshotAlt:
+        'System Settings → Privacy & Security → Accessibility with the Nagori toggle highlighted.',
+      grantButton: 'Grant Accessibility…',
+      grantButtonRetry: 'Open System Settings',
+      recheckButton: 'Re-check',
+      requesting: 'Requesting…',
+      states: {
+        NotRequested: 'Not requested',
+        PromptShownNotGranted: 'Needs action',
+        Granted: 'Granted',
+        RevokedAfterGranted: 'Re-enable',
+        Unavailable: 'Not applicable',
+      },
+      statusLabel: 'Status',
+      messages: {
+        NotRequested:
+          'Nagori has not asked macOS for Accessibility yet. Press the button below to show the system dialog.',
+        PromptShownNotGranted:
+          'macOS will not show the dialog a second time. Open System Settings and turn Nagori on in the Accessibility list.',
+        Granted: 'Auto-paste is ready to go.',
+        RevokedAfterGranted:
+          'Nagori was granted Accessibility before. Re-enable it in System Settings to restore auto-paste.',
+        UnavailableMacosFallback: 'Accessibility status is unavailable on this build.',
+        UnavailableWindows:
+          'Windows does not require an Accessibility-equivalent permission for auto-paste.',
+        UnavailableLinux:
+          'Auto-paste on Linux depends on the `wtype` helper. Install it through your package manager.',
+      },
+      timeoutError:
+        'Did not detect a grant within 60 s. Open System Settings → Privacy & Security → Accessibility, verify the Nagori switch, then press Re-check.',
+      requestError: 'Could not start the Accessibility request — see Console.app for details.',
+    },
+  },
   settings: {
     title: 'Settings',
     backToPalette: 'Back to palette',
@@ -463,6 +542,7 @@ export const en: Messages = {
     statusError: 'Save failed: {error}',
     tauriRequired: 'Saving settings requires the Tauri runtime.',
     tabs: {
+      setup: 'Setup',
       general: 'General',
       privacy: 'Privacy',
       cli: 'CLI',

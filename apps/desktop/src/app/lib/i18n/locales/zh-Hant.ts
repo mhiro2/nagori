@@ -120,6 +120,45 @@ export const zhHant: Messages = {
     openSettings: '開啟系統設定',
     dismiss: '暫不啟用',
   },
+  setup: {
+    title: '設定 Nagori',
+    intro: '授予 Nagori 向其他應用程式貼上所需的權限。您稍後可在系統設定中變更。',
+    accessibility: {
+      title: '輔助使用',
+      required: '必要',
+      description:
+        '啟用輔助使用後，Nagori 可將歷史條目直接貼上到目前的應用程式。點按「授予輔助使用…」開啟 macOS 對話框，並開啟 Nagori 開關。',
+      descriptionLinux:
+        '在 Wayland 工作階段中安裝 `wtype` 套件，Nagori 便可向目前焦點的應用程式合成 Ctrl+V。',
+      screenshotAlt: '「系統設定 → 隱私權與安全性 → 輔助使用」中突顯 Nagori 開關的截圖。',
+      grantButton: '授予輔助使用…',
+      grantButtonRetry: '開啟系統設定',
+      recheckButton: '重新檢查',
+      requesting: '請求中…',
+      states: {
+        NotRequested: '未請求',
+        PromptShownNotGranted: '需要動作',
+        Granted: '已授予',
+        RevokedAfterGranted: '重新啟用',
+        Unavailable: '不適用',
+      },
+      statusLabel: '狀態',
+      messages: {
+        NotRequested: 'Nagori 尚未向 macOS 請求輔助使用權限。點按下方按鈕可顯示系統對話框。',
+        PromptShownNotGranted:
+          'macOS 不會再次顯示對話框。請在「系統設定」中開啟輔助使用清單並啟用 Nagori。',
+        Granted: '自動貼上已可使用。',
+        RevokedAfterGranted:
+          'Nagori 先前已被授予輔助使用權限。請在系統設定中重新啟用以恢復自動貼上。',
+        UnavailableMacosFallback: '此組建無法取得輔助使用狀態。',
+        UnavailableWindows: 'Windows 上自動貼上不需要類似輔助使用的權限。',
+        UnavailableLinux: 'Linux 上的自動貼上依賴 `wtype` 工具，請透過套件管理員安裝。',
+      },
+      timeoutError:
+        '60 秒內未偵測到授權。請開啟「系統設定 → 隱私權與安全性 → 輔助使用」確認 Nagori 開關，然後按「重新檢查」。',
+      requestError: '無法啟動輔助使用請求，詳情請查看 Console.app。',
+    },
+  },
   settings: {
     title: '設定',
     backToPalette: '返回面板',
@@ -129,6 +168,7 @@ export const zhHant: Messages = {
     statusError: '儲存失敗：{error}',
     tauriRequired: '儲存設定需要 Tauri 執行階段。',
     tabs: {
+      setup: '設定流程',
       general: '一般',
       privacy: '隱私',
       cli: 'CLI',

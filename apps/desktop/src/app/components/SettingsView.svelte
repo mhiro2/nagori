@@ -27,6 +27,8 @@
     type SecondaryHotkeyAction,
     type SecretHandling,
   } from '../lib/types';
+  import SetupRoute from '../routes/SetupRoute.svelte';
+  import { refreshCapabilities } from '../stores/capabilities.svelte';
   import { hotkeyFailureState } from '../stores/hotkeyFailure.svelte';
   import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
@@ -34,7 +36,7 @@
 
   type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
-  type Tab = 'general' | 'privacy' | 'cli' | 'advanced';
+  type Tab = 'setup' | 'general' | 'privacy' | 'cli' | 'advanced';
 
   // Standalone Settings window: the OS supplies the close button via its
   // native title bar, so the in-app "Back to palette" affordance is
@@ -42,7 +44,7 @@
   // shows the button.
   const isStandaloneSettingsWindow = currentWindowLabel() === 'settings';
 
-  const TABS: readonly Tab[] = ['general', 'privacy', 'cli', 'advanced'];
+  const TABS: readonly Tab[] = ['setup', 'general', 'privacy', 'cli', 'advanced'];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
     'pin',
     'delete',
@@ -141,6 +143,10 @@
   // hides rather than spamming the user with a non-actionable error.
   let capabilities: PlatformCapabilities | null = $state(null);
   let activeTab: Tab = $state('general');
+  // Flips true once the initial-tab heuristic has run so a later
+  // `onboarding.completedAt` change (e.g. the user clicked through Setup
+  // mid-session) does not rip them back to the Setup tab.
+  let initialTabResolved = false;
   let loading = $state(false);
   let error: string | undefined = $state(undefined);
   let appDenylistText = $state('');
@@ -305,6 +311,23 @@
       try {
         const s = await getSettings();
         settings = s;
+        // First-launch heuristic: surface the Setup tab when the user has
+        // never reached a successful Accessibility grant. Today the daemon
+        // only stamps `accessibilityPromptedAt` / `accessibilityFirstGrantedAt`
+        // — `completedAt` is reserved for a future explicit dismissal — so we
+        // gate on both fields rather than `completedAt` alone (otherwise every
+        // launch lands on Setup even after the user is fully onboarded).
+        // Only runs once per Settings session so we never override an
+        // explicit tab click later in the same window.
+        if (!initialTabResolved) {
+          initialTabResolved = true;
+          if (
+            s.onboarding.completedAt === null &&
+            s.onboarding.accessibilityFirstGrantedAt === null
+          ) {
+            activeTab = 'setup';
+          }
+        }
         appDenylistText = s.appDenylist.join('\n');
         regexDenylistText = s.regexDenylist.join('\n');
         lastValidRegexList = [...s.regexDenylist];
@@ -345,6 +368,11 @@
     // the user has actually granted the permission, and the Auto-paste
     // row sticks on "Needs permission" while auto-paste itself works.
     void refreshSettings();
+    // PermissionCard reads `capabilitiesState` to drive the macOS
+    // screenshot and the non-macOS short-circuit in the UI resolver. The
+    // standalone Settings webview never mounts the Palette so the shared
+    // store stays empty otherwise — populate it explicitly here.
+    void refreshCapabilities();
   });
 
   type CapabilityRowKey = keyof Messages['settings']['capabilities']['rows'];
@@ -977,6 +1005,9 @@
     </div>
 
     <form onsubmit={(e) => e.preventDefault()}>
+      {#if activeTab === 'setup'}
+        <SetupRoute />
+      {/if}
       {#if activeTab === 'general'}
         <fieldset>
           <legend>{t.settings.capture.legend}</legend>

@@ -132,6 +132,52 @@ export const es: Messages = {
     openSettings: 'Abrir Ajustes del Sistema',
     dismiss: 'Continuar sin ello',
   },
+  setup: {
+    title: 'Configurar Nagori',
+    intro:
+      'Concede los permisos que Nagori necesita para pegar en otras apps. Puedes cambiarlos más adelante en Ajustes del Sistema.',
+    accessibility: {
+      title: 'Accesibilidad',
+      required: 'Obligatorio',
+      description:
+        'Habilitar Accesibilidad permite que Nagori pegue entradas del historial directamente en la app activa. Pulsa «Conceder Accesibilidad» para abrir el diálogo de macOS y activa el interruptor de Nagori.',
+      descriptionLinux:
+        'Instala el paquete `wtype` en una sesión Wayland para que Nagori pueda sintetizar Ctrl+V en la app activa.',
+      screenshotAlt:
+        'Ajustes del Sistema → Privacidad y seguridad → Accesibilidad con el interruptor de Nagori resaltado.',
+      grantButton: 'Conceder Accesibilidad…',
+      grantButtonRetry: 'Abrir Ajustes del Sistema',
+      recheckButton: 'Volver a comprobar',
+      requesting: 'Solicitando…',
+      states: {
+        NotRequested: 'No solicitado',
+        PromptShownNotGranted: 'Requiere acción',
+        Granted: 'Concedido',
+        RevokedAfterGranted: 'Reactivar',
+        Unavailable: 'No aplicable',
+      },
+      statusLabel: 'Estado',
+      messages: {
+        NotRequested:
+          'Nagori aún no ha pedido permiso de Accesibilidad a macOS. Pulsa el botón para mostrar el diálogo del sistema.',
+        PromptShownNotGranted:
+          'macOS no mostrará el diálogo una segunda vez. Abre Ajustes del Sistema y activa Nagori en la lista de Accesibilidad.',
+        Granted: 'El pegado automático está listo.',
+        RevokedAfterGranted:
+          'A Nagori se le concedió Accesibilidad anteriormente. Reactívala en Ajustes del Sistema para recuperar el pegado automático.',
+        UnavailableMacosFallback:
+          'El estado de Accesibilidad no está disponible en esta compilación.',
+        UnavailableWindows:
+          'Windows no requiere un permiso equivalente a Accesibilidad para el pegado automático.',
+        UnavailableLinux:
+          'El pegado automático en Linux depende del asistente `wtype`. Instálalo mediante tu gestor de paquetes.',
+      },
+      timeoutError:
+        'No se detectó la concesión en 60 s. Abre Ajustes del Sistema → Privacidad y seguridad → Accesibilidad, comprueba el interruptor de Nagori y pulsa «Volver a comprobar».',
+      requestError:
+        'No se pudo iniciar la solicitud de Accesibilidad — consulta Console.app para más detalles.',
+    },
+  },
   settings: {
     title: 'Ajustes',
     backToPalette: 'Volver a la paleta',
@@ -141,6 +187,7 @@ export const es: Messages = {
     statusError: 'Error al guardar: {error}',
     tauriRequired: 'Guardar los ajustes requiere el runtime de Tauri.',
     tabs: {
+      setup: 'Configuración',
       general: 'General',
       privacy: 'Privacidad',
       cli: 'CLI',

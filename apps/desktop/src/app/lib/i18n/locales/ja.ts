@@ -123,6 +123,50 @@ export const ja: Messages = {
     openSettings: 'システム設定を開く',
     dismiss: 'あとで設定する',
   },
+  setup: {
+    title: 'Nagori をセットアップ',
+    intro:
+      'Nagori が他のアプリへ自動ペーストするために必要な権限を許可します。あとから システム設定 で変更できます。',
+    accessibility: {
+      title: 'アクセシビリティ',
+      required: '必須',
+      description:
+        'アクセシビリティを有効にすると、Nagori が履歴をフォーカス中のアプリへ直接ペーストできます。「アクセシビリティを許可…」を押して macOS のダイアログを表示し、Nagori のスイッチをオンにしてください。',
+      descriptionLinux:
+        'Wayland セッションで `wtype` パッケージをインストールすると、Nagori がフォーカス中のアプリへ Ctrl+V を合成できます。',
+      screenshotAlt:
+        'システム設定 → プライバシーとセキュリティ → アクセシビリティ で Nagori のトグルを強調表示したスクリーンショット。',
+      grantButton: 'アクセシビリティを許可…',
+      grantButtonRetry: 'システム設定を開く',
+      recheckButton: '再確認',
+      requesting: '要求中…',
+      states: {
+        NotRequested: '未要求',
+        PromptShownNotGranted: '対応が必要',
+        Granted: '許可済み',
+        RevokedAfterGranted: '再有効化',
+        Unavailable: '対象外',
+      },
+      statusLabel: '状態',
+      messages: {
+        NotRequested:
+          'Nagori はまだアクセシビリティを要求していません。下のボタンを押すと macOS のダイアログが表示されます。',
+        PromptShownNotGranted:
+          'macOS は二度目のダイアログを表示しません。システム設定を開き、アクセシビリティ一覧で Nagori をオンにしてください。',
+        Granted: '自動ペーストが利用可能です。',
+        RevokedAfterGranted:
+          '以前は許可されていました。システム設定で再度有効にすると自動ペーストが復活します。',
+        UnavailableMacosFallback: 'このビルドではアクセシビリティの状態を取得できません。',
+        UnavailableWindows: 'Windows では自動ペーストにアクセシビリティ相当の権限は不要です。',
+        UnavailableLinux:
+          'Linux の自動ペーストは `wtype` ヘルパーに依存します。パッケージマネージャでインストールしてください。',
+      },
+      timeoutError:
+        '60 秒以内に許可を検知できませんでした。システム設定 → プライバシーとセキュリティ → アクセシビリティ で Nagori のスイッチを確認し、「再確認」を押してください。',
+      requestError:
+        'アクセシビリティ要求を開始できませんでした。コンソール.app で詳細を確認してください。',
+    },
+  },
   settings: {
     title: '設定',
     backToPalette: 'パレットへ戻る',
@@ -132,6 +176,7 @@ export const ja: Messages = {
     statusError: '保存に失敗しました: {error}',
     tauriRequired: '設定の保存には Tauri ランタイムが必要です。',
     tabs: {
+      setup: 'セットアップ',
       general: '一般',
       privacy: 'プライバシー',
       cli: 'CLI',

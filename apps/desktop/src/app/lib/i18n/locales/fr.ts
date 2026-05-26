@@ -132,6 +132,52 @@ export const fr: Messages = {
     openSettings: 'Ouvrir les Réglages Système',
     dismiss: 'Continuer sans',
   },
+  setup: {
+    title: 'Configurer Nagori',
+    intro:
+      'Accordez les autorisations dont Nagori a besoin pour coller dans d’autres applications. Vous pourrez les modifier plus tard dans les Réglages Système.',
+    accessibility: {
+      title: 'Accessibilité',
+      required: 'Obligatoire',
+      description:
+        'Activer l’Accessibilité permet à Nagori de coller les entrées de l’historique directement dans l’application active. Cliquez sur « Accorder l’Accessibilité… » pour afficher la fenêtre macOS, puis activez l’interrupteur Nagori.',
+      descriptionLinux:
+        'Installez le paquet `wtype` dans une session Wayland pour que Nagori puisse synthétiser Ctrl+V dans l’application active.',
+      screenshotAlt:
+        'Réglages Système → Confidentialité et sécurité → Accessibilité avec l’interrupteur Nagori mis en évidence.',
+      grantButton: 'Accorder l’Accessibilité…',
+      grantButtonRetry: 'Ouvrir les Réglages Système',
+      recheckButton: 'Revérifier',
+      requesting: 'Demande en cours…',
+      states: {
+        NotRequested: 'Non demandé',
+        PromptShownNotGranted: 'Action requise',
+        Granted: 'Accordé',
+        RevokedAfterGranted: 'Réactiver',
+        Unavailable: 'Non applicable',
+      },
+      statusLabel: 'État',
+      messages: {
+        NotRequested:
+          'Nagori n’a pas encore demandé l’Accessibilité à macOS. Appuyez sur le bouton ci-dessous pour afficher la fenêtre système.',
+        PromptShownNotGranted:
+          'macOS n’affichera pas la fenêtre une seconde fois. Ouvrez les Réglages Système et activez Nagori dans la liste Accessibilité.',
+        Granted: 'Le collage automatique est prêt.',
+        RevokedAfterGranted:
+          'Nagori a déjà eu l’Accessibilité. Réactivez-la dans les Réglages Système pour rétablir le collage automatique.',
+        UnavailableMacosFallback:
+          'L’état de l’Accessibilité est indisponible dans cette compilation.',
+        UnavailableWindows:
+          'Windows ne nécessite pas d’autorisation équivalente à l’Accessibilité pour le collage automatique.',
+        UnavailableLinux:
+          'Le collage automatique sous Linux dépend de l’assistant `wtype`. Installez-le via votre gestionnaire de paquets.',
+      },
+      timeoutError:
+        'Aucune autorisation détectée en 60 s. Ouvrez Réglages Système → Confidentialité et sécurité → Accessibilité, vérifiez l’interrupteur Nagori et appuyez sur « Revérifier ».',
+      requestError:
+        'Impossible de lancer la demande d’Accessibilité — consultez Console pour plus de détails.',
+    },
+  },
   settings: {
     title: 'Paramètres',
     backToPalette: 'Retour à la palette',
@@ -141,6 +187,7 @@ export const fr: Messages = {
     statusError: 'Échec de l’enregistrement : {error}',
     tauriRequired: 'L’enregistrement des paramètres nécessite le runtime Tauri.',
     tabs: {
+      setup: 'Configuration',
       general: 'Général',
       privacy: 'Confidentialité',
       cli: 'CLI',

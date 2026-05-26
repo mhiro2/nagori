@@ -72,7 +72,10 @@ const baseSettings = (): AppSettings => ({
   onboarding: {
     accessibilityPromptedAt: null,
     accessibilityFirstGrantedAt: null,
-    completedAt: null,
+    // Post-onboarding fixture: a non-null `completedAt` opts the user out
+    // of the first-launch Setup-tab heuristic, so these tests land on the
+    // General pane where their controls live.
+    completedAt: '2024-01-01T00:00:00Z',
   },
 });
 

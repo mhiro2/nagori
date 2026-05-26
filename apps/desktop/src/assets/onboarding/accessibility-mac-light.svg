@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" role="img" aria-hidden="true">
+  <!--
+    Light-mode illustration of the macOS Privacy → Accessibility pane.
+    Stand-in vector graphic until a real screenshot is dropped in. Keep the
+    file path stable so importers in `apps/desktop/src/app/components`
+    do not need to change when the real PNG lands.
+  -->
+  <defs>
+    <linearGradient id="winBg-light" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fafafa"/>
+      <stop offset="1" stop-color="#ececec"/>
+    </linearGradient>
+    <linearGradient id="headerBg-light" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e9e9ea"/>
+      <stop offset="1" stop-color="#d8d8da"/>
+    </linearGradient>
+    <linearGradient id="toggleOn" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34c759"/>
+      <stop offset="1" stop-color="#2fb84d"/>
+    </linearGradient>
+    <filter id="shadow-light">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <rect x="20" y="20" width="600" height="320" rx="14" fill="url(#winBg-light)" stroke="#cfcfd2" stroke-width="1" filter="url(#shadow-light)"/>
+  <rect x="20" y="20" width="600" height="44" rx="14" fill="url(#headerBg-light)"/>
+  <rect x="20" y="60" width="600" height="1" fill="#cfcfd2"/>
+  <!-- traffic lights -->
+  <circle cx="42" cy="42" r="6" fill="#ff5f57"/>
+  <circle cx="62" cy="42" r="6" fill="#febc2e"/>
+  <circle cx="82" cy="42" r="6" fill="#28c840"/>
+  <text x="320" y="46" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif" font-size="13" fill="#1d1d1f" text-anchor="middle">Privacy &amp; Security &gt; Accessibility</text>
+  <!-- sidebar -->
+  <rect x="20" y="61" width="170" height="279" fill="#f3f3f4"/>
+  <text x="40" y="92" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">Accessibility</text>
+  <text x="40" y="116" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">Input Monitoring</text>
+  <text x="40" y="140" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">Screen Recording</text>
+  <text x="40" y="164" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">Automation</text>
+  <!-- right pane -->
+  <text x="210" y="92" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" fill="#1d1d1f" font-weight="600">Accessibility</text>
+  <text x="210" y="114" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">
+    Allow the apps below to control your computer.
+  </text>
+  <!-- list row 1: Nagori (highlighted) -->
+  <rect x="206" y="140" width="404" height="40" rx="8" fill="#ffffff" stroke="#0a84ff" stroke-width="2"/>
+  <rect x="218" y="150" width="20" height="20" rx="4" fill="#3a3a3c"/>
+  <text x="248" y="165" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" fill="#1d1d1f" font-weight="600">Nagori</text>
+  <!-- toggle ON -->
+  <rect x="556" y="151" width="40" height="22" rx="11" fill="url(#toggleOn)"/>
+  <circle cx="586" cy="162" r="9" fill="#ffffff"/>
+  <!-- list row 2: another app, off -->
+  <rect x="206" y="186" width="404" height="36" rx="8" fill="#ffffff" stroke="#dcdce0" stroke-width="1"/>
+  <rect x="218" y="195" width="18" height="18" rx="4" fill="#8e8e93"/>
+  <text x="246" y="208" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" fill="#3a3a3c">Some Other App</text>
+  <rect x="558" y="195" width="36" height="20" rx="10" fill="#d1d1d6"/>
+  <circle cx="568" cy="205" r="8" fill="#ffffff"/>
+  <!-- callout arrow + label -->
+  <path d="M608 138 L632 116 L612 116 Z" fill="#0a84ff" opacity="0"/>
+  <text x="210" y="252" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#0a84ff" font-weight="600">
+    Turn on the Nagori switch
+  </text>
+  <text x="210" y="270" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#6e6e73">
+    macOS may ask for your password to confirm.
+  </text>
+</svg>
