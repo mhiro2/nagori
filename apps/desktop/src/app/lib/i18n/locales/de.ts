@@ -93,8 +93,10 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
-    autoPasteOff: '⚠ Auto-Einfügen aus — Accessibility nicht erteilt',
-    openSetup: 'Einrichtung',
+    autoPasteOff: 'Auto-Einfügen aus — Accessibility nicht erteilt',
+    autoPasteOffShort: '⚠ Auto-Einfügen aus',
+    autoPasteOffSetupAria:
+      'Auto-Einfügen aus: Accessibility-Berechtigung erforderlich. Einrichtung öffnen.',
   },
   actionMenu: {
     title: 'Schnellaktionen',

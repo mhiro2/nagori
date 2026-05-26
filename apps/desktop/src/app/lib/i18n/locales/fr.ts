@@ -95,8 +95,10 @@ export const fr: Messages = {
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
-    autoPasteOff: '⚠ Collage automatique désactivé — Accessibilité non accordée',
-    openSetup: 'Configuration',
+    autoPasteOff: 'Collage automatique désactivé — Accessibilité non accordée',
+    autoPasteOffShort: '⚠ Collage automatique désactivé',
+    autoPasteOffSetupAria:
+      'Collage automatique désactivé : autorisation Accessibilité requise. Ouvrir la configuration.',
   },
   actionMenu: {
     title: 'Actions rapides',

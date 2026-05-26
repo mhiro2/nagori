@@ -95,11 +95,17 @@ export type Messages = {
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
     // Compact accessibility indicator surfaced in the palette StatusBar
-    // when the OS permission required to drive auto-paste is missing.
-    // The label is the full warning string ("⚠ Auto-paste off …"); the
-    // CTA is the trailing chip the user clicks to land on the Setup tab.
+    // when the OS permission required to drive auto-paste is missing. The
+    // indicator is a single clickable chip that opens the Setup tab:
+    //   - `autoPasteOffShort` is the visible chip label (kept short so the
+    //     status bar never wraps),
+    //   - `autoPasteOff` is the full sentence reused as the chip `title`,
+    //   - `autoPasteOffSetupAria` is the accessible name (reason + action)
+    //     so screen-reader / keyboard users get the detail the short label
+    //     omits.
     autoPasteOff: string;
-    openSetup: string;
+    autoPasteOffShort: string;
+    autoPasteOffSetupAria: string;
   };
   actionMenu: {
     title: string;
@@ -449,8 +455,9 @@ export const en: Messages = {
     capturePaused: 'Capture paused',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
-    autoPasteOff: '⚠ Auto-paste off — Accessibility not granted',
-    openSetup: 'Setup',
+    autoPasteOff: 'Auto-paste off — Accessibility not granted',
+    autoPasteOffShort: '⚠ Auto-paste off',
+    autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',
   },
   actionMenu: {
     title: 'Quick actions',

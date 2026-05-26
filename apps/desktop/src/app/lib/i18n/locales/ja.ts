@@ -86,8 +86,9 @@ export const ja: Messages = {
     capturePaused: '取り込み一時停止',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
-    autoPasteOff: '⚠ 自動ペースト OFF — Accessibility 未許可',
-    openSetup: 'セットアップ',
+    autoPasteOff: '自動ペースト OFF — Accessibility 未許可',
+    autoPasteOffShort: '⚠ 自動ペースト OFF',
+    autoPasteOffSetupAria: '自動ペースト OFF: Accessibility の許可が必要です。セットアップを開く。',
   },
   actionMenu: {
     title: 'クイックアクション',

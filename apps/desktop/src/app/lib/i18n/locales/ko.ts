@@ -86,8 +86,9 @@ export const ko: Messages = {
     capturePaused: '캡처 일시 중지',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
-    autoPasteOff: '⚠ 자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
-    openSetup: '설정',
+    autoPasteOff: '자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
+    autoPasteOffShort: '⚠ 자동 붙여넣기 꺼짐',
+    autoPasteOffSetupAria: '자동 붙여넣기 꺼짐: Accessibility 권한이 필요합니다. 설정 열기.',
   },
   actionMenu: {
     title: '빠른 동작',

@@ -10,9 +10,15 @@ vi.mock('../lib/commands', () => ({
   getPermissions: vi.fn(),
   getCapabilities: vi.fn(),
   openSettingsWindow: vi.fn(async () => undefined),
+  setCaptureEnabled: vi.fn(),
 }));
 
-import { getPermissions, getSettings, openSettingsWindow } from '../lib/commands';
+import {
+  getPermissions,
+  getSettings,
+  openSettingsWindow,
+  setCaptureEnabled,
+} from '../lib/commands';
 import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
 import { capabilitiesState } from '../stores/capabilities.svelte';
 import { refreshSettings, settingsState } from '../stores/settings.svelte';
@@ -168,24 +174,64 @@ describe('StatusBar', () => {
     });
     expect(getByText(/Capture paused/i)).toBeTruthy();
   });
+
+  it('toggles capture through the backend and adopts the returned settings', async () => {
+    vi.mocked(getSettings).mockResolvedValue(baseSettings({ captureEnabled: true }));
+    vi.mocked(getPermissions).mockResolvedValue([]);
+    vi.mocked(setCaptureEnabled).mockResolvedValue(baseSettings({ captureEnabled: false }));
+    await refreshSettings();
+
+    const { getByRole, findByText } = render(StatusBar, {
+      props: { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined },
+    });
+    const chip = getByRole('button', { name: /Capture on/i });
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(chip);
+    expect(setCaptureEnabled).toHaveBeenCalledWith(false);
+    // The chip flips to the paused label once the awaited settings land.
+    expect(await findByText(/Capture paused/i)).toBeTruthy();
+  });
+
+  it('surfaces a toggle failure on the error channel instead of throwing', async () => {
+    vi.mocked(getSettings).mockResolvedValue(baseSettings({ captureEnabled: true }));
+    vi.mocked(getPermissions).mockResolvedValue([]);
+    vi.mocked(setCaptureEnabled).mockRejectedValue(new Error('backend gone'));
+    await refreshSettings();
+
+    const { getByRole } = render(StatusBar, {
+      props: { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined },
+    });
+    await fireEvent.click(getByRole('button', { name: /Capture on/i }));
+    // The rejection lands on settingsState.errorMessage (Palette feeds that
+    // into the bar's errorMessage prop) rather than going unhandled.
+    await vi.waitFor(() => expect(settingsState.errorMessage).toMatch(/backend gone/));
+    // The chip stays on — we don't optimistically flip before the IPC lands.
+    expect(getByRole('button', { name: /Capture on/i })).toBeTruthy();
+  });
 });
 
 describe('StatusBar accessibility indicator', () => {
   const props = { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined };
 
+  // The warning is now a single clickable chip: its visible label is the
+  // short "⚠ Auto-paste off", while the "Accessibility …" detail lives in the
+  // accessible name (aria-label) and the `title` tooltip — so the indicator
+  // tests key off the button's accessible name.
   it('stays hidden until the capability snapshot has loaded', () => {
     // Default beforeEach state: no capabilities, no permissions. The
     // indicator must not flash before `get_capabilities` resolves even
     // though the resolver would otherwise read `NotRequested`.
-    const { queryByText } = render(StatusBar, { props });
-    expect(queryByText(/Accessibility not granted/)).toBeNull();
+    const { queryByRole } = render(StatusBar, { props });
+    expect(queryByRole('button', { name: /Accessibility permission required/ })).toBeNull();
   });
 
-  it('shows the warning + Setup CTA when Accessibility is not granted', () => {
+  it('shows the warning chip when Accessibility is not granted', () => {
     seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
     const { getByText, getByRole } = render(StatusBar, { props });
-    expect(getByText(/Accessibility not granted/)).toBeTruthy();
-    expect(getByRole('button', { name: 'Setup' })).toBeTruthy();
+    expect(getByText(/Auto-paste off/)).toBeTruthy();
+    // Accessible name carries the reason + action the short label omits.
+    expect(getByRole('button', { name: /Accessibility permission required/ })).toBeTruthy();
   });
 
   it('shows the warning for a revoked-after-granted state', () => {
@@ -196,26 +242,32 @@ describe('StatusBar accessibility indicator', () => {
         accessibilityFirstGrantedAt: '2024-01-02T00:00:00Z',
       },
     );
-    const { getByText } = render(StatusBar, { props });
-    expect(getByText(/Accessibility not granted/)).toBeTruthy();
+    const { getByRole } = render(StatusBar, { props });
+    expect(getByRole('button', { name: /Accessibility permission required/ })).toBeTruthy();
   });
 
   it('hides the warning once Accessibility is granted', () => {
     seedAccessibility({ kind: 'accessibility', state: 'granted' });
-    const { queryByText } = render(StatusBar, { props });
-    expect(queryByText(/Accessibility not granted/)).toBeNull();
+    const { queryByRole } = render(StatusBar, { props });
+    expect(queryByRole('button', { name: /Accessibility permission required/ })).toBeNull();
   });
 
   it('hides the warning on Unavailable platforms', () => {
     seedAccessibility({ kind: 'accessibility', state: 'unsupported' }, {}, 'linuxWayland');
-    const { queryByText } = render(StatusBar, { props });
-    expect(queryByText(/Accessibility not granted/)).toBeNull();
+    const { queryByRole } = render(StatusBar, { props });
+    expect(queryByRole('button', { name: /Accessibility permission required/ })).toBeNull();
   });
 
-  it('opens the Settings window on the Setup tab when the CTA is clicked', async () => {
+  it('drops the keyboard hints while the warning chip is showing', () => {
+    seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
+    const { container } = render(StatusBar, { props });
+    expect(container.querySelector('.hints')).toBeNull();
+  });
+
+  it('opens the Settings window on the Setup tab when the chip is clicked', async () => {
     seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
     const { getByRole } = render(StatusBar, { props });
-    await fireEvent.click(getByRole('button', { name: 'Setup' }));
+    await fireEvent.click(getByRole('button', { name: /Accessibility permission required/ }));
     expect(openSettingsWindow).toHaveBeenCalledWith('setup');
   });
 });

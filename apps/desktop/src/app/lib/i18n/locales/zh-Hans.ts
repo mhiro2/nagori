@@ -86,8 +86,9 @@ export const zhHans: Messages = {
     capturePaused: '捕获已暂停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hans')} 项`,
     selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
-    autoPasteOff: '⚠ 自动粘贴已关闭 — 未授予 Accessibility',
-    openSetup: '设置',
+    autoPasteOff: '自动粘贴已关闭 — 未授予 Accessibility',
+    autoPasteOffShort: '⚠ 自动粘贴已关闭',
+    autoPasteOffSetupAria: '自动粘贴已关闭：需要 Accessibility 权限。打开设置。',
   },
   actionMenu: {
     title: '快捷操作',

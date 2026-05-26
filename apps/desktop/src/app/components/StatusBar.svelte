@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { openSettingsWindow } from '../lib/commands';
+  import { openSettingsWindow, setCaptureEnabled } from '../lib/commands';
+  import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
@@ -18,7 +19,12 @@
   const { entryCount, elapsedMs, loading, errorMessage, selectedCount = 0 }: Props = $props();
   const t = $derived(messages());
 
-  const capture = $derived(captureEnabled());
+  // Outside Tauri there's no settings store to read from (refreshSettings
+  // only flips `loaded`), so `localCapture` lets the demo chip still reflect
+  // clicks. Under Tauri it stays `undefined` and the store remains the source
+  // of truth.
+  let localCapture = $state<boolean | undefined>(undefined);
+  const capture = $derived(localCapture ?? captureEnabled());
 
   // Lightweight accessibility indicator. Replaces the legacy OnboardingBanner
   // (a ~60-line card) with a one-row hint: when the OS-level grant required
@@ -57,46 +63,92 @@
     if (isTauri()) void openSettingsWindow('setup');
     else showSettings();
   };
+
+  // The capture chip is a toggle, matching the tray's "Pause/Resume capture"
+  // item. We `await` the IPC rather than optimistically flipping the store:
+  // capture toggling is a low-frequency action, so authoritative state from
+  // the returned `AppSettings` is simpler than a rollback path. `pending`
+  // debounces double-clicks so a second press can't race the in-flight call.
+  let pending = $state(false);
+  const toggleCapture = async (): Promise<void> => {
+    if (pending) return;
+    const next = !capture;
+    if (!isTauri()) {
+      localCapture = next;
+      return;
+    }
+    pending = true;
+    try {
+      settingsState.settings = await setCaptureEnabled(next);
+    } catch (err) {
+      // Surface the failure on the existing global error channel (it blanks
+      // the count until the next refresh) rather than letting the rejection
+      // go unhandled — the chip would otherwise silently snap back.
+      settingsState.errorMessage = describeError(err);
+    } finally {
+      pending = false;
+    }
+  };
 </script>
 
 <footer class="status">
   <span class="left">
-    {#if errorMessage}
-      <span class="error">{errorMessage}</span>
-    {:else if loading}
-      <span>{t.palette.searching}</span>
-    {:else}
-      <span>{t.status.entryCount(entryCount)}</span>
-      {#if elapsedMs !== undefined}
-        <span class="dot">·</span>
-        <span>{t.palette.elapsed(elapsedMs)}</span>
+    <!-- Only the volatile summary text truncates under pressure; the warning
+         chip stays whole (its own `flex: 0 0 auto`) so the focus ring and
+         border are never clipped. -->
+    <span class="summary">
+      {#if errorMessage}
+        <span class="error">{errorMessage}</span>
+      {:else if loading}
+        <span>{t.palette.searching}</span>
+      {:else}
+        <span>{t.status.entryCount(entryCount)}</span>
+        {#if elapsedMs !== undefined}
+          <span class="dot">·</span>
+          <span>{t.palette.elapsed(elapsedMs)}</span>
+        {/if}
+        {#if selectedCount > 0}
+          <span class="dot">·</span>
+          <span class="multi">{t.status.selectedCount(selectedCount)}</span>
+        {/if}
       {/if}
-      {#if selectedCount > 0}
-        <span class="dot">·</span>
-        <span class="multi">{t.status.selectedCount(selectedCount)}</span>
-      {/if}
-    {/if}
+    </span>
     {#if showAccessibilityWarning}
-      <span class="dot">·</span>
-      <span class="accessibility-warning">
-        <span>{t.status.autoPasteOff}</span>
-        <button type="button" class="setup-cta" onclick={openSetup}>
-          {t.status.openSetup}
-        </button>
-      </span>
+      <button
+        type="button"
+        class="chip warning-chip"
+        title={t.status.autoPasteOff}
+        aria-label={t.status.autoPasteOffSetupAria}
+        onclick={openSetup}
+      >
+        {t.status.autoPasteOffShort}
+      </button>
     {/if}
   </span>
   <span class="right">
-    <span class="badge" class:on={capture} class:off={!capture}>
+    <button
+      type="button"
+      class="chip capture-chip"
+      class:on={capture}
+      class:off={!capture}
+      aria-pressed={capture}
+      disabled={pending}
+      onclick={() => void toggleCapture()}
+    >
       <span class="dot-icon" aria-hidden="true"></span>
       {capture ? t.status.captureOn : t.status.capturePaused}
-    </span>
-    <span class="hints">
-      <kbd>↑↓</kbd>{t.palette.hints.navigate}
-      <kbd>Enter</kbd>{t.palette.hints.paste}
-      <kbd>⌘K</kbd>{t.palette.hints.actions}
-      <kbd>⌘,</kbd>{t.palette.hints.settings}
-    </span>
+    </button>
+    <!-- Keyboard hints are the lowest-priority row content: drop them while
+         the warning chip is present so the bar never wraps on a narrow
+         palette (priority: warning > capture > summary > hints). -->
+    {#if !showAccessibilityWarning}
+      <span class="hints">
+        <kbd>↑↓</kbd>{t.palette.hints.navigate}
+        <kbd>Enter</kbd>{t.palette.hints.paste}
+        <kbd>⌘K</kbd>{t.palette.hints.actions}
+        <kbd>⌘,</kbd>{t.palette.hints.settings}
+      </span>
+    {/if}
   </span>
 </footer>
 
@@ -117,23 +169,73 @@
     align-items: center;
     gap: 0.5rem;
   }
+  /* The left column gives way under pressure (so its summary truncates),
+     while the right column holds its intrinsic width and never wraps. */
+  .left {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .right {
+    flex: 0 0 auto;
+  }
+  /* Summary is the only shrinkable piece: it ellipsis-truncates when the
+     warning chip needs room, instead of pushing the chips onto a new line.
+     It must stay block-level (not flex) for `text-overflow: ellipsis` to
+     apply to its inline run of count/dot/elapsed spans. */
+  .summary {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
   .error {
     color: var(--danger, #f87171);
   }
-  .badge {
+  /* Shared pill for the two interactive chips (capture toggle + accessibility
+     warning), so they read as the same affordance. */
+  .chip {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
     padding: 0.05rem 0.45rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
     border-radius: 999px;
+    appearance: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
   }
-  .badge.on {
+  .chip:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 2px;
+  }
+  .chip:disabled {
+    cursor: progress;
+    opacity: 0.6;
+  }
+  .capture-chip.on {
     border-color: rgba(120, 200, 140, 0.4);
     color: var(--ok, #86d29a);
   }
-  .badge.off {
+  .capture-chip.off {
     color: var(--muted, rgba(255, 255, 255, 0.4));
+  }
+  .capture-chip:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .warning-chip {
+    color: var(--warning, #f59e0b);
+    border-color: currentColor;
+  }
+  .warning-chip:hover {
+    background: rgba(245, 158, 11, 0.12);
+  }
+  .warning-chip:focus-visible {
+    outline-color: var(--warning, #f59e0b);
   }
   .dot-icon {
     width: 0.4rem;
@@ -143,35 +245,13 @@
   }
   .dot {
     opacity: 0.5;
+    /* Spacing between summary segments — the flex `gap` no longer applies now
+       that `.summary` is block-level for ellipsis. */
+    margin: 0 0.4rem;
   }
   .multi {
     color: var(--accent, #6c8dff);
     font-weight: 600;
-  }
-  .accessibility-warning {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    color: var(--warning, #f59e0b);
-  }
-  .setup-cta {
-    appearance: none;
-    background: transparent;
-    border: 1px solid currentColor;
-    color: inherit;
-    border-radius: 999px;
-    padding: 0.025rem 0.45rem;
-    font: inherit;
-    font-size: 0.7rem;
-    cursor: pointer;
-  }
-  .setup-cta:hover,
-  .setup-cta:focus-visible {
-    background: rgba(245, 158, 11, 0.12);
-  }
-  .setup-cta:focus-visible {
-    outline: 2px solid var(--warning, #f59e0b);
-    outline-offset: 2px;
   }
   .hints {
     display: flex;

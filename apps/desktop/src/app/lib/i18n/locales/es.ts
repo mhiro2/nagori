@@ -94,8 +94,10 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
-    autoPasteOff: '⚠ Pegado automático desactivado — Accesibilidad no autorizada',
-    openSetup: 'Configuración',
+    autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
+    autoPasteOffShort: '⚠ Pegado automático desactivado',
+    autoPasteOffSetupAria:
+      'Pegado automático desactivado: se requiere permiso de Accesibilidad. Abrir configuración.',
   },
   actionMenu: {
     title: 'Acciones rápidas',

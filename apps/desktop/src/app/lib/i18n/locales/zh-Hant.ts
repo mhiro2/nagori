@@ -86,8 +86,9 @@ export const zhHant: Messages = {
     capturePaused: '擷取已暫停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hant')} 項`,
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
-    autoPasteOff: '⚠ 自動貼上已關閉 — 未授予 Accessibility',
-    openSetup: '設定',
+    autoPasteOff: '自動貼上已關閉 — 未授予 Accessibility',
+    autoPasteOffShort: '⚠ 自動貼上已關閉',
+    autoPasteOffSetupAria: '自動貼上已關閉：需要 Accessibility 權限。開啟設定。',
   },
   actionMenu: {
     title: '快速動作',
