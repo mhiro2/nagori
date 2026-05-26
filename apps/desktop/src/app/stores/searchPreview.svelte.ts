@@ -16,6 +16,12 @@ type PreviewState = {
   query: string | undefined;
   preview: EntryPreviewDto | undefined;
   loading: boolean;
+  // Delayed mirror of `loading`: only flips true once a fetch outlives
+  // `LOADING_VISIBLE_DELAY_MS`. The pane binds to this so quick (often
+  // cache-warm) previews never paint the "Loading preview…" message,
+  // killing the per-row flicker during arrow navigation. `loading` stays
+  // the source of truth for dedup so the delay never confuses re-entry.
+  loadingVisible: boolean;
   errorMessage: string | undefined;
   // True while the expanded body is being fetched via `getEntryPreviewFull`.
   // Separate from `loading` so the caller can render a partial overlay
@@ -30,6 +36,7 @@ export const previewState = $state<PreviewState>({
   query: undefined,
   preview: undefined,
   loading: false,
+  loadingVisible: false,
   errorMessage: undefined,
   expandedLoading: false,
   expandedErrorMessage: undefined,
@@ -37,6 +44,19 @@ export const previewState = $state<PreviewState>({
 
 let previewInflight = 0;
 let expandedInflight = 0;
+let loadingDelayTimer: ReturnType<typeof setTimeout> | undefined;
+
+// How long a fetch must run before its loading message is allowed to show.
+// Tuned to outlast the common fast path so navigation stays flicker-free
+// while genuinely heavy bodies still surface a spinner.
+const LOADING_VISIBLE_DELAY_MS = 150;
+
+const clearLoadingDelay = (): void => {
+  if (loadingDelayTimer !== undefined) {
+    clearTimeout(loadingDelayTimer);
+    loadingDelayTimer = undefined;
+  }
+};
 
 export const hydratePreview = async (
   entryId: string | undefined,
@@ -63,11 +83,22 @@ export const hydratePreview = async (
   previewState.expandedErrorMessage = undefined;
   previewState.expandedLoading = false;
   if (!entryId || !isTauri()) {
+    clearLoadingDelay();
     previewState.loading = false;
+    previewState.loadingVisible = false;
     return;
   }
   const ticket = ++previewInflight;
   previewState.loading = true;
+  // Reset the visible flag, not just the pending timer: a prior slow fetch
+  // may have already flipped it true, and leaving it set would let this new
+  // entry paint the message instantly instead of waiting out the delay.
+  previewState.loadingVisible = false;
+  clearLoadingDelay();
+  loadingDelayTimer = setTimeout(() => {
+    loadingDelayTimer = undefined;
+    if (ticket === previewInflight) previewState.loadingVisible = true;
+  }, LOADING_VISIBLE_DELAY_MS);
   try {
     const preview = await getEntryPreview(entryId, query);
     if (
@@ -91,7 +122,9 @@ export const hydratePreview = async (
       previewState.entryId === entryId &&
       previewState.query === query
     ) {
+      clearLoadingDelay();
       previewState.loading = false;
+      previewState.loadingVisible = false;
     }
   }
 };

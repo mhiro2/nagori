@@ -36,6 +36,7 @@ beforeEach(() => {
   previewState.query = undefined;
   previewState.preview = undefined;
   previewState.loading = false;
+  previewState.loadingVisible = false;
   previewState.errorMessage = undefined;
 });
 
@@ -85,5 +86,61 @@ describe('hydratePreview', () => {
     await hydratePreview('e4', 'bar');
     expect(getEntryPreview).toHaveBeenCalledWith('e4', 'bar');
     expect(previewState.query).toBe('bar');
+  });
+
+  it('never shows the loading message when the fetch resolves before the delay', async () => {
+    vi.mocked(getEntryPreview).mockResolvedValue(preview('e5'));
+    await hydratePreview('e5');
+    expect(previewState.loadingVisible).toBe(false);
+  });
+
+  it('surfaces the loading message once a fetch outlives the delay', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch!: (value: EntryPreviewDto) => void;
+      vi.mocked(getEntryPreview).mockReturnValue(
+        new Promise<EntryPreviewDto>((resolve) => {
+          resolveFetch = resolve;
+        }),
+      );
+      const hydrating = hydratePreview('e6');
+      expect(previewState.loadingVisible).toBe(false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(previewState.loadingVisible).toBe(true);
+      resolveFetch(preview('e6'));
+      await hydrating;
+      expect(previewState.loadingVisible).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not carry a visible loading message from a slow entry into a fast one', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveSlow!: (value: EntryPreviewDto) => void;
+      vi.mocked(getEntryPreview).mockReturnValueOnce(
+        new Promise<EntryPreviewDto>((resolve) => {
+          resolveSlow = resolve;
+        }),
+      );
+      const slow = hydratePreview('e7');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(previewState.loadingVisible).toBe(true);
+
+      // Switch to a new entry that resolves well under the delay.
+      vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('e8'));
+      const fast = hydratePreview('e8');
+      expect(previewState.loadingVisible).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      await fast;
+      expect(previewState.loadingVisible).toBe(false);
+
+      // Drain the abandoned slow fetch so it doesn't leak across tests.
+      resolveSlow(preview('e7'));
+      await slow;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
