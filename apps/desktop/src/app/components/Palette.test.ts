@@ -44,11 +44,15 @@ vi.mock('../stores/capabilities.svelte', () => ({
 
 vi.mock('../stores/searchPreview.svelte', () => ({
   hydratePreview: vi.fn(async () => undefined),
+  expandPreview: vi.fn(async () => undefined),
   previewState: {
     entryId: undefined,
     preview: undefined,
     loading: false,
+    loadingVisible: false,
     errorMessage: undefined,
+    expandedLoading: false,
+    expandedErrorMessage: undefined,
   },
 }));
 
@@ -97,6 +101,7 @@ vi.mock('../stores/view.svelte', () => ({
 
 import { closePalette, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
+import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
 import { quickLookAvailable } from '../stores/capabilities.svelte';
 import {
   confirmSelection,
@@ -106,8 +111,15 @@ import {
   previewSelection,
   togglePinSelection,
 } from '../stores/searchActions';
-import { refreshCurrent, scheduleQuery } from '../stores/searchQuery.svelte';
-import { selectFirst, selectLast, selectNext, selectPrev } from '../stores/searchSelection';
+import { previewState } from '../stores/searchPreview.svelte';
+import { refreshCurrent, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
+import {
+  currentSelection,
+  selectFirst,
+  selectLast,
+  selectNext,
+  selectPrev,
+} from '../stores/searchSelection';
 import { showSettings } from '../stores/view.svelte';
 import Palette from './Palette.svelte';
 
@@ -116,8 +128,47 @@ const dispatch = (init: KeyboardEventInit): KeyboardEvent => {
   return event;
 };
 
+const resultRow = (id: string, snippet: string): SearchResultDto => ({
+  id,
+  kind: 'text',
+  preview: snippet,
+  score: 1,
+  createdAt: '2026-05-27T00:00:00Z',
+  pinned: false,
+  sensitivity: 'Public',
+  rankReasons: [],
+  representationSummary: [],
+});
+
+const textPreview = (id: string, body: string): EntryPreviewDto => ({
+  id,
+  kind: 'text',
+  title: 'T',
+  previewText: body,
+  body: { type: 'text', text: body },
+  metadata: {
+    byteCount: body.length,
+    charCount: body.length,
+    lineCount: 1,
+    truncated: false,
+    sensitive: false,
+    fullContentAvailable: true,
+  },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // `vi.clearAllMocks` wipes call history but keeps any `mockReturnValue`
+  // implementation a prior test installed, so re-pin the defaults the
+  // selection-dependent tests below override per-case.
+  vi.mocked(currentSelection).mockReturnValue(undefined);
+  previewState.entryId = undefined;
+  previewState.preview = undefined;
+  previewState.loading = false;
+  previewState.loadingVisible = false;
+  previewState.errorMessage = undefined;
+  searchState.results = [];
+  searchState.selectedIndex = 0;
 });
 
 afterEach(cleanup);
@@ -297,6 +348,38 @@ describe('Palette', () => {
     const input = container.querySelector('input[type="text"]');
     if (input) await fireEvent.keyDown(input, { key: 'y', metaKey: true });
     expect(previewSelection).not.toHaveBeenCalled();
+  });
+
+  // Stale-preview guard: the hydrate is debounced, so right after an arrow
+  // press `previewState` still holds the *previously* selected row's body.
+  // The pane must not paint that body against the freshly-selected row —
+  // most jarringly a clip whose text is the status-bar "⚠ Auto-paste off"
+  // warning. Until the store's `entryId` catches up to the live selection
+  // the pane falls back to the selected row's own list snippet.
+  it('falls back to the row snippet while the store still holds the prior entry', () => {
+    const selected = resultRow('sel', 'SELECTED SNIPPET');
+    searchState.results = [selected];
+    vi.mocked(currentSelection).mockReturnValue(selected);
+    // Store lags one entry behind: a different id with the warning body.
+    previewState.entryId = 'other';
+    previewState.preview = textPreview('other', '⚠ Auto-paste off — Accessibility not granted');
+
+    const { container } = render(Palette);
+    const body = container.querySelector('.preview-pane .body');
+    expect(body?.textContent).toBe('SELECTED SNIPPET');
+    expect(container.textContent).not.toContain('Auto-paste off');
+  });
+
+  it('renders the fetched body once the store matches the live selection', () => {
+    const selected = resultRow('sel', 'SELECTED SNIPPET');
+    searchState.results = [selected];
+    vi.mocked(currentSelection).mockReturnValue(selected);
+    previewState.entryId = 'sel';
+    previewState.preview = textPreview('sel', 'FETCHED BODY');
+
+    const { container } = render(Palette);
+    const body = container.querySelector('.preview-pane .body');
+    expect(body?.textContent).toBe('FETCHED BODY');
   });
 });
 

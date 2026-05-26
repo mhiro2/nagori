@@ -77,6 +77,15 @@
   const selected = $derived(currentSelection());
   const resultIds = $derived(searchState.results.map((r) => r.id));
 
+  // The hydrate below is debounced, so for ~60ms after an arrow press
+  // `previewState` still holds the *previously* selected row's fetched body.
+  // Rendering it would flash another entry's content in the pane — most
+  // jarringly a clipboard item that literally contains the status-bar
+  // "⚠ Auto-paste off" warning text. Gate the preview-derived props on the
+  // store matching the live selection; until the fetch for the new row lands
+  // the pane falls back to that row's own list snippet (`item.preview`).
+  const previewMatchesSelection = $derived(previewState.entryId === selected?.id);
+
   // Debounce so rapid arrow-key navigation across a 50-row list doesn't fire
   // a `get_entry_preview` IPC per row. Only the row the user settles on
   // crosses the bridge.
@@ -246,9 +255,9 @@
     {#if showPreviewPane || previewExpanded}
       <PreviewPane
         item={selected}
-        preview={previewState.preview}
-        loading={previewState.loading}
-        errorMessage={previewState.errorMessage}
+        preview={previewMatchesSelection ? previewState.preview : undefined}
+        loading={previewMatchesSelection ? previewState.loadingVisible : false}
+        errorMessage={previewMatchesSelection ? previewState.errorMessage : undefined}
         expanded={previewExpanded}
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
