@@ -1042,7 +1042,8 @@ not duplicate runtime logic.
 - `SettingsView.svelte` — tabbed *Setup* / *General* / *Privacy* / *CLI* /
   *Advanced* settings panel. The Setup tab mounts `SetupRoute`, which
   hosts a `PermissionCard` per OS permission and is selected by default
-  on first launch (when `onboarding.completedAt === null`) so the user
+  on first launch (when both `onboarding.completedAt` and
+  `onboarding.accessibilityFirstGrantedAt` are still `null`) so the user
   lands directly on the permission grant flow; daemon and hotkey
   registration keep running regardless. Denylists are edited as
   multi-line textareas serialised back into `string[]`; capture kinds,
