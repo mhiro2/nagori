@@ -197,7 +197,7 @@ fn activate_hwnd_sync(
     snapshot_pid: Option<u32>,
     snapshot_exe: Option<&str>,
 ) -> std::result::Result<(), String> {
-    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::{GetLastError, HWND};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
@@ -205,9 +205,11 @@ fn activate_hwnd_sync(
     // SAFETY: round-trip via usize keeps the conversion lossless on
     // both pointer widths; `IsWindow` validates the handle before we
     // touch the window so a stale snapshot (target app closed between
-    // palette open and paste) cannot crash. `SetForegroundWindow` is
-    // a best-effort hint — Windows can deny the focus change (foreground
-    // lock, UAC integrity gap) but never crashes the caller.
+    // palette open and paste) cannot crash. Windows can deny the focus
+    // change (foreground lock, UAC integrity gap) but never crashes the
+    // caller; we surface that denial as an error so the Tauri side aborts
+    // the paste instead of injecting keystrokes into whatever window kept
+    // focus.
     //
     // The `handle as usize` cast is *intentionally* truncating on 32-bit
     // Windows targets: `HWND` is pointer-sized, so on `i686-pc-windows-*`
@@ -266,7 +268,21 @@ fn activate_hwnd_sync(
         if IsIconic(hwnd) != 0 {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        let _ = SetForegroundWindow(hwnd);
+        // A zero return means the foreground change was denied (the target
+        // never came to the front). Reporting it lets the caller stop
+        // before `SendInput` sprays the paste into whatever window still
+        // owns focus. `GetLastError` is occasionally `0` here even on
+        // denial, so we only attach it when it carries a code.
+        if SetForegroundWindow(hwnd) == 0 {
+            let code = GetLastError();
+            return if code == 0 {
+                Err("failed to bring restore target to the foreground".into())
+            } else {
+                Err(format!(
+                    "failed to bring restore target to the foreground (GetLastError {code})"
+                ))
+            };
+        }
     }
     Ok(())
 }
