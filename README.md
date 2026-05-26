@@ -69,9 +69,12 @@ compatibility matrix and troubleshooting.
   copy, but does not call `download_and_install`. Upgrade by
   downloading the bundle from the GitHub release page.
 - **Auto-paste fallback is manual.** When the synthesised Cmd/Ctrl+V
-  fails (Accessibility revoked, `wtype` missing, restore-target lost,
-  …), the entry is still copied to the clipboard and a `paste_failed`
-  toast prompts you to paste manually — there is no automatic retry.
+  fails (restore-target lost, target app refused the paste, …), the
+  entry is still copied to the clipboard and a `paste_failed` toast
+  prompts you to paste manually — there is no automatic retry. The
+  missing-Accessibility case is handled separately: the palette's
+  status bar shows a persistent warning with a *Setup* shortcut instead
+  of a transient toast.
 
 ## Usage
 

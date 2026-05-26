@@ -986,17 +986,20 @@ not duplicate runtime logic.
 **Frontend layout** (`apps/desktop/src/app/components/`):
 
 - `Palette.svelte` — top-level container. Stacks `SearchBox` →
-  `FilterChips` → `OnboardingBanner` → (`ResultList` + `PreviewPane`)
-  → `StatusBar`.
+  `FilterChips` → (`ResultList` + `PreviewPane`) → `StatusBar`.
 - `FilterChips.svelte` — quick-filter row directly under the search
   input. Single-select toggles for *Today* / *Last 7 days* / *Pinned*;
   the active preset feeds `currentFilters()` into every
   `searchClipboard` call. Re-clicking the active chip clears it.
-- `OnboardingBanner.svelte` — only renders when `get_permissions`
-  reports Accessibility as missing; offers an *Open System Settings*
-  deep-link.
 - `StatusBar.svelte` — entry count, last-search elapsed time, capture
-  badge, AI badge, keyboard hints.
+  badge, AI badge, keyboard hints. Also hosts a one-row Accessibility
+  indicator: when the OS grant that auto-paste needs is missing it
+  surfaces a warning plus a *Setup* CTA that opens the Settings window
+  on the Setup tab (`open_settings` with a `route` hint →
+  `nagori://navigate`). The row resolves the shared 5-state
+  `resolvePermissionUiState`, so it hides once the grant lands and on
+  `Unavailable` platforms (Windows, Wayland sans `wtype`) where there is
+  nothing to chase. It replaces the former `OnboardingBanner` card.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise
   the domain; code rows show a heuristic language badge (TS, RS, PY,
   JSON, …) inline.
@@ -1340,10 +1343,14 @@ change.
   webview handle a later palette toggle relies on) alive.
 - **Notifications (`tauri-plugin-notification`)** — one-shot "ready"
   alert after setup, plus a state-change toast when `capture_enabled`
-  flips. Auto-paste failures (e.g. revoked Accessibility)
-  emit `nagori://paste_failed`; the palette renders an in-window toast
-  with a one-click jump into Settings. No-op silently if notification
-  permission is not granted.
+  flips. Auto-paste failures emit `nagori://paste_failed`, which
+  `emit_paste_failed` always routes to the palette (`"main"`) webview —
+  toasts are palette-only, so the Settings window never subscribes. The
+  palette suppresses the toast when the failure is the already-known
+  missing-Accessibility case (the StatusBar indicator covers it) and
+  only renders it for an unexpected failure while the grant is in place;
+  a brief ✓ toast confirms a fresh grant on the NotGranted→Granted
+  transition. No-op silently if notification permission is not granted.
 - **Startup fallback window** — when `AppState::try_new()` fails in
   `setup()` (Linux session whose compositor lacks `wl_data_control` /
   `ext_data_control`, denied data directory, corrupted SQLite file),
