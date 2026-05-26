@@ -319,6 +319,51 @@ describe('PreviewPane', () => {
     expect(invoke).not.toHaveBeenCalledWith('open_url_external', expect.anything());
   });
 
+  it('leaves modified Enter to the palette in an expanded URL preview', async () => {
+    // The window-level Enter listener owns *plain* Enter (open URL) but must
+    // ignore modified Enter — ⌘Enter (copy) and ⌘⇧Enter (paste-as-plain)
+    // belong to the palette. Otherwise a single ⌘Enter would both copy and
+    // pop the open-URL dialog.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Public' }),
+        preview: samplePreview({
+          kind: 'url',
+          previewText: 'https://example.com/',
+          body: {
+            type: 'url',
+            url: 'https://example.com/',
+            scheme: 'https',
+            hostDisplay: 'example.com',
+            pathAndQuery: '/',
+          },
+          metadata: {
+            byteCount: 20,
+            charCount: 20,
+            lineCount: 1,
+            truncated: false,
+            sensitive: false,
+            fullContentAvailable: true,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+      },
+    });
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }),
+    );
+    await Promise.resolve();
+    // No confirm dialog: the modified Enter fell through to the palette.
+    expect(container.querySelector('[data-testid="preview-url-confirm"]')).toBeNull();
+
+    // A plain Enter still opens the confirm dialog.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await Promise.resolve();
+    expect(container.querySelector('[data-testid="preview-url-confirm"]')).not.toBeNull();
+  });
+
   it('hides the open trigger and Enter hint for non-Public URL entries', () => {
     // Sensitivity gate must trip before any external-open affordance ships:
     // a Private URL shouldn't even let the user reach the confirm modal,

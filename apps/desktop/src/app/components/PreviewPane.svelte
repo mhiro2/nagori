@@ -200,9 +200,13 @@
     expandedLoading?: boolean;
     expandedErrorMessage?: string | undefined;
     onExpandBody?: (entryId: string) => void;
+    // Bindable: true while a plain Enter in the expanded preview will open
+    // the URL, so the palette can stand down its Enter-to-paste binding and
+    // the two handlers don't both fire on the same keystroke.
+    enterOpensUrl?: boolean;
   };
 
-  const {
+  let {
     item,
     preview,
     loading,
@@ -211,6 +215,7 @@
     expandedLoading = false,
     expandedErrorMessage = undefined,
     onExpandBody,
+    enterOpensUrl = $bindable(false),
   }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
@@ -459,16 +464,26 @@
     }
   }
 
-  // Enter shortcut: only active in the dedicated preview window
-  // (`expanded` mode) so the palette's Enter-to-paste isn't shadowed.
-  // Attaches to `window` because the preview pane has no focused child
-  // by default; expanded mode hands the whole window over to this
-  // component, so a window-scoped listener is safe.
+  // Enter-to-open owns the keystroke only inside the expanded preview, and
+  // only for a plain Enter — modified Enter (paste-as-plain = ⌘⇧Enter,
+  // copy = ⌘Enter) stays with the palette. Mirror that exact condition into
+  // the bindable `enterOpensUrl` so the palette suppresses its own confirm
+  // binding while we're the rightful Enter handler; otherwise both fire and
+  // the URL opens *and* the entry pastes.
+  $effect(() => {
+    enterOpensUrl = expanded && urlCanOpen && !confirmOpenUrl;
+  });
+  // Attaches to `window` because the preview pane has no focused child by
+  // default; the palette stands down its confirm binding (see
+  // `enterOpensUrl`) so this window-scoped listener is the sole Enter
+  // handler while expanded.
   $effect(() => {
     if (!expanded || !urlCanOpen) return;
     if (typeof window === 'undefined') return;
     const handler = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter') return;
+      // Leave modified Enter to the palette's copy / paste-as-plain bindings.
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       if (confirmOpenUrl) return;
       event.preventDefault();
       confirmOpenUrl = true;

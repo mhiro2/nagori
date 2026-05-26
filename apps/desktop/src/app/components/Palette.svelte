@@ -160,6 +160,10 @@
     ),
   );
   let previewExpanded = $state(false);
+  // Set by PreviewPane while a plain Enter in the expanded preview will open
+  // the highlighted URL. We then suppress the palette's own Enter-to-paste so
+  // a single Enter doesn't both open the URL and paste the entry.
+  let previewEnterOpensUrl = $state(false);
 
   const handleKeydown = (event: KeyboardEvent): void => {
     const action = resolveAction(event, paletteBindings);
@@ -179,6 +183,11 @@
         selectLast();
         break;
       case 'confirm':
+        // The expanded URL preview owns plain Enter (opens the URL); stand
+        // down so the keystroke doesn't also paste the entry. Gate on
+        // `previewExpanded` as well so a stale flag from an unmounted pane
+        // can never wedge the palette's paste shut.
+        if (previewExpanded && previewEnterOpensUrl) break;
         if (multiSelectState.selected.size > 0) void copyMultiSelection();
         else void confirmSelection();
         break;
@@ -262,6 +271,7 @@
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
         onExpandBody={(id) => void expandPreview(id)}
+        bind:enterOpensUrl={previewEnterOpensUrl}
       />
     {/if}
   </div>

@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/tauri', () => ({
@@ -120,6 +121,7 @@ import {
   selectNext,
   selectPrev,
 } from '../stores/searchSelection';
+import { settingsState } from '../stores/settings.svelte';
 import { showSettings } from '../stores/view.svelte';
 import Palette from './Palette.svelte';
 
@@ -156,6 +158,42 @@ const textPreview = (id: string, body: string): EntryPreviewDto => ({
   },
 });
 
+const urlRow = (id: string, url: string): SearchResultDto => ({
+  id,
+  kind: 'url',
+  preview: url,
+  score: 1,
+  createdAt: '2026-05-27T00:00:00Z',
+  pinned: false,
+  sensitivity: 'Public',
+  rankReasons: [],
+  representationSummary: [],
+});
+
+const urlPreview = (id: string, url: string): EntryPreviewDto => ({
+  id,
+  kind: 'url',
+  title: 'U',
+  previewText: url,
+  body: {
+    type: 'url',
+    url,
+    domain: 'example.com',
+    scheme: 'https',
+    hostDisplay: 'example.com',
+    pathAndQuery: '/',
+  },
+  metadata: {
+    byteCount: url.length,
+    charCount: url.length,
+    lineCount: 1,
+    truncated: false,
+    sensitive: false,
+    fullContentAvailable: true,
+    domain: 'example.com',
+  },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   // `vi.clearAllMocks` wipes call history but keeps any `mockReturnValue`
@@ -169,6 +207,7 @@ beforeEach(() => {
   previewState.errorMessage = undefined;
   searchState.results = [];
   searchState.selectedIndex = 0;
+  settingsState.settings = undefined;
 });
 
 afterEach(cleanup);
@@ -291,6 +330,34 @@ describe('Palette', () => {
       spy();
     });
   }
+
+  it('suppresses Enter-to-paste while an expanded URL preview owns Enter', async () => {
+    // Regression: a plain Enter in the expanded URL preview must open the URL
+    // (handled inside PreviewPane) without *also* pasting the entry. PreviewPane
+    // reports `enterOpensUrl`, and the palette stands its confirm binding down.
+    const item = urlRow('u1', 'https://example.com/');
+    vi.mocked(currentSelection).mockReturnValue(item);
+    searchState.results = [item];
+    previewState.entryId = 'u1';
+    previewState.preview = urlPreview('u1', 'https://example.com/');
+    // Bind `open-preview` to a plain key (no default binding ships for it) so
+    // the test can toggle the expanded pane via the keyboard.
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: { 'open-preview': 'e' },
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    expect(input).toBeTruthy();
+    // Expand the preview; PreviewPane mounts and reports `enterOpensUrl`.
+    await fireEvent.keyDown(input!, { key: 'e' });
+    await tick();
+    // Plain Enter now belongs to the URL preview — the palette must not paste.
+    await fireEvent.keyDown(input!, { key: 'Enter' });
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
 
   it('opens the standalone settings window on Cmd+, inside the Tauri runtime', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
