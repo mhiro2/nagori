@@ -737,7 +737,14 @@ enum PermissionKind { Accessibility, InputMonitoring, Clipboard,
 enum PermissionState { Granted, Denied, NotDetermined, Unsupported }
 ```
 
-`PermissionChecker::check()` returns the live state for every kind.
+`PermissionChecker::check(&ctx)` returns the live state for every
+kind. The context carries
+`settings.onboarding.accessibilityPromptedAt` so the macOS adapter can
+distinguish `NotDetermined` (we have never asked the OS to surface
+the TCC dialog) from `Denied` (we have asked and `AXIsProcessTrusted`
+still returns `false`). `PermissionStatus` also carries an optional
+`reason_code` / `setup_route` / `docs_url` triplet that downstream
+scripts and Setup cards branch on without parsing the message string.
 The capture loop and copy paths only need `Clipboard`. The auto-paste
 path needs `Accessibility`; when it is missing, the desktop and CLI
 both fall back to **copy-only** behaviour (palette `Enter` and
@@ -959,8 +966,19 @@ focus, not domain logic:
 - `state.window.activate_app(bundle_id)` (via the
   `WindowBehavior` trait) — reactivates the app that was frontmost
   before the palette stole focus, so Cmd+V lands in the right window.
-- `open_accessibility_settings` — shells out to `open(1)` with the
-  `x-apple.systempreferences:` URL for the onboarding deep link.
+- `request_accessibility(prompt: bool) -> PermissionStatus` — on macOS
+  calls `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt:
+  prompt)`. When `prompt = true` the runtime stamps
+  `settings.onboarding.accessibilityPromptedAt`. The command also
+  falls back to `open(1)` with the `x-apple.systempreferences:` URL
+  when `prompt = true && !Granted && previously_prompted` — i.e. the
+  user has clicked through the TCC dialog before but is still not
+  trusted, so the OS dialog is suppressed and the Privacy pane is the
+  next actionable step. On the *first* prompt we deliberately skip the
+  `open` fallback so the OS dialog stays foregrounded; once the marker
+  is set, subsequent clicks of the Setup card route to System Settings
+  directly. Windows/Linux return a synthetic Granted (UIPI caveat) /
+  wtype-presence row.
 
 Both are deliberately scoped to UI focus / shell integration and do
 not duplicate runtime logic.
@@ -1324,10 +1342,14 @@ change.
   fallback arm of `on_run_event` exits the process via
   `handle.exit(0)` when the user closes the window so the hidden main
   window cannot keep the app alive on macOS.
-- **Permissions deep link** — the `open_accessibility_settings`
-  command shells out to `open(1)` with the
-  `x-apple.systempreferences:` URL so the onboarding banner can take
-  the user directly to the Accessibility pane.
+- **Permissions deep link** — the `request_accessibility` command
+  drives `AXIsProcessTrustedWithOptions(prompt:YES)` on macOS, which
+  surfaces the TCC dialog the first time and otherwise falls back to
+  `open(1)` with the `x-apple.systempreferences:` URL so the
+  onboarding banner can still hand the user the Accessibility pane.
+  The runtime also stamps `settings.onboarding.accessibilityPromptedAt`
+  on `prompt = true` so the Setup card can later distinguish "never
+  asked" from "asked and not granted".
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
   `app.updater()` is always wired. `release.yaml` builds bundles for
   macOS (arm64 + x86_64), Windows x86_64 (NSIS), and Linux x86_64
