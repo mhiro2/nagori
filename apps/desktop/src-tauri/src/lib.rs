@@ -49,6 +49,17 @@ pub(crate) const CLIPBOARD_CHANGED_EVENT: &str = "nagori://clipboard_changed";
 /// `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts`.
 const SETTINGS_CHANGED_EVENT: &str = "nagori://settings_changed";
 
+/// Event used to hand the Settings webview an initial tab / route hint
+/// after `open_settings` shows the window. Payload is the desired
+/// `SettingsView` tab name (currently `"setup"`); the `SettingsView`
+/// subscribes via `TAURI_EVENTS.navigate` and swaps `activeTab` so a
+/// caller that already knows where the user needs to land (e.g. the
+/// Palette accessibility indicator) can jump straight to that tab
+/// instead of relying on the first-launch onboarding heuristic. Keep
+/// the literal in lockstep with `TAURI_EVENTS.navigate` in
+/// `lib/tauri.ts`.
+pub(crate) const NAVIGATE_EVENT: &str = "nagori://navigate";
+
 /// Which side of the hotkey wiring produced a registration failure.
 /// The emitted payload includes a `kind: "secondary"` tag for secondary
 /// accelerators and omits the field for the primary palette shortcut,
@@ -931,7 +942,7 @@ fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyA
                 // Empty-history is silent; other failures surface via the
                 // toast event so the user knows their hotkey did nothing.
                 // Route through `commands::emit_paste_failed` so the
-                // scoping (settings-visible → settings, else main) stays
+                // palette-only scoping (always emit to "main") stays
                 // identical across every paste-failure source — a
                 // broadcast `emit` here would double-toast when both
                 // windows are open.

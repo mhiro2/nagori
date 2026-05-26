@@ -100,7 +100,14 @@ export const hidePalette = (): Promise<void> => invoke('hide_palette');
 // with native decorations in `tauri.conf.json`, so the OS supplies the
 // close button, title-bar drag, and Cmd+Tab / Alt+Tab membership — these
 // commands only flip its visibility.
-export const openSettingsWindow = (): Promise<void> => invoke('open_settings');
+//
+// `route` is an optional tab hint that surfaces an in-window navigate event
+// after the window is shown, so a caller that already knows where the user
+// needs to land (e.g. the Palette's StatusBar accessibility indicator) can
+// jump straight to that tab instead of relying on the SettingsView's first-
+// launch heuristic.
+export const openSettingsWindow = (route?: string): Promise<void> =>
+  route === undefined ? invoke('open_settings') : invoke('open_settings', { route });
 
 export const closeSettingsWindow = (): Promise<void> => invoke('close_settings');
 

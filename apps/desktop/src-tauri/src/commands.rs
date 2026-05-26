@@ -234,26 +234,16 @@ pub async fn paste_entry(
 /// the message inside an invisible store. The repaste-last secondary
 /// hotkey (`dispatch_secondary_hotkey` in `lib.rs`) takes the same path.
 ///
-/// The App-level subscriber is mounted on every webview, so a broadcast
-/// `emit` would surface the same toast twice when the user has both the
-/// palette and the Settings window open. Route the emit to a single
-/// window instead: prefer Settings when it's visible (the user is
-/// actively looking at it and can act on the permission-prompt link in
-/// the toast), otherwise fall back to the main palette webview, which is
-/// hidden between sessions but never destroyed — the toast surfaces on
-/// the next palette open.
+/// Toasts are palette-only: the Settings window surfaces permission and
+/// error state through its own inline surfaces (the Setup tab, the
+/// Capability table) and deliberately renders no toast stack. So route
+/// the emit to the main palette webview unconditionally — it is hidden
+/// between sessions but never destroyed, so the toast surfaces on the
+/// next palette open. Targeting "settings" here would strand the message
+/// in a window that no longer subscribes to the event.
 pub(crate) fn emit_paste_failed(app: &AppHandle, message: &str) {
-    let target = if app
-        .get_webview_window("settings")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false)
-    {
-        "settings"
-    } else {
-        "main"
-    };
     let _ = app.emit_to(
-        target,
+        "main",
         crate::PASTE_FAILED_EVENT,
         serde_json::json!({ "error": message }),
     );
@@ -822,8 +812,18 @@ fn hide_settings_window(app: &AppHandle) -> CommandResult<()> {
 
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
-pub fn open_settings(window: WebviewWindow) -> CommandResult<()> {
-    show_settings_window(window.app_handle())
+pub fn open_settings(window: WebviewWindow, route: Option<String>) -> CommandResult<()> {
+    let app = window.app_handle();
+    show_settings_window(app)?;
+    // Emit *after* the window is shown so the Settings webview is mounted
+    // and its `nagori://navigate` listener is attached. `emit_to` scopes
+    // the broadcast to the Settings window only — the palette's own
+    // navigate handler (App.svelte) would otherwise interpret a tab name
+    // as a view name and ignore it, but routing keeps the wire clean.
+    if let Some(route) = route {
+        let _ = app.emit_to("settings", crate::NAVIGATE_EVENT, route);
+    }
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)]
