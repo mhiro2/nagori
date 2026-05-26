@@ -1047,8 +1047,12 @@ not duplicate runtime logic.
   hosts a `PermissionCard` per OS permission and is selected by default
   on first launch (when both `onboarding.completedAt` and
   `onboarding.accessibilityFirstGrantedAt` are still `null`) so the user
-  lands directly on the permission grant flow; daemon and hotkey
-  registration keep running regardless. Denylists are edited as
+  lands directly on the permission grant flow. On the same first-launch
+  condition the backend surfaces the Settings window itself
+  (`surface_first_launch_setup` in `lib.rs` calls `show_settings_window`
+  during `setup()`) so the user does not have to discover the StatusBar
+  indicator on their own; daemon and hotkey registration keep running
+  regardless. Denylists are edited as
   multi-line textareas serialised back into `string[]`; capture kinds,
   paste format, recent ordering, total storage limit, and appearance
   are exposed as structured controls.
@@ -1064,6 +1068,10 @@ not duplicate runtime logic.
   on `visibilitychange: hidden` / `window#blur`, does a one-shot fetch
   on `window#focus`, and emits a `'timeout'` event after 60 s of
   ungranted polling so the card can render an inline "Re-check" error.
+  The timeout only caps the wait for the *first* grant: once a poll has
+  observed `accessibilityGranted()`, the poller keeps ticking
+  indefinitely (still bounded by the visibility pause) so a later revoke
+  surfaces while the Setup tab stays in focus.
 
 The `stores/settings.svelte.ts` store is the single source for
 `captureEnabled()`, `accessibilityState()`, and
@@ -1346,11 +1354,16 @@ change.
   flips. Auto-paste failures emit `nagori://paste_failed`, which
   `emit_paste_failed` always routes to the palette (`"main"`) webview —
   toasts are palette-only, so the Settings window never subscribes. The
-  palette suppresses the toast when the failure is the already-known
-  missing-Accessibility case (the StatusBar indicator covers it) and
-  only renders it for an unexpected failure while the grant is in place;
-  a brief ✓ toast confirms a fresh grant on the NotGranted→Granted
-  transition. No-op silently if notification permission is not granted.
+  palette suppresses the toast only for the not-yet-granted states the
+  StatusBar indicator already explains (`NotRequested` /
+  `PromptShownNotGranted`); an unexpected failure while the grant is in
+  place — and a genuine failure after a passive revoke
+  (`RevokedAfterGranted`, whose detection is itself silent) — still
+  renders, so the toast stays tied to a real paste attempt. A brief ✓
+  toast confirms a fresh grant on the NotGranted→Granted transition,
+  seeded from the first *hydrated* state (gated on `settingsState.loaded`)
+  so an already-granted cold start does not flash a spurious
+  confirmation. No-op silently if notification permission is not granted.
 - **Startup fallback window** — when `AppState::try_new()` fails in
   `setup()` (Linux session whose compositor lacks `wl_data_control` /
   `ext_data_control`, denied data directory, corrupted SQLite file),
@@ -1369,9 +1382,12 @@ change.
 - **Permissions deep link** — the `request_accessibility` command
   drives `AXIsProcessTrustedWithOptions(prompt:YES)` on macOS, which
   surfaces the TCC dialog the first time and otherwise falls back to
-  `open(1)` with the `x-apple.systempreferences:` URL so the
-  onboarding banner can still hand the user the Accessibility pane.
-  The runtime also stamps `settings.onboarding.accessibilityPromptedAt`
+  `open(1)` with the `x-apple.systempreferences:` URL so the Setup card
+  can still hand the user the Accessibility pane. A failed `open(1)`
+  (spawn error or non-zero exit) is propagated as a `CommandError`
+  rather than swallowed, so the Setup card renders it as an inline error
+  instead of silently dropping the user's only remaining route. The
+  runtime also stamps `settings.onboarding.accessibilityPromptedAt`
   on `prompt = true` so the Setup card can later distinguish "never
   asked" from "asked and not granted".
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
