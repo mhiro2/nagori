@@ -464,6 +464,7 @@ pub fn run() {
             // first outcome, and `nagori doctor` reads from the same
             // surface so the two never disagree.
             spawn_startup_ready_notification(app.handle());
+            surface_first_launch_setup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1104,6 +1105,30 @@ fn spawn_tray_health_refresher(handle: &tauri::AppHandle) {
 /// no-ops if the user has not granted permission yet (or, on Linux, if
 /// no notification daemon is running), so this stays best-effort and
 /// never blocks startup.
+/// First launch: bring the Settings window forward on the Setup tab so the
+/// user lands directly on the Accessibility grant flow instead of discovering
+/// the `StatusBar` indicator on their own. Gates on the same markers
+/// `SettingsView` uses for its default tab (`completed_at` +
+/// `accessibility_first_granted_at` both unset) rather than `completed_at`
+/// alone — `completed_at` is reserved for a future explicit dismissal, so
+/// keying on it would re-pop the window on every launch until then. The
+/// daemon / hotkey registration is intentionally left running (§3.1); this
+/// only surfaces the window, and the Setup tab default selection lives in
+/// `SettingsView` so the two stay in sync.
+fn surface_first_launch_setup(handle: &tauri::AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        // No state means setup() bailed before `manage(state)` ran.
+        return;
+    };
+    let onboarding = state.runtime.current_settings().onboarding;
+    if onboarding.completed_at.is_some() || onboarding.accessibility_first_granted_at.is_some() {
+        return;
+    }
+    if let Err(err) = commands::show_settings_window(handle) {
+        tracing::warn!(error = ?err, "first_launch_setup_window_failed");
+    }
+}
+
 fn spawn_startup_ready_notification(handle: &tauri::AppHandle) {
     use tauri_plugin_notification::NotificationExt;
 
