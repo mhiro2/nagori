@@ -47,6 +47,11 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   autoUpdateCheck: true,
   updateChannel: 'stable',
   maxThumbnailTotalBytes: 64 * 1024 * 1024,
+  onboarding: {
+    accessibilityPromptedAt: null,
+    accessibilityFirstGrantedAt: null,
+    completedAt: null,
+  },
   ...overrides,
 });
 

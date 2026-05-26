@@ -13,7 +13,7 @@ vi.mock('../lib/commands', () => ({
   closePalette: vi.fn(async () => undefined),
   openSettingsWindow: vi.fn(async () => undefined),
   // PreviewPane / OnboardingBanner / settings store reach the same module.
-  openAccessibilitySettings: vi.fn(),
+  requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
   getEntryPreview: vi.fn(),
   getSettings: vi.fn(),
   getPermissions: vi.fn(),

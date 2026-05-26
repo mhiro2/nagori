@@ -7,12 +7,12 @@ vi.mock('../lib/tauri', () => ({
 }));
 
 vi.mock('../lib/commands', () => ({
-  openAccessibilitySettings: vi.fn(async () => undefined),
+  requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
   getSettings: vi.fn(),
   getPermissions: vi.fn(),
 }));
 
-import { openAccessibilitySettings } from '../lib/commands';
+import { requestAccessibility } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
 import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -51,6 +51,11 @@ const baseSettings = (): AppSettings => ({
   autoUpdateCheck: true,
   updateChannel: 'stable',
   maxThumbnailTotalBytes: 64 * 1024 * 1024,
+  onboarding: {
+    accessibilityPromptedAt: null,
+    accessibilityFirstGrantedAt: null,
+    completedAt: null,
+  },
 });
 
 const accessibility = (state: PermissionStatus['state'], message?: string): PermissionStatus => ({
@@ -122,7 +127,8 @@ describe('OnboardingBanner', () => {
     const { getByRole, getByText } = render(OnboardingBanner);
     expect(getByRole('status')).toBeTruthy();
     await user.click(getByText('Open System Settings'));
-    expect(openAccessibilitySettings).toHaveBeenCalledTimes(1);
+    expect(requestAccessibility).toHaveBeenCalledTimes(1);
+    expect(requestAccessibility).toHaveBeenCalledWith(true);
   });
 
   it('hides itself when the dismiss button is pressed', async () => {
@@ -134,14 +140,14 @@ describe('OnboardingBanner', () => {
     expect(container.querySelector('.onboarding')).toBeNull();
   });
 
-  it('skips IPC and silently swallows openAccessibilitySettings errors', async () => {
+  it('skips IPC and silently swallows requestAccessibility errors', async () => {
     const user = userEvent.setup();
-    vi.mocked(openAccessibilitySettings).mockRejectedValue(new Error('boom'));
+    vi.mocked(requestAccessibility).mockRejectedValue(new Error('boom'));
     seedStore(accessibility('denied'));
     const { getByText } = render(OnboardingBanner);
     // Best-effort: the banner shouldn't surface an exception in the UI.
     await user.click(getByText('Open System Settings'));
-    expect(openAccessibilitySettings).toHaveBeenCalled();
+    expect(requestAccessibility).toHaveBeenCalled();
   });
 
   it('does not call the command outside the Tauri runtime', async () => {
@@ -150,7 +156,7 @@ describe('OnboardingBanner', () => {
     seedStore(accessibility('denied'));
     const { getByText } = render(OnboardingBanner);
     await user.click(getByText('Open System Settings'));
-    expect(openAccessibilitySettings).not.toHaveBeenCalled();
+    expect(requestAccessibility).not.toHaveBeenCalled();
   });
 
   it('on Linux Wayland shows the wtype install hint and hides the settings button', () => {

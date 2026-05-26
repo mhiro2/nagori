@@ -69,6 +69,11 @@ const baseSettings = (): AppSettings => ({
   autoUpdateCheck: true,
   updateChannel: 'stable',
   maxThumbnailTotalBytes: 64 * 1024 * 1024,
+  onboarding: {
+    accessibilityPromptedAt: null,
+    accessibilityFirstGrantedAt: null,
+    completedAt: null,
+  },
 });
 
 // Capability fixtures mirror what `nagori-platform-{macos,windows,linux}`

@@ -185,6 +185,17 @@ export type PaletteHotkeyAction =
 
 export type SecondaryHotkeyAction = 'repaste-last' | 'clear-history';
 
+// Mirrors `OnboardingSettings` in `nagori-core`. The three timestamps are
+// sticky onboarding markers stamped by the daemon (never by the frontend);
+// the desktop must still round-trip them through `updateSettings` so a
+// concurrent settings write does not zero them via `#[serde(default)]` on
+// the Rust DTO. All RFC3339 strings; `null` means "never observed".
+export type OnboardingSettings = {
+  accessibilityPromptedAt: string | null;
+  accessibilityFirstGrantedAt: string | null;
+  completedAt: string | null;
+};
+
 export type AppSettings = {
   globalHotkey: string;
   historyRetentionCount: number;
@@ -217,6 +228,7 @@ export type AppSettings = {
   autoUpdateCheck: boolean;
   updateChannel: UpdateChannel;
   maxThumbnailTotalBytes: number | null;
+  onboarding: OnboardingSettings;
 };
 
 export type UpdateInfo = {
@@ -239,6 +251,15 @@ export type PermissionStatus = {
   kind: PermissionKind;
   state: PermissionState;
   message?: string;
+  // Phase A: machine-readable diagnostic / deep-link hints. `reasonCode`
+  // is a stable identifier the UI can branch on (e.g.
+  // `"accessibility_not_prompted"`), `setupRoute` is the in-app route
+  // that walks the user through the fix, `docsUrl` points to the public
+  // docs for the same kind. All optional — older platform adapters
+  // continue to omit them.
+  reasonCode?: string;
+  setupRoute?: string;
+  docsUrl?: string;
 };
 
 // Mirrors the `nagori://hotkey_register_failed` emit envelope and the

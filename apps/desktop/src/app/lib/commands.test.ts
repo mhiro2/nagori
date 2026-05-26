@@ -40,6 +40,11 @@ const baseSettings = (): AppSettings => ({
   autoUpdateCheck: true,
   updateChannel: 'stable',
   maxThumbnailTotalBytes: 64 * 1024 * 1024,
+  onboarding: {
+    accessibilityPromptedAt: null,
+    accessibilityFirstGrantedAt: null,
+    completedAt: null,
+  },
 });
 
 beforeEach(() => {
@@ -234,10 +239,10 @@ describe('command wrappers', () => {
       args: { text: 'out' },
     },
     {
-      name: 'openAccessibilitySettings',
-      run: () => commands.openAccessibilitySettings(),
-      cmd: 'open_accessibility_settings',
-      args: undefined,
+      name: 'requestAccessibility',
+      run: () => commands.requestAccessibility(true),
+      cmd: 'request_accessibility',
+      args: { prompt: true },
     },
     {
       name: 'previewEntry',

@@ -113,7 +113,14 @@ export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
 
 export const saveAiResult = (text: string): Promise<EntryDto> => invoke('save_ai_result', { text });
 
-export const openAccessibilitySettings = (): Promise<void> => invoke('open_accessibility_settings');
+// Phase A: replaces `open_accessibility_settings`. When `prompt` is true the
+// macOS backend triggers `AXIsProcessTrustedWithOptions(prompt:YES)` which
+// surfaces the system dialog the first time it's called; on subsequent calls
+// the daemon falls back to opening the Privacy → Accessibility pane via
+// `open(1)` so the user still has a one-click route. Other platforms return
+// a synthetic Granted/Denied row.
+export const requestAccessibility = (prompt: boolean): Promise<PermissionStatus> =>
+  invoke('request_accessibility', { prompt });
 
 // Public-only external URL open. Backend verifies sensitivity, entry-id
 // vs. URL match, and scheme allowlist (https/http) before handing the

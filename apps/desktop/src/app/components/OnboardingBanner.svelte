@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { openAccessibilitySettings } from '../lib/commands';
+  import { requestAccessibility } from '../lib/commands';
   import { messages } from '../lib/i18n/index.svelte';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -9,12 +9,14 @@
     settingsState,
   } from '../stores/settings.svelte';
 
-  // Open the macOS Privacy → Accessibility pane via the backend `open(1)`
-  // shim. Webview navigation can't follow `x-apple.systempreferences:` URLs.
+  // Phase A: invoke the new `request_accessibility` command with prompt=true.
+  // First call on macOS triggers the OS TCC dialog; subsequent calls (after
+  // the user has dismissed once) fall back to `open(1)` on the Privacy pane.
+  // The Phase C onboarding redesign will replace this banner entirely.
   const openSettings = async (): Promise<void> => {
     if (!isTauri()) return;
     try {
-      await openAccessibilitySettings();
+      await requestAccessibility(true);
     } catch {
       // Best-effort.
     }
@@ -27,10 +29,10 @@
   // "Open System Settings" button — there is no equivalent pane.
   const platform = $derived(capabilitiesState.capabilities?.platform);
   const isLinux = $derived(platform === 'linuxWayland');
-  // `open_accessibility_settings` only lands the user on a real pane on
-  // macOS; the Windows/Linux backends return `Unsupported`. Gate the
-  // CTA on `'macos'` (rather than `!isLinux`) so the button never
-  // points at a no-op.
+  // `request_accessibility` only triggers a real TCC prompt / Privacy
+  // pane on macOS; the Windows/Linux backends return a synthetic Granted
+  // row. Gate the CTA on `'macos'` (rather than `!isLinux`) so the
+  // button never points at a no-op.
   const showOpenSettings = $derived(platform === 'macos');
   const description = $derived(isLinux ? t.onboarding.descriptionLinux : t.onboarding.description);
   const requiredLabel = $derived(
