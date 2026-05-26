@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { checkForUpdates, getCapabilities, getSettings, updateSettings } from '../lib/commands';
+  import {
+    checkForUpdates,
+    cliInstallStatus,
+    getCapabilities,
+    getSettings,
+    installCli,
+    updateSettings,
+  } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from '../lib/i18n/index.svelte';
   import type { Messages } from '../lib/i18n/locales/en';
@@ -18,6 +25,7 @@
     type Appearance,
     type AppSettings,
     type Capability,
+    type CliInstallStatus,
     type ContentKind,
     type LocaleSetting,
     type PaletteHotkeyAction,
@@ -299,9 +307,55 @@
     }
   };
 
+  // Read-only state of the bundled `nagori` CLI, loaded when the CLI tab is
+  // first shown. `null` while unknown; the install affordance only renders
+  // once a status is available.
+  let cliStatus: CliInstallStatus | null = $state(null);
+  let cliInstalling = $state(false);
+  let cliStatusMessage: string | undefined = $state(undefined);
+  let cliStatusKind: 'info' | 'error' = $state('info');
+
+  const loadCliStatus = async (): Promise<void> => {
+    try {
+      cliStatus = await cliInstallStatus();
+    } catch {
+      // Diagnostic-only surface; a failure just hides the install affordance.
+      cliStatus = null;
+    }
+  };
+
+  const runCliInstall = async (): Promise<void> => {
+    if (cliInstalling) return;
+    cliInstalling = true;
+    cliStatusMessage = undefined;
+    try {
+      const result = await installCli();
+      cliStatusKind = 'info';
+      cliStatusMessage = result.onPath
+        ? t.settings.cli.install.installed.replace('{path}', result.installedPath)
+        : t.settings.cli.install.installedNeedsPath.replace('{path}', result.installedPath);
+      // Refresh so the button flips to its "installed" affordance.
+      await loadCliStatus();
+    } catch (err) {
+      cliStatusKind = 'error';
+      cliStatusMessage = describeError(err);
+    } finally {
+      cliInstalling = false;
+    }
+  };
+
   const t = $derived.by(() => {
     void i18nState.locale;
     return messages();
+  });
+
+  // Lazily probe CLI install state the first time the CLI tab is shown. The
+  // probe spawns the user's login shell to read PATH, so we avoid running it
+  // on every Settings open by gating on the active tab.
+  $effect(() => {
+    if (isTauri() && activeTab === 'cli' && cliStatus === null) {
+      void loadCliStatus();
+    }
   });
 
   $effect(() => {
@@ -1432,6 +1486,51 @@
             {t.settings.cli.ipcEnabled}
           </label>
         </fieldset>
+        <fieldset>
+          <legend>{t.settings.cli.install.legend}</legend>
+          <p class="help">{t.settings.cli.install.help}</p>
+          {#if cliStatus}
+            {#if !cliStatus.supported}
+              <p class="status hint">{t.settings.cli.install.unsupported}</p>
+            {:else if !cliStatus.bundled}
+              <p class="status hint">{t.settings.cli.install.unavailable}</p>
+            {:else}
+              <p class="status">
+                {cliStatus.installed
+                  ? t.settings.cli.install.statusInstalled.replace(
+                      '{path}',
+                      cliStatus.installedPath,
+                    )
+                  : t.settings.cli.install.statusNotInstalled}
+              </p>
+              <div class="actions">
+                <button
+                  type="button"
+                  class="secondary compact"
+                  disabled={cliInstalling}
+                  onclick={runCliInstall}
+                >
+                  {#if cliInstalling}
+                    {t.settings.cli.install.installing}
+                  {:else if cliStatus.installed}
+                    {t.settings.cli.install.reinstall}
+                  {:else}
+                    {t.settings.cli.install.button}
+                  {/if}
+                </button>
+              </div>
+              {#if cliStatus.installed && !cliStatus.onPath}
+                <p class="status">
+                  {t.settings.cli.install.notOnPath.replace('{dir}', cliStatus.binDir)}
+                </p>
+                <pre class="cli-path-export"><code>{t.settings.cli.install.pathExport}</code></pre>
+              {/if}
+            {/if}
+          {/if}
+          {#if cliStatusMessage}
+            <p class="status" class:error={cliStatusKind === 'error'}>{cliStatusMessage}</p>
+          {/if}
+        </fieldset>
       {/if}
 
       {#if activeTab === 'advanced'}
@@ -1725,6 +1824,17 @@
   .help {
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
+  }
+  .cli-path-export {
+    margin: 0.25rem 0 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    background: var(--surface-muted, rgba(255, 255, 255, 0.06));
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: all;
   }
   .subhead {
     margin: 0.25rem 0 0;

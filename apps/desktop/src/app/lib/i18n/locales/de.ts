@@ -249,6 +249,25 @@ export const de: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: 'CLI-IPC-Verbindungen erlauben',
+      install: {
+        legend: 'Kommandozeilen-Tool',
+        help: 'Installiere das mitgelieferte `nagori`-Kommandozeilen-Tool nach ~/.local/bin, um den Verlauf vom Terminal aus zu durchsuchen und einzufügen.',
+        button: 'nagori-CLI installieren',
+        reinstall: 'Neu installieren',
+        installing: 'Wird installiert…',
+        statusInstalled: 'nagori ist unter {path} verknüpft.',
+        statusNotInstalled: 'Das nagori-Kommandozeilen-Tool ist noch nicht installiert.',
+        installed: 'nagori wurde nach {path} installiert.',
+        installedNeedsPath:
+          'nagori wurde nach {path} installiert. Füge das untenstehende Verzeichnis zu deinem PATH hinzu, um es zu nutzen.',
+        notOnPath:
+          '{dir} ist noch nicht in deinem PATH. Füge diese Zeile zu deinem Shell-Profil hinzu (z. B. ~/.zshrc) und öffne ein neues Terminal:',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable:
+          'Das mitgelieferte CLI ist nur in der paketierten App enthalten, nicht in Entwicklungs-Builds.',
+        unsupported:
+          'Die Ein-Klick-Installation ist auf dieser Plattform nicht verfügbar. Kopiere die mitgelieferte nagori-Datei in ein Verzeichnis in deinem PATH.',
+      },
     },
     appearance: {
       legend: 'Darstellung',

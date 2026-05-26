@@ -228,6 +228,22 @@ export const zhHant: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: '允許來自 CLI 的 IPC 連線',
+      install: {
+        legend: '命令列工具',
+        help: '將隨附的 `nagori` 命令列工具安裝到 ~/.local/bin，即可在終端機中搜尋與貼上歷史記錄。',
+        button: '安裝 nagori CLI',
+        reinstall: '重新安裝',
+        installing: '安裝中…',
+        statusInstalled: 'nagori 已連結至 {path}。',
+        statusNotInstalled: '尚未安裝 nagori 命令列工具。',
+        installed: '已將 nagori 安裝至 {path}。',
+        installedNeedsPath: '已將 nagori 安裝至 {path}。請將下面的目錄加入 PATH 後再使用。',
+        notOnPath:
+          '{dir} 尚未加入 PATH。請將下面這行加入 shell 設定（如 ~/.zshrc），然後開啟新的終端機：',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable: '隨附的 CLI 僅包含在打包的應用程式中，開發版本不提供。',
+        unsupported: '此平台不支援一鍵安裝。請將隨附的 nagori 執行檔複製到 PATH 中的目錄。',
+      },
     },
     appearance: {
       legend: '外觀',

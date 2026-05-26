@@ -251,6 +251,25 @@ export const es: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: 'Permitir conexiones IPC desde la CLI',
+      install: {
+        legend: 'Herramienta de línea de comandos',
+        help: 'Instala la herramienta de línea de comandos `nagori` incluida en ~/.local/bin para buscar y pegar el historial desde una terminal.',
+        button: 'Instalar la CLI de nagori',
+        reinstall: 'Reinstalar',
+        installing: 'Instalando…',
+        statusInstalled: 'nagori está enlazado en {path}.',
+        statusNotInstalled: 'La herramienta de línea de comandos nagori aún no está instalada.',
+        installed: 'nagori se instaló en {path}.',
+        installedNeedsPath:
+          'nagori se instaló en {path}. Añade el directorio de abajo a tu PATH para usarlo.',
+        notOnPath:
+          '{dir} aún no está en tu PATH. Añade esta línea a tu perfil de shell (p. ej. ~/.zshrc) y abre una terminal nueva:',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable:
+          'La CLI incluida solo viene con la app empaquetada, no con las compilaciones de desarrollo.',
+        unsupported:
+          'La instalación con un clic no está disponible en esta plataforma. Copia el ejecutable nagori incluido a un directorio de tu PATH.',
+      },
     },
     appearance: {
       legend: 'Apariencia',

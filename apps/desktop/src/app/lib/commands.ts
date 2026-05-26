@@ -6,6 +6,8 @@ import type {
   AiActionId,
   AiActionResult,
   AppSettings,
+  CliInstallResult,
+  CliInstallStatus,
   EntryDto,
   EntryPreviewDto,
   HotkeyFailure,
@@ -140,6 +142,15 @@ export const previewEntry = (entryId: string): Promise<void> =>
   invoke('preview_entry', { entryId });
 
 export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');
+
+// Read-only state of the bundled `nagori` CLI relative to `~/.local/bin` and
+// the user's shell PATH — drives the Settings → CLI install affordance.
+export const cliInstallStatus = (): Promise<CliInstallStatus> => invoke('cli_install_status');
+
+// Symlink the bundled CLI into `~/.local/bin` (macOS / Linux only). Rejects
+// with an `unsupported` code on Windows and an `internal` code under
+// `tauri dev`, where no sidecar ships beside the dev binary.
+export const installCli = (): Promise<CliInstallResult> => invoke('install_cli');
 
 // Backend cache mirror of the latest `nagori://hotkey_register_failed`
 // emit. Returns `null` when the most recent (re-)registration succeeded

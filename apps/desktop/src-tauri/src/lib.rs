@@ -503,6 +503,8 @@ pub fn run() {
             commands::open_settings,
             commands::close_settings,
             commands::check_for_updates,
+            commands::cli_install_status,
+            commands::install_cli,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {

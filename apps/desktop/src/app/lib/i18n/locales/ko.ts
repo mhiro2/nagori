@@ -236,6 +236,24 @@ export const ko: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: 'CLI에서 IPC 연결 허용',
+      install: {
+        legend: '명령줄 도구',
+        help: '번들된 `nagori` 명령줄 도구를 ~/.local/bin에 설치하면 터미널에서 기록을 검색하고 붙여넣을 수 있습니다.',
+        button: 'nagori CLI 설치',
+        reinstall: '다시 설치',
+        installing: '설치 중…',
+        statusInstalled: 'nagori가 {path}에 연결되어 있습니다.',
+        statusNotInstalled: 'nagori 명령줄 도구가 아직 설치되지 않았습니다.',
+        installed: 'nagori를 {path}에 설치했습니다.',
+        installedNeedsPath:
+          'nagori를 {path}에 설치했습니다. 사용하려면 아래 디렉터리를 PATH에 추가하세요.',
+        notOnPath:
+          '{dir}가 아직 PATH에 없습니다. 다음 줄을 셸 프로필(예: ~/.zshrc)에 추가한 뒤 새 터미널을 여세요:',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable: '번들된 CLI는 패키지된 앱에만 포함되며 개발 빌드에는 포함되지 않습니다.',
+        unsupported:
+          '이 플랫폼에서는 원클릭 설치를 사용할 수 없습니다. 번들된 nagori 실행 파일을 PATH에 있는 디렉터리로 복사하세요.',
+      },
     },
     appearance: {
       legend: '표시',

@@ -237,6 +237,24 @@ export const ja: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: 'CLI からの IPC 接続を許可する',
+      install: {
+        legend: 'コマンドラインツール',
+        help: '同梱の `nagori` コマンドラインツールを ~/.local/bin にインストールすると、ターミナルから履歴の検索・貼り付けができます。',
+        button: 'nagori CLI をインストール',
+        reinstall: '再インストール',
+        installing: 'インストール中…',
+        statusInstalled: 'nagori は {path} にリンクされています。',
+        statusNotInstalled: 'nagori コマンドラインツールはまだインストールされていません。',
+        installed: 'nagori を {path} にインストールしました。',
+        installedNeedsPath:
+          'nagori を {path} にインストールしました。利用するには下のディレクトリを PATH に追加してください。',
+        notOnPath:
+          '{dir} はまだ PATH に含まれていません。次の行をシェルの設定（例: ~/.zshrc）に追加し、新しいターミナルを開いてください:',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable: '同梱の CLI はパッケージ版アプリにのみ含まれ、開発ビルドには含まれません。',
+        unsupported:
+          'このプラットフォームではワンクリックインストールに対応していません。同梱の nagori 実行ファイルを PATH 上のディレクトリにコピーしてください。',
+      },
     },
     appearance: {
       legend: '表示',

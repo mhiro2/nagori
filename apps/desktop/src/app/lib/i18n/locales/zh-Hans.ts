@@ -228,6 +228,22 @@ export const zhHans: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: '允许来自 CLI 的 IPC 连接',
+      install: {
+        legend: '命令行工具',
+        help: '将随附的 `nagori` 命令行工具安装到 ~/.local/bin，即可在终端中搜索和粘贴历史记录。',
+        button: '安装 nagori CLI',
+        reinstall: '重新安装',
+        installing: '正在安装…',
+        statusInstalled: 'nagori 已链接到 {path}。',
+        statusNotInstalled: '尚未安装 nagori 命令行工具。',
+        installed: '已将 nagori 安装到 {path}。',
+        installedNeedsPath: '已将 nagori 安装到 {path}。请将下面的目录添加到 PATH 后再使用。',
+        notOnPath:
+          '{dir} 尚未加入 PATH。请将下面这行添加到 shell 配置（如 ~/.zshrc），然后打开新的终端：',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable: '随附的 CLI 仅包含在打包的应用中，开发版本不提供。',
+        unsupported: '此平台不支持一键安装。请将随附的 nagori 可执行文件复制到 PATH 中的目录。',
+      },
     },
     appearance: {
       legend: '外观',

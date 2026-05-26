@@ -230,7 +230,25 @@ export type Messages = {
         empty: string;
       };
     };
-    cli: { legend: string; ipcEnabled: string };
+    cli: {
+      legend: string;
+      ipcEnabled: string;
+      install: {
+        legend: string;
+        help: string;
+        button: string;
+        reinstall: string;
+        installing: string;
+        statusInstalled: string;
+        statusNotInstalled: string;
+        installed: string;
+        installedNeedsPath: string;
+        notOnPath: string;
+        pathExport: string;
+        unavailable: string;
+        unsupported: string;
+      };
+    };
     appearance: {
       legend: string;
       locale: string;
@@ -606,6 +624,24 @@ export const en: Messages = {
     cli: {
       legend: 'CLI',
       ipcEnabled: 'Allow CLI IPC connections',
+      install: {
+        legend: 'Command-line tool',
+        help: 'Install the bundled `nagori` command-line tool into ~/.local/bin so you can search and paste history from a terminal.',
+        button: 'Install nagori CLI',
+        reinstall: 'Reinstall',
+        installing: 'Installing…',
+        statusInstalled: 'nagori is linked at {path}.',
+        statusNotInstalled: 'The nagori command-line tool is not installed yet.',
+        installed: 'Installed nagori to {path}.',
+        installedNeedsPath:
+          'Installed nagori to {path}. Add the directory below to your PATH to use it.',
+        notOnPath:
+          '{dir} is not on your PATH yet. Add this line to your shell profile (e.g. ~/.zshrc), then open a new terminal:',
+        pathExport: 'export PATH="$HOME/.local/bin:$PATH"',
+        unavailable: 'The bundled CLI ships only with the packaged app, not development builds.',
+        unsupported:
+          'One-click install is not available on this platform. Copy the bundled nagori executable to a directory on your PATH.',
+      },
     },
     appearance: {
       legend: 'Appearance',

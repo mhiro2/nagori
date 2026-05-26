@@ -238,6 +238,27 @@ export type UpdateInfo = {
   downloadSupported: boolean;
 };
 
+// Mirrors `CliInstallStatusDto` — the read-only state behind the Settings →
+// CLI install affordance. `supported` is false on Windows (no one-click
+// installer yet); `bundled` is false under `tauri dev`, where the sidecar is
+// not staged beside the dev binary.
+export type CliInstallStatus = {
+  supported: boolean;
+  bundled: boolean;
+  installed: boolean;
+  installedPath: string;
+  binDir: string;
+  onPath: boolean;
+};
+
+// Mirrors `CliInstallResultDto` — returned by a successful `install_cli`.
+export type CliInstallResult = {
+  installedPath: string;
+  binDir: string;
+  sourcePath: string;
+  onPath: boolean;
+};
+
 export type PermissionKind =
   | 'accessibility'
   | 'inputMonitoring'

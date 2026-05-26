@@ -1413,6 +1413,47 @@ impl From<AppSettingsDto> for AppSettings {
     }
 }
 
+/// Current state of the bundled `nagori` CLI relative to the user's `PATH`.
+/// Surfaced read-only in Settings → CLI so the "Install" button can render
+/// the right affordance (install / re-link / already linked) without the
+/// renderer probing the filesystem itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInstallStatusDto {
+    /// Whether this OS build supports the one-click install at all. macOS and
+    /// Linux symlink into `~/.local/bin`; Windows is `false` for now and the
+    /// UI shows manual guidance instead.
+    pub supported: bool,
+    /// Whether the CLI binary actually shipped beside the desktop executable
+    /// (false under `tauri dev`, where sidecars are not copied next to the
+    /// dev binary).
+    pub bundled: bool,
+    /// Whether `<bin_dir>/nagori` already resolves to the bundled binary.
+    pub installed: bool,
+    /// Symlink destination this build would create / has created.
+    pub installed_path: String,
+    /// Directory the symlink lives in (`~/.local/bin`).
+    pub bin_dir: String,
+    /// Best-effort: whether `bin_dir` is on the user's shell `PATH`.
+    pub on_path: bool,
+}
+
+/// Result of a successful `install_cli` call. Mirrors the status shape minus
+/// the capability flags so the UI can confirm where the link landed and
+/// whether the user still needs to extend their `PATH`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliInstallResultDto {
+    /// Symlink that now points at the bundled binary.
+    pub installed_path: String,
+    /// Directory the symlink was created in (`~/.local/bin`).
+    pub bin_dir: String,
+    /// Bundled binary the symlink resolves to.
+    pub source_path: String,
+    /// Best-effort: whether `bin_dir` is on the user's shell `PATH`.
+    pub on_path: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use nagori_core::{

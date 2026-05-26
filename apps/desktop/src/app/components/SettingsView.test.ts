@@ -23,6 +23,8 @@ vi.mock('../lib/commands', () => ({
   getCapabilities: vi.fn(),
   getPermissions: vi.fn(),
   checkForUpdates: vi.fn(),
+  cliInstallStatus: vi.fn(),
+  installCli: vi.fn(),
 }));
 
 // `onMount` reaches into `@tauri-apps/api/event` to subscribe to hotkey
@@ -31,9 +33,21 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-import { getCapabilities, getPermissions, getSettings, updateSettings } from '../lib/commands';
+import {
+  cliInstallStatus,
+  getCapabilities,
+  getPermissions,
+  getSettings,
+  installCli,
+  updateSettings,
+} from '../lib/commands';
 import { isTauri, subscribe } from '../lib/tauri';
-import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
+import type {
+  AppSettings,
+  CliInstallStatus,
+  PermissionStatus,
+  PlatformCapabilities,
+} from '../lib/types';
 import { settingsState } from '../stores/settings.svelte';
 import SettingsView from './SettingsView.svelte';
 
@@ -1764,5 +1778,92 @@ describe('SettingsView Advanced tab — capability table', () => {
     // that motivates the README's Linux footnote.
     const globalHotkey = table.rows.find((r) => r.label === 'Global hotkey');
     expect(globalHotkey?.detail).toContain('X11-only');
+  });
+});
+
+const cliStatus = (overrides: Partial<CliInstallStatus> = {}): CliInstallStatus => ({
+  supported: true,
+  bundled: true,
+  installed: false,
+  installedPath: '/Users/me/.local/bin/nagori',
+  binDir: '/Users/me/.local/bin',
+  onPath: false,
+  ...overrides,
+});
+
+const openCliTab = async () => {
+  const view = render(SettingsView);
+  const cliTab = await view.findByRole('tab', { name: 'CLI' });
+  await fireEvent.click(cliTab);
+  return view;
+};
+
+describe('SettingsView CLI install', () => {
+  it('offers an install button when the bundled CLI is present but not yet linked', async () => {
+    vi.mocked(cliInstallStatus).mockResolvedValue(cliStatus());
+    const { findByRole, findByText } = await openCliTab();
+
+    await findByText('The nagori command-line tool is not installed yet.');
+    const button = await findByRole('button', { name: 'Install nagori CLI' });
+    expect(button).toBeTruthy();
+    expect(installCli).not.toHaveBeenCalled();
+  });
+
+  it('links the CLI and surfaces the PATH hint when ~/.local/bin is not on PATH', async () => {
+    // First probe (CLI tab open) sees nothing installed; the post-install
+    // refresh reports the freshly created symlink so the persistent
+    // "not on PATH" block — including the export snippet — renders.
+    vi.mocked(cliInstallStatus)
+      .mockResolvedValueOnce(cliStatus())
+      .mockResolvedValueOnce(cliStatus({ installed: true, onPath: false }));
+    vi.mocked(installCli).mockResolvedValue({
+      installedPath: '/Users/me/.local/bin/nagori',
+      binDir: '/Users/me/.local/bin',
+      sourcePath: '/Applications/Nagori.app/Contents/MacOS/nagori',
+      onPath: false,
+    });
+    const { findByRole, findByText } = await openCliTab();
+
+    const button = await findByRole('button', { name: 'Install nagori CLI' });
+    await fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(installCli).toHaveBeenCalled();
+    });
+    await findByText(/Add the directory below to your PATH/);
+    await findByText('export PATH="$HOME/.local/bin:$PATH"');
+  });
+
+  it('confirms a clean install without the PATH hint when the directory is already on PATH', async () => {
+    vi.mocked(cliInstallStatus).mockResolvedValue(cliStatus());
+    vi.mocked(installCli).mockResolvedValue({
+      installedPath: '/Users/me/.local/bin/nagori',
+      binDir: '/Users/me/.local/bin',
+      sourcePath: '/Applications/Nagori.app/Contents/MacOS/nagori',
+      onPath: true,
+    });
+    const { findByRole, findByText, queryByText } = await openCliTab();
+
+    const button = await findByRole('button', { name: 'Install nagori CLI' });
+    await fireEvent.click(button);
+
+    await findByText('Installed nagori to /Users/me/.local/bin/nagori.');
+    expect(queryByText('export PATH="$HOME/.local/bin:$PATH"')).toBeNull();
+  });
+
+  it('explains that the bundled CLI is missing in development builds', async () => {
+    vi.mocked(cliInstallStatus).mockResolvedValue(cliStatus({ bundled: false }));
+    const { findByText, queryByRole } = await openCliTab();
+
+    await findByText('The bundled CLI ships only with the packaged app, not development builds.');
+    expect(queryByRole('button', { name: 'Install nagori CLI' })).toBeNull();
+  });
+
+  it('falls back to manual guidance on platforms without one-click install', async () => {
+    vi.mocked(cliInstallStatus).mockResolvedValue(cliStatus({ supported: false }));
+    const { findByText, queryByRole } = await openCliTab();
+
+    await findByText(/One-click install is not available on this platform/);
+    expect(queryByRole('button', { name: 'Install nagori CLI' })).toBeNull();
   });
 });
