@@ -924,11 +924,20 @@ pub async fn request_accessibility(
     if prompt && previously_prompted && status.state != nagori_platform::PermissionState::Granted {
         // TCC suppressed the dialog because it remembers a prior
         // Deny / dismiss; the Privacy pane is the user's only
-        // remaining route. Failures are non-fatal — the Setup card's
-        // inline retry button covers the rare `open(1)` outage.
-        let _ = std::process::Command::new("open")
+        // remaining route. Surface a failed `open(1)` as a command
+        // error so the Setup card can render it inline (§3.4) instead
+        // of silently dropping the user's only escape hatch.
+        let open_status = std::process::Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            .status();
+            .status()
+            .map_err(|err| {
+                CommandError::internal(format!("failed to open the Accessibility pane: {err}"))
+            })?;
+        if !open_status.success() {
+            return Err(CommandError::internal(format!(
+                "the Accessibility pane failed to open ({open_status})"
+            )));
+        }
     }
     Ok(status.into())
 }
