@@ -20,6 +20,8 @@ vi.mock('./lib/commands', () => ({
   hidePalette: vi.fn(async () => undefined),
   openSettingsWindow: vi.fn(async () => undefined),
   lastHotkeyFailure: vi.fn(async () => null),
+  getSettings: vi.fn(async () => undefined),
+  getPermissions: vi.fn(async () => []),
 }));
 
 // The App shell wires keybindings + window blur; the route children are out
@@ -40,9 +42,11 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import App from './App.svelte';
-import { hidePalette, lastHotkeyFailure } from './lib/commands';
+import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
+import type { PermissionStatus } from './lib/types';
 import { dismissHotkeyFailure, hotkeyFailureState } from './stores/hotkeyFailure.svelte';
+import { settingsState } from './stores/settings.svelte';
 import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
 beforeEach(() => {
@@ -53,6 +57,9 @@ beforeEach(() => {
     onReady?.();
     return () => {};
   });
+  settingsState.settings = undefined;
+  settingsState.permissions = [];
+  settingsState.loaded = false;
   dismissHotkeyFailure();
   showPalette();
 });
@@ -96,6 +103,27 @@ const captureHotkeyFailureHandler = (): {
     },
   };
 };
+
+// Capture the `nagori://paste_failed` handler so a test can fire a paste
+// failure into App's palette-window listener.
+const capturePasteFailedHandler = (): { fire: (payload: { error?: string }) => void } => {
+  const slot: { handler?: (payload: { error?: string }) => void } = {};
+  vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
+    if (event === 'nagori://paste_failed') {
+      slot.handler = handler as (payload: { error?: string }) => void;
+    }
+    onReady?.();
+    return () => {};
+  });
+  return {
+    fire: (payload) => {
+      if (!slot.handler) throw new Error('paste_failed handler not registered');
+      slot.handler(payload);
+    },
+  };
+};
+
+const grantedPermission: PermissionStatus = { kind: 'accessibility', state: 'granted' };
 
 describe('App shell', () => {
   it('mounts the palette route by default', () => {
@@ -149,6 +177,19 @@ describe('App shell', () => {
     vi.mocked(isTauri).mockReturnValue(true);
     await fireEvent.blur(window);
     expect(hidePalette).not.toHaveBeenCalled();
+  });
+
+  it('re-fetches permissions when the palette window regains focus', async () => {
+    // A grant made in the separate Settings webview never reaches this
+    // window's store, so the palette re-fetches on focus — the moment the
+    // user returns after using the Setup tab.
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(App);
+    vi.mocked(getPermissions).mockClear();
+    await fireEvent.focus(window);
+    await waitFor(() => {
+      expect(getPermissions).toHaveBeenCalled();
+    });
   });
 
   it('renders the hotkey-failure toast when a live emit fires after mount', async () => {
@@ -380,5 +421,43 @@ describe('App shell', () => {
     readySlots[1]?.();
     await Promise.resolve();
     expect(lastHotkeyFailure).toHaveBeenCalled();
+  });
+});
+
+describe('App auto-paste toast rules', () => {
+  it('suppresses the auto-paste toast when Accessibility is not granted', async () => {
+    // No permission seeded → resolver reads `NotRequested`, which the
+    // StatusBar indicator already covers, so the toast must stay quiet.
+    const { fire } = capturePasteFailedHandler();
+    const { queryByText } = render(App);
+    fire({ error: 'paste rejected' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queryByText('Auto-paste failed')).toBeNull();
+    expect(queryByText('paste rejected')).toBeNull();
+  });
+
+  it('shows the auto-paste toast when the grant is in place (unexpected failure)', async () => {
+    settingsState.permissions = [grantedPermission];
+    const { fire } = capturePasteFailedHandler();
+    const { findByText } = render(App);
+    fire({ error: 'target app refused the paste' });
+    await findByText('target app refused the paste');
+  });
+
+  it('flashes a confirmation toast when Accessibility transitions to granted', async () => {
+    const { findByText } = render(App);
+    // Mount observed the not-granted seed; flipping to granted is the
+    // success transition that earns the brief ✓ toast.
+    settingsState.permissions = [grantedPermission];
+    await findByText('Accessibility granted');
+  });
+
+  it('does not flash the confirmation toast when already granted at mount', async () => {
+    settingsState.permissions = [grantedPermission];
+    const { queryByText } = render(App);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queryByText('Accessibility granted')).toBeNull();
   });
 });

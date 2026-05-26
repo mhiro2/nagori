@@ -1,6 +1,11 @@
 <script lang="ts">
+  import { openSettingsWindow } from '../lib/commands';
   import { messages } from '../lib/i18n/index.svelte';
-  import { captureEnabled } from '../stores/settings.svelte';
+  import { resolvePermissionUiState } from '../lib/permissions';
+  import { isTauri } from '../lib/tauri';
+  import { capabilitiesState } from '../stores/capabilities.svelte';
+  import { accessibilityState, captureEnabled, settingsState } from '../stores/settings.svelte';
+  import { showSettings } from '../stores/view.svelte';
 
   type Props = {
     entryCount: number;
@@ -14,6 +19,44 @@
   const t = $derived(messages());
 
   const capture = $derived(captureEnabled());
+
+  // Lightweight accessibility indicator. Replaces the legacy OnboardingBanner
+  // (a ~60-line card) with a one-row hint: when the OS-level grant required
+  // for auto-paste is missing the palette surfaces the warning + Setup CTA
+  // here, and hides the row entirely once the grant lands. The 5-state
+  // resolver lives in `lib/permissions.ts` so this row stays in lockstep
+  // with the SetupRoute card's view of the same status (e.g. it correctly
+  // suppresses the warning on `Unavailable` platforms where there is no
+  // grant to chase).
+  const accessibilityUiState = $derived(
+    resolvePermissionUiState(
+      accessibilityState(),
+      settingsState.settings?.onboarding,
+      capabilitiesState.capabilities?.platform,
+    ),
+  );
+  // Show the indicator while we genuinely need a grant — `Unavailable`
+  // platforms (Windows, Wayland without `wtype`, etc.) have nothing the
+  // user can act on, so the row would just nag. Gate on the capability
+  // snapshot having loaded so we don't flash the warning on every palette
+  // open before `get_capabilities` resolves (the status defaults to
+  // `NotRequested` until then).
+  const showAccessibilityWarning = $derived(
+    capabilitiesState.capabilities !== undefined &&
+      (accessibilityUiState === 'NotRequested' ||
+        accessibilityUiState === 'PromptShownNotGranted' ||
+        accessibilityUiState === 'RevokedAfterGranted'),
+  );
+
+  const openSetup = (): void => {
+    // Standalone Settings window under Tauri (own decorations, no
+    // always-on-top). The `'setup'` route hint asks SettingsView to land
+    // on the Setup tab regardless of the first-launch heuristic — which
+    // would otherwise drop a previously-granted-then-revoked user on
+    // General.
+    if (isTauri()) void openSettingsWindow('setup');
+    else showSettings();
+  };
 </script>
 
 <footer class="status">
@@ -32,6 +75,15 @@
         <span class="dot">·</span>
         <span class="multi">{t.status.selectedCount(selectedCount)}</span>
       {/if}
+    {/if}
+    {#if showAccessibilityWarning}
+      <span class="dot">·</span>
+      <span class="accessibility-warning">
+        <span>{t.status.autoPasteOff}</span>
+        <button type="button" class="setup-cta" onclick={openSetup}>
+          {t.status.openSetup}
+        </button>
+      </span>
     {/if}
   </span>
   <span class="right">
@@ -95,6 +147,31 @@
   .multi {
     color: var(--accent, #6c8dff);
     font-weight: 600;
+  }
+  .accessibility-warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--warning, #f59e0b);
+  }
+  .setup-cta {
+    appearance: none;
+    background: transparent;
+    border: 1px solid currentColor;
+    color: inherit;
+    border-radius: 999px;
+    padding: 0.025rem 0.45rem;
+    font: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .setup-cta:hover,
+  .setup-cta:focus-visible {
+    background: rgba(245, 158, 11, 0.12);
+  }
+  .setup-cta:focus-visible {
+    outline: 2px solid var(--warning, #f59e0b);
+    outline-offset: 2px;
   }
   .hints {
     display: flex;

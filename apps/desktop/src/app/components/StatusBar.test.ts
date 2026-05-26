@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/tauri', () => ({
@@ -8,12 +8,57 @@ vi.mock('../lib/tauri', () => ({
 vi.mock('../lib/commands', () => ({
   getSettings: vi.fn(),
   getPermissions: vi.fn(),
+  getCapabilities: vi.fn(),
+  openSettingsWindow: vi.fn(async () => undefined),
 }));
 
-import { getPermissions, getSettings } from '../lib/commands';
-import type { AppSettings } from '../lib/types';
+import { getPermissions, getSettings, openSettingsWindow } from '../lib/commands';
+import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
+import { capabilitiesState } from '../stores/capabilities.svelte';
 import { refreshSettings, settingsState } from '../stores/settings.svelte';
 import StatusBar from './StatusBar.svelte';
+
+const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapabilities => {
+  const cap = { status: 'unsupported', reason: 'test stub' } as const;
+  return {
+    platform,
+    tier: 'supported',
+    captureText: cap,
+    captureImage: cap,
+    captureFiles: cap,
+    writeText: cap,
+    writeImage: cap,
+    clipboardMultiRepresentationWrite: cap,
+    autoPaste: cap,
+    globalHotkey: cap,
+    frontmostApp: cap,
+    permissionsUi: cap,
+    updateCheck: cap,
+    previewQuickLook: cap,
+  };
+};
+
+// Seed the shared stores so the accessibility indicator resolves a known
+// 5-state value. `platform` defaults to macOS — the only platform that
+// drives the TCC grant the indicator nudges toward.
+const seedAccessibility = (
+  perm: PermissionStatus | undefined,
+  onboardingOverrides: Partial<AppSettings['onboarding']> = {},
+  platform: PlatformCapabilities['platform'] = 'macos',
+): void => {
+  settingsState.settings = baseSettings({
+    onboarding: {
+      accessibilityPromptedAt: null,
+      accessibilityFirstGrantedAt: null,
+      completedAt: null,
+      ...onboardingOverrides,
+    },
+  });
+  settingsState.permissions = perm ? [perm] : [];
+  settingsState.loaded = true;
+  capabilitiesState.capabilities = capabilities(platform);
+  capabilitiesState.loaded = true;
+};
 
 const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   globalHotkey: 'Cmd+Shift+V',
@@ -61,6 +106,8 @@ beforeEach(() => {
   settingsState.permissions = [];
   settingsState.loaded = false;
   settingsState.errorMessage = undefined;
+  capabilitiesState.capabilities = undefined;
+  capabilitiesState.loaded = false;
 });
 
 afterEach(cleanup);
@@ -120,5 +167,55 @@ describe('StatusBar', () => {
       props: { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined },
     });
     expect(getByText(/Capture paused/i)).toBeTruthy();
+  });
+});
+
+describe('StatusBar accessibility indicator', () => {
+  const props = { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined };
+
+  it('stays hidden until the capability snapshot has loaded', () => {
+    // Default beforeEach state: no capabilities, no permissions. The
+    // indicator must not flash before `get_capabilities` resolves even
+    // though the resolver would otherwise read `NotRequested`.
+    const { queryByText } = render(StatusBar, { props });
+    expect(queryByText(/Accessibility not granted/)).toBeNull();
+  });
+
+  it('shows the warning + Setup CTA when Accessibility is not granted', () => {
+    seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
+    const { getByText, getByRole } = render(StatusBar, { props });
+    expect(getByText(/Accessibility not granted/)).toBeTruthy();
+    expect(getByRole('button', { name: 'Setup' })).toBeTruthy();
+  });
+
+  it('shows the warning for a revoked-after-granted state', () => {
+    seedAccessibility(
+      { kind: 'accessibility', state: 'denied' },
+      {
+        accessibilityPromptedAt: '2024-01-01T00:00:00Z',
+        accessibilityFirstGrantedAt: '2024-01-02T00:00:00Z',
+      },
+    );
+    const { getByText } = render(StatusBar, { props });
+    expect(getByText(/Accessibility not granted/)).toBeTruthy();
+  });
+
+  it('hides the warning once Accessibility is granted', () => {
+    seedAccessibility({ kind: 'accessibility', state: 'granted' });
+    const { queryByText } = render(StatusBar, { props });
+    expect(queryByText(/Accessibility not granted/)).toBeNull();
+  });
+
+  it('hides the warning on Unavailable platforms', () => {
+    seedAccessibility({ kind: 'accessibility', state: 'unsupported' }, {}, 'linuxWayland');
+    const { queryByText } = render(StatusBar, { props });
+    expect(queryByText(/Accessibility not granted/)).toBeNull();
+  });
+
+  it('opens the Settings window on the Setup tab when the CTA is clicked', async () => {
+    seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
+    const { getByRole } = render(StatusBar, { props });
+    await fireEvent.click(getByRole('button', { name: 'Setup' }));
+    expect(openSettingsWindow).toHaveBeenCalledWith('setup');
   });
 });

@@ -1619,18 +1619,26 @@ const readCapabilityTable = (
 ): {
   platform: string;
   tier: string;
-  rows: { label: string; status: string; detail: string }[];
+  rows: { label: string; status: string; detail: string; hasSetupButton: boolean }[];
 } => {
   const meta = container.querySelector('.capability-meta');
   const platform =
     meta?.querySelector('span:nth-of-type(1)')?.textContent?.replace('Platform:', '').trim() ?? '';
   const tier =
     meta?.querySelector('span:nth-of-type(2)')?.textContent?.replace('Tier:', '').trim() ?? '';
-  const rows = Array.from(container.querySelectorAll('.capability-table tbody tr')).map((row) => ({
-    label: row.querySelector('.capability-label')?.textContent?.trim() ?? '',
-    status: row.querySelector('.capability-status')?.textContent?.trim() ?? '',
-    detail: row.querySelector('.capability-detail')?.textContent?.trim() ?? '',
-  }));
+  const rows = Array.from(container.querySelectorAll('.capability-table tbody tr')).map((row) => {
+    const detailCell = row.querySelector('.capability-detail');
+    const setupButton = detailCell?.querySelector('.capability-setup-link') ?? null;
+    return {
+      label: row.querySelector('.capability-label')?.textContent?.trim() ?? '',
+      status: row.querySelector('.capability-status')?.textContent?.trim() ?? '',
+      // When a row routes remediation to the Setup tab the detail cell
+      // holds only the `Open Setup` button — strip it so `detail` stays a
+      // pure free-form-text accessor for the rows that still carry copy.
+      detail: setupButton ? '' : (detailCell?.textContent?.trim() ?? ''),
+      hasSetupButton: setupButton !== null,
+    };
+  });
   return { platform, tier, rows };
 };
 
@@ -1643,12 +1651,13 @@ describe('SettingsView Advanced tab — capability table', () => {
     expect(table.tier).toBe('supported');
     expect(table.rows.map((r) => r.label)).toEqual([...CAPABILITY_LABELS]);
 
-    // Auto-paste is the only Permission-gated cap on macOS — surfaced
-    // so onboarding can prompt the user to grant Accessibility.
+    // Auto-paste is the only Permission-gated cap on macOS. The detail
+    // copy now lives on the Setup tab, so the row carries no free-form
+    // text — just the `Open Setup` button that switches to it.
     const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
     expect(autoPaste?.status).toBe(STATUS_BADGE.requiresPermission);
-    expect(autoPaste?.detail).toContain('accessibility');
-    expect(autoPaste?.detail).toContain('Grant Accessibility access');
+    expect(autoPaste?.detail).toBe('');
+    expect(autoPaste?.hasSetupButton).toBe(true);
 
     // Every other cap should be `Available`.
     const others = table.rows.filter((r) => r.label !== 'Auto-paste');
@@ -1744,11 +1753,12 @@ describe('SettingsView Advanced tab — capability table', () => {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
     }
 
-    // Auto-paste detail must surface both the tool name and the
-    // install hint so the user knows what to apt-install.
+    // Auto-paste needs the `wtype` external tool; its install guidance now
+    // lives on the Setup tab, so the row only renders the `Open Setup`
+    // button rather than inline tool/hint copy.
     const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
-    expect(autoPaste?.detail).toContain('wtype');
-    expect(autoPaste?.detail).toContain('apt install wtype');
+    expect(autoPaste?.detail).toBe('');
+    expect(autoPaste?.hasSetupButton).toBe(true);
 
     // Global hotkey explanation covers the X11-only upstream constraint
     // that motivates the README's Linux footnote.

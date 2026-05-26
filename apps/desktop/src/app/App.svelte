@@ -1,16 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
 
   import { hidePalette, openSettingsWindow } from './lib/commands';
   import { messages } from './lib/i18n/index.svelte';
+  import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
+  import { capabilitiesState } from './stores/capabilities.svelte';
   import {
     dismissHotkeyFailure,
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
+  import { accessibilityState, refreshSettings, settingsState } from './stores/settings.svelte';
   import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
   // Settings runs in its own native window (`label: "settings"` in
@@ -43,30 +46,39 @@
     void hidePalette();
   };
 
+  const handleFocus = (): void => {
+    // The Settings window runs in a separate webview with its own store, so a
+    // grant made there never reaches this palette webview's
+    // `settingsState`. Re-fetch when the palette regains focus (the natural
+    // moment the user returns after using the Setup tab) so the StatusBar
+    // accessibility indicator clears and the success toast can fire on the
+    // resulting NotGranted→Granted transition.
+    void refreshSettings();
+  };
+
   onMount(() => {
     // Hotkey registration failures are subscribed at App level — startup
     // races (the backend can emit before any window's listener has
-    // attached) leak past a SettingsView-only subscription, and the
-    // toast / banner needs to survive Settings being closed and
-    // re-opened. The watcher also queries the backend's cache on mount
-    // so a missed live emit is recovered.
+    // attached) leak past a SettingsView-only subscription. The watcher
+    // also feeds `hotkeyFailureState`, which SettingsView reads to render
+    // an inline warning under the affected HotkeyInput. It runs in both
+    // windows so that store stays current, but toasts only ever render in
+    // the palette (see the template's `isSettingsWindow` guard) — Settings
+    // has its own inline surfaces and never shows a toast (§3.4).
     const offHotkeyFailure = startHotkeyFailureWatcher();
 
     if (isSettingsWindow) {
-      // Surface paste-failed toasts even when only the Settings window is
-      // foregrounded — the permission prompt link inside the toast lives
-      // here. No Esc / blur wiring: the OS title bar drives close.
-      const offPasteFailed = subscribe<{ error?: string }>(TAURI_EVENTS.pasteFailed, (payload) => {
-        pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
-      });
+      // No paste-failed subscription here: toasts are palette-only. The
+      // Settings window surfaces permission state through the Setup tab
+      // and the Capability table instead.
       return () => {
-        offPasteFailed();
         offHotkeyFailure();
       };
     }
 
     window.addEventListener('keydown', handleEscape);
     window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
 
     // Legacy in-window navigation. The tray now opens Settings as a
     // standalone window via the `open_settings` IPC, but we keep this
@@ -76,22 +88,77 @@
       if (payload === 'settings') showSettings();
       else if (payload === 'palette') showPalette();
     });
-    // Accessibility loss / paste failure: surface a toast that nudges the
-    // user into Settings, where they can re-grant the permission.
+    // Auto-paste failure. Suppress the toast when the failure is the
+    // already-known "Accessibility not granted" state — the StatusBar
+    // indicator covers that case, so a toast would just double up (§3.4).
+    // A failure while the grant IS in place (e.g. the target app rejected
+    // the synthetic paste) is genuinely unexpected and still toasts.
     const offPasteFailed = subscribe<{ error?: string }>(TAURI_EVENTS.pasteFailed, (payload) => {
+      if (accessibilityNeedsGrant) return;
       pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
     });
 
     return () => {
       window.removeEventListener('keydown', handleEscape);
       window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
       offNavigate();
       offPasteFailed();
       offHotkeyFailure();
     };
   });
 
+  // 5-state permission model shared with the SetupRoute card and the
+  // StatusBar indicator. Drives both the paste-failure suppression above
+  // and the success-confirmation toast below.
+  const accessibilityUiState = $derived(
+    resolvePermissionUiState(
+      accessibilityState(),
+      settingsState.settings?.onboarding,
+      capabilitiesState.capabilities?.platform,
+    ),
+  );
+  // True while we still need a grant the user can act on. `Unavailable`
+  // platforms (Windows, Wayland sans `wtype`) are excluded — a paste
+  // failure there is a real error, not a missing-permission no-op.
+  const accessibilityNeedsGrant = $derived(
+    accessibilityUiState === 'NotRequested' ||
+      accessibilityUiState === 'PromptShownNotGranted' ||
+      accessibilityUiState === 'RevokedAfterGranted',
+  );
+
+  // Brief success confirmation: when the grant flips to `Granted` from a
+  // not-yet-granted state, flash a ✓ toast for 2 s so the user gets
+  // immediate feedback that the Setup flow worked. Seeded from the first
+  // observed state so an already-granted launch does not toast, and only
+  // fires on a genuine transition (not a re-render at the same state).
+  const ACCESSIBILITY_CONFIRM_MS = 2000;
+  let previousAccessibilityState: ReturnType<typeof resolvePermissionUiState> | undefined;
+  let accessibilityConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (isSettingsWindow) return;
+    const current = accessibilityUiState;
+    const previous = previousAccessibilityState;
+    previousAccessibilityState = current;
+    if (previous === undefined) return; // first observation — seed only
+    if (previous === 'Granted' || current !== 'Granted') return;
+    accessibilityConfirmMessage = messages().toasts.accessibilityGrantedTitle;
+    if (accessibilityConfirmTimer !== undefined) clearTimeout(accessibilityConfirmTimer);
+    accessibilityConfirmTimer = setTimeout(() => {
+      accessibilityConfirmMessage = null;
+      accessibilityConfirmTimer = undefined;
+    }, ACCESSIBILITY_CONFIRM_MS);
+  });
+
+  onDestroy(() => {
+    if (accessibilityConfirmTimer !== undefined) {
+      clearTimeout(accessibilityConfirmTimer);
+      accessibilityConfirmTimer = undefined;
+    }
+  });
+
   let pasteFailureMessage = $state<string | null>(null);
+  let accessibilityConfirmMessage = $state<string | null>(null);
 
   const hotkeyFailureMessage = $derived.by<string | null>(() => {
     const failure = hotkeyFailureState.failure;
@@ -130,7 +197,7 @@
   {:else}
     <SettingsRoute />
   {/if}
-  {#if pasteFailureMessage || hotkeyFailureMessage}
+  {#if !isSettingsWindow && (pasteFailureMessage || hotkeyFailureMessage || accessibilityConfirmMessage)}
     <div class="toast-stack">
       {#if hotkeyFailureMessage}
         <div class="toast toast-hotkey" role="status">
@@ -143,6 +210,13 @@
               {t.toasts.openSettings}
             </button>
             <button type="button" onclick={dismissHotkeyFailure}>{t.toasts.dismiss}</button>
+          </div>
+        </div>
+      {/if}
+      {#if accessibilityConfirmMessage}
+        <div class="toast toast-success" role="status">
+          <div class="toast-body">
+            <strong>{accessibilityConfirmMessage}</strong>
           </div>
         </div>
       {/if}
@@ -206,6 +280,11 @@
   }
   .toast-hotkey .toast-detail {
     color: rgba(255, 233, 200, 0.85);
+  }
+  .toast-success {
+    background: rgba(16, 40, 24, 0.92);
+    color: #c8f0d4;
+    border-color: rgba(120, 200, 140, 0.5);
   }
   .toast-body {
     display: flex;

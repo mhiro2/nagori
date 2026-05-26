@@ -454,15 +454,23 @@
       case 'unsupported':
         return capability.reason;
       case 'requiresPermission':
-        return `${capability.permission} — ${capability.message}`;
       case 'requiresExternalTool':
-        return capability.installHint
-          ? `${capability.tool} (${capability.installHint})`
-          : capability.tool;
+        // Detail text is intentionally empty for these statuses. The Setup
+        // tab carries the localised description, screenshot, and CTA so the
+        // capability row stays a single-glance diagnostic readout and the
+        // `[Open Setup]` button (rendered alongside this cell) is the only
+        // affordance on the row.
+        return '';
       case 'experimental':
         return capability.message;
     }
   };
+
+  // True for rows whose remediation lives on the Setup tab. The detail cell
+  // renders an `Open Setup` button instead of free-form text, switching the
+  // active tab in the same Settings window.
+  const showSetupButton = (capability: Capability): boolean =>
+    capability.status === 'requiresPermission' || capability.status === 'requiresExternalTool';
 
   // Assemble the settings payload from the current form state. Splitting
   // the payload out from the JSON round-trip lets `commitSave` and
@@ -888,8 +896,27 @@
     // `hotkeyFailureState`, so opening Settings after a startup-time
     // failure still shows the conflict.
     const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, applyRemoteSettings);
+    // Tab-hint listener. `open_settings` re-emits its `route` argument
+    // on the Settings webview after showing the window so a caller that
+    // already knows where the user needs to land (e.g. the Palette
+    // accessibility indicator) can jump straight there instead of
+    // waiting on the first-launch heuristic — which would land on
+    // General once `accessibilityFirstGrantedAt` is stamped, even if
+    // the grant has since been revoked.
+    const offNavigate = subscribe<string>(TAURI_EVENTS.navigate, (payload) => {
+      if (typeof payload !== 'string') return;
+      const tab = payload as Tab;
+      if ((TABS as readonly string[]).includes(tab)) {
+        activeTab = tab;
+        // Mark the initial-tab heuristic resolved so a later
+        // `getSettings` callback inside the same Settings session does
+        // not snap the user back to its default selection.
+        initialTabResolved = true;
+      }
+    });
     return () => {
       offSettings();
+      offNavigate();
     };
   });
 
@@ -1459,7 +1486,19 @@
                         {capabilityStatusLabel(row.capability)}
                       </span>
                     </td>
-                    <td class="capability-detail">{capabilityDetail(row.capability)}</td>
+                    <td class="capability-detail">
+                      {#if showSetupButton(row.capability)}
+                        <button
+                          type="button"
+                          class="capability-setup-link"
+                          onclick={() => (activeTab = 'setup')}
+                        >
+                          {t.settings.capabilities.openSetup}
+                        </button>
+                      {:else}
+                        {capabilityDetail(row.capability)}
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>
@@ -1887,5 +1926,26 @@
   .capability-detail {
     color: var(--muted, rgba(255, 255, 255, 0.6));
     font-size: 0.75rem;
+  }
+  .capability-setup-link {
+    appearance: none;
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: var(--accent, #60a5fa);
+    font: inherit;
+    font-size: 0.75rem;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .capability-setup-link:hover,
+  .capability-setup-link:focus-visible {
+    color: var(--accent-strong, #93c5fd);
+  }
+  .capability-setup-link:focus-visible {
+    outline: 2px solid var(--accent, #60a5fa);
+    outline-offset: 2px;
+    border-radius: 2px;
   }
 </style>
