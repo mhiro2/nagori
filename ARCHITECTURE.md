@@ -1039,11 +1039,27 @@ not duplicate runtime logic.
   overlay; Linux lacks a desktop-environment-agnostic equivalent), and
   the palette gates the keybinding on the capability snapshot so the
   shortcut becomes inert outside macOS.
-- `SettingsView.svelte` — tabbed *General* / *Privacy* / *CLI* /
-  *Advanced* settings panel. Denylists are edited as multi-line
-  textareas serialised back into `string[]`; capture kinds, paste
-  format, recent ordering, total storage limit, and appearance are
-  exposed as structured controls.
+- `SettingsView.svelte` — tabbed *Setup* / *General* / *Privacy* / *CLI* /
+  *Advanced* settings panel. The Setup tab mounts `SetupRoute`, which
+  hosts a `PermissionCard` per OS permission and is selected by default
+  on first launch (when `onboarding.completedAt === null`) so the user
+  lands directly on the permission grant flow; daemon and hotkey
+  registration keep running regardless. Denylists are edited as
+  multi-line textareas serialised back into `string[]`; capture kinds,
+  paste format, recent ordering, total storage limit, and appearance
+  are exposed as structured controls.
+- `PermissionCard.svelte` + `lib/permissions.ts` — frontend surface for
+  the OS permission flow. The card derives a 5-value
+  `PermissionUiState` (`NotRequested` / `PromptShownNotGranted` /
+  `Granted` / `RevokedAfterGranted` / `Unavailable`) from the
+  `PermissionStatus` snapshot, the `OnboardingSettings` sticky markers,
+  and the platform tag, then routes the Grant CTA through
+  `request_accessibility(prompt=true)`. A module-scoped refcounted
+  poller in `lib/permissions.ts` re-fetches `getSettings` +
+  `getPermissions` every 2 s while at least one card is mounted, pauses
+  on `visibilitychange: hidden` / `window#blur`, does a one-shot fetch
+  on `window#focus`, and emits a `'timeout'` event after 60 s of
+  ungranted polling so the card can render an inline "Re-check" error.
 
 The `stores/settings.svelte.ts` store is the single source for
 `captureEnabled()`, `accessibilityState()`, and
