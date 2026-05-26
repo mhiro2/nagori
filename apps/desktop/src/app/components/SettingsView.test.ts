@@ -21,6 +21,7 @@ vi.mock('../lib/commands', () => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   getCapabilities: vi.fn(),
+  getPermissions: vi.fn(),
   checkForUpdates: vi.fn(),
 }));
 
@@ -30,9 +31,10 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-import { getCapabilities, getSettings, updateSettings } from '../lib/commands';
+import { getCapabilities, getPermissions, getSettings, updateSettings } from '../lib/commands';
 import { isTauri, subscribe } from '../lib/tauri';
-import type { AppSettings, PlatformCapabilities } from '../lib/types';
+import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
+import { settingsState } from '../stores/settings.svelte';
 import SettingsView from './SettingsView.svelte';
 
 const baseSettings = (): AppSettings => ({
@@ -165,6 +167,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(getSettings).mockResolvedValue(baseSettings());
+  // Default permissions response: empty array means `accessibilityGranted()`
+  // returns false, preserving the "Needs permission" status on the
+  // Auto-paste capability row for tests that don't opt in to granted state.
+  vi.mocked(getPermissions).mockResolvedValue([]);
+  // `settingsState` is a module-level Svelte store, so its `permissions`
+  // array survives across tests. Reset it here so a previous granted-state
+  // fixture cannot leak into a subsequent test that mounts before its own
+  // `refreshSettings()` round-trip resolves.
+  settingsState.permissions = [];
   // Default capabilities response so the existing test suite — which
   // already exercises the Advanced tab — has a deterministic stub. The
   // platform-specific tests below override this per-case.
@@ -1677,6 +1688,37 @@ describe('SettingsView Advanced tab — capability table', () => {
     for (const row of others) {
       expect(row.status, `${row.label} should be Available on macOS`).toBe(STATUS_BADGE.available);
     }
+  });
+
+  it('flips Auto-paste to Available when Accessibility is granted', async () => {
+    // The backend capability matrix is intentionally static — it only
+    // reports "the OS could do it, given the Accessibility permission",
+    // and is unaware of the live grant state. Merging the
+    // `PermissionChecker` snapshot in the view layer is what turns the
+    // row from "Needs permission" into "Available" once the user has
+    // actually toggled Accessibility on in System Settings; this test
+    // pins that merge so a regression cannot silently strand the row at
+    // "Needs permission" while real paste flows succeed.
+    const grantedAccessibility: PermissionStatus = {
+      kind: 'accessibility',
+      state: 'granted',
+    };
+    vi.mocked(getPermissions).mockResolvedValue([grantedAccessibility]);
+
+    const { container } = await openAdvancedTab(macosCapabilities());
+
+    // The capability table mounts as soon as `getCapabilities` resolves,
+    // but `getPermissions` rides a separate promise — wait for the
+    // merged badge to land instead of asserting synchronously.
+    await waitFor(() => {
+      const table = readCapabilityTable(container);
+      const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
+      expect(autoPaste?.status).toBe(STATUS_BADGE.available);
+      // The "requires permission" detail string must also disappear so
+      // the row reads cleanly as `Available` without trailing
+      // onboarding-style hint text.
+      expect(autoPaste?.detail).toBe('');
+    });
   });
 
   it('renders Windows capabilities — permissions UI Unsupported, updates Available', async () => {

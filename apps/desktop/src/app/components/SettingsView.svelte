@@ -28,6 +28,7 @@
     type SecretHandling,
   } from '../lib/types';
   import { hotkeyFailureState } from '../stores/hotkeyFailure.svelte';
+  import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
 
   type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -337,6 +338,12 @@
         // Diagnostic-only surface; ignore failures.
       }
     })();
+    // The Settings window is a separate Tauri webview, so the palette's
+    // mount-time `refreshSettings` never runs here. Without this fetch the
+    // capability table reads `accessibilityGranted() === false` even when
+    // the user has actually granted the permission, and the Auto-paste
+    // row sticks on "Needs permission" while auto-paste itself works.
+    void refreshSettings();
   });
 
   type CapabilityRowKey = keyof Messages['settings']['capabilities']['rows'];
@@ -345,6 +352,23 @@
     key: CapabilityRowKey;
     label: string;
     capability: Capability;
+  };
+
+  // The backend capability matrix is static ("what the OS could do, given
+  // a permission") — it does not know whether the user has actually
+  // granted Accessibility. Merge the live `PermissionChecker` result here
+  // so a granted permission flips the row from "Needs permission" to
+  // "Available", matching what the user observes when Enter triggers a
+  // real paste.
+  const resolveCapability = (cap: Capability): Capability => {
+    if (
+      cap.status === 'requiresPermission' &&
+      cap.permission === 'accessibility' &&
+      accessibilityGranted()
+    ) {
+      return { status: 'available' };
+    }
+    return cap;
   };
 
   const capabilityRows = $derived.by<CapabilityRow[]>(() => {
@@ -361,7 +385,11 @@
         label: rows.clipboardMultiRepresentationWrite,
         capability: capabilities.clipboardMultiRepresentationWrite,
       },
-      { key: 'autoPaste', label: rows.autoPaste, capability: capabilities.autoPaste },
+      {
+        key: 'autoPaste',
+        label: rows.autoPaste,
+        capability: resolveCapability(capabilities.autoPaste),
+      },
       { key: 'globalHotkey', label: rows.globalHotkey, capability: capabilities.globalHotkey },
       { key: 'frontmostApp', label: rows.frontmostApp, capability: capabilities.frontmostApp },
       { key: 'permissionsUi', label: rows.permissionsUi, capability: capabilities.permissionsUi },
