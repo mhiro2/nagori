@@ -89,6 +89,11 @@ compatibility matrix and troubleshooting.
    `nagori doctor` if something feels off (the desktop app's
    **Settings → Advanced → Diagnostics** runs the same probe).
 
+The `nagori` CLI ships inside the desktop app bundle. Homebrew cask installs
+link it onto your PATH automatically; for direct `.dmg` installs, open
+**Settings → CLI → Command-line tool → Install nagori CLI** to symlink it into
+`~/.local/bin`. See [`docs/cli.md`](./docs/cli.md#installation) for details.
+
 CLI quick reference:
 
 ```sh

@@ -4,6 +4,36 @@ The CLI is a single binary, `nagori`, that can either talk directly to the
 SQLite database or to a running daemon over its IPC endpoint (Unix-domain
 socket on macOS / Linux, Win32 named pipe on Windows).
 
+## Installation
+
+The `nagori` binary ships **inside the desktop app bundle** rather than as a
+separate download — there is one artifact to install and update.
+
+* **Homebrew (macOS).** `brew install --cask mhiro2/tap/nagori` links the
+  bundled binary onto Homebrew's PATH automatically (via the cask `binary`
+  stanza), so `nagori` is usable from a terminal as soon as the cask is
+  installed.
+* **Manual / direct install (macOS or Linux).** Apps launched from a file
+  manager don't put the bundled binary on your PATH. Open
+  **Settings → CLI → Command-line tool** and click **Install nagori CLI**: it
+  symlinks the bundled binary into `~/.local/bin` (no admin prompt). If that
+  directory isn't on your PATH yet, the dialog shows the line to add to your
+  shell profile:
+
+  ```sh
+  export PATH="$HOME/.local/bin:$PATH"
+  ```
+
+  The installer links against the binary inside the installed app, so the app
+  must live in a stable location. If you launch it straight from the `.dmg` or
+  an unmoved download (where macOS *translocates* the app to a temporary copy),
+  or from a Linux AppImage's transient mount, the installer refuses rather than
+  create a link that would break on quit — move the app to Applications (or use
+  the `.deb`) and relaunch first.
+
+* **Windows.** One-click install isn't wired up; copy the bundled `nagori.exe`
+  from inside the app to a directory already on your PATH.
+
 ## Modes
 
 | Mode        | When to use                                                  | Flag                |

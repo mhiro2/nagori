@@ -1167,6 +1167,32 @@ startup-ready notification body switches to "Nagori is running, but
 clipboard capture is currently degraded." instead of falsely claiming
 readiness.
 
+**Distribution.** The `nagori` binary is **not shipped as a separate
+download** — it rides inside the desktop bundle as a Tauri
+`bundle.externalBin` sidecar so there is a single artifact to install
+and version. `scripts/build-cli-sidecar.mjs` (run from
+`beforeBuildCommand`) compiles `nagori-cli` for the target triple and
+copies it to `apps/desktop/src-tauri/binaries/nagori-<triple>`; Tauri
+strips the triple and lands it at `Contents/MacOS/nagori` inside the
+`.app`. Because `tauri-build`'s `build.rs` validates `externalBin`
+existence on *every* `cargo` compile, the `externalBin` key lives in a
+bundle-only `tauri.bundle.conf.json` that is merged via
+`tauri build --config` (the `desktop-build` Makefile target and
+`release.yaml`) rather than the base `tauri.conf.json` — plain `cargo
+check` / CI jobs that never build the sidecar stay green.
+
+Getting that bundled binary onto a user's PATH has two paths. The
+Homebrew cask emits a `binary "#{appdir}/Nagori.app/Contents/MacOS/nagori"`
+stanza (see `.github/workflows/brew-bump.yaml`) so a cask install links
+it automatically. For direct `.dmg` installs — where Finder-launched
+apps inherit only launchd's minimal PATH — the desktop exposes an
+in-app installer (`commands::install_cli` /
+`commands::cli_install_status`, surfaced in **Settings → CLI**) that
+symlinks the sidecar into `~/.local/bin` without an admin prompt. The
+status command probes the user's *login + interactive* shell PATH (via
+`$SHELL -lic`) rather than the GUI process environment, so the UI can
+tell the user when `~/.local/bin` still needs adding to PATH.
+
 ---
 
 ## 14. Quick actions
