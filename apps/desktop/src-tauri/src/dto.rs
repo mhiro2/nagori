@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nagori_core::settings::AiProviderSetting;
+use nagori_core::settings::{AiProviderSetting, OnboardingSettings};
 use nagori_core::{
     AiOutput, AppSettings, Appearance, ClipboardContent, ClipboardEntry, ContentKind, EntryId,
     Locale, PaletteHotkeyAction, PasteFormat, RankReason, RecentOrder, RepresentationRole,
@@ -809,6 +809,18 @@ pub struct PermissionStatusDto {
     pub state: PermissionStateDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Stable identifier (e.g. `"accessibility_not_prompted"`) so the
+    /// frontend can branch without scraping the message string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Deep-link target inside the Settings window (e.g.
+    /// `"setup/accessibility"`) used by the `StatusBar` indicator click
+    /// handler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_route: Option<String>,
+    /// Permalink to the relevant docs section, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
 }
 
 /// Wire-shape mirror of `state::HotkeyFailureRecord`. Returned by the
@@ -853,6 +865,9 @@ impl From<PermissionStatus> for PermissionStatusDto {
             kind: value.kind.into(),
             state: value.state.into(),
             message: value.message,
+            reason_code: value.reason_code,
+            setup_route: value.setup_route,
+            docs_url: value.docs_url,
         }
     }
 }
@@ -1270,6 +1285,48 @@ pub struct AppSettingsDto {
     pub update_channel: UpdateChannelDto,
     #[serde(default = "nagori_core::settings::default_max_thumbnail_total_bytes")]
     pub max_thumbnail_total_bytes: Option<u64>,
+    /// Onboarding lifecycle markers (Phase A). `#[serde(default)]` keeps
+    /// older settings snapshots forward-compatible — pre-Phase-A clients
+    /// simply omit the field, which deserialises to all-`None`.
+    #[serde(default)]
+    pub onboarding: OnboardingSettingsDto,
+}
+
+/// Wire shape of [`OnboardingSettings`]. Mirrors the camelCase field
+/// names already used elsewhere in the DTO surface so the renderer never
+/// sees the `snake_case` core form.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+// `accessibility_*_at` / `completed_at` are timestamps by nature; the
+// "all-fields-end-in-at" lint is noisier than useful here.
+#[allow(clippy::struct_field_names)]
+pub struct OnboardingSettingsDto {
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub accessibility_prompted_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub accessibility_first_granted_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<OffsetDateTime>,
+}
+
+impl From<OnboardingSettings> for OnboardingSettingsDto {
+    fn from(value: OnboardingSettings) -> Self {
+        Self {
+            accessibility_prompted_at: value.accessibility_prompted_at,
+            accessibility_first_granted_at: value.accessibility_first_granted_at,
+            completed_at: value.completed_at,
+        }
+    }
+}
+
+impl From<OnboardingSettingsDto> for OnboardingSettings {
+    fn from(value: OnboardingSettingsDto) -> Self {
+        Self {
+            accessibility_prompted_at: value.accessibility_prompted_at,
+            accessibility_first_granted_at: value.accessibility_first_granted_at,
+            completed_at: value.completed_at,
+        }
+    }
 }
 
 impl Default for SecretHandlingDto {
@@ -1312,6 +1369,7 @@ impl From<AppSettings> for AppSettingsDto {
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
             max_thumbnail_total_bytes: value.max_thumbnail_total_bytes,
+            onboarding: value.onboarding.into(),
         }
     }
 }
@@ -1350,6 +1408,7 @@ impl From<AppSettingsDto> for AppSettings {
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
             max_thumbnail_total_bytes: value.max_thumbnail_total_bytes,
+            onboarding: value.onboarding.into(),
         }
     }
 }
@@ -1743,6 +1802,11 @@ mod tests {
             auto_update_check: false,
             update_channel: UpdateChannel::Stable,
             max_thumbnail_total_bytes: Some(32 * 1024 * 1024),
+            onboarding: nagori_core::settings::OnboardingSettings {
+                accessibility_prompted_at: Some(OffsetDateTime::UNIX_EPOCH),
+                accessibility_first_granted_at: None,
+                completed_at: None,
+            },
         };
 
         let dto: AppSettingsDto = original.clone().into();
@@ -1792,6 +1856,43 @@ mod tests {
         assert!(!restored.capture_initial_clipboard_on_launch);
         assert!(!restored.auto_update_check);
         assert!(matches!(restored.update_channel, UpdateChannel::Stable));
+    }
+
+    #[test]
+    fn onboarding_dto_serialises_as_camel_case_rfc3339() {
+        // The frontend reads `onboarding.accessibilityPromptedAt` etc.
+        // as RFC3339 strings (or `null`). Pin both the camelCase rename
+        // and the RFC3339 serialisation so a future serde tweak on the
+        // `time::serde::rfc3339::option` adapter cannot silently break
+        // the wire format. Also asserts the absent marker emits `null`
+        // rather than being skipped — the TS contract treats absence as
+        // a JSON parsing error.
+        let stamped =
+            OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("static timestamp parses");
+        let core = nagori_core::OnboardingSettings {
+            accessibility_prompted_at: Some(stamped),
+            accessibility_first_granted_at: None,
+            completed_at: None,
+        };
+        let dto: OnboardingSettingsDto = core.clone().into();
+        let json = serde_json::to_value(&dto).expect("serialise");
+        assert_eq!(
+            json["accessibilityPromptedAt"],
+            json!("2023-11-14T22:13:20Z")
+        );
+        assert_eq!(json["accessibilityFirstGrantedAt"], json!(null));
+        assert_eq!(json["completedAt"], json!(null));
+        // snake_case must not coexist with camelCase rename.
+        assert!(
+            json.get("accessibility_prompted_at").is_none() && json.get("completed_at").is_none(),
+            "snake_case fields must not appear on the wire",
+        );
+        // Round-trip the JSON back through the DTO and into the core
+        // type so the timestamp survives the conversion.
+        let parsed: OnboardingSettingsDto =
+            serde_json::from_value(json).expect("deserialise OnboardingSettingsDto");
+        let restored: nagori_core::OnboardingSettings = parsed.into();
+        assert_eq!(restored, core);
     }
 
     #[test]

@@ -880,53 +880,86 @@ pub async fn set_capture_enabled(
     Ok(settings.into())
 }
 
-/// Open the macOS Accessibility privacy pane. Used by the onboarding banner
-/// to deep-link the user into the right place — `x-apple.systempreferences:`
-/// URLs are intercepted by `open(1)` but not by webview navigation.
+/// Trigger the host's accessibility prompt and return the resulting
+/// permission status. Wired to the Setup tab's `[ Grant Accessibility… ]`
+/// button.
+///
+/// macOS: invokes `AXIsProcessTrustedWithOptions(prompt: true)` which
+/// surfaces the TCC dialog asynchronously. The runtime stamps
+/// `onboarding.accessibility_prompted_at` so the next
+/// `permission_check` discriminates `Denied` from `NotDetermined`.
+///
+/// When `prompt = true` and TCC has *already* been asked previously
+/// (i.e. `accessibility_prompted_at` is already `Some` before this
+/// call), the OS suppresses the inline dialog. Falling back to `open(1)`
+/// on the Privacy pane in that case gives the user a one-click route
+/// to flip the toggle manually. On the very first prompt the inline
+/// dialog is shown by the OS itself, so we deliberately skip the
+/// fallback to avoid stacking a System Settings window on top of the
+/// TCC dialog.
+///
+/// Windows / Linux: no analogous user-toggleable permission exists, so
+/// the command returns the same curated status the doctor / Capability
+/// table renders (granted-with-caveat for Windows UIPI, requires-wtype
+/// for Linux). Returning a structured status rather than an
+/// `Unsupported` error keeps the frontend code path symmetrical with
+/// macOS.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub async fn open_accessibility_settings() -> CommandResult<()> {
-    use std::process::Command;
-    Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .status()
-        .map_err(|err| CommandError::internal(err.to_string()))?;
-    Ok(())
+pub async fn request_accessibility(
+    state: State<'_, AppState>,
+    prompt: bool,
+) -> CommandResult<PermissionStatusDto> {
+    // Snapshot prompt history BEFORE the runtime call. The runtime
+    // unconditionally stamps `accessibility_prompted_at` on
+    // `prompt = true`, so reading after the call would always see the
+    // fresh timestamp and never trigger the System Settings fallback.
+    let previously_prompted = state
+        .runtime
+        .current_settings()
+        .onboarding
+        .accessibility_prompted_at
+        .is_some();
+    let status = state.runtime.request_accessibility(prompt).await?;
+    if prompt && previously_prompted && status.state != nagori_platform::PermissionState::Granted {
+        // TCC suppressed the dialog because it remembers a prior
+        // Deny / dismiss; the Privacy pane is the user's only
+        // remaining route. Failures are non-fatal — the Setup card's
+        // inline retry button covers the rare `open(1)` outage.
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status();
+    }
+    Ok(status.into())
 }
 
-/// Windows has no TCC-style privacy gate for `SendInput`, so there is no
-/// settings pane to deep-link into. Surface a curated message instead of
-/// a generic "unsupported" code so the UI can explain that auto-paste
-/// works out-of-the-box and direct the user to UAC integrity-level
-/// troubleshooting when paste silently fails.
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub async fn open_accessibility_settings() -> CommandResult<()> {
-    Err(CommandError::unsupported(
-        "Windows has no Accessibility-style permission for auto-paste; if SendInput is dropped, \
-         check whether the target window belongs to an elevated process.",
-    ))
+pub async fn request_accessibility(
+    state: State<'_, AppState>,
+    prompt: bool,
+) -> CommandResult<PermissionStatusDto> {
+    let status = state.runtime.request_accessibility(prompt).await?;
+    Ok(status.into())
 }
 
-/// Linux Wayland gates auto-paste behind the compositor's
-/// `zwp_virtual_keyboard_v1` protocol plus the `wtype` CLI, neither of
-/// which lives in a Settings pane. Surface a curated message so the UI
-/// can explain the dependency rather than emit a bare "unsupported"
-/// code.
 #[cfg(target_os = "linux")]
 #[tauri::command]
-pub async fn open_accessibility_settings() -> CommandResult<()> {
-    Err(CommandError::unsupported(
-        "Linux Wayland has no Accessibility settings pane for auto-paste. Auto-paste requires \
-         the `wtype` CLI and a compositor that exposes the virtual-keyboard protocol \
-         (e.g. sway, Hyprland, KDE).",
-    ))
+pub async fn request_accessibility(
+    state: State<'_, AppState>,
+    prompt: bool,
+) -> CommandResult<PermissionStatusDto> {
+    let status = state.runtime.request_accessibility(prompt).await?;
+    Ok(status.into())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[tauri::command]
-pub async fn open_accessibility_settings() -> CommandResult<()> {
-    Err(CommandError::unsupported("open_accessibility_settings"))
+pub async fn request_accessibility(
+    _state: State<'_, AppState>,
+    _prompt: bool,
+) -> CommandResult<PermissionStatusDto> {
+    Err(CommandError::unsupported("request_accessibility"))
 }
 
 /// Allowlisted URL schemes for the `open_url_external` external-open
@@ -1004,7 +1037,7 @@ fn validate_external_open(
 }
 
 /// Hand the URL to the platform's default URL handler. We shell out
-/// directly (mirroring `open_accessibility_settings`) rather than wiring
+/// directly (mirroring `request_accessibility`'s open-settings fallback) rather than wiring
 /// `tauri-plugin-shell`'s JS surface — every call site here is already
 /// inside a Rust command that has run the full sensitivity / allowlist
 /// gate, so the plugin's capability layer would be redundant overhead.

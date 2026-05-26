@@ -484,7 +484,7 @@ pub fn run() {
             commands::get_permissions,
             commands::get_capabilities,
             commands::last_hotkey_failure,
-            commands::open_accessibility_settings,
+            commands::request_accessibility,
             commands::open_url_external,
             commands::toggle_palette,
             commands::hide_palette,
