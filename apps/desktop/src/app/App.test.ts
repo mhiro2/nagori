@@ -59,6 +59,7 @@ beforeEach(() => {
   });
   settingsState.settings = undefined;
   settingsState.permissions = [];
+  settingsState.permissionsErrorMessage = undefined;
   settingsState.loaded = false;
   dismissHotkeyFailure();
   showPalette();
@@ -446,18 +447,71 @@ describe('App auto-paste toast rules', () => {
   });
 
   it('flashes a confirmation toast when Accessibility transitions to granted', async () => {
+    // Hydrated with a not-granted snapshot: render seeds `NotRequested`, so
+    // flipping to granted is the success transition that earns the ✓ toast.
+    settingsState.loaded = true;
     const { findByText } = render(App);
-    // Mount observed the not-granted seed; flipping to granted is the
-    // success transition that earns the brief ✓ toast.
     settingsState.permissions = [grantedPermission];
     await findByText('Accessibility granted');
   });
 
   it('does not flash the confirmation toast when already granted at mount', async () => {
     settingsState.permissions = [grantedPermission];
+    settingsState.loaded = true;
     const { queryByText } = render(App);
     await Promise.resolve();
     await Promise.resolve();
     expect(queryByText('Accessibility granted')).toBeNull();
+  });
+
+  it('does not flash the confirmation toast on cold start when the first fetch lands granted', async () => {
+    // Cold start: the store is still empty (`loaded = false`) so the resolver
+    // reads `NotRequested` pre-hydration. The effect must not seed from that
+    // value — otherwise the first *real* fetch returning granted looks like a
+    // NotRequested→Granted transition and fires a spurious ✓ toast.
+    const { queryByText } = render(App);
+    // Hydration completes: `refreshSettings` flips permissions + `loaded`
+    // together in one synchronous block, so the first seeded state is Granted.
+    settingsState.permissions = [grantedPermission];
+    settingsState.loaded = true;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queryByText('Accessibility granted')).toBeNull();
+  });
+
+  it('does not flash the confirmation toast when only the first permission probe failed', async () => {
+    // `refreshSettings` flips `loaded` true even when only the permission leg
+    // failed (the settings leg succeeded). The effect must not seed from that
+    // empty-permission `NotRequested`; otherwise a later successful granted
+    // probe looks like a NotRequested→Granted transition and re-flashes the ✓.
+    settingsState.loaded = true;
+    settingsState.permissionsErrorMessage = 'permission probe unavailable';
+    const { queryByText } = render(App);
+    await Promise.resolve();
+    // The permission probe recovers and now reports granted.
+    settingsState.permissions = [grantedPermission];
+    settingsState.permissionsErrorMessage = undefined;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queryByText('Accessibility granted')).toBeNull();
+  });
+
+  it('shows the auto-paste toast on a genuine paste failure after a passive revoke', async () => {
+    // `RevokedAfterGranted` is deliberately *not* a suppressed state: the
+    // revoke itself is detected silently, but the next real paste attempt
+    // that fails should surface a toast tied to the user's intent (S4 step 5).
+    settingsState.permissions = [{ kind: 'accessibility', state: 'denied' }];
+    settingsState.settings = {
+      onboarding: {
+        accessibilityPromptedAt: '2026-05-01T00:00:00Z',
+        accessibilityFirstGrantedAt: '2026-05-01T00:00:00Z',
+        completedAt: null,
+      },
+    } as unknown as NonNullable<typeof settingsState.settings>;
+    settingsState.loaded = true;
+    const { fire } = capturePasteFailedHandler();
+    const { findByText } = render(App);
+    fire({ error: 'paste rejected after revoke' });
+    await findByText('paste rejected after revoke');
   });
 });

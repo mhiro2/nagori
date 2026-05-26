@@ -94,7 +94,7 @@
     // A failure while the grant IS in place (e.g. the target app rejected
     // the synthetic paste) is genuinely unexpected and still toasts.
     const offPasteFailed = subscribe<{ error?: string }>(TAURI_EVENTS.pasteFailed, (payload) => {
-      if (accessibilityNeedsGrant) return;
+      if (suppressPasteFailureToast) return;
       pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
     });
 
@@ -118,13 +118,16 @@
       capabilitiesState.capabilities?.platform,
     ),
   );
-  // True while we still need a grant the user can act on. `Unavailable`
-  // platforms (Windows, Wayland sans `wtype`) are excluded — a paste
-  // failure there is a real error, not a missing-permission no-op.
-  const accessibilityNeedsGrant = $derived(
-    accessibilityUiState === 'NotRequested' ||
-      accessibilityUiState === 'PromptShownNotGranted' ||
-      accessibilityUiState === 'RevokedAfterGranted',
+  // Suppress the auto-paste failure toast only for the not-yet-granted
+  // states the StatusBar indicator already explains, where a toast would
+  // just double up (§3.4). `RevokedAfterGranted` is deliberately *not*
+  // suppressed: the revoke itself is detected passively without a toast,
+  // but the next real paste attempt that fails should surface one so the
+  // failure is tied to the user's intent (S4 step 5). `Unavailable`
+  // platforms (Windows, Wayland sans `wtype`) also fall through — a paste
+  // failure there is a genuine error, not a missing-permission no-op.
+  const suppressPasteFailureToast = $derived(
+    accessibilityUiState === 'NotRequested' || accessibilityUiState === 'PromptShownNotGranted',
   );
 
   // Brief success confirmation: when the grant flips to `Granted` from a
@@ -137,10 +140,20 @@
   let accessibilityConfirmTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     if (isSettingsWindow) return;
+    // Wait for the first real *permission* snapshot before seeding. The store
+    // starts empty, so the resolver reads `NotRequested` pre-hydration; seeding
+    // from that and then observing the genuine `Granted` snapshot would look
+    // like a NotRequested→Granted transition and flash a spurious ✓ toast on
+    // cold start. `loaded` alone is not enough: `refreshSettings` flips it true
+    // even when only the permission leg failed (the settings leg succeeded), so
+    // we'd seed from an empty-permission `NotRequested` and re-flash the toast
+    // once the permission probe later succeeds as granted. Require the
+    // permission leg to have actually landed.
+    if (!settingsState.loaded || settingsState.permissionsErrorMessage !== undefined) return;
     const current = accessibilityUiState;
     const previous = previousAccessibilityState;
     previousAccessibilityState = current;
-    if (previous === undefined) return; // first observation — seed only
+    if (previous === undefined) return; // first real observation — seed only
     if (previous === 'Granted' || current !== 'Granted') return;
     accessibilityConfirmMessage = messages().toasts.accessibilityGrantedTitle;
     if (accessibilityConfirmTimer !== undefined) clearTimeout(accessibilityConfirmTimer);
