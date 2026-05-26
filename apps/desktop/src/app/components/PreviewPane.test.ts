@@ -116,6 +116,40 @@ describe('PreviewPane', () => {
     expect(summary).toMatch(/KB|kB/i);
   });
 
+  // The preview fetch is debounced upstream, so the pane renders with the row
+  // snippet a beat before the DTO (and its lines·bytes / size) arrives.
+  // Reserve those slots so the values fade into place instead of shoving the
+  // body and footer rows around — the residual flicker the chip used to cause.
+  it('reserves the summary chip and size row while the preview is still pending', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: undefined,
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    // Chip element is present but empty for a non-URL kind, holding its line.
+    const chip = container.querySelector('[data-testid="preview-summary"]');
+    expect(chip).toBeTruthy();
+    expect(chip?.textContent?.trim()).toBe('');
+    // The size row's dt label is rendered even before the byte count lands.
+    const foot = container.querySelector('.foot')?.textContent ?? '';
+    expect(foot).toMatch(/size/i);
+  });
+
+  it('omits the summary chip slot for URL kinds, which carry no chip', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url' }),
+        preview: undefined,
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-summary"]')).toBeNull();
+  });
+
   it('renders highlighted code via tokenize for code body type', () => {
     const { container } = render(PreviewPane, {
       props: {

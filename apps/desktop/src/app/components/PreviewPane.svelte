@@ -502,8 +502,14 @@
       <span class="kind">{preview?.title ?? item.kind}</span>
       <span class="time">{formatRelativeTime(item.createdAt)}</span>
     </header>
-    {#if summaryChip}
-      <p class="summary" data-testid="preview-summary">{summaryChip}</p>
+    {#if item.kind !== 'url'}
+      <!-- Reserve the chip's line whenever the kind will carry one (every
+           non-URL body), so the lines·bytes summary fades into pre-allocated
+           space when the debounced preview fetch lands instead of shoving the
+           body down a row. URL kinds intentionally have no chip. -->
+      <p class="summary" class:pending={!summaryChip} data-testid="preview-summary">
+        {summaryChip ?? ''}
+      </p>
     {/if}
     <div class="body-wrap">
       {#if loading}
@@ -645,10 +651,11 @@
           <dt>{t.preview.fields.source}</dt>
           <dd>{item.sourceAppName}</dd>
         {/if}
-        {#if preview}
-          <dt>{t.preview.fields.size}</dt>
-          <dd>{formatByteCount(preview.metadata.byteCount)}</dd>
-        {/if}
+        <!-- Always render the size row so its value lands in place once the
+             preview fetch resolves, rather than appending a grid row and
+             nudging the rows above it. -->
+        <dt>{t.preview.fields.size}</dt>
+        <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
         <dt>{t.preview.fields.rank}</dt>
         <dd>{item.rankReasons.join(', ') || t.preview.none}</dd>
         {#if preservedFormats}
@@ -764,6 +771,9 @@
   }
   .summary {
     margin: 0;
+    /* Reserve one line so the empty (pending) chip occupies the same height
+       as the filled one — the lines·bytes value then appears without a shift. */
+    min-height: 1.2em;
     color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
     font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
