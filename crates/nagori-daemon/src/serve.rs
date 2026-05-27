@@ -424,7 +424,16 @@ async fn supervise_ipc_server(
                             server = Some(next);
                             backoff = IPC_RESTART_BACKOFF_INITIAL;
                         }
-                        Err(err) => warn!(error = %err, "ipc_server_start_failed"),
+                        Err(err) => {
+                            // A transient failure here (e.g. the runtime dir
+                            // not yet writable) must not leave IPC dead for
+                            // good. Arm the restart timer so the backoff path
+                            // retries; otherwise — with settings already
+                            // enabled — neither this arm nor the timer would
+                            // ever fire again and IPC would never recover.
+                            warn!(error = %err, "ipc_server_start_failed");
+                            restart_pending = true;
+                        }
                     }
                 }
             }
