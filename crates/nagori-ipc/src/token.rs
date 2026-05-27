@@ -10,8 +10,17 @@ use nagori_core::{AppError, Result};
 /// 32 random bytes -> 64 hex chars; long enough that brute-forcing across
 /// the daemon's lifetime is not realistic, short enough to fit comfortably
 /// in a single envelope frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthToken(String);
+
+// Manual `Debug` so the secret never lands in logs/traces via a derived
+// `{:?}`. The token is short-lived and per-launch, but reproducing a panic or
+// dumping a struct that transitively holds it must not leak the value.
+impl std::fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AuthToken").field(&"[redacted]").finish()
+    }
+}
 
 impl AuthToken {
     pub fn generate() -> Result<Self> {
@@ -422,6 +431,17 @@ mod tests {
         let a = AuthToken::generate().unwrap();
         let b = AuthToken::generate().unwrap();
         assert!(!a.verify(b.as_str()));
+    }
+
+    #[test]
+    fn debug_does_not_leak_token_value() {
+        let token = AuthToken::generate().unwrap();
+        let rendered = format!("{token:?}");
+        assert!(
+            !rendered.contains(token.as_str()),
+            "Debug leaked the raw token: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"));
     }
 
     #[cfg(unix)]

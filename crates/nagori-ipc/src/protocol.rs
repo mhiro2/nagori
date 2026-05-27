@@ -15,10 +15,22 @@ use time::OffsetDateTime;
 /// per-launch token cannot reach any handler — including `Health` and
 /// `Shutdown`. Adding the wrapper at the protocol layer (vs the server layer)
 /// keeps tests, traces, and any future transports honest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IpcEnvelope {
     pub token: String,
     pub request: IpcRequest,
+}
+
+// Manual `Debug` so the wrapped auth token is redacted: the envelope is the one
+// place the raw token travels as a plain `String`, and a derived `{:?}` (e.g.
+// in a trace or a connection-handling panic) would print it verbatim.
+impl std::fmt::Debug for IpcEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpcEnvelope")
+            .field("token", &"[redacted]")
+            .field("request", &self.request)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,6 +551,22 @@ impl From<AiOutput> for AiOutputDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_debug_redacts_token() {
+        let envelope = IpcEnvelope {
+            token: "deadbeef".repeat(8),
+            request: IpcRequest::Health,
+        };
+        let rendered = format!("{envelope:?}");
+        assert!(
+            !rendered.contains("deadbeef"),
+            "Debug leaked the raw token: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"));
+        // The request payload must still be visible for debugging.
+        assert!(rendered.contains("Health"));
+    }
 
     /// Pre-`startup`-field `DoctorReport` JSON must still deserialize against
     /// the current shape so a newer CLI can read a `Doctor` reply from an

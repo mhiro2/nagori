@@ -327,8 +327,19 @@ struct SocketFingerprint;
 /// portable across Unix/Windows and naturally distinguishes "our file" from
 /// "a file another daemon happened to overwrite the same path with" because
 /// every launch mints a fresh 32-byte random token.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct TokenFingerprint(String);
+
+// Manual `Debug` so the raw token is never printed via `RuntimeFingerprints`'
+// derived `{:?}` (e.g. a supervisor trace or panic). Mirrors `AuthToken` /
+// `IpcEnvelope` in `nagori-ipc`.
+impl std::fmt::Debug for TokenFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TokenFingerprint")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
 
 impl From<&AuthToken> for TokenFingerprint {
     fn from(token: &AuthToken) -> Self {
