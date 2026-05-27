@@ -53,6 +53,15 @@
   let actionMenuOpen = $state(false);
 
   onMount(() => {
+    // One-shot bootstrap. This must NOT live in an `$effect`: `refreshRecent`
+    // reads `currentFilters()` while it runs, so an effect would subscribe to
+    // `filterState` and re-fire on every chip toggle — re-running the empty
+    // `Recent` query and clobbering the active search that `FilterChips`'s
+    // own `runQuery(searchState.query)` is concurrently issuing. Running it
+    // once at mount keeps filter changes the sole responsibility of the chip
+    // handler.
+    void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);
+
     const offClipboardChanged = subscribe<{ entryId: string }>(
       TAURI_EVENTS.clipboardChanged,
       () => {
@@ -68,10 +77,6 @@
     return () => {
       offClipboardChanged();
     };
-  });
-
-  $effect(() => {
-    void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);
   });
 
   const selected = $derived(currentSelection());
