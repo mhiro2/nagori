@@ -9,14 +9,15 @@ media, platform support, the in-app updater — is described in
 
 ## What `release.yaml` produces
 
-When a `v*` tag is pushed, `release.yaml` builds one bundle row per
-matrix entry and uploads each artifact (plus an entry in the shared
-`latest.json` updater manifest) to a GitHub draft release. After every
-row finishes, the `publish` job flips the draft to a public release.
-`0.0.x` tags are marked as GitHub pre-releases — the workflow inspects
-the tag name and passes `prerelease: true` to `tauri-action` while
-`0.0.*` is in effect, then switches back to `false` once `>= 0.1.0`
-tags ship.
+When a `v*` tag is pushed, the `prepare` job creates a single GitHub
+draft release, then `release.yaml` builds every matrix row in parallel
+and uploads each artifact and its signed `*.sig` companion into that
+draft. Once all rows finish, the `updater` job assembles the
+consolidated `latest.json` updater manifest once, and the `publish`
+job flips the draft to a public release. `0.0.x` tags are marked as
+GitHub pre-releases — `prepare` inspects the tag name and creates the
+draft with `prerelease: true` while `0.0.*` is in effect, then
+switches back to `false` once `>= 0.1.0` tags ship.
 
 | Target                          | Bundles        | Probe verdict shown in Settings → Advanced     |
 | ------------------------------- | -------------- | ---------------------------------------------- |
@@ -32,17 +33,25 @@ toggle above is driven by `commands::in_place_update_supported()`,
 which delegates to `tauri::utils::platform::bundle_type()` so the
 labels line up with the bundle the updater would have replaced.
 
-The matrix runs with `max-parallel: 1` because `tauri-action` reads
-the draft release's existing `latest.json`, appends the current row's
-platform entry, deletes the old asset, and re-uploads — parallel rows
-would race on that asset and only the last writer's platform would
-survive.
+The `bundle` matrix runs in parallel. `tauri-action`'s
+`uploadVersionJSON` step does a read-modify-write on the draft
+release's shared `latest.json` (read existing → append the current
+row's platform → delete the old asset → re-upload) with no locking, so
+running it per row in parallel would race on that asset and only the
+last writer's platform would survive. The matrix therefore passes
+`includeUpdaterJson: false` (which gates only that step — the signed
+`*.sig` companions are uploaded regardless), and a dedicated `updater`
+job runs once after the matrix to assemble the consolidated manifest
+from the artifacts already attached to the draft release.
 
 `bundle.createUpdaterArtifacts: true` in `apps/desktop/src-tauri/tauri.conf.json`
-makes Tauri emit the matching `*.sig` companion for every bundle, and
-`tauri-action`'s `includeUpdaterJson: true` rolls those companions into
-the signed `latest.json` feed that the in-app updater reads from
+makes Tauri emit the matching `*.sig` companion for every bundle. The
+`updater` job downloads those signatures, maps each platform key to its
+updater artifact's download URL, and uploads the signed `latest.json`
+feed that the in-app updater reads from
 `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`.
+The `publish` job depends on `updater`, so the draft is flipped to a
+real release only after the manifest lands.
 
 ## One-time setup
 
@@ -109,10 +118,11 @@ two options:
    release tag` step checks the `nagori-desktop` crate version against
    the tag name and fails fast on a mismatch.
 2. Tag the merge commit `vX.Y.Z` and push the tag.
-3. `release.yaml` builds each row, uploads the bundle plus its
-   `latest.json` sidecar to a draft GitHub release, and the `publish`
-   job promotes the draft to a published release once every matrix row
-   succeeds.
+3. `release.yaml` builds every row in parallel and uploads each
+   bundle plus its signed `*.sig` companion to a draft GitHub release.
+   The `updater` job then assembles the consolidated `latest.json` once,
+   and the `publish` job promotes the draft to a published release after
+   the manifest lands.
 4. The next time any installed copy of nagori starts with
    **Settings → Advanced → Updates → Check for updates automatically**
    on (or the user clicks **Settings → Advanced → Check for updates

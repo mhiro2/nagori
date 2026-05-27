@@ -1419,9 +1419,9 @@ change.
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
   `app.updater()` is always wired. `release.yaml` builds bundles for
   macOS (arm64 + x86_64), Windows x86_64 (NSIS), and Linux x86_64
-  (`deb` + `AppImage`), and `tauri-action` emits a consolidated signed
-  `latest.json` for every row in the matrix, so the availability
-  probe runs on every supported OS. The MVP surface is read-only — the
+  (`deb` + `AppImage`), and a dedicated `updater` job emits one
+  consolidated signed `latest.json` covering every row in the matrix,
+  so the availability probe runs on every supported OS. The MVP surface is read-only — the
   desktop shell calls `updater.check()` for the version comparison but
   does not call `update.download_and_install()`; users still follow
   the GitHub release link to upgrade. The wording differs by install
@@ -1439,12 +1439,14 @@ change.
   (`plugins.updater`); the endpoint resolves
   `https://github.com/mhiro2/nagori/releases/latest/download/latest.json`
   via GitHub's "always points at the newest release asset" redirect,
-  so no manifest needs to be edited per release. `release.yaml` passes
-  `includeUpdaterJson: true` to `tauri-action@v0.6.2` and the bundle
-  config sets `createUpdaterArtifacts: true` so the matching `.sig`
-  sidecars land next to each bundle; `max-parallel: 1` serialises the
-  matrix because `tauri-action` rewrites the shared `latest.json`
-  asset per row. The `commands::check_for_updates` Tauri command
+  so no manifest needs to be edited per release. The bundle config sets
+  `createUpdaterArtifacts: true` so the matching `.sig` sidecars land
+  next to each bundle. The `bundle` matrix runs in parallel with
+  `includeUpdaterJson: false` on `tauri-action@v0.6.2`, because that
+  action's `latest.json` step does an unlocked read-modify-write on a
+  single shared release asset and parallel rows would race it; instead
+  the downstream `updater` job assembles the manifest once from the
+  uploaded signatures, and `publish` depends on `updater`. The `commands::check_for_updates` Tauri command
   wraps `updater.check()` and is surfaced as the "Check for updates
   now" button under Settings → Advanced.
   `AppSettings.auto_update_check`, when enabled, drives the one-shot

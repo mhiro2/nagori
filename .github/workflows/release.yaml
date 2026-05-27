@@ -20,8 +20,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Prepare draft release
+    # Create (or reuse) the draft release once, up front, and hand its
+    # `releaseId` to every bundle row. `tauri-action`'s `getOrCreateRelease`
+    # has no concurrency guard: with the matrix parallelised, several rows
+    # would each find no draft for a fresh tag and all call `createRelease`,
+    # producing duplicate drafts with the same tag and scattering bundles
+    # across them. Passing `releaseId` makes each row skip the get-or-create
+    # path entirely (see `if (tagName && !releaseId)` in tauri-action), so the
+    # draft is authored exactly once here.
+    runs-on: ubuntu-latest
+    outputs:
+      releaseId: ${{ steps.draft.outputs.releaseId }}
+    steps:
+      - name: Decide pre-release flag
+        # `0.0.x` is the dogfooding canary line — mark the GitHub release as a
+        # pre-release so tooling that follows "latest stable" doesn't pick it
+        # up. Anything `>=0.1.0` is treated as a regular release.
+        id: prerelease
+        run: |
+          case "${GITHUB_REF_NAME#v}" in
+            0.0.*) echo "value=true" >> "${GITHUB_OUTPUT}" ;;
+            *)     echo "value=false" >> "${GITHUB_OUTPUT}" ;;
+          esac
+      - name: Get or create draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.prerelease.outputs.value }}
+        run: |
+          # A draft release can't be fetched by tag via the API, so list
+          # releases and match on tag_name (mirrors tauri-action). Reusing an
+          # existing draft keeps re-runs of the same tag idempotent.
+          release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n1)"
+          if [ -z "${release_id}" ]; then
+            echo "No release found for ${TAG}; creating a draft."
+            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+              -f "tag_name=${TAG}" \
+              -f "name=${TAG}" \
+              -f "target_commitish=${GITHUB_SHA}" \
+              -F draft=true \
+              -F "prerelease=${PRERELEASE}" \
+              --jq '.id')"
+          else
+            echo "Reusing existing release ${release_id} for ${TAG}."
+          fi
+          echo "releaseId=${release_id}" >> "${GITHUB_OUTPUT}"
+
   bundle:
     name: Bundle (${{ matrix.target }})
+    needs: prepare
     # Platform policy (see README → "Platform support" and ARCHITECTURE
     # updater notes): every target ships an installer bundle and an
     # `updater` companion (created by `bundle.createUpdaterArtifacts`
@@ -36,13 +87,13 @@ jobs:
     # the NSIS bundle triggers a SmartScreen warning on first launch.
     strategy:
       fail-fast: false
-      # `tauri-action` reads the draft release's existing `latest.json`,
-      # appends the current row's platform entry, deletes the old asset,
-      # and re-uploads — so two rows finishing in parallel would race on
-      # the same asset and only the last writer's platform would land in
-      # the published feed. Serialize the matrix to keep every platform
-      # in the consolidated manifest.
-      max-parallel: 1
+      # Every row builds in parallel with `includeUpdaterJson: false`, so no
+      # row writes `latest.json` and the per-row asset uploads never race on
+      # it (each platform's bundles/signatures have distinct names). The
+      # `tauri-action` `uploadVersionJSON` step is the only part gated by
+      # `includeUpdaterJson`; the signed updater artifacts (`.sig`) are
+      # uploaded unconditionally. The consolidated manifest is assembled once
+      # afterwards by the `updater` job from those attached artifacts.
       matrix:
         include:
           - os: macos-26
@@ -60,18 +111,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
-      - name: Decide pre-release flag
-        # `0.0.x` is the dogfooding canary line — mark the GitHub
-        # release as a pre-release so tooling that follows
-        # "latest stable" doesn't pick it up. Anything `>=0.1.0` is
-        # treated as a regular release.
-        id: prerelease
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          case "${TAG}" in
-            0.0.*) echo "value=true" >> "${GITHUB_OUTPUT}" ;;
-            *)     echo "value=false" >> "${GITHUB_OUTPUT}" ;;
-          esac
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install Rust toolchain
@@ -152,16 +191,98 @@ jobs:
           # base config) so plain `cargo` workspace builds don't require the
           # staged sidecar that tauri-build validates when externalBin is set.
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.bundle.conf.json
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: ${{ steps.prerelease.outputs.value }}
+          # Upload into the draft authored by the `prepare` job. Passing
+          # `releaseId` (instead of `tagName`/`releaseName`) skips
+          # tauri-action's get-or-create path, so parallel rows can't each
+          # create a duplicate draft for a fresh tag.
+          releaseId: ${{ needs.prepare.outputs.releaseId }}
           includeRelease: true
-          includeUpdaterJson: true
+          # `latest.json` is built once by the `updater` job (see the matrix
+          # strategy note) to avoid parallel rows racing on the same asset.
+          # Setting this false only skips manifest generation here — the
+          # signed updater artifacts (`.sig`) are still uploaded.
+          includeUpdaterJson: false
+
+  updater:
+    name: Generate updater manifest
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and upload latest.json
+        # `tauri-action`'s `uploadVersionJSON` does a read-modify-write on the
+        # release's `latest.json` (read existing → merge this row's platform →
+        # delete → re-upload) with no locking, so running it per matrix row in
+        # parallel races and only the last writer's platforms survive. The
+        # bundle matrix therefore skips it (`includeUpdaterJson: false`) and we
+        # assemble the full manifest here, once, from the signed updater
+        # artifacts already attached to the draft release. Mapping (platform
+        # key -> updater artifact) mirrors what `tauri-action` would emit; keep
+        # it in sync with the `bundles` produced by the matrix.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          mkdir -p sigs
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --pattern '*.sig' --dir sigs
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].name' > assets.txt
+
+          # Resolve an updater artifact's asset name by filename suffix. Asset
+          # names embed the version for Linux/Windows but not macOS, so match on
+          # the suffix rather than reconstructing the full name. `|| true` keeps
+          # an empty result from tripping `pipefail`; `add` validates presence.
+          resolve() {
+            grep -E "$1" assets.txt | grep -v '\.sig$' | head -n1 || true
+          }
+
+          platforms='{}'
+          add() {
+            local key="$1" asset="$2"
+            if [ -z "${asset}" ] || [ ! -f "sigs/${asset}.sig" ]; then
+              echo "::error::missing updater artifact or signature for '${key}' (asset='${asset}') — did a bundle row fail?"
+              exit 1
+            fi
+            local sig url
+            sig="$(cat "sigs/${asset}.sig")"
+            url="${base}/${asset}"
+            platforms="$(jq --arg k "${key}" --arg s "${sig}" --arg u "${url}" \
+              '.[$k] = {signature: $s, url: $u}' <<<"${platforms}")"
+          }
+
+          mac_arm="$(resolve 'aarch64\.app\.tar\.gz$')"
+          mac_x64="$(resolve 'x64\.app\.tar\.gz$')"
+          appimage="$(resolve '\.AppImage$')"
+          deb="$(resolve '\.deb$')"
+          nsis="$(resolve 'x64-setup\.exe$')"
+
+          add 'darwin-aarch64'        "${mac_arm}"
+          add 'darwin-aarch64-app'    "${mac_arm}"
+          add 'darwin-x86_64'         "${mac_x64}"
+          add 'darwin-x86_64-app'     "${mac_x64}"
+          add 'linux-x86_64'          "${appimage}"
+          add 'linux-x86_64-appimage' "${appimage}"
+          add 'linux-x86_64-deb'      "${deb}"
+          add 'windows-x86_64'        "${nsis}"
+          add 'windows-x86_64-nsis'   "${nsis}"
+
+          jq -n \
+            --arg v "${VERSION}" \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --argjson p "${platforms}" \
+            '{version: $v, notes: "", pub_date: $d, platforms: $p}' > latest.json
+
+          echo "::group::latest.json"
+          cat latest.json
+          echo "::endgroup::"
+
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" latest.json --clobber
 
   publish:
     name: Publish release
-    needs: bundle
+    needs: updater
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
