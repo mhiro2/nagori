@@ -30,7 +30,19 @@ use crate::toggle_main_palette;
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray.png");
 
 fn decode_tray_icon() -> (Vec<u8>, u32, u32) {
-    let decoder = png::Decoder::new(TRAY_ICON_PNG);
+    decode_icon_rgba(TRAY_ICON_PNG)
+}
+
+fn decode_icon_rgba(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut decoder = png::Decoder::new(png_bytes);
+    // Normalise away the encodings a lossy optimiser (e.g. `pngquant`,
+    // which emits an *indexed* PNG) might apply to the bundled asset:
+    // `EXPAND` unpacks a palette into RGB(A) and promotes a `tRNS` chunk
+    // to a real alpha channel, and `STRIP_16` collapses 16-bit channels
+    // to 8-bit. After this the frame is always 8-bit RGB(A) or grayscale,
+    // so re-running the icon pipeline can never reintroduce the
+    // colour-type panic that crashed the app at launch.
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
         .read_info()
         .expect("embedded tray PNG header must be valid");
@@ -50,7 +62,24 @@ fn decode_tray_icon() -> (Vec<u8>, u32, u32) {
             }
             out
         }
-        other => panic!("unsupported tray PNG colour type: {other:?}"),
+        png::ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity(buf.len() * 2);
+            for ga in buf.chunks_exact(2) {
+                out.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
+            }
+            out
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity(buf.len() * 4);
+            for &g in &buf {
+                out.extend_from_slice(&[g, g, g, 0xFF]);
+            }
+            out
+        }
+        // `EXPAND` turns palette PNGs into RGB(A), so `Indexed` cannot
+        // reach this arm; keep it explicit rather than a catch-all so a
+        // future `png` change can't silently hand Tauri raw indices.
+        png::ColorType::Indexed => unreachable!("EXPAND removes the palette"),
     };
     (rgba, info.width, info.height)
 }
@@ -261,7 +290,43 @@ fn open_settings(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_tray_tooltip;
+    use super::{build_tray_tooltip, decode_icon_rgba, decode_tray_icon};
+
+    #[test]
+    fn embedded_tray_icon_decodes_to_rgba() {
+        // Guards against a lossy icon re-optimisation (the `pngquant`
+        // indexed-PNG regression that aborted the app at launch in
+        // 0.0.2): the bundled `tray.png` must always decode into a
+        // width*height*4 RGBA buffer for `Image::new_owned`.
+        let (rgba, width, height) = decode_tray_icon();
+        assert!(width > 0 && height > 0);
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+    }
+
+    #[test]
+    fn indexed_png_with_transparency_decodes_to_rgba() {
+        // Exercises the hardened path directly: `pngquant` emits exactly
+        // this shape (a palette plus a `tRNS` chunk), which is what broke
+        // 0.0.2. The bundled asset is RGBA again, so without a synthetic
+        // fixture the indexed/EXPAND logic would never be covered.
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(vec![0, 0, 0, 255, 255, 255]);
+            // Index 0 fully transparent, index 1 fully opaque.
+            encoder.set_trns(vec![0, 255]);
+            let mut writer = encoder.write_header().expect("write indexed header");
+            writer
+                .write_image_data(&[0, 1])
+                .expect("write indexed pixels");
+        }
+
+        let (rgba, width, height) = decode_icon_rgba(&bytes);
+        assert_eq!((width, height), (2, 1));
+        assert_eq!(rgba, vec![0, 0, 0, 0, 255, 255, 255, 255]);
+    }
 
     #[test]
     fn tooltip_reads_clean_when_nothing_is_degraded() {
