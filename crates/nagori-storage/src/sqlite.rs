@@ -1698,18 +1698,52 @@ fn clamp_limit(limit: usize) -> i64 {
         .clamp(0, MAX_CANDIDATE_LIMIT)
 }
 
+/// Names of the `SQLite` sidecar files derived from the main DB path.
+/// `SQLite` creates these under the process umask once `journal_mode = WAL`
+/// runs.
+#[cfg(unix)]
+const DB_SIDECAR_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
+
+#[cfg(unix)]
+fn db_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sibling = path.as_os_str().to_owned();
+    sibling.push(suffix);
+    std::path::PathBuf::from(sibling)
+}
+
+/// Stat `path` without following the final component. Returns `Ok(true)` when
+/// it exists as a non-symlink, `Ok(false)` when absent, and an error when it is
+/// a symlink (so `set_permissions` / `SQLite` never chmod-follow or open the
+/// target of a planted link) or the stat itself fails.
+#[cfg(unix)]
+fn reject_if_symlink(path: &Path, role: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                Err(AppError::Storage(format!(
+                    "{} is a symlink; refusing to use it as {role}",
+                    path.display()
+                )))
+            } else {
+                Ok(true)
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(storage_err_io(&err)),
+    }
+}
+
 #[cfg(unix)]
 fn harden_db_file_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = || std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, mode()).map_err(|err| storage_err_io(&err))?;
     // WAL/SHM sidecars are created by SQLite under the process umask once
-    // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist.
-    for suffix in ["-wal", "-shm"] {
-        let mut sibling = path.as_os_str().to_owned();
-        sibling.push(suffix);
-        let sibling = std::path::PathBuf::from(sibling);
-        if sibling.exists() {
+    // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist, but
+    // refuse to follow a symlink raced into a sidecar path.
+    for suffix in DB_SIDECAR_SUFFIXES {
+        let sibling = db_sidecar_path(path, suffix);
+        if reject_if_symlink(&sibling, "a database sidecar")? {
             std::fs::set_permissions(&sibling, mode()).map_err(|err| storage_err_io(&err))?;
         }
     }
@@ -1729,16 +1763,32 @@ fn harden_db_file_permissions(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn pre_create_db_file_private(path: &Path) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if path.exists() {
-        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|err| storage_err_io(&err));
+    // The DB directory must be writable by us alone — otherwise a co-tenant can
+    // race a `-wal`/`-shm` symlink into the window before SQLite opens the
+    // sidecars. Reject a shared `--db` location up front.
+    ensure_db_parent_strictly_private(path)?;
+    // Refuse to chmod / open a symlink planted at the DB path itself.
+    if reject_if_symlink(path, "the database file")? {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|err| storage_err_io(&err))?;
+    } else {
+        // `create_new` (O_EXCL) refuses to follow a symlink raced into the
+        // path between the stat above and this open, so the create path needs
+        // no extra guard.
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|err| storage_err_io(&err))?;
     }
-    std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|err| storage_err_io(&err))?;
+    // Reject a symlink planted at the WAL/SHM sidecar paths *before*
+    // `Connection::open` runs `journal_mode = WAL` — SQLite would otherwise
+    // follow the link when it creates/opens the sidecar. We don't create them
+    // ourselves (SQLite owns that); we only refuse a hostile pre-existing link.
+    for suffix in DB_SIDECAR_SUFFIXES {
+        reject_if_symlink(&db_sidecar_path(path, suffix), "a database sidecar")?;
+    }
     Ok(())
 }
 
@@ -1803,8 +1853,42 @@ fn existing_path_metadata(dir: &Path) -> std::io::Result<Option<std::fs::Metadat
     }
 }
 
+/// Effective uid of the calling process.
+///
+/// Isolated so the `unsafe` block (the FFI call, which takes no arguments and
+/// cannot fail) carries a narrow `allow(unsafe_code)` rather than relaxing the
+/// workspace-wide deny over the whole validator.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn current_euid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, never fails, and is always safe to
+    // call.
+    unsafe { libc::geteuid() }
+}
+
 #[cfg(unix)]
 fn validate_existing_directory(dir: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    // The shared helper (IPC socket / token parents) tolerates a sticky
+    // world-writable root so dev endpoints under `/tmp` keep working.
+    validate_existing_directory_with(dir, metadata, true)
+}
+
+/// Validate an existing directory we are about to host sensitive files in.
+///
+/// `allow_sticky_shared` controls whether a world-writable directory protected
+/// only by the sticky bit (e.g. `/tmp`) is acceptable. The IPC helper allows it
+/// because the socket/token files defend themselves (Unix-socket mode, atomic
+/// symlink-replacing token writes). The database does **not**: `SQLite`
+/// creates `-wal`/`-shm` sidecars whose names a co-tenant could win a race to plant as
+/// symlinks, so the DB requires a directory no other user can write at all.
+#[cfg(unix)]
+fn validate_existing_directory_with(
+    dir: &Path,
+    metadata: &std::fs::Metadata,
+    allow_sticky_shared: bool,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
     if metadata.file_type().is_symlink() {
         return Err(std::io::Error::other(format!(
             "{} is a symlink",
@@ -1817,6 +1901,59 @@ fn validate_existing_directory(dir: &Path, metadata: &std::fs::Metadata) -> std:
             dir.display()
         )));
     }
+    // A directory holding the IPC socket / token / database must be owned by
+    // us. A directory owned by another (non-root) user could have been planted
+    // to intercept the socket or read the token. Root-owned shared roots (e.g.
+    // `/tmp`, `/var`) are allowed so custom endpoints under them still work.
+    let euid = current_euid();
+    let owner = metadata.uid();
+    if owner != euid && owner != 0 {
+        return Err(std::io::Error::other(format!(
+            "{} is owned by uid {owner}, expected {euid}",
+            dir.display()
+        )));
+    }
+    // Reject group/other-writable directories: anyone who can write the
+    // directory can plant a malicious socket or symlink at our endpoint. The
+    // sticky bit (as on `/tmp`) restricts deletion/rename to the owner, so a
+    // world-writable + sticky shared root is acceptable *only* for callers that
+    // opt in via `allow_sticky_shared`.
+    let mode = metadata.mode();
+    let group_other_writable = mode & 0o022 != 0;
+    let sticky = mode & 0o1000 != 0;
+    if group_other_writable && !(allow_sticky_shared && sticky) {
+        return Err(std::io::Error::other(format!(
+            "{} is group/other-writable (mode {:#o})",
+            dir.display(),
+            mode & 0o7777,
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a database path whose parent directory any other user can write.
+///
+/// Runs before `Connection::open`, so it closes the residual race where a
+/// co-tenant in a sticky shared dir (`/tmp`) plants a `-wal`/`-shm` symlink in
+/// the window between our existence check and `SQLite` opening the sidecar: if no
+/// other user can write the directory, no such file can be planted at all. The
+/// default DB lives in a private `0o700` data dir, so this only ever rejects a
+/// deliberately shared `--db` location.
+#[cfg(unix)]
+fn ensure_db_parent_strictly_private(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(parent).map_err(|err| storage_err_io(&err))?;
+    validate_existing_directory_with(parent, &metadata, false)
+        .map_err(|err| AppError::Storage(err.to_string()))
+}
+
+#[cfg(not(unix))]
+fn ensure_db_parent_strictly_private(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -2582,12 +2719,49 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let shared = temp.path().join("shared");
         std::fs::create_dir(&shared).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // 0o750: group-readable but not group/other-writable, so it passes
+        // the privacy validation and must be left untouched (not chmodded).
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o750)).unwrap();
 
         ensure_private_directory(&shared).unwrap();
 
         let mode = std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o777);
+        assert_eq!(mode, 0o750);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_rejects_world_writable_without_sticky() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        // World-writable without the sticky bit lets a co-tenant plant a
+        // socket/symlink at our endpoint — must be rejected.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let err = ensure_private_directory(&shared).unwrap_err();
+
+        assert!(
+            err.to_string().contains("group/other-writable"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_directory_allows_world_writable_with_sticky() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        // Sticky + world-writable mirrors `/tmp`: deletion/rename is restricted
+        // to the owner, so a custom endpoint under it stays usable.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+
+        ensure_private_directory(&shared).unwrap();
     }
 
     #[cfg(unix)]
@@ -2602,6 +2776,70 @@ mod tests {
 
         let mode = std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_create_db_file_private_rejects_symlinked_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let bystander = temp.path().join("victim");
+        std::fs::write(&bystander, b"do-not-touch").unwrap();
+        let db_path = temp.path().join("nagori.db");
+        std::os::unix::fs::symlink(&bystander, &db_path).unwrap();
+
+        let err = pre_create_db_file_private(&db_path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is a symlink"),
+            "unexpected error: {err}"
+        );
+        // The symlink target must be untouched (not chmodded or truncated).
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"do-not-touch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_create_db_file_private_rejects_shared_parent_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        // Sticky + world-writable (like `/tmp`): tolerated for IPC, but the DB
+        // must refuse it because a co-tenant could race a sidecar symlink.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let db_path = shared.join("nagori.db");
+
+        let err = pre_create_db_file_private(&db_path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("group/other-writable"),
+            "unexpected error: {err}"
+        );
+        // Nothing was created in the rejected directory.
+        assert!(!db_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_create_db_file_private_rejects_symlinked_wal_sidecar() {
+        // A co-tenant can't necessarily plant the main DB path, but the WAL
+        // sidecar SQLite creates later is just as dangerous: rejecting it must
+        // happen before `journal_mode = WAL` opens it.
+        let temp = tempfile::tempdir().unwrap();
+        let bystander = temp.path().join("victim");
+        std::fs::write(&bystander, b"do-not-touch").unwrap();
+        let db_path = temp.path().join("nagori.db");
+        let wal_path = temp.path().join("nagori.db-wal");
+        std::os::unix::fs::symlink(&bystander, &wal_path).unwrap();
+
+        let err = pre_create_db_file_private(&db_path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is a symlink"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"do-not-touch");
     }
 
     #[cfg(unix)]

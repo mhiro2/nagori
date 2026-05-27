@@ -3095,6 +3095,7 @@ version = "0.0.2"
 dependencies = [
  "async-trait",
  "criterion",
+ "libc",
  "nagori-core",
  "nagori-search",
  "regex",

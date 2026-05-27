@@ -18,6 +18,11 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Used by `ensure_private_directory` to read the calling process' effective
+# uid so an existing IPC/data directory owned by another user is rejected.
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support"] }
 tempfile.workspace = true
