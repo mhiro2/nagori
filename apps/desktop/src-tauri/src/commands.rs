@@ -476,9 +476,10 @@ pub async fn delete_entries(state: State<'_, AppState>, ids: Vec<String>) -> Com
 }
 
 /// Concatenate the text of multiple entries with newline separators and
-/// write the result to the system clipboard. Image / file-list entries are
-/// silently skipped — the multi-select UI surfaces the count of skipped
-/// entries to the user. Used by the palette's bulk copy action.
+/// write the result to the system clipboard. Image / file-list entries and
+/// any non-`Public`/`Unknown` (Private / Secret / Blocked) rows are silently
+/// skipped — the multi-select UI surfaces the count of skipped entries to the
+/// user. Used by the palette's bulk copy action.
 #[tauri::command]
 pub async fn copy_entries_combined(
     state: State<'_, AppState>,
@@ -497,10 +498,12 @@ pub async fn copy_entries_combined(
         let Some(entry) = state.runtime.get_entry(entry_id).await? else {
             continue;
         };
-        if matches!(
-            entry.sensitivity,
-            Sensitivity::Blocked | Sensitivity::Secret
-        ) {
+        // Only `Public` / `Unknown` text is safe to combine into the clipboard
+        // without an explicit opt-in. Skipping `Private` here (alongside
+        // `Secret` / `Blocked`) keeps bulk copy from silently concatenating
+        // sensitive bodies the single-row path would have dropped to
+        // preview-only — see `is_text_safe_for_default_output`.
+        if !is_text_safe_for_default_output(entry.sensitivity) {
             continue;
         }
         let text = match &entry.content {
