@@ -185,6 +185,10 @@ the IPC endpoint (Unix socket on macOS / Linux, named pipe on Windows).
 Available on macOS and Windows; other platforms exit with
 "daemon run is only available on macOS and Windows in this build".
 
+`--capture-interval-ms` accepts `1`–`3600000` (default `500`) and
+`--maintenance-interval-min` accepts `1`–`525600` (default `30`); `0` is
+rejected at parse time so neither loop can be spun into a busy loop.
+
 ### `nagori daemon stop`
 
 Send a shutdown request via IPC. Requires `--ipc <endpoint>`.

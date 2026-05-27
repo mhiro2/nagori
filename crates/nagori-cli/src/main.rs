@@ -152,9 +152,15 @@ enum DaemonCommand {
 
 #[derive(Debug, Args)]
 struct DaemonRunArgs {
-    #[arg(long, default_value_t = 500)]
+    /// Clipboard poll interval. Must be non-zero — `0` would spin the
+    /// capture loop into a busy loop — and is capped at one hour so a
+    /// fat-fingered value can't silently disable capture for days.
+    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u64).range(1..=3_600_000))]
     capture_interval_ms: u64,
-    #[arg(long, default_value_t = 30)]
+    /// Maintenance sweep interval in minutes. Non-zero (a `0` interval
+    /// busy-loops the maintenance task) and capped well below the point
+    /// where `* 60` would overflow the seconds `Duration`.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=525_600))]
     maintenance_interval_min: u64,
     /// Cap on concurrent IPC handlers. Defaults to the IPC crate's
     /// built-in ceiling; tune down in regression tests or up when the
@@ -492,7 +498,12 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         socket_path,
         token_path,
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
-        maintenance_interval: std::time::Duration::from_secs(args.maintenance_interval_min * 60),
+        // The clap range above already keeps this well clear of overflow;
+        // `saturating_mul` is belt-and-suspenders in case the bound is ever
+        // relaxed without revisiting this arithmetic.
+        maintenance_interval: std::time::Duration::from_secs(
+            args.maintenance_interval_min.saturating_mul(60),
+        ),
         secure_focus_fail_closed,
         max_concurrent_connections,
         ..defaults
