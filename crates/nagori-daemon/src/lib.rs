@@ -1,5 +1,6 @@
 pub mod capture_loop;
 pub mod health;
+pub mod ipc_handler;
 pub mod maintenance;
 pub mod runtime;
 pub mod search_cache;
