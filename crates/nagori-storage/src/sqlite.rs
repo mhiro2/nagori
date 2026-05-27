@@ -982,8 +982,9 @@ fn decode_representation_payload(
     match (text, blob) {
         (Some(text), None) => {
             if mime.eq_ignore_ascii_case("text/uri-list") {
-                let paths = text.split('\n').map(ToOwned::to_owned).collect();
-                Ok(RepresentationDataRef::FilePaths(paths))
+                Ok(RepresentationDataRef::FilePaths(
+                    nagori_core::decode_file_paths(&text),
+                ))
             } else {
                 Ok(RepresentationDataRef::InlineText(text))
             }
@@ -1282,11 +1283,12 @@ fn insert_pending_representations(
                 .map_err(|err| storage_err(&err))?;
             }
             RepresentationDataRef::FilePaths(paths) => {
-                // Encode as a newline-joined list under text_content so the
-                // schema's "exactly one of text_content / payload_blob" CHECK
-                // is satisfied. `byte_count` (from `rep.byte_count()`) already
-                // counts the joined form, keeping retention math honest.
-                let joined = paths.join("\n");
+                // Encode as a JSON array under text_content so the schema's
+                // "exactly one of text_content / payload_blob" CHECK is
+                // satisfied and paths containing newlines survive the round
+                // trip. `byte_count` (from `rep.byte_count()`) counts the same
+                // encoded form, keeping retention math honest.
+                let encoded = nagori_core::encode_file_paths(paths);
                 tx.execute(
                     "INSERT INTO entry_representations (
                         id, entry_id, role, mime_type, platform_format, ordinal,
@@ -1300,7 +1302,7 @@ fn insert_pending_representations(
                         role,
                         rep.mime_type,
                         ordinal,
-                        joined,
+                        encoded,
                         byte_count,
                         created_at,
                     ],
@@ -3567,8 +3569,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_representations_decodes_file_paths_from_text_uri_list() {
-        // File lists are persisted as a newline-joined string under the
-        // `text/uri-list` mime; the read path must split them back into a
+        // File lists are persisted as a JSON array under the `text/uri-list`
+        // mime; the read path must decode them back into a
         // `RepresentationDataRef::FilePaths` vector so the platform writer
         // can republish each path as a separate `NSPasteboardTypeFileURL`.
         use nagori_core::{

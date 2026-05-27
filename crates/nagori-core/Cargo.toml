@@ -18,6 +18,9 @@ clap = { workspace = true, optional = true }
 hex.workspace = true
 regex.workspace = true
 serde.workspace = true
+# `FilePaths` representations are persisted as a JSON array so paths
+# containing newlines survive the round trip (see `encode_file_paths`).
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true

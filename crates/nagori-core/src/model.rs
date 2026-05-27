@@ -580,17 +580,10 @@ impl StoredClipboardRepresentation {
             RepresentationDataRef::InlineText(text) => text.len(),
             RepresentationDataRef::DatabaseBlob(bytes) => bytes.len(),
             RepresentationDataRef::FilePaths(paths) => {
-                // Stored as a newline-joined list in `text_content`; size
-                // the row by the joined byte length so the retention budget
-                // matches what physically lands in SQLite.
-                let mut total: usize = 0;
-                for (idx, path) in paths.iter().enumerate() {
-                    if idx > 0 {
-                        total = total.saturating_add(1);
-                    }
-                    total = total.saturating_add(path.len());
-                }
-                total
+                // Stored as a JSON array in `text_content`; size the row by
+                // the encoded byte length so the retention budget matches
+                // what physically lands in SQLite.
+                encode_file_paths(paths).len()
             }
         }
     }
@@ -680,12 +673,40 @@ impl RepresentationRole {
 /// Text-shaped reps (plain, html, rtf) land in
 /// `entry_representations.text_content`; image bytes land in
 /// `entry_representations.payload_blob`; file URL lists are encoded into
-/// `text_content` as one path per line.
+/// `text_content` as a JSON array (see [`encode_file_paths`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationDataRef {
     InlineText(String),
     DatabaseBlob(Vec<u8>),
     FilePaths(Vec<String>),
+}
+
+/// Encode a `FilePaths` list into the canonical `text_content` form: a JSON
+/// array of strings.
+///
+/// The previous newline-joined encoding was lossy — a path containing a
+/// newline (legal on Unix) split into multiple bogus entries on read. JSON
+/// escapes such bytes, so the list round-trips exactly. Both the storage
+/// insert and [`StoredClipboardRepresentation::byte_count`] go through here so
+/// the retention accounting matches the bytes actually written.
+#[must_use]
+pub fn encode_file_paths(paths: &[String]) -> String {
+    // Serialising a `Vec<String>` to JSON cannot fail (strings are always
+    // valid JSON values), so the only error variant is unreachable.
+    serde_json::to_string(paths).expect("Vec<String> always serialises to JSON")
+}
+
+/// Decode the `text_content` of a `text/uri-list` representation back into a
+/// `FilePaths` list.
+///
+/// New rows are JSON arrays produced by [`encode_file_paths`]. Rows written by
+/// older builds are newline-joined, which is not valid JSON for a realistic
+/// path, so a parse failure falls back to the legacy newline split — keeping
+/// existing histories readable after upgrade.
+#[must_use]
+pub fn decode_file_paths(stored: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(stored)
+        .unwrap_or_else(|_| stored.split('\n').map(ToOwned::to_owned).collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -956,14 +977,41 @@ mod tests {
         };
         assert_eq!(blob.byte_count(), 4);
 
-        // Newline-joined storage form: 3 + 1 + 3 = 7 bytes.
+        // JSON-array storage form: `["one","two"]` is 13 bytes.
         let paths = StoredClipboardRepresentation {
             role: RepresentationRole::Alternative,
             mime_type: "text/uri-list".to_owned(),
             ordinal: 2,
             data: RepresentationDataRef::FilePaths(vec!["one".to_owned(), "two".to_owned()]),
         };
-        assert_eq!(paths.byte_count(), 7);
+        assert_eq!(paths.byte_count(), 13);
+        assert_eq!(
+            paths.byte_count(),
+            encode_file_paths(&["one".to_owned(), "two".to_owned()]).len()
+        );
+    }
+
+    #[test]
+    fn file_paths_round_trip_preserves_embedded_newlines() {
+        // A path containing a newline is legal on Unix and broke the old
+        // newline-joined encoding (it split into two bogus entries). The JSON
+        // encoding must round-trip it byte-for-byte.
+        let paths = vec![
+            "/tmp/normal.txt".to_owned(),
+            "/tmp/weird\nname.txt".to_owned(),
+        ];
+        let encoded = encode_file_paths(&paths);
+        assert_eq!(decode_file_paths(&encoded), paths);
+    }
+
+    #[test]
+    fn decode_file_paths_falls_back_to_legacy_newline_split() {
+        // Rows written by older builds are newline-joined and are not valid
+        // JSON, so decoding must fall back to the legacy split.
+        assert_eq!(
+            decode_file_paths("/tmp/a.txt\n/tmp/b.txt"),
+            vec!["/tmp/a.txt".to_owned(), "/tmp/b.txt".to_owned()],
+        );
     }
 
     #[test]
