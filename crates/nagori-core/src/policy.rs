@@ -236,11 +236,19 @@ impl SensitivityClassifier {
     /// persist (`Persist`) or drop the entry (`Drop`).
     ///
     /// `StoreRedacted` (the default) rewrites `entry.content`, the
-    /// SHA-256 content hash, and the search document's normalized text /
-    /// tokens to the redacted body so the durable copy on disk can never
-    /// leak the raw secret. `StoreFull` keeps the original text — preview
-    /// is still redacted via `redacted_preview`. `Block` returns `Drop`
-    /// so the caller can audit and skip insertion.
+    /// SHA-256 content hash, the search preview, and the search document's
+    /// normalized text / tokens to the redacted body so the durable copy on
+    /// disk can never leak the raw secret. `StoreFull` keeps the original
+    /// body (the explicit opt-in) but still rewrites the search preview to the
+    /// redacted form, matching the default-DTO contract where a Secret row's
+    /// body is hidden behind `include_text` while its preview is shown.
+    /// `Block` returns `Drop` so the caller can audit and skip insertion.
+    ///
+    /// Rewriting `entry.search.preview` here makes the redaction self-contained
+    /// at the core-API boundary: the daemon's capture/runtime paths already
+    /// overwrite the preview with `classification.redacted_preview` before
+    /// calling this, but a caller that invokes `apply_secret_handling` directly
+    /// must not be able to persist a raw-secret preview under either policy.
     pub fn apply_secret_handling(
         &self,
         entry: &mut ClipboardEntry,
@@ -251,12 +259,24 @@ impl SensitivityClassifier {
         }
         match handling {
             SecretHandling::Block => SecretAction::Drop,
-            SecretHandling::StoreFull => SecretAction::Persist,
+            SecretHandling::StoreFull => {
+                // Keep the raw body (the user opted in) but scrub the preview
+                // so the default DTO path — which shows the preview while
+                // gating the body behind `include_text` — never surfaces the
+                // raw secret.
+                let raw = entry.plain_text().unwrap_or_default().to_owned();
+                entry.search.preview = make_preview(&self.redact(&raw), 180);
+                SecretAction::Persist
+            }
             SecretHandling::StoreRedacted => {
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
                 let redacted = self.redact(&raw);
                 let redacted_normalized = normalize_text(&redacted);
                 entry.metadata.content_hash = ContentHash::sha256(redacted.as_bytes());
+                // Match the preview cap used by `classify`'s `redacted_preview`
+                // so the standalone API yields the same scrubbed preview the
+                // daemon path produces.
+                entry.search.preview = make_preview(&redacted, 180);
                 entry.content = ClipboardContent::from_plain_text(redacted);
                 entry.search.tokens = redacted_normalized
                     .split_whitespace()
@@ -805,6 +825,18 @@ mod tests {
             "tokens index leaked the raw secret: {:?}",
             entry.search.tokens,
         );
+        // The search preview must be redacted too. The daemon path overwrites
+        // it before calling this, but the core API must be self-contained so a
+        // direct caller can't persist a raw-secret preview.
+        assert!(
+            !entry
+                .search
+                .preview
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
+            "search preview leaked the raw secret: {:?}",
+            entry.search.preview,
+        );
+        assert!(entry.search.preview.contains("[REDACTED]"));
     }
 
     #[test]
@@ -817,7 +849,19 @@ mod tests {
         let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreFull);
 
         assert_eq!(action, SecretAction::Persist);
+        // The raw body is retained (the explicit opt-in)...
         assert_eq!(entry.plain_text(), Some(raw));
+        // ...but the preview is still scrubbed so the default DTO path can't
+        // leak the raw secret.
+        assert!(
+            !entry
+                .search
+                .preview
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
+            "search preview leaked the raw secret under StoreFull: {:?}",
+            entry.search.preview,
+        );
+        assert!(entry.search.preview.contains("[REDACTED]"));
     }
 
     #[test]
