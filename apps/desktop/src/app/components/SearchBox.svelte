@@ -5,10 +5,9 @@
     value: string;
     placeholder?: string;
     onInput: (next: string) => void;
-    onKeydown?: (event: KeyboardEvent) => void;
   };
 
-  const { value, placeholder, onInput, onKeydown }: Props = $props();
+  const { value, placeholder, onInput }: Props = $props();
 
   const effectivePlaceholder = $derived(placeholder ?? messages().palette.placeholder);
 
@@ -37,7 +36,6 @@
     placeholder={effectivePlaceholder}
     {value}
     oninput={handleInput}
-    onkeydown={onKeydown}
   />
 </div>
 

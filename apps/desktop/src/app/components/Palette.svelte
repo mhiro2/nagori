@@ -248,10 +248,25 @@
         break;
     }
   };
+
+  // Palette key handling lives at the window level, not on the search input.
+  // The input only keeps focus until the user clicks the result-list
+  // scrollbar — WKWebView then moves focus to the scrollable div, and an
+  // input-scoped listener would silently drop every binding: arrow keys would
+  // scroll the list natively instead of moving the selection, and Cmd+K /
+  // Cmd+, would stop responding entirely. A window listener keeps navigation
+  // and shortcuts working regardless of which element holds focus. ActionMenu
+  // stops propagation on its own keydowns, so its shortcuts never leak back
+  // here while it is open, and matched actions call `preventDefault`, so
+  // App.svelte's window-level Escape handler stands down on `close`.
+  onMount(() => {
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  });
 </script>
 
 <section class="palette" style="--palette-row-count: {paletteRowCount}">
-  <SearchBox value={searchState.query} onInput={handleInput} onKeydown={handleKeydown} />
+  <SearchBox value={searchState.query} onInput={handleInput} />
   <FilterChips />
   <div
     class="body"

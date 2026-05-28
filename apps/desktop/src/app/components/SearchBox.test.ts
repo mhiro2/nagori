@@ -23,22 +23,6 @@ describe('SearchBox', () => {
     expect(onInput).toHaveBeenLastCalledWith('needle');
   });
 
-  it('forwards keydown events to onKeydown', async () => {
-    const user = userEvent.setup();
-    const onKeydown = vi.fn();
-    const { getByRole } = render(SearchBox, {
-      props: { value: '', onInput: () => {}, onKeydown },
-    });
-    // The input auto-focuses on mount, so keyboard events go to it directly.
-    expect(document.activeElement).toBe(getByRole('textbox'));
-    await user.keyboard('{Enter}');
-    expect(onKeydown).toHaveBeenCalledTimes(1);
-    const firstCall = onKeydown.mock.calls[0];
-    expect(firstCall?.[0]).toBeInstanceOf(KeyboardEvent);
-    const evt = firstCall?.[0] as KeyboardEvent | undefined;
-    expect(evt?.key).toBe('Enter');
-  });
-
   it('auto-focuses the input on mount', () => {
     const { getByRole } = render(SearchBox, {
       props: { value: '', onInput: () => {} },
