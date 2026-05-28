@@ -25,8 +25,9 @@ pub use services::{
     FtsCandidate, NgramCandidate, Ranker, SearchCandidateProvider, SearchPlan, SearchService,
 };
 pub use settings::{
-    AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT, MAX_PASTE_DELAY_MS,
-    MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, OnboardingSettings, PaletteHotkeyAction, PasteFormat,
-    RecentOrder, SecondaryHotkeyAction, SecretHandling, UpdateChannel, validate_hotkey,
+    AppDenyRule, AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT, MAX_PASTE_DELAY_MS,
+    MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, OnboardingSettings, PASSWORD_MANAGER_PRESET,
+    PaletteHotkeyAction, PasteFormat, PresetEntry, RecentOrder, RuleSource, SecondaryHotkeyAction,
+    SecretHandling, SourceAppIdKind, UpdateChannel, password_manager_preset_rules, validate_hotkey,
 };
 pub use text::normalize_text;

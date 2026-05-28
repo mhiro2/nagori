@@ -4,7 +4,8 @@ use regex::{Regex, RegexBuilder};
 
 use crate::{
     AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, RepresentationDataRef,
-    Result, Sensitivity, SensitivityReason, make_preview, normalize_text, settings::SecretHandling,
+    Result, Sensitivity, SensitivityReason, SourceApp, make_preview, normalize_text,
+    settings::{AppDenyRule, SecretHandling, SourceAppIdKind},
 };
 
 /// Hard upper bound on the source byte length of a single user-provided
@@ -115,16 +116,20 @@ impl SensitivityClassifier {
                 .settings
                 .app_denylist
                 .iter()
-                .any(|item| source_text.contains(&item.to_lowercase()))
+                .any(|rule| rule_matches_source(rule, source, &source_text))
             {
                 reasons.push(SensitivityReason::SourceAppDenylist);
             }
-            if ["1password", "bitwarden", "keepass", "password"]
-                .iter()
-                .any(|item| source_text.contains(item))
-            {
-                reasons.push(SensitivityReason::PasswordManagerSource);
-            }
+            // The legacy hardcoded substring heuristic ("1password" /
+            // "bitwarden" / "keepass" / "password" in `source_text`)
+            // used to push `PasswordManagerSource` unconditionally.
+            // It now lives on the user-controllable `app_denylist`
+            // preset (`password_manager_preset_rules`) instead, so
+            // toggling "Block password managers" off in Settings
+            // actually disables the block. Without this change the
+            // toggle would be cosmetic — apps named "PasswordSafe"
+            // etc. would still be blocked by the broad substring
+            // even after the user cleared every rule.
         }
 
         // Scan every text-shaped representation, not just the primary's
@@ -148,7 +153,6 @@ impl SensitivityClassifier {
             matches!(
                 reason,
                 SensitivityReason::SourceAppDenylist
-                    | SensitivityReason::PasswordManagerSource
                     | SensitivityReason::Oversized
                     | SensitivityReason::UserRegex
             )
@@ -287,6 +291,86 @@ impl SensitivityClassifier {
             }
         }
     }
+}
+
+/// Match a single [`AppDenyRule`] against the observed `SourceApp`.
+///
+/// `SourceApp` rules compare the typed identifier against the
+/// corresponding `SourceApp` field with case-insensitive exact match:
+/// drift-free in the common "block this bundle ID" case.
+/// `Pattern` rules retain the legacy substring behaviour on the
+/// joined `name + bundle_id + executable_path` blob so existing
+/// free-text entries keep working without a settings migration.
+fn rule_matches_source(rule: &AppDenyRule, source: &SourceApp, source_text_lower: &str) -> bool {
+    match rule {
+        AppDenyRule::Pattern { value } => {
+            let needle = value.trim().to_lowercase();
+            !needle.is_empty() && source_text_lower.contains(&needle)
+        }
+        AppDenyRule::SourceApp { kind, value, .. } => {
+            let target = value.trim();
+            if target.is_empty() {
+                return false;
+            }
+            match kind {
+                SourceAppIdKind::MacosBundleId => source
+                    .bundle_id
+                    .as_deref()
+                    .is_some_and(|bid| bid.eq_ignore_ascii_case(target)),
+                SourceAppIdKind::WindowsExeName => source
+                    .executable_path
+                    .as_deref()
+                    .and_then(windows_exe_basename)
+                    .is_some_and(|basename| basename.eq_ignore_ascii_case(target)),
+                SourceAppIdKind::WindowsExecutablePath => source
+                    .executable_path
+                    .as_deref()
+                    .is_some_and(|path| normalize_exe_path(path) == normalize_exe_path(target)),
+                // Linux desktop / Flatpak / X11 WM_CLASS are reserved
+                // for a future X11 path; the Wayland adapter currently
+                // returns `Ok(None)` for the frontmost app, so these
+                // never fire on real hardware. Match against bundle_id
+                // (`org.example.App`) or name as a best-effort hook so
+                // a forward-looking config does not start out broken.
+                SourceAppIdKind::LinuxDesktopId
+                | SourceAppIdKind::LinuxFlatpakId
+                | SourceAppIdKind::X11WmClass => {
+                    let id_match = source
+                        .bundle_id
+                        .as_deref()
+                        .is_some_and(|bid| bid.eq_ignore_ascii_case(target));
+                    let name_match = source
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(target));
+                    id_match || name_match
+                }
+            }
+        }
+    }
+}
+
+/// Lowercased basename of a Windows-style executable path, with the
+/// `.exe` suffix stripped. Accepts both `\` and `/` separators so a
+/// user-pasted path normalises the same regardless of how it was
+/// captured.
+fn windows_exe_basename(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let basename = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    let lower = basename.to_lowercase();
+    Some(lower.strip_suffix(".exe").unwrap_or(&lower).to_owned())
+}
+
+/// Normalise a Windows-style executable path for case-insensitive
+/// equality. Collapses separators to `\` and lowercases the result —
+/// intentionally minimal because deeper normalisation (`Program Files
+/// (x86)` / `%LOCALAPPDATA%` / MSIX) adds complexity without
+/// increasing confidence that two paths name the same binary.
+fn normalize_exe_path(path: &str) -> String {
+    path.trim().replace('/', "\\").to_lowercase()
 }
 
 /// Compile a user-provided `regex_denylist` pattern with the DoS-resistant
@@ -545,10 +629,17 @@ mod tests {
 
     #[test]
     fn classifies_password_manager_source_as_blocked() {
+        // The default preset (`password_manager_preset_rules`) carries
+        // the canonical 1Password bundle ID, so an entry tagged with
+        // `com.agilebits.onepassword7` trips `SourceAppDenylist` and
+        // ends up `Blocked`. The broad substring heuristic
+        // (`PasswordManagerSource`) was removed when the toggle moved
+        // onto the user-controllable preset — toggling it off must
+        // actually disable the block.
         let mut entry = EntryFactory::from_text("safe-looking value");
         entry.metadata.source = Some(crate::SourceApp {
-            bundle_id: Some("com.agilebits.onepassword".to_owned()),
-            name: Some("1Password".to_owned()),
+            bundle_id: Some("com.agilebits.onepassword7".to_owned()),
+            name: Some("1Password 7".to_owned()),
             executable_path: None,
         });
         let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
@@ -559,14 +650,223 @@ mod tests {
         assert!(
             result
                 .reasons
-                .contains(&SensitivityReason::PasswordManagerSource)
-        );
-        assert!(
-            result
-                .reasons
                 .contains(&SensitivityReason::SourceAppDenylist)
         );
         assert!(result.redacted_preview.is_none());
+    }
+
+    #[test]
+    fn classifies_password_manager_source_as_public_when_preset_cleared() {
+        // Regression: the legacy substring heuristic used to block
+        // anything whose source contained "1password" / "bitwarden" /
+        // "keepass" / "password" even when `app_denylist` was empty.
+        // After the toggle migration, clearing the preset must
+        // actually let the capture through — otherwise the UI toggle
+        // is cosmetic.
+        let mut entry = EntryFactory::from_text("safe-looking value");
+        entry.metadata.source = Some(crate::SourceApp {
+            bundle_id: Some("com.agilebits.onepassword7".to_owned()),
+            name: Some("1Password 7".to_owned()),
+            executable_path: None,
+        });
+        let mut settings = AppSettings::default();
+        settings.app_denylist.clear();
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+        let result = classifier.classify(&entry);
+
+        assert_ne!(result.sensitivity, Sensitivity::Blocked);
+        assert!(
+            !result
+                .reasons
+                .contains(&SensitivityReason::SourceAppDenylist)
+        );
+    }
+
+    #[test]
+    fn classifies_macos_bundle_id_typed_rule_as_blocked() {
+        // Typed `SourceApp { MacosBundleId }` rules must match on
+        // exact bundle_id (case-insensitive). The matcher must NOT
+        // fall back to substring matching against name or
+        // executable_path — that is what `Pattern` rules are for.
+        use crate::settings::{AppDenyRule, RuleSource, SourceAppIdKind};
+
+        let mut entry = EntryFactory::from_text("safe-looking value");
+        entry.metadata.source = Some(crate::SourceApp {
+            bundle_id: Some("com.example.target".to_owned()),
+            name: Some("Other Name".to_owned()),
+            executable_path: None,
+        });
+        let settings = AppSettings {
+            app_denylist: vec![AppDenyRule::SourceApp {
+                kind: SourceAppIdKind::MacosBundleId,
+                value: "com.example.target".to_owned(),
+                label: Some("Target".to_owned()),
+                source: RuleSource::Manual,
+            }],
+            ..AppSettings::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+        let result = classifier.classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Blocked);
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::SourceAppDenylist),
+            "typed bundle ID rule must fire: {:?}",
+            result.reasons,
+        );
+    }
+
+    #[test]
+    fn macos_bundle_id_rule_does_not_match_other_bundle_ids() {
+        // A typed rule must not accidentally cover unrelated apps that
+        // happen to share a substring. `com.example.target-other`
+        // contains the rule's exact value as a prefix, but the typed
+        // matcher uses equality (not substring), so the entry stays
+        // Public.
+        use crate::settings::{AppDenyRule, RuleSource, SourceAppIdKind};
+
+        let mut entry = EntryFactory::from_text("ordinary text");
+        entry.metadata.source = Some(crate::SourceApp {
+            bundle_id: Some("com.example.target-other".to_owned()),
+            name: None,
+            executable_path: None,
+        });
+        let settings = AppSettings {
+            // Drop the default preset so the only rule under test is
+            // the one defined here.
+            app_denylist: vec![AppDenyRule::SourceApp {
+                kind: SourceAppIdKind::MacosBundleId,
+                value: "com.example.target".to_owned(),
+                label: None,
+                source: RuleSource::Manual,
+            }],
+            ..AppSettings::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+        let result = classifier.classify(&entry);
+        assert!(
+            !result
+                .reasons
+                .contains(&SensitivityReason::SourceAppDenylist),
+            "typed rule must use equality, not substring: {:?}",
+            result.reasons,
+        );
+    }
+
+    #[test]
+    fn classifies_windows_exe_name_typed_rule_as_blocked() {
+        // Windows captures bring back the executable path; the typed
+        // rule compares the basename (without `.exe`,
+        // case-insensitively) so a config that names "1password"
+        // fires for `C:\Program Files\1Password\1Password.exe`.
+        use crate::settings::{AppDenyRule, RuleSource, SourceAppIdKind};
+
+        let mut entry = EntryFactory::from_text("safe-looking value");
+        entry.metadata.source = Some(crate::SourceApp {
+            bundle_id: None,
+            name: Some("Vendor App".to_owned()),
+            executable_path: Some(r"C:\Program Files\Vendor\VendorApp.exe".to_owned()),
+        });
+        let settings = AppSettings {
+            app_denylist: vec![AppDenyRule::SourceApp {
+                kind: SourceAppIdKind::WindowsExeName,
+                value: "vendorapp".to_owned(),
+                label: Some("VendorApp".to_owned()),
+                source: RuleSource::Manual,
+            }],
+            ..AppSettings::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+        let result = classifier.classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Blocked);
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::SourceAppDenylist),
+            "exe-name rule must fire: {:?}",
+            result.reasons,
+        );
+    }
+
+    #[test]
+    fn legacy_string_app_denylist_deserialises_as_pattern_rule() {
+        // Settings JSON persisted by a pre-Phase-A build stored each
+        // denylist entry as a bare string. The custom
+        // `deserialize_app_denylist` must read that shape and lift
+        // each entry into `AppDenyRule::Pattern`, otherwise upgrading
+        // would silently wipe a user's existing rules.
+        use crate::settings::AppDenyRule;
+
+        let json = r#"{
+            "app_denylist": ["1Password", "Bitwarden"]
+        }"#;
+        let settings: AppSettings =
+            serde_json::from_str(json).expect("legacy Vec<String> deserialises");
+        assert_eq!(settings.app_denylist.len(), 2);
+        assert_eq!(
+            settings.app_denylist[0],
+            AppDenyRule::Pattern {
+                value: "1Password".to_owned()
+            },
+        );
+        assert_eq!(
+            settings.app_denylist[1],
+            AppDenyRule::Pattern {
+                value: "Bitwarden".to_owned()
+            },
+        );
+    }
+
+    #[test]
+    fn missing_app_denylist_field_defaults_to_password_manager_preset() {
+        // Settings JSON that omits `app_denylist` entirely (e.g. an
+        // older row from before the field existed) must fall back to
+        // the bundled password-manager preset rather than an empty Vec
+        // — otherwise upgrading from a pre-field build would silently
+        // drop the default protections.
+        use crate::settings::password_manager_preset_rules;
+
+        let json = "{}";
+        let settings: AppSettings =
+            serde_json::from_str(json).expect("empty settings JSON deserialises");
+        assert_eq!(settings.app_denylist, password_manager_preset_rules());
+        assert!(
+            !settings.app_denylist.is_empty(),
+            "preset must seed at least one rule, otherwise the regression is masked",
+        );
+    }
+
+    #[test]
+    fn pattern_rule_preserves_substring_match_behaviour() {
+        // `Pattern` rules keep the original case-insensitive substring
+        // semantics so a settings snapshot full of legacy strings (now
+        // lifted to `Pattern`) keeps blocking the same apps after the
+        // upgrade.
+        use crate::settings::AppDenyRule;
+
+        let mut entry = EntryFactory::from_text("safe-looking value");
+        entry.metadata.source = Some(crate::SourceApp {
+            bundle_id: Some("com.example.somepassword".to_owned()),
+            name: Some("SomeApp".to_owned()),
+            executable_path: None,
+        });
+        let settings = AppSettings {
+            app_denylist: vec![AppDenyRule::Pattern {
+                value: "SomePassword".to_owned(),
+            }],
+            ..AppSettings::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+        let result = classifier.classify(&entry);
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::SourceAppDenylist),
+            "pattern rule must still match by substring: {:?}",
+            result.reasons,
+        );
     }
 
     #[test]

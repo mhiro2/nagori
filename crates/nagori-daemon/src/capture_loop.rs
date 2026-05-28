@@ -1208,8 +1208,14 @@ mod tests {
             async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
                 Ok(Some(FrontmostApp {
                     source: SourceApp {
-                        bundle_id: Some("com.agilebits.onepassword".to_owned()),
-                        name: Some("1Password".to_owned()),
+                        // Pick a bundle ID that is on the default
+                        // password-manager preset so the typed
+                        // `SourceAppDenylist` rule fires. The matcher
+                        // now uses exact bundle-ID equality, so
+                        // older 1Password identifiers that are not in
+                        // the preset would no longer trigger.
+                        bundle_id: Some("com.agilebits.onepassword7".to_owned()),
+                        name: Some("1Password 7".to_owned()),
                         executable_path: None,
                     },
                     window_title: None,
@@ -1238,10 +1244,11 @@ mod tests {
             .await
             .expect("clipboard write");
 
-        // 1Password is on the default app_denylist, so the entry must be
-        // dropped (Sensitivity::Blocked) once the source attribution is
-        // attached. If the frontmost weren't picked up, the entry would be
-        // persisted as Public and the test would observe a stored row.
+        // 1Password is on the default app_denylist (preset), so the
+        // entry must be dropped (Sensitivity::Blocked) once the
+        // source attribution is attached. If the frontmost weren't
+        // picked up, the entry would be persisted as Public and the
+        // test would observe a stored row.
         assert!(loop_.capture_once().await.unwrap().is_none());
         assert!(store.list_recent(10).await.unwrap().is_empty());
     }

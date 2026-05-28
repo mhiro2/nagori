@@ -209,6 +209,7 @@ pub fn run() {
             commands::run_ai_action,
             commands::save_ai_result,
             commands::get_settings,
+            commands::password_manager_preset,
             commands::update_settings,
             commands::set_capture_enabled,
             commands::get_permissions,

@@ -10,8 +10,8 @@ use nagori_search::normalize_text;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{
-    AiActionResultDto, AppSettingsDto, CliInstallResultDto, CliInstallStatusDto, EntryDto,
-    EntryPreviewDto, HotkeyFailureDto, PasteFormatDto, PermissionStatusDto,
+    AiActionResultDto, AppDenyRuleDto, AppSettingsDto, CliInstallResultDto, CliInstallStatusDto,
+    EntryDto, EntryPreviewDto, HotkeyFailureDto, PasteFormatDto, PermissionStatusDto,
     PlatformCapabilitiesDto, SearchRequestDto, SearchResponseDto, SearchResultDto,
 };
 use crate::error::{CommandError, CommandResult};
@@ -590,6 +590,20 @@ pub async fn run_ai_action(
 pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettingsDto> {
     let settings = state.runtime.get_settings().await?;
     Ok(settings.into())
+}
+
+/// Canonical password-manager preset bundled with the daemon. The
+/// Settings UI calls this to learn what rules its "Block password
+/// managers" toggle should add back when the user re-enables the
+/// preset after disabling it — without a round trip the frontend
+/// would have to keep its own copy of the preset list in sync with
+/// `nagori-core`. Pure read; never touches state.
+#[tauri::command]
+pub fn password_manager_preset() -> Vec<AppDenyRuleDto> {
+    nagori_core::password_manager_preset_rules()
+        .into_iter()
+        .map(Into::into)
+        .collect()
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 
 use crate::ContentKind;
@@ -30,6 +30,209 @@ pub const MAX_PASTE_DELAY_MS: u64 = 1000;
 /// empty; above 64 layout overflows the popup and wastes the LRU.
 pub const MAX_PALETTE_ROW_COUNT: u32 = 64;
 
+/// Identifier kind for a [`AppDenyRule::SourceApp`] entry.
+///
+/// Each variant pins which `SourceApp` field the matcher should compare
+/// against. The split exists so a macOS bundle ID, a Windows executable
+/// name, and a Linux desktop ID can sit side-by-side on the same
+/// denylist without sharing an opaque string column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAppIdKind {
+    /// macOS bundle identifier (`com.example.app`).
+    MacosBundleId,
+    /// Basename of the Windows executable, without the `.exe` suffix.
+    WindowsExeName,
+    /// Fully-qualified Windows executable path. Compared with separator
+    /// + case normalisation.
+    WindowsExecutablePath,
+    /// Linux freedesktop application ID (matches `.desktop` file basename).
+    LinuxDesktopId,
+    /// Linux Flatpak application ID (`org.example.App`).
+    LinuxFlatpakId,
+    /// X11 `WM_CLASS` value (reserved for the future X11 platform path).
+    X11WmClass,
+}
+
+/// Provenance of an [`AppDenyRule`].
+///
+/// Distinguishes rules that the user explicitly added (`Manual`) from
+/// rules that came from a curated preset (`Preset`). The UI uses this
+/// to decide whether a row is editable, and the audit story benefits
+/// from being able to point at the preset that introduced a rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSource {
+    #[default]
+    Manual,
+    Preset,
+}
+
+/// A single entry on the source-app denylist.
+///
+/// `SourceApp` rules carry a typed identifier (e.g. a macOS bundle ID)
+/// and are matched by exact value against the corresponding `SourceApp`
+/// field — drift-free in the common "block 1Password" case.
+/// `Pattern` rules preserve the original free-text substring matching
+/// behaviour so existing settings keep working and advanced users have
+/// a hatch for cases the typed identifiers do not cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AppDenyRule {
+    /// Typed identifier match. Carries the kind, the identifier value,
+    /// an optional human-readable label for UI, and the rule's
+    /// provenance.
+    SourceApp {
+        kind: SourceAppIdKind,
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default)]
+        source: RuleSource,
+    },
+    /// Free-text substring match against
+    /// `name + bundle_id + executable_path`. Case-insensitive.
+    Pattern { value: String },
+}
+
+/// One entry in a bundled preset dictionary. Static, owned by the
+/// crate, expanded into [`AppDenyRule::SourceApp`] entries on demand.
+#[derive(Debug, Clone, Copy)]
+pub struct PresetEntry {
+    pub kind: SourceAppIdKind,
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
+impl PresetEntry {
+    /// Materialise this preset entry as a concrete [`AppDenyRule`].
+    /// `source` is stamped `Preset` so the settings UI can render the
+    /// row read-only and the audit log keeps track of where the rule
+    /// originated.
+    #[must_use]
+    pub fn to_rule(self) -> AppDenyRule {
+        AppDenyRule::SourceApp {
+            kind: self.kind,
+            value: self.value.to_owned(),
+            label: Some(self.label.to_owned()),
+            source: RuleSource::Preset,
+        }
+    }
+}
+
+/// Curated password-manager preset. Covers the apps the project's
+/// privacy guarantee names explicitly, with both macOS bundle IDs and
+/// Windows executable names so the rule fires on either platform.
+///
+/// Kept hardcoded (not loaded over the network) so an offline install,
+/// a hostile DNS, or a supply-chain compromise of an update channel
+/// cannot widen or narrow the policy without an app release.
+pub const PASSWORD_MANAGER_PRESET: &[PresetEntry] = &[
+    // 1Password — modern and Setapp builds share the v8 bundle ID, v7
+    // ships under its own. Listing both rules out the "I'm on the v7
+    // build" miss.
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "com.1password.1password",
+        label: "1Password",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "com.agilebits.onepassword7",
+        label: "1Password 7",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "com.agilebits.onepassword4",
+        label: "1Password (legacy)",
+    },
+    // Bitwarden desktop. The browser extensions live in the browser
+    // process, so the host browser's bundle ID would shadow them —
+    // the desktop client is the meaningful target.
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "com.bitwarden.desktop",
+        label: "Bitwarden",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "org.keepassxc.keepassxc",
+        label: "KeePassXC",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::MacosBundleId,
+        value: "com.apple.Passwords",
+        label: "Apple Passwords",
+    },
+    // Windows side: compare the executable basename (no `.exe`),
+    // case-insensitively. The exe name is the most stable identifier
+    // we can pin without bringing in MSIX / Program Files (x86) path
+    // normalisation.
+    PresetEntry {
+        kind: SourceAppIdKind::WindowsExeName,
+        value: "1password",
+        label: "1Password (Windows)",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::WindowsExeName,
+        value: "bitwarden",
+        label: "Bitwarden (Windows)",
+    },
+    PresetEntry {
+        kind: SourceAppIdKind::WindowsExeName,
+        value: "keepassxc",
+        label: "KeePassXC (Windows)",
+    },
+];
+
+/// Expand [`PASSWORD_MANAGER_PRESET`] into concrete [`AppDenyRule`]s.
+///
+/// Each rule is stamped with `RuleSource::Preset` so the Settings UI
+/// can tell preset-managed entries apart from user-typed patterns.
+/// Default settings call this so fresh installs ship with canonical
+/// bundle IDs instead of the old hand-typed display-name strings
+/// that may or may not have matched the real `SourceApp::name`.
+#[must_use]
+pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
+    PASSWORD_MANAGER_PRESET
+        .iter()
+        .copied()
+        .map(PresetEntry::to_rule)
+        .collect()
+}
+
+/// Custom deserializer for `app_denylist` that accepts both the new
+/// shape (`Vec<AppDenyRule>`) and the legacy free-text form
+/// (`Vec<String>`).
+///
+/// A pre-Phase-A settings snapshot stored each entry as a bare string;
+/// the schema is now an internally-tagged enum. The settings JSON
+/// blob lives in `SQLite`, so a hard format break would silently lose
+/// the user's rules on first launch. Reading either shape — and
+/// mapping the legacy strings to [`AppDenyRule::Pattern`] — keeps
+/// every existing rule active across the upgrade.
+pub fn deserialize_app_denylist<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AppDenyRule>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RuleOrString {
+        Rule(AppDenyRule),
+        Legacy(String),
+    }
+    let raw: Vec<RuleOrString> = Vec::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|item| match item {
+            RuleOrString::Rule(rule) => rule,
+            RuleOrString::Legacy(value) => AppDenyRule::Pattern { value },
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -53,7 +256,26 @@ pub struct AppSettings {
     pub auto_paste_enabled: bool,
     pub paste_format_default: PasteFormat,
     pub paste_delay_ms: u64,
-    pub app_denylist: Vec<String>,
+    /// Source-app denylist. Mixes typed identifier rules (preferred
+    /// for the bundled "Password managers" preset) with free-text
+    /// pattern rules (free-text substring match, retained for
+    /// backward compatibility and for cases the typed identifiers do
+    /// not cover). Deserialised through a custom path so a legacy
+    /// snapshot persisted as `Vec<String>` is read as
+    /// [`AppDenyRule::Pattern`] without losing the user's rules.
+    // `default` resolves to `password_manager_preset_rules` rather than
+    // `Vec::default`. Field-level `#[serde(default)]` would call
+    // `<Vec<AppDenyRule>>::default()` (empty), but the struct-level
+    // intent for a missing field is "user has not opted out of the
+    // preset" — i.e. fall back to the same preset the struct's
+    // `Default::default()` ships with. Without this, a pre-1.0 settings
+    // row that omitted the field would silently drop the password-
+    // manager preset on read.
+    #[serde(
+        deserialize_with = "deserialize_app_denylist",
+        default = "password_manager_preset_rules"
+    )]
+    pub app_denylist: Vec<AppDenyRule>,
     pub regex_denylist: Vec<String>,
     pub ai_provider: AiProviderSetting,
     pub ai_enabled: bool,
@@ -461,12 +683,7 @@ impl Default for AppSettings {
             auto_paste_enabled: true,
             paste_format_default: PasteFormat::default(),
             paste_delay_ms: 60,
-            app_denylist: vec![
-                "1Password".to_owned(),
-                "Bitwarden".to_owned(),
-                "KeePassXC".to_owned(),
-                "Apple Passwords".to_owned(),
-            ],
+            app_denylist: password_manager_preset_rules(),
             regex_denylist: Vec::new(),
             ai_provider: AiProviderSetting::None,
             ai_enabled: false,

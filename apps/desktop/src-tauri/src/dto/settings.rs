@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use nagori_core::settings::{AiProviderSetting, OnboardingSettings};
 use nagori_core::{
-    AppSettings, Appearance, Locale, PaletteHotkeyAction, PasteFormat, RecentOrder,
-    SecondaryHotkeyAction, SecretHandling, UpdateChannel,
+    AppDenyRule, AppSettings, Appearance, Locale, PaletteHotkeyAction, PasteFormat, RecentOrder,
+    RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -88,6 +88,132 @@ impl From<LocaleDto> for Locale {
             LocaleDto::De => Self::De,
             LocaleDto::Fr => Self::Fr,
             LocaleDto::Es => Self::Es,
+        }
+    }
+}
+
+/// Wire shape of [`SourceAppIdKind`]. Kept in lockstep with the core
+/// enum; the frontend renders the kind as part of a denylist row so
+/// the user can distinguish a bundle-ID rule from an exe-name rule.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceAppIdKindDto {
+    MacosBundleId,
+    WindowsExeName,
+    WindowsExecutablePath,
+    LinuxDesktopId,
+    LinuxFlatpakId,
+    X11WmClass,
+}
+
+impl From<SourceAppIdKind> for SourceAppIdKindDto {
+    fn from(value: SourceAppIdKind) -> Self {
+        match value {
+            SourceAppIdKind::MacosBundleId => Self::MacosBundleId,
+            SourceAppIdKind::WindowsExeName => Self::WindowsExeName,
+            SourceAppIdKind::WindowsExecutablePath => Self::WindowsExecutablePath,
+            SourceAppIdKind::LinuxDesktopId => Self::LinuxDesktopId,
+            SourceAppIdKind::LinuxFlatpakId => Self::LinuxFlatpakId,
+            SourceAppIdKind::X11WmClass => Self::X11WmClass,
+        }
+    }
+}
+
+impl From<SourceAppIdKindDto> for SourceAppIdKind {
+    fn from(value: SourceAppIdKindDto) -> Self {
+        match value {
+            SourceAppIdKindDto::MacosBundleId => Self::MacosBundleId,
+            SourceAppIdKindDto::WindowsExeName => Self::WindowsExeName,
+            SourceAppIdKindDto::WindowsExecutablePath => Self::WindowsExecutablePath,
+            SourceAppIdKindDto::LinuxDesktopId => Self::LinuxDesktopId,
+            SourceAppIdKindDto::LinuxFlatpakId => Self::LinuxFlatpakId,
+            SourceAppIdKindDto::X11WmClass => Self::X11WmClass,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSourceDto {
+    #[default]
+    Manual,
+    Preset,
+}
+
+impl From<RuleSource> for RuleSourceDto {
+    fn from(value: RuleSource) -> Self {
+        match value {
+            RuleSource::Manual => Self::Manual,
+            RuleSource::Preset => Self::Preset,
+        }
+    }
+}
+
+impl From<RuleSourceDto> for RuleSource {
+    fn from(value: RuleSourceDto) -> Self {
+        match value {
+            RuleSourceDto::Manual => Self::Manual,
+            RuleSourceDto::Preset => Self::Preset,
+        }
+    }
+}
+
+/// Wire shape of [`AppDenyRule`].
+///
+/// Internally tagged on `type` so the Svelte form can discriminate
+/// without resorting to instanceof checks. `SourceApp` rules carry
+/// the typed identifier + a human-readable label for UI; `Pattern`
+/// rules wrap the legacy free-text substring shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AppDenyRuleDto {
+    SourceApp {
+        kind: SourceAppIdKindDto,
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default)]
+        source: RuleSourceDto,
+    },
+    Pattern {
+        value: String,
+    },
+}
+
+impl From<AppDenyRule> for AppDenyRuleDto {
+    fn from(value: AppDenyRule) -> Self {
+        match value {
+            AppDenyRule::SourceApp {
+                kind,
+                value,
+                label,
+                source,
+            } => Self::SourceApp {
+                kind: kind.into(),
+                value,
+                label,
+                source: source.into(),
+            },
+            AppDenyRule::Pattern { value } => Self::Pattern { value },
+        }
+    }
+}
+
+impl From<AppDenyRuleDto> for AppDenyRule {
+    fn from(value: AppDenyRuleDto) -> Self {
+        match value {
+            AppDenyRuleDto::SourceApp {
+                kind,
+                value,
+                label,
+                source,
+            } => Self::SourceApp {
+                kind: kind.into(),
+                value,
+                label,
+                source: source.into(),
+            },
+            AppDenyRuleDto::Pattern { value } => Self::Pattern { value },
         }
     }
 }
@@ -262,7 +388,7 @@ pub struct AppSettingsDto {
     #[serde(default)]
     pub paste_format_default: PasteFormatDto,
     pub paste_delay_ms: u64,
-    pub app_denylist: Vec<String>,
+    pub app_denylist: Vec<AppDenyRuleDto>,
     pub regex_denylist: Vec<String>,
     pub ai_provider: AiProviderSettingDto,
     pub ai_enabled: bool,
@@ -359,7 +485,7 @@ impl From<AppSettings> for AppSettingsDto {
             auto_paste_enabled: value.auto_paste_enabled,
             paste_format_default: value.paste_format_default.into(),
             paste_delay_ms: value.paste_delay_ms,
-            app_denylist: value.app_denylist,
+            app_denylist: value.app_denylist.into_iter().map(Into::into).collect(),
             regex_denylist: value.regex_denylist,
             ai_provider: value.ai_provider.into(),
             ai_enabled: value.ai_enabled,
@@ -398,7 +524,7 @@ impl From<AppSettingsDto> for AppSettings {
             auto_paste_enabled: value.auto_paste_enabled,
             paste_format_default: value.paste_format_default.into(),
             paste_delay_ms: value.paste_delay_ms,
-            app_denylist: value.app_denylist,
+            app_denylist: value.app_denylist.into_iter().map(Into::into).collect(),
             regex_denylist: value.regex_denylist,
             ai_provider: value.ai_provider.into(),
             ai_enabled: value.ai_enabled,
@@ -427,8 +553,8 @@ impl From<AppSettingsDto> for AppSettings {
 #[cfg(test)]
 mod tests {
     use nagori_core::{
-        AppSettings, Appearance, ContentKind, PasteFormat, RecentOrder, SecretHandling,
-        UpdateChannel,
+        AppDenyRule, AppSettings, Appearance, ContentKind, PasteFormat, RecentOrder, RuleSource,
+        SecretHandling, SourceAppIdKind, UpdateChannel,
     };
     use serde_json::json;
     use time::OffsetDateTime;
@@ -436,6 +562,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn app_settings_dto_round_trip_preserves_every_field() {
         use nagori_core::{PaletteHotkeyAction, SecondaryHotkeyAction};
         use std::collections::BTreeMap;
@@ -460,7 +587,17 @@ mod tests {
             auto_paste_enabled: true,
             paste_format_default: PasteFormat::PlainText,
             paste_delay_ms: 80,
-            app_denylist: vec!["1Password".to_owned(), "Bitwarden".to_owned()],
+            app_denylist: vec![
+                AppDenyRule::SourceApp {
+                    kind: SourceAppIdKind::MacosBundleId,
+                    value: "com.1password.1password".to_owned(),
+                    label: Some("1Password".to_owned()),
+                    source: RuleSource::Preset,
+                },
+                AppDenyRule::Pattern {
+                    value: "Bitwarden".to_owned(),
+                },
+            ],
             regex_denylist: vec!["INTERNAL-\\d+".to_owned()],
             ai_provider: AiProviderSetting::Remote {
                 name: "anthropic".to_owned(),
@@ -589,6 +726,39 @@ mod tests {
         assert_eq!(json["pasteFormatDefault"], json!("preserve"));
         assert_eq!(json["recentOrder"], json!("by_recency"));
         assert_eq!(json["appearance"], json!("system"));
+    }
+
+    #[test]
+    fn app_deny_rule_dto_wire_shape_is_stable() {
+        // Pin the JSON layout the Svelte side reads. Source-app rules
+        // surface their kind / value / label / source verbatim;
+        // pattern rules drop the typed fields entirely. A future
+        // refactor that renames `type` to `kind` or adds an enum
+        // variant without a snake_case rename would silently break
+        // the form.
+        let source_rule = AppDenyRuleDto::SourceApp {
+            kind: SourceAppIdKindDto::MacosBundleId,
+            value: "com.example.app".to_owned(),
+            label: Some("Example".to_owned()),
+            source: RuleSourceDto::Preset,
+        };
+        let source_json = serde_json::to_value(&source_rule).expect("serialize");
+        assert_eq!(
+            source_json,
+            json!({
+                "type": "source_app",
+                "kind": "macos_bundle_id",
+                "value": "com.example.app",
+                "label": "Example",
+                "source": "preset",
+            }),
+        );
+
+        let pattern_rule = AppDenyRuleDto::Pattern {
+            value: "MyApp".to_owned(),
+        };
+        let pattern_json = serde_json::to_value(&pattern_rule).expect("serialize");
+        assert_eq!(pattern_json, json!({ "type": "pattern", "value": "MyApp" }),);
     }
 
     #[test]
