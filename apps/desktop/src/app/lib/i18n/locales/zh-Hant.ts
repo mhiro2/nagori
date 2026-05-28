@@ -106,6 +106,8 @@ export const zhHant: Messages = {
     saved: '已儲存',
     closeResult: '關閉',
     runFailed: '快速動作執行失敗。',
+    clearAllHistory: '清除全部歷史',
+    clearAllHistoryHint: '刪除所有未釘選的項目。已釘選的項目會保留。',
   },
   setup: {
     title: '設定 Nagori',

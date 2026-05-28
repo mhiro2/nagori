@@ -106,6 +106,8 @@ export const ja: Messages = {
     saved: '保存しました',
     closeResult: '閉じる',
     runFailed: 'クイックアクションの実行に失敗しました。',
+    clearAllHistory: '履歴をすべて削除',
+    clearAllHistoryHint: 'ピン留め以外のすべてのエントリを削除します。ピン留めは保持されます。',
   },
   setup: {
     title: 'Nagori をセットアップ',

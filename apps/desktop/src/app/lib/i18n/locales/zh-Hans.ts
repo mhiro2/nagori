@@ -106,6 +106,8 @@ export const zhHans: Messages = {
     saved: '已保存',
     closeResult: '关闭',
     runFailed: '快捷操作执行失败。',
+    clearAllHistory: '清除全部历史',
+    clearAllHistoryHint: '删除所有未固定的条目。已固定的条目会保留。',
   },
   setup: {
     title: '设置 Nagori',

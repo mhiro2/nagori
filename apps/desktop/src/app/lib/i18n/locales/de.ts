@@ -114,6 +114,9 @@ export const de: Messages = {
     saved: 'Gespeichert',
     closeResult: 'Schließen',
     runFailed: 'Schnellaktion fehlgeschlagen.',
+    clearAllHistory: 'Gesamten Verlauf löschen',
+    clearAllHistoryHint:
+      'Entfernt alle nicht angehefteten Einträge. Angeheftete Einträge bleiben erhalten.',
   },
   setup: {
     title: 'Nagori einrichten',

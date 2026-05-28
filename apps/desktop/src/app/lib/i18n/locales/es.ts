@@ -115,6 +115,9 @@ export const es: Messages = {
     saved: 'Guardado',
     closeResult: 'Cerrar',
     runFailed: 'La acción rápida falló.',
+    clearAllHistory: 'Borrar todo el historial',
+    clearAllHistoryHint:
+      'Elimina todas las entradas no fijadas. Las entradas fijadas se conservan.',
   },
   setup: {
     title: 'Configurar Nagori',

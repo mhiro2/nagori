@@ -9,9 +9,12 @@
     target: SearchResultDto | undefined;
     open: boolean;
     onClose: () => void;
+    // Soft-delete every non-pinned entry. Wired by the palette to the
+    // `clearAllHistory` store action; absent in standalone/test mounts.
+    onClearAll?: () => void;
   };
 
-  const { target, open, onClose }: Props = $props();
+  const { target, open, onClose, onClearAll }: Props = $props();
 
   // Narrowed to the four quick-action variants the UI surfaces. The
   // `AiActionId` enum still carries legacy LLM-only variants for
@@ -70,6 +73,20 @@
     } finally {
       pending = undefined;
     }
+  };
+
+  // Clear the whole (non-pinned) history. Closing the menu immediately is
+  // the feedback here — the palette list re-runs its query underneath and
+  // the cleared rows vanish; there is no confirmation dialog, matching the
+  // tray "Clear History" item. We intentionally do NOT gate on the visible
+  // result count: that reflects the active query/filter, not the global
+  // non-pinned history this clears, so an empty filtered view must not
+  // disable a global action. An already-empty history is a harmless no-op
+  // (the daemon returns 0).
+  const clearAll = (): void => {
+    if (!isTauri() || !onClearAll) return;
+    onClearAll();
+    onClose();
   };
 
   // Reset feedback after a beat so repeated actions still flash visibly.
@@ -200,6 +217,15 @@
         {/each}
       </ul>
 
+      {#if onClearAll}
+        <section class="danger" aria-label={t.actionMenu.clearAllHistory}>
+          <button type="button" class="danger-button" disabled={!isTauri()} onclick={clearAll}>
+            {t.actionMenu.clearAllHistory}
+          </button>
+          <p class="danger-hint">{t.actionMenu.clearAllHistoryHint}</p>
+        </section>
+      {/if}
+
       {#if runError}
         <p class="error">{runError}</p>
       {/if}
@@ -302,6 +328,34 @@
   .pending {
     margin-left: 0.25rem;
     color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .danger {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  }
+  .danger-button {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--danger, #f87171);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--danger, #f87171);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .danger-button:not(:disabled):hover {
+    background: rgba(248, 113, 113, 0.12);
+  }
+  .danger-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .danger-hint {
+    margin: 0.4rem 0 0;
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
   }
   .error {
     margin: 0.75rem 0 0;

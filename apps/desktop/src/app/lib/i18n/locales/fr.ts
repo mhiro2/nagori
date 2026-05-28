@@ -116,6 +116,9 @@ export const fr: Messages = {
     saved: 'Enregistré',
     closeResult: 'Fermer',
     runFailed: 'Échec de l’action rapide.',
+    clearAllHistory: 'Effacer tout l’historique',
+    clearAllHistoryHint:
+      'Supprime toutes les entrées non épinglées. Les entrées épinglées sont conservées.',
   },
   setup: {
     title: 'Configurer Nagori',

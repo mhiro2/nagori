@@ -199,4 +199,46 @@ describe('ActionMenu', () => {
     await user.click(getByText('Save as new entry'));
     expect(saveAiResult).toHaveBeenCalledWith('result body');
   });
+
+  it('omits the clear-all section when onClearAll is not wired', () => {
+    const { queryByText } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    expect(queryByText('Clear all history')).toBeNull();
+  });
+
+  it('clears all history and closes when the clear-all button is clicked', async () => {
+    const user = userEvent.setup();
+    const onClearAll = vi.fn();
+    const onClose = vi.fn();
+    const { getByText } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClearAll, onClose },
+    });
+    await user.click(getByText('Clear all history'));
+    expect(onClearAll).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays enabled with no target (the clear is global, not per-entry)', async () => {
+    // The action clears global non-pinned history, so it must not be gated
+    // on a current selection or on the filtered result count — an active
+    // query with zero matches still has clearable history behind it.
+    const user = userEvent.setup();
+    const onClearAll = vi.fn();
+    const { getByText } = render(ActionMenu, {
+      props: { open: true, target: undefined, onClearAll, onClose: () => {} },
+    });
+    const button = getByText('Clear all history') as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    await user.click(button);
+    expect(onClearAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the clear-all button outside the Tauri runtime', () => {
+    vi.mocked(isTauri).mockReturnValue(false);
+    const { getByText } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClearAll: vi.fn(), onClose: () => {} },
+    });
+    expect((getByText('Clear all history') as HTMLButtonElement).disabled).toBe(true);
+  });
 });

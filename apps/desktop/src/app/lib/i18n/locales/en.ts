@@ -123,6 +123,8 @@ export type Messages = {
     saved: string;
     closeResult: string;
     runFailed: string;
+    clearAllHistory: string;
+    clearAllHistoryHint: string;
   };
   setup: {
     title: string;
@@ -493,6 +495,8 @@ export const en: Messages = {
     saved: 'Saved',
     closeResult: 'Close',
     runFailed: 'Quick action failed.',
+    clearAllHistory: 'Clear all history',
+    clearAllHistoryHint: 'Removes every unpinned entry. Pinned entries are kept.',
   },
   setup: {
     title: 'Set up Nagori',

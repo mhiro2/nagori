@@ -106,6 +106,8 @@ export const ko: Messages = {
     saved: '저장됨',
     closeResult: '닫기',
     runFailed: '빠른 동작 실행에 실패했습니다.',
+    clearAllHistory: '모든 기록 지우기',
+    clearAllHistoryHint: '고정되지 않은 모든 항목을 삭제합니다. 고정된 항목은 유지됩니다.',
   },
   setup: {
     title: 'Nagori 설정',
