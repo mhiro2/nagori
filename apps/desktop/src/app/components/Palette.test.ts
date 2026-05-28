@@ -103,8 +103,8 @@ vi.mock('../stores/view.svelte', () => ({
 
 import { closePalette, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
-import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
-import { quickLookAvailable } from '../stores/capabilities.svelte';
+import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../lib/types';
+import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
 import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
@@ -209,6 +209,7 @@ beforeEach(() => {
   searchState.results = [];
   searchState.selectedIndex = 0;
   settingsState.settings = undefined;
+  capabilitiesState.capabilities = undefined;
 });
 
 afterEach(cleanup);
@@ -362,6 +363,11 @@ describe('Palette', () => {
 
   it('opens the standalone settings window on Cmd+, inside the Tauri runtime', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
+    // Pin the platform: once `isTauri()` reports true, `paletteBindingsFor`
+    // consults `navigator.userAgent` as a pre-hydration hint. On Linux/Windows
+    // CI runners jsdom's UA matches `Linux`, which swaps Cmd+, to Ctrl+, and
+    // the metaKey event below would no longer hit the binding.
+    capabilitiesState.capabilities = { platform: 'macos' } as PlatformCapabilities;
     const { container } = render(Palette);
     const input = container.querySelector('input[type="text"]');
     if (input) await fireEvent.keyDown(input, { key: ',', metaKey: true });
