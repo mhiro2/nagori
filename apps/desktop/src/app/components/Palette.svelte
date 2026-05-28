@@ -29,6 +29,7 @@
   } from '../stores/searchMultiSelect.svelte';
   import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
   import {
+    cancelPendingQuery,
     refreshCurrent,
     refreshRecent,
     scheduleQuery,
@@ -246,7 +247,15 @@
         if (actionMenuOpen) actionMenuOpen = false;
         else if (multiSelectState.selected.size > 0) clearMultiSelect();
         else if (previewExpanded) previewExpanded = false;
-        else if (isTauri()) void closePalette();
+        else if (isTauri()) {
+          // The palette's own Escape path preempts App.svelte's window
+          // listener (matched actions call `preventDefault`), so we must
+          // drop the debounced search here too — otherwise a keystroke
+          // typed milliseconds before Escape lands a `runQuery` against
+          // the now-hidden window.
+          cancelPendingQuery();
+          void closePalette();
+        }
         break;
     }
   };

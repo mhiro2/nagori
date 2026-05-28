@@ -61,6 +61,7 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   refreshCurrent: vi.fn(async () => undefined),
   refreshRecent: vi.fn(async () => undefined),
   scheduleQuery: vi.fn(),
+  cancelPendingQuery: vi.fn(),
   searchState: {
     query: '',
     results: [],

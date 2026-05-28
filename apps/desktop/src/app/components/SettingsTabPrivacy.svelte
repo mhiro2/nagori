@@ -17,7 +17,7 @@
     // denylist would silently drop every capture — render a disabled
     // banner instead of letting the user configure a rule that can't
     // fire.
-    frontmostAppCapability?: Capability;
+    frontmostAppCapability: Capability | undefined;
     appDenylistPresetEnabled: boolean;
     appDenylistPatternsText: string;
     regexDenylistText: string;

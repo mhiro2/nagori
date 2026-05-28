@@ -13,6 +13,7 @@
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
+  import { cancelPendingQuery } from './stores/searchQuery.svelte';
   import { accessibilityState, refreshSettings, settingsState } from './stores/settings.svelte';
   import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
@@ -35,6 +36,10 @@
       showPalette();
       return;
     }
+    // Drop any debounced keystroke before hiding — the timer would
+    // otherwise fire ~80 ms later against a closed palette and clobber
+    // `searchState.results` while the next invocation is being primed.
+    cancelPendingQuery();
     void hidePalette();
   };
 
@@ -43,6 +48,7 @@
     // the next hotkey press feels like a fresh invocation. Settings stays
     // visible because the user explicitly navigated there.
     if (viewState.current !== 'palette') return;
+    cancelPendingQuery();
     void hidePalette();
   };
 

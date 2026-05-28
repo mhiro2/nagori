@@ -12,7 +12,7 @@ import { describeError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
 import type { PasteFormat } from '../lib/types';
 import { clearMultiSelect, multiSelectState } from './searchMultiSelect.svelte';
-import { runQuery, searchState } from './searchQuery.svelte';
+import { cancelPendingQuery, runQuery, searchState } from './searchQuery.svelte';
 import { currentSelection } from './searchSelection';
 import { settingsState } from './settings.svelte';
 
@@ -25,6 +25,10 @@ const oppositeFormat = (): PasteFormat | undefined => {
 export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   const target = currentSelection();
   if (!target || !isTauri()) return;
+  // The Tauri command hides the palette on its way out; drop any pending
+  // debounced search so a keystroke typed within the 80 ms window before
+  // Enter doesn't land a runQuery against the now-hidden webview.
+  cancelPendingQuery();
   try {
     await pasteEntryCmd(target.id, format);
   } catch (err) {
@@ -39,6 +43,9 @@ export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
 export const copySelection = async (): Promise<void> => {
   const target = currentSelection();
   if (!target || !isTauri()) return;
+  // Same hide-on-return contract as `confirmSelection` — cancel before
+  // the IPC so the debounce can't fire post-hide.
+  cancelPendingQuery();
   try {
     await copyEntryCmd(target.id);
   } catch (err) {
