@@ -31,7 +31,7 @@
   };
 
   let {
-    settings,
+    settings = $bindable(),
     capabilities,
     hotkeyError,
     t,

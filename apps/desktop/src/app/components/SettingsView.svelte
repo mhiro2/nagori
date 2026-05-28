@@ -789,73 +789,84 @@
     <form onsubmit={(e) => e.preventDefault()}>
       {#if activeTab === 'setup'}
         <SetupRoute />
-      {/if}
-      {#if activeTab === 'general'}
-        <SettingsTabGeneral
-          {settings}
-          {capabilities}
-          {hotkeyError}
-          {t}
-          debounceNumberMs={DEBOUNCE_NUMBER_MS}
-          paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}
-          secondaryHotkeyActions={SECONDARY_HOTKEY_ACTIONS}
-          {scheduleSave}
-          {clampRowCount}
-          {onLocaleChange}
-          {onAppearanceChange}
-          {onGlobalHotkeyChange}
-          {onPaletteHotkeyChange}
-          {onSecondaryHotkeyChange}
-        />
-      {/if}
+      {:else}
+        <!--
+          Wrapper that anchors the shared form-control CSS to the non-Setup
+          tabs only. `:global(...)` selectors below traverse into the tab
+          child components, so anchoring on `.settings` would also reach
+          into `PermissionCard` (rendered by SetupRoute) and override its
+          button styling. The setup branch never renders this wrapper, so
+          its scoped CSS stays isolated.
+        -->
+        <div class="tab-content">
+          {#if activeTab === 'general'}
+            <SettingsTabGeneral
+              bind:settings
+              {capabilities}
+              {hotkeyError}
+              {t}
+              debounceNumberMs={DEBOUNCE_NUMBER_MS}
+              paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}
+              secondaryHotkeyActions={SECONDARY_HOTKEY_ACTIONS}
+              {scheduleSave}
+              {clampRowCount}
+              {onLocaleChange}
+              {onAppearanceChange}
+              {onGlobalHotkeyChange}
+              {onPaletteHotkeyChange}
+              {onSecondaryHotkeyChange}
+            />
+          {/if}
 
-      {#if activeTab === 'privacy'}
-        <SettingsTabPrivacy
-          {settings}
-          {t}
-          bind:appDenylistText
-          bind:regexDenylistText
-          {regexDenylistErrors}
-          debounceNumberMs={DEBOUNCE_NUMBER_MS}
-          debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
-          {scheduleSave}
-          {describeRegexError}
-          {toggleCaptureKind}
-        />
-      {/if}
+          {#if activeTab === 'privacy'}
+            <SettingsTabPrivacy
+              bind:settings
+              {t}
+              bind:appDenylistText
+              bind:regexDenylistText
+              {regexDenylistErrors}
+              debounceNumberMs={DEBOUNCE_NUMBER_MS}
+              debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
+              {scheduleSave}
+              {describeRegexError}
+              {toggleCaptureKind}
+            />
+          {/if}
 
-      {#if activeTab === 'cli'}
-        <SettingsTabCli
-          {settings}
-          {t}
-          {cliStatus}
-          {cliInstalling}
-          {cliStatusMessage}
-          {cliStatusKind}
-          {scheduleSave}
-          {runCliInstall}
-        />
-      {/if}
+          {#if activeTab === 'cli'}
+            <SettingsTabCli
+              bind:settings
+              {t}
+              {cliStatus}
+              {cliInstalling}
+              {cliStatusMessage}
+              {cliStatusKind}
+              {scheduleSave}
+              {runCliInstall}
+            />
+          {/if}
 
-      {#if activeTab === 'advanced'}
-        <SettingsTabAdvanced
-          {settings}
-          {t}
-          {capabilities}
-          {capabilityRows}
-          {updateChecking}
-          {updateStatus}
-          {updateStatusKind}
-          {updateReleaseUrl}
-          {updateDownloadSupported}
-          debounceNumberMs={DEBOUNCE_NUMBER_MS}
-          {scheduleSave}
-          {runUpdateCheck}
-          {capabilityStatusLabel}
-          {capabilityDetail}
-          {showSetupButton}
-          onOpenSetup={() => (activeTab = 'setup')}
-        />
+          {#if activeTab === 'advanced'}
+            <SettingsTabAdvanced
+              bind:settings
+              {t}
+              {capabilities}
+              {capabilityRows}
+              {updateChecking}
+              {updateStatus}
+              {updateStatusKind}
+              {updateReleaseUrl}
+              {updateDownloadSupported}
+              debounceNumberMs={DEBOUNCE_NUMBER_MS}
+              {scheduleSave}
+              {runUpdateCheck}
+              {capabilityStatusLabel}
+              {capabilityDetail}
+              {showSetupButton}
+              onOpenSetup={() => (activeTab = 'setup')}
+            />
+          {/if}
+        </div>
       {/if}
     </form>
   {:else if !loading && !error}
@@ -938,10 +949,12 @@
     gap: 0.25rem;
     border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
   }
-  /* Fieldsets are direct children of the form; without an explicit gap they
-     stack flush against each other. A column flex layout adds vertical
-     breathing room between CAPTURE / PALETTE DISPLAY / HOTKEYS / … */
-  form {
+  /* Fieldsets are direct children of the form (Setup branch) or of the
+     `.tab-content` wrapper (non-Setup tabs). Both layers use a column
+     flex layout so the gap between CAPTURE / PALETTE DISPLAY / HOTKEYS / …
+     applies regardless of which level renders the fieldsets. */
+  form,
+  .tab-content {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
@@ -965,7 +978,7 @@
      have to re-declare its own copy of these rules. The selectors are
      still bounded by `.settings` so they cannot leak into the palette
      or other windows. */
-  .settings :global(fieldset) {
+  .tab-content :global(fieldset) {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -973,44 +986,44 @@
     border-radius: 8px;
     padding: 0.75rem 1rem;
   }
-  .settings :global(legend) {
+  .tab-content :global(legend) {
     padding: 0 0.25rem;
     color: var(--muted, rgba(255, 255, 255, 0.6));
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
-  .settings :global(label) {
+  .tab-content :global(label) {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     font-size: 0.875rem;
   }
-  .settings :global(label.stack),
-  .settings :global(.stack) {
+  .tab-content :global(label.stack),
+  .tab-content :global(.stack) {
     flex-direction: column;
     align-items: stretch;
     gap: 0.35rem;
   }
-  .settings :global(.stack) {
+  .tab-content :global(.stack) {
     display: flex;
     font-size: 0.875rem;
   }
-  .settings :global(.help) {
+  .tab-content :global(.help) {
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
   }
-  .settings :global(.hint) {
+  .tab-content :global(.hint) {
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
   }
-  .settings :global(.status) {
+  .tab-content :global(.status) {
     color: var(--muted, rgba(255, 255, 255, 0.5));
   }
-  .settings :global(.status.error) {
+  .tab-content :global(.status.error) {
     color: var(--danger, #f87171);
   }
-  .settings :global(.status.warning) {
+  .tab-content :global(.status.warning) {
     margin: 0;
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--warning, #f59e0b);
@@ -1020,9 +1033,9 @@
     font-size: 0.75rem;
     line-height: 1.4;
   }
-  .settings :global(input[type='number']),
-  .settings :global(textarea),
-  .settings :global(select) {
+  .tab-content :global(input[type='number']),
+  .tab-content :global(textarea),
+  .tab-content :global(select) {
     flex: 1;
     min-width: 0;
     padding: 0.45rem 0.6rem;
@@ -1035,10 +1048,10 @@
   /* Cap fixed-width-feeling controls with max-width (not flex-basis) so
      they behave correctly inside both row and column flex containers —
      basis would otherwise be interpreted as height in `.stack` rows. */
-  .settings :global(input[type='number']) {
+  .tab-content :global(input[type='number']) {
     max-width: 9rem;
   }
-  .settings :global(select) {
+  .tab-content :global(select) {
     max-width: 22rem;
   }
   /* WKWebView desaturates native form controls when the window goes
@@ -1049,7 +1062,7 @@
      SVG drawn in `--bg` so it pops against the accent fill.
      CSP note: `img-src` already allows `data:`, so the inline SVG
      loads without a manifest change. */
-  .settings :global(input[type='checkbox']) {
+  .tab-content :global(input[type='checkbox']) {
     appearance: none;
     -webkit-appearance: none;
     width: 1rem;
@@ -1065,24 +1078,24 @@
     flex-shrink: 0;
     vertical-align: middle;
   }
-  .settings :global(input[type='checkbox']:checked) {
+  .tab-content :global(input[type='checkbox']:checked) {
     background-color: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3.5 3.5L13 5.5'/></svg>");
   }
-  .settings :global(input[type='checkbox']:focus-visible) {
+  .tab-content :global(input[type='checkbox']:focus-visible) {
     outline: 2px solid var(--accent, #6c8dff);
     outline-offset: 1px;
   }
-  .settings :global(input[type='checkbox']:disabled) {
+  .tab-content :global(input[type='checkbox']:disabled) {
     opacity: 0.55;
     cursor: not-allowed;
   }
-  .settings :global(textarea) {
+  .tab-content :global(textarea) {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     resize: vertical;
   }
-  .settings :global(.actions) {
+  .tab-content :global(.actions) {
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -1091,7 +1104,7 @@
        `align-items: stretch`. */
     align-self: flex-start;
   }
-  .settings :global(.actions button) {
+  .tab-content :global(.actions button) {
     padding: 0.45rem 1.2rem;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -1104,24 +1117,24 @@
   /* Lower-emphasis variant used by maintenance actions like "Check for
      update" — same footprint, but reads as a secondary control rather
      than competing with the primary action for attention. */
-  .settings :global(.actions button.secondary) {
+  .tab-content :global(.actions button.secondary) {
     background: transparent;
     color: inherit;
     border-color: var(--border, rgba(255, 255, 255, 0.18));
     font-weight: 500;
   }
-  .settings :global(.actions button.compact) {
+  .tab-content :global(.actions button.compact) {
     padding: 0.25rem 0.7rem;
     font-size: 0.8rem;
   }
-  .settings :global(.actions button:not(:disabled):hover) {
+  .tab-content :global(.actions button:not(:disabled):hover) {
     filter: brightness(1.08);
   }
-  .settings :global(.actions button.secondary:not(:disabled):hover) {
+  .tab-content :global(.actions button.secondary:not(:disabled):hover) {
     background: rgba(255, 255, 255, 0.06);
     filter: none;
   }
-  .settings :global(.actions button:disabled) {
+  .tab-content :global(.actions button:disabled) {
     opacity: 0.5;
     cursor: not-allowed;
   }

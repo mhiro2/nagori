@@ -14,7 +14,7 @@
   };
 
   let {
-    settings,
+    settings = $bindable(),
     t,
     cliStatus,
     cliInstalling,

@@ -22,7 +22,7 @@
   };
 
   let {
-    settings,
+    settings = $bindable(),
     t,
     appDenylistText = $bindable(),
     regexDenylistText = $bindable(),

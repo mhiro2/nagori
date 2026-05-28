@@ -30,7 +30,7 @@
   };
 
   let {
-    settings,
+    settings = $bindable(),
     t,
     capabilities,
     capabilityRows,
