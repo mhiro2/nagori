@@ -88,6 +88,7 @@ pub(crate) const TRAY_ID: &str = "nagori-main";
 const ID_TOGGLE_PALETTE: &str = "tray.toggle_palette";
 const ID_TOGGLE_CAPTURE: &str = "tray.toggle_capture";
 const ID_OPEN_SETTINGS: &str = "tray.open_settings";
+const ID_CLEAR_HISTORY: &str = "tray.clear_history";
 const ID_QUIT: &str = "tray.quit";
 
 /// Cache of the menu items we need to rebuild labels on. Stored in
@@ -114,8 +115,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, ID_TOGGLE_CAPTURE, "Pause Capture", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, ID_OPEN_SETTINGS, "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
+    let clear_history_item =
+        MenuItem::with_id(app, ID_CLEAR_HISTORY, "Clear History", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, ID_QUIT, "Quit Nagori", true, None::<&str>)?;
 
+    // The separator sets the destructive "Clear History" + "Quit" group off
+    // from the everyday Show Palette / Capture / Settings entries above.
     let menu = Menu::with_items(
         app,
         &[
@@ -123,6 +128,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &toggle_capture_item,
             &settings_item,
             &separator,
+            &clear_history_item,
             &quit_item,
         ],
     )?;
@@ -250,6 +256,7 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
         ID_TOGGLE_PALETTE => toggle_main_palette(app),
         ID_TOGGLE_CAPTURE => toggle_capture(app),
         ID_OPEN_SETTINGS => open_settings(app),
+        ID_CLEAR_HISTORY => clear_history(app),
         ID_QUIT => app.exit(0),
         _ => {}
     }
@@ -273,6 +280,38 @@ fn toggle_capture(app: &AppHandle) {
         };
         if let Err(err) = runtime.set_capture_enabled(!current).await {
             tracing::warn!(error = %err, "tray_toggle_capture_save_failed");
+        }
+    });
+}
+
+fn clear_history(app: &AppHandle) {
+    use tauri::Emitter;
+    use tauri_plugin_notification::NotificationExt;
+
+    // Mirrors the `SecondaryHotkeyAction::ClearHistory` flow in `hotkey.rs`:
+    // soft-delete every non-pinned entry (pinned rows are intentionally
+    // preserved), drop the tracked last-pasted pointer so a later repaste
+    // doesn't resolve an evicted id, and confirm with a notification since
+    // the tray click gives no other feedback. We additionally emit
+    // `CLIPBOARD_CHANGED_EVENT` so an open palette re-runs its query and the
+    // cleared rows disappear live rather than lingering until the next open.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        match state.runtime.clear_non_pinned().await {
+            Ok(purged) => {
+                state.clear_last_pasted();
+                let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Nagori")
+                    .body(format!("Cleared {purged} non-pinned entries."))
+                    .show();
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "tray_clear_history_failed");
+            }
         }
     });
 }

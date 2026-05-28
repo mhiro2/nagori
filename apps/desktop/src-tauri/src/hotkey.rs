@@ -411,6 +411,12 @@ pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: Secon
             SecondaryHotkeyAction::ClearHistory => match state.runtime.clear_non_pinned().await {
                 Ok(purged) => {
                     state.clear_last_pasted();
+                    // Re-run an open palette's query so the cleared rows
+                    // disappear live, matching the tray "Clear History" item.
+                    {
+                        use tauri::Emitter;
+                        let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+                    }
                     let _ = app
                         .notification()
                         .builder()

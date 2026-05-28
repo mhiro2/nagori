@@ -1333,7 +1333,10 @@ change.
   bar, Windows notification area, Linux StatusNotifierItem /
   `libayatana-appindicator`) with *Show Palette*, *Pause Capture* /
   *Resume Capture* (label tracks `capture_enabled`), *Settings…*,
-  *Quit Nagori*. The settings entry emits the Tauri event
+  *Clear History* (soft-deletes every non-pinned entry — pinned rows are
+  kept — then emits `CLIPBOARD_CHANGED_EVENT` so an open palette refreshes
+  and confirms via a notification, mirroring the `ClearHistory` secondary
+  hotkey), *Quit Nagori*. The settings entry emits the Tauri event
   `nagori://navigate` with payload `"settings"`; the frontend listens
   via `@tauri-apps/api/event` and switches its route. Visibility is
   gated by `AppSettings.show_in_menu_bar`; toggling the setting hides
