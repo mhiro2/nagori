@@ -305,6 +305,25 @@ mod tests {
     }
 
     #[test]
+    fn url_normalization_preserves_case_sensitive_path_and_query() {
+        // Path / query / fragment are case-sensitive per RFC 3986 §6.2.2.1:
+        // only the scheme and host may be lower-cased. Forcing the whole URL
+        // to lowercase used to break S3 signed URLs (signature in query),
+        // GitHub blob hashes, and CamelCase paths — none of which should
+        // dedupe against their lowercased twin.
+        let content = ClipboardContent::from_plain_text(
+            "https://Example.COM/CasePath/File.PDF?Sig=AbCdEf#Section",
+        );
+        let ClipboardContent::Url(url) = content else {
+            panic!("expected URL content");
+        };
+        assert_eq!(
+            url.normalized,
+            "https://example.com/CasePath/File.PDF?Sig=AbCdEf#Section"
+        );
+    }
+
+    #[test]
     fn plain_text_classifies_multiline_code() {
         let content = ClipboardContent::from_plain_text("fn main() {\n    println!(\"hi\");\n}");
 

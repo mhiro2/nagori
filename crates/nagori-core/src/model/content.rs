@@ -88,9 +88,15 @@ impl UrlContent {
             return None;
         }
         let parsed = Url::parse(trimmed).ok()?;
+        // `Url::parse` already lower-cases the scheme and host per WHATWG, so
+        // we only need to strip a trailing slash for dedupe parity. Lower-
+        // casing the whole string here used to break case-sensitive paths
+        // and query parameters (e.g. signed S3 URLs whose signature is
+        // mixed-case), so the canonical form is taken verbatim from the
+        // parser.
         Some(Self {
             raw: raw.to_owned(),
-            normalized: parsed.as_str().trim_end_matches('/').to_lowercase(),
+            normalized: parsed.as_str().trim_end_matches('/').to_owned(),
             domain: parsed.domain().map(ToOwned::to_owned),
         })
     }
