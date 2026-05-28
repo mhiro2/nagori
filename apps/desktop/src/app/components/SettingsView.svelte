@@ -10,7 +10,7 @@
     updateSettings,
   } from '../lib/commands';
   import { describeError } from '../lib/errors';
-  import { LOCALE_PREFERENCES, i18nState, messages, setLocale } from '../lib/i18n/index.svelte';
+  import { i18nState, messages, setLocale } from '../lib/i18n/index.svelte';
   import type { Messages } from '../lib/i18n/locales/en';
   import {
     MAX_USER_REGEX_LEN,
@@ -30,18 +30,18 @@
     type ContentKind,
     type LocaleSetting,
     type PaletteHotkeyAction,
-    type PasteFormat,
     type PlatformCapabilities,
-    type RecentOrder,
     type SecondaryHotkeyAction,
-    type SecretHandling,
   } from '../lib/types';
   import SetupRoute from '../routes/SetupRoute.svelte';
   import { refreshCapabilities } from '../stores/capabilities.svelte';
   import { hotkeyFailureState } from '../stores/hotkeyFailure.svelte';
   import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
-  import HotkeyInput from './HotkeyInput.svelte';
+  import SettingsTabAdvanced from './SettingsTabAdvanced.svelte';
+  import SettingsTabCli from './SettingsTabCli.svelte';
+  import SettingsTabGeneral from './SettingsTabGeneral.svelte';
+  import SettingsTabPrivacy from './SettingsTabPrivacy.svelte';
 
   type Tab = 'setup' | 'general' | 'privacy' | 'cli' | 'advanced';
 
@@ -114,6 +114,27 @@
     if (value.length === 0) delete next[action];
     else next[action] = value;
     (settings[field] as Partial<Record<Action, string>>) = next;
+  };
+
+  const onGlobalHotkeyChange = (next: string): void => {
+    if (!settings) return;
+    settings.globalHotkey = next;
+    lastBlurredGlobalHotkey = next;
+    scheduleSave(0);
+  };
+
+  const onPaletteHotkeyChange = (action: PaletteHotkeyAction, next: string): void => {
+    if (!settings) return;
+    setOverride('paletteHotkeys', action, next);
+    lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
+    scheduleSave(0);
+  };
+
+  const onSecondaryHotkeyChange = (action: SecondaryHotkeyAction, next: string): void => {
+    if (!settings) return;
+    setOverride('secondaryHotkeys', action, next);
+    lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
+    scheduleSave(0);
   };
 
   const clampRowCount = (raw: number): number => {
@@ -770,556 +791,71 @@
         <SetupRoute />
       {/if}
       {#if activeTab === 'general'}
-        <fieldset>
-          <legend>{t.settings.capture.legend}</legend>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.captureEnabled}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.capture.enabled}
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.autoPasteEnabled}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.capture.autoPaste}
-          </label>
-          <label class="field-row">
-            <span>{t.settings.capture.pasteFormatDefault}</span>
-            <select
-              bind:value={settings.pasteFormatDefault}
-              onchange={(e) => {
-                if (!settings) return;
-                settings.pasteFormatDefault = (e.target as HTMLSelectElement).value as PasteFormat;
-                scheduleSave(0);
-              }}
-            >
-              <option value="preserve">{t.settings.capture.pasteFormatOptions.preserve}</option>
-              <option value="plain_text">{t.settings.capture.pasteFormatOptions.plain_text}</option>
-            </select>
-          </label>
-          <label class="field-row">
-            <span>{t.settings.capture.hotkey}</span>
-            <HotkeyInput
-              value={settings.globalHotkey}
-              platform={capabilities?.platform}
-              target="tauri-global"
-              placeholder={t.settings.hotkeys.placeholder}
-              recordingLabel={t.settings.hotkeys.recordingHint}
-              clearLabel={t.settings.hotkeys.clearAriaLabel}
-              onChange={(next) => {
-                if (!settings) return;
-                settings.globalHotkey = next;
-                lastBlurredGlobalHotkey = next;
-                scheduleSave(0);
-              }}
-            />
-          </label>
-          {#if hotkeyError}
-            <p class="status error">{hotkeyError}</p>
-          {/if}
-          <label class="stack">
-            <span>
-              <input
-                type="checkbox"
-                bind:checked={settings.captureInitialClipboardOnLaunch}
-                onchange={() => scheduleSave(0)}
-              />
-              {t.settings.capture.captureInitialClipboard}
-            </span>
-            <span class="help">{t.settings.capture.captureInitialClipboardHelp}</span>
-          </label>
-        </fieldset>
-
-        <fieldset>
-          <legend>{t.settings.display.legend}</legend>
-          <label class="field-row">
-            <span>{t.settings.display.rowCount}</span>
-            <input
-              type="number"
-              min="3"
-              max="20"
-              step="1"
-              value={settings.paletteRowCount}
-              oninput={(e) => {
-                if (!settings) return;
-                settings.paletteRowCount = clampRowCount(
-                  Number((e.target as HTMLInputElement).value),
-                );
-                scheduleSave(DEBOUNCE_NUMBER_MS);
-              }}
-            />
-          </label>
-          <span class="help">{t.settings.display.rowCountHelp}</span>
-          <label class="stack">
-            <span>
-              <input
-                type="checkbox"
-                bind:checked={settings.showPreviewPane}
-                onchange={() => scheduleSave(0)}
-              />
-              {t.settings.display.previewPane}
-            </span>
-            <span class="help">{t.settings.display.previewPaneHelp}</span>
-          </label>
-        </fieldset>
-
-        <fieldset>
-          <legend>{t.settings.hotkeys.legend}</legend>
-          <p class="subhead">{t.settings.hotkeys.paletteHeading}</p>
-          <p class="help">{t.settings.hotkeys.paletteHelp}</p>
-          <div class="hotkey-grid">
-            {#each PALETTE_HOTKEY_ACTIONS as action (action)}
-              <label class="hotkey-row">
-                <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
-                <HotkeyInput
-                  value={settings.paletteHotkeys[action] ?? ''}
-                  platform={capabilities?.platform}
-                  target="palette-binding"
-                  placeholder={t.settings.hotkeys.placeholder}
-                  recordingLabel={t.settings.hotkeys.recordingHint}
-                  clearLabel={t.settings.hotkeys.clearAriaLabel}
-                  onChange={(next) => {
-                    if (!settings) return;
-                    setOverride('paletteHotkeys', action, next);
-                    lastBlurredPaletteHotkeys = { ...settings.paletteHotkeys };
-                    scheduleSave(0);
-                  }}
-                />
-              </label>
-            {/each}
-          </div>
-          <p class="subhead">{t.settings.hotkeys.secondaryHeading}</p>
-          <p class="help">{t.settings.hotkeys.secondaryHelp}</p>
-          <div class="hotkey-grid">
-            {#each SECONDARY_HOTKEY_ACTIONS as action (action)}
-              <label class="hotkey-row">
-                <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
-                <HotkeyInput
-                  value={settings.secondaryHotkeys[action] ?? ''}
-                  platform={capabilities?.platform}
-                  target="tauri-global"
-                  placeholder={t.settings.hotkeys.placeholder}
-                  recordingLabel={t.settings.hotkeys.recordingHint}
-                  clearLabel={t.settings.hotkeys.clearAriaLabel}
-                  onChange={(next) => {
-                    if (!settings) return;
-                    setOverride('secondaryHotkeys', action, next);
-                    lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
-                    scheduleSave(0);
-                  }}
-                />
-              </label>
-            {/each}
-          </div>
-        </fieldset>
-
-        <fieldset>
-          <legend>{t.settings.appearance.legend}</legend>
-          <label class="field-row">
-            <span>{t.settings.appearance.locale}</span>
-            <select
-              bind:value={settings.locale}
-              onchange={(e) =>
-                onLocaleChange((e.target as HTMLSelectElement).value as LocaleSetting)}
-            >
-              {#each LOCALE_PREFERENCES as code (code)}
-                <option value={code}>{t.locales[code]}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="field-row">
-            <span>{t.settings.appearance.theme}</span>
-            <select
-              bind:value={settings.appearance}
-              onchange={(e) =>
-                onAppearanceChange((e.target as HTMLSelectElement).value as Appearance)}
-            >
-              <option value="system">{t.settings.appearance.themeOptions.system}</option>
-              <option value="light">{t.settings.appearance.themeOptions.light}</option>
-              <option value="dark">{t.settings.appearance.themeOptions.dark}</option>
-            </select>
-          </label>
-          <label class="field-row">
-            <span>{t.settings.appearance.recentOrder}</span>
-            <select
-              bind:value={settings.recentOrder}
-              onchange={(e) => {
-                if (!settings) return;
-                settings.recentOrder = (e.target as HTMLSelectElement).value as RecentOrder;
-                scheduleSave(0);
-              }}
-            >
-              <option value="by_recency"
-                >{t.settings.appearance.recentOrderOptions.by_recency}</option
-              >
-              <option value="by_use_count"
-                >{t.settings.appearance.recentOrderOptions.by_use_count}</option
-              >
-              <option value="pinned_first_then_recency"
-                >{t.settings.appearance.recentOrderOptions.pinned_first_then_recency}</option
-              >
-            </select>
-          </label>
-        </fieldset>
-
-        <fieldset>
-          <legend>{t.settings.integration.legend}</legend>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.autoLaunch}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.integration.autoLaunch}
-          </label>
-          <p class="help">{t.settings.integration.autoLaunchHelp}</p>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.showInMenuBar}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.integration.menuBar}
-          </label>
-          <p class="help">{t.settings.integration.menuBarHelp}</p>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.clearOnQuit}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.integration.clearOnQuit}
-          </label>
-          <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
-        </fieldset>
+        <SettingsTabGeneral
+          {settings}
+          {capabilities}
+          {hotkeyError}
+          {t}
+          debounceNumberMs={DEBOUNCE_NUMBER_MS}
+          paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}
+          secondaryHotkeyActions={SECONDARY_HOTKEY_ACTIONS}
+          {scheduleSave}
+          {clampRowCount}
+          {onLocaleChange}
+          {onAppearanceChange}
+          {onGlobalHotkeyChange}
+          {onPaletteHotkeyChange}
+          {onSecondaryHotkeyChange}
+        />
       {/if}
 
       {#if activeTab === 'privacy'}
-        <fieldset>
-          <legend>{t.settings.privacy.legend}</legend>
-          <label class="stack">
-            {t.settings.privacy.appDenylist}
-            <textarea
-              rows="4"
-              bind:value={appDenylistText}
-              oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
-            ></textarea>
-            <span class="help">{t.settings.privacy.appDenylistHelp}</span>
-          </label>
-          <label class="stack">
-            {t.settings.privacy.regexDenylist}
-            <textarea
-              rows="4"
-              bind:value={regexDenylistText}
-              oninput={() => scheduleSave(DEBOUNCE_TEXTAREA_MS)}
-              aria-invalid={regexDenylistErrors.length > 0 || undefined}
-              aria-describedby={regexDenylistErrors.length > 0
-                ? 'regex-denylist-help regex-denylist-errors regex-denylist-autosave'
-                : 'regex-denylist-help regex-denylist-autosave'}
-            ></textarea>
-            <span class="help" id="regex-denylist-help">
-              {t.settings.privacy.regexDenylistHelp}
-            </span>
-            {#if regexDenylistErrors.length > 0}
-              <ul id="regex-denylist-errors" class="status error regex-errors" role="alert">
-                {#each regexDenylistErrors as err (`${err.index}:${err.kind}`)}
-                  <li>
-                    <strong>
-                      {t.settings.privacy.regexErrors.lineLabel.replace(
-                        '{line}',
-                        String(err.index + 1),
-                      )}
-                    </strong>
-                    {describeRegexError(err)}
-                  </li>
-                {/each}
-              </ul>
-              <span class="help" id="regex-denylist-autosave">
-                {t.settings.privacy.regexDenylistAutosaveHint}
-              </span>
-            {:else}
-              <span class="help" id="regex-denylist-autosave" hidden></span>
-            {/if}
-          </label>
-          <label class="stack">
-            {t.settings.privacy.secretHandling}
-            <select
-              value={settings.secretHandling}
-              onchange={(e) => {
-                if (!settings) return;
-                const select = e.currentTarget as HTMLSelectElement;
-                const next = select.value as SecretHandling;
-                if (next === 'store_full' && settings.secretHandling !== 'store_full') {
-                  // Plaintext storage is irreversible against a compromised
-                  // disk image — gate it behind an explicit confirm so a
-                  // misclick or muscle memory in a long settings session
-                  // can't silently flip the durable copy from redacted to
-                  // raw. The DB has no encryption-at-rest, so the cost of
-                  // an unintentional toggle is recoverable secrets.
-                  const ok = window.confirm(t.settings.privacy.storeFullConfirm);
-                  if (!ok) {
-                    select.value = settings.secretHandling;
-                    return;
-                  }
-                }
-                settings.secretHandling = next;
-                scheduleSave(0);
-              }}
-            >
-              <option value="block">{t.settings.privacy.secretHandlingOptions.block}</option>
-              <option value="store_redacted"
-                >{t.settings.privacy.secretHandlingOptions.store_redacted}</option
-              >
-              <option value="store_full"
-                >{t.settings.privacy.secretHandlingOptions.store_full}</option
-              >
-            </select>
-            <span class="help">{t.settings.privacy.secretHandlingHelp}</span>
-            {#if settings.secretHandling === 'store_full'}
-              <p class="status warning" role="alert">
-                {t.settings.privacy.storeFullWarning}
-              </p>
-            {/if}
-          </label>
-          <div class="stack">
-            <span>{t.settings.privacy.captureKinds}</span>
-            <div class="checkbox-grid">
-              {#each CONTENT_KINDS as kind (kind)}
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={settings.captureKinds.includes(kind)}
-                    onchange={(e) =>
-                      toggleCaptureKind(kind, (e.target as HTMLInputElement).checked)}
-                  />
-                  {t.settings.privacy.captureKindOptions[kind]}
-                </label>
-              {/each}
-            </div>
-            <span class="help">{t.settings.privacy.captureKindsHelp}</span>
-          </div>
-        </fieldset>
-
-        <fieldset>
-          <legend>{t.settings.retention.legend}</legend>
-          <label>
-            {t.settings.retention.maxCount}
-            <input
-              type="number"
-              min="0"
-              step="100"
-              bind:value={settings.historyRetentionCount}
-              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-            />
-          </label>
-          <label class="stack">
-            {t.settings.retention.maxDays}
-            <input
-              type="number"
-              min="0"
-              step="1"
-              placeholder={t.settings.retention.maxDaysPlaceholder}
-              value={settings.historyRetentionDays ?? 0}
-              oninput={(e) => {
-                if (!settings) return;
-                const next = Number((e.target as HTMLInputElement).value);
-                settings.historyRetentionDays = Number.isFinite(next) && next > 0 ? next : null;
-                scheduleSave(DEBOUNCE_NUMBER_MS);
-              }}
-            />
-            <span class="help">{t.settings.retention.maxDaysHelp}</span>
-          </label>
-          <label class="stack">
-            {t.settings.retention.maxTotalBytes}
-            <input
-              type="number"
-              min="0"
-              step="1048576"
-              placeholder={t.settings.retention.maxTotalBytesPlaceholder}
-              value={settings.maxTotalBytes ?? 0}
-              oninput={(e) => {
-                if (!settings) return;
-                const next = Number((e.target as HTMLInputElement).value);
-                settings.maxTotalBytes = Number.isFinite(next) && next > 0 ? next : null;
-                scheduleSave(DEBOUNCE_NUMBER_MS);
-              }}
-            />
-            <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
-          </label>
-        </fieldset>
+        <SettingsTabPrivacy
+          {settings}
+          {t}
+          bind:appDenylistText
+          bind:regexDenylistText
+          {regexDenylistErrors}
+          debounceNumberMs={DEBOUNCE_NUMBER_MS}
+          debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
+          {scheduleSave}
+          {describeRegexError}
+          {toggleCaptureKind}
+        />
       {/if}
 
       {#if activeTab === 'cli'}
-        <fieldset>
-          <legend>{t.settings.cli.legend}</legend>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.cliIpcEnabled}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.cli.ipcEnabled}
-          </label>
-        </fieldset>
-        <fieldset>
-          <legend>{t.settings.cli.install.legend}</legend>
-          <p class="help">{t.settings.cli.install.help}</p>
-          {#if cliStatus}
-            {#if !cliStatus.supported}
-              <p class="status hint">{t.settings.cli.install.unsupported}</p>
-            {:else if !cliStatus.bundled}
-              <p class="status hint">{t.settings.cli.install.unavailable}</p>
-            {:else}
-              <p class="status">
-                {cliStatus.installed
-                  ? t.settings.cli.install.statusInstalled.replace(
-                      '{path}',
-                      cliStatus.installedPath,
-                    )
-                  : t.settings.cli.install.statusNotInstalled}
-              </p>
-              <div class="actions">
-                <button
-                  type="button"
-                  class="secondary compact"
-                  disabled={cliInstalling}
-                  onclick={runCliInstall}
-                >
-                  {#if cliInstalling}
-                    {t.settings.cli.install.installing}
-                  {:else if cliStatus.installed}
-                    {t.settings.cli.install.reinstall}
-                  {:else}
-                    {t.settings.cli.install.button}
-                  {/if}
-                </button>
-              </div>
-              {#if cliStatus.installed && !cliStatus.onPath}
-                <p class="status">
-                  {t.settings.cli.install.notOnPath.replace('{dir}', cliStatus.binDir)}
-                </p>
-                <pre class="cli-path-export"><code>{t.settings.cli.install.pathExport}</code></pre>
-              {/if}
-            {/if}
-          {/if}
-          {#if cliStatusMessage}
-            <p class="status" class:error={cliStatusKind === 'error'}>{cliStatusMessage}</p>
-          {/if}
-        </fieldset>
+        <SettingsTabCli
+          {settings}
+          {t}
+          {cliStatus}
+          {cliInstalling}
+          {cliStatusMessage}
+          {cliStatusKind}
+          {scheduleSave}
+          {runCliInstall}
+        />
       {/if}
 
       {#if activeTab === 'advanced'}
-        <fieldset>
-          <legend>{t.settings.retention.legend}</legend>
-          <label>
-            {t.settings.retention.maxBytes}
-            <input
-              type="number"
-              min="0"
-              step="1024"
-              bind:value={settings.maxEntrySizeBytes}
-              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-            />
-          </label>
-          <label>
-            {t.settings.retention.pasteDelayMs}
-            <input
-              type="number"
-              min="0"
-              max="1000"
-              step="10"
-              bind:value={settings.pasteDelayMs}
-              oninput={() => scheduleSave(DEBOUNCE_NUMBER_MS)}
-            />
-          </label>
-        </fieldset>
-        {#if capabilities}
-          <fieldset>
-            <legend>{t.settings.capabilities.legend}</legend>
-            <p class="help">{t.settings.capabilities.help}</p>
-            <div class="capability-meta">
-              <span
-                ><strong>{t.settings.capabilities.platform}:</strong> {capabilities.platform}</span
-              >
-              <span><strong>{t.settings.capabilities.tier}:</strong> {capabilities.tier}</span>
-            </div>
-            <table class="capability-table">
-              <thead>
-                <tr>
-                  <th scope="col">{t.settings.capabilities.columns.capability}</th>
-                  <th scope="col">{t.settings.capabilities.columns.status}</th>
-                  <th scope="col">{t.settings.capabilities.columns.detail}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each capabilityRows as row (row.key)}
-                  <tr>
-                    <th scope="row" class="capability-label">{row.label}</th>
-                    <td>
-                      <span class="capability-status" data-status={row.capability.status}>
-                        {capabilityStatusLabel(row.capability)}
-                      </span>
-                    </td>
-                    <td class="capability-detail">
-                      {#if showSetupButton(row.capability)}
-                        <button
-                          type="button"
-                          class="capability-setup-link"
-                          onclick={() => (activeTab = 'setup')}
-                        >
-                          {t.settings.capabilities.openSetup}
-                        </button>
-                      {:else}
-                        {capabilityDetail(row.capability)}
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </fieldset>
-        {/if}
-        <fieldset>
-          <legend>{t.settings.updates.legend}</legend>
-          <label>
-            <input
-              type="checkbox"
-              bind:checked={settings.autoUpdateCheck}
-              onchange={() => scheduleSave(0)}
-            />
-            {t.settings.updates.autoCheck}
-          </label>
-          <p class="help">
-            {t.settings.updates.channel}: <strong>{settings.updateChannel}</strong>
-          </p>
-          <div class="actions">
-            <button
-              type="button"
-              class="secondary compact"
-              disabled={updateChecking}
-              onclick={runUpdateCheck}
-            >
-              {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
-            </button>
-          </div>
-          {#if updateStatus}
-            <p class="status" class:error={updateStatusKind === 'error'}>
-              {updateStatus}
-              {#if updateReleaseUrl}
-                <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
-                  {updateDownloadSupported
-                    ? t.settings.updates.viewRelease
-                    : t.settings.updates.downloadManual}
-                </a>
-              {/if}
-            </p>
-          {/if}
-        </fieldset>
+        <SettingsTabAdvanced
+          {settings}
+          {t}
+          {capabilities}
+          {capabilityRows}
+          {updateChecking}
+          {updateStatus}
+          {updateStatusKind}
+          {updateReleaseUrl}
+          {updateDownloadSupported}
+          debounceNumberMs={DEBOUNCE_NUMBER_MS}
+          {scheduleSave}
+          {runUpdateCheck}
+          {capabilityStatusLabel}
+          {capabilityDetail}
+          {showSetupButton}
+          onOpenSetup={() => (activeTab = 'setup')}
+        />
       {/if}
     </form>
   {:else if !loading && !error}
@@ -1397,32 +933,6 @@
   .status.error {
     color: var(--danger, #f87171);
   }
-  .status.warning {
-    margin: 0;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--warning, #f59e0b);
-    border-radius: 6px;
-    background: rgba(245, 158, 11, 0.08);
-    color: var(--warning, #f59e0b);
-    font-size: 0.75rem;
-    line-height: 1.4;
-  }
-  .regex-errors {
-    margin: 0;
-    padding: 0.4rem 0.75rem 0.4rem 1.5rem;
-    border: 1px solid var(--danger, #f87171);
-    border-radius: 6px;
-    background: rgba(248, 113, 113, 0.08);
-    font-size: 0.75rem;
-    line-height: 1.4;
-    list-style: disc;
-  }
-  .regex-errors li + li {
-    margin-top: 0.25rem;
-  }
-  .regex-errors strong {
-    margin-right: 0.35rem;
-  }
   .tabs {
     display: flex;
     gap: 0.25rem;
@@ -1449,7 +959,13 @@
     color: var(--fg, #f5f5f5);
     border-bottom-color: var(--accent, #6c8dff);
   }
-  fieldset {
+  /* Shared form-control rules are hoisted to `:global(.settings …)` so
+     they reach into the per-tab child components. Svelte scoped CSS does
+     not traverse component boundaries, so without this every tab would
+     have to re-declare its own copy of these rules. The selectors are
+     still bounded by `.settings` so they cannot leak into the palette
+     or other windows. */
+  .settings :global(fieldset) {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -1457,87 +973,56 @@
     border-radius: 8px;
     padding: 0.75rem 1rem;
   }
-  legend {
+  .settings :global(legend) {
     padding: 0 0.25rem;
     color: var(--muted, rgba(255, 255, 255, 0.6));
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
-  label {
+  .settings :global(label) {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     font-size: 0.875rem;
   }
-  label.stack,
-  .stack {
+  .settings :global(label.stack),
+  .settings :global(.stack) {
     flex-direction: column;
     align-items: stretch;
     gap: 0.35rem;
   }
-  .stack {
+  .settings :global(.stack) {
     display: flex;
     font-size: 0.875rem;
   }
-  /* Two-column grid for labeled controls in the General tab: keeps the
-     label width fixed so adjacent rows' inputs line up vertically, and
-     caps the control width so selects/text inputs don't stretch to the
-     fieldset edge. */
-  label.field-row {
-    display: grid;
-    grid-template-columns: minmax(8rem, 12rem) minmax(8rem, 14rem);
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-  }
-  label.field-row > input,
-  label.field-row > select {
-    width: 100%;
-    max-width: none;
-  }
-  .checkbox-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-    gap: 0.35rem 0.75rem;
-  }
-  .help {
+  .settings :global(.help) {
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
   }
-  .cli-path-export {
-    margin: 0.25rem 0 0;
-    padding: 0.4rem 0.6rem;
+  .settings :global(.hint) {
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+  .settings :global(.status) {
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .settings :global(.status.error) {
+    color: var(--danger, #f87171);
+  }
+  .settings :global(.status.warning) {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--warning, #f59e0b);
     border-radius: 6px;
-    background: var(--surface-muted, rgba(255, 255, 255, 0.06));
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--warning, #f59e0b);
     font-size: 0.75rem;
-    white-space: pre-wrap;
-    word-break: break-all;
-    user-select: all;
+    line-height: 1.4;
   }
-  .subhead {
-    margin: 0.25rem 0 0;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--muted, rgba(255, 255, 255, 0.65));
-  }
-  .hotkey-grid {
-    display: grid;
-    grid-template-columns: minmax(11rem, 1fr) 2fr;
-    gap: 0.4rem 0.6rem;
-  }
-  .hotkey-row {
-    display: contents;
-  }
-  .hotkey-label {
-    align-self: center;
-    font-size: 0.875rem;
-  }
-  input[type='number'],
-  textarea,
-  select {
+  .settings :global(input[type='number']),
+  .settings :global(textarea),
+  .settings :global(select) {
     flex: 1;
     min-width: 0;
     padding: 0.45rem 0.6rem;
@@ -1550,10 +1035,10 @@
   /* Cap fixed-width-feeling controls with max-width (not flex-basis) so
      they behave correctly inside both row and column flex containers —
      basis would otherwise be interpreted as height in `.stack` rows. */
-  input[type='number'] {
+  .settings :global(input[type='number']) {
     max-width: 9rem;
   }
-  select {
+  .settings :global(select) {
     max-width: 22rem;
   }
   /* WKWebView desaturates native form controls when the window goes
@@ -1564,7 +1049,7 @@
      SVG drawn in `--bg` so it pops against the accent fill.
      CSP note: `img-src` already allows `data:`, so the inline SVG
      loads without a manifest change. */
-  input[type='checkbox'] {
+  .settings :global(input[type='checkbox']) {
     appearance: none;
     -webkit-appearance: none;
     width: 1rem;
@@ -1580,24 +1065,24 @@
     flex-shrink: 0;
     vertical-align: middle;
   }
-  input[type='checkbox']:checked {
+  .settings :global(input[type='checkbox']:checked) {
     background-color: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3.5 3.5L13 5.5'/></svg>");
   }
-  input[type='checkbox']:focus-visible {
+  .settings :global(input[type='checkbox']:focus-visible) {
     outline: 2px solid var(--accent, #6c8dff);
     outline-offset: 1px;
   }
-  input[type='checkbox']:disabled {
+  .settings :global(input[type='checkbox']:disabled) {
     opacity: 0.55;
     cursor: not-allowed;
   }
-  textarea {
+  .settings :global(textarea) {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     resize: vertical;
   }
-  .actions {
+  .settings :global(.actions) {
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -1606,7 +1091,7 @@
        `align-items: stretch`. */
     align-self: flex-start;
   }
-  .actions button {
+  .settings :global(.actions button) {
     padding: 0.45rem 1.2rem;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -1619,123 +1104,25 @@
   /* Lower-emphasis variant used by maintenance actions like "Check for
      update" — same footprint, but reads as a secondary control rather
      than competing with the primary action for attention. */
-  .actions button.secondary {
+  .settings :global(.actions button.secondary) {
     background: transparent;
     color: inherit;
     border-color: var(--border, rgba(255, 255, 255, 0.18));
     font-weight: 500;
   }
-  .actions button.compact {
+  .settings :global(.actions button.compact) {
     padding: 0.25rem 0.7rem;
     font-size: 0.8rem;
   }
-  .actions button:not(:disabled):hover {
+  .settings :global(.actions button:not(:disabled):hover) {
     filter: brightness(1.08);
   }
-  .actions button.secondary:not(:disabled):hover {
+  .settings :global(.actions button.secondary:not(:disabled):hover) {
     background: rgba(255, 255, 255, 0.06);
     filter: none;
   }
-  .actions button:disabled {
+  .settings :global(.actions button:disabled) {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  .hint {
-    color: var(--muted, rgba(255, 255, 255, 0.5));
-    font-size: 0.75rem;
-  }
-  .capability-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem 1.25rem;
-    font-size: 0.8125rem;
-  }
-  .capability-table {
-    border-collapse: collapse;
-    width: 100%;
-    font-size: 0.8125rem;
-    table-layout: auto;
-  }
-  .capability-table th,
-  .capability-table td {
-    padding: 0.25rem 0.6rem 0.25rem 0;
-    text-align: left;
-    font-weight: normal;
-    vertical-align: baseline;
-  }
-  .capability-table thead th:nth-child(1),
-  .capability-table tbody th {
-    white-space: nowrap;
-    width: 1%;
-  }
-  .capability-table thead th:nth-child(2),
-  .capability-table tbody td:nth-child(2) {
-    white-space: nowrap;
-    width: 1%;
-  }
-  .capability-table thead th {
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--muted, rgba(255, 255, 255, 0.6));
-    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-  }
-  .capability-table tbody th {
-    font-weight: 500;
-  }
-  .capability-label {
-    color: var(--fg, #f5f5f5);
-  }
-  .capability-status {
-    display: inline-block;
-    white-space: nowrap;
-    padding: 0.1rem 0.55rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--muted, rgba(255, 255, 255, 0.7));
-  }
-  .capability-status[data-status='available'] {
-    color: #4ade80;
-    border-color: rgba(74, 222, 128, 0.4);
-    background: rgba(74, 222, 128, 0.08);
-  }
-  .capability-status[data-status='unsupported'] {
-    color: var(--danger, #f87171);
-    border-color: rgba(248, 113, 113, 0.4);
-    background: rgba(248, 113, 113, 0.08);
-  }
-  .capability-status[data-status='requiresPermission'],
-  .capability-status[data-status='requiresExternalTool'],
-  .capability-status[data-status='experimental'] {
-    color: var(--warning, #f59e0b);
-    border-color: rgba(245, 158, 11, 0.4);
-    background: rgba(245, 158, 11, 0.08);
-  }
-  .capability-detail {
-    color: var(--muted, rgba(255, 255, 255, 0.6));
-    font-size: 0.75rem;
-  }
-  .capability-setup-link {
-    appearance: none;
-    background: transparent;
-    border: none;
-    padding: 0;
-    margin: 0;
-    color: var(--accent, #60a5fa);
-    font: inherit;
-    font-size: 0.75rem;
-    text-decoration: underline;
-    cursor: pointer;
-  }
-  .capability-setup-link:hover,
-  .capability-setup-link:focus-visible {
-    color: var(--accent-strong, #93c5fd);
-  }
-  .capability-setup-link:focus-visible {
-    outline: 2px solid var(--accent, #60a5fa);
-    outline-offset: 2px;
-    border-radius: 2px;
   }
 </style>
