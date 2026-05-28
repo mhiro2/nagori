@@ -196,8 +196,14 @@ export const ko: Messages = {
     },
     privacy: {
       legend: '필터',
-      appDenylist: '앱 차단 목록',
-      appDenylistHelp: '한 줄에 한 앱 이름. 해당 앱의 복사는 캡처되지 않습니다.',
+      appDenylistPasswordManagers: '비밀번호 관리자 차단',
+      appDenylistPasswordManagersHelp:
+        '번들 프리셋(1Password, Bitwarden, KeePassXC, Apple Passwords)에서의 복사를 정확한 앱 식별자로 차단합니다. 프리셋 내용은 고정되어 편집할 수 없습니다. 비밀번호 관리자에서 클립보드로 붙여넣을 일이 없다면 켜둔 채로 두는 것을 권장합니다.',
+      appDenylistPatterns: '사용자 지정 패턴',
+      appDenylistPatternsHelp:
+        '한 줄에 부분 문자열 하나씩 입력합니다. 소스 앱 이름, 번들 ID, 실행 파일 경로 중 하나라도 포함되면 캡처되지 않습니다(대소문자 구분 없음). 프리셋에 없는 앱(Dashlane / LastPass / 사내 도구 등)을 차단하고 싶을 때 여기에 추가하세요.',
+      appDenylistUnsupported:
+        '현재 데스크톱 세션은 최상위 앱 정보를 제공하지 않으므로 앱별 차단이 동작하지 않습니다. 아래의 정규식 차단 목록이나 캡처 종류로 캡처 범위를 제한하세요.',
       regexDenylist: '정규식 차단 목록',
       regexDenylistHelp:
         '한 줄에 하나의 패턴(예: INTERNAL-\\d+). 일치하는 내용은 기록에 저장되지 않습니다. 각 패턴은 256바이트(UTF-8) 이하, 이스케이프하지 않은 ( ) 중첩은 최대 3단계까지 유지하세요. 복잡한 규칙은 그룹을 중첩하지 말고 여러 줄로 나눠 작성합니다.',

@@ -5,6 +5,7 @@ import { invoke } from './tauri';
 import type {
   AiActionId,
   AiActionResult,
+  AppDenyRule,
   AppSettings,
   CliInstallResult,
   CliInstallStatus,
@@ -73,6 +74,14 @@ export const runAiAction = (action: AiActionId, entryId: string): Promise<AiActi
   invoke('run_ai_action', { action, entryId });
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
+
+// Canonical password-manager preset shipped with the daemon. The Privacy
+// tab's "Block password managers" toggle calls this on mount so it can
+// re-add the bundled rules if the user toggles the preset back on after
+// disabling it — without it the frontend would have to keep its own
+// duplicate of the preset list in sync with `nagori-core`.
+export const passwordManagerPreset = (): Promise<AppDenyRule[]> =>
+  invoke('password_manager_preset');
 
 // Serialize `update_settings` IPC at the module level. `save_settings`
 // inside the daemon writes through a multi-connection SQLite pool, so two

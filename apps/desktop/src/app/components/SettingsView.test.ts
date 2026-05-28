@@ -25,6 +25,7 @@ vi.mock('../lib/commands', () => ({
   checkForUpdates: vi.fn(),
   cliInstallStatus: vi.fn(),
   installCli: vi.fn(),
+  passwordManagerPreset: vi.fn(async () => []),
 }));
 
 // `onMount` reaches into `@tauri-apps/api/event` to subscribe to hotkey
@@ -43,6 +44,7 @@ import {
 } from '../lib/commands';
 import { isTauri, subscribe } from '../lib/tauri';
 import type {
+  AppDenyRule,
   AppSettings,
   CliInstallStatus,
   PermissionStatus,
@@ -62,7 +64,11 @@ const baseSettings = (): AppSettings => ({
   autoPasteEnabled: true,
   pasteFormatDefault: 'preserve',
   pasteDelayMs: 50,
-  appDenylist: ['1Password'],
+  // Use an empty list so the "Block password managers" toggle starts
+  // OFF and the patterns textarea starts blank — keeps the per-test
+  // typing assertions focused on the exact value the test wrote, not
+  // the bundled preset that would otherwise round-trip alongside it.
+  appDenylist: [] as AppDenyRule[],
   regexDenylist: [],
   aiProvider: 'none',
   aiEnabled: false,
@@ -258,13 +264,24 @@ describe('SettingsView', () => {
     const hotkeyButton = container.querySelector('.hotkey-input .display') as HTMLButtonElement;
     expect(hotkeyButton.textContent?.trim()).toBe('⇧⌘V');
 
-    // Switching to Privacy reveals the denylist textarea hydrated from the
-    // app-denylist payload.
-    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    // Switching to Privacy reveals the patterns textarea hydrated from
+    // the `Pattern` rules in the app-denylist payload. The fixture
+    // injects a single `pattern` rule so the value is deterministic;
+    // preset / source_app rules don't surface in this textarea.
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...baseSettings(),
+      appDenylist: [{ type: 'pattern', value: '1Password' }],
+    });
+    cleanup();
+    const view2 = render(SettingsView);
+    await view2.findByRole('button', { name: 'Back to palette' });
+    const privacyTab = await view2.findByRole('tab', { name: 'Privacy' });
     await fireEvent.click(privacyTab);
     await waitFor(() => {
-      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-      expect(textarea?.value).toBe('1Password');
+      const textareas = view2.container.querySelectorAll('textarea');
+      // First textarea on Privacy is the custom-patterns one; the
+      // regex denylist is rendered immediately below it.
+      expect((textareas[0] as HTMLTextAreaElement)?.value).toBe('1Password');
     });
   });
 
@@ -272,7 +289,7 @@ describe('SettingsView', () => {
     const { findByRole, queryByText } = render(SettingsView);
     const privacyTab = await findByRole('tab', { name: 'Privacy' });
     await fireEvent.click(privacyTab);
-    expect(queryByText('App denylist')).toBeTruthy();
+    expect(queryByText('Custom patterns')).toBeTruthy();
     expect(privacyTab.getAttribute('aria-selected')).toBe('true');
   });
 
@@ -444,7 +461,7 @@ describe('SettingsView', () => {
       expect(updateSettings).toHaveBeenCalledTimes(1);
     });
     const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.appDenylist).toEqual(['NewApp']);
+    expect(sent?.appDenylist).toEqual([{ type: 'pattern', value: 'NewApp' }]);
   });
 
   it('defers the unmount flush until any in-flight save resolves', async () => {
@@ -1202,7 +1219,7 @@ describe('SettingsView', () => {
     events.fire({
       ...baseSettings(),
       captureEnabled: false,
-      appDenylist: ['Bitwarden'],
+      appDenylist: [{ type: 'pattern', value: 'Bitwarden' }],
     });
 
     // Textarea is untouched (user-edited).
@@ -1215,7 +1232,7 @@ describe('SettingsView', () => {
       expect(updateSettings).toHaveBeenCalledTimes(1);
     });
     const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
-    expect(sent?.appDenylist).toEqual(['KeePassXC']);
+    expect(sent?.appDenylist).toEqual([{ type: 'pattern', value: 'KeePassXC' }]);
     // And the adopted captureEnabled went out on the same snapshot.
     expect(sent?.captureEnabled).toBe(false);
   });

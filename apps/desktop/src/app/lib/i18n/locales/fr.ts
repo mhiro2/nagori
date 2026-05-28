@@ -209,9 +209,14 @@ export const fr: Messages = {
     },
     privacy: {
       legend: 'Filtres',
-      appDenylist: 'Liste de refus d’apps',
-      appDenylistHelp:
-        'Un nom d’application source par ligne. Les captures depuis ces apps sont ignorées.',
+      appDenylistPasswordManagers: 'Bloquer les gestionnaires de mots de passe',
+      appDenylistPasswordManagersHelp:
+        'Rejette les captures provenant des gestionnaires de mots de passe fournis (1Password, Bitwarden, KeePassXC, Apple Passwords) via des identifiants exacts. Le préréglage est figé et non modifiable. Recommandé ; gardez l’option activée sauf si vous devez réellement coller depuis un gestionnaire de mots de passe via le presse-papiers.',
+      appDenylistPatterns: 'Motifs personnalisés',
+      appDenylistPatternsHelp:
+        'Une sous-chaîne par ligne — toute capture dont le nom d’app source, l’ID de bundle ou le chemin d’exécutable contient l’une d’elles est ignorée (insensible à la casse). Utilisez cette liste pour les apps hors préréglage, par exemple Dashlane, LastPass ou des outils internes.',
+      appDenylistUnsupported:
+        'Votre session de bureau n’expose pas l’app au premier plan, donc le blocage par app ne correspondrait silencieusement à rien. Utilisez plutôt la liste de refus regex ou les types de capture ci-dessous pour restreindre ce qui est capturé.',
       regexDenylist: 'Liste de refus regex',
       regexDenylistHelp:
         'Un motif par ligne (ex. INTERNAL-\\d+). Toute correspondance est ignorée avant d’atteindre l’historique. Chaque motif doit faire moins de 256 octets (UTF-8) et ne pas dépasser 3 niveaux de parenthèses ( ) non échappées ; scindez les règles complexes sur plusieurs lignes plutôt que d’imbriquer des groupes.',

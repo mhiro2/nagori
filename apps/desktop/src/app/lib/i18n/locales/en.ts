@@ -199,8 +199,11 @@ export type Messages = {
     };
     privacy: {
       legend: string;
-      appDenylist: string;
-      appDenylistHelp: string;
+      appDenylistPasswordManagers: string;
+      appDenylistPasswordManagersHelp: string;
+      appDenylistPatterns: string;
+      appDenylistPatternsHelp: string;
+      appDenylistUnsupported: string;
       regexDenylist: string;
       regexDenylistHelp: string;
       secretHandling: string;
@@ -585,8 +588,14 @@ export const en: Messages = {
     },
     privacy: {
       legend: 'Filters',
-      appDenylist: 'App denylist',
-      appDenylistHelp: 'One source-app name per line. Captures from these apps are dropped.',
+      appDenylistPasswordManagers: 'Block password managers',
+      appDenylistPasswordManagersHelp:
+        'Drops captures from bundled password managers (1Password, Bitwarden, KeePassXC, Apple Passwords) by exact app identifier. The preset is fixed; recommended on unless you actively copy from a password manager via the clipboard.',
+      appDenylistPatterns: 'Custom patterns',
+      appDenylistPatternsHelp:
+        'One substring per line — captures whose source-app name, bundle ID, or executable path contains any of these are dropped (case-insensitive). Use this to cover apps not in the preset above, such as Dashlane, LastPass, or internal tools.',
+      appDenylistUnsupported:
+        'Your desktop session does not expose the frontmost app, so per-app blocking would silently match nothing. Use the regex denylist or Capture kinds below to restrict what is captured.',
       regexDenylist: 'Regex denylist',
       regexDenylistHelp:
         'One pattern per line (e.g. INTERNAL-\\d+). Anything that matches is dropped before it reaches history. Keep each pattern under 256 bytes (UTF-8) and limit unescaped ( ) groups to 3 levels — split complex rules across multiple lines instead of nesting them.',

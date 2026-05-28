@@ -4,6 +4,7 @@
   import {
     CONTENT_KINDS,
     type AppSettings,
+    type Capability,
     type ContentKind,
     type SecretHandling,
   } from '../lib/types';
@@ -11,12 +12,20 @@
   type Props = {
     settings: AppSettings;
     t: Messages;
-    appDenylistText: string;
+    // Whether the host platform can identify the frontmost app at all.
+    // Linux/Wayland reports `unsupported` here, in which case the app
+    // denylist would silently drop every capture — render a disabled
+    // banner instead of letting the user configure a rule that can't
+    // fire.
+    frontmostAppCapability?: Capability;
+    appDenylistPresetEnabled: boolean;
+    appDenylistPatternsText: string;
     regexDenylistText: string;
     regexDenylistErrors: UserRegexError[];
     debounceNumberMs: number;
     debounceTextareaMs: number;
     scheduleSave: (delay: number) => void;
+    onPasswordManagerPresetToggle: (next: boolean) => void;
     describeRegexError: (err: UserRegexError) => string;
     toggleCaptureKind: (kind: ContentKind, enabled: boolean) => void;
   };
@@ -24,24 +33,53 @@
   let {
     settings = $bindable(),
     t,
-    appDenylistText = $bindable(),
+    frontmostAppCapability,
+    appDenylistPresetEnabled = $bindable(),
+    appDenylistPatternsText = $bindable(),
     regexDenylistText = $bindable(),
     regexDenylistErrors,
     debounceNumberMs,
     debounceTextareaMs,
     scheduleSave,
+    onPasswordManagerPresetToggle,
     describeRegexError,
     toggleCaptureKind,
   }: Props = $props();
+
+  // True on Linux/Wayland where neither X11 nor Wayland exposes the
+  // focused window's owning process. Without that the daemon can't tell
+  // which app a capture came from, so denylist matching is a no-op.
+  // Mirror this state in the UI by disabling the controls and showing
+  // a banner so the user knows why the section is inert.
+  const denylistDisabled = $derived(frontmostAppCapability?.status === 'unsupported');
 </script>
 
 <fieldset>
   <legend>{t.settings.privacy.legend}</legend>
+  {#if denylistDisabled}
+    <p class="status warning" role="status">
+      {t.settings.privacy.appDenylistUnsupported}
+    </p>
+  {/if}
+  <label>
+    <input
+      type="checkbox"
+      checked={appDenylistPresetEnabled}
+      disabled={denylistDisabled || undefined}
+      onchange={(e) => onPasswordManagerPresetToggle((e.target as HTMLInputElement).checked)}
+    />
+    {t.settings.privacy.appDenylistPasswordManagers}
+  </label>
+  <span class="help">{t.settings.privacy.appDenylistPasswordManagersHelp}</span>
   <label class="stack">
-    {t.settings.privacy.appDenylist}
-    <textarea rows="4" bind:value={appDenylistText} oninput={() => scheduleSave(debounceTextareaMs)}
+    {t.settings.privacy.appDenylistPatterns}
+    <textarea
+      rows="4"
+      bind:value={appDenylistPatternsText}
+      disabled={denylistDisabled || undefined}
+      oninput={() => scheduleSave(debounceTextareaMs)}
     ></textarea>
-    <span class="help">{t.settings.privacy.appDenylistHelp}</span>
+    <span class="help">{t.settings.privacy.appDenylistPatternsHelp}</span>
   </label>
   <label class="stack">
     {t.settings.privacy.regexDenylist}

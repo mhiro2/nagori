@@ -207,9 +207,14 @@ export const de: Messages = {
     },
     privacy: {
       legend: 'Filter',
-      appDenylist: 'App-Sperrliste',
-      appDenylistHelp:
-        'Ein Quell-App-Name pro Zeile. Erfassungen aus diesen Apps werden verworfen.',
+      appDenylistPasswordManagers: 'Passwortmanager blockieren',
+      appDenylistPasswordManagersHelp:
+        'Verwirft Erfassungen aus den mitgelieferten Passwortmanagern (1Password, Bitwarden, KeePassXC, Apple Passwords) anhand exakter App-Identifier. Die Preset-Einträge sind fest und nicht editierbar. Empfohlen — lass die Option an, sofern du nicht aktiv aus einem Passwortmanager über die Zwischenablage einfügen musst.',
+      appDenylistPatterns: 'Eigene Muster',
+      appDenylistPatternsHelp:
+        'Ein Teilstring pro Zeile — Erfassungen werden verworfen, wenn Quell-App-Name, Bundle-ID oder Programmpfad einen Eintrag enthält (case-insensitiv). Nutze diese Liste für Apps außerhalb des Presets, z. B. Dashlane, LastPass oder interne Tools.',
+      appDenylistUnsupported:
+        'Deine Desktop-Sitzung legt die Vordergrund-App nicht offen, daher würde App-spezifisches Blockieren stillschweigend nichts treffen. Nutze stattdessen die Regex-Sperrliste oder die Erfassungstypen unten, um Erfassungen einzuschränken.',
       regexDenylist: 'Regex-Sperrliste',
       regexDenylistHelp:
         'Ein Muster pro Zeile (z. B. INTERNAL-\\d+). Treffer landen nicht im Verlauf. Jedes Muster sollte unter 256 Byte (UTF-8) lang sein und maximal 3 Ebenen unmaskierter ( )-Klammern enthalten – komplexe Regeln bitte auf mehrere Zeilen aufteilen, statt Gruppen zu verschachteln.',

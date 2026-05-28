@@ -196,8 +196,14 @@ export const ja: Messages = {
     },
     privacy: {
       legend: 'フィルタ',
-      appDenylist: 'アプリ拒否リスト',
-      appDenylistHelp: '1 行に 1 つアプリ名を記入。これらのアプリからのコピーは取り込みません。',
+      appDenylistPasswordManagers: 'パスワードマネージャをブロック',
+      appDenylistPasswordManagersHelp:
+        '同梱プリセット（1Password / Bitwarden / KeePassXC / Apple Passwords）からのコピーを正確なアプリ識別子で除外します。プリセットの内容は固定で編集できません。クリップボード経由でこれらから貼り付ける必要がない限り、有効のままにしておくことを推奨します。',
+      appDenylistPatterns: 'カスタムパターン',
+      appDenylistPatternsHelp:
+        '1 行に 1 つ部分文字列を記入してください。送信元アプリ名・バンドル ID・実行ファイルパスのいずれかに含まれる場合は取り込みません（大文字小文字は区別しません）。プリセットに無いアプリ（Dashlane / LastPass / 社内ツール等）をブロックしたい場合にここへ追加してください。',
+      appDenylistUnsupported:
+        'このデスクトップ環境は最前面のアプリ情報を提供しないため、アプリ単位のブロックは機能しません。下の正規表現拒否リストや「取り込む種類」で取り込み範囲を制限してください。',
       regexDenylist: '正規表現拒否リスト',
       regexDenylistHelp:
         '1 行に 1 つパターンを記入（例: INTERNAL-\\d+）。一致した内容は履歴に保存されません。各パターンは 256 バイト（UTF-8）以内、エスケープしていない ( ) の入れ子は 3 段までに収めてください。複雑なルールは入れ子にせず、複数行に分けて書きます。',

@@ -190,8 +190,14 @@ export const zhHans: Messages = {
     },
     privacy: {
       legend: '过滤器',
-      appDenylist: '应用拒绝列表',
-      appDenylistHelp: '每行填写一个来源应用名。来自这些应用的复制不会被捕获。',
+      appDenylistPasswordManagers: '屏蔽密码管理器',
+      appDenylistPasswordManagersHelp:
+        '使用精确的应用标识符屏蔽内置预设(1Password、Bitwarden、KeePassXC、Apple Passwords)的复制。预设内容固定,无法编辑。除非你确实需要从密码管理器通过剪贴板粘贴,否则建议保持开启。',
+      appDenylistPatterns: '自定义模式',
+      appDenylistPatternsHelp:
+        '每行填写一个子串。来源应用名、Bundle ID 或可执行文件路径中包含任意一项时不会被捕获(不区分大小写)。可用于屏蔽预设以外的应用,例如 Dashlane、LastPass、公司内部工具等。',
+      appDenylistUnsupported:
+        '当前桌面会话不暴露前台应用,按应用屏蔽将无法生效。请使用下方的正则拒绝列表或“捕获类型”来限定捕获范围。',
       regexDenylist: '正则表达式拒绝列表',
       regexDenylistHelp:
         '每行填写一个正则（例如 INTERNAL-\\d+）。匹配到的内容不会进入历史记录。单个正则应不超过 256 字节（UTF-8），未转义的 ( ) 嵌套不超过 3 层；复杂规则请拆成多行，而不是嵌套分组。',

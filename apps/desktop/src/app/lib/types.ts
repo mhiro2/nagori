@@ -157,6 +157,37 @@ export type SearchResponse = {
 
 export type AiProviderSetting = 'none' | 'local' | { remote: { name: string } };
 
+// Mirrors `SourceAppIdKind` (snake_case via serde) in `nagori-core`.
+// Identifies which platform-specific identifier an `AppDenyRule` carries
+// so the daemon can match exact bundle IDs / exe basenames instead of
+// substring-matching a free-form display name.
+export type SourceAppIdKind =
+  | 'macos_bundle_id'
+  | 'windows_exe_name'
+  | 'windows_executable_path'
+  | 'linux_desktop_id'
+  | 'linux_flatpak_id'
+  | 'x11_wm_class';
+
+// `manual` (default) flags rules typed in by the user; `preset` flags
+// rules pulled from a bundled list (e.g. password managers). The
+// distinction lets the UI tell preset-managed entries apart from
+// custom patterns when re-rendering the form.
+export type RuleSource = 'manual' | 'preset';
+
+// Internally-tagged union: `type: 'source_app'` carries a typed identifier
+// (bundle ID, exe name) for exact-match blocking, `type: 'pattern'` keeps
+// the legacy substring behaviour so old user-typed entries still work.
+export type AppDenyRule =
+  | {
+      type: 'source_app';
+      kind: SourceAppIdKind;
+      value: string;
+      label?: string | null;
+      source?: RuleSource;
+    }
+  | { type: 'pattern'; value: string };
+
 // Concrete UI locales that have a translation dictionary on disk.
 export type Locale = 'en' | 'ja' | 'ko' | 'zh-Hans' | 'zh-Hant' | 'de' | 'fr' | 'es';
 
@@ -207,7 +238,7 @@ export type AppSettings = {
   autoPasteEnabled: boolean;
   pasteFormatDefault: PasteFormat;
   pasteDelayMs: number;
-  appDenylist: string[];
+  appDenylist: AppDenyRule[];
   regexDenylist: string[];
   aiProvider: AiProviderSetting;
   aiEnabled: boolean;

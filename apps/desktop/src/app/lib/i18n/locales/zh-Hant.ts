@@ -190,8 +190,14 @@ export const zhHant: Messages = {
     },
     privacy: {
       legend: '篩選器',
-      appDenylist: '應用程式拒絕清單',
-      appDenylistHelp: '每行一個來源應用程式名稱。來自這些應用程式的複製不會被擷取。',
+      appDenylistPasswordManagers: '封鎖密碼管理器',
+      appDenylistPasswordManagersHelp:
+        '使用精確的應用程式識別碼封鎖內建預設(1Password、Bitwarden、KeePassXC、Apple Passwords)的複製。預設內容為固定,無法編輯。除非你需要透過剪貼簿從密碼管理器貼上,否則建議保持開啟。',
+      appDenylistPatterns: '自訂樣式',
+      appDenylistPatternsHelp:
+        '每行一個子字串。當來源應用程式名稱、Bundle ID 或執行檔路徑包含其中任一項時不會被擷取(不分大小寫)。可用於封鎖預設之外的應用程式,例如 Dashlane、LastPass、公司內部工具等。',
+      appDenylistUnsupported:
+        '目前的桌面工作階段不會公開最前景的應用程式,因此依應用程式封鎖無法生效。請改用下方的正規表示式拒絕清單或「擷取類型」來限制擷取範圍。',
       regexDenylist: '正規表示式拒絕清單',
       regexDenylistHelp:
         '每行一個樣式（例如 INTERNAL-\\d+）。符合的內容不會進入歷史紀錄。每個樣式長度應在 256 位元組（UTF-8）以內，未跳脫的 ( ) 巢狀不超過 3 層；複雜規則請拆成多行，而不是巢狀分組。',

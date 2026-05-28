@@ -208,9 +208,14 @@ export const es: Messages = {
     },
     privacy: {
       legend: 'Filtros',
-      appDenylist: 'Lista de apps denegadas',
-      appDenylistHelp:
-        'Un nombre de aplicación de origen por línea. Las capturas desde estas apps se descartan.',
+      appDenylistPasswordManagers: 'Bloquear gestores de contraseñas',
+      appDenylistPasswordManagersHelp:
+        'Descarta las capturas de los gestores de contraseñas incluidos (1Password, Bitwarden, KeePassXC, Apple Passwords) usando identificadores exactos de app. El preset es fijo y no editable. Recomendado; déjalo activado salvo que necesites pegar activamente desde un gestor de contraseñas vía el portapapeles.',
+      appDenylistPatterns: 'Patrones personalizados',
+      appDenylistPatternsHelp:
+        'Una subcadena por línea: se descartan las capturas cuyo nombre de app de origen, bundle ID o ruta de ejecutable contengan alguna (sin distinguir mayúsculas/minúsculas). Usa esta lista para apps fuera del preset, por ejemplo Dashlane, LastPass o herramientas internas.',
+      appDenylistUnsupported:
+        'Tu sesión de escritorio no expone la app en primer plano, por lo que el bloqueo por app no coincidiría con nada. Usa la lista de regex denegados o «Tipos de captura» de abajo para limitar lo que se captura.',
       regexDenylist: 'Lista de regex denegados',
       regexDenylistHelp:
         'Un patrón por línea (p. ej. INTERNAL-\\d+). Las coincidencias se descartan antes de llegar al historial. Cada patrón debe tener menos de 256 bytes (UTF-8) y un máximo de 3 niveles de paréntesis ( ) sin escapar; divide las reglas complejas en varias líneas en lugar de anidar grupos.',

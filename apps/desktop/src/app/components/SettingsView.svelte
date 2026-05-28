@@ -7,6 +7,7 @@
     getCapabilities,
     getSettings,
     installCli,
+    passwordManagerPreset,
     updateSettings,
   } from '../lib/commands';
   import { describeError } from '../lib/errors';
@@ -24,6 +25,7 @@
   import {
     CONTENT_KINDS,
     type Appearance,
+    type AppDenyRule,
     type AppSettings,
     type Capability,
     type CliInstallStatus,
@@ -150,6 +152,70 @@
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
+  // Pull free-form `Pattern` rules out for the textarea. Preset rules
+  // and non-preset `SourceApp` rules round-trip through their own
+  // state slots so the textarea only ever shows what the user can
+  // edit there.
+  const patternRules = (rules: readonly AppDenyRule[]): string[] =>
+    rules.flatMap((rule) => (rule.type === 'pattern' ? [rule.value] : []));
+
+  // Did the loaded list include any preset rule? The toggle defaults
+  // to ON if the user has preset rules (initial install or after
+  // enabling), OFF if the user explicitly cleared them.
+  const presetEnabled = (rules: readonly AppDenyRule[]): boolean =>
+    rules.some((rule) => rule.type === 'source_app' && rule.source === 'preset');
+
+  // Extract just the preset-stamped rules so we can cache them as the
+  // canonical preset for this Settings session. The dedicated Tauri
+  // command is still used as a fallback (e.g. on a fresh install
+  // where the user has somehow cleared the preset before opening
+  // Settings for the first time), but seeding from the loaded
+  // snapshot avoids a hydrate-time race: `save.hydrate` runs
+  // synchronously after `getSettings` resolves, and if we waited on
+  // `passwordManagerPreset()` instead the first snapshot the
+  // controller saw would have an empty preset bucket — a later
+  // unrelated save would then ship `appDenylist: []` and silently
+  // drop the user's preset rules.
+  const extractPresetRules = (rules: readonly AppDenyRule[]): AppDenyRule[] =>
+    rules.filter((rule) => rule.type === 'source_app' && rule.source === 'preset');
+
+  // Carry-over bucket: anything that isn't a preset rule and isn't a
+  // free-form pattern. Today the UI never produces these (the toggle +
+  // textarea cover the visible surface), but the wire format allows
+  // typed `SourceApp` rules with `source: 'manual'`, e.g. from a
+  // future advanced editor or from an IPC client. Preserve them so a
+  // round-trip through Settings doesn't silently delete them.
+  const extraRules = (rules: readonly AppDenyRule[]): AppDenyRule[] =>
+    rules.filter((rule) => {
+      if (rule.type === 'pattern') return false;
+      if (rule.type === 'source_app' && rule.source === 'preset') return false;
+      return true;
+    });
+
+  // Recombine the three UI buckets into the canonical wire shape.
+  // Preset rules are pulled from the cached preset list (refreshed
+  // each mount) so we always ship the daemon's current source of
+  // truth, not whatever stale subset survives in `settings.appDenylist`.
+  const assembleDenylist = (): AppDenyRule[] => {
+    const out: AppDenyRule[] = [];
+    if (appDenylistPresetEnabled) {
+      out.push(...passwordManagerPresetRules);
+    }
+    out.push(...appDenylistExtraRules);
+    for (const value of linesToList(appDenylistPatternsText)) {
+      out.push({ type: 'pattern', value });
+    }
+    return out;
+  };
+
+  // Toggle handler for the "Block password managers" checkbox. Flips
+  // the boolean and schedules a save; `assembleDenylist` adds/removes
+  // the preset rules accordingly.
+  const onPasswordManagerPresetToggle = (next: boolean): void => {
+    appDenylistPresetEnabled = next;
+    scheduleSave(0);
+  };
+
   // Settings live behind the Tauri runtime — `AppSettings::default()` in the
   // backend is the single source of truth, so we render the form only after
   // `get_settings` resolves. In a plain browser (`vite dev`) the call fails
@@ -166,13 +232,35 @@
   let initialTabResolved = false;
   let loading = $state(false);
   let error: string | undefined = $state(undefined);
-  let appDenylistText = $state('');
+  // App-denylist UI is split into three pieces:
+  //   - `appDenylistPresetEnabled` mirrors whether any rule with
+  //     `source: 'preset'` is in the list (the "Block password managers"
+  //     toggle).
+  //   - `appDenylistPatternsText` is the multi-line textarea for
+  //     free-form `Pattern` rules — only user-typed entries land here.
+  //   - `appDenylistExtraRules` holds typed `SourceApp` rules the user
+  //     added by some other mechanism (none yet, but the wire format
+  //     supports them) plus *manual* `SourceApp` rules; the form
+  //     preserves them round-trip so an old config doesn't lose data
+  //     just because the UI doesn't surface them.
+  // `buildSnapshotPayload` recombines all three into the canonical
+  // `AppDenyRule[]` shape at save time.
+  let appDenylistPresetEnabled = $state(true);
+  let appDenylistPatternsText = $state('');
+  let appDenylistExtraRules: AppDenyRule[] = $state([]);
+  // Canonical preset shipped by the daemon. Loaded once on mount so the
+  // "Block password managers" toggle can add the rules back when the
+  // user re-enables it after disabling them. Empty until the IPC
+  // resolves; the toggle still works (it just leaves the list empty
+  // until the preset arrives, which the user can fix by toggling
+  // again).
+  let passwordManagerPresetRules: AppDenyRule[] = [];
   let regexDenylistText = $state('');
   // `hydrated` flips true only after `get_settings` resolves *and* the
   // derived textarea state is in sync. Auto-save gates on this flag so
-  // the initial render — which assigns `settings`, `appDenylistText`,
-  // and `regexDenylistText` in sequence — cannot accidentally feed the
-  // defaults straight back to disk.
+  // the initial render — which assigns `settings`, the app-denylist
+  // textarea / toggle state, and `regexDenylistText` in sequence —
+  // cannot accidentally feed the defaults straight back to disk.
   let hydrated = $state(false);
   // Mirrors the most recent regex denylist that passed preflight. When
   // the textarea contains a half-typed pattern that fails validation,
@@ -355,7 +443,20 @@
             activeTab = 'setup';
           }
         }
-        appDenylistText = s.appDenylist.join('\n');
+        appDenylistPresetEnabled = presetEnabled(s.appDenylist);
+        appDenylistExtraRules = extraRules(s.appDenylist);
+        appDenylistPatternsText = patternRules(s.appDenylist).join('\n');
+        // Seed the preset cache from the loaded settings so
+        // `assembleDenylist` can faithfully re-emit the preset rules
+        // *before* the async `passwordManagerPreset()` call resolves.
+        // Without this seed an unrelated save firing between hydrate
+        // and the IPC completing would persist an empty `appDenylist`
+        // because `assembleDenylist` would have no preset rules to
+        // splice in.
+        const loadedPreset = extractPresetRules(s.appDenylist);
+        if (loadedPreset.length > 0) {
+          passwordManagerPresetRules = loadedPreset;
+        }
         regexDenylistText = s.regexDenylist.join('\n');
         lastValidRegexList = [...s.regexDenylist];
         lastBlurredGlobalHotkey = s.globalHotkey;
@@ -387,6 +488,28 @@
         capabilities = await getCapabilities();
       } catch {
         // Diagnostic-only surface; ignore failures.
+      }
+    })();
+    void (async () => {
+      try {
+        const fromIpc = await passwordManagerPreset();
+        // Only adopt the IPC result if we don't already have a preset
+        // seeded from the loaded settings — the load path runs
+        // synchronously after `getSettings` resolves and is the
+        // canonical source for the *user's current* preset (they
+        // may have removed individual rules). The IPC's role is the
+        // fresh-install fallback when the loaded settings have no
+        // preset rules at all.
+        if (passwordManagerPresetRules.length === 0) {
+          passwordManagerPresetRules = fromIpc;
+        }
+      } catch {
+        // Best-effort: when the preset call fails we leave the cache
+        // at whatever the load seeded (possibly empty). Toggling the
+        // preset back on in that state writes an empty preset
+        // section until the next Settings open; logging would just
+        // noise the diagnostics surface for a never-seen failure
+        // mode (the command never touches disk).
       }
     })();
     // The Settings window is a separate Tauri webview, so the palette's
@@ -516,7 +639,7 @@
     globalHotkey: lastBlurredGlobalHotkey,
     paletteHotkeys: lastBlurredPaletteHotkeys,
     secondaryHotkeys: lastBlurredSecondaryHotkeys,
-    appDenylist: linesToList(appDenylistText),
+    appDenylist: assembleDenylist(),
     regexDenylist:
       regexDenylistErrors.length === 0 ? linesToList(regexDenylistText) : lastValidRegexList,
   });
@@ -616,18 +739,19 @@
     if (save.noteEcho(remoteJson)) return;
     const baseline = JSON.parse(save.persistedJson) as AppSettings;
     const local = settings;
-    // Denylist fields live in textarea state (`appDenylistText` /
-    // `regexDenylistText`), not in `settings` directly — `settings`
-    // only catches up when `buildSnapshotPayload` runs at save time.
-    // Compare the *raw textarea text* against the baseline's stringified
-    // form for the dirty check. Using `linesToList` for the comparison
-    // would drop trailing newlines a user has typed but not yet finished
-    // a line on, and for the regex case substituting `lastValidRegexList`
-    // when the textarea is invalid would falsely classify a mid-typed
-    // broken regex as clean and let `remote` overwrite the user's input.
-    const baselineAppText = baseline.appDenylist.join('\n');
+    // Denylist fields live in textarea / toggle state, not in
+    // `settings` directly — `settings.appDenylist` only catches up
+    // when `buildSnapshotPayload` runs at save time. Compute the
+    // dirty flag against the *baseline JSON* representation so a
+    // mid-typed pattern (or a freshly-flipped toggle) is preserved
+    // when an external save lands.
+    const baselineAppPatterns = patternRules(baseline.appDenylist).join('\n');
+    const baselinePresetEnabled = presetEnabled(baseline.appDenylist);
     const baselineRegexText = baseline.regexDenylist.join('\n');
-    const appDenylistDirty = appDenylistText !== baselineAppText;
+    const appDenylistDirty =
+      appDenylistPatternsText !== baselineAppPatterns ||
+      appDenylistPresetEnabled !== baselinePresetEnabled ||
+      !fieldEqual(appDenylistExtraRules, extraRules(baseline.appDenylist));
     const regexDenylistDirty = regexDenylistText !== baselineRegexText;
     type Key = keyof AppSettings;
     for (const key of Object.keys(remote) as Key[]) {
@@ -647,7 +771,9 @@
     // the loop above so a textarea we just classified as user-edited
     // keeps its in-progress content (and `lastValidRegexList`) intact.
     if (!appDenylistDirty) {
-      appDenylistText = remote.appDenylist.join('\n');
+      appDenylistPresetEnabled = presetEnabled(remote.appDenylist);
+      appDenylistExtraRules = extraRules(remote.appDenylist);
+      appDenylistPatternsText = patternRules(remote.appDenylist).join('\n');
     }
     if (!regexDenylistDirty) {
       regexDenylistText = remote.regexDenylist.join('\n');
@@ -822,12 +948,15 @@
             <SettingsTabPrivacy
               bind:settings
               {t}
-              bind:appDenylistText
+              frontmostAppCapability={capabilities?.frontmostApp}
+              bind:appDenylistPresetEnabled
+              bind:appDenylistPatternsText
               bind:regexDenylistText
               {regexDenylistErrors}
               debounceNumberMs={DEBOUNCE_NUMBER_MS}
               debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
               {scheduleSave}
+              {onPasswordManagerPresetToggle}
               {describeRegexError}
               {toggleCaptureKind}
             />
