@@ -50,6 +50,61 @@ the daemon fully offline.
   directory, otherwise the copy silently loses the last-N captures
   that haven't been written through yet.
 
+## App denylist
+
+The privacy panel exposes two controls under
+**Settings → Privacy → App denylist**:
+
+### Block password managers (preset, default ON)
+
+A bundled list of exact app identifiers. Captures whose source app
+matches any entry are classified as `Blocked` and never written to
+history. The toggle is on by default and is recommended unless you
+actively need to copy from a password manager via the clipboard.
+
+The preset is fixed (not user-editable). Current entries:
+
+- macOS bundle IDs:
+  - `com.1password.1password` — 1Password 8 / Setapp
+  - `com.agilebits.onepassword7` — 1Password 7
+  - `com.agilebits.onepassword4` — 1Password (legacy)
+  - `com.bitwarden.desktop` — Bitwarden desktop
+  - `org.keepassxc.keepassxc` — KeePassXC
+  - `com.apple.Passwords` — Apple Passwords
+- Windows executable basename (case-insensitive, no `.exe`):
+  - `1password`, `bitwarden`, `keepassxc`
+
+The Windows side matches the executable basename so MSIX / `Program
+Files (x86)` path variants resolve to the same rule without
+per-install normalisation. Linux desktop sessions that cannot
+expose the frontmost app (Wayland on most compositors) disable the
+denylist UI entirely and surface a banner — per-app blocking would
+silently match nothing there.
+
+Tracking the full universe of password managers would be a
+moving-target maintenance burden, so the preset only covers the
+clients we can confidently pin with stable identifiers. For
+anything outside the list — Dashlane, LastPass desktop, Enpass,
+1Password browser extensions running inside a host browser, an
+internal tool you want to exclude — use **Custom patterns** below.
+
+### Custom patterns (free-text substring, default empty)
+
+One pattern per line. A capture is dropped when its source-app
+name, bundle ID, or executable path contains the line as a
+case-insensitive substring. Patterns are independent from the
+preset — disabling the toggle does not remove user-entered
+patterns, and vice versa.
+
+Custom patterns are the right place for:
+
+- Password managers not in the bundled preset (Dashlane, LastPass,
+  Enpass, …).
+- Internal / company tools you do not want clipped to history.
+- Browser-extension password managers, by matching the host
+  browser's bundle ID when the extension is open in a dedicated
+  profile.
+
 ## User regex denylist
 
 The privacy panel accepts user-defined patterns under

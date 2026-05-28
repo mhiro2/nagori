@@ -565,7 +565,10 @@ exact substring + recency.
 **Detectors** (`nagori-core::policy`): API-key-like strings, JWTs, SSH
 private keys (PEM blocks tolerate a missing END marker), AWS access
 keys, GitHub tokens, Luhn-checked credit-card runs, OTP-like 6–8 digit
-short codes, password-manager source apps, and user-defined regex.
+short codes, source-app denylist matches (typed identifiers from the
+bundled password-manager preset plus free-text patterns — see
+[`docs/privacy.md`](./docs/privacy.md#app-denylist)), and user-defined
+regex.
 
 **Classification output:**
 
