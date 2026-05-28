@@ -2,6 +2,7 @@
   import { openSettingsWindow, setCaptureEnabled } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
+  import { formatAccelerator } from '../lib/keybindings';
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -18,6 +19,15 @@
 
   const { entryCount, elapsedMs, loading, errorMessage, selectedCount = 0 }: Props = $props();
   const t = $derived(messages());
+
+  // Hint glyphs follow the host platform — `⌘K` / `⌘,` on macOS, `Ctrl+K`
+  // / `Ctrl+,` on Windows/Linux — so the row matches the modifier the
+  // user actually presses. `formatAccelerator` does the per-OS render
+  // (mac contiguous glyphs vs the `Ctrl+...` join the rest of the OS
+  // chrome uses) and folds CmdOrCtrl to the correct primary key.
+  const platform = $derived(capabilitiesState.capabilities?.platform);
+  const hintActions = $derived(formatAccelerator('CmdOrCtrl+K', platform));
+  const hintSettings = $derived(formatAccelerator('CmdOrCtrl+,', platform));
 
   // Outside Tauri there's no settings store to read from (refreshSettings
   // only flips `loaded`), so `localCapture` lets the demo chip still reflect
@@ -145,8 +155,8 @@
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}
-        <kbd>⌘K</kbd>{t.palette.hints.actions}
-        <kbd>⌘,</kbd>{t.palette.hints.settings}
+        <kbd>{hintActions}</kbd>{t.palette.hints.actions}
+        <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
       </span>
     {/if}
   </span>

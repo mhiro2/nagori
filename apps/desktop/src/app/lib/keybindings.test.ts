@@ -4,6 +4,7 @@ import {
   buildBindings,
   captureFromKeyboardEvent,
   formatAccelerator,
+  isPrimaryModifierHeld,
   resolveAction,
 } from './keybindings';
 
@@ -161,6 +162,44 @@ describe('buildBindings', () => {
     // still parse correctly.
     const overlaid = buildBindings({ pin: 'CmdOrCtrl+I' });
     expect(resolveAction(event({ key: 'i', metaKey: true }), overlaid)).toBe('toggle-pin');
+  });
+
+  it('swaps default primary-modifier bindings to Ctrl on Windows', () => {
+    // PALETTE_BINDINGS is mac-shaped (`meta: true`); on non-mac the same
+    // logical bindings must fire under Ctrl instead, otherwise Win/Linux
+    // users would have no working palette accelerators at all (Win+K is OS-
+    // reserved on Windows and doesn't reach the webview).
+    const overlaid = buildBindings({}, 'windows');
+    expect(resolveAction(event({ key: 'k', ctrlKey: true }), overlaid)).toBe('open-actions');
+    expect(resolveAction(event({ key: ',', ctrlKey: true }), overlaid)).toBe('open-settings');
+    expect(resolveAction(event({ key: 'p', ctrlKey: true }), overlaid)).toBe('toggle-pin');
+    // And the corresponding Meta presses no longer match — Cmd-shaped
+    // combos are not what the user sees on a Windows/Linux keyboard.
+    expect(resolveAction(event({ key: 'k', metaKey: true }), overlaid)).toBeUndefined();
+  });
+
+  it('keeps Emacs Ctrl+N/Ctrl+P on macOS, drops them on non-mac to avoid collision', () => {
+    // On macOS the primary modifier is Cmd, so `Ctrl+P` (Emacs prev) and
+    // `Cmd+P` (toggle-pin) are distinct chords. On Win/Linux the primary
+    // modifier collapses to Ctrl, so `Ctrl+P` would have to be either
+    // select-prev or toggle-pin — keep toggle-pin (the action the user
+    // most likely reaches for) and rely on Arrow keys for navigation.
+    const macOverlaid = buildBindings({}, 'macos');
+    const winOverlaid = buildBindings({}, 'windows');
+    expect(resolveAction(event({ key: 'n', ctrlKey: true }), macOverlaid)).toBe('select-next');
+    expect(resolveAction(event({ key: 'p', ctrlKey: true }), macOverlaid)).toBe('select-prev');
+    expect(resolveAction(event({ key: 'n', ctrlKey: true }), winOverlaid)).toBeUndefined();
+    expect(resolveAction(event({ key: 'p', ctrlKey: true }), winOverlaid)).toBe('toggle-pin');
+  });
+});
+
+describe('isPrimaryModifierHeld', () => {
+  it('returns metaKey on macOS and ctrlKey elsewhere', () => {
+    expect(isPrimaryModifierHeld({ metaKey: true }, 'macos')).toBe(true);
+    expect(isPrimaryModifierHeld({ ctrlKey: true }, 'macos')).toBe(false);
+    expect(isPrimaryModifierHeld({ ctrlKey: true }, 'windows')).toBe(true);
+    expect(isPrimaryModifierHeld({ metaKey: true }, 'windows')).toBe(false);
+    expect(isPrimaryModifierHeld({ ctrlKey: true }, 'linuxWayland')).toBe(true);
   });
 });
 

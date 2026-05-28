@@ -5,6 +5,7 @@
 // Human-readable labels for each action live in the i18n dictionaries
 // (`palette.hints.*` and `keybindings.*`) and are looked up by the consumer.
 
+import { isTauri } from './tauri';
 import type { PaletteHotkeyAction, Platform } from './types';
 
 export type PaletteAction =
@@ -35,6 +36,13 @@ export type Binding = {
   alt?: boolean;
 };
 
+// Defaults are written with `meta: true` standing in for the *primary OS
+// modifier* — Cmd on macOS, Ctrl on Windows/Linux. `paletteBindingsFor`
+// rewrites those to `ctrl: true` on non-mac hosts so the same logical
+// binding fires under the modifier that platform's users actually press.
+// The literal `ctrl: true` entries (Ctrl+N / Ctrl+P) stay verbatim on
+// every platform — those come from the Emacs convention and are
+// independent of the primary-modifier swap.
 export const PALETTE_BINDINGS: readonly Binding[] = [
   { action: 'select-next', key: 'ArrowDown' },
   { action: 'select-prev', key: 'ArrowUp' },
@@ -63,6 +71,40 @@ export const PALETTE_BINDINGS: readonly Binding[] = [
   { action: 'preview-quick-look', key: 'y', meta: true },
   { action: 'close', key: 'Escape' },
 ];
+
+// Resolve the default binding set for a given platform. The static
+// `PALETTE_BINDINGS` list above expresses every primary-modifier binding
+// as `meta: true` (mac-shaped); this swaps to `ctrl: true` on
+// Windows/Linux so the literal modifier the user presses actually
+// matches. The Emacs-style `Ctrl+N` / `Ctrl+P` navigation bindings are
+// dropped on non-mac hosts because the Cmd→Ctrl swap collides them with
+// `toggle-pin` (Cmd+P) and `select-next`/`select-prev` — Arrow keys
+// continue to cover that affordance on every platform.
+export const paletteBindingsFor = (platform: Platform | undefined): readonly Binding[] => {
+  if (macOsLikePlatform(platform)) return PALETTE_BINDINGS;
+  const out: Binding[] = [];
+  for (const b of PALETTE_BINDINGS) {
+    if (b.ctrl === true && b.meta !== true && (b.key === 'n' || b.key === 'p')) continue;
+    if (b.meta) {
+      const swapped: Binding = { action: b.action, key: b.key, ctrl: true };
+      if (b.shift !== undefined) swapped.shift = b.shift;
+      if (b.alt !== undefined) swapped.alt = b.alt;
+      out.push(swapped);
+    } else {
+      out.push(b);
+    }
+  }
+  return out;
+};
+
+// Modifier the platform treats as its "primary" accelerator — Cmd on
+// macOS, Ctrl on Windows/Linux. Shared by mouse handlers (ctrl/⌘-click
+// multi-select) and any non-keyboard surface that needs the same
+// per-platform behaviour the default bindings give the keyboard.
+export const isPrimaryModifierHeld = (
+  event: { metaKey?: boolean; ctrlKey?: boolean },
+  platform: Platform | undefined,
+): boolean => (macOsLikePlatform(platform) ? !!event.metaKey : !!event.ctrlKey);
 
 // Overrides target the same `PaletteAction` codes via the
 // `PaletteHotkeyAction` enum (kebab-case wire format). The mapping is
@@ -142,17 +184,41 @@ const NAMED_KEYS: ReadonlySet<string> = new Set([
   'F20',
 ]);
 
+// Pre-hydration platform hint derived from `navigator.userAgent` so the
+// palette bindings, hint glyphs, and hotkey-edit UI use the right modifier
+// from the very first keystroke — `getCapabilities` round-trips through
+// the daemon and isn't ready until a few frames after mount, which would
+// otherwise show Win/Linux users the macOS `Meta` form briefly. Gated on
+// `isTauri()` so jsdom / Storybook contexts keep the documented macOS
+// fallback (their UA strings are not the host platform's).
+const detectPlatformFromNavigator = (): Platform | undefined => {
+  if (!isTauri()) return undefined;
+  if (typeof navigator === 'undefined') return undefined;
+  const ua = navigator.userAgent;
+  if (!ua) return undefined;
+  if (/Mac|iPad|iPhone|iPod/i.test(ua)) return 'macos';
+  if (/Windows/i.test(ua)) return 'windows';
+  if (/Linux|X11|CrOS/i.test(ua)) return 'linuxWayland';
+  return undefined;
+};
+
 // `CmdOrCtrl` is the canonical wire format used by tauri-plugin-global-shortcut
 // and the AppSettings layer (`crates/nagori-core/src/settings.rs`). The shortcut
 // plugin resolves it to Cmd on macOS and Ctrl elsewhere; the frontend must do
 // the same so user overrides actually fire on Windows/Linux. `Cmd` / `Meta`
 // stay bound to the Meta key on all platforms because users who type those
 // names are asking for that specific physical key.
-const macOsLikePlatform = (platform: Platform | undefined): boolean =>
-  // Default to macOS semantics when the capability snapshot hasn't loaded yet
-  // (e.g. Storybook / browser preview). The desktop shell hydrates this before
-  // any user-supplied accelerator is parsed.
-  platform === undefined || platform === 'macos';
+const macOsLikePlatform = (platform: Platform | undefined): boolean => {
+  // Authoritative snapshot already loaded — trust it verbatim.
+  if (platform !== undefined) return platform === 'macos';
+  // Pre-hydration: use the UA-derived hint so Win/Linux callers don't get
+  // a macOS-shaped binding for the first few frames. Falls through to
+  // `true` (the historical default) only when even the UA hint is absent
+  // (SSR / unit tests), where the binding shape is incidental anyway.
+  const hint = detectPlatformFromNavigator();
+  if (hint !== undefined) return hint === 'macos';
+  return true;
+};
 
 /// Parse an accelerator string like `Cmd+Shift+P` into a `Binding`. Returns
 /// `null` for accelerators with no key segment, with unsupported tokens, or
@@ -247,7 +313,7 @@ export const buildBindings = (
   }
   const replacements = parsedBindings.filter((b) => !colliding.has(b.action));
   const replacedActions = new Set(replacements.map((b) => b.action));
-  const overlaid: Binding[] = PALETTE_BINDINGS.filter(
+  const overlaid: Binding[] = paletteBindingsFor(platform).filter(
     (b) => !replacedActions.has(b.action) && !replacements.some((r) => sameShortcut(b, r)),
   );
   overlaid.push(...replacements);

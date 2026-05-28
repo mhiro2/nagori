@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
 
   import { closePalette, openSettingsWindow } from '../lib/commands';
-  import { buildBindings, resolveAction } from '../lib/keybindings';
+  import { buildBindings, isPrimaryModifierHeld, resolveAction } from '../lib/keybindings';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
     capabilitiesState,
@@ -133,7 +133,9 @@
     selectByIndex(index);
     const id = searchState.results[index]?.id;
     if (id !== undefined) {
-      if (event?.metaKey) {
+      // Primary-modifier click toggles multi-select — Cmd on macOS, Ctrl
+      // on Windows/Linux. Shift extends the range either way.
+      if (event && isPrimaryModifierHeld(event, capabilitiesState.capabilities?.platform)) {
         toggleMultiSelect(id);
         return;
       }
