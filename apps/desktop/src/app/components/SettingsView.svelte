@@ -18,6 +18,7 @@
     validateUserRegex,
     type UserRegexError,
   } from '../lib/policyValidation';
+  import { SettingsSaveController } from '../lib/settingsSave.svelte';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from '../lib/tauri';
   import { applyAppearance } from '../lib/theme';
   import {
@@ -41,8 +42,6 @@
   import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
   import HotkeyInput from './HotkeyInput.svelte';
-
-  type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
   type Tab = 'setup' | 'general' | 'privacy' | 'cli' | 'advanced';
 
@@ -72,17 +71,6 @@
   // so a window lets bursts coalesce into one `update_settings` call.
   const DEBOUNCE_NUMBER_MS = 350;
   const DEBOUNCE_TEXTAREA_MS = 500;
-  // How long the "Saved" pill lingers after a successful round-trip
-  // before the header collapses back to `idle`. Long enough to register
-  // visually, short enough to stay out of the way of the next edit.
-  const SAVED_HOLD_MS = 1500;
-  // Cool-down between automatic retries after a failed save. The user
-  // has no manual retry button (we deleted Save going macOS-style
-  // silent-autosave), so without this a transient backend hiccup would
-  // leave the snapshot stranded until the user edits again or closes
-  // Settings. 5 s is long enough to absorb a brief IPC blip without
-  // hammering, short enough to recover before the user wanders off.
-  const RETRY_DELAY_MS = 5000;
 
   const onLocaleChange = (next: LocaleSetting): void => {
     if (!settings) return;
@@ -165,41 +153,6 @@
   // and `regexDenylistText` in sequence — cannot accidentally feed the
   // defaults straight back to disk.
   let hydrated = $state(false);
-  let saveStatus = $state<SaveStatus>('idle');
-  let saveError: string | undefined = $state(undefined);
-  // Single shared debounce timer — any new edit cancels the pending
-  // tick so we coalesce bursts into one `update_settings` round-trip.
-  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
-  // At most one in-flight save; concurrent edits set `queued` and the
-  // post-commit hook drains it. Full-snapshot semantics mean last-write
-  // wins, so a single follow-up flag replaces a proper queue.
-  let inflight: Promise<void> | null = null;
-  let queued = false;
-  // Raised by `applyRemoteSettings` when an external `settings_changed`
-  // event lands while a save is in flight. The commitSave success/catch
-  // branches use this to skip writing back `lastPersistedJson` (the merge
-  // already advanced it to the remote snapshot), and the finally hook
-  // fires a follow-up commit so the merged local state — which may now
-  // diverge from the snapshot the backend just accepted — actually
-  // reaches disk. Without this, a tray toggle that races against an
-  // in-flight save can be silently overwritten when the success branch
-  // restores `lastPersistedJson` to the pre-merge snapshot.
-  let externalMergeDuringInflight = false;
-  let savedTimer: ReturnType<typeof setTimeout> | null = null;
-  // Set in the `updateSettings` failure branch and cleared on success
-  // or unmount. Fires `commitSave` again so the snapshot keeps trying
-  // even when the user makes no further edits — the only other retry
-  // triggers are a new edit or the unmount flush, neither of which
-  // covers "user opened Settings, save failed, user does nothing".
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
-  // The exact JSON payload that failed, captured at the moment of
-  // failure. The retry re-sends this verbatim instead of re-reading
-  // live state — `bind:value` on the hotkey textbox updates
-  // `settings.globalHotkey` on every keystroke (the save trigger is
-  // `onblur`), so building a fresh snapshot at retry-fire time would
-  // leak a half-typed accelerator like "Cmd+Sh…" into the IPC and
-  // defeat the "no partial hotkeys" design.
-  let pendingRetryJson: string | null = null;
   // Mirrors the most recent regex denylist that passed preflight. When
   // the textarea contains a half-typed pattern that fails validation,
   // `buildSnapshotPayload` substitutes this list so a checkbox toggle on
@@ -220,25 +173,24 @@
   let lastBlurredGlobalHotkey = '';
   let lastBlurredPaletteHotkeys: Partial<Record<PaletteHotkeyAction, string>> = {};
   let lastBlurredSecondaryHotkeys: Partial<Record<SecondaryHotkeyAction, string>> = {};
-  // JSON-serialised form of the last payload we handed to
-  // `updateSettings`, set *before* the IPC is dispatched. Used by
-  // `commitSave` to suppress idempotent IPC — typing in a broken regex
-  // textarea keeps re-emitting the previous valid list, so without an
-  // equality short-circuit the header pill flashes for nothing. Also
-  // covers the "rapid undo" case: if the user toggles a checkbox while
-  // an earlier in-flight save is still settling, the next snapshot may
-  // equal the *pre-inflight* state, so comparing only against the
-  // persisted baseline would skip the corrective write the in-flight
-  // save's resolution will need.
-  let lastSentJson = '';
-  // JSON-serialised form of the last payload the backend acknowledged.
-  // Advances only inside the success branch of `updateSettings`, never
-  // optimistically. The failure branch rewinds `lastSentJson` to this
-  // value so the cool-down retry / unmount flush can re-send the
-  // payload the backend rejected — without that the dedup
-  // short-circuit at the top of `commitSave` would silently drop the
-  // retry.
-  let lastPersistedJson = '';
+
+  // Autosave state machine lives in its own module so the textarea
+  // debounce, retry timer, in-flight + queued draining, and remote-
+  // merge baselines stay testable in isolation. The controller calls
+  // back into `buildSnapshotPayload` whenever it needs a fresh payload
+  // so the snapshot still composes live form state with the pinned
+  // `lastBlurred…` set.
+  const save = new SettingsSaveController({
+    buildSnapshot: () => buildSnapshotPayload(),
+    updateSettings,
+    describeError,
+    onSaveSuccess: () => {
+      error = undefined;
+    },
+  });
+  const scheduleSave = (delay: number): void => {
+    save.scheduleSave(delay);
+  };
   // Live preflight against the same limits `compile_user_regex` enforces in
   // `nagori-core::policy`. Rendered inline next to the textarea so the user
   // sees per-line guidance ("too long", "nested too deep", "invalid syntax")
@@ -393,16 +345,16 @@
         // All form-bound state is now in sync with the backend snapshot;
         // arming `hydrated` here means handlers fired during the initial
         // bindings (e.g. Svelte's two-way binding pass) cannot trigger
-        // a spurious save.
+        // a spurious save. The controller mirrors this gate so its own
+        // `scheduleSave` / `commitSave` short-circuit until the
+        // initial-baseline seed has run.
         hydrated = true;
         // The freshly-loaded form already matches what's on disk, so
         // seed both baselines from the same snapshot. This suppresses a
         // no-op save on the first commit after hydration and keeps the
         // unmount flush quiet when the user only opened Settings to
         // read.
-        const initialJson = JSON.stringify(buildSnapshotPayload());
-        lastSentJson = initialJson;
-        lastPersistedJson = initialJson;
+        save.hydrate(JSON.stringify(buildSnapshotPayload()));
       } catch (err: unknown) {
         error = describeError(err);
       } finally {
@@ -559,194 +511,6 @@
     }
   });
 
-  const clearRetryTimer = (): void => {
-    if (retryTimer !== null) {
-      clearTimeout(retryTimer);
-      retryTimer = null;
-    }
-    pendingRetryJson = null;
-  };
-
-  // Send the captured retry payload, deferring if a save is already in
-  // flight. Riding the `queued` drain instead would lose the override
-  // — the drain calls `commitSave()` with no argument, which rebuilds
-  // the snapshot from live state and could leak a mid-typed hotkey
-  // accelerator. Chaining off `inflight.finally` keeps the retry
-  // payload pinned across an arbitrarily long save chain.
-  const fireRetry = (): void => {
-    if (destroyed) return;
-    const payload = pendingRetryJson;
-    if (payload === null) return;
-    if (inflight) {
-      // `.finally` callbacks run in registration order: the original
-      // `await inflight` continuation (the outer `finally` that
-      // potentially starts a drain) fires first, so by the time our
-      // handler runs the next `inflight` is either set (drain
-      // started) or null. Re-evaluate from scratch.
-      void inflight.finally(() => {
-        fireRetry();
-      });
-      return;
-    }
-    void commitSave(payload);
-  };
-
-  const scheduleSave = (delay: number): void => {
-    if (!hydrated || !settings || destroyed) return;
-    // A fresh user edit supersedes any cooled-down auto-retry. The edit
-    // path will call `commitSave` anyway, so leaving the retry armed
-    // would just produce a duplicate IPC moments later.
-    clearRetryTimer();
-    if (pendingTimer !== null) {
-      clearTimeout(pendingTimer);
-      pendingTimer = null;
-    }
-    if (delay === 0) {
-      void commitSave();
-      return;
-    }
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      void commitSave();
-    }, delay);
-  };
-
-  // `overrideJson` is supplied by the retry timer to re-submit the
-  // exact payload that failed earlier, bypassing the live-state read
-  // in `buildSnapshotPayload`. Without it the retry would pick up a
-  // mid-typed hotkey accelerator from the textbox's two-way binding.
-  const commitSave = async (overrideJson?: string): Promise<void> => {
-    if (!hydrated || !settings || destroyed) return;
-
-    if (inflight) {
-      // Full-snapshot semantics give us last-write-wins — a single
-      // follow-up flag replaces a proper queue. The post-commit hook
-      // re-invokes once and the latest snapshot wins.
-      queued = true;
-      return;
-    }
-
-    // Skip a backend round-trip when the payload matches what we just
-    // sent. The JSON round-trip also detaches the IPC payload from the
-    // live `$state` proxy so a follow-up edit while `updateSettings` is
-    // in flight can't mutate the snapshot mid-call; `structuredClone`
-    // is unsuitable because jsdom (vitest) refuses to clone Svelte's
-    // reactive Array proxy.
-    const snapshotJson = overrideJson ?? JSON.stringify(buildSnapshotPayload());
-    if (snapshotJson === lastSentJson) return;
-    const snapshot = JSON.parse(snapshotJson) as AppSettings;
-    // Record the send *before* awaiting so a follow-up commit during
-    // the in-flight window can short-circuit if it ends up emitting the
-    // same payload.
-    lastSentJson = snapshotJson;
-
-    saveStatus = 'saving';
-    if (savedTimer !== null) {
-      clearTimeout(savedTimer);
-      savedTimer = null;
-    }
-
-    inflight = (async () => {
-      externalMergeDuringInflight = false;
-      try {
-        await updateSettings(snapshot);
-        // Advance the persisted baseline before the destroyed check so
-        // a successful save that lands during teardown still updates the
-        // record the unmount flush would otherwise re-send. Skip when an
-        // external merge happened mid-flight — `applyRemoteSettings`
-        // already advanced `lastPersistedJson` to the merged remote
-        // snapshot, and clobbering it with the pre-merge `snapshotJson`
-        // here would let the next echo silently revert the merge.
-        if (!externalMergeDuringInflight) {
-          lastPersistedJson = snapshotJson;
-        }
-        if (destroyed) return;
-        // If another edit was already queued while we were in flight
-        // skip the "Saved" pill — the next commit will flip the header
-        // back to "Saving…" within the same tick anyway.
-        if (!queued) {
-          saveStatus = 'saved';
-          saveError = undefined;
-          error = undefined;
-          savedTimer = setTimeout(() => {
-            savedTimer = null;
-            if (saveStatus === 'saved') saveStatus = 'idle';
-          }, SAVED_HOLD_MS);
-        }
-        // A retry timer left over from an earlier failure is now moot —
-        // the most recent snapshot has landed.
-        clearRetryTimer();
-      } catch (err: unknown) {
-        // Leave `lastPersistedJson` untouched and rewind `lastSentJson`
-        // to it. The cool-down retry below and the unmount flush both
-        // rebuild a snapshot from live state and compare against
-        // `lastSentJson`; without the rewind the dedup short-circuit
-        // at the top of `commitSave` would silently skip the retry of
-        // the exact same payload.
-        //
-        // Apply the rewind unconditionally — including when an external
-        // merge happened mid-flight. In that case `lastPersistedJson`
-        // is the merged remote snapshot R; aligning `lastSentJson` to R
-        // lets the follow-up commit in `finally` dispatch whenever the
-        // merged live snapshot still diverges from R (the common case
-        // when the user has preserved-dirty fields), and dedup only
-        // when it doesn't. Skipping the rewind here used to leave
-        // `lastSentJson` at the failed pre-merge dispatch L; if the
-        // merge net-cancelled the in-flight edits the follow-up
-        // snapshot would equal L and the dedup check would silently
-        // drop the user's intent.
-        lastSentJson = lastPersistedJson;
-        if (destroyed) return;
-        saveStatus = 'error';
-        saveError = describeError(err);
-        if (externalMergeDuringInflight) {
-          // The follow-up commit triggered from `finally` will dispatch
-          // the merged state; if it also fails its own catch branch
-          // will arm a fresh retry. Re-arming the timer here would
-          // double-fire and risks the pre-merge snapshot landing after
-          // the merge follow-up.
-          clearRetryTimer();
-        } else {
-          // Re-fire the save after a brief cool-down. Without this the
-          // failed snapshot would be stranded until the user either
-          // edits again or closes Settings — a transient IPC blip would
-          // appear as a permanent error pill. Each retry that also fails
-          // hits this branch again and reschedules, giving an indefinite
-          // 5 s poll until the backend recovers or the user navigates
-          // away. We accept the trade-off of polling against a
-          // permanently broken backend for the simpler state machine.
-          // Capture the snapshot the backend just rejected and feed it
-          // back into `commitSave` verbatim — re-reading live state in
-          // the timer callback would pull in any mid-typed hotkey value
-          // the user has tapped out since the failure landed.
-          clearRetryTimer();
-          pendingRetryJson = snapshotJson;
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            fireRetry();
-          }, RETRY_DELAY_MS);
-        }
-      }
-    })();
-
-    try {
-      await inflight;
-    } finally {
-      inflight = null;
-      // Drain order: a queued local edit and a pending external-merge
-      // follow-up both want to fire a fresh commit. Either one alone is
-      // enough — `commitSave` will rebuild from the current settings,
-      // which already reflects both signals. So OR them into a single
-      // dispatch instead of firing twice and chasing our own tail.
-      const needsExternalMergeFollowUp = externalMergeDuringInflight;
-      externalMergeDuringInflight = false;
-      if ((queued || needsExternalMergeFollowUp) && !destroyed) {
-        queued = false;
-        void commitSave();
-      }
-    }
-  };
-
   const describeRegexError = (err: UserRegexError): string => {
     const regexMessages = t.settings.privacy.regexErrors;
     switch (err.kind) {
@@ -766,19 +530,17 @@
   };
 
   const saveStatusLabel = $derived.by(() => {
-    switch (saveStatus) {
+    switch (save.saveStatus) {
       case 'saving':
         return t.settings.statusSaving;
       case 'saved':
         return t.settings.statusSaved;
       case 'error':
-        return t.settings.statusError.replace('{error}', saveError ?? '');
+        return t.settings.statusError.replace('{error}', save.saveError ?? '');
       case 'idle':
         return '';
     }
   });
-
-  let destroyed = false;
 
   // Order-independent value equality for the leaf shapes that show up
   // inside `AppSettings`: primitives compare by `===`, arrays element-
@@ -823,26 +585,15 @@
   // silently overwritten the next time SettingsView autosaves the full
   // snapshot.
   const applyRemoteSettings = (remote: AppSettings): void => {
-    if (!hydrated || destroyed || !settings) return;
+    if (!hydrated || !settings) return;
     const remoteJson = JSON.stringify(remote);
     // Echo of our own most-recent dispatch — the backend has confirmed
     // the write landed. Advance the persisted baseline so subsequent
     // remote events evaluate against reality, but leave local state
     // alone: anything the user has typed since we sent the snapshot
     // stays as an unflushed edit.
-    if (remoteJson === lastSentJson) {
-      // While `externalMergeDuringInflight` is set, an external merge
-      // has already advanced `lastPersistedJson` to the remote snapshot;
-      // an echo of our pre-merge dispatch that lands afterwards would
-      // otherwise rewind the baseline to the stale snapshot and let a
-      // follow-up remote event be misclassified as dirty. Leave the
-      // baseline alone here — the follow-up commit will re-sync it.
-      if (!externalMergeDuringInflight) {
-        lastPersistedJson = remoteJson;
-      }
-      return;
-    }
-    const baseline = JSON.parse(lastPersistedJson) as AppSettings;
+    if (save.noteEcho(remoteJson)) return;
+    const baseline = JSON.parse(save.persistedJson) as AppSettings;
     const local = settings;
     // Denylist fields live in textarea state (`appDenylistText` /
     // `regexDenylistText`), not in `settings` directly — `settings`
@@ -902,45 +653,15 @@
     if (local.locale === remote.locale) setLocale(remote.locale);
     if (local.appearance === remote.appearance) applyAppearance(remote.appearance);
 
-    // Backend is now authoritative at `remote`. Advance the merge
-    // baseline so the next event re-evaluates against the latest
-    // persisted state. When no save is in flight we can also realign
-    // `lastSentJson` to `remoteJson` — the dedup check at the top of
-    // `commitSave` then short-circuits when the user has no unflushed
-    // edits, but a divergent next snapshot (e.g. a debounce-pending
-    // number input that the merge preserved) still dispatches.
-    //
-    // Using `remoteJson` instead of `buildSnapshotPayload()` is
-    // load-bearing: the latter folds preserved-dirty fields into the
-    // baseline, so the next commit would dedup against state that has
-    // not actually been sent and the user's edit would be silently
-    // dropped.
-    //
-    // Skip the realignment while a save is in flight: the in-flight
-    // dispatch is still the source of truth for `lastSentJson`, and
-    // the `finally` hook will fire a follow-up commit (via
-    // `externalMergeDuringInflight`) that re-syncs both pointers.
-    lastPersistedJson = remoteJson;
-    if (inflight === null) {
-      lastSentJson = remoteJson;
-    } else {
-      externalMergeDuringInflight = true;
-    }
-
-    // A retry timer armed against a pre-merge failure would re-send the
-    // stale snapshot and silently undo the external mutation. Cancel it
-    // and immediately schedule a fresh commit from the merged live state
-    // — if the user's preserved-dirty fields still diverge from `remote`
-    // the new dispatch ships them, and otherwise the dedup check
-    // short-circuits without an IPC. Skip when a save is already in
-    // flight: the `finally` hook will fire the follow-up commit via
-    // `externalMergeDuringInflight` and we do not want to double-dispatch.
-    if (pendingRetryJson !== null) {
-      clearRetryTimer();
-      if (inflight === null) {
-        scheduleSave(0);
-      }
-    }
+    // Backend is now authoritative at `remote`. The controller updates
+    // its baselines and cancels/reschedules any pending retry so a
+    // stale failed-payload retry can't silently undo this merge. When
+    // a save is in flight the controller raises an
+    // `externalMergeDuringInflight` flag and the `finally` hook fires
+    // the follow-up commit — using `remoteJson` instead of
+    // `buildSnapshotPayload()` keeps preserved-dirty fields intact for
+    // that follow-up.
+    save.noteExternalMerge(remoteJson);
   };
 
   onMount(() => {
@@ -975,24 +696,13 @@
   });
 
   onDestroy(() => {
-    if (pendingTimer !== null) {
-      clearTimeout(pendingTimer);
-      pendingTimer = null;
-    }
-    if (savedTimer !== null) {
-      clearTimeout(savedTimer);
-      savedTimer = null;
-    }
-    clearRetryTimer();
     // Flush any in-memory edits the user hasn't given the debounce / blur
     // path a chance to commit. Covers three loss paths: a textarea or
     // number input still inside its debounce window when the user
     // navigates away, a queued snapshot waiting on the post-commit drain
-    // (won't fire once `destroyed` is set), and a hotkey field that was
-    // edited via `setOverride` but never blurred (Escape -> palette
-    // tears the focused input off the DOM without firing `blur`). The
-    // webview context outlives the Svelte component, so a fire-and-forget
-    // `updateSettings` reaches Tauri even though the UI is already gone.
+    // (won't fire once the controller is destroyed), and a hotkey field
+    // that was edited via `setOverride` but never blurred (Escape ->
+    // palette tears the focused input off the DOM without firing `blur`).
     if (hydrated && settings) {
       // Promote any unblurred hotkey edits into the pinned set before
       // building the snapshot — unmount is the user's last chance, so
@@ -1006,43 +716,13 @@
       lastBlurredSecondaryHotkeys = { ...settings.secondaryHotkeys };
       const snapshotJson = JSON.stringify(buildSnapshotPayload());
       const snapshot = JSON.parse(snapshotJson) as AppSettings;
-      // Swallow the error: the component is unmounting, so the status
-      // pill is already gone and there's no surface left to render a
-      // failure on. The next session reloads from disk anyway.
-      const dispatchFinal = (): void => {
-        void updateSettings(snapshot).catch(() => {});
-      };
-      if (inflight) {
-        // Defer the decision until the in-flight save settles. Comparing
-        // the live snapshot to `lastPersistedJson` at settle-time covers
-        // every interleaving:
-        //   • in-flight succeeds at the same payload → snapshot ==
-        //     lastPersistedJson, skip (no duplicate IPC),
-        //   • in-flight succeeds but the user reverted / followed up so
-        //     the queued drain would have fired (gated off by
-        //     `destroyed`) → snapshot != lastPersistedJson, dispatch,
-        //   • in-flight fails entirely → its catch rewinds
-        //     `lastSentJson` and bails on `destroyed` before arming
-        //     the retry timer, leaving `lastPersistedJson` at the
-        //     pre-edit baseline → snapshot != lastPersistedJson,
-        //     dispatch (the only path left for the edit to survive).
-        // Chaining off `.finally` instead of firing in parallel
-        // serialises against the in-flight save: the backend's SQLite
-        // pool uses multiple connections, so two parallel
-        // `update_settings` could settle out of order.
-        void inflight.finally(() => {
-          if (snapshotJson !== lastPersistedJson) dispatchFinal();
-        });
-      } else if (snapshotJson !== lastSentJson) {
-        // No in-flight: an earlier failure may have rewound
-        // `lastSentJson` to the persisted baseline (and we just
-        // cleared its retry timer above), or this is the first save
-        // attempt. Either way, snapshot ≠ lastSentJson means there's
-        // an unflushed edit that needs to land.
-        dispatchFinal();
-      }
+      save.flushOnUnmount(snapshotJson, snapshot);
+    } else {
+      // Pre-hydration teardown: nothing to flush, but timers from a
+      // debounced edit attempt (or an `error`-branch retry timer that
+      // armed against a partial load) still need cancelling.
+      save.flushOnUnmount('', {} as AppSettings);
     }
-    destroyed = true;
   });
 </script>
 
@@ -1050,8 +730,8 @@
   <header class="head">
     <h1>{t.settings.title}</h1>
     <div class="head-trailing">
-      {#if saveStatus !== 'idle'}
-        <span class="save-status" data-status={saveStatus} aria-live="polite">
+      {#if save.saveStatus !== 'idle'}
+        <span class="save-status" data-status={save.saveStatus} aria-live="polite">
           {saveStatusLabel}
         </span>
       {/if}
