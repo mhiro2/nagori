@@ -483,6 +483,11 @@ const fn canonical_text_mime(bare: &str) -> Option<&'static str> {
 }
 
 fn is_allowlisted_image_mime(bare: &str) -> bool {
+    // Stays in lockstep with `image_signature::SUPPORTED_IMAGE_MIMES` and the
+    // desktop `ALLOWED_IMAGE_MIME`. BMP is intentionally absent on every
+    // side: none of the platform crates can publish it back to the system
+    // clipboard, so accepting BMP at capture would silently strand entries
+    // that look pasteable in the palette but fail on Cmd+Enter.
     matches!(
         bare.to_ascii_lowercase().as_str(),
         "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"
@@ -732,6 +737,30 @@ mod tests {
             }
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn snapshot_bmp_is_rejected_until_paste_back_supports_it() {
+        // BMP is rejected on the capture side because no platform crate can
+        // publish it back to the OS clipboard. Lock the contract here so a
+        // future "add BMP to the allowlist" change has to confront the
+        // missing copy-back path instead of silently storing entries that
+        // fail on paste.
+        let bmp_header = b"BM\x46\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let snapshot = ClipboardSnapshot {
+            sequence: crate::ClipboardSequence::content_hash("bmp-reject"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/bmp".to_owned(),
+                data: ClipboardData::Bytes(bmp_header),
+            }],
+        };
+
+        // BMP is dropped during normalisation; the only rep in the snapshot
+        // was the BMP image, so `pick_primary` finds nothing and the snapshot
+        // is treated as unpublishable.
+        assert!(EntryFactory::from_snapshot(snapshot).is_none());
     }
 
     #[test]

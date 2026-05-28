@@ -308,7 +308,6 @@ const ALLOWED_IMAGE_MIME: &[&str] = &[
     "image/jpeg",
     "image/gif",
     "image/webp",
-    "image/bmp",
     "image/tiff",
 ];
 

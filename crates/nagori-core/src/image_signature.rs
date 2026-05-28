@@ -13,7 +13,9 @@
 //!
 //! The set of supported formats matches the desktop allow-list
 //! (`ALLOWED_IMAGE_MIME`); SVG is intentionally absent because it can
-//! host script.
+//! host script, and BMP is intentionally absent until the platform
+//! crates implement BMP paste-back — otherwise BMPs would round-trip
+//! into the database but fail at Cmd+Enter.
 
 /// Image formats the workspace recognises by their byte signature.
 ///
@@ -26,7 +28,6 @@ pub enum ImageFormat {
     Jpeg,
     Gif,
     WebP,
-    Bmp,
     Tiff,
 }
 
@@ -41,7 +42,6 @@ impl ImageFormat {
             Self::Jpeg => "image/jpeg",
             Self::Gif => "image/gif",
             Self::WebP => "image/webp",
-            Self::Bmp => "image/bmp",
             Self::Tiff => "image/tiff",
         }
     }
@@ -58,7 +58,6 @@ pub const SUPPORTED_IMAGE_MIMES: &[&str] = &[
     "image/jpeg",
     "image/gif",
     "image/webp",
-    "image/bmp",
     "image/tiff",
 ];
 
@@ -91,10 +90,6 @@ pub fn detect(bytes: &[u8]) -> Option<ImageFormat> {
     // compare the marker positions rather than a flat prefix.
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some(ImageFormat::WebP);
-    }
-    // BMP — "BM" magic.
-    if bytes.starts_with(b"BM") {
-        return Some(ImageFormat::Bmp);
     }
     // TIFF — little-endian (`II*\0`) or big-endian (`MM\0*`) header.
     if bytes.starts_with(&[0x49, 0x49, 0x2A, 0x00]) || bytes.starts_with(&[0x4D, 0x4D, 0x00, 0x2A])
@@ -138,7 +133,6 @@ mod tests {
     // Synthetic WebP container: "RIFF????WEBPVP8 " — the chunk length
     // (`????`) and the VP8 chunk header don't influence detection.
     const WEBP_HEADER: &[u8] = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
-    const BMP_HEADER: &[u8] = b"BM\x76\x00\x00\x00";
     const TIFF_LE_HEADER: &[u8] = &[0x49, 0x49, 0x2A, 0x00];
     const TIFF_BE_HEADER: &[u8] = &[0x4D, 0x4D, 0x00, 0x2A];
 
@@ -148,9 +142,17 @@ mod tests {
         assert_eq!(detect(JPEG_HEADER), Some(ImageFormat::Jpeg));
         assert_eq!(detect(GIF_HEADER), Some(ImageFormat::Gif));
         assert_eq!(detect(WEBP_HEADER), Some(ImageFormat::WebP));
-        assert_eq!(detect(BMP_HEADER), Some(ImageFormat::Bmp));
         assert_eq!(detect(TIFF_LE_HEADER), Some(ImageFormat::Tiff));
         assert_eq!(detect(TIFF_BE_HEADER), Some(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn detect_rejects_bmp_until_paste_back_supports_it() {
+        // BMP is detectable from its "BM" magic but is deliberately not in
+        // the supported set: the platform crates cannot publish BMP bytes
+        // back to the system clipboard, so accepting BMP at capture would
+        // strand entries that look pasteable in the palette.
+        assert_eq!(detect(b"BM\x76\x00\x00\x00"), None);
     }
 
     #[test]
