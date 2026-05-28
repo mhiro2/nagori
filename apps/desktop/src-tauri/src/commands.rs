@@ -1376,9 +1376,17 @@ fn open_external_url(url: &str) -> CommandResult<()> {
         // dash as one of its own flags, even though the upstream parser
         // is currently strict about that — keeps us safe across releases.
         command.arg("--").arg(url);
-        command
+        let status = command
             .status()
             .map_err(|err| CommandError::internal(err.to_string()))?;
+        if !status.success() {
+            // Mirror the Windows branch and the paste-failure UX: surface the
+            // failure to the WebView so the user sees a toast instead of a
+            // silent no-op when LaunchServices refuses the URL.
+            return Err(CommandError::internal(format!(
+                "open(1) exited with {status}"
+            )));
+        }
         Ok(())
     }
     #[cfg(target_os = "linux")]
@@ -1386,9 +1394,17 @@ fn open_external_url(url: &str) -> CommandResult<()> {
         use std::process::Command;
         let mut command = Command::new("xdg-open");
         command.arg(url);
-        command
+        let status = command
             .status()
             .map_err(|err| CommandError::internal(err.to_string()))?;
+        if !status.success() {
+            // `xdg-open` exits non-zero for missing handlers, syntax errors,
+            // and tool-not-found shims — none of which should look like
+            // success to the WebView.
+            return Err(CommandError::internal(format!(
+                "xdg-open exited with {status}"
+            )));
+        }
         Ok(())
     }
     #[cfg(target_os = "windows")]
