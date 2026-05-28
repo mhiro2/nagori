@@ -1019,6 +1019,7 @@
   }
   .tab-content :global(.status) {
     color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
   }
   .tab-content :global(.status.error) {
     color: var(--danger, #f87171);
