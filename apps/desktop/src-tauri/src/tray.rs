@@ -13,6 +13,7 @@
 //! `install()` time, which the caller logs and degrades to in-app
 //! controls.
 
+use std::io::Cursor;
 use std::sync::Mutex;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -34,7 +35,9 @@ fn decode_tray_icon() -> (Vec<u8>, u32, u32) {
 }
 
 fn decode_icon_rgba(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
-    let mut decoder = png::Decoder::new(png_bytes);
+    // png 0.18 requires `BufRead + Seek` on `Decoder::new`; wrap the
+    // embedded byte slice in a `Cursor` to satisfy both bounds.
+    let mut decoder = png::Decoder::new(Cursor::new(png_bytes));
     // Normalise away the encodings a lossy optimiser (e.g. `pngquant`,
     // which emits an *indexed* PNG) might apply to the bundled asset:
     // `EXPAND` unpacks a palette into RGB(A) and promotes a `tRNS` chunk
@@ -46,7 +49,14 @@ fn decode_icon_rgba(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
     let mut reader = decoder
         .read_info()
         .expect("embedded tray PNG header must be valid");
-    let mut buf = vec![0; reader.output_buffer_size()];
+    // png 0.18 returns `Option<usize>` to support progressive decoding;
+    // for a fully-buffered header we always have a concrete size.
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("png header parsed → buffer size known")
+    ];
     let info = reader
         .next_frame(&mut buf)
         .expect("embedded tray PNG frame must decode");
