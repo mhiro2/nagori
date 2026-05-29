@@ -289,31 +289,45 @@ pub async fn paste_entry_from_palette(
         .await?;
     hide_main_palette(&app)?;
 
-    // Settings load is the user's chance to disable auto-paste. If we can't
-    // read it, propagate the error rather than guessing — the copy still
-    // succeeded, and the palette UI can show "copied, but auto-paste status
-    // unknown" with the recoverable error.
+    // Re-focus the app the user came from *regardless* of the auto-paste
+    // setting. The snapshot was taken at `open_palette` time, so it is the
+    // source they copied from / want to paste back into.
+    //   * auto-paste ON  — focus must be back on the target before we
+    //     synthesise ⌘V, or the keystroke lands in Nagori's own webview.
+    //   * auto-paste OFF — the user pastes manually, so handing focus back
+    //     means their next ⌘V lands in the right window without first
+    //     clicking to re-activate it. Skipping the restore here (the
+    //     previous behaviour) left the user's source window in the
+    //     background, so ⌘V did nothing until they clicked it — the poor
+    //     UX this restore fixes.
+    // macOS dispatches on `bundle_id`; Windows re-foregrounds the HWND
+    // captured in `native_handle` via `SetForegroundWindow`; Linux Wayland
+    // recorded `None`, so this is a no-op and the compositor's own
+    // post-hide focus handoff already returns focus to the source surface.
+    let restored = match state.take_previous_frontmost() {
+        Some(prev) => state.window.activate_restore_target(&prev).await,
+        None => Ok(()),
+    };
+
+    // Auto-paste is the user's switch for the synthesised keystroke only —
+    // focus is already handed back above, so a manual ⌘V works either way.
     if !settings.auto_paste_enabled {
-        state.clear_previous_frontmost();
+        // Copy succeeded and we tried to restore focus. A restore failure
+        // here only costs the user one manual click, so log it but do not
+        // raise a hard error — there is no auto-paste step to "skip".
+        if let Err(err) = restored {
+            tracing::warn!(error = %err, "palette_previous_app_restore_failed");
+        }
         return Ok(());
     }
 
-    // Re-focus the previously frontmost app before synthesising the paste
-    // keystroke. macOS dispatches via `bundle_id`; Windows now uses the
-    // HWND captured in `native_handle` to call `SetForegroundWindow`
-    // directly. Linux Wayland records `None` for `previous_frontmost`
-    // entirely, so the call is a no-op and `wtype` targets whatever the
-    // compositor considers focused.
-    if let Some(prev) = state.take_previous_frontmost()
-        && let Err(err) = state.window.activate_restore_target(&prev).await
-    {
-        // Surface restore failure to the UI: the entry was copied but we
-        // never refocused the originating app, so the synthesised paste
-        // would land in nagori itself. The palette window is already
-        // hidden above, so a returned `Err` only reaches the now-invisible
-        // `searchState.errorMessage` — emit `nagori://paste_failed` so
-        // the App-level toast (Settings window or palette on re-open)
-        // shows the failure with the "copy succeeded" framing.
+    // auto-paste ON: a restore failure means the synthesised paste would
+    // land in nagori itself, so surface it. The palette window is already
+    // hidden above, so a returned `Err` only reaches the now-invisible
+    // `searchState.errorMessage` — emit `nagori://paste_failed` so the
+    // App-level toast (Settings window or palette on re-open) shows the
+    // failure with the "copy succeeded" framing.
+    if let Err(err) = restored {
         tracing::warn!(error = %err, "palette_previous_app_restore_failed");
         let message = format!(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"

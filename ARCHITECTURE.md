@@ -982,6 +982,13 @@ focus, not domain logic:
 - `state.window.activate_app(bundle_id)` (via the
   `WindowBehavior` trait) — reactivates the app that was frontmost
   before the palette stole focus, so Cmd+V lands in the right window.
+  The palette-confirm path runs this **regardless of the `auto_paste`
+  setting**: with auto-paste on, focus must return before the synthesised
+  Cmd+V; with auto-paste off, the user pastes manually, and restoring
+  focus means their next Cmd+V hits the source window without first
+  clicking to re-activate it. (Linux Wayland captures no frontmost
+  handle, so this is a no-op there and the compositor's own post-hide
+  focus handoff returns focus to the source surface.)
 - `request_accessibility(prompt: bool) -> PermissionStatus` — on macOS
   calls `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt:
   prompt)`. When `prompt = true` the runtime stamps
