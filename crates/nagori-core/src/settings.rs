@@ -206,7 +206,7 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// shape (`Vec<AppDenyRule>`) and the legacy free-text form
 /// (`Vec<String>`).
 ///
-/// A pre-Phase-A settings snapshot stored each entry as a bare string;
+/// A legacy settings snapshot stored each entry as a bare string;
 /// the schema is now an internally-tagged enum. The settings JSON
 /// blob lives in `SQLite`, so a hard format break would silently lose
 /// the user's rules on first launch. Reading either shape — and

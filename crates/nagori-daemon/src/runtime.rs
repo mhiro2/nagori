@@ -2522,8 +2522,8 @@ mod tests {
 
     #[tokio::test]
     async fn request_accessibility_stamps_prompted_at_when_prompt_true() {
-        // The Phase A redesign keys the "NotRequested vs PromptShownNotGranted"
-        // UI branch off `onboarding.accessibility_prompted_at`. Verify the
+        // The "NotRequested vs PromptShownNotGranted" UI branch keys off
+        // `onboarding.accessibility_prompted_at`. Verify the
         // runtime persists that timestamp the first time we ask the host
         // to surface the TCC dialog (`prompt = true`).
         let store = SqliteStore::open_memory().expect("memory store should open");

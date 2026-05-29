@@ -577,8 +577,9 @@ mod tests {
 
     #[test]
     fn classifier_detects_secret_inside_alternative_representation() {
-        // Phase 2 widens what reaches storage: a snapshot's HTML / RTF
-        // alternatives land in entry_representations alongside the primary.
+        // Capturing alternative representations widens what reaches storage:
+        // a snapshot's HTML / RTF alternatives land in entry_representations
+        // alongside the primary.
         // If the classifier only inspected the primary's plain projection,
         // a secret hiding inside the HTML alternative would slip through
         // as Public and persist unredacted. Cover both the detection (must
@@ -792,7 +793,7 @@ mod tests {
 
     #[test]
     fn legacy_string_app_denylist_deserialises_as_pattern_rule() {
-        // Settings JSON persisted by a pre-Phase-A build stored each
+        // Settings JSON persisted by an older build stored each
         // denylist entry as a bare string. The custom
         // `deserialize_app_denylist` must read that shape and lift
         // each entry into `AppDenyRule::Pattern`, otherwise upgrading

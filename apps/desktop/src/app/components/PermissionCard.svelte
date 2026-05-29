@@ -16,8 +16,8 @@
   import { capabilitiesState } from '../stores/capabilities.svelte';
   import { accessibilityState, settingsState } from '../stores/settings.svelte';
 
-  // Surface chosen by the Setup tab. We only ship the Accessibility flow in
-  // this phase but the prop keeps the door open for Input Monitoring /
+  // Surface chosen by the Setup tab. We only ship the Accessibility flow for
+  // now but the prop keeps the door open for Input Monitoring /
   // Notifications cards to reuse the same shell.
   type Props = { kind: PermissionKind };
   const { kind }: Props = $props();

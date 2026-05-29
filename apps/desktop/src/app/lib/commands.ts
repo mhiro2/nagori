@@ -149,7 +149,7 @@ export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
 
 export const saveAiResult = (text: string): Promise<EntryDto> => invoke('save_ai_result', { text });
 
-// Phase A: replaces `open_accessibility_settings`. When `prompt` is true the
+// Replaces `open_accessibility_settings`. When `prompt` is true the
 // macOS backend triggers `AXIsProcessTrustedWithOptions(prompt:YES)` which
 // surfaces the system dialog the first time it's called; on subsequent calls
 // the daemon falls back to opening the Privacy → Accessibility pane via

@@ -141,13 +141,13 @@ impl ClipboardReader for MacosClipboard {
                 let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
                 let before = pasteboard_sequence();
 
-                // Phase 1: peek byte sizes without materialising payloads. On
+                // First pass: peek byte sizes without materialising payloads. On
                 // macOS, NSData backs each `dataForType` result with bytes
                 // already paged into our address space, but skipping `to_vec()`
                 // still avoids the second copy into a Rust `Vec<u8>` and lets
                 // NSData drop on scope exit, freeing both copies promptly.
                 // NSString::len() reports UTF-8 bytes without materialising a
-                // Rust String. Phase 1 is still only an admission pre-filter:
+                // Rust String. This pass is still only an admission pre-filter:
                 // it catches oversized single reps and file URL aggregates
                 // before we allocate Rust payload buffers, while the capture
                 // loop's post-load check remains authoritative for the final
@@ -173,12 +173,12 @@ impl ClipboardReader for MacosClipboard {
                     });
                 }
 
-                // Phase 2: load the snapshot. Phase 1 only rejected the
-                // obvious oversize cases; reps that pass it can still grow
+                // Second pass: load the snapshot. The first pass only rejected
+                // the obvious oversize cases; reps that pass it can still grow
                 // past `max_bytes` once decoded to UTF-8, and the aggregate
                 // of multiple reps is not bounded here at all. The capture
                 // loop's post-load `payload_bytes > max_entry_size_bytes`
-                // check is the authoritative limit — Phase 1 just spares
+                // check is the authoritative limit — the first pass just spares
                 // us the worst allocations. Mirror `current_snapshot`
                 // exactly so the two entry points cannot drift.
                 let plain = match guard.get_text() {
@@ -508,7 +508,7 @@ fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> boo
 /// the type name, so the dynamic `NSString` only has to outlive
 /// `setData_forType`. File paths fan out per-item via `setString_forType`
 /// on `NSPasteboardTypeFileURL`; multi-file lists currently keep only the
-/// last URL on the implicit pasteboard item, which is the Phase 4
+/// last URL on the implicit pasteboard item, which is the multi-file
 /// limitation documented in ARCHITECTURE.md and addressed once
 /// `NSPasteboardItem` batches replace the per-rep `setString` loop.
 #[cfg(target_os = "macos")]
@@ -560,15 +560,15 @@ unsafe fn publish_one_representation(
             pb.setData_forType(Some(&data), &ty)
         }
         ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => {
-            // The Phase 4 "simple" path: write each file URL via
+            // The simple file-URL path: write each file URL via
             // `setString_forType(NSPasteboardTypeFileURL)`. AppKit holds
             // one value per type on the implicit pasteboard item, so a
             // multi-file list collapses to its last URL — Finder / TextEdit
             // still accept a single-file paste, which is the common case
             // and a strict improvement over the previous "skip every
             // file-list rep" behaviour. Switching to `NSPasteboardItem`
-            // batches for true multi-file paste is tracked for a later
-            // phase.
+            // batches for true multi-file paste is left for a future
+            // change.
             let mut any_accepted = false;
             for path in paths {
                 let Some(url) = path_to_file_url(path) else {
@@ -1137,7 +1137,7 @@ mod tests {
             .expect("text/plain missing from snapshot");
         assert_eq!(text_back, "write_entry text fallback round-trip");
 
-        // Phase 4: JPEG / GIF / WebP go through dynamic UTI strings rather
+        // JPEG / GIF / WebP go through dynamic UTI strings rather
         // than the static `NSPasteboardType*` constants — round-trip each
         // through its UTI to confirm the publisher's match arm fires and
         // AppKit accepts the bytes verbatim.

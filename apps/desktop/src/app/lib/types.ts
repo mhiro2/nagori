@@ -391,7 +391,7 @@ export type PermissionStatus = {
   kind: PermissionKind;
   state: PermissionState;
   message?: string;
-  // Phase A: machine-readable diagnostic / deep-link hints. `reasonCode`
+  // Machine-readable diagnostic / deep-link hints. `reasonCode`
   // is a stable identifier the UI can branch on (e.g.
   // `"accessibility_not_prompted"`), `setupRoute` is the in-app route
   // that walks the user through the fix, `docsUrl` points to the public
