@@ -97,7 +97,7 @@ domain code. This leads to four design rules:
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
-| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
+| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
@@ -1214,16 +1214,27 @@ Two distinct, type-separated families:
   the runner sees it.
 - **AI actions** (`AiActionId`: `Summarize`, `Translate`, `Rewrite`,
   `FormatMarkdown`, `ExtractTasks`, `ExplainCode`) are model-backed and resolved
-  through the `AiActionEngine`. Only `Summarize` is wired today (Apple
-  `TextGenerator`); the rest report a capability mismatch until their backends
-  land.
+  through the `AiActionEngine`. `Summarize` (Apple `TextGenerator`) and
+  `Translate` (Apple `Translator`) are wired today; the rest report a capability
+  mismatch until their backends land.
 
 **Engine layering.** `nagori-ai` is provider-agnostic. `AiEngine` resolves an
 action to a backend family via the static `(action, provider) → backend` table,
 then dispatches to a `TextGenerator` / `Translator` / `Embedder` backend. The
-Apple backend (`nagori-ai-apple::AppleFoundationBackend`) is injected by
-`nagori-platform-native` on macOS; other platforms wire no engine, so AI
-actions are refused there while quick actions keep working.
+Apple backends (`nagori-ai-apple::AppleFoundationBackend` for text generation,
+`AppleTranslateBackend` for translation) are injected by `nagori-platform-native`
+on macOS; other platforms wire no engine, so AI actions are refused there while
+quick actions keep working.
+
+**Translation.** `AppleTranslateBackend` wraps the `Translation` framework's
+`TranslationSession`, detecting the source language with `NLLanguageRecognizer`
+when the caller does not pass one and translating into the requested target
+(`AiRequestOptions::target_language`). Translation is one-shot, so the engine
+adapts the single `TranslationOutput` into a terminal `Done` event; a missing
+language pack surfaces as an `AssetMissing` error carrying a download
+remediation. `nagori ai translate <id> --to <lang> [--from <lang>]` drives it
+from the CLI. The framework requires the app-bundle runtime context, so live
+translation is exercised in the desktop app (Nightly), not the headless CLI.
 
 **Streaming + cancellation.** `NagoriRuntime::start_ai_action` gates on the
 `ai.enabled` master toggle, the allow-list, and the selected provider; shapes

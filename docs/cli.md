@@ -105,12 +105,29 @@ the platform paste shortcut into the frontmost app — Cmd+V on macOS
 Soft-delete unpinned entries. With no flag, deletes everything that is not
 pinned. With `--older-than-days`, deletes entries created before that cutoff.
 
-### `nagori ai <action> <id>`
+### `nagori quick <action> <id>`
 
-Run a local AI action against an entry. Available actions: `summarize`,
-`translate`, `format-json`, `format-markdown`, `explain-code`, `rewrite`,
-`extract-tasks`, `redact-secrets`. `Secret` entries are blocked unless the
-action is `redact-secrets`; `Private` entries are redacted before being sent.
+Run a deterministic on-device quick action against an entry. These never touch a
+language model and are always available regardless of the AI provider
+configuration. Actions: `format-json`, `extract-tasks`, `redact-secrets`,
+`summarize-first-sentence`. `Secret` entries are blocked unless the action is
+`redact-secrets`; `Private` entries are redacted first.
+
+### `nagori ai <action> <id> [--to <lang>] [--from <lang>]`
+
+Run a model-backed AI action against an entry, streaming the result by default
+(`--no-stream` prints only the final text; `--json` / `--jsonl` select the
+output shape). Actions: `summarize`, `translate`, `rewrite`, `format-markdown`,
+`extract-tasks`, `explain-code` — `summarize` and `translate` are wired today,
+the rest report a capability mismatch until their backends land. `Secret`
+entries are blocked; `Private` entries are redacted before the model sees them.
+
+`translate` requires `--to <lang>` (a BCP-47 / ISO code such as `ja`, `en`, or
+`zh-Hans`); `--from <lang>` is optional and the source is auto-detected when
+omitted, e.g. `nagori ai translate <id> --to ja`. On-device translation uses the
+Apple Translation framework, which needs the desktop app-bundle runtime context,
+so the headless CLI path is available but live translation is exercised in the
+app.
 
 ### `nagori doctor`
 
