@@ -2,6 +2,7 @@
 members = [
   "apps/desktop/src-tauri",
   "crates/nagori-ai",
+  "crates/nagori-ai-apple",
   "crates/nagori-cli",
   "crates/nagori-core",
   "crates/nagori-daemon",

@@ -2870,6 +2870,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nagori-ai-apple"
+version = "0.0.4"
+dependencies = [
+ "swift-rs",
+ "tokio",
+]
+
+[[package]]
 name = "nagori-cli"
 version = "0.0.4"
 dependencies = [

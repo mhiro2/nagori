@@ -1,0 +1,20 @@
+[package]
+name = "nagori-ai-apple"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+
+# `swift-rs` only does work on macOS, where `build.rs` invokes `SwiftLinker`.
+# It is keyed to the *host* platform here (build scripts run on the host) so
+# Linux / Windows CI never pulls it in; cross-compiling a macOS target from a
+# non-macOS host is out of scope and skipped by the inner target-os guard.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+swift-rs = { version = "1", features = ["build"] }
+
+[lints]
+workspace = true
