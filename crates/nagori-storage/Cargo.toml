@@ -13,10 +13,25 @@ nagori-search = { path = "../nagori-search" }
 regex.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
+# `sqlite-vec` registers its `vec_distance_*` scalar functions as a SQLite
+# auto-extension so the on-device semantic index can rank stored embeddings by
+# cosine distance in SQL. Optional + feature-gated so a build that does not
+# want the bundled C extension (or runs on a host with no embedder backend)
+# compiles without it. See the `semantic` module.
+# Pinned exactly: 0.1.10-alpha.4 fails to vendor `sqlite-vec-diskann.c`, so the
+# C extension won't compile. 0.1.6 bundles a self-contained amalgamation and
+# ships the rusqlite auto-extension integration we rely on.
+sqlite-vec = { version = "=0.1.6", optional = true }
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[features]
+# Compiles the `sqlite-vec`-backed semantic index. The daemon enables this so
+# the shipping app has semantic search; the feature stays off for a standalone
+# storage build that does not want the native extension.
+semantic-index = ["dep:sqlite-vec"]
 
 [target.'cfg(unix)'.dependencies]
 # Used by `ensure_private_directory` to read the calling process' effective

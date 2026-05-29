@@ -6,6 +6,8 @@ mod permissions;
 mod pool;
 mod schema;
 mod search;
+#[cfg(feature = "semantic-index")]
+mod semantic;
 mod settings;
 mod thumbnail;
 
@@ -18,6 +20,8 @@ use nagori_core::{AppError, Result};
 use rusqlite::Connection;
 
 pub use permissions::ensure_private_directory;
+#[cfg(feature = "semantic-index")]
+pub use semantic::{PendingEmbedding, SemanticIndexCounts};
 
 use convert::storage_err;
 // Pulled in here so the `tests` submodule can reach the helper through
@@ -35,6 +39,10 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        // Register sqlite-vec's scalar functions before opening any connection
+        // so the semantic index can rank embeddings via `vec_distance_cosine`.
+        #[cfg(feature = "semantic-index")]
+        semantic::register_vec_extension();
         let path = path.as_ref();
         // Atomically create the DB file with `0600` *before* SQLite opens
         // it, closing the TOCTOU window where `Connection::open` would
@@ -71,6 +79,8 @@ impl SqliteStore {
     }
 
     pub fn open_memory() -> Result<Self> {
+        #[cfg(feature = "semantic-index")]
+        semantic::register_vec_extension();
         // `Connection::open_in_memory` is a brand-new database per call, so
         // there's no way to share state across multiple in-memory
         // connections without enabling shared-cache + a named URI. For

@@ -3138,6 +3138,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde_json",
+ "sqlite-vec",
  "tempfile",
  "time",
  "tokio",
@@ -4916,6 +4917,15 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec77b84fb8dd5f0f8def127226db83b5d1152c5bf367f09af03998b76ba554a"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

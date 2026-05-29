@@ -365,4 +365,36 @@ CREATE TABLE IF NOT EXISTS audit_events (
     message TEXT,
     created_at TEXT NOT NULL
 );
+
+-- On-device semantic search index. Vectors are stored as raw little-endian
+-- float32 BLOBs (the layout `sqlite-vec`'s `vec_distance_cosine` consumes
+-- directly); the dimension is whatever the embedder reports at runtime, so it
+-- is recorded per row rather than baked into the schema. `ON DELETE CASCADE`
+-- drops a row's embedding when its entry is hard-deleted; soft-deleted entries
+-- keep their vector but are filtered out at query time. `content_hash` lets the
+-- indexer skip re-embedding entries whose text is unchanged.
+CREATE TABLE IF NOT EXISTS entry_embeddings (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    vector BLOB NOT NULL,
+    dimension INTEGER NOT NULL
+        CHECK (dimension > 0),
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Singleton row describing the embedding model the stored vectors were
+-- produced with. Compared at startup against the live embedder's metadata so a
+-- model / revision / dimension change clears the index and triggers a rebuild
+-- instead of mixing incompatible embedding spaces.
+CREATE TABLE IF NOT EXISTS semantic_index_meta (
+    id INTEGER PRIMARY KEY
+        CHECK (id = 1),
+    model_identifier TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    dimension INTEGER NOT NULL,
+    max_sequence_length INTEGER NOT NULL,
+    languages TEXT NOT NULL,
+    index_version INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ";

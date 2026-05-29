@@ -5,4 +5,6 @@
 
 mod sqlite;
 
+#[cfg(feature = "semantic-index")]
+pub use sqlite::{PendingEmbedding, SemanticIndexCounts};
 pub use sqlite::{SqliteStore, ensure_private_directory};
