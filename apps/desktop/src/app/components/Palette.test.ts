@@ -354,10 +354,10 @@ describe('Palette', () => {
     const input = container.querySelector('input[type="text"]');
     expect(input).toBeTruthy();
     // Expand the preview; PreviewPane mounts and reports `enterOpensUrl`.
-    await fireEvent.keyDown(input!, { key: 'e' });
+    if (input) await fireEvent.keyDown(input, { key: 'e' });
     await tick();
     // Plain Enter now belongs to the URL preview — the palette must not paste.
-    await fireEvent.keyDown(input!, { key: 'Enter' });
+    if (input) await fireEvent.keyDown(input, { key: 'Enter' });
     expect(confirmSelection).not.toHaveBeenCalled();
   });
 
@@ -399,13 +399,41 @@ describe('Palette', () => {
     expect(confirmSelection).not.toHaveBeenCalled();
   });
 
-  it('opens the action menu on Cmd+K', async () => {
+  it('docks the action inspector on Cmd+K', async () => {
     const { container } = render(Palette);
     const input = container.querySelector('input[type="text"]');
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
     if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
-    // Action menu is rendered via the same container; opening flips a local
-    // state and renders a [role="dialog"].
-    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    // The inspector is a docked panel, not a modal: opening flips a local
+    // state and mounts it into the palette body's right column.
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+  });
+
+  it('gives the inspector the right column over the preview pane, then restores it', async () => {
+    const item = resultRow('r1', 'snippet');
+    vi.mocked(currentSelection).mockReturnValue(item);
+    searchState.results = [item];
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    // Idle: preview pane owns the right column, inspector is unmounted.
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
+
+    // Open actions: the inspector takes the slot and the preview steps aside.
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+    expect(container.querySelector('.preview-pane')).toBeNull();
+
+    // Escape closes the inspector and the preview pane comes back.
+    if (input) await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
   });
 
   it('triggers Quick Look on Cmd+Y when the capability is available', async () => {

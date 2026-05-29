@@ -100,6 +100,7 @@ export const de: Messages = {
   },
   actionMenu: {
     title: 'Schnellaktionen',
+    close: 'Schließen',
     actions: {
       SummarizeFirstSentence: 'Zusammenfassen (erster Satz)',
       FormatJson: 'JSON formatieren',

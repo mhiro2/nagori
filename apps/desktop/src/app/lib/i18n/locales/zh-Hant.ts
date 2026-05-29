@@ -92,6 +92,7 @@ export const zhHant: Messages = {
   },
   actionMenu: {
     title: '快速動作',
+    close: '關閉',
     actions: {
       SummarizeFirstSentence: '摘要（首句）',
       FormatJson: '格式化 JSON',

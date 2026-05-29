@@ -25,8 +25,8 @@
   const t = $derived(messages());
 
   // Hide-on-blur and Esc are window-level concerns (the palette is the
-  // window). Components can still consume Escape inside ActionMenu / inputs
-  // and stop propagation; the global handler only fires for unhandled keys.
+  // window). Components can still consume Escape inside the action inspector /
+  // inputs and stop propagation; the global handler only fires for unhandled keys.
   // The Settings window owns its own lifecycle (OS title-bar close, Cmd+W
   // through native decorations), so these handlers only run for the
   // palette window.

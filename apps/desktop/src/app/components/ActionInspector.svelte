@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+
   import {
     cancelAiAction,
     getAiAvailability,
@@ -67,7 +69,7 @@
   let copyOk = $state(false);
   let saveOk = $state(false);
   let saving = $state(false);
-  let menuEl: HTMLDivElement | undefined = $state();
+  let panelEl: HTMLElement | undefined = $state();
 
   let quickRunningVisible = $state(false);
   let quickRunningTimer: ReturnType<typeof setTimeout> | undefined;
@@ -85,8 +87,8 @@
   let doneFlashTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Non-reactive guards. `runToken` fences a quick action's async result so a
-  // run that resolves after the menu was closed (and possibly reopened on a
-  // different target) can't commit stale output. `cancelRequested` remembers a
+  // run that resolves after the inspector was closed (and possibly reopened on
+  // a different target) can't commit stale output. `cancelRequested` remembers a
   // cancel pressed during the AI startup window — before `startAiAction` has
   // returned a request id — so we can cancel the moment that id arrives.
   let runToken = 0;
@@ -97,7 +99,8 @@
   let saveFlashTimer: FlashTimer = undefined;
 
   // A run is in flight whenever a quick action or an AI stream is active; the
-  // whole picker disables so a second action can't race the first.
+  // whole picker disables so a second action can't race the first. The picker
+  // stays visible (compact) so the user can chain runs once one settles.
   const busy = $derived(aiStreaming || pending !== undefined);
 
   // The single work-area state machine. Error wins, then an active run, then a
@@ -161,6 +164,35 @@
     }, DONE_FLASH_MS);
   };
 
+  // Tear down the work area back to idle: invalidate any in-flight quick run
+  // (the bumped `runToken` fences late resolutions), cancel an active AI
+  // stream, and clear every transient flag and timer. Shared by the close and
+  // re-target effects so both leave the same clean slate.
+  const resetRun = (): void => {
+    runToken += 1;
+    cancelRequested = false;
+    if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
+    lastResult = undefined;
+    runError = undefined;
+    copyOk = false;
+    saveOk = false;
+    pending = undefined;
+    aiText = '';
+    aiStreaming = false;
+    aiRequestId = undefined;
+    aiPendingAction = undefined;
+    doneFlash = false;
+    quickRunningVisible = false;
+    if (quickRunningTimer !== undefined) {
+      clearTimeout(quickRunningTimer);
+      quickRunningTimer = undefined;
+    }
+    if (doneFlashTimer !== undefined) {
+      clearTimeout(doneFlashTimer);
+      doneFlashTimer = undefined;
+    }
+  };
+
   const run = async (id: QuickActionId): Promise<void> => {
     if (!target || !isTauri() || busy) return;
     const token = ++runToken;
@@ -202,6 +234,10 @@
   const runAiAction = async (action: AiTextActionId): Promise<void> => {
     const entry = aiActionList.find((item) => item.action === action);
     if (!target || !isTauri() || busy || !entry?.available) return;
+    // Fence the startup window the same way `run` does: closing, re-targeting,
+    // or starting another action bumps `runToken`, so a `startAiAction` that
+    // resolves after any of those can detect it lost the race.
+    const token = ++runToken;
     runError = undefined;
     lastResult = undefined;
     aiText = '';
@@ -211,6 +247,13 @@
     cancelRequested = false;
     try {
       const id = await startAiAction(action, target.id);
+      // Superseded while the backend was spinning up (the inspector was closed
+      // or re-targeted before the id arrived): cancel the orphaned backend run
+      // so it doesn't stream into a now-stale request, and don't adopt its id.
+      if (token !== runToken) {
+        void cancelAiAction(id);
+        return;
+      }
       // Cancel pressed during startup (before the id existed): honour it now
       // that the backend has a handle, and abandon this run.
       if (cancelRequested) {
@@ -222,6 +265,9 @@
       }
       aiRequestId = id;
     } catch (err) {
+      // A superseding run (or the reset) already owns the work area; don't let
+      // this run's failure clobber it.
+      if (token !== runToken) return;
       runError = describeError(err);
       aiStreaming = false;
       aiRequestId = undefined;
@@ -327,46 +373,41 @@
   };
 
   // Escape cancels an in-flight stream first (so a stray keystroke doesn't
-  // abandon the run *and* close), and only closes the menu when idle.
+  // abandon the run *and* close), and only closes the inspector when idle.
   const onEscape = (): void => {
     if (aiStreaming) cancelAi();
     else onClose();
   };
 
-  // Reset transient feedback when the user dismisses or re-opens the menu. An
-  // in-flight AI run is cancelled so the backend (and its concurrency permit)
+  // Reset transient feedback when the user dismisses or re-opens the inspector.
+  // An in-flight AI run is cancelled so the backend (and its concurrency permit)
   // is released rather than streaming on to no one.
   $effect(() => {
-    if (!open) {
-      // Invalidate any in-flight quick run and pending startup-cancel so their
-      // late resolutions don't write into a closed (or reopened) menu.
-      runToken += 1;
-      cancelRequested = false;
-      if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
-      lastResult = undefined;
-      runError = undefined;
-      copyOk = false;
-      saveOk = false;
-      pending = undefined;
-      aiText = '';
-      aiStreaming = false;
-      aiRequestId = undefined;
-      aiPendingAction = undefined;
-      doneFlash = false;
-      quickRunningVisible = false;
-      if (quickRunningTimer !== undefined) {
-        clearTimeout(quickRunningTimer);
-        quickRunningTimer = undefined;
-      }
-      if (doneFlashTimer !== undefined) {
-        clearTimeout(doneFlashTimer);
-        doneFlashTimer = undefined;
-      }
-    }
+    if (!open) resetRun();
   });
 
-  // Probe AI availability each time the menu opens so the AI buttons reflect
-  // the live Apple Intelligence / provider state (disabled + reason when off).
+  // Because the inspector is docked (not a modal), the user can re-target it
+  // by clicking another row while it stays open — the palette feeds it the
+  // live selection. The work area belongs to the *previous* target, so when
+  // the id changes under an open inspector we cancel any run and clear it
+  // rather than leave a stale result (or land a finishing run) against the new
+  // entry. `lastSeenTargetId` tracks the id while closed too, so reopening on
+  // the same entry (the common case) is not treated as a change. `untrack`
+  // keeps this effect's dependencies to `open` + `target.id` only.
+  let lastSeenTargetId: string | undefined = undefined;
+  $effect(() => {
+    const id = target?.id;
+    if (!open) {
+      lastSeenTargetId = id;
+      return;
+    }
+    if (id === lastSeenTargetId) return;
+    lastSeenTargetId = id;
+    untrack(() => resetRun());
+  });
+
+  // Probe AI availability each time the inspector opens so the AI buttons
+  // reflect the live Apple Intelligence / provider state (disabled + reason).
   $effect(() => {
     if (!open || !isTauri()) return;
     void (async () => {
@@ -378,8 +419,8 @@
     })();
   });
 
-  // Subscribe to the request-scoped streaming events while the menu is open.
-  // Events whose `requestId` does not match the active run are discarded.
+  // Subscribe to the request-scoped streaming events while the inspector is
+  // open. Events whose `requestId` does not match the active run are discarded.
   $effect(() => {
     if (!open || !isTauri()) return;
     // `aiRequestId` is the id returned by `startAiAction` — authoritative and
@@ -422,23 +463,23 @@
     };
   });
 
-  // Move focus into the dialog on open so screen readers announce the role and
+  // Move focus into the panel on open so screen readers announce the region and
   // so the Escape keydown handler below has somewhere reachable to fire from.
   $effect(() => {
-    if (open && menuEl) {
-      menuEl.focus();
+    if (open && panelEl) {
+      panelEl.focus();
     }
   });
 
   // Starting an AI stream disables the action button that launched it, so focus
   // would otherwise land on a disabled control (or <body>) and route Escape
-  // past the dialog (to the palette's window handler) instead of into our
-  // cancel logic. Pull focus back to the dialog when a stream begins so it
+  // past the panel (to the palette's window handler) instead of into our
+  // cancel logic. Pull focus back to the panel when a stream begins so it
   // keeps owning the keyboard. Gated on `aiStreaming` (not `busy`) so quick
   // sub-150ms runs don't yank focus on every click.
   $effect(() => {
-    if (aiStreaming && menuEl) {
-      menuEl.focus();
+    if (aiStreaming && panelEl) {
+      panelEl.focus();
     }
   });
 
@@ -455,102 +496,100 @@
 </script>
 
 {#if open}
+  <!-- A docked panel, not a modal: it shares the palette body with the result
+       list rather than floating over it, so the target the actions run against
+       stays in view beside its source row. `role="dialog"` without `aria-modal`
+       marks it as a non-modal task surface — focusable, labelled, and
+       Escape-dismissible, but it neither traps focus nor blocks the list the way
+       the old modal did. While focused the panel owns the keyboard (keydowns are
+       stopped before the palette's window handler) so action shortcuts don't
+       leak and Escape routes into `onEscape`. A plain <div> carries the role
+       cleanly (a landmark <aside> cannot host it). -->
   <div
-    class="scrim"
-    role="presentation"
-    onclick={onClose}
+    class="action-inspector"
+    data-testid="action-inspector"
+    role="dialog"
+    aria-labelledby="action-inspector-title"
+    tabindex="-1"
+    bind:this={panelEl}
     onkeydown={(e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onEscape();
+        return;
+      }
+      e.stopPropagation();
     }}
   >
-    <div
-      class="menu"
-      role="dialog"
-      aria-modal="true"
-      tabindex="-1"
-      aria-labelledby="action-menu-title"
-      bind:this={menuEl}
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => {
-        // The dialog stops keydown from leaking out so action button
-        // shortcuts don't bubble into the palette behind. Escape still has to
-        // be handled here directly.
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          onEscape();
-          return;
-        }
-        e.stopPropagation();
+    <header class="head">
+      <span id="action-inspector-title">{t.actionMenu.title}</span>
+      <button type="button" class="close" aria-label={t.actionMenu.close} onclick={onClose}
+        >×</button
+      >
+    </header>
+
+    <CompactPreview item={target} />
+
+    <div class="divider"></div>
+
+    <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
+
+    {#if aiUnavailableReason}
+      <p class="ai-reason">{aiUnavailableReason}</p>
+    {/if}
+
+    <ActionRunPanel
+      {phase}
+      text={workText}
+      streaming={aiStreaming}
+      {runningLabel}
+      errorMessage={runError}
+      {doneFlash}
+      labels={{
+        result: t.actionMenu.resultTitle,
+        copy: t.actionMenu.copyResult,
+        copied: t.actionMenu.copied,
+        save: t.actionMenu.saveResult,
+        saved: t.actionMenu.saved,
+        cancel: t.actionMenu.aiCancel,
+        done: t.actionMenu.done,
       }}
-    >
-      <header class="head">
-        <span id="action-menu-title">{t.actionMenu.title}</span>
-        <button type="button" class="close" onclick={onClose}>×</button>
-      </header>
+      {copyOk}
+      {saveOk}
+      {saving}
+      canSave={isTauri()}
+      onCopy={() => void copyResult()}
+      onSave={() => void saveResult()}
+      onCancel={cancelAi}
+    />
 
-      <CompactPreview item={target} />
-
-      <div class="divider"></div>
-
-      <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
-
-      {#if aiUnavailableReason}
-        <p class="ai-reason">{aiUnavailableReason}</p>
-      {/if}
-
-      <ActionRunPanel
-        {phase}
-        text={workText}
-        streaming={aiStreaming}
-        {runningLabel}
-        errorMessage={runError}
-        {doneFlash}
-        labels={{
-          result: t.actionMenu.resultTitle,
-          copy: t.actionMenu.copyResult,
-          copied: t.actionMenu.copied,
-          save: t.actionMenu.saveResult,
-          saved: t.actionMenu.saved,
-          cancel: t.actionMenu.aiCancel,
-          done: t.actionMenu.done,
-        }}
-        {copyOk}
-        {saveOk}
-        {saving}
-        canSave={isTauri()}
-        onCopy={() => void copyResult()}
-        onSave={() => void saveResult()}
-        onCancel={cancelAi}
-      />
-
-      {#if !isTauri()}
-        <p class="hint">{t.actionMenu.tauriRequired}</p>
-      {/if}
-    </div>
+    {#if !isTauri()}
+      <p class="hint">{t.actionMenu.tauriRequired}</p>
+    {/if}
   </div>
 {/if}
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
-  }
-  .menu {
+  .action-inspector {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    width: min(480px, 92vw);
-    max-height: 80vh;
+    /* Share the palette body with the result list. `flex: 1` splits the width
+       with the list; full panel height (vs. the old 80vh modal) is what gives
+       long results room to breathe. */
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
     padding: 1rem;
-    border-radius: 8px;
-    background: var(--bg-overlay, #1d1f23);
+    border-left: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
     color: var(--fg, #f5f5f5);
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
-    overflow: auto;
+    /* Children scroll their own regions (the result `<pre>` in particular), so
+       the panel frame itself stays put. */
+    overflow: hidden;
+  }
+  .action-inspector:focus {
+    outline: none;
   }
   .head {
     display: flex;

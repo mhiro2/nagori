@@ -92,6 +92,7 @@ export const zhHans: Messages = {
   },
   actionMenu: {
     title: '快捷操作',
+    close: '关闭',
     actions: {
       SummarizeFirstSentence: '总结（首句）',
       FormatJson: '格式化 JSON',

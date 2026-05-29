@@ -92,6 +92,10 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    /* Grow into the remaining inspector height so a long result fills the
+       panel and scrolls inside the `<pre>` rather than capping early. */
+    flex: 1;
+    min-height: 0;
   }
   .run-head {
     display: flex;
@@ -165,7 +169,10 @@
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 320px;
+    /* Fill the grown `.run` area; scroll internally once the text overflows.
+       `min-height` keeps a useful floor when the panel is short. */
+    flex: 1;
+    min-height: 6rem;
     overflow: auto;
   }
   .error {

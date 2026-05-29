@@ -92,6 +92,7 @@ export const ja: Messages = {
   },
   actionMenu: {
     title: 'クイックアクション',
+    close: '閉じる',
     actions: {
       SummarizeFirstSentence: '要約（先頭の一文）',
       FormatJson: 'JSON 整形',

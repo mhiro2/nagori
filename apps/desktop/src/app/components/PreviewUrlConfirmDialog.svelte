@@ -32,7 +32,7 @@
   // Move keyboard focus into the dialog on mount so screen readers
   // announce the role, Escape can fire from a reachable element, and
   // tab navigation lands inside the dialog rather than on a button
-  // behind it. Mirrors the pattern in ActionMenu.svelte.
+  // behind it. Mirrors the focus-on-open pattern in ActionInspector.svelte.
   $effect(() => {
     if (dialogEl) {
       dialogEl.focus();

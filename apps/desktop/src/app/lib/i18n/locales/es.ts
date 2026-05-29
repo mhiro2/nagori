@@ -101,6 +101,7 @@ export const es: Messages = {
   },
   actionMenu: {
     title: 'Acciones rápidas',
+    close: 'Cerrar',
     actions: {
       SummarizeFirstSentence: 'Resumir (primera frase)',
       FormatJson: 'Formatear JSON',

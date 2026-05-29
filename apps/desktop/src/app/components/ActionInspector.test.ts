@@ -47,7 +47,7 @@ import {
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
-import ActionMenu from './ActionMenu.svelte';
+import ActionInspector from './ActionInspector.svelte';
 
 const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   id: 'entry-id',
@@ -62,7 +62,7 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   ...overrides,
 });
 
-// The streaming text actions the menu surfaces (Translate is CLI-only).
+// The streaming text actions the inspector surfaces (Translate is CLI-only).
 const TEXT_ACTIONS: AiActionId[] = [
   'Summarize',
   'Rewrite',
@@ -98,19 +98,19 @@ afterEach(cleanup);
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe('ActionMenu', () => {
+describe('ActionInspector', () => {
   it('renders nothing when open is false', () => {
-    const { container } = render(ActionMenu, {
+    const { container } = render(ActionInspector, {
       props: { open: false, target: sample(), onClose: () => {} },
     });
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
   });
 
-  it('renders a dialog with the deterministic and AI actions in one list', () => {
-    const { getByRole, getByText } = render(ActionMenu, {
+  it('renders the docked panel with the deterministic and AI actions in one list', () => {
+    const { getByTestId, getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    expect(getByRole('dialog')).toBeTruthy();
+    expect(getByTestId('action-inspector')).toBeTruthy();
     // Deterministic actions.
     expect(getByText('Summarize (first sentence)')).toBeTruthy();
     expect(getByText('Format JSON')).toBeTruthy();
@@ -127,7 +127,7 @@ describe('ActionMenu', () => {
   });
 
   it('shows the target summary for the selected entry', () => {
-    const { getByTestId } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample({ preview: 'hello there' }), onClose: () => {} },
     });
     const target = getByTestId('action-target');
@@ -137,36 +137,14 @@ describe('ActionMenu', () => {
   it('invokes onClose when the close button is clicked', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    const { getByRole, container } = render(ActionMenu, {
+    const { getByTestId, container } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose },
     });
     const closeBtn = container.querySelector('.close');
     expect(closeBtn).toBeTruthy();
-    expect(getByRole('dialog')).toBeTruthy();
+    expect(getByTestId('action-inspector')).toBeTruthy();
     await user.click(closeBtn as HTMLElement);
     expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('invokes onClose when the scrim is clicked', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    const { container } = render(ActionMenu, {
-      props: { open: true, target: sample(), onClose },
-    });
-    const scrim = container.querySelector('.scrim');
-    expect(scrim).toBeTruthy();
-    await user.click(scrim as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not close when the inner menu is clicked (event stopped)', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    const { getByRole } = render(ActionMenu, {
-      props: { open: true, target: sample(), onClose },
-    });
-    await user.click(getByRole('dialog'));
-    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('dispatches runQuickAction with the target id and renders the result', async () => {
@@ -176,7 +154,7 @@ describe('ActionMenu', () => {
       warnings: [],
     });
 
-    const { getByTestId, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionInspector, {
       props: { open: true, target: sample({ id: 'abc' }), onClose: () => {} },
     });
     await user.click(getByTestId('quick-SummarizeFirstSentence'));
@@ -188,7 +166,7 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(runQuickAction).mockRejectedValue(new Error('bad json'));
 
-    const { getByTestId, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await user.click(getByTestId('quick-FormatJson'));
@@ -204,7 +182,7 @@ describe('ActionMenu', () => {
       }),
     );
 
-    const { getByTestId } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await user.click(getByTestId('quick-FormatJson'));
@@ -221,7 +199,7 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-1');
 
-    const { getByTestId, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionInspector, {
       props: { open: true, target: sample({ id: 'abc' }), onClose: () => {} },
     });
     await flush(); // let the availability probe resolve
@@ -242,7 +220,7 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-2');
 
-    const { getByTestId } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample({ id: 'xyz' }), onClose: () => {} },
     });
     await flush(); // let the availability probe resolve
@@ -252,7 +230,7 @@ describe('ActionMenu', () => {
 
   it('disables the AI button with a reason when it is unavailable', async () => {
     vi.mocked(getAiAvailability).mockResolvedValue(availability(false));
-    const { getByTestId, getByText } = render(ActionMenu, {
+    const { getByTestId, getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await flush();
@@ -267,7 +245,7 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-9');
 
-    const { getByTestId, getByText } = render(ActionMenu, {
+    const { getByTestId, getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await flush();
@@ -282,7 +260,7 @@ describe('ActionMenu', () => {
     const onClose = vi.fn();
     vi.mocked(startAiAction).mockResolvedValue('req-esc');
 
-    const { getByTestId } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose },
     });
     await flush();
@@ -302,7 +280,7 @@ describe('ActionMenu', () => {
       }),
     );
 
-    const { getByTestId } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await flush(); // let the availability probe resolve
@@ -316,7 +294,7 @@ describe('ActionMenu', () => {
     expect(cancelAiAction).toHaveBeenCalledWith('req-late');
   });
 
-  it('does not commit a quick-action result after the menu has closed', async () => {
+  it('does not commit a quick-action result after the inspector has closed', async () => {
     const user = userEvent.setup();
     let resolveRun: ((value: { text: string; warnings: string[] }) => void) | undefined;
     vi.mocked(runQuickAction).mockReturnValue(
@@ -325,11 +303,11 @@ describe('ActionMenu', () => {
       }),
     );
 
-    const { getByTestId, queryByText, rerender } = render(ActionMenu, {
+    const { getByTestId, queryByText, rerender } = render(ActionInspector, {
       props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
     });
     await user.click(getByTestId('quick-FormatJson'));
-    // Close before the IPC resolves, then let it resolve into the closed menu.
+    // Close before the IPC resolves, then let it resolve into the closed panel.
     await rerender({ open: false, target: sample({ id: 'a' }), onClose: () => {} });
     resolveRun?.({ text: 'stale output', warnings: [] });
     await flush();
@@ -338,8 +316,57 @@ describe('ActionMenu', () => {
     expect(queryByText('stale output')).toBeNull();
   });
 
+  it('clears the work area when re-targeted to another entry while open', async () => {
+    // Docked, not modal: clicking another palette row re-targets the live
+    // inspector. A result from the previous entry must not linger against the
+    // new one, so a target-id change clears the work area back to idle.
+    const user = userEvent.setup();
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'first sentence.', warnings: [] });
+
+    const { getByTestId, findByText, queryByText, queryByTestId, rerender } = render(
+      ActionInspector,
+      { props: { open: true, target: sample({ id: 'a' }), onClose: () => {} } },
+    );
+    await user.click(getByTestId('quick-SummarizeFirstSentence'));
+    expect(await findByText('first sentence.')).toBeTruthy();
+
+    await rerender({ open: true, target: sample({ id: 'b' }), onClose: () => {} });
+    expect(queryByText('first sentence.')).toBeNull();
+    // The work area is gone entirely (idle), not just emptied.
+    expect(queryByTestId('action-run')).toBeNull();
+  });
+
+  it('cancels an AI run still starting up when re-targeted, and never adopts it', async () => {
+    // The startup window has no request id yet, so close/re-target cannot cancel
+    // by id at the time. The `runToken` fence must make the late `startAiAction`
+    // resolution cancel the orphaned backend run instead of binding it (and its
+    // stream) to the now-current target.
+    const user = userEvent.setup();
+    let resolveStart: ((id: string) => void) | undefined;
+    vi.mocked(startAiAction).mockReturnValue(
+      new Promise<string>((r) => {
+        resolveStart = r;
+      }),
+    );
+
+    const { getByTestId, queryByTestId, rerender } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+    await user.click(getByTestId('ai-Summarize'));
+    // Close (no id to cancel yet) then reopen on a different target.
+    await rerender({ open: false, target: sample({ id: 'a' }), onClose: () => {} });
+    await rerender({ open: true, target: sample({ id: 'b' }), onClose: () => {} });
+    // The orphaned startup finally resolves: cancel it, don't adopt it.
+    resolveStart?.('req-orphan');
+    await flush();
+    expect(cancelAiAction).toHaveBeenCalledWith('req-orphan');
+    // No stream was adopted, so the work area stayed idle.
+    expect(queryByTestId('action-run')).toBeNull();
+  });
+
   it('includes the AI badge in the accessible name of AI actions', () => {
-    const { getByRole } = render(ActionMenu, {
+    const { getByRole } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     // The deterministic "Summarize (first sentence)" and the AI "Summarize"
@@ -350,26 +377,26 @@ describe('ActionMenu', () => {
 
   it('shows the tauriRequired hint when the runtime is unavailable', () => {
     vi.mocked(isTauri).mockReturnValue(false);
-    const { getByText } = render(ActionMenu, {
+    const { getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     expect(getByText('Quick actions require the Tauri runtime.')).toBeTruthy();
   });
 
-  it('auto-focuses the dialog when opened', () => {
-    const { getByRole } = render(ActionMenu, {
+  it('auto-focuses the panel when opened', () => {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    expect(document.activeElement).toBe(getByRole('dialog'));
+    expect(document.activeElement).toBe(getByTestId('action-inspector'));
   });
 
   it('invokes onClose when Escape is pressed while idle', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    const { getByRole } = render(ActionMenu, {
+    const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose },
     });
-    expect(document.activeElement).toBe(getByRole('dialog'));
+    expect(document.activeElement).toBe(getByTestId('action-inspector'));
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -389,7 +416,7 @@ describe('ActionMenu', () => {
       representationSummary: [],
     });
 
-    const { findByText, getByTestId, getByText } = render(ActionMenu, {
+    const { findByText, getByTestId, getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await user.click(getByTestId('quick-FormatJson'));

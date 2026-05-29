@@ -44,14 +44,17 @@
   } from '../stores/searchSelection';
   import { refreshSettings, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
-  import ActionMenu from './ActionMenu.svelte';
+  import ActionInspector from './ActionInspector.svelte';
   import FilterChips from './FilterChips.svelte';
   import PreviewPane from './PreviewPane.svelte';
   import ResultList from './ResultList.svelte';
   import SearchBox from './SearchBox.svelte';
   import StatusBar from './StatusBar.svelte';
 
-  let actionMenuOpen = $state(false);
+  // The action inspector is a docked right-panel rather than a modal: when
+  // open it takes the right column in place of the preview pane (see the body
+  // markup below), so it cannot coexist with an expanded full-width preview.
+  let actionsOpen = $state(false);
 
   onMount(() => {
     // One-shot bootstrap. This must NOT live in an `$effect`: `refreshRecent`
@@ -208,7 +211,10 @@
         else void copySelection();
         break;
       case 'open-actions':
-        actionMenuOpen = true;
+        // Collapse the full-width preview first: the inspector docks into the
+        // right column and the two would otherwise fight over it.
+        previewExpanded = false;
+        actionsOpen = true;
         break;
       case 'toggle-pin':
         void togglePinSelection();
@@ -243,7 +249,7 @@
         selectAllMulti(resultIds);
         break;
       case 'close':
-        if (actionMenuOpen) actionMenuOpen = false;
+        if (actionsOpen) actionsOpen = false;
         else if (multiSelectState.selected.size > 0) clearMultiSelect();
         else if (previewExpanded) previewExpanded = false;
         else if (isTauri()) {
@@ -265,10 +271,10 @@
   // input-scoped listener would silently drop every binding: arrow keys would
   // scroll the list natively instead of moving the selection, and Cmd+K /
   // Cmd+, would stop responding entirely. A window listener keeps navigation
-  // and shortcuts working regardless of which element holds focus. ActionMenu
-  // stops propagation on its own keydowns, so its shortcuts never leak back
-  // here while it is open, and matched actions call `preventDefault`, so
-  // App.svelte's window-level Escape handler stands down on `close`.
+  // and shortcuts working regardless of which element holds focus. The action
+  // inspector stops propagation on its own keydowns while focused, so its
+  // shortcuts never leak back here, and matched actions call `preventDefault`,
+  // so App.svelte's window-level Escape handler stands down on `close`.
   onMount(() => {
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
@@ -280,7 +286,7 @@
   <FilterChips />
   <div
     class="body"
-    class:single-column={!showPreviewPane && !previewExpanded}
+    class:single-column={!showPreviewPane && !previewExpanded && !actionsOpen}
     class:preview-only={previewExpanded}
   >
     {#if !previewExpanded}
@@ -292,7 +298,9 @@
         onConfirm={handleConfirm}
       />
     {/if}
-    {#if showPreviewPane || previewExpanded}
+    <!-- Right column. The inspector wins the slot whenever it is open; the
+         preview pane returns the moment it closes. -->
+    {#if (showPreviewPane || previewExpanded) && !actionsOpen}
       <PreviewPane
         item={selected}
         preview={previewMatchesSelection ? previewState.preview : undefined}
@@ -305,6 +313,9 @@
         bind:enterOpensUrl={previewEnterOpensUrl}
       />
     {/if}
+    <!-- Kept mounted (it renders nothing while closed) so that toggling
+         `open` off can cancel any in-flight AI run and reset its work area. -->
+    <ActionInspector open={actionsOpen} target={selected} onClose={() => (actionsOpen = false)} />
   </div>
   <StatusBar
     entryCount={searchState.results.length}
@@ -314,8 +325,6 @@
     selectedCount={multiSelectState.selected.size}
   />
 </section>
-
-<ActionMenu open={actionMenuOpen} target={selected} onClose={() => (actionMenuOpen = false)} />
 
 <style>
   .palette {

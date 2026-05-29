@@ -109,6 +109,8 @@ export type Messages = {
   };
   actionMenu: {
     title: string;
+    // Accessible name for the panel's × dismiss control.
+    close: string;
     actions: {
       SummarizeFirstSentence: string;
       FormatJson: string;
@@ -526,6 +528,7 @@ export const en: Messages = {
   },
   actionMenu: {
     title: 'Quick actions',
+    close: 'Close',
     actions: {
       SummarizeFirstSentence: 'Summarize (first sentence)',
       FormatJson: 'Format JSON',

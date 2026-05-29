@@ -92,6 +92,7 @@ export const ko: Messages = {
   },
   actionMenu: {
     title: '빠른 동작',
+    close: '닫기',
     actions: {
       SummarizeFirstSentence: '요약(첫 문장)',
       FormatJson: 'JSON 정리',
