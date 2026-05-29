@@ -14,7 +14,7 @@ use crate::dto::{
     AiActionResultDto, AiAvailabilityDto, AppDenyRuleDto, AppSettingsDto, CliInstallResultDto,
     CliInstallStatusDto, EntryDto, EntryPreviewDto, HotkeyFailureDto, PasteFormatDto,
     PermissionStatusDto, PlatformCapabilitiesDto, SearchRequestDto, SearchResponseDto,
-    SearchResultDto,
+    SearchResultDto, SemanticIndexStatusDto,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -593,6 +593,24 @@ pub async fn run_quick_action(
 pub async fn get_ai_availability(state: State<'_, AppState>) -> CommandResult<AiAvailabilityDto> {
     let report = state.runtime.ai_availability().await?;
     Ok(report.into())
+}
+
+/// Current state of the on-device semantic index (state + indexed/pending/total
+/// counts) for the AI settings tab.
+#[tauri::command]
+pub async fn get_semantic_index_status(
+    state: State<'_, AppState>,
+) -> CommandResult<SemanticIndexStatusDto> {
+    let status = state.runtime.semantic_index_status().await?;
+    Ok(status.into())
+}
+
+/// Requests a full rebuild of the semantic index: the background worker clears
+/// the stored vectors and re-embeds the whole corpus on its next pass.
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn rebuild_semantic_index(state: State<'_, AppState>) {
+    state.runtime.rebuild_semantic_index();
 }
 
 /// Starts a streaming AI action. Returns the request id immediately; events

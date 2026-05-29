@@ -40,6 +40,7 @@ const baseSettings = (): AppSettings => ({
     allowStreaming: true,
     requestTimeoutMs: 30000,
     semanticIndexEnabled: false,
+    semanticIndexAcPowerOnly: true,
     onboardingDismissed: false,
     allowOpenaiFallbackPrompt: true,
   },

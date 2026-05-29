@@ -58,8 +58,28 @@ export type AiSettings = {
   allowStreaming: boolean;
   requestTimeoutMs: number;
   semanticIndexEnabled: boolean;
+  semanticIndexAcPowerOnly: boolean;
   onboardingDismissed: boolean;
   allowOpenaiFallbackPrompt: boolean;
+};
+
+// Coarse state of the semantic index. Mirrors `nagori_core::SemanticIndexState`
+// (snake_case via serde).
+export type SemanticIndexState =
+  | 'disabled'
+  | 'unsupported'
+  | 'unavailable'
+  | 'ready'
+  | 'indexing'
+  | 'paused';
+
+// Mirrors the desktop `SemanticIndexStatusDto`.
+export type SemanticIndexStatus = {
+  state: SemanticIndexState;
+  indexed: number;
+  pending: number;
+  total: number;
+  model?: string;
 };
 
 // Per-action availability status. Mirrors `nagori_core::PerActionStatus`

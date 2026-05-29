@@ -1,7 +1,8 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiOverallStatus, ClipboardEntry, ContentKind,
     EntryId, PerActionStatus, RankReason, RepresentationRole, RepresentationSummary, SearchFilters,
-    SearchMode, SearchResult, Sensitivity, safe_preview_for_dto,
+    SearchMode, SearchResult, SemanticIndexState, SemanticIndexStatus, Sensitivity,
+    safe_preview_for_dto,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -305,6 +306,31 @@ impl From<AiAvailabilityReport> for AiAvailabilityDto {
                     remediation: entry.remediation.map(|rem| rem.i18n_key),
                 })
                 .collect(),
+        }
+    }
+}
+
+/// Wire shape of [`SemanticIndexStatus`] for the settings UI: the coarse state
+/// plus indexed / pending / total counts and the model identifier.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticIndexStatusDto {
+    pub state: SemanticIndexState,
+    pub indexed: u64,
+    pub pending: u64,
+    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl From<SemanticIndexStatus> for SemanticIndexStatusDto {
+    fn from(value: SemanticIndexStatus) -> Self {
+        Self {
+            state: value.state,
+            indexed: value.indexed,
+            pending: value.pending,
+            total: value.total,
+            model: value.model.map(|meta| meta.model_identifier),
         }
     }
 }

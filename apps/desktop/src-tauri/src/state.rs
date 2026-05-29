@@ -165,6 +165,7 @@ impl HotkeyFailureCache {
 struct BackgroundTasks {
     capture: tauri::async_runtime::JoinHandle<()>,
     maintenance: tauri::async_runtime::JoinHandle<()>,
+    semantic: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl AppState {
@@ -332,6 +333,7 @@ impl AppState {
             let store = runtime.store().clone();
             let settings = runtime.current_settings();
             let app_for_capture_event = app.clone();
+            let runtime_for_notify = runtime.clone();
             let capture_notifier = Arc::new(move |entry_id: EntryId| {
                 use tauri::Emitter;
 
@@ -339,6 +341,9 @@ impl AppState {
                     crate::CLIPBOARD_CHANGED_EVENT,
                     serde_json::json!({ "entryId": entry_id.to_string() }),
                 );
+                // Nudge the semantic indexer so the fresh clip is embedded
+                // promptly (no-op when the index is disabled / unsupported).
+                runtime_for_notify.notify_semantic_capture();
             });
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_window(window)
@@ -379,9 +384,16 @@ impl AppState {
             }
         });
 
+        let runtime = self.runtime.clone();
+        let semantic = tauri::async_runtime::spawn(async move {
+            let shutdown = runtime.shutdown_handle();
+            runtime.run_semantic_indexer(shutdown).await;
+        });
+
         *tasks_slot = Some(BackgroundTasks {
             capture,
             maintenance,
+            semantic,
         });
     }
 
@@ -396,6 +408,7 @@ impl AppState {
         tokio::join!(
             drain_background_task("capture", tasks.capture, grace),
             drain_background_task("maintenance", tasks.maintenance, grace),
+            drain_background_task("semantic", tasks.semantic, grace),
         );
     }
 

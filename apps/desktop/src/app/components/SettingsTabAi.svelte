@@ -1,8 +1,13 @@
 <script lang="ts">
-  import { getAiAvailability } from '../lib/commands';
+  import { getAiAvailability, getSemanticIndexStatus, rebuildSemanticIndex } from '../lib/commands';
   import type { Messages } from '../lib/i18n/locales/en';
   import { isTauri } from '../lib/tauri';
-  import type { AiAvailability, AiProviderKind, AppSettings } from '../lib/types';
+  import type {
+    AiAvailability,
+    AiProviderKind,
+    AppSettings,
+    SemanticIndexStatus,
+  } from '../lib/types';
 
   type Props = {
     settings: AppSettings;
@@ -13,6 +18,7 @@
   let { settings = $bindable(), t, scheduleSave }: Props = $props();
 
   let availability = $state<AiAvailability | undefined>(undefined);
+  let semanticStatus = $state<SemanticIndexStatus | undefined>(undefined);
 
   // Re-probe availability whenever AI is enabled (or the tab re-renders with
   // it on), so the status line reflects the live Apple Intelligence state.
@@ -30,6 +36,25 @@
     })();
   });
 
+  // Poll the semantic index status while the index is enabled so the progress
+  // line tracks the background worker as it embeds the backlog.
+  $effect(() => {
+    if (!isTauri() || !settings.ai.semanticIndexEnabled) {
+      semanticStatus = undefined;
+      return;
+    }
+    const refresh = async (): Promise<void> => {
+      try {
+        semanticStatus = await getSemanticIndexStatus();
+      } catch {
+        semanticStatus = undefined;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 2000);
+    return () => clearInterval(timer);
+  });
+
   const statusLabel = $derived.by(() => {
     if (!settings.ai.enabled) return t.settings.ai.statusDisabled;
     switch (availability?.overallStatus) {
@@ -42,10 +67,32 @@
     }
   });
 
+  const semanticStateLabel = $derived.by(() => {
+    switch (semanticStatus?.state) {
+      case 'ready':
+        return t.settings.ai.semanticIndexStateReady;
+      case 'indexing':
+        return t.settings.ai.semanticIndexStateIndexing;
+      case 'paused':
+        return t.settings.ai.semanticIndexStatePaused;
+      case 'unavailable':
+        return t.settings.ai.semanticIndexStateUnavailable;
+      case 'unsupported':
+        return t.settings.ai.semanticIndexStateUnsupported;
+      default:
+        return t.settings.ai.semanticIndexStateDisabled;
+    }
+  });
+
   const onProviderChange = (event: Event): void => {
     const value = (event.currentTarget as HTMLSelectElement).value as AiProviderKind;
     settings.ai.provider = value;
     scheduleSave(0);
+  };
+
+  const onRebuild = (): void => {
+    if (!isTauri()) return;
+    void rebuildSemanticIndex();
   };
 </script>
 
@@ -89,6 +136,28 @@
     {t.settings.ai.semanticIndex}
   </label>
   <p class="help">{t.settings.ai.semanticIndexHelp}</p>
+
+  {#if settings.ai.semanticIndexEnabled}
+    <label>
+      <input
+        type="checkbox"
+        bind:checked={settings.ai.semanticIndexAcPowerOnly}
+        onchange={() => scheduleSave(0)}
+      />
+      {t.settings.ai.semanticIndexAcPowerOnly}
+    </label>
+    <p class="help">{t.settings.ai.semanticIndexAcPowerOnlyHelp}</p>
+
+    <div class="index-row">
+      <button type="button" onclick={onRebuild}>{t.settings.ai.semanticIndexRebuild}</button>
+      {#if semanticStatus}
+        <span class="status">
+          {t.settings.ai.semanticIndexStatus}: {semanticStateLabel}
+          ({semanticStatus.indexed} / {semanticStatus.total})
+        </span>
+      {/if}
+    </div>
+  {/if}
 </fieldset>
 
 <style>
@@ -107,5 +176,14 @@
     margin: 0.5rem 0 0;
     font-size: 0.8125rem;
     color: var(--muted, rgba(255, 255, 255, 0.6));
+  }
+  .index-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.5rem 0 0;
+  }
+  .index-row .status {
+    margin: 0;
   }
 </style>

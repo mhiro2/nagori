@@ -19,6 +19,7 @@ import type {
   QuickActionId,
   SearchRequest,
   SearchResponse,
+  SemanticIndexStatus,
   UpdateInfo,
 } from './types';
 
@@ -84,6 +85,11 @@ export const cancelAiAction = (requestId: string): Promise<void> =>
   invoke('cancel_ai_action', { requestId });
 
 export const getAiAvailability = (): Promise<AiAvailability> => invoke('get_ai_availability');
+
+export const getSemanticIndexStatus = (): Promise<SemanticIndexStatus> =>
+  invoke('get_semantic_index_status');
+
+export const rebuildSemanticIndex = (): Promise<void> => invoke('rebuild_semantic_index');
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 

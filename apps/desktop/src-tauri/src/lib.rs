@@ -211,6 +211,8 @@ pub fn run() {
             commands::start_ai_action,
             commands::cancel_ai_action,
             commands::get_ai_availability,
+            commands::get_semantic_index_status,
+            commands::rebuild_semantic_index,
             commands::save_ai_result,
             commands::get_settings,
             commands::password_manager_preset,

@@ -194,6 +194,16 @@ export type Messages = {
       allowStreamingHelp: string;
       semanticIndex: string;
       semanticIndexHelp: string;
+      semanticIndexAcPowerOnly: string;
+      semanticIndexAcPowerOnlyHelp: string;
+      semanticIndexRebuild: string;
+      semanticIndexStatus: string;
+      semanticIndexStateReady: string;
+      semanticIndexStateIndexing: string;
+      semanticIndexStatePaused: string;
+      semanticIndexStateUnavailable: string;
+      semanticIndexStateUnsupported: string;
+      semanticIndexStateDisabled: string;
       status: string;
       statusAvailable: string;
       statusUnavailable: string;
@@ -612,7 +622,18 @@ export const en: Messages = {
         'Show partial output while the model writes. Turn off to reveal only the final result.',
       semanticIndex: 'Semantic search index',
       semanticIndexHelp:
-        'Build on-device embeddings for semantic search. Not yet available; reserved for a future release.',
+        'Build on-device embeddings so search can match by meaning, not just text. Requires Apple Intelligence; off by default.',
+      semanticIndexAcPowerOnly: 'Index only while on AC power',
+      semanticIndexAcPowerOnlyHelp:
+        'Pause background embedding while on battery to save power. Turn off to index on battery too.',
+      semanticIndexRebuild: 'Rebuild index',
+      semanticIndexStatus: 'Index status',
+      semanticIndexStateReady: 'Up to date',
+      semanticIndexStateIndexing: 'Indexing…',
+      semanticIndexStatePaused: 'Paused (on battery)',
+      semanticIndexStateUnavailable: 'Embedding model unavailable',
+      semanticIndexStateUnsupported: 'Not supported on this device',
+      semanticIndexStateDisabled: 'Disabled',
       status: 'Availability',
       statusAvailable: 'Available',
       statusUnavailable: 'Unavailable',
