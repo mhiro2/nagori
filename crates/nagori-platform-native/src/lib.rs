@@ -235,10 +235,29 @@ where
     if let Some(engine) = options.ai_engine.or_else(default_ai_engine) {
         builder = builder.ai_engine(engine);
     }
+    if let Some(probe) = power_probe() {
+        builder = builder.power_probe(probe);
+    }
     if let Some(socket_path) = options.socket_path {
         builder = builder.socket_path(socket_path);
     }
     builder.build()
+}
+
+/// The host's AC-power probe for the semantic indexer's battery guard. macOS
+/// reads it from `IOKit`; other hosts return `None` so the guard treats power as
+/// unknown and runs.
+// The non-macOS sibling returns `None`, so the signature must be `Option`; this
+// arm always wires a probe but shares it.
+#[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)]
+fn power_probe() -> Option<nagori_daemon::semantic_index::PowerProbe> {
+    Some(Arc::new(nagori_ai_apple::on_ac_power))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn power_probe() -> Option<nagori_daemon::semantic_index::PowerProbe> {
+    None
 }
 
 /// The host's default AI engine, or `None` where no backend is wired.
@@ -253,12 +272,21 @@ where
 #[allow(clippy::unnecessary_wraps)]
 pub fn default_ai_engine() -> Option<Arc<dyn AiActionEngine>> {
     use nagori_ai::AiEngine;
-    use nagori_ai_apple::{AppleFoundationBackend, AppleTranslateBackend};
+    use nagori_ai_apple::{
+        AppleEmbedderBackend, AppleFoundationBackend, AppleTranslateBackend,
+        preferred_embedding_language,
+    };
     use nagori_core::AiProviderKind;
 
+    // Pin the embedder to the user's preferred language: `NLContextualEmbedding`
+    // uses different (incompatible) models per language group, so a single model
+    // keeps the semantic index coherent.
     let engine = AiEngine::builder(AiProviderKind::AppleNative)
         .text_generator(Arc::new(AppleFoundationBackend::new()))
         .translator(Arc::new(AppleTranslateBackend::new()))
+        .embedder(Arc::new(AppleEmbedderBackend::new(
+            preferred_embedding_language(),
+        )))
         .build();
     Some(Arc::new(engine))
 }

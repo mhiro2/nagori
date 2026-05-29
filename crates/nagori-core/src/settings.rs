@@ -406,6 +406,10 @@ pub struct AiSettings {
     pub request_timeout_ms: u64,
     /// Whether the semantic search index is enabled (separate from `enabled`).
     pub semantic_index_enabled: bool,
+    /// Whether the background embedding indexer only runs while on AC power.
+    /// Default `true` so laptops don't drain the battery building embeddings;
+    /// turning it off lets the indexer run on battery too.
+    pub semantic_index_ac_power_only: bool,
     /// Whether the onboarding banner has been shown and dismissed. Sticky —
     /// not reset when availability changes, so the user's "later" is honoured.
     pub onboarding_dismissed: bool,
@@ -423,6 +427,7 @@ impl Default for AiSettings {
             allow_streaming: true,
             request_timeout_ms: 30_000,
             semantic_index_enabled: false,
+            semantic_index_ac_power_only: true,
             onboarding_dismissed: false,
             allow_openai_fallback_prompt: true,
         }

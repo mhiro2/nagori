@@ -15,7 +15,8 @@ nagori-core = { path = "../nagori-core" }
 nagori-ipc = { path = "../nagori-ipc" }
 nagori-platform = { path = "../nagori-platform" }
 nagori-search = { path = "../nagori-search" }
-nagori-storage = { path = "../nagori-storage" }
+# The semantic index ships in the daemon, so enable its sqlite-vec backend.
+nagori-storage = { path = "../nagori-storage", features = ["semantic-index"] }
 image.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true

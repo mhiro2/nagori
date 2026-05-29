@@ -703,11 +703,15 @@ where
         // here so `nagori doctor` doesn't transiently report "not ready"
         // while the capture task is being spawned.
         runtime.startup_health().record_capture_ready();
+        let notify_runtime = runtime.clone();
         tokio::spawn(async move {
             let settings = settings_rx.borrow().clone();
+            let semantic_notifier: std::sync::Arc<dyn Fn(nagori_core::EntryId) + Send + Sync> =
+                std::sync::Arc::new(move |_entry_id| notify_runtime.notify_semantic_capture());
             let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                 .with_search_cache(search_cache)
-                .with_capture_health(capture_health);
+                .with_capture_health(capture_health)
+                .with_capture_notifier(semantic_notifier);
             if !secure_focus_fail_closed {
                 capture = capture.without_secure_focus_fail_closed();
             }
@@ -767,6 +771,12 @@ where
         })
     };
 
+    let semantic_handle = {
+        let runtime = runtime.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runtime.run_semantic_indexer(shutdown).await })
+    };
+
     let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
         Some(spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await?)
     } else {
@@ -799,6 +809,7 @@ where
         serve_handle,
         capture_handle,
         maintenance_handle,
+        semantic_handle,
         config.shutdown_grace,
     )
     .await;
@@ -830,6 +841,7 @@ async fn drain_workers(
     serve_handle: tokio::task::JoinHandle<()>,
     capture_handle: tokio::task::JoinHandle<()>,
     maintenance_handle: tokio::task::JoinHandle<()>,
+    semantic_handle: tokio::task::JoinHandle<()>,
     grace: Duration,
 ) {
     drain_one(
@@ -841,6 +853,7 @@ async fn drain_workers(
     tokio::join!(
         drain_one("capture", capture_handle, grace),
         drain_one("maintenance", maintenance_handle, grace),
+        drain_one("semantic", semantic_handle, grace),
     );
 }
 

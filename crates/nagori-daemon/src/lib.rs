@@ -5,6 +5,7 @@ pub mod ipc_handler;
 pub mod maintenance;
 pub mod runtime;
 pub mod search_cache;
+pub mod semantic_index;
 pub mod serve;
 pub mod thumbnails;
 

@@ -8,7 +8,7 @@ use nagori_core::{
     AiInputPolicy, AiOutput, AiOverallStatus, AiRequestOptions, AppError, AppSettings, AuditLog,
     ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository, OnboardingSettings,
     PasteFormat, PerActionAvailability, PerActionStatus, QuickActionId, RequestId, Result,
-    SearchQuery, SearchResult, SecretAction, SemanticIndexAvailability, Sensitivity,
+    SearchMode, SearchQuery, SearchResult, SecretAction, SemanticIndexAvailability, Sensitivity,
     SensitivityClassifier, SettingsRepository, estimate_tokens,
 };
 use tokio_util::sync::CancellationToken;
@@ -109,6 +109,10 @@ pub struct NagoriRuntime {
     /// the lock only spans the read-modify-write sequence below in
     /// `save_settings` and `mutate_onboarding`.
     settings_write_lock: Arc<AsyncMutex<()>>,
+    /// Shared state for the background semantic-index worker: its current
+    /// coarse state, a wake signal new captures fire, a rebuild flag, and the
+    /// AC-power probe its battery guard reads. See `semantic_index.rs`.
+    pub(crate) semantic: Arc<crate::semantic_index::SemanticState>,
 }
 
 impl NagoriRuntime {
@@ -121,6 +125,7 @@ impl NagoriRuntime {
             permissions: None,
             socket_path: None,
             capabilities: None,
+            power_probe: None,
         }
     }
 
@@ -207,6 +212,19 @@ impl NagoriRuntime {
 
     pub fn current_settings(&self) -> AppSettings {
         self.settings_rx.borrow().clone()
+    }
+
+    /// The wired embedding backend, if any. The semantic index pipeline drives
+    /// it directly (embedding is not an `AiActionId`-level streaming action).
+    pub(crate) fn embedder(&self) -> Option<Arc<dyn nagori_ai::Embedder>> {
+        self.ai_engine.as_ref().and_then(|engine| engine.embedder())
+    }
+
+    /// The semaphore that bounds concurrent embedding work, shared with the
+    /// registry so on-demand semantic queries and the background indexer never
+    /// run two embedding passes at once.
+    pub(crate) fn embedding_semaphore(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.ai_registry.semaphores().embedding)
     }
 
     fn publish_settings(&self, settings: AppSettings) {
@@ -458,6 +476,13 @@ impl NagoriRuntime {
     /// turns over too quickly for caching to help.
     pub async fn search(&self, mut query: SearchQuery) -> Result<Vec<SearchResult>> {
         query.recent_order = self.store.get_settings().await?.recent_order;
+        // Semantic mode needs a query embedding (only available here, where the
+        // embedder lives), so it routes to its own embed-then-rank path rather
+        // than the text-candidate cache. An empty query falls through to the
+        // normal Recent path below.
+        if query.mode == SearchMode::Semantic && !query.raw.trim().is_empty() {
+            return self.semantic_search_results(query).await;
+        }
         let key = CacheKey::from_query(&query);
         // Capture the epoch we observed at miss time so the post-query `put`
         // can refuse to publish stale results when a concurrent mutation
@@ -1023,6 +1048,7 @@ pub struct NagoriRuntimeBuilder {
     permissions: Option<Arc<dyn PermissionChecker>>,
     socket_path: Option<std::path::PathBuf>,
     capabilities: Option<PlatformCapabilities>,
+    power_probe: Option<crate::semantic_index::PowerProbe>,
 }
 
 impl NagoriRuntimeBuilder {
@@ -1068,6 +1094,16 @@ impl NagoriRuntimeBuilder {
     #[must_use]
     pub fn capabilities(mut self, capabilities: PlatformCapabilities) -> Self {
         self.capabilities = Some(capabilities);
+        self
+    }
+
+    /// Set the AC-power probe the semantic indexer's battery guard reads.
+    ///
+    /// `nagori-platform-native::build_native_runtime` wires the host probe
+    /// (`IOKit` on macOS); unset, the guard treats power as unknown and runs.
+    #[must_use]
+    pub fn power_probe(mut self, probe: crate::semantic_index::PowerProbe) -> Self {
+        self.power_probe = Some(probe);
         self
     }
 
@@ -1154,6 +1190,7 @@ impl NagoriRuntimeBuilder {
             thumbnail_gate: ThumbnailGate::default(),
             update_probe: Arc::new(UpdateProbeState::default()),
             settings_write_lock: Arc::new(AsyncMutex::new(())),
+            semantic: Arc::new(crate::semantic_index::SemanticState::new(self.power_probe)),
         }
     }
 }
@@ -1167,6 +1204,13 @@ pub struct ShutdownHandle {
 impl ShutdownHandle {
     pub fn cancel(&self) {
         let _ = self.tx.send_replace(true);
+    }
+
+    /// Non-blocking check of whether shutdown has been signalled, for loops that
+    /// poll between units of work rather than `select!`-ing on `cancelled`.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
     }
 
     pub async fn cancelled(&mut self) {
