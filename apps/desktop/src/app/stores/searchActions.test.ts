@@ -5,7 +5,6 @@ vi.mock('../lib/tauri', () => ({
 }));
 
 vi.mock('../lib/commands', () => ({
-  clearHistory: vi.fn(),
   copyEntriesCombined: vi.fn(),
   copyEntryFromPalette: vi.fn(),
   deleteEntries: vi.fn(),
@@ -18,7 +17,6 @@ vi.mock('../lib/commands', () => ({
 }));
 
 import {
-  clearHistory,
   copyEntriesCombined,
   copyEntryFromPalette,
   deleteEntries,
@@ -31,7 +29,6 @@ import {
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
 import {
-  clearAllHistory,
   confirmSelection,
   copyMultiSelection,
   copySelection,
@@ -150,40 +147,6 @@ describe('previewSelection', () => {
     vi.mocked(previewEntry).mockRejectedValue(new Error('qlmanage missing'));
     await previewSelection();
     expect(searchState.errorMessage).toBe('qlmanage missing');
-  });
-});
-
-describe('clearAllHistory', () => {
-  it('calls clear_history and clears any stale multi-selection', async () => {
-    searchState.results = [result({ id: 'a' }), result({ id: 'b' })];
-    toggleMultiSelect('a');
-    vi.mocked(clearHistory).mockResolvedValue(2);
-    await clearAllHistory();
-    expect(clearHistory).toHaveBeenCalledTimes(1);
-    expect(multiSelectState.selected.size).toBe(0);
-  });
-
-  it('surfaces a failure and keeps the multi-selection intact', async () => {
-    const visible = result({ id: 'a' });
-    searchState.results = [visible];
-    toggleMultiSelect('a');
-    vi.mocked(clearHistory).mockRejectedValue(new Error('disk gone'));
-    // The post-call refresh re-runs the active query; return the same row so
-    // reconcileMultiSelect doesn't prune the still-visible selection.
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [visible],
-      totalCandidates: 1,
-      elapsedMs: 0,
-    });
-    await clearAllHistory();
-    expect(searchState.errorMessage).toBe('disk gone');
-    expect(multiSelectState.selected.has('a')).toBe(true);
-  });
-
-  it('skips the IPC outside the Tauri runtime', async () => {
-    vi.mocked(isTauri).mockReturnValue(false);
-    await clearAllHistory();
-    expect(clearHistory).not.toHaveBeenCalled();
   });
 });
 

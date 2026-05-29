@@ -10,7 +10,6 @@
     refreshCapabilities,
   } from '../stores/capabilities.svelte';
   import {
-    clearAllHistory,
     confirmSelection,
     confirmSelectionWithAlternateFormat,
     copyMultiSelection,
@@ -316,12 +315,7 @@
   />
 </section>
 
-<ActionMenu
-  open={actionMenuOpen}
-  target={selected}
-  onClearAll={() => void clearAllHistory()}
-  onClose={() => (actionMenuOpen = false)}
-/>
+<ActionMenu open={actionMenuOpen} target={selected} onClose={() => (actionMenuOpen = false)} />
 
 <style>
   .palette {

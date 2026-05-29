@@ -115,8 +115,6 @@ export type Messages = {
       ExtractTasks: string;
       RedactSecrets: string;
     };
-    // Model-backed AI section.
-    aiTitle: string;
     // Labels for the streaming, model-backed AI actions (one button each).
     aiActions: {
       Summarize: string;
@@ -125,20 +123,23 @@ export type Messages = {
       ExtractTasks: string;
       ExplainCode: string;
     };
+    // Pill shown beside AI actions in the single, unified action list.
+    aiBadge: string;
     aiCancel: string;
     aiUnavailable: string;
     // Localized remediation hints, keyed by the backend's `Remediation.i18n_key`.
     aiRemediation: Record<string, string>;
     tauriRequired: string;
+    // Work-area status labels: a streaming AI run, a slow deterministic run,
+    // and the brief completion flash.
+    generating: string;
+    working: string;
+    done: string;
     resultTitle: string;
     copyResult: string;
     copied: string;
     saveResult: string;
     saved: string;
-    closeResult: string;
-    runFailed: string;
-    clearAllHistory: string;
-    clearAllHistoryHint: string;
   };
   setup: {
     title: string;
@@ -531,14 +532,14 @@ export const en: Messages = {
       ExtractTasks: 'Extract tasks',
       RedactSecrets: 'Redact secrets',
     },
-    aiTitle: 'AI',
     aiActions: {
-      Summarize: 'AI: Summarize',
-      Rewrite: 'AI: Rewrite',
-      FormatMarkdown: 'AI: Format as Markdown',
-      ExtractTasks: 'AI: Extract tasks',
-      ExplainCode: 'AI: Explain code',
+      Summarize: 'Summarize',
+      Rewrite: 'Rewrite',
+      FormatMarkdown: 'Format as Markdown',
+      ExtractTasks: 'Organize tasks',
+      ExplainCode: 'Explain code',
     },
+    aiBadge: 'AI',
     aiCancel: 'Cancel',
     aiUnavailable: 'AI actions are unavailable right now.',
     aiRemediation: {
@@ -552,15 +553,14 @@ export const en: Messages = {
       'ai.unavailable.rate_limited': 'The on-device model is busy. Try again shortly.',
     },
     tauriRequired: 'Quick actions require the Tauri runtime.',
+    generating: 'Generating…',
+    working: 'Working…',
+    done: 'Done',
     resultTitle: 'Result',
     copyResult: 'Copy',
     copied: 'Copied',
     saveResult: 'Save as new entry',
     saved: 'Saved',
-    closeResult: 'Close',
-    runFailed: 'Quick action failed.',
-    clearAllHistory: 'Clear all history',
-    clearAllHistoryHint: 'Removes every unpinned entry. Pinned entries are kept.',
   },
   setup: {
     title: 'Set up Nagori',

@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, render, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -106,20 +106,32 @@ describe('ActionMenu', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('renders a dialog with the quick actions plus the AI entry when open', () => {
+  it('renders a dialog with the deterministic and AI actions in one list', () => {
     const { getByRole, getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     expect(getByRole('dialog')).toBeTruthy();
+    // Deterministic actions.
     expect(getByText('Summarize (first sentence)')).toBeTruthy();
     expect(getByText('Format JSON')).toBeTruthy();
     expect(getByText('Extract tasks')).toBeTruthy();
     expect(getByText('Redact secrets')).toBeTruthy();
-    expect(getByText('AI: Summarize')).toBeTruthy();
-    expect(getByText('AI: Rewrite')).toBeTruthy();
-    expect(getByText('AI: Format as Markdown')).toBeTruthy();
-    expect(getByText('AI: Extract tasks')).toBeTruthy();
-    expect(getByText('AI: Explain code')).toBeTruthy();
+    // AI actions: no `AI:` prefix; surfaced with a badge instead. The AI
+    // "extract tasks" reads as "Organize tasks" so it no longer collides with
+    // the deterministic entry.
+    expect(getByText('Summarize')).toBeTruthy();
+    expect(getByText('Rewrite')).toBeTruthy();
+    expect(getByText('Format as Markdown')).toBeTruthy();
+    expect(getByText('Organize tasks')).toBeTruthy();
+    expect(getByText('Explain code')).toBeTruthy();
+  });
+
+  it('shows the target summary for the selected entry', () => {
+    const { getByTestId } = render(ActionMenu, {
+      props: { open: true, target: sample({ preview: 'hello there' }), onClose: () => {} },
+    });
+    const target = getByTestId('action-target');
+    expect(within(target).getByText('hello there')).toBeTruthy();
   });
 
   it('invokes onClose when the close button is clicked', async () => {
@@ -164,26 +176,26 @@ describe('ActionMenu', () => {
       warnings: [],
     });
 
-    const { getByText, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionMenu, {
       props: { open: true, target: sample({ id: 'abc' }), onClose: () => {} },
     });
-    await user.click(getByText('Summarize (first sentence)'));
+    await user.click(getByTestId('quick-SummarizeFirstSentence'));
     expect(runQuickAction).toHaveBeenCalledWith('SummarizeFirstSentence', 'abc');
     expect(await findByText('first sentence.')).toBeTruthy();
   });
 
-  it('surfaces a runFailed message when a quick action rejects', async () => {
+  it('surfaces the error message when a quick action rejects', async () => {
     const user = userEvent.setup();
     vi.mocked(runQuickAction).mockRejectedValue(new Error('bad json'));
 
-    const { getByText, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    await user.click(getByText('Format JSON'));
+    await user.click(getByTestId('quick-FormatJson'));
     expect(await findByText('bad json')).toBeTruthy();
   });
 
-  it('disables every quick-action button while a request is in flight', async () => {
+  it('disables every action button while a request is in flight', async () => {
     const user = userEvent.setup();
     let resolve: ((value: { text: string; warnings: string[] }) => void) | undefined;
     vi.mocked(runQuickAction).mockReturnValue(
@@ -192,14 +204,13 @@ describe('ActionMenu', () => {
       }),
     );
 
-    const { getByText, getAllByRole } = render(ActionMenu, {
+    const { getByTestId } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    await user.click(getByText('Format JSON'));
-    const actionButtons = getAllByRole('button').filter(
-      (btn) => btn.parentElement?.tagName === 'LI',
-    );
-    expect(actionButtons).toHaveLength(4);
+    await user.click(getByTestId('quick-FormatJson'));
+    const picker = getByTestId('action-picker');
+    const actionButtons = within(picker).getAllByRole('button');
+    expect(actionButtons.length).toBeGreaterThan(0);
     for (const btn of actionButtons) {
       expect((btn as HTMLButtonElement).disabled).toBe(true);
     }
@@ -210,11 +221,11 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-1');
 
-    const { getByText, findByText } = render(ActionMenu, {
+    const { getByTestId, findByText } = render(ActionMenu, {
       props: { open: true, target: sample({ id: 'abc' }), onClose: () => {} },
     });
     await flush(); // let the availability probe resolve
-    await user.click(getByText('AI: Summarize'));
+    await user.click(getByTestId('ai-Summarize'));
     expect(startAiAction).toHaveBeenCalledWith('Summarize', 'abc');
     await flush(); // let startAiAction resolve so aiRequestId is set
 
@@ -231,40 +242,110 @@ describe('ActionMenu', () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-2');
 
-    const { getByText } = render(ActionMenu, {
+    const { getByTestId } = render(ActionMenu, {
       props: { open: true, target: sample({ id: 'xyz' }), onClose: () => {} },
     });
     await flush(); // let the availability probe resolve
-    await user.click(getByText('AI: Rewrite'));
+    await user.click(getByTestId('ai-Rewrite'));
     expect(startAiAction).toHaveBeenCalledWith('Rewrite', 'xyz');
   });
 
-  it('disables the AI button with a reason when summarize is unavailable', async () => {
+  it('disables the AI button with a reason when it is unavailable', async () => {
     vi.mocked(getAiAvailability).mockResolvedValue(availability(false));
-    const { getByText } = render(ActionMenu, {
+    const { getByTestId, getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await flush();
-    const aiButton = getByText('AI: Summarize').closest('button') as HTMLButtonElement;
-    expect(aiButton.disabled).toBe(true);
+    expect((getByTestId('ai-Summarize') as HTMLButtonElement).disabled).toBe(true);
     // The remediation hint for the disabled state is surfaced.
     expect(
       getByText('Enable Apple Intelligence in System Settings to use AI actions.'),
     ).toBeTruthy();
   });
 
-  it('cancels the in-flight AI run', async () => {
+  it('cancels the in-flight AI run from the work area', async () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-9');
 
-    const { getByText } = render(ActionMenu, {
+    const { getByTestId, getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
     await flush();
-    await user.click(getByText('AI: Summarize'));
+    await user.click(getByTestId('ai-Summarize'));
     await flush();
     await user.click(getByText('Cancel'));
     expect(cancelAiAction).toHaveBeenCalledWith('req-9');
+  });
+
+  it('cancels an in-flight stream on Escape instead of closing', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.mocked(startAiAction).mockResolvedValue('req-esc');
+
+    const { getByTestId } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClose },
+    });
+    await flush();
+    await user.click(getByTestId('ai-Summarize'));
+    await flush();
+    await user.keyboard('{Escape}');
+    expect(cancelAiAction).toHaveBeenCalledWith('req-esc');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('cancels an AI run requested during startup once the id arrives', async () => {
+    const user = userEvent.setup();
+    let resolveStart: ((id: string) => void) | undefined;
+    vi.mocked(startAiAction).mockReturnValue(
+      new Promise<string>((r) => {
+        resolveStart = r;
+      }),
+    );
+
+    const { getByTestId } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+    await user.click(getByTestId('ai-Summarize'));
+    // The request id hasn't resolved yet, so there is nothing to cancel.
+    await user.keyboard('{Escape}');
+    expect(cancelAiAction).not.toHaveBeenCalled();
+    // Once startAiAction resolves, the deferred cancel fires with the new id.
+    resolveStart?.('req-late');
+    await flush();
+    expect(cancelAiAction).toHaveBeenCalledWith('req-late');
+  });
+
+  it('does not commit a quick-action result after the menu has closed', async () => {
+    const user = userEvent.setup();
+    let resolveRun: ((value: { text: string; warnings: string[] }) => void) | undefined;
+    vi.mocked(runQuickAction).mockReturnValue(
+      new Promise((r) => {
+        resolveRun = r;
+      }),
+    );
+
+    const { getByTestId, queryByText, rerender } = render(ActionMenu, {
+      props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    // Close before the IPC resolves, then let it resolve into the closed menu.
+    await rerender({ open: false, target: sample({ id: 'a' }), onClose: () => {} });
+    resolveRun?.({ text: 'stale output', warnings: [] });
+    await flush();
+    // Reopen on a different target; the superseded result must not appear.
+    await rerender({ open: true, target: sample({ id: 'b' }), onClose: () => {} });
+    expect(queryByText('stale output')).toBeNull();
+  });
+
+  it('includes the AI badge in the accessible name of AI actions', () => {
+    const { getByRole } = render(ActionMenu, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    // The deterministic "Summarize (first sentence)" and the AI "Summarize"
+    // both exist; the AI entry carries the badge in its accessible name so a
+    // screen reader still hears that it is the model-backed action.
+    expect(getByRole('button', { name: 'Summarize, AI' })).toBeTruthy();
   });
 
   it('shows the tauriRequired hint when the runtime is unavailable', () => {
@@ -282,7 +363,7 @@ describe('ActionMenu', () => {
     expect(document.activeElement).toBe(getByRole('dialog'));
   });
 
-  it('invokes onClose when Escape is pressed inside the dialog', async () => {
+  it('invokes onClose when Escape is pressed while idle', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     const { getByRole } = render(ActionMenu, {
@@ -308,39 +389,12 @@ describe('ActionMenu', () => {
       representationSummary: [],
     });
 
-    const { findByText, getByText } = render(ActionMenu, {
+    const { findByText, getByTestId, getByText } = render(ActionMenu, {
       props: { open: true, target: sample(), onClose: () => {} },
     });
-    await user.click(getByText('Format JSON'));
+    await user.click(getByTestId('quick-FormatJson'));
     await findByText('result body');
     await user.click(getByText('Save as new entry'));
     expect(saveAiResult).toHaveBeenCalledWith('result body');
-  });
-
-  it('omits the clear-all section when onClearAll is not wired', () => {
-    const { queryByText } = render(ActionMenu, {
-      props: { open: true, target: sample(), onClose: () => {} },
-    });
-    expect(queryByText('Clear all history')).toBeNull();
-  });
-
-  it('clears all history and closes when the clear-all button is clicked', async () => {
-    const user = userEvent.setup();
-    const onClearAll = vi.fn();
-    const onClose = vi.fn();
-    const { getByText } = render(ActionMenu, {
-      props: { open: true, target: sample(), onClearAll, onClose },
-    });
-    await user.click(getByText('Clear all history'));
-    expect(onClearAll).toHaveBeenCalledTimes(1);
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('disables the clear-all button outside the Tauri runtime', () => {
-    vi.mocked(isTauri).mockReturnValue(false);
-    const { getByText } = render(ActionMenu, {
-      props: { open: true, target: sample(), onClearAll: vi.fn(), onClose: () => {} },
-    });
-    expect((getByText('Clear all history') as HTMLButtonElement).disabled).toBe(true);
   });
 });

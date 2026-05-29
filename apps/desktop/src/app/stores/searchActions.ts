@@ -1,5 +1,4 @@
 import {
-  clearHistory as clearHistoryCmd,
   copyEntriesCombined as copyEntriesCombinedCmd,
   copyEntryFromPalette as copyEntryCmd,
   deleteEntries as deleteEntriesCmd,
@@ -139,21 +138,3 @@ const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Prom
 export const copyMultiSelection = (): Promise<void> => runBulkAction(copyEntriesCombinedCmd);
 
 export const deleteMultiSelection = (): Promise<void> => runBulkAction(deleteEntriesCmd);
-
-// Soft-delete every non-pinned entry, mirroring the tray "Clear History"
-// item and the secondary clear-history hotkey. Pinned rows are preserved by
-// the daemon. We drop any stale multi-selection (the selected ids may have
-// just been cleared) and re-run the active query so the list reflects the
-// purge, reusing the same error-preserving refresh as the bulk actions.
-export const clearAllHistory = async (): Promise<void> => {
-  if (!isTauri()) return;
-  const queryBeforeAction = searchState.query;
-  let actionError: string | undefined;
-  try {
-    await clearHistoryCmd();
-  } catch (err) {
-    actionError = describeError(err);
-  }
-  if (actionError === undefined) clearMultiSelect();
-  await refreshPreservingError(actionError, queryBeforeAction);
-};
