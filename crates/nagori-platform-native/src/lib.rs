@@ -243,20 +243,22 @@ where
 
 /// The host's default AI engine, or `None` where no backend is wired.
 ///
-/// macOS gets an Apple Foundation Models text-generation engine; Windows and
-/// Linux have no on-device backend yet, so AI actions are refused there (quick
-/// actions remain available) until the OpenAI-compatible provider lands.
+/// macOS gets an Apple-native engine: Foundation Models for text generation
+/// (Summarize) plus the Translation framework for Translate. Windows and Linux
+/// have no on-device backend yet, so AI actions are refused there (quick actions
+/// remain available) until the OpenAI-compatible provider lands.
 #[cfg(target_os = "macos")]
 // The non-macOS sibling returns `None`, so the call site needs `Option`; this
 // arm always wires an engine but must share that signature.
 #[allow(clippy::unnecessary_wraps)]
 pub fn default_ai_engine() -> Option<Arc<dyn AiActionEngine>> {
     use nagori_ai::AiEngine;
-    use nagori_ai_apple::AppleFoundationBackend;
+    use nagori_ai_apple::{AppleFoundationBackend, AppleTranslateBackend};
     use nagori_core::AiProviderKind;
 
     let engine = AiEngine::builder(AiProviderKind::AppleNative)
         .text_generator(Arc::new(AppleFoundationBackend::new()))
+        .translator(Arc::new(AppleTranslateBackend::new()))
         .build();
     Some(Arc::new(engine))
 }

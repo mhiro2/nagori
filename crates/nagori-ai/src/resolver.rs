@@ -30,11 +30,18 @@ struct ActionSpec {
 /// unlisted pair resolves to `None`, which the engine surfaces as
 /// `CapabilityMismatch`. Rows are added as each action's backend lands, so the
 /// table doubles as a precise record of what ships today.
-const ACTION_SPECS: &[ActionSpec] = &[ActionSpec {
-    action: AiActionId::Summarize,
-    provider: AiProviderKind::AppleNative,
-    backend: BackendKind::TextGeneration,
-}];
+const ACTION_SPECS: &[ActionSpec] = &[
+    ActionSpec {
+        action: AiActionId::Summarize,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::TextGeneration,
+    },
+    ActionSpec {
+        action: AiActionId::Translate,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::Translation,
+    },
+];
 
 /// Resolves the backend family for `(action, provider)`, or `None` when no
 /// backend is wired for that combination.
@@ -60,10 +67,18 @@ mod tests {
     }
 
     #[test]
-    fn unwired_pairs_resolve_to_none() {
-        // Translate's backend is not wired yet.
+    fn translate_resolves_to_translation_for_apple() {
         assert_eq!(
             resolve_backend(AiActionId::Translate, AiProviderKind::AppleNative),
+            Some(BackendKind::Translation)
+        );
+    }
+
+    #[test]
+    fn unwired_pairs_resolve_to_none() {
+        // Rewrite's backend is not wired yet.
+        assert_eq!(
+            resolve_backend(AiActionId::Rewrite, AiProviderKind::AppleNative),
             None
         );
         // No provider is configured.

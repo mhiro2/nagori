@@ -31,6 +31,6 @@ pub use backend::{
     TranslationRequest, Translator,
 };
 pub use engine::{AiActionEngine, AiActionRun, AiEngine, AiEngineBuilder, AiEventStream};
-pub use mock::MockBackend;
+pub use mock::{MockBackend, MockTranslator};
 pub use quick::QuickActionRunner;
 pub use resolver::{BackendKind, resolve_backend};

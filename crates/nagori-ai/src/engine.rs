@@ -22,7 +22,8 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{
-    BackendAvailability, Embedder, TextGenerationRequest, TextGenerator, Translator,
+    BackendAvailability, Embedder, TextGenerationRequest, TextGenerator, TranslationRequest,
+    Translator,
 };
 use crate::resolver::{BackendKind, resolve_backend};
 
@@ -93,15 +94,18 @@ impl AiEngine {
     }
 
     /// Resolves the per-action status used by both `availability` and the
-    /// desktop's gating. `tg_availability` is the (cached) text-generation
-    /// backend availability, so the caller probes the OS at most once.
+    /// desktop's gating. The two availabilities are the (cached) text-generation
+    /// and translation backend availabilities, so the caller probes the OS at
+    /// most once per backend family.
     fn action_status(
         &self,
         action: AiActionId,
         settings: &AiSettings,
         tg_availability: Option<BackendAvailability>,
+        translator_availability: Option<BackendAvailability>,
     ) -> PerActionAvailability {
-        let (status, remediation) = self.resolve_status(action, settings, tg_availability);
+        let (status, remediation) =
+            self.resolve_status(action, settings, tg_availability, translator_availability);
         PerActionAvailability {
             action,
             status,
@@ -114,6 +118,7 @@ impl AiEngine {
         action: AiActionId,
         settings: &AiSettings,
         tg_availability: Option<BackendAvailability>,
+        translator_availability: Option<BackendAvailability>,
     ) -> (PerActionStatus, Option<Remediation>) {
         if !settings.enabled {
             return (PerActionStatus::DisabledBySettings, None);
@@ -140,12 +145,17 @@ impl AiEngine {
                     (os_unavailable_status(reason), reason.remediation())
                 }
             },
-            BackendKind::Translation => self
-                .translator
-                .as_ref()
-                .map_or((PerActionStatus::CapabilityMismatch, None), |_| {
-                    (PerActionStatus::Unknown, None)
-                }),
+            BackendKind::Translation => {
+                match (self.translator.is_some(), translator_availability) {
+                    (false, _) | (true, None) => (PerActionStatus::CapabilityMismatch, None),
+                    (true, Some(BackendAvailability::Available)) => {
+                        (PerActionStatus::Available, None)
+                    }
+                    (true, Some(BackendAvailability::Unavailable(reason))) => {
+                        (os_unavailable_status(reason), reason.remediation())
+                    }
+                }
+            }
             BackendKind::Embedding => self
                 .embedder
                 .as_ref()
@@ -154,6 +164,43 @@ impl AiEngine {
                 }),
         }
     }
+}
+
+/// Adapts a (non-streaming) [`Translator::translate`] into the engine's
+/// [`AiEventStream`]: one terminal item — `Ok(Done)` on success, `Ok(Cancelled)`
+/// if the caller's token trips first, or `Err(AiError)` if translation fails.
+///
+/// The translate call is deferred to the first poll (the stream is lazy), so the
+/// daemon's consumer-side deadline race still bounds it, and the cancel token is
+/// passed through so the backend can abort its in-flight work.
+fn translation_stream(
+    backend: Arc<dyn Translator>,
+    req: TranslationRequest,
+    cancel: CancellationToken,
+) -> AiEventStream {
+    use futures::future::{Either, select};
+    use futures::{FutureExt, StreamExt};
+
+    let translate_cancel = cancel.clone();
+    futures::stream::once(async move {
+        // Pre-check: `select` polls the translate future first and returns as soon
+        // as it is ready, so a synchronous backend would never reach the cancel
+        // arm. Short-circuit an already-cancelled request before any work runs.
+        if cancel.is_cancelled() {
+            return Ok(AiEvent::Cancelled);
+        }
+        let translate = backend.translate(req, translate_cancel).boxed();
+        let cancelled = cancel.cancelled().boxed();
+        match select(translate, cancelled).await {
+            Either::Left((result, _)) => result.map(|out| AiEvent::Done {
+                final_text: out.text,
+                created_entry: None,
+                warnings: Vec::new(),
+            }),
+            Either::Right(((), _)) => Ok(AiEvent::Cancelled),
+        }
+    })
+    .boxed()
 }
 
 /// Maps an OS-unavailable backend reason onto the per-action availability
@@ -219,13 +266,30 @@ impl AiActionEngine for AiEngine {
                 Ok(AiActionRun { request_id, events })
             }
             BackendKind::Translation => {
-                // Reading the field keeps the layered structure honest; the
-                // translation backend itself is wired with the translate action.
-                let _ = self.translator.as_ref();
-                Err(AiError::new(
-                    AiErrorCode::CapabilityMismatch,
-                    "translation is not yet implemented",
-                ))
+                let backend = self.translator.clone().ok_or_else(|| {
+                    AiError::new(
+                        AiErrorCode::CapabilityMismatch,
+                        "translation backend not configured",
+                    )
+                })?;
+                if let BackendAvailability::Unavailable(reason) = backend.availability().await {
+                    return Err(reason.into_error());
+                }
+                let Some(target_language) = req.options.target_language.clone() else {
+                    return Err(AiError::new(
+                        AiErrorCode::CapabilityMismatch,
+                        "translate requires a target language",
+                    ));
+                };
+                let request_id = req.request_id;
+                let tr_req = TranslationRequest {
+                    request_id,
+                    input: req.input,
+                    source_language: req.options.source_language,
+                    target_language,
+                };
+                let events = translation_stream(backend, tr_req, cancel);
+                Ok(AiActionRun { request_id, events })
             }
             BackendKind::Embedding => {
                 let _ = self.embedder.as_ref();
@@ -242,10 +306,16 @@ impl AiActionEngine for AiEngine {
             Some(backend) => Some(backend.availability().await),
             None => None,
         };
+        let translator_availability = match &self.translator {
+            Some(backend) => Some(backend.availability().await),
+            None => None,
+        };
 
         let per_action: Vec<PerActionAvailability> = AiActionId::all()
             .iter()
-            .map(|&action| self.action_status(action, settings, tg_availability))
+            .map(|&action| {
+                self.action_status(action, settings, tg_availability, translator_availability)
+            })
             .collect();
 
         let overall_status = if !settings.enabled {
@@ -346,7 +416,7 @@ impl AiEngineBuilder {
 mod tests {
     use super::*;
     use crate::backend::BackendUnavailableReason;
-    use crate::mock::MockBackend;
+    use crate::mock::{MockBackend, MockTranslator};
     use futures::StreamExt;
     use nagori_core::AiRequestOptions;
 
@@ -372,6 +442,36 @@ mod tests {
         AiEngine::builder(AiProviderKind::AppleNative)
             .text_generator(Arc::new(backend))
             .build()
+    }
+
+    fn apple_engine_with_translator(translator: MockTranslator) -> AiEngine {
+        AiEngine::builder(AiProviderKind::AppleNative)
+            .text_generator(Arc::new(MockBackend::new()))
+            .translator(Arc::new(translator))
+            .build()
+    }
+
+    fn translate_request(input: &str, target: &str) -> AiActionRequest {
+        AiActionRequest {
+            request_id: RequestId::new(),
+            action: AiActionId::Translate,
+            input: input.to_owned(),
+            policy: AiActionId::Translate.input_policy(),
+            options: AiRequestOptions {
+                target_language: Some(target.to_owned()),
+                ..AiRequestOptions::default()
+            },
+        }
+    }
+
+    async fn drain_to_done(mut events: AiEventStream) -> AiEvent {
+        while let Some(item) = events.next().await {
+            let event = item.expect("no stream error");
+            if event.is_terminal() {
+                return event;
+            }
+        }
+        panic!("stream ended without a terminal event");
     }
 
     #[tokio::test]
@@ -413,6 +513,84 @@ mod tests {
             panic!("rewrite is not wired");
         };
         assert_eq!(err.code, AiErrorCode::CapabilityMismatch);
+    }
+
+    #[tokio::test]
+    async fn start_translate_streams_to_done() {
+        let engine = apple_engine_with_translator(MockTranslator::new());
+        let run = engine
+            .start(translate_request("hello", "ja"), CancellationToken::new())
+            .await
+            .expect("translate should start");
+        match drain_to_done(run.events).await {
+            AiEvent::Done { final_text, .. } => assert_eq!(final_text, "[ja] hello"),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_translate_without_target_is_capability_mismatch() {
+        let engine = apple_engine_with_translator(MockTranslator::new());
+        // A translate request whose options carry no target language.
+        let req = request(AiActionId::Translate, "hello");
+        let Err(err) = engine.start(req, CancellationToken::new()).await else {
+            panic!("translate without a target language must error");
+        };
+        assert_eq!(err.code, AiErrorCode::CapabilityMismatch);
+    }
+
+    #[tokio::test]
+    async fn start_translate_without_backend_is_capability_mismatch() {
+        // Engine wired for Apple text generation only — no translator.
+        let engine = apple_engine(MockBackend::new());
+        let Err(err) = engine
+            .start(translate_request("hello", "ja"), CancellationToken::new())
+            .await
+        else {
+            panic!("translate has no backend wired");
+        };
+        assert_eq!(err.code, AiErrorCode::CapabilityMismatch);
+    }
+
+    #[tokio::test]
+    async fn start_translate_cancelled_before_consume_yields_cancelled() {
+        let engine = apple_engine_with_translator(MockTranslator::new());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let run = engine
+            .start(translate_request("hello", "ja"), cancel)
+            .await
+            .expect("translate should still start so the cancel can drain");
+        assert_eq!(drain_to_done(run.events).await, AiEvent::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn start_translate_unavailable_surfaces_remediation() {
+        let engine = apple_engine_with_translator(MockTranslator::unavailable(
+            BackendUnavailableReason::NotEnabled,
+        ));
+        let Err(err) = engine
+            .start(translate_request("hello", "ja"), CancellationToken::new())
+            .await
+        else {
+            panic!("translator is unavailable");
+        };
+        assert_eq!(err.code, AiErrorCode::Unavailable);
+        assert!(err.remediation.is_some());
+    }
+
+    #[tokio::test]
+    async fn availability_reports_translate_when_translator_wired() {
+        let engine = apple_engine_with_translator(MockTranslator::new());
+        let report = engine
+            .availability(&settings(true, AiProviderKind::AppleNative))
+            .await;
+        let translate = report
+            .per_action
+            .iter()
+            .find(|entry| entry.action == AiActionId::Translate)
+            .unwrap();
+        assert_eq!(translate.status, PerActionStatus::Available);
     }
 
     #[tokio::test]

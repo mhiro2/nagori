@@ -6,6 +6,9 @@
 //!
 //! - [`AppleFoundationBackend`] implements `nagori-ai`'s `TextGenerator` over
 //!   `SystemLanguageModel`, streaming on-device summaries (macOS only).
+//! - [`AppleTranslateBackend`] implements `nagori-ai`'s `Translator` over the
+//!   `Translation` framework's `TranslationSession`, with source-language
+//!   detection via `NLLanguageRecognizer` (macOS only).
 //! - [`probe`] resolves Apple Intelligence [`AppleAvailability`], either from
 //!   the live OS ([`AvailabilitySource::Real`], macOS only) or from a
 //!   [`AvailabilitySource::Mock`] fixture so CI can exercise every unavailable
@@ -27,6 +30,8 @@ mod stream;
 mod bridge;
 #[cfg(target_os = "macos")]
 mod foundation;
+#[cfg(target_os = "macos")]
+mod translate;
 
 pub use availability::{AppleAvailability, AvailabilitySource, MockReason, probe};
 pub use delta::{SnapshotDelta, diff_snapshot};
@@ -38,3 +43,5 @@ pub use stream::{StreamHandle, simulate_snapshot_stream};
 pub use bridge::{bridge_snapshot_stream, hello};
 #[cfg(target_os = "macos")]
 pub use foundation::AppleFoundationBackend;
+#[cfg(target_os = "macos")]
+pub use translate::AppleTranslateBackend;

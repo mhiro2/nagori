@@ -152,6 +152,14 @@ struct QuickArgs {
 struct AiArgs {
     action: AiActionId,
     id: String,
+    /// Target language for `translate` (BCP-47 / ISO code, e.g. `ja`, `en`,
+    /// `zh-Hans`). Required for `translate`; ignored by other actions.
+    #[arg(long)]
+    to: Option<String>,
+    /// Source language for `translate`; auto-detected from the input when
+    /// omitted.
+    #[arg(long)]
+    from: Option<String>,
     /// Print only the final result instead of streaming as it is generated.
     /// Streaming (the default) emits JSON Lines under `--json`/`--jsonl`, or
     /// plain text to stdout otherwise.
@@ -458,11 +466,20 @@ async fn run_local_command(cli: Cli) -> Result<()> {
             print_ai_output(&output.into(), format)?;
         }
         Command::Ai(args) => {
+            if matches!(args.action, AiActionId::Translate) && args.to.is_none() {
+                anyhow::bail!("`nagori ai translate` requires --to <language> (e.g. --to ja)");
+            }
+            let options = AiRequestOptions {
+                source_language: args.from.clone(),
+                target_language: args.to.clone(),
+                ..AiRequestOptions::default()
+            };
             let runtime = build_headless_runtime(store.clone())?;
             run_ai_streaming(
                 &runtime,
                 parse_id(&args.id)?,
                 args.action,
+                options,
                 !args.no_stream,
                 format,
             )
@@ -781,14 +798,13 @@ async fn run_ai_streaming(
     runtime: &NagoriRuntime,
     id: EntryId,
     action: AiActionId,
+    options: AiRequestOptions,
     stream: bool,
     format: OutputFormat,
 ) -> Result<()> {
     use std::io::Write;
 
-    let run = runtime
-        .start_ai_action(id, action, AiRequestOptions::default())
-        .await?;
+    let run = runtime.start_ai_action(id, action, options).await?;
     let request_id = run.request_id;
     let mut events = run.events;
 

@@ -1391,6 +1391,27 @@ mod tests {
         (runtime, clipboard)
     }
 
+    /// A runtime whose `AppleNative` engine also wires a `MockTranslator`, so the
+    /// translate path (option threading, the translation semaphore, the
+    /// non-streaming `Done`) is testable on any host. The mock echoes
+    /// `"[<target>] <input>"`.
+    fn runtime_with_mock_translator() -> (NagoriRuntime, Arc<MemoryClipboard>) {
+        use nagori_ai::{AiEngine, MockBackend, MockTranslator};
+        use nagori_core::AiProviderKind;
+
+        let store = SqliteStore::open_memory().expect("memory store should open");
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .text_generator(Arc::new(MockBackend::new()))
+            .translator(Arc::new(MockTranslator::new()))
+            .build();
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(clipboard.clone())
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+        (runtime, clipboard)
+    }
+
     /// Enables AI with the `AppleNative` provider plus the given extra settings,
     /// so AI-action tests share one place to flip the master toggle.
     fn ai_enabled_settings(extra: AppSettings) -> AppSettings {
@@ -2189,6 +2210,65 @@ mod tests {
         }
         assert!(saw_cancelled, "stream must terminate with Cancelled");
         drop(events);
+        assert_eq!(runtime.ai_registry.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn translate_action_threads_target_language_to_backend() {
+        // The translate option (target language) reaches the backend, the
+        // translation semaphore is acquired and released, and the non-streaming
+        // result arrives as a single terminal `Done`.
+        let (runtime, _) = runtime_with_mock_translator();
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = runtime
+            .add_text("hello world".to_owned())
+            .await
+            .expect("entry should be added");
+        let options = AiRequestOptions {
+            target_language: Some("ja".to_owned()),
+            ..AiRequestOptions::default()
+        };
+        let run = runtime
+            .start_ai_action(id, AiActionId::Translate, options)
+            .await
+            .expect("translate should start");
+        let mut events = run.events;
+        let mut final_text = None;
+        while let Some(item) = events.next().await {
+            if let Ok(AiEvent::Done {
+                final_text: text, ..
+            }) = item
+            {
+                final_text = Some(text);
+                break;
+            }
+        }
+        assert_eq!(final_text.as_deref(), Some("[ja] hello world"));
+        drop(events);
+        assert_eq!(runtime.ai_registry.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn translate_action_without_target_language_is_unsupported() {
+        // The one-shot path uses default options (no target language); the engine
+        // refuses with a capability mismatch, which surfaces as Unsupported.
+        let (runtime, _) = runtime_with_mock_translator();
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = runtime
+            .add_text("hello".to_owned())
+            .await
+            .expect("entry should be added");
+        let err = runtime
+            .run_ai_action(id, AiActionId::Translate)
+            .await
+            .expect_err("translate without a target language must error");
+        assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
         assert_eq!(runtime.ai_registry.active_count(), 0);
     }
 

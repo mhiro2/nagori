@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
-use nagori_ai::AiEventStream;
+use nagori_ai::{AiEventStream, BackendUnavailableReason, TranslationOutput};
 use nagori_core::{AiError, AiErrorCode, AiEvent};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::availability::AppleAvailability;
@@ -40,6 +40,17 @@ unsafe extern "C" {
         is_cancelled: extern "C" fn(*mut c_void) -> u8,
         on_snapshot: extern "C" fn(*mut c_void, *const u8, usize),
         on_done: extern "C" fn(*mut c_void, i32),
+    );
+    fn nagori_apple_translation_pair_status_c(
+        source_ptr: *const c_char,
+        target_ptr: *const c_char,
+    ) -> i32;
+    fn nagori_apple_translate_c(
+        text_ptr: *const c_char,
+        source_ptr: *const c_char,
+        target_ptr: *const c_char,
+        ctx: *mut c_void,
+        on_complete: extern "C" fn(*mut c_void, i32, *const u8, usize, *const u8, usize),
     );
 }
 
@@ -304,6 +315,156 @@ pub(crate) fn summarize_stream(input: &str, cancel: CancellationToken) -> AiEven
     .boxed()
 }
 
+/// Opaque context handed to Swift for one translation. It owns the oneshot
+/// sender the single `translate_on_complete` callback fulfils.
+struct TranslateCtx {
+    tx: oneshot::Sender<Result<TranslationOutput, AiError>>,
+}
+
+/// Single terminal callback for a translation: builds the result, sends it to
+/// the waiting [`translate`] future, and reclaims the context box.
+extern "C" fn translate_on_complete(
+    ctx: *mut c_void,
+    code: i32,
+    text_ptr: *const u8,
+    text_len: usize,
+    src_ptr: *const u8,
+    src_len: usize,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: `translate_on_complete` is the sole, final callback for a
+    // translation, so reclaiming the box here is sound — Swift does not touch
+    // `ctx` afterwards.
+    let ctx = unsafe { Box::from_raw(ctx.cast::<TranslateCtx>()) };
+    let result = build_translation_result(code, text_ptr, text_len, src_ptr, src_len);
+    // The receiver is dropped if the request was cancelled; the send then fails
+    // harmlessly and the result is discarded.
+    let _ = ctx.tx.send(result);
+}
+
+/// Copies a UTF-8 buffer Swift handed us into an owned `String`. Swift keeps the
+/// buffer alive only for the duration of the callback, so we copy eagerly.
+fn read_utf8(ptr: *const u8, len: usize) -> String {
+    if ptr.is_null() || len == 0 {
+        return String::new();
+    }
+    // SAFETY: `ptr`/`len` describe a buffer Swift keeps valid for the call.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Builds the translation result from the Swift terminal callback's status code
+/// and (on success) its two UTF-8 buffers.
+fn build_translation_result(
+    code: i32,
+    text_ptr: *const u8,
+    text_len: usize,
+    src_ptr: *const u8,
+    src_len: usize,
+) -> Result<TranslationOutput, AiError> {
+    if code == 0 {
+        let detected = read_utf8(src_ptr, src_len);
+        Ok(TranslationOutput {
+            text: read_utf8(text_ptr, text_len),
+            detected_source_language: (!detected.is_empty()).then_some(detected),
+        })
+    } else {
+        Err(translate_terminal(code))
+    }
+}
+
+/// Maps the Swift translation status code onto an [`AiError`]. Keep in sync with
+/// `translationErrorCode` in `Bridge.swift`.
+fn translate_terminal(code: i32) -> AiError {
+    match code {
+        // `notInstalled`: the language pack is downloadable but not present.
+        // Reuse the asset-missing reason so the UI gets a download remediation.
+        1 => BackendUnavailableReason::AssetMissing.into_error(),
+        2 => AiError::new(
+            AiErrorCode::BackendInternal,
+            "the source/target language pair is not supported",
+        ),
+        3 => AiError::new(
+            AiErrorCode::BackendInternal,
+            "could not identify the source language; pass one explicitly",
+        ),
+        4 => AiError::new(
+            AiErrorCode::BackendInternal,
+            "there was nothing to translate",
+        ),
+        // The Swift bridge's own timeout fired (the framework wedged); see
+        // `translateTimeoutNanoseconds` in `Bridge.swift`.
+        6 => AiError::new(
+            AiErrorCode::Timeout,
+            "the translation framework did not respond in time",
+        ),
+        _ => AiError::new(
+            AiErrorCode::BackendInternal,
+            "the translation framework failed to translate the input",
+        ),
+    }
+}
+
+/// Reports a source/target pair's readiness via the Swift bridge.
+///
+/// Returns the raw status code (`0` installed, `1` downloadable, `2`
+/// unsupported, `3` unknown / no source / timed out); [`crate::translate`] maps
+/// it onto a `BackendAvailability`.
+pub(crate) fn translation_pair_status(source: Option<&str>, target: &str) -> i32 {
+    let c_source = CString::new(source.unwrap_or_default().replace('\0', " ")).unwrap_or_default();
+    let c_target = CString::new(target.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: a C function taking two NUL-terminated strings, returning a code.
+    unsafe { nagori_apple_translation_pair_status_c(c_source.as_ptr(), c_target.as_ptr()) }
+}
+
+/// Translates `input` into `target` (auto-detecting the source when `source` is
+/// `None`) via the Apple Translation framework.
+///
+/// Cancellation is not polled here: the single async `translate` has no polling
+/// point, so the engine's stream wrapper handles user cancellation by dropping
+/// this future (which drops the receiver; the Swift side then sends into a
+/// closed channel). To keep that from leaking native work when the framework
+/// wedges, the Swift bridge enforces its own timeout and *always* calls back
+/// (success, error, or a timeout sentinel), so `ctx` is reclaimed and this
+/// future always resolves within a bounded time.
+pub(crate) async fn translate(
+    input: &str,
+    source: Option<&str>,
+    target: &str,
+) -> Result<TranslationOutput, AiError> {
+    let (tx, rx) = oneshot::channel::<Result<TranslationOutput, AiError>>();
+    let ctx = Box::new(TranslateCtx { tx });
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
+
+    // Strip interior NULs so the C strings survive intact.
+    let c_text = CString::new(input.replace('\0', " ")).unwrap_or_default();
+    let c_source = CString::new(source.unwrap_or_default().replace('\0', " ")).unwrap_or_default();
+    let c_target = CString::new(target.replace('\0', " ")).unwrap_or_default();
+
+    // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
+    // the call (reclaimed in `translate_on_complete`), and `on_complete` is a
+    // plain `fn` item.
+    unsafe {
+        nagori_apple_translate_c(
+            c_text.as_ptr(),
+            c_source.as_ptr(),
+            c_target.as_ptr(),
+            ctx_ptr,
+            translate_on_complete,
+        );
+    }
+
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the translation bridge closed without a result",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -376,5 +537,58 @@ mod tests {
             }
             other => panic!("expected Cancelled terminal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translate_terminal_maps_not_installed_to_asset_missing() {
+        use nagori_core::AiErrorCode;
+        let err = super::translate_terminal(1);
+        assert_eq!(err.code, AiErrorCode::AssetMissing);
+        // The asset-missing reason carries a download remediation hint.
+        assert!(err.remediation.is_some());
+    }
+
+    #[test]
+    fn translate_terminal_maps_timeout_sentinel() {
+        use nagori_core::AiErrorCode;
+        assert_eq!(super::translate_terminal(6).code, AiErrorCode::Timeout);
+    }
+
+    #[test]
+    fn translate_terminal_maps_other_codes_to_backend_internal() {
+        use nagori_core::AiErrorCode;
+        for code in [2, 3, 4, 5, 99] {
+            assert_eq!(
+                super::translate_terminal(code).code,
+                AiErrorCode::BackendInternal
+            );
+        }
+    }
+
+    #[test]
+    fn build_translation_result_success_copies_buffers() {
+        let text = b"\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf"; // こんにちは
+        let src = b"en";
+        let out =
+            super::build_translation_result(0, text.as_ptr(), text.len(), src.as_ptr(), src.len())
+                .expect("code 0 is success");
+        assert_eq!(out.text, "こんにちは");
+        assert_eq!(out.detected_source_language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn build_translation_result_success_without_detected_source() {
+        let text = b"hi";
+        let out =
+            super::build_translation_result(0, text.as_ptr(), text.len(), std::ptr::null(), 0)
+                .expect("code 0 is success");
+        assert_eq!(out.text, "hi");
+        assert_eq!(out.detected_source_language, None);
+    }
+
+    #[test]
+    fn build_translation_result_error_code_is_err() {
+        let result = super::build_translation_result(2, std::ptr::null(), 0, std::ptr::null(), 0);
+        assert!(result.is_err());
     }
 }

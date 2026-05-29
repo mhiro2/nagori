@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::AiEventStream;
 use crate::backend::{
     BackendAvailability, BackendUnavailableReason, TextGenerationCapabilities,
-    TextGenerationRequest, TextGenerator,
+    TextGenerationRequest, TextGenerator, TranslationOutput, TranslationRequest, Translator,
 };
 
 /// A canned text-generation backend.
@@ -90,6 +90,87 @@ impl TextGenerator for MockBackend {
             return Err(reason.into_error());
         }
         Ok(stream_chars(&self.render(&req.input), cancel))
+    }
+}
+
+/// A canned [`Translator`] backend for tests and CI.
+///
+/// Echoes the input back tagged with the target language so a test can assert
+/// exactly what the backend received, and can be put into any availability /
+/// per-pair state to exercise the engine's translation branch — unavailable
+/// provider, a missing language pack, or a clean success — without the Apple
+/// Translation framework.
+#[derive(Debug, Clone)]
+pub struct MockTranslator {
+    availability: BackendAvailability,
+    /// Status reported for any source/target pair queried via `pair_status`.
+    pair: BackendAvailability,
+}
+
+impl Default for MockTranslator {
+    fn default() -> Self {
+        Self {
+            availability: BackendAvailability::Available,
+            pair: BackendAvailability::Available,
+        }
+    }
+}
+
+impl MockTranslator {
+    /// An available translator whose language pairs are all installed.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A translator that reports the given unavailable `reason`.
+    #[must_use]
+    pub const fn unavailable(reason: BackendUnavailableReason) -> Self {
+        Self {
+            availability: BackendAvailability::Unavailable(reason),
+            pair: BackendAvailability::Unavailable(reason),
+        }
+    }
+
+    /// An available translator whose language packs are not yet installed, so a
+    /// `pair_status` query reports [`BackendUnavailableReason::AssetMissing`].
+    #[must_use]
+    pub const fn pair_missing() -> Self {
+        Self {
+            availability: BackendAvailability::Available,
+            pair: BackendAvailability::Unavailable(BackendUnavailableReason::AssetMissing),
+        }
+    }
+}
+
+#[async_trait]
+impl Translator for MockTranslator {
+    async fn availability(&self) -> BackendAvailability {
+        self.availability
+    }
+
+    async fn pair_status(&self, _source: Option<&str>, _target: &str) -> BackendAvailability {
+        self.pair
+    }
+
+    async fn translate(
+        &self,
+        req: TranslationRequest,
+        cancel: CancellationToken,
+    ) -> Result<TranslationOutput, nagori_core::AiError> {
+        if let BackendAvailability::Unavailable(reason) = self.availability {
+            return Err(reason.into_error());
+        }
+        if cancel.is_cancelled() {
+            return Err(nagori_core::AiError::new(
+                nagori_core::AiErrorCode::Unknown,
+                "translation cancelled",
+            ));
+        }
+        Ok(TranslationOutput {
+            text: format!("[{}] {}", req.target_language, req.input),
+            detected_source_language: req.source_language.or_else(|| Some("en".to_owned())),
+        })
     }
 }
 
@@ -215,6 +296,49 @@ mod tests {
         // `AiEventStream` is not `Debug`, so use let-else rather than `expect_err`.
         let Err(err) = backend.stream_text(request("ignored"), cancel).await else {
             panic!("unavailable backend must error");
+        };
+        assert_eq!(err.code, nagori_core::AiErrorCode::Unavailable);
+    }
+
+    fn translation_request(input: &str, target: &str) -> TranslationRequest {
+        TranslationRequest {
+            request_id: RequestId::new(),
+            input: input.to_owned(),
+            source_language: None,
+            target_language: target.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn translator_echoes_input_tagged_with_target() {
+        let backend = MockTranslator::new();
+        let out = backend
+            .translate(translation_request("hello", "ja"), CancellationToken::new())
+            .await
+            .expect("available translator should translate");
+        assert_eq!(out.text, "[ja] hello");
+        // No explicit source means the mock reports its auto-detected default.
+        assert_eq!(out.detected_source_language.as_deref(), Some("en"));
+    }
+
+    #[tokio::test]
+    async fn translator_pair_missing_reports_asset_missing() {
+        let backend = MockTranslator::pair_missing();
+        assert_eq!(backend.availability().await, BackendAvailability::Available);
+        assert_eq!(
+            backend.pair_status(Some("en"), "ja").await,
+            BackendAvailability::Unavailable(BackendUnavailableReason::AssetMissing)
+        );
+    }
+
+    #[tokio::test]
+    async fn translator_unavailable_errors() {
+        let backend = MockTranslator::unavailable(BackendUnavailableReason::NotEnabled);
+        let Err(err) = backend
+            .translate(translation_request("hi", "ja"), CancellationToken::new())
+            .await
+        else {
+            panic!("unavailable translator must error");
         };
         assert_eq!(err.code, nagori_core::AiErrorCode::Unavailable);
     }
