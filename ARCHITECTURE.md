@@ -1047,14 +1047,26 @@ not duplicate runtime logic.
   `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
   — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
   Non-Public entries hide both the Enter hint and the open button.
-- `ActionMenu.svelte` — modal for quick actions (Summarize first
-  sentence, Format JSON, Extract tasks, Redact secrets) plus a separate
-  set of availability-gated, model-backed AI entries (*Summarize*,
-  *Rewrite*, *Format as Markdown*, *Extract tasks*, *Explain code*) that
-  stream over the `nagori://ai/*` events; each button is disabled with a
-  remediation tooltip when its action is unavailable. The result block
-  shows *Copy* (uses `navigator.clipboard`) and *Save as new entry*
-  (calls `save_ai_result`).
+- `ActionMenu.svelte` — a hotkey-triggered modal that runs actions
+  against the selected entry. It composes `CompactPreview.svelte` (the
+  target's kind / source / time and a short snippet, kept visible so the
+  user always sees what they are acting on), `ActionPicker.svelte` (one
+  flat list mixing the deterministic quick actions — Summarize first
+  sentence, Format JSON, Extract tasks, Redact secrets — with the
+  availability-gated, model-backed AI actions — *Summarize*, *Rewrite*,
+  *Format as Markdown*, *Organize tasks*, *Explain code* — each marked
+  with a small `AI` badge instead of a label prefix), and
+  `ActionRunPanel.svelte` (a single `idle / running / result / error`
+  work area). Streaming AI partials and the final result land in that one
+  area, so the output never jumps position on completion; the AI actions
+  stream over the `nagori://ai/*` events, and a fast deterministic run
+  skips the running indicator (shown only once it outlives ~120 ms). Each
+  AI button is disabled with a remediation tooltip when its action is
+  unavailable; Escape cancels an in-flight stream and otherwise closes the
+  modal. The result shows *Copy* (uses `navigator.clipboard`) and *Save as
+  new entry* (calls `save_ai_result`). Clearing the whole history is not
+  offered here — that global, destructive action lives on the tray menu
+  and the `clear-history` hotkey.
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
   the `preview_entry` Tauri command, which is gated to the desktop
   process because the daemon does not host an AppKit event loop. The
