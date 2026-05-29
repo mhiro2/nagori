@@ -20,7 +20,7 @@ keeping the desktop palette, CLI, and capture daemon aligned.
 11. [IPC boundary](#11-ipc-boundary)
 12. [Tauri boundary and frontend](#12-tauri-boundary-and-frontend)
 13. [CLI](#13-cli)
-14. [Quick actions](#14-quick-actions)
+14. [Quick actions and AI actions](#14-quick-actions-and-ai-actions)
 15. [Internationalization](#15-internationalization)
 16. [Desktop shell integration](#16-desktop-shell-integration)
 17. [Observability](#17-observability)
@@ -96,8 +96,8 @@ domain code. This leads to four design rules:
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image + file-list copy-back (PNG → RGBA via arboard, file paths packed into a hand-rolled `DROPFILES` + `SetClipboardData(CF_HDROP)`), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
-| `nagori-ai` | `AiProvider` trait, rule-based local runner, action registry, redactor |
-| `nagori-ai-apple` | macOS-only Apple on-device AI bridge (proof-of-concept). Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with shared-`AtomicBool` cancellation. Not yet wired into the daemon. |
+| `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
+| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
@@ -1028,8 +1028,10 @@ not duplicate runtime logic.
   `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
   — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
   Non-Public entries hide both the Enter hint and the open button.
-- `ActionMenu.svelte` — modal for Quick actions (Summarize, Format
-  JSON, Extract tasks, Redact secrets). The result block shows *Copy*
+- `ActionMenu.svelte` — modal for quick actions (Summarize first
+  sentence, Format JSON, Extract tasks, Redact secrets) plus a separate
+  availability-gated *AI: Summarize* entry that streams over the
+  `nagori://ai/*` events. The result block shows *Copy*
   (uses `navigator.clipboard`) and *Save as new entry* (calls
   `save_ai_result`).
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
@@ -1199,45 +1201,57 @@ tell the user when `~/.local/bin` still needs adding to PATH.
 
 ---
 
-## 14. Quick actions
+## 14. Quick actions and AI actions
 
-`nagori-ai` exposes:
+Two distinct, type-separated families:
 
-- `AiProvider` trait (rule-based local runner + mock impls).
-- Action registry. The desktop palette surfaces only four entries —
-  `Summarize`, `FormatJson`, `ExtractTasks`, `RedactSecrets` — and
-  `AiActionId::is_quick_action` is the canonical check for that set.
-  The enum still carries legacy variants (`Translate`, `Rewrite`,
-  `FormatMarkdown`, `ExplainCode`) for schema compatibility; the
-  rule-based runner handles `FormatMarkdown` / `ExplainCode` with
-  simple text transforms and only refuses `Translate` / `Rewrite`,
-  which need a real model.
-- A `Redactor` for shaping payloads as a defence-in-depth pass before
-  the runner consumes them.
+- **Quick actions** (`QuickActionId`: `FormatJson`, `ExtractTasks`,
+  `RedactSecrets`, `SummarizeFirstSentence`) are deterministic on-device
+  transforms run by `nagori-ai`'s `QuickActionRunner`. They never touch a
+  language model and are always available, independent of the AI provider
+  configuration. `NagoriRuntime::run_quick_action` shapes the input through the
+  settings-aware redaction classifier and the per-action `max_bytes` cap before
+  the runner sees it.
+- **AI actions** (`AiActionId`: `Summarize`, `Translate`, `Rewrite`,
+  `FormatMarkdown`, `ExtractTasks`, `ExplainCode`) are model-backed and resolved
+  through the `AiActionEngine`. Only `Summarize` is wired today (Apple
+  `TextGenerator`); the rest report a capability mismatch until their backends
+  land.
 
-**Privacy contract.** Quick actions short-circuit the legacy
-`ai_enabled` / `ai_provider` gates in
-`NagoriRuntime::run_ai_action` and always route to the on-device
-runner — the desktop UI no longer surfaces those toggles, so making
-them load-bearing would brick the palette under default config. The
-input-policy pipeline (`AiInputPolicy::require_redaction`, the
-secret/blocked sensitivity rules, the `max_bytes` cap) still runs
-before the runner sees the text. Legacy variants keep the original
-gating so an IPC caller can't silently reach a remote provider when
-the user has disabled AI. The schema retains the `ai_enabled` /
-`ai_provider` / `semantic_search_enabled` fields so older config
-files round-trip unchanged.
+**Engine layering.** `nagori-ai` is provider-agnostic. `AiEngine` resolves an
+action to a backend family via the static `(action, provider) → backend` table,
+then dispatches to a `TextGenerator` / `Translator` / `Embedder` backend. The
+Apple backend (`nagori-ai-apple::AppleFoundationBackend`) is injected by
+`nagori-platform-native` on macOS; other platforms wire no engine, so AI
+actions are refused there while quick actions keep working.
 
-**Output.** `run_ai_action` returns `AiOutput` (text + runner
-warnings). When the user clicks *Save as new entry* in
-`ActionMenu.svelte`, the frontend invokes the separate `save_ai_result`
-Tauri command which writes the text via `runtime.add_text()` and
-returns the resulting `EntryDto`. The persistence is intentionally a
-second user-driven step rather than a side effect of the action.
+**Streaming + cancellation.** `NagoriRuntime::start_ai_action` gates on the
+`ai.enabled` master toggle, the allow-list, and the selected provider; shapes
+the input (redaction, byte cap, and a ~3,500-token budget that refuses oversized
+input rather than letting the model silently truncate); acquires the backend's
+concurrency permit (text generation is serialised to one, matching Apple's
+single-request model); and registers the request in the `AiRequestRegistry`,
+which owns the `CancellationToken`. The returned stream of `AiEvent`s
+(`Delta` / `Replace` / `Done` / `Cancelled`, with errors as `Err(AiError)`
+items) releases the permit and removes the registry entry — and cancels the run
+— when dropped. The desktop drives the engine in-process and re-emits events on
+the request-scoped `nagori://ai/*` Tauri channel (coalesced); the CLI's
+`nagori ai` streams in-process to stdout (`Ctrl-C` cancels). The IPC
+`RunAiAction` envelope drives the engine to completion and returns a single
+`AiOutput`; `RunQuickAction` runs the one-shot quick path.
 
-The caller surface for settings-aware redaction is
-`SensitivityClassifier::redact`, **not** the bare `Redactor` — see
-[section 9](#9-sensitivity-and-redaction).
+**Privacy contract.** Apple's on-device models run fully local
+(`AiInputPolicy::allow_remote` is always `false`). The input-policy pipeline
+(`require_redaction`, the secret/blocked sensitivity rules, the `max_bytes` cap)
+runs before any backend sees the text, and the settings-aware
+`SensitivityClassifier::redact` — **not** the bare `Redactor` — is the caller
+surface for redaction (see [section 9](#9-sensitivity-and-redaction)).
+
+**Output.** When the user clicks *Save as new entry* in `ActionMenu.svelte`,
+the frontend invokes the separate `save_ai_result` Tauri command which writes
+the text via `runtime.add_text()` and returns the resulting `EntryDto`. The
+persistence is intentionally a second user-driven step rather than a side effect
+of the action.
 
 ---
 
