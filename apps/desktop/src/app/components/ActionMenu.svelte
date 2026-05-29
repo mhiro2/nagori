@@ -30,13 +30,25 @@
 
   const { target, open, onClose, onClearAll }: Props = $props();
 
-  // The deterministic on-device quick actions. The model-backed "AI:
-  // Summarize" entry below is a separate path that streams.
+  // The deterministic on-device quick actions. The model-backed AI entries
+  // below are a separate path that streams.
   const QUICK_ACTION_IDS: readonly QuickActionId[] = [
     'SummarizeFirstSentence',
     'FormatJson',
     'ExtractTasks',
     'RedactSecrets',
+  ];
+
+  // The streaming, model-backed text actions, in capability-matrix order.
+  // `Translate` is omitted: it needs a target-language picker and is CLI-only
+  // for now.
+  type AiTextActionId = 'Summarize' | 'Rewrite' | 'FormatMarkdown' | 'ExtractTasks' | 'ExplainCode';
+  const AI_ACTION_IDS: readonly AiTextActionId[] = [
+    'Summarize',
+    'Rewrite',
+    'FormatMarkdown',
+    'ExtractTasks',
+    'ExplainCode',
   ];
 
   const t = $derived(messages());
@@ -55,20 +67,38 @@
   let aiRequestId = $state<string | undefined>(undefined);
   let aiText = $state('');
   let aiStreaming = $state(false);
+  // Which AI action is currently streaming, for the per-button spinner.
+  let aiPendingAction = $state<AiTextActionId | undefined>(undefined);
 
-  const summarizeAvailability = $derived(
-    availability?.actions.find((entry) => entry.action === 'Summarize'),
+  // The localized "why is this disabled" hint for one action: its remediation
+  // key, or a generic fallback. `undefined` when the action is available.
+  const reasonFor = (entry: AiAvailability['actions'][number] | undefined): string | undefined => {
+    if (entry?.available) return undefined;
+    return entry?.remediation
+      ? (t.actionMenu.aiRemediation[entry.remediation] ?? t.actionMenu.aiUnavailable)
+      : t.actionMenu.aiUnavailable;
+  };
+
+  // One button descriptor per AI text action, gated by its own availability.
+  const aiActionList = $derived(
+    AI_ACTION_IDS.map((action) => {
+      const entry = availability?.actions.find((e) => e.action === action);
+      return {
+        action,
+        label: t.actionMenu.aiActions[action],
+        available: entry?.available ?? false,
+        reason: reasonFor(entry),
+      };
+    }),
   );
-  const summarizeAvailable = $derived(summarizeAvailability?.available ?? false);
-  // Tooltip text for a disabled AI button: the localized remediation hint, or
-  // a generic "unavailable" fallback keyed off the per-action status.
-  const summarizeReason = $derived(
-    summarizeAvailable
+  const anyAiAvailable = $derived(aiActionList.some((item) => item.available));
+  // Shown once below the buttons when nothing is runnable. The text actions all
+  // resolve to the same on-device backend, so the first hint represents them
+  // all (e.g. "enable Apple Intelligence").
+  const aiUnavailableReason = $derived(
+    anyAiAvailable
       ? undefined
-      : summarizeAvailability?.remediation
-        ? (t.actionMenu.aiRemediation[summarizeAvailability.remediation] ??
-          t.actionMenu.aiUnavailable)
-        : t.actionMenu.aiUnavailable,
+      : (aiActionList.find((item) => item.reason)?.reason ?? t.actionMenu.aiUnavailable),
   );
 
   // Reset transient feedback when the user dismisses or re-opens the menu. An
@@ -85,6 +115,7 @@
       aiText = '';
       aiStreaming = false;
       aiRequestId = undefined;
+      aiPendingAction = undefined;
     }
   });
 
@@ -123,17 +154,20 @@
         lastResult = payload.finalText;
         aiStreaming = false;
         aiRequestId = undefined;
+        aiPendingAction = undefined;
       }),
       subscribe<AiErrorEvent>(TAURI_EVENTS.aiError, (payload) => {
         if (!matches(payload.requestId)) return;
         runError = payload.message;
         aiStreaming = false;
         aiRequestId = undefined;
+        aiPendingAction = undefined;
       }),
       subscribe<{ requestId: string }>(TAURI_EVENTS.aiCancelled, (payload) => {
         if (!matches(payload.requestId)) return;
         aiStreaming = false;
         aiRequestId = undefined;
+        aiPendingAction = undefined;
       }),
     ];
     return () => {
@@ -141,18 +175,21 @@
     };
   });
 
-  const runAiSummarize = async (): Promise<void> => {
-    if (!target || !isTauri() || aiStreaming || !summarizeAvailable) return;
+  const runAiAction = async (action: AiTextActionId): Promise<void> => {
+    const entry = aiActionList.find((item) => item.action === action);
+    if (!target || !isTauri() || aiStreaming || pending !== undefined || !entry?.available) return;
     runError = undefined;
     lastResult = undefined;
     aiText = '';
     aiStreaming = true;
+    aiPendingAction = action;
     try {
-      aiRequestId = await startAiAction('Summarize', target.id);
+      aiRequestId = await startAiAction(action, target.id);
     } catch (err) {
       runError = describeError(err);
       aiStreaming = false;
       aiRequestId = undefined;
+      aiPendingAction = undefined;
     }
   };
 
@@ -331,24 +368,30 @@
 
       <section class="ai" aria-label={t.actionMenu.aiTitle}>
         <header class="ai-head">{t.actionMenu.aiTitle}</header>
-        <button
-          type="button"
-          class="ai-button"
-          disabled={!target || aiStreaming || pending !== undefined || !summarizeAvailable}
-          title={summarizeReason}
-          onclick={() => void runAiSummarize()}
-        >
-          {t.actionMenu.aiSummarize}
-          {#if aiStreaming}<span class="pending">…</span>{/if}
-        </button>
+        <!-- Not a <ul>/<li>: kept as plain buttons so quick-action tests that
+             count list-item buttons stay scoped to the quick actions above. -->
+        <div class="ai-list">
+          {#each aiActionList as item (item.action)}
+            <button
+              type="button"
+              class="ai-button"
+              disabled={!target || aiStreaming || pending !== undefined || !item.available}
+              title={item.reason}
+              onclick={() => void runAiAction(item.action)}
+            >
+              {item.label}
+              {#if aiPendingAction === item.action}<span class="pending">…</span>{/if}
+            </button>
+          {/each}
+        </div>
         {#if aiStreaming}
           <button type="button" class="ghost ai-cancel" onclick={cancelAi}>
             {t.actionMenu.aiCancel}
           </button>
           <pre class="result ai-stream">{aiText}</pre>
         {/if}
-        {#if summarizeReason}
-          <p class="ai-reason">{summarizeReason}</p>
+        {#if aiUnavailableReason}
+          <p class="ai-reason">{aiUnavailableReason}</p>
         {/if}
       </section>
 
@@ -475,6 +518,10 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .ai-list {
+    display: grid;
+    gap: 0.4rem;
   }
   .ai-button {
     width: 100%;

@@ -117,7 +117,14 @@ export type Messages = {
     };
     // Model-backed AI section.
     aiTitle: string;
-    aiSummarize: string;
+    // Labels for the streaming, model-backed AI actions (one button each).
+    aiActions: {
+      Summarize: string;
+      Rewrite: string;
+      FormatMarkdown: string;
+      ExtractTasks: string;
+      ExplainCode: string;
+    };
     aiCancel: string;
     aiUnavailable: string;
     // Localized remediation hints, keyed by the backend's `Remediation.i18n_key`.
@@ -525,9 +532,15 @@ export const en: Messages = {
       RedactSecrets: 'Redact secrets',
     },
     aiTitle: 'AI',
-    aiSummarize: 'AI: Summarize',
+    aiActions: {
+      Summarize: 'AI: Summarize',
+      Rewrite: 'AI: Rewrite',
+      FormatMarkdown: 'AI: Format as Markdown',
+      ExtractTasks: 'AI: Extract tasks',
+      ExplainCode: 'AI: Explain code',
+    },
     aiCancel: 'Cancel',
-    aiUnavailable: 'AI Summarize is unavailable right now.',
+    aiUnavailable: 'AI actions are unavailable right now.',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Enable Apple Intelligence in System Settings to use AI actions.',

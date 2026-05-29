@@ -109,9 +109,15 @@ export const fr: Messages = {
       RedactSecrets: 'Masquer les secrets',
     },
     aiTitle: 'IA',
-    aiSummarize: 'IA : Résumer',
+    aiActions: {
+      Summarize: 'IA : Résumer',
+      Rewrite: 'IA : Reformuler',
+      FormatMarkdown: 'IA : Formater en Markdown',
+      ExtractTasks: 'IA : Extraire les tâches',
+      ExplainCode: 'IA : Expliquer le code',
+    },
     aiCancel: 'Annuler',
-    aiUnavailable: 'Le résumé IA est indisponible pour le moment.',
+    aiUnavailable: 'Les actions IA sont indisponibles pour le moment.',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Activez Apple Intelligence dans Réglages Système pour utiliser les actions IA.',

@@ -107,9 +107,15 @@ export const de: Messages = {
       RedactSecrets: 'Geheimnisse maskieren',
     },
     aiTitle: 'KI',
-    aiSummarize: 'KI: Zusammenfassen',
+    aiActions: {
+      Summarize: 'KI: Zusammenfassen',
+      Rewrite: 'KI: Umformulieren',
+      FormatMarkdown: 'KI: Als Markdown formatieren',
+      ExtractTasks: 'KI: Aufgaben extrahieren',
+      ExplainCode: 'KI: Code erklären',
+    },
     aiCancel: 'Abbrechen',
-    aiUnavailable: 'KI-Zusammenfassen ist derzeit nicht verfügbar.',
+    aiUnavailable: 'KI-Aktionen sind derzeit nicht verfügbar.',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Aktiviere Apple Intelligence in den Systemeinstellungen, um KI-Aktionen zu nutzen.',

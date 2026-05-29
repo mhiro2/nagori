@@ -99,9 +99,15 @@ export const ja: Messages = {
       RedactSecrets: '秘匿情報マスク',
     },
     aiTitle: 'AI',
-    aiSummarize: 'AI: 要約',
+    aiActions: {
+      Summarize: 'AI: 要約',
+      Rewrite: 'AI: 書き直し',
+      FormatMarkdown: 'AI: Markdown 整形',
+      ExtractTasks: 'AI: タスク抽出',
+      ExplainCode: 'AI: コード解説',
+    },
     aiCancel: 'キャンセル',
-    aiUnavailable: '現在 AI 要約は利用できません。',
+    aiUnavailable: '現在 AI アクションは利用できません。',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'AI アクションを使うには、システム設定で Apple Intelligence を有効化してください。',

@@ -36,8 +36,9 @@ export type QuickActionId =
   | 'SummarizeFirstSentence';
 
 // Model-backed AI actions resolved through the engine. Mirrors
-// `nagori_core::AiActionId`. Only `Summarize` is wired today; the rest are
-// surfaced for forward compatibility and report `capabilityMismatch`.
+// `nagori_core::AiActionId`. The text-generation actions (everything but
+// `Translate`) and `Translate` are wired on macOS; on other platforms they
+// report `capabilityMismatch`.
 export type AiActionId =
   | 'Summarize'
   | 'Translate'

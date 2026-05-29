@@ -99,9 +99,15 @@ export const ko: Messages = {
       RedactSecrets: '비밀 정보 마스킹',
     },
     aiTitle: 'AI',
-    aiSummarize: 'AI: 요약',
+    aiActions: {
+      Summarize: 'AI: 요약',
+      Rewrite: 'AI: 다시 쓰기',
+      FormatMarkdown: 'AI: Markdown 형식화',
+      ExtractTasks: 'AI: 작업 추출',
+      ExplainCode: 'AI: 코드 설명',
+    },
     aiCancel: '취소',
-    aiUnavailable: '지금은 AI 요약을 사용할 수 없습니다.',
+    aiUnavailable: '지금은 AI 작업을 사용할 수 없습니다.',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'AI 동작을 사용하려면 시스템 설정에서 Apple Intelligence를 켜세요.',

@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AiAvailability } from '../lib/types';
+import type { AiActionId, AiAvailability } from '../lib/types';
 
 // `vi.mock` is hoisted above module-level consts, so the shared mock state has
 // to be defined via `vi.hoisted` to be reachable from the factory.
@@ -62,19 +62,29 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   ...overrides,
 });
 
-const availability = (summarizeAvailable: boolean): AiAvailability => ({
-  provider: summarizeAvailable ? 'appleNative' : 'disabled',
-  overallStatus: summarizeAvailable ? 'available' : 'disabled',
-  actions: [
-    {
-      action: 'Summarize',
-      status: summarizeAvailable ? 'available' : 'disabled_by_settings',
-      available: summarizeAvailable,
-      ...(summarizeAvailable
-        ? {}
-        : { remediation: 'ai.unavailable.apple_intelligence_not_enabled' }),
-    },
-  ],
+// The streaming text actions the menu surfaces (Translate is CLI-only).
+const TEXT_ACTIONS: AiActionId[] = [
+  'Summarize',
+  'Rewrite',
+  'FormatMarkdown',
+  'ExtractTasks',
+  'ExplainCode',
+];
+
+const availability = (actionsAvailable: boolean): AiAvailability => ({
+  provider: actionsAvailable ? 'appleNative' : 'disabled',
+  overallStatus: actionsAvailable ? 'available' : 'disabled',
+  actions: TEXT_ACTIONS.map((action) => {
+    const entry: AiAvailability['actions'][number] = {
+      action,
+      status: actionsAvailable ? 'available' : 'disabled_by_settings',
+      available: actionsAvailable,
+    };
+    if (!actionsAvailable) {
+      entry.remediation = 'ai.unavailable.apple_intelligence_not_enabled';
+    }
+    return entry;
+  }),
 });
 
 beforeEach(() => {
@@ -106,6 +116,10 @@ describe('ActionMenu', () => {
     expect(getByText('Extract tasks')).toBeTruthy();
     expect(getByText('Redact secrets')).toBeTruthy();
     expect(getByText('AI: Summarize')).toBeTruthy();
+    expect(getByText('AI: Rewrite')).toBeTruthy();
+    expect(getByText('AI: Format as Markdown')).toBeTruthy();
+    expect(getByText('AI: Extract tasks')).toBeTruthy();
+    expect(getByText('AI: Explain code')).toBeTruthy();
   });
 
   it('invokes onClose when the close button is clicked', async () => {
@@ -211,6 +225,18 @@ describe('ActionMenu', () => {
       warnings: [],
     });
     expect(await findByText('Hello world')).toBeTruthy();
+  });
+
+  it('starts a non-summarize AI action with its own id', async () => {
+    const user = userEvent.setup();
+    vi.mocked(startAiAction).mockResolvedValue('req-2');
+
+    const { getByText } = render(ActionMenu, {
+      props: { open: true, target: sample({ id: 'xyz' }), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+    await user.click(getByText('AI: Rewrite'));
+    expect(startAiAction).toHaveBeenCalledWith('Rewrite', 'xyz');
   });
 
   it('disables the AI button with a reason when summarize is unavailable', async () => {

@@ -99,9 +99,15 @@ export const zhHans: Messages = {
       RedactSecrets: '屏蔽机密',
     },
     aiTitle: 'AI',
-    aiSummarize: 'AI：总结',
+    aiActions: {
+      Summarize: 'AI：总结',
+      Rewrite: 'AI：改写',
+      FormatMarkdown: 'AI：格式化为 Markdown',
+      ExtractTasks: 'AI：提取任务',
+      ExplainCode: 'AI：解释代码',
+    },
     aiCancel: '取消',
-    aiUnavailable: '当前无法使用 AI 总结。',
+    aiUnavailable: '当前无法使用 AI 操作。',
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         '请在系统设置中启用 Apple Intelligence 以使用 AI 操作。',
