@@ -43,6 +43,8 @@ fn link_swift() {
     println!("cargo:rustc-link-lib=framework=FoundationModels");
     println!("cargo:rustc-link-lib=framework=Translation");
     println!("cargo:rustc-link-lib=framework=NaturalLanguage");
+    // IOKit backs the AC-power probe the semantic indexer's battery guard uses.
+    println!("cargo:rustc-link-lib=framework=IOKit");
 
     // Rebuild when the Swift sources change.
     println!("cargo:rerun-if-changed=swift/Sources");

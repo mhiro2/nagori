@@ -3,6 +3,7 @@ import SwiftRs
 import FoundationModels
 import Translation
 import NaturalLanguage
+import IOKit.ps
 
 // All exports use the C ABI (`@_cdecl`) because `swift-rs` cannot export async
 // Swift functions directly (swift-rs#31). The Rust side declares matching
@@ -230,8 +231,8 @@ public func nagoriAppleTranslationPairStatusC(
 }
 
 /// Guards a one-shot completion callback so it fires exactly once, no matter
-/// which racing task (the translation or its timeout) reaches it first.
-private final class TranslateOnce: @unchecked Sendable {
+/// which racing task (the work or its timeout) reaches it first.
+private final class OnceFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var fired = false
     /// Returns `true` for the first caller only.
@@ -288,7 +289,7 @@ public func nagoriAppleTranslateC(
 
     let ctxCopy = ctx
     let onCompleteCopy = onComplete
-    let once = TranslateOnce()
+    let once = OnceFlag()
 
     // Fire `onComplete` at most once. `targetText`/`detected` are non-nil only
     // on success (code 0).
@@ -367,5 +368,243 @@ private func translationErrorCode(_ error: Error) -> Int32 {
         return 4
     default:
         return 5
+    }
+}
+
+/// Reports whether the Mac is on AC power, used by the semantic indexer's
+/// battery guard: `1` = on AC (time remaining unlimited), `0` = on battery,
+/// `-1` = unknown.
+@_cdecl("nagori_apple_on_ac_power_c")
+public func nagoriAppleOnAcPowerC() -> Int32 {
+    let remaining = IOPSGetTimeRemainingEstimate()
+    if remaining == kIOPSTimeRemainingUnlimited {
+        return 1
+    }
+    if remaining == kIOPSTimeRemainingUnknown {
+        return -1
+    }
+    return 0
+}
+
+/// Delivers the user's preferred language code (e.g. `"en"`, `"ja"`) through
+/// `onResult` (invoked synchronously); falls back to `"en"`. Used to pin the
+/// embedding model to the language the user's clips are most likely in. The
+/// buffer is valid only for the call.
+@_cdecl("nagori_apple_preferred_language_c")
+public func nagoriApplePreferredLanguageC(
+    ctx: UnsafeMutableRawPointer?,
+    onResult: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
+) {
+    let code =
+        Locale.preferredLanguages.first
+        .flatMap { Locale(identifier: $0).language.languageCode?.identifier }
+        ?? Locale.current.language.languageCode?.identifier
+        ?? "en"
+    let bytes = Array(code.utf8)
+    bytes.withUnsafeBufferPointer { buf in
+        onResult(ctx, buf.baseAddress, buf.count)
+    }
+}
+
+// MARK: - NLContextualEmbedding semantic index bridge
+
+/// Process-wide cache of loaded contextual-embedding models, keyed by language
+/// code, so the background indexer does not reconstruct and reload the model for
+/// every clip. `NLContextualEmbedding` is reference-typed and thread-safe for
+/// concurrent `embeddingResult` calls once loaded.
+private final class EmbeddingCache: @unchecked Sendable {
+    static let shared = EmbeddingCache()
+    private let lock = NSLock()
+    private var models: [String: NLContextualEmbedding] = [:]
+
+    /// Returns a loaded embedding model for `language`, constructing and loading
+    /// it on first use. `nil` if the language has no model or its assets are not
+    /// installed (the caller maps that to an asset-missing error).
+    func loaded(for language: String) -> NLContextualEmbedding? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = models[language] {
+            return cached
+        }
+        guard let embedding = NLContextualEmbedding(language: NLLanguage(language)),
+            embedding.hasAvailableAssets
+        else {
+            return nil
+        }
+        do {
+            try embedding.load()
+        } catch {
+            return nil
+        }
+        models[language] = embedding
+        return embedding
+    }
+}
+
+/// Hard cap on a single embedding call, mirroring the translation bridge's
+/// timeout so the FFI lifetime is bounded and `ctx` is always reclaimed even if
+/// the framework wedges.
+private let embedTimeoutNanoseconds: UInt64 = 20_000_000_000
+
+/// Reports whether the contextual-embedding model for `langPtr` is ready:
+/// 0 = assets installed (ready), 1 = assets missing (downloadable),
+/// 2 = the language has no embedding model.
+@_cdecl("nagori_apple_embed_availability_c")
+public func nagoriAppleEmbedAvailabilityC(langPtr: UnsafePointer<CChar>) -> Int32 {
+    let language = String(cString: langPtr)
+    guard let embedding = NLContextualEmbedding(language: NLLanguage(language)) else {
+        return 2
+    }
+    return embedding.hasAvailableAssets ? 0 : 1
+}
+
+/// Reads the runtime metadata of the contextual-embedding model for `langPtr`
+/// and delivers it through `onComplete` (invoked synchronously):
+/// `onComplete(ctx, code, dimension, revision, maxSequenceLength, modelIdPtr,
+/// modelIdLen)`. `code` 0 = success; 2 = no model for the language (numeric
+/// fields 0, model id null). The model-id buffer is valid only for the call.
+@_cdecl("nagori_apple_embed_metadata_c")
+public func nagoriAppleEmbedMetadataC(
+    langPtr: UnsafePointer<CChar>,
+    ctx: UnsafeMutableRawPointer?,
+    onComplete: @convention(c) (
+        UnsafeMutableRawPointer?, Int32, Int, Int, Int, UnsafePointer<UInt8>?, Int
+    ) -> Void
+) {
+    let language = String(cString: langPtr)
+    guard let embedding = NLContextualEmbedding(language: NLLanguage(language)) else {
+        onComplete(ctx, 2, 0, 0, 0, nil, 0)
+        return
+    }
+    let modelId = Array(embedding.modelIdentifier.utf8)
+    modelId.withUnsafeBufferPointer { buf in
+        onComplete(
+            ctx, 0, embedding.dimension, embedding.revision, embedding.maximumSequenceLength,
+            buf.baseAddress, buf.count
+        )
+    }
+}
+
+/// Requests download of the contextual-embedding assets for `langPtr`, calling
+/// `onComplete(ctx, code)` once: 0 = available afterwards, 1 = not available,
+/// 2 = no model for the language, 5 = request errored, 6 = timed out.
+@_cdecl("nagori_apple_embed_request_assets_c")
+public func nagoriAppleEmbedRequestAssetsC(
+    langPtr: UnsafePointer<CChar>,
+    ctx: UnsafeMutableRawPointer?,
+    onComplete: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
+) {
+    let language = String(cString: langPtr)
+    let ctxCopy = ctx
+    let onCompleteCopy = onComplete
+    let once = OnceFlag()
+    func deliver(_ code: Int32) {
+        guard once.claim() else { return }
+        onCompleteCopy(ctxCopy, code)
+    }
+
+    guard let embedding = NLContextualEmbedding(language: NLLanguage(language)) else {
+        deliver(2)
+        return
+    }
+    embedding.requestAssets { result, _ in
+        switch result {
+        case .available:
+            deliver(0)
+        case .notAvailable:
+            deliver(1)
+        case .error:
+            deliver(5)
+        @unknown default:
+            deliver(5)
+        }
+    }
+
+    Task.detached(priority: .utility) {
+        try? await Task.sleep(nanoseconds: embedTimeoutNanoseconds)
+        deliver(6)
+    }
+}
+
+/// Embeds `textPtr` with the contextual-embedding model for `langPtr`,
+/// mean-pooling the per-token vectors into one L2-normalised document vector and
+/// delivering it through `onComplete(ctx, code, floatPtr, count)`:
+/// - `code` 0 = success, `floatPtr`/`count` carry `dimension` float32 values
+///   (valid only for the call; Rust copies immediately).
+/// - 1 = assets missing / no model, 4 = nothing to embed, 5 = framework error,
+///   6 = timed out.
+///
+/// A timeout task races the work so the callback always fires within
+/// `embedTimeoutNanoseconds`, keeping the FFI lifetime bounded.
+@_cdecl("nagori_apple_embed_c")
+public func nagoriAppleEmbedC(
+    langPtr: UnsafePointer<CChar>,
+    textPtr: UnsafePointer<CChar>,
+    ctx: UnsafeMutableRawPointer?,
+    onComplete: @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<Float>?, Int) -> Void
+) {
+    let language = String(cString: langPtr)
+    let text = String(cString: textPtr)
+    let ctxCopy = ctx
+    let onCompleteCopy = onComplete
+    let once = OnceFlag()
+    func deliver(_ code: Int32, vector: [Float]?) {
+        guard once.claim() else { return }
+        if let vector {
+            vector.withUnsafeBufferPointer { buf in
+                onCompleteCopy(ctxCopy, code, buf.baseAddress, buf.count)
+            }
+        } else {
+            onCompleteCopy(ctxCopy, code, nil, 0)
+        }
+    }
+
+    let work = Task.detached(priority: .userInitiated) {
+        guard let embedding = EmbeddingCache.shared.loaded(for: language) else {
+            deliver(1, vector: nil)
+            return
+        }
+        do {
+            let result = try embedding.embeddingResult(for: text, language: NLLanguage(language))
+            let dimension = embedding.dimension
+            var sum = [Double](repeating: 0, count: dimension)
+            var count = 0
+            result.enumerateTokenVectors(in: text.startIndex..<text.endIndex) { vector, _ in
+                if vector.count == dimension {
+                    for index in 0..<dimension {
+                        sum[index] += vector[index]
+                    }
+                    count += 1
+                }
+                return true
+            }
+            if count == 0 {
+                deliver(4, vector: nil)
+                return
+            }
+            // Mean-pool then L2-normalise so cosine distance is well-defined.
+            var pooled = [Float](repeating: 0, count: dimension)
+            var norm = 0.0
+            for index in 0..<dimension {
+                let mean = sum[index] / Double(count)
+                norm += mean * mean
+                pooled[index] = Float(mean)
+            }
+            norm = norm.squareRoot()
+            if norm > 0 {
+                for index in 0..<dimension {
+                    pooled[index] = Float(Double(pooled[index]) / norm)
+                }
+            }
+            deliver(0, vector: pooled)
+        } catch {
+            deliver(5, vector: nil)
+        }
+    }
+
+    Task.detached(priority: .utility) {
+        try? await Task.sleep(nanoseconds: embedTimeoutNanoseconds)
+        work.cancel()
+        deliver(6, vector: nil)
     }
 }

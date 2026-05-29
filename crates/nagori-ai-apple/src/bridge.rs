@@ -52,6 +52,28 @@ unsafe extern "C" {
         ctx: *mut c_void,
         on_complete: extern "C" fn(*mut c_void, i32, *const u8, usize, *const u8, usize),
     );
+    fn nagori_apple_on_ac_power_c() -> i32;
+    fn nagori_apple_preferred_language_c(
+        ctx: *mut c_void,
+        on_result: extern "C" fn(*mut c_void, *const u8, usize),
+    );
+    fn nagori_apple_embed_availability_c(lang_ptr: *const c_char) -> i32;
+    fn nagori_apple_embed_metadata_c(
+        lang_ptr: *const c_char,
+        ctx: *mut c_void,
+        on_complete: extern "C" fn(*mut c_void, i32, isize, isize, isize, *const u8, usize),
+    );
+    fn nagori_apple_embed_request_assets_c(
+        lang_ptr: *const c_char,
+        ctx: *mut c_void,
+        on_complete: extern "C" fn(*mut c_void, i32),
+    );
+    fn nagori_apple_embed_c(
+        lang_ptr: *const c_char,
+        text_ptr: *const c_char,
+        ctx: *mut c_void,
+        on_complete: extern "C" fn(*mut c_void, i32, *const f32, usize),
+    );
 }
 
 /// Box handed to Swift as an opaque context pointer for the duration of one
@@ -465,6 +487,233 @@ pub(crate) async fn translate(
     }
 }
 
+/// Whether the Mac is on AC power: `Some(true)` on AC, `Some(false)` on
+/// battery, `None` if the power source could not be determined.
+#[must_use]
+pub(crate) fn on_ac_power() -> Option<bool> {
+    // SAFETY: a no-argument C function returning a status code.
+    match unsafe { nagori_apple_on_ac_power_c() } {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
+}
+
+extern "C" fn collect_language(ctx: *mut c_void, ptr: *const u8, len: usize) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: `ctx` points at the caller's `Option<String>` on the stack, which
+    // outlives this synchronous callback.
+    let out = unsafe { &mut *ctx.cast::<Option<String>>() };
+    *out = Some(read_utf8(ptr, len));
+}
+
+/// The user's preferred language code (e.g. `"en"`, `"ja"`), or `"en"` if it
+/// cannot be resolved. Used to pin the embedding model to the language the
+/// user's clips are most likely written in.
+#[must_use]
+pub(crate) fn preferred_language() -> String {
+    let mut out: Option<String> = None;
+    let ctx_ptr = std::ptr::from_mut(&mut out).cast::<c_void>();
+    // SAFETY: the signature matches the `@_cdecl` export; `collect_language`
+    // runs synchronously during the call, while `out` is still live.
+    unsafe {
+        nagori_apple_preferred_language_c(ctx_ptr, collect_language);
+    }
+    out.filter(|code| !code.is_empty())
+        .unwrap_or_else(|| "en".to_owned())
+}
+
+/// Runtime metadata of the contextual-embedding model, read from the Swift
+/// bridge. The backend wraps this in `nagori-ai`'s `EmbeddingModelMetadata`,
+/// adding the configured language list.
+pub(crate) struct RawEmbedMetadata {
+    pub model_identifier: String,
+    pub revision: u32,
+    pub dimension: usize,
+    pub max_sequence_length: usize,
+}
+
+/// Reports the embedding model's asset readiness for `language` (raw code: `0`
+/// installed, `1` downloadable, `2` no model for the language).
+pub(crate) fn embed_availability(language: &str) -> i32 {
+    let c_lang = CString::new(language.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: a C function taking one NUL-terminated string, returning a code.
+    unsafe { nagori_apple_embed_availability_c(c_lang.as_ptr()) }
+}
+
+/// Context for one metadata read: owns the oneshot the single callback fulfils.
+struct EmbedMetaCtx {
+    tx: oneshot::Sender<Result<RawEmbedMetadata, AiError>>,
+}
+
+extern "C" fn embed_metadata_on_complete(
+    ctx: *mut c_void,
+    code: i32,
+    dimension: isize,
+    revision: isize,
+    max_sequence_length: isize,
+    id_ptr: *const u8,
+    id_len: usize,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: the sole, final callback for this metadata read, so reclaiming the
+    // box here is sound — Swift does not touch `ctx` afterwards.
+    let ctx = unsafe { Box::from_raw(ctx.cast::<EmbedMetaCtx>()) };
+    let result = if code == 0 {
+        Ok(RawEmbedMetadata {
+            model_identifier: read_utf8(id_ptr, id_len),
+            revision: u32::try_from(revision).unwrap_or(0),
+            dimension: usize::try_from(dimension).unwrap_or(0),
+            max_sequence_length: usize::try_from(max_sequence_length).unwrap_or(0),
+        })
+    } else {
+        Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "no embedding model is available for the configured language",
+        ))
+    };
+    let _ = ctx.tx.send(result);
+}
+
+/// Reads the contextual-embedding model's runtime metadata for `language`.
+pub(crate) async fn embed_metadata(language: &str) -> Result<RawEmbedMetadata, AiError> {
+    let (tx, rx) = oneshot::channel::<Result<RawEmbedMetadata, AiError>>();
+    let ctx = Box::new(EmbedMetaCtx { tx });
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
+    let c_lang = CString::new(language.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: the signature matches the `@_cdecl` export; the ctx box is
+    // reclaimed in `embed_metadata_on_complete` (invoked synchronously here).
+    unsafe {
+        nagori_apple_embed_metadata_c(c_lang.as_ptr(), ctx_ptr, embed_metadata_on_complete);
+    }
+    rx.await.unwrap_or_else(|_| {
+        Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding bridge closed without metadata",
+        ))
+    })
+}
+
+/// Context for one asset-download request.
+struct EmbedAssetsCtx {
+    tx: oneshot::Sender<Result<(), AiError>>,
+}
+
+extern "C" fn embed_assets_on_complete(ctx: *mut c_void, code: i32) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: guarded one-shot callback (Swift's `OnceFlag`), so reclaiming the
+    // box here is sound.
+    let ctx = unsafe { Box::from_raw(ctx.cast::<EmbedAssetsCtx>()) };
+    let result = match code {
+        0 => Ok(()),
+        1 => Err(BackendUnavailableReason::AssetMissing.into_error()),
+        6 => Err(AiError::new(
+            AiErrorCode::Timeout,
+            "the embedding asset download did not respond in time",
+        )),
+        _ => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding asset download failed",
+        )),
+    };
+    let _ = ctx.tx.send(result);
+}
+
+/// Requests download of the contextual-embedding assets for `language`.
+pub(crate) async fn embed_request_assets(language: &str) -> Result<(), AiError> {
+    let (tx, rx) = oneshot::channel::<Result<(), AiError>>();
+    let ctx = Box::new(EmbedAssetsCtx { tx });
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
+    let c_lang = CString::new(language.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: the signature matches the `@_cdecl` export; the ctx box is
+    // reclaimed in `embed_assets_on_complete`, which Swift's `OnceFlag` fires
+    // exactly once (success/error or the timeout sentinel).
+    unsafe {
+        nagori_apple_embed_request_assets_c(c_lang.as_ptr(), ctx_ptr, embed_assets_on_complete);
+    }
+    rx.await.unwrap_or_else(|_| {
+        Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding bridge closed without an asset result",
+        ))
+    })
+}
+
+/// Context for one embedding call.
+struct EmbedCtx {
+    tx: oneshot::Sender<Result<Vec<f32>, AiError>>,
+}
+
+extern "C" fn embed_on_complete(ctx: *mut c_void, code: i32, ptr: *const f32, len: usize) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: guarded one-shot callback (Swift's `OnceFlag`), so reclaiming the
+    // box here is sound.
+    let ctx = unsafe { Box::from_raw(ctx.cast::<EmbedCtx>()) };
+    let result = if code == 0 {
+        Ok(read_f32(ptr, len))
+    } else {
+        Err(embed_terminal(code))
+    };
+    let _ = ctx.tx.send(result);
+}
+
+/// Copies a float32 buffer Swift handed us into an owned `Vec`. Swift keeps the
+/// buffer alive only for the duration of the callback, so we copy eagerly.
+fn read_f32(ptr: *const f32, len: usize) -> Vec<f32> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    // SAFETY: `ptr`/`len` describe a buffer Swift keeps valid for the call.
+    unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+}
+
+/// Maps the Swift embedding status code onto an [`AiError`]. Keep in sync with
+/// `nagori_apple_embed_c` in `Bridge.swift`.
+fn embed_terminal(code: i32) -> AiError {
+    match code {
+        1 => BackendUnavailableReason::AssetMissing.into_error(),
+        4 => AiError::new(AiErrorCode::BackendInternal, "there was nothing to embed"),
+        6 => AiError::new(
+            AiErrorCode::Timeout,
+            "the embedding model did not respond in time",
+        ),
+        _ => AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding model failed to embed the input",
+        ),
+    }
+}
+
+/// Embeds `text` with the contextual-embedding model for `language`, returning
+/// one mean-pooled, L2-normalised document vector.
+pub(crate) async fn embed_text(language: &str, text: &str) -> Result<Vec<f32>, AiError> {
+    let (tx, rx) = oneshot::channel::<Result<Vec<f32>, AiError>>();
+    let ctx = Box::new(EmbedCtx { tx });
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
+    let c_lang = CString::new(language.replace('\0', " ")).unwrap_or_default();
+    let c_text = CString::new(text.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: the signature matches the `@_cdecl` export; the ctx box is
+    // reclaimed in `embed_on_complete`, which Swift's `OnceFlag` fires exactly
+    // once (success, error, or the timeout sentinel).
+    unsafe {
+        nagori_apple_embed_c(c_lang.as_ptr(), c_text.as_ptr(), ctx_ptr, embed_on_complete);
+    }
+    rx.await.unwrap_or_else(|_| {
+        Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding bridge closed without a result",
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -590,5 +839,38 @@ mod tests {
     fn build_translation_result_error_code_is_err() {
         let result = super::build_translation_result(2, std::ptr::null(), 0, std::ptr::null(), 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn embed_terminal_maps_assets_missing_with_remediation() {
+        use nagori_core::AiErrorCode;
+        let err = super::embed_terminal(1);
+        assert_eq!(err.code, AiErrorCode::AssetMissing);
+        assert!(err.remediation.is_some());
+    }
+
+    #[test]
+    fn embed_terminal_maps_timeout_sentinel() {
+        use nagori_core::AiErrorCode;
+        assert_eq!(super::embed_terminal(6).code, AiErrorCode::Timeout);
+    }
+
+    #[test]
+    fn embed_terminal_maps_other_codes_to_backend_internal() {
+        use nagori_core::AiErrorCode;
+        for code in [4, 5, 99] {
+            assert_eq!(
+                super::embed_terminal(code).code,
+                AiErrorCode::BackendInternal
+            );
+        }
+    }
+
+    #[test]
+    fn read_f32_copies_buffer() {
+        let values = [0.5_f32, -1.0, 2.5];
+        let copied = super::read_f32(values.as_ptr(), values.len());
+        assert_eq!(copied, vec![0.5, -1.0, 2.5]);
+        assert!(super::read_f32(std::ptr::null(), 0).is_empty());
     }
 }

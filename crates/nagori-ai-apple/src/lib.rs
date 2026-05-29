@@ -29,6 +29,8 @@ mod stream;
 #[cfg(target_os = "macos")]
 mod bridge;
 #[cfg(target_os = "macos")]
+mod embed;
+#[cfg(target_os = "macos")]
 mod foundation;
 #[cfg(target_os = "macos")]
 mod translate;
@@ -41,6 +43,17 @@ pub use stream::{StreamHandle, simulate_snapshot_stream};
 
 #[cfg(target_os = "macos")]
 pub use bridge::{bridge_snapshot_stream, hello};
+
+/// Whether the Mac is on AC power: `Some(true)` on AC, `Some(false)` on
+/// battery, `None` if it could not be determined. The daemon's semantic indexer
+/// uses this for its battery guard.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn on_ac_power() -> Option<bool> {
+    bridge::on_ac_power()
+}
+#[cfg(target_os = "macos")]
+pub use embed::{AppleEmbedderBackend, preferred_embedding_language};
 #[cfg(target_os = "macos")]
 pub use foundation::AppleFoundationBackend;
 #[cfg(target_os = "macos")]
