@@ -97,6 +97,7 @@ domain code. This leads to four design rules:
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | `AiProvider` trait, rule-based local runner, action registry, redactor |
+| `nagori-ai-apple` | macOS-only Apple on-device AI bridge (proof-of-concept). Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with shared-`AtomicBool` cancellation. Not yet wired into the daemon. |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
@@ -112,7 +113,7 @@ crates/
   nagori-platform/ nagori-platform-macos/
   nagori-platform-windows/ nagori-platform-linux/
   nagori-platform-native/
-  nagori-ai/ nagori-ipc/ nagori-daemon/ nagori-cli/
+  nagori-ai/ nagori-ai-apple/ nagori-ipc/ nagori-daemon/ nagori-cli/
 docs/                       # CLI / IPC / permissions / release notes
 ```
 
