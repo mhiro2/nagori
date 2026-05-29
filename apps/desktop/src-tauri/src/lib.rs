@@ -658,6 +658,11 @@ pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
         if let Some(state) = app.try_state::<AppState>() {
             state.remember_previous_frontmost();
         }
+        // Re-home the palette onto the monitor under the cursor before it
+        // becomes visible — `tauri.conf.json`'s `center: true` only pins it to
+        // the primary display once at creation. Done while hidden to avoid a
+        // visible jump.
+        commands::recenter_palette_on_cursor_monitor(&window);
         let _ = window.show();
         let _ = window.set_focus();
     }
