@@ -118,8 +118,8 @@ configuration. Actions: `format-json`, `extract-tasks`, `redact-secrets`,
 Run a model-backed AI action against an entry, streaming the result by default
 (`--no-stream` prints only the final text; `--json` / `--jsonl` select the
 output shape). Actions: `summarize`, `translate`, `rewrite`, `format-markdown`,
-`extract-tasks`, `explain-code` — `summarize` and `translate` are wired today,
-the rest report a capability mismatch until their backends land. `Secret`
+`extract-tasks`, `explain-code` — all are wired on macOS; on other platforms
+they report a capability mismatch since no engine is available. `Secret`
 entries are blocked; `Private` entries are redacted before the model sees them.
 
 `translate` requires `--to <lang>` (a BCP-47 / ISO code such as `ja`, `en`, or

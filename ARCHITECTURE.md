@@ -97,7 +97,7 @@ domain code. This leads to four design rules:
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
-| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), `AppleEmbedderBackend` (an `Embedder` over `NLContextualEmbedding` for semantic search), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
+| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device text — summaries, rewrites, Markdown reformatting, task extraction, code explanations — via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), `AppleEmbedderBackend` (an `Embedder` over `NLContextualEmbedding` for semantic search), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, the background semantic-index worker, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
@@ -1042,10 +1042,12 @@ not duplicate runtime logic.
   Non-Public entries hide both the Enter hint and the open button.
 - `ActionMenu.svelte` — modal for quick actions (Summarize first
   sentence, Format JSON, Extract tasks, Redact secrets) plus a separate
-  availability-gated *AI: Summarize* entry that streams over the
-  `nagori://ai/*` events. The result block shows *Copy*
-  (uses `navigator.clipboard`) and *Save as new entry* (calls
-  `save_ai_result`).
+  set of availability-gated, model-backed AI entries (*Summarize*,
+  *Rewrite*, *Format as Markdown*, *Extract tasks*, *Explain code*) that
+  stream over the `nagori://ai/*` events; each button is disabled with a
+  remediation tooltip when its action is unavailable. The result block
+  shows *Copy* (uses `navigator.clipboard`) and *Save as new entry*
+  (calls `save_ai_result`).
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
   the `preview_entry` Tauri command, which is gated to the desktop
   process because the daemon does not host an AppKit event loop. The
@@ -1226,9 +1228,14 @@ Two distinct, type-separated families:
   the runner sees it.
 - **AI actions** (`AiActionId`: `Summarize`, `Translate`, `Rewrite`,
   `FormatMarkdown`, `ExtractTasks`, `ExplainCode`) are model-backed and resolved
-  through the `AiActionEngine`. `Summarize` (Apple `TextGenerator`) and
-  `Translate` (Apple `Translator`) are wired today; the rest report a capability
-  mismatch until their backends land.
+  through the `AiActionEngine`. On macOS the text-generation actions
+  (`Summarize`, `Rewrite`, `FormatMarkdown`, `ExtractTasks`, `ExplainCode`) run
+  on Apple's `TextGenerator` and `Translate` on the Apple `Translator`; on other
+  platforms no engine is wired, so every AI action reports a capability mismatch.
+  The text-generation actions differ only by their system prompt; `ExtractTasks`
+  prompts for a Markdown checklist (guided generation via Apple's `@Generable`
+  needs the macro compiler plugin, which ships only with full Xcode, not the
+  Command Line Tools the bridge builds against).
 
 **Engine layering.** `nagori-ai` is provider-agnostic. `AiEngine` resolves an
 action to a backend family via the static `(action, provider) → backend` table,
