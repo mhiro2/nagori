@@ -194,7 +194,7 @@ export const zhHant: Messages = {
       allowStreamingHelp: '在模型撰寫時顯示部分輸出。關閉後只顯示最終結果。',
       semanticIndex: '語意搜尋索引',
       semanticIndexHelp:
-        '建立裝置端嵌入，讓搜尋能依語意比對，而不只是文字。需要 Apple Intelligence；預設關閉。',
+        '建立裝置端嵌入，讓搜尋能依語意比對，而不只是文字。使用 Apple 的裝置端嵌入模型（macOS）；預設關閉。',
       semanticIndexAcPowerOnly: '僅在接上電源時建立索引',
       semanticIndexAcPowerOnlyHelp:
         '使用電池時暫停背景嵌入以節省電力。關閉後在電池供電時也會建立索引。',

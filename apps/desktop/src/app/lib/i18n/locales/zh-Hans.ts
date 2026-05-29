@@ -192,7 +192,7 @@ export const zhHans: Messages = {
       allowStreamingHelp: '在模型生成时显示部分输出。关闭后仅显示最终结果。',
       semanticIndex: '语义搜索索引',
       semanticIndexHelp:
-        '构建设备端嵌入，使搜索能按含义匹配，而不仅是文本。需要 Apple Intelligence；默认关闭。',
+        '构建设备端嵌入，使搜索能按含义匹配，而不仅是文本。使用 Apple 的设备端嵌入模型（macOS）；默认关闭。',
       semanticIndexAcPowerOnly: '仅在接通电源时建立索引',
       semanticIndexAcPowerOnlyHelp:
         '使用电池时暂停后台嵌入以省电。关闭后在电池供电时也会建立索引。',

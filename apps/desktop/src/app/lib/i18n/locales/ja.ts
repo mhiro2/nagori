@@ -203,7 +203,7 @@ export const ja: Messages = {
         'モデルの生成中に途中経過を表示します。オフにすると最終結果のみ表示します。',
       semanticIndex: 'セマンティック検索インデックス',
       semanticIndexHelp:
-        'オンデバイスの埋め込みを作成し、本文だけでなく意味でも検索できるようにします。Apple Intelligence が必要で、既定はオフです。',
+        'オンデバイスの埋め込みを作成し、本文だけでなく意味でも検索できるようにします。Apple のオンデバイス埋め込みモデル (macOS) を使用し、既定はオフです。',
       semanticIndexAcPowerOnly: '電源接続中のみインデックスを作成',
       semanticIndexAcPowerOnlyHelp:
         'バッテリー駆動中はバックグラウンドの埋め込み生成を一時停止して節電します。オフにするとバッテリー駆動中も作成します。',

@@ -202,7 +202,7 @@ export const ko: Messages = {
         '모델이 작성하는 동안 부분 출력을 표시합니다. 끄면 최종 결과만 표시합니다.',
       semanticIndex: '시맨틱 검색 인덱스',
       semanticIndexHelp:
-        '온디바이스 임베딩을 만들어 텍스트뿐 아니라 의미로도 검색할 수 있게 합니다. Apple Intelligence가 필요하며 기본값은 꺼짐입니다.',
+        '온디바이스 임베딩을 만들어 텍스트뿐 아니라 의미로도 검색할 수 있게 합니다. Apple의 온디바이스 임베딩 모델(macOS)을 사용하며 기본값은 꺼짐입니다.',
       semanticIndexAcPowerOnly: 'AC 전원 연결 시에만 인덱싱',
       semanticIndexAcPowerOnlyHelp:
         '배터리 사용 중에는 백그라운드 임베딩을 일시 중지하여 전력을 아낍니다. 끄면 배터리에서도 인덱싱합니다.',

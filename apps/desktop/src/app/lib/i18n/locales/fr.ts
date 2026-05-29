@@ -215,7 +215,7 @@ export const fr: Messages = {
         'Affiche la sortie partielle pendant que le modèle écrit. Désactivez pour n’afficher que le résultat final.',
       semanticIndex: 'Index de recherche sémantique',
       semanticIndexHelp:
-        'Crée des embeddings sur l’appareil pour que la recherche corresponde au sens, pas seulement au texte. Nécessite Apple Intelligence ; désactivé par défaut.',
+        'Crée des embeddings sur l’appareil pour que la recherche corresponde au sens, pas seulement au texte. Utilise un modèle d’embedding Apple sur l’appareil (macOS) ; désactivé par défaut.',
       semanticIndexAcPowerOnly: 'Indexer uniquement sur secteur',
       semanticIndexAcPowerOnlyHelp:
         'Suspend l’embedding en arrière-plan sur batterie pour économiser l’énergie. Désactivez pour indexer aussi sur batterie.',

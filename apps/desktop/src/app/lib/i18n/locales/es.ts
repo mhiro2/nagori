@@ -215,7 +215,7 @@ export const es: Messages = {
         'Muestra la salida parcial mientras el modelo escribe. Desactívalo para ver solo el resultado final.',
       semanticIndex: 'Índice de búsqueda semántica',
       semanticIndexHelp:
-        'Crea embeddings en el dispositivo para que la búsqueda coincida por significado, no solo por texto. Requiere Apple Intelligence; desactivado por defecto.',
+        'Crea embeddings en el dispositivo para que la búsqueda coincida por significado, no solo por texto. Usa un modelo de embeddings de Apple en el dispositivo (macOS); desactivado por defecto.',
       semanticIndexAcPowerOnly: 'Indexar solo con corriente alterna',
       semanticIndexAcPowerOnlyHelp:
         'Pausa el embedding en segundo plano con batería para ahorrar energía. Desactívalo para indexar también con batería.',

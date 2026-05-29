@@ -635,7 +635,7 @@ export const en: Messages = {
         'Show partial output while the model writes. Turn off to reveal only the final result.',
       semanticIndex: 'Semantic search index',
       semanticIndexHelp:
-        'Build on-device embeddings so search can match by meaning, not just text. Requires Apple Intelligence; off by default.',
+        'Build on-device embeddings so search can match by meaning, not just text. Uses an on-device Apple embedding model (macOS); off by default.',
       semanticIndexAcPowerOnly: 'Index only while on AC power',
       semanticIndexAcPowerOnlyHelp:
         'Pause background embedding while on battery to save power. Turn off to index on battery too.',

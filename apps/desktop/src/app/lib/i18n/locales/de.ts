@@ -215,7 +215,7 @@ export const de: Messages = {
         'Teilausgabe anzeigen, während das Modell schreibt. Ausschalten, um nur das Endergebnis zu zeigen.',
       semanticIndex: 'Semantischer Suchindex',
       semanticIndexHelp:
-        'Erzeugt geräteseitige Embeddings, damit die Suche nach Bedeutung statt nur nach Text trifft. Erfordert Apple Intelligence; standardmäßig aus.',
+        'Erzeugt geräteseitige Embeddings, damit die Suche nach Bedeutung statt nur nach Text trifft. Nutzt ein geräteseitiges Apple-Embedding-Modell (macOS); standardmäßig aus.',
       semanticIndexAcPowerOnly: 'Nur bei Netzstrom indizieren',
       semanticIndexAcPowerOnlyHelp:
         'Pausiert das Embedding im Hintergrund im Akkubetrieb, um Strom zu sparen. Ausschalten, um auch im Akkubetrieb zu indizieren.',
