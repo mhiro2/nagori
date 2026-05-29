@@ -7,7 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+futures.workspace = true
+nagori-ai = { path = "../nagori-ai" }
+nagori-core = { path = "../nagori-core" }
 tokio = { workspace = true }
+tokio-util.workspace = true
 
 # `swift-rs` only does work on macOS, where `build.rs` invokes `SwiftLinker`.
 # It is keyed to the *host* platform here (build scripts run on the host) so

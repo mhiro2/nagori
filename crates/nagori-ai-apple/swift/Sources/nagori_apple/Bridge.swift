@@ -44,7 +44,8 @@ public func nagoriAppleFmAvailabilityC() -> Int32 {
 /// `LanguageModelSession.streamResponse`. This exercises the Rust-side
 /// longest-common-prefix delta pump and the shared cancellation path
 /// end-to-end on real hardware without requiring Apple Intelligence to be
-/// enabled. The real FoundationModels session is wired in Phase B.
+/// enabled. The real `FoundationModels` summarize path is
+/// `nagori_apple_summarize_c` below.
 ///
 /// - `isCancelled` is a Rust callback (it performs the atomic load itself, so
 ///   the cancel flag is never read across the language boundary); it is polled
@@ -83,9 +84,90 @@ public func nagoriAppleStreamSnapshotsC(
                 }
             }
             // Small per-character delay so a cancel armed from Rust can be
-            // observed mid-stream (the PoC measured ~30ms interception).
+            // observed mid-stream.
             usleep(2_000)
         }
         onDoneCopy(ctxCopy, doneCode)
+    }
+}
+
+/// Summarize `promptPtr` with the on-device language model, streaming partial
+/// snapshots back through `onSnapshot`. The callback contract matches
+/// `nagori_apple_stream_snapshots_c`:
+///
+/// - `isCancelled` (a Rust callback that performs the atomic load itself) is
+///   polled before forwarding each snapshot; observing cancellation stops the
+///   loop and reports `onDone(ctx, 1)`.
+/// - `onSnapshot` receives the cumulative partial text so far (not a delta);
+///   the Rust longest-common-prefix pump turns it into ordered deltas.
+/// - `onDone` reports a terminal status code: 0 success, 1 cancelled, and
+///   2–8 map `LanguageModelSession.GenerationError` cases onto stable codes the
+///   Rust side translates into `AiError`s.
+@_cdecl("nagori_apple_summarize_c")
+public func nagoriAppleSummarizeC(
+    promptPtr: UnsafePointer<CChar>,
+    ctx: UnsafeMutableRawPointer?,
+    isCancelled: @convention(c) (UnsafeMutableRawPointer?) -> UInt8,
+    onSnapshot: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>, Int) -> Void,
+    onDone: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
+) {
+    let input = String(cString: promptPtr)
+
+    let ctxCopy = ctx
+    let isCancelledCopy = isCancelled
+    let onSnapshotCopy = onSnapshot
+    let onDoneCopy = onDone
+
+    Task.detached(priority: .userInitiated) {
+        let session = LanguageModelSession(
+            instructions: """
+            You are a concise summarizer. Summarize the user's text in its \
+            original language. Respond with only the summary and no preamble.
+            """
+        )
+        var doneCode: Int32 = 0
+        do {
+            let stream = session.streamResponse(to: input)
+            for try await snapshot in stream {
+                if isCancelledCopy(ctxCopy) != 0 {
+                    doneCode = 1
+                    break
+                }
+                let bytes = Array(snapshot.content.utf8)
+                bytes.withUnsafeBufferPointer { buf in
+                    if let base = buf.baseAddress {
+                        onSnapshotCopy(ctxCopy, base, buf.count)
+                    }
+                }
+            }
+        } catch let error as LanguageModelSession.GenerationError {
+            doneCode = generationErrorCode(error)
+        } catch {
+            doneCode = 2
+        }
+        onDoneCopy(ctxCopy, doneCode)
+    }
+}
+
+/// Collapses a `GenerationError` into a stable status code shared with the Rust
+/// `AiError` mapping. Keep in sync with `bridge::summarize_terminal`.
+private func generationErrorCode(_ error: LanguageModelSession.GenerationError) -> Int32 {
+    switch error {
+    case .exceededContextWindowSize:
+        return 3
+    case .rateLimited:
+        return 4
+    case .assetsUnavailable:
+        return 5
+    case .guardrailViolation:
+        return 6
+    case .unsupportedLanguageOrLocale:
+        return 7
+    case .concurrentRequests:
+        return 8
+    case .decodingFailure, .unsupportedGuide, .refusal:
+        return 2
+    @unknown default:
+        return 2
     }
 }

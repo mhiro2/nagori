@@ -1,13 +1,19 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nagori_ai::{AiActionRegistry, AiProvider, MockAiProvider};
+use futures::StreamExt;
+use nagori_ai::{AiActionEngine, AiActionRun, QuickActionRunner, resolve_backend};
 use nagori_core::{
-    AiActionId, AppError, AppSettings, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory,
-    EntryId, EntryRepository, OnboardingSettings, PasteFormat, Result, SearchQuery, SearchResult,
-    SecretAction, Sensitivity, SensitivityClassifier, SettingsRepository,
-    settings::AiProviderSetting,
+    AiActionId, AiActionRequest, AiAvailabilityReport, AiError, AiErrorCode, AiEvent,
+    AiInputPolicy, AiOutput, AiOverallStatus, AiRequestOptions, AppError, AppSettings, AuditLog,
+    ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository, OnboardingSettings,
+    PasteFormat, PerActionAvailability, PerActionStatus, QuickActionId, RequestId, Result,
+    SearchQuery, SearchResult, SecretAction, SemanticIndexAvailability, Sensitivity,
+    SensitivityClassifier, SettingsRepository, estimate_tokens,
 };
+use tokio_util::sync::CancellationToken;
+
+use crate::ai_registry::AiRequestRegistry;
 use nagori_ipc::IpcServerHealth;
 use nagori_platform::{
     ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionCheckContext,
@@ -32,8 +38,14 @@ pub struct NagoriRuntime {
     pub(crate) store: SqliteStore,
     clipboard: Arc<dyn ClipboardWriter>,
     paste: Arc<dyn PasteController>,
-    ai: Arc<dyn AiProvider>,
-    ai_registry: Arc<AiActionRegistry>,
+    /// Model-backed AI engine. `None` on platforms with no wired backend
+    /// (currently everything but macOS); AI actions are refused there while
+    /// quick actions stay available.
+    ai_engine: Option<Arc<dyn AiActionEngine>>,
+    /// Deterministic rule-based quick actions, always available.
+    quick_runner: Arc<QuickActionRunner>,
+    /// Tracks in-flight AI actions and owns their cancellation tokens.
+    ai_registry: Arc<AiRequestRegistry>,
     pub(crate) permissions: Option<Arc<dyn PermissionChecker>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -105,7 +117,7 @@ impl NagoriRuntime {
             store,
             clipboard: None,
             paste: None,
-            ai: None,
+            ai_engine: None,
             permissions: None,
             socket_path: None,
             capabilities: None,
@@ -632,103 +644,382 @@ impl NagoriRuntime {
         Ok(settings)
     }
 
-    pub async fn run_ai_action(
-        &self,
-        id: EntryId,
-        action: AiActionId,
-    ) -> Result<nagori_core::AiOutput> {
+    /// Runs a deterministic [`QuickActionId`] on-device.
+    ///
+    /// Quick actions never touch a language model and are always available,
+    /// independent of the AI provider configuration. Input is still shaped by
+    /// the settings-aware redaction classifier and the per-action size cap.
+    pub async fn run_quick_action(&self, id: EntryId, action: QuickActionId) -> Result<AiOutput> {
         let settings = self.store.get_settings().await?;
-        let action_def = self
-            .ai_registry
-            .get(action)
-            .ok_or_else(|| AppError::InvalidInput(format!("unknown ai action {action:?}")))?;
-        let policy = action_def.input_policy.clone();
-        // Quick actions (Summarize / FormatJson / ExtractTasks /
-        // RedactSecrets) always run on-device against the rule-based
-        // runner, regardless of the legacy `ai_enabled` / `ai_provider`
-        // settings — those toggles no longer have a UI entry point but
-        // remain in `AppSettings` as schema-compat seats so a future
-        // remote provider can be reintroduced without a settings
-        // migration. The input policy (redaction, size cap) below
-        // still applies. Legacy LLM-only variants keep the original
-        // gating so a direct IPC caller can't accidentally bypass the
-        // user's provider choice.
-        if !action.is_quick_action() {
-            if !settings.ai_enabled {
-                return Err(AppError::Policy(
-                    "ai actions are disabled in settings".to_owned(),
-                ));
-            }
-            // Provider gating: `None` blocks everything; `Local` runs the
-            // on-device runner; `Remote` is reserved as an extension
-            // point for a future OpenAI-compatible generic provider but
-            // has no implementation wired in this build, so we surface
-            // an Unsupported error rather than silently fall through to
-            // the local runner. The `allow_remote` per-action policy is
-            // kept on `AiActionDef` so the gate site stays one line when
-            // a remote provider is later wired back in.
-            match &settings.ai_provider {
-                AiProviderSetting::None => {
-                    return Err(AppError::Policy(
-                        "ai_provider is set to None — refusing to run".to_owned(),
-                    ));
-                }
-                AiProviderSetting::Local => {}
-                AiProviderSetting::Remote { .. } => {
-                    return Err(AppError::Unsupported(
-                        "remote ai_provider has no implementation wired in this build".to_owned(),
-                    ));
-                }
-            }
-        }
+        let policy = action.input_policy();
         let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
+        let classifier = SensitivityClassifier::try_new(settings)?;
         let raw = entry.plain_text().unwrap_or_default();
-        // The redactor here must be settings-aware: a bare `redact_text`
-        // applies only the built-in patterns and silently leaks anything
-        // matched by `regex_denylist`. Constructing the classifier from
-        // the same `settings` we just loaded ensures user-supplied rules
-        // gate the AI input the same way they gate the preview pane.
-        let classifier = SensitivityClassifier::try_new(settings.clone())?;
-        // Input shaping: secrets must be redacted (or refused), private
-        // entries are redacted unconditionally, and `require_redaction`
-        // forces redaction even on Public entries before the provider sees
-        // the text.
+        // Secrets must be redacted (or refused); private entries are redacted
+        // unconditionally; `require_redaction` forces redaction even on Public
+        // entries. `RedactSecrets` is the one action allowed to consume a
+        // secret entry, because redacting it is the whole point.
         let input = match (entry.sensitivity, action) {
-            (Sensitivity::Secret | Sensitivity::Blocked, AiActionId::RedactSecrets) => {
+            (Sensitivity::Secret | Sensitivity::Blocked, QuickActionId::RedactSecrets) => {
                 classifier.redact(raw)
             }
             (Sensitivity::Secret | Sensitivity::Blocked, _) => {
                 return Err(AppError::Policy(
-                    "secret entries must be redacted before this AI action".to_owned(),
+                    "secret entries must be redacted before this quick action".to_owned(),
                 ));
             }
             (Sensitivity::Private, _) => classifier.redact(raw),
-            _ => {
-                if policy.require_redaction {
-                    classifier.redact(raw)
-                } else {
-                    raw.to_owned()
-                }
-            }
+            _ if policy.require_redaction => classifier.redact(raw),
+            _ => raw.to_owned(),
         };
-        // Size cap: refuse rather than silently truncating — truncation can
-        // produce surprising AI output (cut-off code, half-translated text)
-        // and the user can re-issue with a smaller selection if they want.
         if input.len() > policy.max_bytes {
             return Err(AppError::Policy(format!(
                 "input exceeds max_bytes ({}) for action {}",
-                policy.max_bytes, action_def.name
+                policy.max_bytes,
+                action.slug()
             )));
         }
-        self.ai.run_action(action, &input).await
+        self.quick_runner.run(action, &input)
     }
+
+    /// Begins a model-backed [`AiActionId`], returning its live event stream.
+    ///
+    /// Gates on the master toggle, the per-action allow-list, and the selected
+    /// provider; shapes the input through the redaction classifier, byte cap,
+    /// and token budget; acquires the appropriate concurrency permit; and
+    /// registers the request so it can be cancelled by id. The returned
+    /// stream's drop releases the permit and removes the registry entry, and a
+    /// watchdog cancels it once the configured timeout elapses.
+    pub async fn start_ai_action(
+        &self,
+        id: EntryId,
+        action: AiActionId,
+        options: AiRequestOptions,
+    ) -> Result<AiActionRun> {
+        let settings = self.store.get_settings().await?;
+        if !settings.ai.enabled {
+            return Err(AppError::Policy(
+                "ai actions are disabled in settings".to_owned(),
+            ));
+        }
+        if !settings.ai.allowed_actions.is_empty() && !settings.ai.allowed_actions.contains(&action)
+        {
+            return Err(AppError::Policy(format!(
+                "ai action {} is not in the allow-list",
+                action.slug()
+            )));
+        }
+        let engine = self.ai_engine.as_ref().ok_or_else(|| {
+            AppError::Unsupported("no AI engine is available on this platform".to_owned())
+        })?;
+        if settings.ai.provider != engine.provider() {
+            return Err(AppError::Unsupported(format!(
+                "the selected AI provider ({:?}) has no backend wired in this build",
+                settings.ai.provider
+            )));
+        }
+
+        let policy = action.input_policy();
+        let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
+        let classifier = SensitivityClassifier::try_new(settings.clone())?;
+        let input = shape_ai_input(&entry, &classifier, &policy)?;
+
+        let request_id = RequestId::new();
+        let req = AiActionRequest {
+            request_id,
+            action,
+            input,
+            policy,
+            options,
+        };
+
+        // Register *before* acquiring the permit so the request is cancellable
+        // while it waits behind the semaphore (Apple serialises text generation
+        // to one in-flight request). The registry mutex is never held across the
+        // acquire, so permit waiters can't deadlock against the map mutation.
+        let cancel = CancellationToken::new();
+        self.ai_registry
+            .register(request_id, action, cancel.clone());
+
+        // Acquire the backend's concurrency permit, racing it against a cancel
+        // so a queued request can be aborted before it ever reaches the model.
+        let permit = match resolve_backend(action, engine.provider()) {
+            Some(kind) => {
+                let semaphore = self.ai_registry.semaphores().for_backend(kind);
+                tokio::select! {
+                    acquired = semaphore.acquire_owned() => {
+                        let permit = acquired.map_err(|_| {
+                            self.ai_registry.remove(request_id);
+                            AppError::Ai("ai concurrency semaphore closed".to_owned())
+                        })?;
+                        // The reaper (or an explicit cancel) may have cancelled —
+                        // and removed — this request while the acquire and the
+                        // cancel arms were both ready. Re-check so we don't start
+                        // an untracked run that holds no registry handle; dropping
+                        // `permit` here returns it to the semaphore.
+                        if cancel.is_cancelled() {
+                            self.ai_registry.remove(request_id);
+                            return Err(AppError::Ai(
+                                "ai action was cancelled while queued".to_owned(),
+                            ));
+                        }
+                        Some(permit)
+                    }
+                    () = cancel.cancelled() => {
+                        self.ai_registry.remove(request_id);
+                        return Err(AppError::Ai(
+                            "ai action was cancelled while queued".to_owned(),
+                        ));
+                    }
+                }
+            }
+            // No backend wired — let the engine surface the capability mismatch.
+            None => None,
+        };
+        // Bind the permit to the registry handle so a normal removal *and* the
+        // TTL reaper both release it, even if the stream is never polled out.
+        self.ai_registry.attach_permit(request_id, permit);
+
+        let run = match engine.start(req, cancel.clone()).await {
+            Ok(run) => run,
+            Err(err) => {
+                self.ai_registry.remove(request_id);
+                return Err(ai_error_to_app(&err));
+            }
+        };
+
+        let timeout = Duration::from_millis(settings.ai.request_timeout_ms);
+        let guard = RequestGuard {
+            registry: Arc::clone(&self.ai_registry),
+            request_id,
+            cancel,
+        };
+        let events = guard_event_stream(run.events, guard, timeout);
+        Ok(AiActionRun { request_id, events })
+    }
+
+    /// Runs an AI action to completion and returns the collected result.
+    ///
+    /// The one-shot path used by the IPC `RunAiAction` handler: it drives
+    /// [`Self::start_ai_action`] and folds the stream into a single
+    /// [`AiOutput`].
+    pub async fn run_ai_action(&self, id: EntryId, action: AiActionId) -> Result<AiOutput> {
+        let run = self
+            .start_ai_action(id, action, AiRequestOptions::default())
+            .await?;
+        let mut events = run.events;
+        let mut text = String::new();
+        let mut warnings = Vec::new();
+        while let Some(item) = events.next().await {
+            match item {
+                Ok(AiEvent::Delta { text: delta, .. }) => text.push_str(&delta),
+                Ok(AiEvent::Replace { text: snapshot, .. }) => text = snapshot,
+                Ok(AiEvent::Done {
+                    final_text,
+                    warnings: done_warnings,
+                    ..
+                }) => {
+                    text = final_text;
+                    warnings = done_warnings;
+                    break;
+                }
+                Ok(AiEvent::Cancelled) => {
+                    return Err(AppError::Ai("ai action was cancelled".to_owned()));
+                }
+                Err(err) => return Err(ai_error_to_app(&err)),
+            }
+        }
+        Ok(AiOutput {
+            text,
+            created_entry: None,
+            warnings,
+        })
+    }
+
+    /// Cancels an in-flight AI action by id. Returns `true` if it was tracked.
+    #[must_use]
+    pub fn cancel_ai_action(&self, request_id: RequestId) -> bool {
+        self.ai_registry.cancel(request_id)
+    }
+
+    /// Cancels and reaps AI request handles older than the registry TTL,
+    /// returning how many were reaped. Called by the maintenance loop.
+    pub fn reap_stale_ai_requests(&self) -> usize {
+        self.ai_registry.reap_stale()
+    }
+
+    /// Builds a point-in-time AI availability report for the current settings.
+    pub async fn ai_availability(&self) -> Result<AiAvailabilityReport> {
+        let settings = self.store.get_settings().await?;
+        match &self.ai_engine {
+            Some(engine) => Ok(engine.availability(&settings.ai).await),
+            None => Ok(no_engine_availability(&settings.ai)),
+        }
+    }
+}
+
+/// Conservative upper bound on AI input size, in estimated tokens.
+///
+/// Apple's Foundation Models cap a session at 4,096 tokens (instructions +
+/// prompt + output) and silently truncate on overflow, so the daemon refuses
+/// input above this budget rather than letting the model drop text. The margin
+/// below 4,096 leaves room for the instructions and the generated summary.
+const MAX_AI_INPUT_TOKENS: usize = 3_500;
+
+/// Shapes an entry's text for a model-backed AI action: redacts per
+/// sensitivity, enforces the byte cap, and refuses input over the token budget.
+fn shape_ai_input(
+    entry: &ClipboardEntry,
+    classifier: &SensitivityClassifier,
+    policy: &AiInputPolicy,
+) -> Result<String> {
+    let raw = entry.plain_text().unwrap_or_default();
+    let input = match entry.sensitivity {
+        Sensitivity::Secret | Sensitivity::Blocked => {
+            return Err(AppError::Policy(
+                "secret entries must be redacted before this AI action".to_owned(),
+            ));
+        }
+        Sensitivity::Private => classifier.redact(raw),
+        _ if policy.require_redaction => classifier.redact(raw),
+        _ => raw.to_owned(),
+    };
+    if input.len() > policy.max_bytes {
+        return Err(AppError::Policy(format!(
+            "input exceeds max_bytes ({})",
+            policy.max_bytes
+        )));
+    }
+    let tokens = estimate_tokens(&input);
+    if tokens > MAX_AI_INPUT_TOKENS {
+        return Err(AppError::Policy(format!(
+            "input is ~{tokens} tokens; the on-device model caps at {MAX_AI_INPUT_TOKENS}"
+        )));
+    }
+    Ok(input)
+}
+
+/// Maps a structured [`AiError`] onto the daemon's [`AppError`].
+fn ai_error_to_app(err: &AiError) -> AppError {
+    match err.code {
+        AiErrorCode::Unavailable | AiErrorCode::CapabilityMismatch | AiErrorCode::AssetMissing => {
+            AppError::Unsupported(err.message.clone())
+        }
+        AiErrorCode::InputTooLarge => AppError::Policy(err.message.clone()),
+        _ => AppError::Ai(err.message.clone()),
+    }
+}
+
+/// Availability report for hosts with no wired AI engine.
+fn no_engine_availability(settings: &nagori_core::AiSettings) -> AiAvailabilityReport {
+    let status = if settings.enabled {
+        PerActionStatus::OsUnavailable
+    } else {
+        PerActionStatus::DisabledBySettings
+    };
+    let per_action = AiActionId::all()
+        .iter()
+        .map(|&action| PerActionAvailability {
+            action,
+            status,
+            remediation: None,
+        })
+        .collect();
+    AiAvailabilityReport {
+        generated_at: OffsetDateTime::now_utc(),
+        provider: settings.provider,
+        overall_status: if settings.enabled {
+            AiOverallStatus::Unavailable
+        } else {
+            AiOverallStatus::Disabled
+        },
+        per_action,
+        semantic_index: if settings.semantic_index_enabled {
+            SemanticIndexAvailability::NotImplemented
+        } else {
+            SemanticIndexAvailability::Disabled
+        },
+    }
+}
+
+/// Cancels the request and removes its registry handle when the event stream
+/// ends or is dropped.
+///
+/// Cancelling on drop is what makes "dropping the stream cancels the run" work
+/// for the CLI: when the consumer stops polling, the backend task stops too.
+/// Removing the handle releases the registry-owned concurrency permit. On a
+/// clean completion the token is already past use, so the cancel is a harmless
+/// no-op.
+struct RequestGuard {
+    registry: Arc<AiRequestRegistry>,
+    request_id: RequestId,
+    cancel: CancellationToken,
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.registry.remove(self.request_id);
+    }
+}
+
+/// Internal `unfold` state for the guarded, deadline-bounded event stream.
+struct GuardedStreamState {
+    inner: nagori_ai::AiEventStream,
+    guard: RequestGuard,
+    deadline: Instant,
+    ended: bool,
+}
+
+/// Wraps an engine event stream so the registry guard lives exactly as long as
+/// the stream (dropping it cancels the run and releases the permit), and
+/// enforces the request timeout *consumer-side*: each poll races the backend
+/// against the remaining deadline, so even a backend wedged in an `await`
+/// terminates with a distinct [`AiErrorCode::Timeout`] rather than hanging.
+fn guard_event_stream(
+    inner: nagori_ai::AiEventStream,
+    guard: RequestGuard,
+    timeout: Duration,
+) -> nagori_ai::AiEventStream {
+    let state = GuardedStreamState {
+        inner,
+        guard,
+        deadline: Instant::now() + timeout,
+        ended: false,
+    };
+    futures::stream::unfold(state, |mut state| async move {
+        if state.ended {
+            return None;
+        }
+        let now = Instant::now();
+        let remaining = state.deadline.saturating_duration_since(now);
+        if remaining.is_zero() {
+            state.ended = true;
+            state.guard.cancel.cancel();
+            return Some((Err(timeout_error()), state));
+        }
+        match tokio::time::timeout(remaining, state.inner.next()).await {
+            Ok(Some(item)) => Some((item, state)),
+            Ok(None) => None,
+            Err(_) => {
+                state.ended = true;
+                state.guard.cancel.cancel();
+                Some((Err(timeout_error()), state))
+            }
+        }
+    })
+    .boxed()
+}
+
+fn timeout_error() -> AiError {
+    AiError::new(AiErrorCode::Timeout, "ai action timed out")
 }
 
 pub struct NagoriRuntimeBuilder {
     store: SqliteStore,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
     paste: Option<Arc<dyn PasteController>>,
-    ai: Option<Arc<dyn AiProvider>>,
+    ai_engine: Option<Arc<dyn AiActionEngine>>,
     permissions: Option<Arc<dyn PermissionChecker>>,
     socket_path: Option<std::path::PathBuf>,
     capabilities: Option<PlatformCapabilities>,
@@ -747,9 +1038,11 @@ impl NagoriRuntimeBuilder {
         self
     }
 
+    /// Wires the model-backed AI engine. Leave unset on platforms with no
+    /// backend; AI actions are then refused while quick actions stay available.
     #[must_use]
-    pub fn ai(mut self, ai: Arc<dyn AiProvider>) -> Self {
-        self.ai = Some(ai);
+    pub fn ai_engine(mut self, engine: Arc<dyn AiActionEngine>) -> Self {
+        self.ai_engine = Some(engine);
         self
     }
 
@@ -806,7 +1099,7 @@ impl NagoriRuntimeBuilder {
     }
 
     /// Build a runtime suitable for tests, supplying dummy adapters
-    /// (`MemoryClipboard`, `NoopPasteController`, `MockAiProvider`)
+    /// (`MemoryClipboard`, `NoopPasteController`, and no AI engine)
     /// for anything the caller did not set explicitly.
     ///
     /// Production code must use [`Self::build`] so that adapter wiring
@@ -843,8 +1136,9 @@ impl NagoriRuntimeBuilder {
             store: self.store,
             clipboard,
             paste,
-            ai: self.ai.unwrap_or_else(|| Arc::new(MockAiProvider)),
-            ai_registry: Arc::new(AiActionRegistry::default()),
+            ai_engine: self.ai_engine,
+            quick_runner: Arc::new(QuickActionRunner::new()),
+            ai_registry: Arc::new(AiRequestRegistry::new()),
             permissions: self.permissions,
             shutdown_tx,
             shutdown_rx,
@@ -1076,19 +1370,39 @@ mod tests {
         (runtime, clipboard)
     }
 
-    fn runtime_with_local_ai() -> (NagoriRuntime, Arc<MemoryClipboard>) {
-        // The default test builder wires `MockAiProvider`, which echoes
-        // the action name + input back as a single string. That's fine
-        // for gate-level assertions, but Quick-action contracts also
-        // need to prove the real on-device runner accepts the inputs —
-        // wire `LocalAiProvider` explicitly for those cases.
+    /// A runtime wired with a `MockBackend`-backed `AppleNative` engine so AI
+    /// action paths (gating, redaction, streaming, cancellation) are testable
+    /// on any host. The mock echoes the (already redaction-shaped) input back as
+    /// `"Summary: <first line>"`, which lets tests assert exactly what the
+    /// backend received.
+    fn runtime_with_mock_ai() -> (NagoriRuntime, Arc<MemoryClipboard>) {
+        use nagori_ai::{AiEngine, MockBackend};
+        use nagori_core::AiProviderKind;
+
         let store = SqliteStore::open_memory().expect("memory store should open");
         let clipboard = Arc::new(MemoryClipboard::new());
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .text_generator(Arc::new(MockBackend::new()))
+            .build();
         let runtime = NagoriRuntime::builder(store)
             .clipboard(clipboard.clone())
-            .ai(Arc::new(nagori_ai::LocalAiProvider::default()))
+            .ai_engine(Arc::new(engine))
             .build_for_test();
         (runtime, clipboard)
+    }
+
+    /// Enables AI with the `AppleNative` provider plus the given extra settings,
+    /// so AI-action tests share one place to flip the master toggle.
+    fn ai_enabled_settings(extra: AppSettings) -> AppSettings {
+        use nagori_core::{AiProviderKind, AiSettings};
+        AppSettings {
+            ai: AiSettings {
+                enabled: true,
+                provider: AiProviderKind::AppleNative,
+                ..AiSettings::default()
+            },
+            ..extra
+        }
     }
 
     #[derive(Default)]
@@ -1614,94 +1928,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ai_action_blocked_when_ai_disabled_for_legacy_action() {
-        // Legacy LLM-only variants still respect the `ai_enabled` master
-        // switch so IPC callers can't bypass a deliberate "no AI" config
-        // by reaching for `Translate` / `Rewrite` etc. — only the four
-        // Quick actions are exempt because they have no UI toggle left.
-        let (runtime, _) = runtime_with_memory_clipboard();
-        let id = runtime
-            .add_text("hello".to_owned())
-            .await
-            .expect("entry should be added");
-        let err = runtime
-            .run_ai_action(id, AiActionId::Rewrite)
-            .await
-            .expect_err("legacy ai actions must be refused when ai_enabled=false");
-        assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
-    }
-
-    #[tokio::test]
-    async fn run_ai_action_quick_action_bypasses_default_gates() {
-        // Defaults are `ai_enabled=false`, `ai_provider=None`. The
-        // desktop UI no longer surfaces any of these toggles, so the
-        // four Quick actions must still execute against the on-device
-        // runner under the default config or the palette's "Summarize /
-        // Format JSON / Extract tasks / Redact secrets" buttons would
-        // be perma-broken. Each action gets a stable input that the
-        // real `LocalAiProvider` accepts — `FormatJson` in particular
-        // needs valid JSON, since anything else would surface as
-        // `AppError::Ai` and look like the gate is still rejecting.
-        let cases: &[(AiActionId, &str)] = &[
-            (AiActionId::Summarize, "hello world"),
-            (AiActionId::FormatJson, r#"{"a":1}"#),
-            (AiActionId::ExtractTasks, "TODO: ship the thing"),
-            (AiActionId::RedactSecrets, "no secrets here"),
+    async fn quick_actions_run_under_defaults() {
+        use nagori_core::QuickActionId;
+        // Quick actions never gate on the AI toggle — they must run under the
+        // default (AI off) config or the palette's quick-action buttons would
+        // be perma-broken. `FormatJson` needs valid JSON, since anything else
+        // surfaces as `AppError::Ai` and would look like a gate rejection.
+        let cases: &[(QuickActionId, &str)] = &[
+            (QuickActionId::SummarizeFirstSentence, "hello world"),
+            (QuickActionId::FormatJson, r#"{"a":1}"#),
+            (QuickActionId::ExtractTasks, "TODO: ship the thing"),
+            (QuickActionId::RedactSecrets, "no secrets here"),
         ];
         for (action, input) in cases {
-            let (runtime, _) = runtime_with_local_ai();
+            let (runtime, _) = runtime_with_memory_clipboard();
             let id = runtime
                 .add_text((*input).to_owned())
                 .await
                 .expect("entry should be added");
             runtime
-                .run_ai_action(id, *action)
+                .run_quick_action(id, *action)
                 .await
                 .unwrap_or_else(|err| panic!("{action:?} must run under defaults; got {err:?}"));
         }
     }
 
     #[tokio::test]
-    async fn run_ai_action_quick_action_ignores_remote_provider_config() {
-        // A persisted `ai_provider = Remote { .. }` from an older config
-        // must not change Quick-action behaviour: they always run
-        // on-device, regardless of `allow_remote`.
-        let (runtime, _) = runtime_with_local_ai();
-        runtime
-            .save_settings(AppSettings {
-                ai_enabled: true,
-                ai_provider: AiProviderSetting::Remote {
-                    name: "openai".to_owned(),
-                },
-                ..AppSettings::default()
-            })
-            .await
-            .expect("save settings");
+    async fn ai_action_blocked_when_disabled() {
+        // With AI off (the default), a model-backed action is refused even
+        // though the engine is wired.
+        let (runtime, _) = runtime_with_mock_ai();
         let id = runtime
-            .add_text("note".to_owned())
+            .add_text("hello".to_owned())
             .await
             .expect("entry should be added");
-        runtime
+        let err = runtime
             .run_ai_action(id, AiActionId::Summarize)
             .await
-            .expect("quick action must succeed even with Remote provider stored");
+            .expect_err("ai actions must be refused when disabled");
+        assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
     }
 
     #[tokio::test]
-    async fn run_ai_action_remote_provider_returns_unsupported_for_legacy_actions() {
-        // No remote provider is wired in this build. Legacy AI actions
-        // (driven through `Rewrite` here, since Quick actions
-        // short-circuit) must surface that as `AppError::Unsupported`
-        // rather than silently fall through to the on-device runner —
-        // the latter would mask "you asked for a remote summary, here's
-        // a local one" from a direct IPC caller.
+    async fn ai_action_runs_when_enabled() {
+        let (runtime, _) = runtime_with_mock_ai();
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = runtime
+            .add_text("hello world".to_owned())
+            .await
+            .expect("entry should be added");
+        let output = runtime
+            .run_ai_action(id, AiActionId::Summarize)
+            .await
+            .expect("summarize should succeed when enabled");
+        assert!(output.text.starts_with("Summary:"), "got {}", output.text);
+        // The registry handle is removed once the run completes.
+        assert_eq!(runtime.ai_registry.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn ai_action_unsupported_without_engine() {
+        // No engine wired (the default test builder): AI actions surface as
+        // Unsupported even when enabled.
         let (runtime, _) = runtime_with_memory_clipboard();
         runtime
-            .store()
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = runtime
+            .add_text("hello".to_owned())
+            .await
+            .expect("entry should be added");
+        let err = runtime
+            .run_ai_action(id, AiActionId::Summarize)
+            .await
+            .expect_err("no engine must surface as Unsupported");
+        assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn ai_action_provider_mismatch_is_unsupported() {
+        use nagori_core::{AiProviderKind, AiSettings};
+        // Engine is AppleNative, but settings select the (unwired)
+        // OpenAI-compatible provider.
+        let (runtime, _) = runtime_with_mock_ai();
+        runtime
             .save_settings(AppSettings {
-                ai_enabled: true,
-                ai_provider: AiProviderSetting::Remote {
-                    name: "openai".to_owned(),
+                ai: AiSettings {
+                    enabled: true,
+                    provider: AiProviderKind::OpenAiCompatible,
+                    ..AiSettings::default()
                 },
                 ..AppSettings::default()
             })
@@ -1712,49 +2031,62 @@ mod tests {
             .await
             .expect("entry should be added");
         let err = runtime
-            .run_ai_action(id, AiActionId::Rewrite)
+            .run_ai_action(id, AiActionId::Summarize)
             .await
-            .expect_err("remote ai_provider must surface as Unsupported");
+            .expect_err("provider mismatch must surface as Unsupported");
         assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
     }
 
     #[tokio::test]
-    async fn run_ai_action_applies_user_regex_to_redaction() {
-        // Regression for the leak where `run_ai_action` redacted only the
-        // built-in patterns (`Redactor::redact`) and silently passed any
-        // `regex_denylist` match through to the AI provider. After the
-        // fix, the redactor must be settings-aware so user-supplied rules
-        // apply uniformly — even on entries classified before the regex
-        // was added.
-        let (runtime, _) = runtime_with_memory_clipboard();
-        // Step 1: add the entry under default (empty) regex_denylist so it
-        // lands as Public — Issue 1 ensures any UserRegex match instead
-        // gets dropped at capture time.
-        let id = runtime
-            .add_text("ticket INTERNAL-42 stays".to_owned())
-            .await
-            .expect("public entry should be added");
-        // Step 2: enable AI and configure the regex denylist *after* the
-        // entry is in the DB, mirroring "user adds a rule then runs an AI
-        // action on an old clip".
+    async fn ai_action_not_in_allow_list_is_blocked() {
+        use nagori_core::{AiProviderKind, AiSettings};
+        // A non-empty allow-list that omits the action blocks it.
+        let (runtime, _) = runtime_with_mock_ai();
         runtime
             .save_settings(AppSettings {
-                ai_enabled: true,
-                ai_provider: AiProviderSetting::Local,
-                regex_denylist: vec![r"INTERNAL-\d+".to_owned()],
+                ai: AiSettings {
+                    enabled: true,
+                    provider: AiProviderKind::AppleNative,
+                    allowed_actions: vec![AiActionId::Translate],
+                    ..AiSettings::default()
+                },
                 ..AppSettings::default()
             })
             .await
             .expect("save settings");
+        let id = runtime
+            .add_text("hello".to_owned())
+            .await
+            .expect("entry should be added");
+        let err = runtime
+            .run_ai_action(id, AiActionId::Summarize)
+            .await
+            .expect_err("action outside the allow-list must be blocked");
+        assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
+    }
 
-        // Summarize has require_redaction=true, so even Public input must
-        // be redacted before reaching the provider.
+    #[tokio::test]
+    async fn ai_action_applies_user_regex_to_redaction() {
+        // The classifier must be settings-aware so a `regex_denylist` rule
+        // redacts AI input even on an entry classified before the rule existed.
+        // The mock echoes the shaped input, so we can assert what it received.
+        let (runtime, _) = runtime_with_mock_ai();
+        let id = runtime
+            .add_text("ticket INTERNAL-42 stays".to_owned())
+            .await
+            .expect("public entry should be added");
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings {
+                regex_denylist: vec![r"INTERNAL-\d+".to_owned()],
+                ..AppSettings::default()
+            }))
+            .await
+            .expect("save settings");
+
         let output = runtime
             .run_ai_action(id, AiActionId::Summarize)
             .await
             .expect("summarize should succeed");
-        // MockAiProvider echoes the redacted input back as the output text,
-        // which lets us assert exactly what the provider saw.
         assert!(
             !output.text.contains("INTERNAL-42"),
             "user regex must redact AI input, got: {}",
@@ -1768,14 +2100,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ai_action_redact_secrets_applies_user_regex_on_public_entry() {
-        // RedactSecrets used to keep `require_redaction = false`, which let
-        // the local provider's bare `Redactor` (built-in patterns only) run
-        // against the raw text of Public entries. Anything matched solely
-        // by the user's `regex_denylist` slipped through unredacted. With
-        // the policy bumped to `require_redaction = true`, run_ai_action
-        // redacts via the settings-aware classifier before the provider
-        // sees the input.
+    async fn quick_redact_secrets_applies_user_regex_on_public_entry() {
+        use nagori_core::QuickActionId;
+        // `RedactSecrets` routes input through the settings-aware classifier
+        // before the built-in scrub, so a `regex_denylist`-only match on a
+        // Public entry is still redacted.
         let (runtime, _) = runtime_with_memory_clipboard();
         let id = runtime
             .add_text("ticket INTERNAL-77 stays".to_owned())
@@ -1783,8 +2112,6 @@ mod tests {
             .expect("public entry should be added");
         runtime
             .save_settings(AppSettings {
-                ai_enabled: true,
-                ai_provider: AiProviderSetting::Local,
                 regex_denylist: vec![r"INTERNAL-\d+".to_owned()],
                 ..AppSettings::default()
             })
@@ -1792,10 +2119,9 @@ mod tests {
             .expect("save settings");
 
         let output = runtime
-            .run_ai_action(id, AiActionId::RedactSecrets)
+            .run_quick_action(id, QuickActionId::RedactSecrets)
             .await
             .expect("redact-secrets should succeed");
-
         assert!(
             !output.text.contains("INTERNAL-77"),
             "user regex must redact RedactSecrets input, got: {}",
@@ -1809,19 +2135,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ai_action_blocked_when_input_exceeds_max_bytes() {
-        let (runtime, _) = runtime_with_memory_clipboard();
-        // Save with a roomy max_entry_size_bytes so add_text accepts the
-        // long body, but ai_enabled=true + Local so we get past the policy
-        // and hit the registry's 64 KiB max_bytes cap.
+    async fn ai_action_blocked_when_input_exceeds_max_bytes() {
+        // A body over the per-action byte cap is refused rather than truncated.
+        let (runtime, _) = runtime_with_mock_ai();
         runtime
-            .store()
-            .save_settings(AppSettings {
-                ai_enabled: true,
-                ai_provider: AiProviderSetting::Local,
+            .save_settings(ai_enabled_settings(AppSettings {
                 max_entry_size_bytes: 256 * 1024,
                 ..AppSettings::default()
-            })
+            }))
             .await
             .expect("save settings");
         let large = "a".repeat(65 * 1024);
@@ -1834,6 +2155,48 @@ mod tests {
             .await
             .expect_err("must refuse inputs over max_bytes");
         assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn ai_action_cancel_via_registry_yields_cancelled() {
+        // Cancelling by `request_id` through the registry propagates to the
+        // stream, which terminates with `Cancelled` and removes its handle.
+        let (runtime, _) = runtime_with_mock_ai();
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = runtime
+            .add_text("a long body to summarize repeatedly".to_owned())
+            .await
+            .expect("entry should be added");
+        let run = runtime
+            .start_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
+            .await
+            .expect("summarize should start");
+        assert!(runtime.cancel_ai_action(run.request_id));
+
+        let mut events = run.events;
+        let mut saw_cancelled = false;
+        while let Some(item) = events.next().await {
+            if matches!(item, Ok(AiEvent::Cancelled)) {
+                saw_cancelled = true;
+            }
+            assert!(
+                !matches!(item, Ok(AiEvent::Done { .. })),
+                "a cancelled run must not complete"
+            );
+        }
+        assert!(saw_cancelled, "stream must terminate with Cancelled");
+        drop(events);
+        assert_eq!(runtime.ai_registry.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn ai_availability_reports_disabled_by_default() {
+        let (runtime, _) = runtime_with_mock_ai();
+        let report = runtime.ai_availability().await.expect("availability");
+        assert_eq!(report.overall_status, AiOverallStatus::Disabled);
     }
 
     #[test]

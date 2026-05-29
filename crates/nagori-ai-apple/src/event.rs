@@ -1,13 +1,13 @@
-//! Streaming events emitted by the Apple bridge proof-of-concept.
+//! Streaming events emitted by the Apple snapshot-stream driver.
 
-/// A single event in an Apple text-generation stream.
+/// A single event in an Apple snapshot stream.
 ///
-/// This is the Phase A subset of the eventual `AiEvent`: partial-snapshot
-/// streaming is delta-ised here
-/// into [`AppleStreamEvent::Delta`] / [`AppleStreamEvent::Replace`], and the
-/// stream terminates with exactly one [`AppleStreamEvent::Done`] **or**
+/// Partial-snapshot streaming is delta-ised here into
+/// [`AppleStreamEvent::Delta`] / [`AppleStreamEvent::Replace`], and the stream
+/// terminates with exactly one [`AppleStreamEvent::Done`] **or**
 /// [`AppleStreamEvent::Cancelled`]. `seq` lets a consumer verify ordering and
-/// detect gaps.
+/// detect gaps. The Foundation Models backend reuses the same delta pump but
+/// maps the terminal onto `nagori-core`'s `AiEvent` directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppleStreamEvent {
     /// The new snapshot extends the previous one; carries only the appended

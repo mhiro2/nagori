@@ -1,3 +1,4 @@
+pub mod ai_registry;
 pub mod capture_loop;
 pub mod health;
 pub mod ipc_handler;

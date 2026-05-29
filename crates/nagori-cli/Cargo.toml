@@ -14,6 +14,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
+futures.workspace = true
 nagori-ai = { path = "../nagori-ai" }
 nagori-core = { path = "../nagori-core", features = ["clap"] }
 nagori-daemon = { path = "../nagori-daemon" }

@@ -2,41 +2,134 @@ use serde::{Deserialize, Serialize};
 
 use super::EntryId;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AiAction {
-    pub id: AiActionId,
-    pub name: String,
-    pub input_policy: AiInputPolicy,
-    pub output_policy: AiOutputPolicy,
+mod engine;
+
+pub use engine::{
+    AiActionRequest, AiAvailabilityReport, AiCapability, AiCapabilitySet, AiError, AiErrorCode,
+    AiEvent, AiOverallStatus, AiPriority, AiProviderKind, AiRequestOptions, GuidedSchema,
+    PerActionAvailability, PerActionStatus, Remediation, RemediationAction, RequestId,
+    SemanticIndexAvailability, estimate_tokens,
+};
+
+/// A rule-based "Quick action": always available on-device.
+///
+/// Quick actions never touch a language model regardless of the AI provider
+/// configuration — they are deterministic transforms surfaced from the
+/// palette's action menu.
+///
+/// This is deliberately a *separate* enum from [`AiActionId`]: the two used to
+/// be conflated behind an `is_quick_action()` predicate, which forced every
+/// dispatch site to branch on the same variant by call context. Splitting them
+/// lets the type system distinguish "deterministic on-device transform" from
+/// "model-backed AI action" with no runtime predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum QuickActionId {
+    /// Pretty-print JSON input.
+    FormatJson,
+    /// Extract `TODO` / `FIXME` / checkbox lines heuristically.
+    ExtractTasks,
+    /// Redact secrets using the settings-aware classifier.
+    RedactSecrets,
+    /// Return the first non-empty sentence (the former rule-based `Summarize`).
+    SummarizeFirstSentence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl QuickActionId {
+    /// Stable kebab-case identifier, used by the CLI and logs.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::FormatJson => "format-json",
+            Self::ExtractTasks => "extract-tasks",
+            Self::RedactSecrets => "redact-secrets",
+            Self::SummarizeFirstSentence => "summarize-first-sentence",
+        }
+    }
+
+    /// The input policy that gates this quick action.
+    #[must_use]
+    pub const fn input_policy(self) -> AiInputPolicy {
+        let require_redaction = match self {
+            // `RedactSecrets` is the redaction action, but it still routes
+            // through the settings-aware classifier so the user's
+            // `regex_denylist` applies even on Public entries. The summarise
+            // / extract heuristics see the raw text only after redaction.
+            Self::RedactSecrets | Self::SummarizeFirstSentence | Self::ExtractTasks => true,
+            Self::FormatJson => false,
+        };
+        AiInputPolicy {
+            allow_remote: false,
+            require_redaction,
+            max_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// A model-backed AI action, resolved through the `AiActionEngine`.
+///
+/// Resolves to a concrete backend (Apple on-device today; an
+/// `OpenAI`-compatible provider later). Distinct from [`QuickActionId`]: these
+/// require an available provider and stream their output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum AiActionId {
+    /// Summarise the input via a language model.
     Summarize,
+    /// Translate the input via the platform translation framework.
     Translate,
-    FormatJson,
-    FormatMarkdown,
-    ExplainCode,
+    /// Rewrite / rephrase the input.
     Rewrite,
+    /// Reformat the input as Markdown.
+    FormatMarkdown,
+    /// Extract structured tasks via guided generation (distinct from the
+    /// heuristic [`QuickActionId::ExtractTasks`]).
     ExtractTasks,
-    RedactSecrets,
+    /// Explain a code snippet (Apple docs flag code reasoning as out of scope,
+    /// so this stays last and quality-gated).
+    ExplainCode,
 }
 
 impl AiActionId {
-    /// Quick actions are the four entries surfaced by the desktop
-    /// palette's action menu; they always run against the on-device
-    /// rule-based runner regardless of `ai_enabled` / `ai_provider`.
-    /// Legacy variants (`Translate`, `Rewrite`, `FormatMarkdown`,
-    /// `ExplainCode`) remain in the enum for schema compatibility but
-    /// have no UI entry point — they still flow through the regular
-    /// provider gating logic.
+    /// Stable kebab-case identifier, used by the CLI and logs.
     #[must_use]
-    pub const fn is_quick_action(&self) -> bool {
-        matches!(
-            self,
-            Self::Summarize | Self::FormatJson | Self::ExtractTasks | Self::RedactSecrets
-        )
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Summarize => "summarize",
+            Self::Translate => "translate",
+            Self::Rewrite => "rewrite",
+            Self::FormatMarkdown => "format-markdown",
+            Self::ExtractTasks => "extract-tasks",
+            Self::ExplainCode => "explain-code",
+        }
+    }
+
+    /// Every AI action, in capability-matrix order. Used to build availability
+    /// reports and to validate the settings allow-list.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Summarize,
+            Self::Translate,
+            Self::Rewrite,
+            Self::FormatMarkdown,
+            Self::ExtractTasks,
+            Self::ExplainCode,
+        ]
+    }
+
+    /// The input policy that gates this AI action. Apple's on-device models run
+    /// fully local, so `allow_remote` is always `false`; the byte cap is a
+    /// coarse guard, with the precise token-budget check applied separately
+    /// (see [`engine::estimate_tokens`]).
+    #[must_use]
+    pub const fn input_policy(self) -> AiInputPolicy {
+        let require_redaction = !matches!(self, Self::FormatMarkdown);
+        AiInputPolicy {
+            allow_remote: false,
+            require_redaction,
+            max_bytes: 64 * 1024,
+        }
     }
 }
 

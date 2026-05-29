@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 dirs.workspace = true
+futures.workspace = true
 nagori-ai = { path = "../nagori-ai" }
 nagori-core = { path = "../nagori-core" }
 nagori-ipc = { path = "../nagori-ipc" }
@@ -22,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

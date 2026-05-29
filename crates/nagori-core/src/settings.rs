@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 use crate::ContentKind;
 use crate::errors::{AppError, Result};
 use crate::limits::MAX_ENTRY_SIZE_BYTES;
+use crate::model::{AiActionId, AiProviderKind};
 
 /// Maximum entries the user can ask retention to keep. Beyond this the
 /// retention sweep would no longer fit in a single transaction without
@@ -277,9 +278,13 @@ pub struct AppSettings {
     )]
     pub app_denylist: Vec<AppDenyRule>,
     pub regex_denylist: Vec<String>,
-    pub ai_provider: AiProviderSetting,
-    pub ai_enabled: bool,
-    pub semantic_search_enabled: bool,
+    /// AI feature configuration. Replaces the former flat `ai_enabled` /
+    /// `ai_provider` / `semantic_search_enabled` triple. Older settings rows
+    /// that still carry those keys deserialize cleanly because unknown fields
+    /// are ignored and the new `ai` namespace falls back to its default
+    /// (`enabled = false`), matching the previous "AI off" behaviour.
+    #[serde(default)]
+    pub ai: AiSettings,
     pub cli_ipc_enabled: bool,
     pub locale: Locale,
     pub recent_order: RecentOrder,
@@ -379,11 +384,49 @@ pub struct OnboardingSettings {
     pub completed_at: Option<OffsetDateTime>,
 }
 
+/// AI feature configuration.
+///
+/// Two independent toggles plus a provider family selector: `enabled` is the
+/// master switch for the model-backed AI actions, `semantic_index_enabled`
+/// gates the (separate) semantic search index, and `provider` chooses which
+/// backend family resolves the actions. Quick actions are always available and
+/// are not gated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AiProviderSetting {
-    None,
-    Local,
-    Remote { name: String },
+#[serde(default)]
+pub struct AiSettings {
+    /// Master toggle for all model-backed AI actions. Default `false` (opt-in).
+    pub enabled: bool,
+    /// Which provider family backs the AI actions. Default `Disabled`.
+    pub provider: AiProviderKind,
+    /// Per-action allow-list. Empty means "all actions the provider supports".
+    pub allowed_actions: Vec<AiActionId>,
+    /// Whether streaming output is surfaced in the UI. Default `true`.
+    pub allow_streaming: bool,
+    /// Per-request timeout in milliseconds. Default `30_000`.
+    pub request_timeout_ms: u64,
+    /// Whether the semantic search index is enabled (separate from `enabled`).
+    pub semantic_index_enabled: bool,
+    /// Whether the onboarding banner has been shown and dismissed. Sticky —
+    /// not reset when availability changes, so the user's "later" is honoured.
+    pub onboarding_dismissed: bool,
+    /// Whether to offer an `OpenAI` fallback prompt when the device is not
+    /// eligible for Apple Intelligence. Default `true`.
+    pub allow_openai_fallback_prompt: bool,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: AiProviderKind::default(),
+            allowed_actions: Vec::new(),
+            allow_streaming: true,
+            request_timeout_ms: 30_000,
+            semantic_index_enabled: false,
+            onboarding_dismissed: false,
+            allow_openai_fallback_prompt: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,9 +728,7 @@ impl Default for AppSettings {
             paste_delay_ms: 60,
             app_denylist: password_manager_preset_rules(),
             regex_denylist: Vec::new(),
-            ai_provider: AiProviderSetting::None,
-            ai_enabled: false,
-            semantic_search_enabled: false,
+            ai: AiSettings::default(),
             cli_ipc_enabled: true,
             locale: Locale::default(),
             recent_order: RecentOrder::default(),

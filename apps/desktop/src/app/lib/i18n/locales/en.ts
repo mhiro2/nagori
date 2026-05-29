@@ -110,11 +110,18 @@ export type Messages = {
   actionMenu: {
     title: string;
     actions: {
-      Summarize: string;
+      SummarizeFirstSentence: string;
       FormatJson: string;
       ExtractTasks: string;
       RedactSecrets: string;
     };
+    // Model-backed AI section.
+    aiTitle: string;
+    aiSummarize: string;
+    aiCancel: string;
+    aiUnavailable: string;
+    // Localized remediation hints, keyed by the backend's `Remediation.i18n_key`.
+    aiRemediation: Record<string, string>;
     tauriRequired: string;
     resultTitle: string;
     copyResult: string;
@@ -172,8 +179,25 @@ export type Messages = {
       setup: string;
       general: string;
       privacy: string;
+      ai: string;
       cli: string;
       advanced: string;
+    };
+    ai: {
+      legend: string;
+      enabled: string;
+      enabledHelp: string;
+      provider: string;
+      providerDisabled: string;
+      providerApple: string;
+      allowStreaming: string;
+      allowStreamingHelp: string;
+      semanticIndex: string;
+      semanticIndexHelp: string;
+      status: string;
+      statusAvailable: string;
+      statusUnavailable: string;
+      statusDisabled: string;
     };
     capture: {
       legend: string;
@@ -485,10 +509,24 @@ export const en: Messages = {
   actionMenu: {
     title: 'Quick actions',
     actions: {
-      Summarize: 'Summarize',
+      SummarizeFirstSentence: 'Summarize (first sentence)',
       FormatJson: 'Format JSON',
       ExtractTasks: 'Extract tasks',
       RedactSecrets: 'Redact secrets',
+    },
+    aiTitle: 'AI',
+    aiSummarize: 'AI: Summarize',
+    aiCancel: 'Cancel',
+    aiUnavailable: 'AI Summarize is unavailable right now.',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'Enable Apple Intelligence in System Settings to use AI actions.',
+      'ai.unavailable.device_not_eligible':
+        'This Mac is not eligible for Apple Intelligence (Apple silicon required).',
+      'ai.unavailable.model_not_ready':
+        'The on-device model is still downloading. Try again shortly.',
+      'ai.unavailable.asset_missing': 'A required on-device asset is unavailable.',
+      'ai.unavailable.rate_limited': 'The on-device model is busy. Try again shortly.',
     },
     tauriRequired: 'Quick actions require the Tauri runtime.',
     resultTitle: 'Result',
@@ -557,8 +595,28 @@ export const en: Messages = {
       setup: 'Setup',
       general: 'General',
       privacy: 'Privacy',
+      ai: 'AI',
       cli: 'CLI',
       advanced: 'Advanced',
+    },
+    ai: {
+      legend: 'AI',
+      enabled: 'Enable AI actions',
+      enabledHelp:
+        'Model-backed actions like Summarize run fully on-device via Apple Intelligence. Off by default.',
+      provider: 'Provider',
+      providerDisabled: 'Disabled',
+      providerApple: 'Apple (on-device)',
+      allowStreaming: 'Stream results as they generate',
+      allowStreamingHelp:
+        'Show partial output while the model writes. Turn off to reveal only the final result.',
+      semanticIndex: 'Semantic search index',
+      semanticIndexHelp:
+        'Build on-device embeddings for semantic search. Not yet available; reserved for a future release.',
+      status: 'Availability',
+      statusAvailable: 'Available',
+      statusUnavailable: 'Unavailable',
+      statusDisabled: 'Disabled',
     },
     capture: {
       legend: 'Capture',

@@ -731,6 +731,7 @@ where
         let mut settings_rx = settings_rx.clone();
         let search_cache = runtime.search_cache_handle();
         let health = runtime.maintenance_health();
+        let reaper_runtime = runtime.clone();
         tokio::spawn(async move {
             let maintenance =
                 MaintenanceService::new(store.clone()).with_search_cache(search_cache);
@@ -745,6 +746,13 @@ where
                         health.record_failure(err.to_string());
                         warn!(error = %err, "maintenance_failed");
                     }
+                }
+                // Backstop for AI requests whose stream was leaked or wedged:
+                // the guard-drop path releases the permit on normal completion,
+                // but a never-polled stream needs the TTL reaper to free it.
+                let reaped = reaper_runtime.reap_stale_ai_requests();
+                if reaped > 0 {
+                    warn!(count = reaped, "ai_requests_reaped");
                 }
                 tokio::select! {
                     () = shutdown.cancelled() => return,

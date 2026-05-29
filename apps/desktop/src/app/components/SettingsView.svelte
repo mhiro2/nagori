@@ -41,11 +41,12 @@
   import { accessibilityGranted, refreshSettings } from '../stores/settings.svelte';
   import { showPalette } from '../stores/view.svelte';
   import SettingsTabAdvanced from './SettingsTabAdvanced.svelte';
+  import SettingsTabAi from './SettingsTabAi.svelte';
   import SettingsTabCli from './SettingsTabCli.svelte';
   import SettingsTabGeneral from './SettingsTabGeneral.svelte';
   import SettingsTabPrivacy from './SettingsTabPrivacy.svelte';
 
-  type Tab = 'setup' | 'general' | 'privacy' | 'cli' | 'advanced';
+  type Tab = 'setup' | 'general' | 'privacy' | 'ai' | 'cli' | 'advanced';
 
   // Standalone Settings window: the OS supplies the close button via its
   // native title bar, so the in-app "Back to palette" affordance is
@@ -53,7 +54,7 @@
   // shows the button.
   const isStandaloneSettingsWindow = currentWindowLabel() === 'settings';
 
-  const TABS: readonly Tab[] = ['setup', 'general', 'privacy', 'cli', 'advanced'];
+  const TABS: readonly Tab[] = ['setup', 'general', 'privacy', 'ai', 'cli', 'advanced'];
   const PALETTE_HOTKEY_ACTIONS: readonly PaletteHotkeyAction[] = [
     'pin',
     'delete',
@@ -960,6 +961,10 @@
               {describeRegexError}
               {toggleCaptureKind}
             />
+          {/if}
+
+          {#if activeTab === 'ai'}
+            <SettingsTabAi bind:settings {t} {scheduleSave} />
           {/if}
 
           {#if activeTab === 'cli'}

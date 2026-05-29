@@ -8,10 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-use nagori_ai::LocalAiProvider;
+use futures::StreamExt;
 use nagori_core::{
-    AiActionId, AppError, EntryId, EntryRepository, SearchQuery, SettingsRepository,
-    is_text_safe_for_default_output,
+    AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository, QuickActionId,
+    SearchQuery, SettingsRepository, is_text_safe_for_default_output,
 };
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_daemon::run_daemon;
@@ -20,7 +20,7 @@ use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
     DeleteEntryRequest, DoctorReport, EntryDto, GetEntryRequest, IpcClient, IpcRequest,
     IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest, PinEntryRequest,
-    RunAiActionRequest, SearchRequest, SearchResponse,
+    RunAiActionRequest, RunQuickActionRequest, SearchRequest, SearchResponse,
 };
 use nagori_platform::{MemoryClipboard, NoopPasteController, PlatformCapabilities};
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
@@ -81,6 +81,9 @@ enum Command {
     Copy(IdArgs),
     Paste(IdArgs),
     Clear(ClearArgs),
+    /// Run a deterministic on-device quick action against an entry.
+    Quick(QuickArgs),
+    /// Run a model-backed AI action against an entry (streams by default).
     Ai(AiArgs),
     Doctor,
     /// Print the host adapter's capability matrix (clipboard / paste /
@@ -140,9 +143,20 @@ struct ClearArgs {
 }
 
 #[derive(Debug, Args)]
+struct QuickArgs {
+    action: QuickActionId,
+    id: String,
+}
+
+#[derive(Debug, Args)]
 struct AiArgs {
     action: AiActionId,
     id: String,
+    /// Print only the final result instead of streaming as it is generated.
+    /// Streaming (the default) emits JSON Lines under `--json`/`--jsonl`, or
+    /// plain text to stdout otherwise.
+    #[arg(long)]
+    no_stream: bool,
 }
 
 #[derive(Debug, Args)]
@@ -261,6 +275,9 @@ fn env_truthy(name: &str) -> bool {
 }
 
 const fn is_write_command(cmd: &Command) -> bool {
+    // `Quick` / `Ai` only read the target entry and never mutate the store, so
+    // they're not write commands — and `Ai` in particular runs its engine
+    // in-process so it can stream, rather than routing to the daemon.
     matches!(
         cmd,
         Command::Add(_)
@@ -270,7 +287,6 @@ const fn is_write_command(cmd: &Command) -> bool {
             | Command::Copy(_)
             | Command::Paste(_)
             | Command::Clear(_)
-            | Command::Ai(_)
     )
 }
 
@@ -434,12 +450,23 @@ async fn run_local_command(cli: Cli) -> Result<()> {
             let deleted = store.clear_older_than(cutoff).await?;
             print_clear_result(deleted, format);
         }
-        Command::Ai(args) => {
+        Command::Quick(args) => {
             let runtime = build_headless_runtime(store.clone())?;
             let output = runtime
-                .run_ai_action(parse_id(&args.id)?, args.action)
+                .run_quick_action(parse_id(&args.id)?, args.action)
                 .await?;
             print_ai_output(&output.into(), format)?;
+        }
+        Command::Ai(args) => {
+            let runtime = build_headless_runtime(store.clone())?;
+            run_ai_streaming(
+                &runtime,
+                parse_id(&args.id)?,
+                args.action,
+                !args.no_stream,
+                format,
+            )
+            .await?;
         }
         Command::Doctor => {
             print_local_doctor(&db_path, &store).await?;
@@ -523,7 +550,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             store,
             NativeRuntimeOptions {
                 socket_path: Some(config.socket_path.clone()),
-                ai: None,
+                ai_engine: None,
             },
         )?;
         run_daemon(
@@ -656,7 +683,19 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
             )?;
             print_ack(format);
         }
+        Command::Quick(args) => {
+            let resp = client
+                .send(IpcRequest::RunQuickAction(RunQuickActionRequest {
+                    id: parse_id(&args.id)?,
+                    action: args.action,
+                }))
+                .await?;
+            print_ai_output(&expect_ai_output(resp)?, format)?;
+        }
         Command::Ai(args) => {
+            // The daemon drives AI actions to completion over a one-shot
+            // envelope — streaming runs in-process via the local path, so an
+            // explicit `--ipc` connection always returns the final result.
             let resp = client
                 .send(IpcRequest::RunAiAction(RunAiActionRequest {
                     id: parse_id(&args.id)?,
@@ -721,11 +760,125 @@ fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
 /// `Result` so a future required adapter surfaces here as a user-facing
 /// CLI error instead of a panic.
 fn build_headless_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
-    Ok(NagoriRuntime::builder(store)
+    let mut builder = NagoriRuntime::builder(store)
         .clipboard(Arc::new(MemoryClipboard::new()))
-        .paste(Arc::new(NoopPasteController))
-        .ai(Arc::new(LocalAiProvider::default()))
-        .build()?)
+        .paste(Arc::new(NoopPasteController));
+    // Wire the host's default AI engine (Apple Foundation Models on macOS) so
+    // `nagori ai` can stream in-process without opening the OS clipboard.
+    if let Some(engine) = nagori_platform_native::default_ai_engine() {
+        builder = builder.ai_engine(engine);
+    }
+    Ok(builder.build()?)
+}
+
+/// Drives a model-backed AI action in-process and renders its event stream.
+///
+/// Cancellation is wired two ways: `Ctrl-C` cancels the in-flight request (and
+/// the process exits 130 once the stream drains), and dropping the stream — for
+/// example on a broken stdout pipe — cancels it through the runtime's request
+/// registry guard.
+async fn run_ai_streaming(
+    runtime: &NagoriRuntime,
+    id: EntryId,
+    action: AiActionId,
+    stream: bool,
+    format: OutputFormat,
+) -> Result<()> {
+    use std::io::Write;
+
+    let run = runtime
+        .start_ai_action(id, action, AiRequestOptions::default())
+        .await?;
+    let request_id = run.request_id;
+    let mut events = run.events;
+
+    let mut interrupted = false;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut final_text = String::new();
+    let mut buffer = String::new();
+    let stdout = std::io::stdout();
+
+    loop {
+        let item = tokio::select! {
+            biased;
+            // Ctrl-C cancels the request through the registry; keep draining so
+            // the stream reaches its terminal `Cancelled`.
+            res = tokio::signal::ctrl_c(), if !interrupted => {
+                res.ok();
+                interrupted = true;
+                let _ = runtime.cancel_ai_action(request_id);
+                continue;
+            }
+            item = events.next() => item,
+        };
+        let Some(item) = item else { break };
+        let event = item.map_err(|err| anyhow!("{:?}: {}", err.code, err.message))?;
+
+        if stream && format.is_json() {
+            let mut handle = stdout.lock();
+            writeln!(handle, "{}", serde_json::to_string(&event)?)?;
+        }
+        match event {
+            AiEvent::Delta { text, .. } => {
+                buffer.push_str(&text);
+                if stream && !format.is_json() {
+                    let mut handle = stdout.lock();
+                    write!(handle, "{text}")?;
+                    handle.flush()?;
+                }
+            }
+            AiEvent::Replace { text, .. } => {
+                if stream && !format.is_json() {
+                    let mut handle = stdout.lock();
+                    writeln!(handle)?;
+                    write!(handle, "{text}")?;
+                    handle.flush()?;
+                }
+                buffer = text;
+            }
+            AiEvent::Done {
+                final_text: text,
+                warnings: done_warnings,
+                ..
+            } => {
+                final_text = text;
+                warnings = done_warnings;
+                break;
+            }
+            AiEvent::Cancelled => break,
+        }
+    }
+
+    if !stream || format.is_json() {
+        // Non-streaming (or JSON Lines already emitted): print the authoritative
+        // result once. The streaming text path already wrote to stdout.
+        if !format.is_json() {
+            let output = AiOutputDto {
+                text: if final_text.is_empty() {
+                    buffer.clone()
+                } else {
+                    final_text.clone()
+                },
+                created_entry: None,
+                warnings: warnings.clone(),
+            };
+            print_ai_output(&output, format)?;
+        }
+    } else if !final_text.is_empty() || !buffer.is_empty() {
+        // Terminate the streamed text line.
+        let mut handle = stdout.lock();
+        writeln!(handle)?;
+    }
+
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    if interrupted {
+        // SIGINT: mirror shells' 128 + signal-number convention.
+        std::process::exit(130);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -796,22 +949,26 @@ fn parse_id(value: &str) -> Result<EntryId> {
         .map_err(|err| AppError::InvalidInput(format!("invalid entry id: {value}: {err}")).into())
 }
 
+/// Stable label for the configured AI provider family.
+const fn ai_provider_label(provider: nagori_core::AiProviderKind) -> &'static str {
+    match provider {
+        nagori_core::AiProviderKind::Disabled => "disabled",
+        nagori_core::AiProviderKind::AppleNative => "apple-native",
+        nagori_core::AiProviderKind::OpenAiCompatible => "openai-compatible",
+    }
+}
+
 async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     let settings = store.get_settings().await?;
-    let provider_label = match &settings.ai_provider {
-        nagori_core::settings::AiProviderSetting::None => "none".to_owned(),
-        nagori_core::settings::AiProviderSetting::Local => "local".to_owned(),
-        nagori_core::settings::AiProviderSetting::Remote { name } => format!("remote:{name}"),
-    };
     println!("version\t{}", env!("CARGO_PKG_VERSION"));
     println!("version_latest\t(unknown)");
     println!("update_channel\t{}", settings.update_channel.as_str());
     println!("db\t{}", shorten_home(db_path));
     println!("capture_enabled\t{}", settings.capture_enabled);
     println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);
-    println!("ai_enabled\t{}", settings.ai_enabled);
+    println!("ai_enabled\t{}", settings.ai.enabled);
     println!("auto_update_check\t{}", settings.auto_update_check);
-    println!("ai_provider\t{provider_label}");
+    println!("ai_provider\t{}", ai_provider_label(settings.ai.provider));
     // The macOS checker keys NotDetermined vs Denied off this timestamp;
     // build the context once and share it across the per-OS branches.
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

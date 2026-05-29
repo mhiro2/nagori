@@ -93,10 +93,25 @@ export const ja: Messages = {
   actionMenu: {
     title: 'クイックアクション',
     actions: {
-      Summarize: '要約',
+      SummarizeFirstSentence: '要約（先頭の一文）',
       FormatJson: 'JSON 整形',
       ExtractTasks: 'タスク抽出',
       RedactSecrets: '秘匿情報マスク',
+    },
+    aiTitle: 'AI',
+    aiSummarize: 'AI: 要約',
+    aiCancel: 'キャンセル',
+    aiUnavailable: '現在 AI 要約は利用できません。',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'AI アクションを使うには、システム設定で Apple Intelligence を有効化してください。',
+      'ai.unavailable.device_not_eligible':
+        'この Mac は Apple Intelligence に対応していません（Apple シリコンが必要です）。',
+      'ai.unavailable.model_not_ready':
+        'オンデバイスモデルをダウンロード中です。しばらくしてから再試行してください。',
+      'ai.unavailable.asset_missing': '必要なオンデバイスアセットが利用できません。',
+      'ai.unavailable.rate_limited':
+        'オンデバイスモデルが混雑しています。しばらくしてから再試行してください。',
     },
     tauriRequired: 'クイックアクションには Tauri ランタイムが必要です。',
     resultTitle: '実行結果',
@@ -165,8 +180,28 @@ export const ja: Messages = {
       setup: 'セットアップ',
       general: '一般',
       privacy: 'プライバシー',
+      ai: 'AI',
       cli: 'CLI',
       advanced: '詳細',
+    },
+    ai: {
+      legend: 'AI',
+      enabled: 'AI アクションを有効化',
+      enabledHelp:
+        '要約などのモデル連携アクションは Apple Intelligence によりデバイス上で実行されます。既定では無効です。',
+      provider: 'プロバイダ',
+      providerDisabled: '無効',
+      providerApple: 'Apple（オンデバイス）',
+      allowStreaming: '生成中の結果をストリーミング表示',
+      allowStreamingHelp:
+        'モデルの生成中に途中経過を表示します。オフにすると最終結果のみ表示します。',
+      semanticIndex: 'セマンティック検索インデックス',
+      semanticIndexHelp:
+        'セマンティック検索用のオンデバイス埋め込みを作成します。未対応で、将来のリリース向けに予約されています。',
+      status: '利用可否',
+      statusAvailable: '利用可能',
+      statusUnavailable: '利用不可',
+      statusDisabled: '無効',
     },
     capture: {
       legend: 'キャプチャ',

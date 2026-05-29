@@ -1,9 +1,23 @@
 <script lang="ts">
-  import { runAiAction, saveAiResult } from '../lib/commands';
+  import {
+    cancelAiAction,
+    getAiAvailability,
+    runQuickAction,
+    saveAiResult,
+    startAiAction,
+  } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
-  import { isTauri } from '../lib/tauri';
-  import type { SearchResultDto } from '../lib/types';
+  import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
+  import type {
+    AiAvailability,
+    AiDeltaEvent,
+    AiDoneEvent,
+    AiErrorEvent,
+    AiReplaceEvent,
+    QuickActionId,
+    SearchResultDto,
+  } from '../lib/types';
 
   type Props = {
     target: SearchResultDto | undefined;
@@ -16,12 +30,10 @@
 
   const { target, open, onClose, onClearAll }: Props = $props();
 
-  // Narrowed to the four quick-action variants the UI surfaces. The
-  // `AiActionId` enum still carries legacy LLM-only variants for
-  // backend compatibility, but those are not addressable here.
-  type QuickActionId = 'Summarize' | 'FormatJson' | 'ExtractTasks' | 'RedactSecrets';
-  const ACTION_IDS: readonly QuickActionId[] = [
-    'Summarize',
+  // The deterministic on-device quick actions. The model-backed "AI:
+  // Summarize" entry below is a separate path that streams.
+  const QUICK_ACTION_IDS: readonly QuickActionId[] = [
+    'SummarizeFirstSentence',
     'FormatJson',
     'ExtractTasks',
     'RedactSecrets',
@@ -37,16 +49,116 @@
   let saving = $state(false);
   let menuEl: HTMLDivElement | undefined = $state();
 
-  // Reset transient feedback when the user dismisses or re-opens the menu.
+  // Streaming AI state. `aiRequestId` scopes the `nagori://ai/*` events we
+  // accept; `aiText` is the request-local display buffer.
+  let availability = $state<AiAvailability | undefined>(undefined);
+  let aiRequestId = $state<string | undefined>(undefined);
+  let aiText = $state('');
+  let aiStreaming = $state(false);
+
+  const summarizeAvailability = $derived(
+    availability?.actions.find((entry) => entry.action === 'Summarize'),
+  );
+  const summarizeAvailable = $derived(summarizeAvailability?.available ?? false);
+  // Tooltip text for a disabled AI button: the localized remediation hint, or
+  // a generic "unavailable" fallback keyed off the per-action status.
+  const summarizeReason = $derived(
+    summarizeAvailable
+      ? undefined
+      : summarizeAvailability?.remediation
+        ? (t.actionMenu.aiRemediation[summarizeAvailability.remediation] ??
+          t.actionMenu.aiUnavailable)
+        : t.actionMenu.aiUnavailable,
+  );
+
+  // Reset transient feedback when the user dismisses or re-opens the menu. An
+  // in-flight AI run is cancelled so the backend (and its concurrency permit)
+  // is released rather than streaming on to no one.
   $effect(() => {
     if (!open) {
+      if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
       lastResult = undefined;
       runError = undefined;
       copyOk = false;
       saveOk = false;
       pending = undefined;
+      aiText = '';
+      aiStreaming = false;
+      aiRequestId = undefined;
     }
   });
+
+  // Probe AI availability each time the menu opens so the AI button reflects
+  // the live Apple Intelligence / provider state (disabled + reason when off).
+  $effect(() => {
+    if (!open || !isTauri()) return;
+    void (async () => {
+      try {
+        availability = await getAiAvailability();
+      } catch {
+        availability = undefined;
+      }
+    })();
+  });
+
+  // Subscribe to the request-scoped streaming events while the menu is open.
+  // Events whose `requestId` does not match the active run are discarded.
+  $effect(() => {
+    if (!open || !isTauri()) return;
+    // `aiRequestId` is the id returned by `startAiAction` — authoritative and
+    // scoped to *this* run, so we never adopt a stray `started` from another
+    // run/window. The command returns the id before the backend produces its
+    // first real snapshot, so deltas are not dropped in practice.
+    const matches = (id: string): boolean => aiRequestId !== undefined && id === aiRequestId;
+    const unsubscribers = [
+      subscribe<AiDeltaEvent>(TAURI_EVENTS.aiDelta, (payload) => {
+        if (matches(payload.requestId)) aiText += payload.text;
+      }),
+      subscribe<AiReplaceEvent>(TAURI_EVENTS.aiReplace, (payload) => {
+        if (matches(payload.requestId)) aiText = payload.text;
+      }),
+      subscribe<AiDoneEvent>(TAURI_EVENTS.aiDone, (payload) => {
+        if (!matches(payload.requestId)) return;
+        aiText = payload.finalText;
+        lastResult = payload.finalText;
+        aiStreaming = false;
+        aiRequestId = undefined;
+      }),
+      subscribe<AiErrorEvent>(TAURI_EVENTS.aiError, (payload) => {
+        if (!matches(payload.requestId)) return;
+        runError = payload.message;
+        aiStreaming = false;
+        aiRequestId = undefined;
+      }),
+      subscribe<{ requestId: string }>(TAURI_EVENTS.aiCancelled, (payload) => {
+        if (!matches(payload.requestId)) return;
+        aiStreaming = false;
+        aiRequestId = undefined;
+      }),
+    ];
+    return () => {
+      for (const unsub of unsubscribers) unsub();
+    };
+  });
+
+  const runAiSummarize = async (): Promise<void> => {
+    if (!target || !isTauri() || aiStreaming || !summarizeAvailable) return;
+    runError = undefined;
+    lastResult = undefined;
+    aiText = '';
+    aiStreaming = true;
+    try {
+      aiRequestId = await startAiAction('Summarize', target.id);
+    } catch (err) {
+      runError = describeError(err);
+      aiStreaming = false;
+      aiRequestId = undefined;
+    }
+  };
+
+  const cancelAi = (): void => {
+    if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
+  };
 
   // Move focus into the dialog on open so screen readers announce the
   // role and so the Escape keydown handler below has somewhere reachable
@@ -65,7 +177,7 @@
     copyOk = false;
     saveOk = false;
     try {
-      const result = await runAiAction(id, target.id);
+      const result = await runQuickAction(id, target.id);
       lastResult = result.text;
     } catch (err) {
       runError = describeError(err);
@@ -203,7 +315,7 @@
         <button type="button" class="close" onclick={onClose}>×</button>
       </header>
       <ul class="list">
-        {#each ACTION_IDS as id (id)}
+        {#each QUICK_ACTION_IDS as id (id)}
           <li>
             <button
               type="button"
@@ -216,6 +328,29 @@
           </li>
         {/each}
       </ul>
+
+      <section class="ai" aria-label={t.actionMenu.aiTitle}>
+        <header class="ai-head">{t.actionMenu.aiTitle}</header>
+        <button
+          type="button"
+          class="ai-button"
+          disabled={!target || aiStreaming || pending !== undefined || !summarizeAvailable}
+          title={summarizeReason}
+          onclick={() => void runAiSummarize()}
+        >
+          {t.actionMenu.aiSummarize}
+          {#if aiStreaming}<span class="pending">…</span>{/if}
+        </button>
+        {#if aiStreaming}
+          <button type="button" class="ghost ai-cancel" onclick={cancelAi}>
+            {t.actionMenu.aiCancel}
+          </button>
+          <pre class="result ai-stream">{aiText}</pre>
+        {/if}
+        {#if summarizeReason}
+          <p class="ai-reason">{summarizeReason}</p>
+        {/if}
+      </section>
 
       {#if onClearAll}
         <section class="danger" aria-label={t.actionMenu.clearAllHistory}>
@@ -328,6 +463,44 @@
   .pending {
     margin-left: 0.25rem;
     color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .ai {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  }
+  .ai-head {
+    margin-bottom: 0.4rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+  }
+  .ai-button {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--accent, #6ea8fe);
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ai-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .ai-cancel {
+    margin-top: 0.4rem;
+  }
+  .ai-stream {
+    margin-top: 0.4rem;
+  }
+  .ai-reason {
+    margin: 0.4rem 0 0;
+    color: var(--muted, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
   }
   .danger {
     margin-top: 0.75rem;

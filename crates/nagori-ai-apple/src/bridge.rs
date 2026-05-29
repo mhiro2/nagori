@@ -13,7 +13,11 @@ use std::ffi::{CString, c_char, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use futures::StreamExt;
+use nagori_ai::AiEventStream;
+use nagori_core::{AiError, AiErrorCode, AiEvent};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::availability::AppleAvailability;
 use crate::event::AppleStreamEvent;
@@ -25,6 +29,13 @@ unsafe extern "C" {
     fn nagori_apple_fm_availability_c() -> i32;
     fn nagori_apple_stream_snapshots_c(
         source_ptr: *const c_char,
+        ctx: *mut c_void,
+        is_cancelled: extern "C" fn(*mut c_void) -> u8,
+        on_snapshot: extern "C" fn(*mut c_void, *const u8, usize),
+        on_done: extern "C" fn(*mut c_void, i32),
+    );
+    fn nagori_apple_summarize_c(
+        prompt_ptr: *const c_char,
         ctx: *mut c_void,
         is_cancelled: extern "C" fn(*mut c_void) -> u8,
         on_snapshot: extern "C" fn(*mut c_void, *const u8, usize),
@@ -133,7 +144,7 @@ fn spawn_bridge(text: &str, cancel: Arc<AtomicBool>) -> StreamHandle {
     });
     let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
 
-    // Strip interior NULs so the C string survives intact (PoC inputs only).
+    // Strip interior NULs so the C string survives intact.
     let source = CString::new(text.replace('\0', " ")).unwrap_or_default();
 
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
@@ -150,6 +161,147 @@ fn spawn_bridge(text: &str, cancel: Arc<AtomicBool>) -> StreamHandle {
     }
 
     StreamHandle::new(cancel, rx)
+}
+
+/// Opaque context handed to Swift for the duration of one summarize stream. It
+/// owns the event sender, the snapshot-delta pump, and a clone of the
+/// cancellation token Swift polls through [`summarize_is_cancelled`].
+struct SummarizeCtx {
+    tx: mpsc::UnboundedSender<Result<AiEvent, AiError>>,
+    pump: SnapshotPump,
+    cancel: CancellationToken,
+}
+
+/// Polled by Swift before forwarding each snapshot. The token's atomic load
+/// happens entirely in Rust, so its bytes never cross the language boundary.
+extern "C" fn summarize_is_cancelled(ctx: *mut c_void) -> u8 {
+    if ctx.is_null() {
+        return 1;
+    }
+    // SAFETY: `ctx` is the `SummarizeCtx` pointer handed to Swift; callbacks run
+    // sequentially on one task, so this shared borrow never overlaps the `&mut`
+    // reborrow in `summarize_on_snapshot`.
+    let ctx = unsafe { &*ctx.cast::<SummarizeCtx>() };
+    u8::from(ctx.cancel.is_cancelled())
+}
+
+/// Receives one cumulative snapshot from Swift and forwards the streaming delta.
+extern "C" fn summarize_on_snapshot(ctx: *mut c_void, ptr: *const u8, len: usize) {
+    if ctx.is_null() || ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ctx` is the `SummarizeCtx` pointer; Swift invokes callbacks
+    // sequentially from a single task, so a unique `&mut` is sound. `ptr`/`len`
+    // describe a buffer Swift keeps alive for the call's duration.
+    let ctx = unsafe { &mut *ctx.cast::<SummarizeCtx>() };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && let Some(event) = ctx.pump.push(text)
+        && let Some(ai_event) = streaming_event(event)
+    {
+        let _ = ctx.tx.send(Ok(ai_event));
+    }
+}
+
+/// Final callback: maps the terminal status code onto a terminal stream item
+/// and reclaims the box.
+extern "C" fn summarize_on_done(ctx: *mut c_void, code: i32) {
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: `summarize_on_done` is the last callback for a stream, so
+    // reclaiming the box here is sound — Swift does not touch `ctx` afterwards.
+    let ctx = unsafe { Box::from_raw(ctx.cast::<SummarizeCtx>()) };
+    let SummarizeCtx {
+        tx,
+        pump,
+        cancel: _,
+    } = *ctx;
+    let _ = tx.send(summarize_terminal(code, pump.current().to_owned()));
+}
+
+/// Converts a streaming [`AppleStreamEvent`] into an [`AiEvent`]. The terminal
+/// variants are produced from the status code instead, so they map to `None`.
+fn streaming_event(event: AppleStreamEvent) -> Option<AiEvent> {
+    match event {
+        AppleStreamEvent::Delta { seq, text } => Some(AiEvent::Delta { seq, text }),
+        AppleStreamEvent::Replace { seq, text } => Some(AiEvent::Replace { seq, text }),
+        AppleStreamEvent::Done { .. } | AppleStreamEvent::Cancelled { .. } => None,
+    }
+}
+
+/// Maps the Swift terminal status code onto the stream's terminal item. Keep in
+/// sync with `generationErrorCode` in `Bridge.swift`.
+fn summarize_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> {
+    match code {
+        0 => Ok(AiEvent::Done {
+            final_text,
+            created_entry: None,
+            warnings: Vec::new(),
+        }),
+        1 => Ok(AiEvent::Cancelled),
+        3 => Err(AiError::new(
+            AiErrorCode::InputTooLarge,
+            "input exceeded the on-device model's context window",
+        )),
+        4 | 8 => Err(AiError::new(
+            AiErrorCode::RateLimited,
+            "the on-device model is busy; retry shortly",
+        )),
+        5 => Err(AiError::new(
+            AiErrorCode::AssetMissing,
+            "a required on-device asset is unavailable",
+        )),
+        6 => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the request was blocked by the model guardrail",
+        )),
+        7 => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the input language or locale is unsupported",
+        )),
+        _ => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the on-device model failed to generate a response",
+        )),
+    }
+}
+
+/// Streams a summary of `input` from the on-device language model.
+///
+/// Cancellation is observed by polling `cancel` (a [`CancellationToken`] the
+/// caller owns) before each snapshot; the caller cancels it to stop the Swift
+/// task. The returned stream ends after exactly one terminal item
+/// (`Ok(Done)` / `Ok(Cancelled)` / `Err`).
+pub(crate) fn summarize_stream(input: &str, cancel: CancellationToken) -> AiEventStream {
+    let (tx, rx) = mpsc::unbounded_channel::<Result<AiEvent, AiError>>();
+    let ctx = Box::new(SummarizeCtx {
+        tx,
+        pump: SnapshotPump::new(),
+        cancel,
+    });
+    let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
+
+    // Strip interior NULs so the C string survives intact.
+    let source = CString::new(input.replace('\0', " ")).unwrap_or_default();
+
+    // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
+    // the call (reclaimed in `summarize_on_done`), and the callbacks are plain
+    // `fn` items that read the cancel token through the ctx atomically.
+    unsafe {
+        nagori_apple_summarize_c(
+            source.as_ptr(),
+            ctx_ptr,
+            summarize_is_cancelled,
+            summarize_on_snapshot,
+            summarize_on_done,
+        );
+    }
+
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+    .boxed()
 }
 
 #[cfg(test)]

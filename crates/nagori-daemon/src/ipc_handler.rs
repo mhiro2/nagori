@@ -1,13 +1,13 @@
 use nagori_core::{
-    AppError, AppSettings, EntryRepository, Result, SearchQuery, is_text_safe_for_default_output,
-    settings::AiProviderSetting,
+    AiProviderKind, AppError, AppSettings, EntryRepository, Result, SearchQuery,
+    is_text_safe_for_default_output,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
     DeleteEntryRequest, DoctorPermission, DoctorReport, EntryDto, GetEntryRequest, HealthResponse,
     IpcError, IpcRequest, IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest,
-    PinEntryRequest, RunAiActionRequest, SearchRequest, SearchResponse, SearchResultDto,
-    UpdateSettingsRequest,
+    PinEntryRequest, RunAiActionRequest, RunQuickActionRequest, SearchRequest, SearchResponse,
+    SearchResultDto, UpdateSettingsRequest,
 };
 use nagori_platform::PermissionCheckContext;
 use nagori_search::normalize_text;
@@ -138,6 +138,10 @@ impl NagoriRuntime {
                 self.pin_entry(id, pinned).await?;
                 Ok(IpcResponse::Ack)
             }
+            IpcRequest::RunQuickAction(RunQuickActionRequest { id, action }) => {
+                let output = self.run_quick_action(id, action).await?;
+                Ok(IpcResponse::AiOutput(AiOutputDto::from(output)))
+            }
             IpcRequest::RunAiAction(RunAiActionRequest { id, action }) => {
                 let output = self.run_ai_action(id, action).await?;
                 Ok(IpcResponse::AiOutput(AiOutputDto::from(output)))
@@ -219,11 +223,14 @@ impl NagoriRuntime {
                 });
             }
         }
-        let provider_label = match &settings.ai_provider {
-            AiProviderSetting::None => "none".to_owned(),
-            AiProviderSetting::Local => "local".to_owned(),
-            AiProviderSetting::Remote { name } => format!("remote:{name}"),
+        let provider_label = match settings.ai.provider {
+            AiProviderKind::Disabled => "disabled".to_owned(),
+            AiProviderKind::AppleNative => "apple-native".to_owned(),
+            AiProviderKind::OpenAiCompatible => "openai-compatible".to_owned(),
         };
+        // Best-effort AI availability snapshot. A probe failure (e.g. a Swift
+        // bridge error) must not abort the whole report.
+        let ai_availability = self.ai_availability().await.ok();
         // Probe the GitHub Releases API for the latest tag so `nagori
         // doctor` can show whether an update is available. Best-effort:
         // the probe runs on every release target (macOS / Windows /
@@ -255,9 +262,10 @@ impl NagoriRuntime {
             socket_path: self.socket_path.display().to_string(),
             capture_enabled: settings.capture_enabled,
             auto_paste_enabled: settings.auto_paste_enabled,
-            ai_enabled: settings.ai_enabled,
+            ai_enabled: settings.ai.enabled,
             auto_update_check: settings.auto_update_check,
             ai_provider: provider_label,
+            ai_availability,
             permissions,
             maintenance: self.maintenance_health.report(),
             capture: self.capture_health.report(),

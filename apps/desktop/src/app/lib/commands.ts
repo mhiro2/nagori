@@ -5,6 +5,7 @@ import { invoke } from './tauri';
 import type {
   AiActionId,
   AiActionResult,
+  AiAvailability,
   AppDenyRule,
   AppSettings,
   CliInstallResult,
@@ -15,6 +16,7 @@ import type {
   PasteFormat,
   PermissionStatus,
   PlatformCapabilities,
+  QuickActionId,
   SearchRequest,
   SearchResponse,
   UpdateInfo,
@@ -70,8 +72,18 @@ export const repasteLast = (): Promise<void> => invoke('repaste_last');
 export const pinEntry = (id: string, pinned: boolean): Promise<void> =>
   invoke('pin_entry', { id, pinned });
 
-export const runAiAction = (action: AiActionId, entryId: string): Promise<AiActionResult> =>
-  invoke('run_ai_action', { action, entryId });
+export const runQuickAction = (action: QuickActionId, entryId: string): Promise<AiActionResult> =>
+  invoke('run_quick_action', { action, entryId });
+
+// Starts a streaming AI action. Events arrive on the `nagori://ai/*` channel;
+// the resolved value is the request id, which `cancelAiAction` accepts.
+export const startAiAction = (action: AiActionId, entryId: string): Promise<string> =>
+  invoke('start_ai_action', { action, entryId });
+
+export const cancelAiAction = (requestId: string): Promise<void> =>
+  invoke('cancel_ai_action', { requestId });
+
+export const getAiAvailability = (): Promise<AiAvailability> => invoke('get_ai_availability');
 
 export const getSettings = (): Promise<AppSettings> => invoke('get_settings');
 

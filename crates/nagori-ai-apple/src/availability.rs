@@ -1,6 +1,6 @@
 //! Apple Intelligence availability detection, plus the mock fixtures that let
 //! CI exercise every unavailable branch on hosts without an Apple Intelligence
-//! environment (Phase A, gate A→B).
+//! environment.
 
 /// Availability of Apple's on-device text generation.
 ///
@@ -50,7 +50,8 @@ impl AppleAvailability {
 }
 
 /// The reason a [`AvailabilitySource::Mock`] fixture should report. Covers the
-/// happy path plus the four states Phase A must be able to inject from Rust.
+/// happy path plus the four unavailable states CI must be able to inject from
+/// Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockReason {
     /// Pretend Apple Intelligence is available.

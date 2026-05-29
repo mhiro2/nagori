@@ -31,6 +31,7 @@ async-trait = "0.1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+futures = "0.3"
 hex = "0.4"
 idna = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
@@ -46,6 +47,7 @@ tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
 # `webview-data-url` is required so the startup fallback window can load
 # its inline error HTML via `WebviewUrl::External(data:text/html;...)` —
 # without it, `WebviewWindowBuilder::build` returns `InvalidWebviewUrl`
@@ -64,7 +66,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
 url = "2"
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

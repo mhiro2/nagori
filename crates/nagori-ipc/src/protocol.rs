@@ -1,7 +1,7 @@
 use nagori_core::{
-    AiActionId, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId, PasteFormat,
-    RankReason, RepresentationRole, RepresentationSummary, SearchResult, Sensitivity,
-    safe_preview_for_dto,
+    AiActionId, AiAvailabilityReport, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId,
+    PasteFormat, QuickActionId, RankReason, RepresentationRole, RepresentationSummary,
+    SearchResult, Sensitivity, safe_preview_for_dto,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,11 @@ pub enum IpcRequest {
     AddEntry(AddEntryRequest),
     DeleteEntry(DeleteEntryRequest),
     PinEntry(PinEntryRequest),
+    /// Run a deterministic on-device quick action (one-shot).
+    RunQuickAction(RunQuickActionRequest),
+    /// Run a model-backed AI action, driven to completion server-side and
+    /// returned as a single [`AiOutputDto`]. Streaming AI runs in-process in the
+    /// desktop and CLI rather than over this one-shot envelope.
     RunAiAction(RunAiActionRequest),
     GetSettings,
     UpdateSettings(UpdateSettingsRequest),
@@ -136,6 +141,12 @@ pub struct PinEntryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunQuickActionRequest {
+    pub id: EntryId,
+    pub action: QuickActionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunAiActionRequest {
     pub id: EntryId,
     pub action: AiActionId,
@@ -175,6 +186,11 @@ pub struct DoctorReport {
     #[serde(default = "default_auto_update_check_report")]
     pub auto_update_check: bool,
     pub ai_provider: String,
+    /// Point-in-time AI availability snapshot (provider, overall status, and
+    /// per-action availability). `None` when the daemon could not produce one
+    /// — e.g. a legacy daemon that predates the field, or a probe failure.
+    #[serde(default)]
+    pub ai_availability: Option<AiAvailabilityReport>,
     pub permissions: Vec<DoctorPermission>,
     /// Health snapshot of the background maintenance loop. Surfaced here
     /// so `nagori doctor` flags retention pauses without the operator

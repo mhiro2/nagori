@@ -49,6 +49,7 @@ const SETTINGS_CHANGED_EVENT: &str = "nagori://settings_changed";
 pub(crate) const NAVIGATE_EVENT: &str = "nagori://navigate";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[allow(clippy::too_many_lines)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
@@ -206,7 +207,10 @@ pub fn run() {
             commands::clear_history,
             commands::repaste_last,
             commands::pin_entry,
-            commands::run_ai_action,
+            commands::run_quick_action,
+            commands::start_ai_action,
+            commands::cancel_ai_action,
+            commands::get_ai_availability,
             commands::save_ai_result,
             commands::get_settings,
             commands::password_manager_preset,
@@ -395,7 +399,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
 
         let mut current_hotkey = initial.global_hotkey.clone();
         let mut current_capture = initial.capture_enabled;
-        let mut current_ai_enabled = initial.ai_enabled;
+        let mut current_ai_enabled = initial.ai.enabled;
         let mut current_auto_launch = initial.auto_launch;
         let mut current_show_in_menu_bar = initial.show_in_menu_bar;
         let mut current_secondary: BTreeMap<SecondaryHotkeyAction, String> =
@@ -513,7 +517,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                     .show();
             }
 
-            if snapshot.ai_enabled && !current_ai_enabled {
+            if snapshot.ai.enabled && !current_ai_enabled {
                 current_ai_enabled = true;
                 let _ = app
                     .notification()
@@ -521,7 +525,7 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                     .title("Nagori AI")
                     .body("AI actions are now enabled.")
                     .show();
-            } else if !snapshot.ai_enabled && current_ai_enabled {
+            } else if !snapshot.ai.enabled && current_ai_enabled {
                 current_ai_enabled = false;
             }
 

@@ -104,6 +104,17 @@ export const TAURI_EVENTS = {
   // view instead of being silently overwritten by the next full-snapshot
   // autosave. Wire shape: `AppSettings` (`get_settings` payload).
   settingsChanged: 'nagori://settings_changed',
+  // Streaming AI action lifecycle, all request-scoped by `requestId`. A run
+  // begins with `aiStarted`, streams `aiDelta` (appended text) and/or
+  // `aiReplace` (full-snapshot reset), and ends with exactly one of `aiDone`,
+  // `aiCancelled`, or `aiError`. Receivers discard events whose `requestId`
+  // does not match the run they are rendering.
+  aiStarted: 'nagori://ai/started',
+  aiDelta: 'nagori://ai/delta',
+  aiReplace: 'nagori://ai/replace',
+  aiDone: 'nagori://ai/done',
+  aiError: 'nagori://ai/error',
+  aiCancelled: 'nagori://ai/cancelled',
 } as const;
 
 export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];

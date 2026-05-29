@@ -27,15 +27,86 @@ export type RankReason =
   | 'FrequentlyUsed'
   | 'Pinned';
 
+// Deterministic on-device quick actions (no language model). Mirrors
+// `nagori_core::QuickActionId`.
+export type QuickActionId =
+  | 'FormatJson'
+  | 'ExtractTasks'
+  | 'RedactSecrets'
+  | 'SummarizeFirstSentence';
+
+// Model-backed AI actions resolved through the engine. Mirrors
+// `nagori_core::AiActionId`. Only `Summarize` is wired today; the rest are
+// surfaced for forward compatibility and report `capabilityMismatch`.
 export type AiActionId =
   | 'Summarize'
   | 'Translate'
-  | 'FormatJson'
-  | 'FormatMarkdown'
-  | 'ExplainCode'
   | 'Rewrite'
+  | 'FormatMarkdown'
   | 'ExtractTasks'
-  | 'RedactSecrets';
+  | 'ExplainCode';
+
+// Which provider family backs the AI actions. Mirrors
+// `nagori_core::AiProviderKind`.
+export type AiProviderKind = 'disabled' | 'appleNative' | 'openAiCompatible';
+
+// Mirrors `nagori_core::AiSettings`.
+export type AiSettings = {
+  enabled: boolean;
+  provider: AiProviderKind;
+  allowedActions: AiActionId[];
+  allowStreaming: boolean;
+  requestTimeoutMs: number;
+  semanticIndexEnabled: boolean;
+  onboardingDismissed: boolean;
+  allowOpenaiFallbackPrompt: boolean;
+};
+
+// Per-action availability status. Mirrors `nagori_core::PerActionStatus`
+// (snake_case via serde).
+export type AiActionStatus =
+  | 'available'
+  | 'disabled_by_settings'
+  | 'capability_mismatch'
+  | 'os_unavailable'
+  | 'asset_missing'
+  | 'language_unsupported'
+  | 'not_configured'
+  | 'unknown';
+
+export type AiActionAvailability = {
+  action: AiActionId;
+  status: AiActionStatus;
+  available: boolean;
+  remediation?: string;
+};
+
+export type AiOverallStatus = 'available' | 'unavailable' | 'disabled';
+
+export type AiAvailability = {
+  provider: AiProviderKind;
+  overallStatus: AiOverallStatus;
+  actions: AiActionAvailability[];
+};
+
+// Payloads for the `nagori://ai/*` streaming events emitted while a model-backed
+// action runs.
+export type AiStartedEvent = { requestId: string };
+export type AiDeltaEvent = { requestId: string; seq: number; text: string };
+export type AiReplaceEvent = { requestId: string; seq: number; text: string };
+export type AiDoneEvent = {
+  requestId: string;
+  finalText: string;
+  createdEntryId?: string | null;
+  warnings: string[];
+};
+export type AiErrorEvent = {
+  requestId: string;
+  code: string;
+  message: string;
+  remediation?: string | null;
+};
+export type AiCancelledEvent = { requestId: string };
 
 export type SearchResultDto = {
   id: string;
@@ -155,8 +226,6 @@ export type SearchResponse = {
   elapsedMs: number;
 };
 
-export type AiProviderSetting = 'none' | 'local' | { remote: { name: string } };
-
 // Mirrors `SourceAppIdKind` (snake_case via serde) in `nagori-core`.
 // Identifies which platform-specific identifier an `AppDenyRule` carries
 // so the daemon can match exact bundle IDs / exe basenames instead of
@@ -240,9 +309,7 @@ export type AppSettings = {
   pasteDelayMs: number;
   appDenylist: AppDenyRule[];
   regexDenylist: string[];
-  aiProvider: AiProviderSetting;
-  aiEnabled: boolean;
-  semanticSearchEnabled: boolean;
+  ai: AiSettings;
   cliIpcEnabled: boolean;
   locale: LocaleSetting;
   recentOrder: RecentOrder;

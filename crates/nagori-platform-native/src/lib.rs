@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nagori_ai::{AiProvider, LocalAiProvider};
+use nagori_ai::AiActionEngine;
 use nagori_core::AppError;
 use nagori_core::Result;
 use nagori_daemon::NagoriRuntime;
@@ -43,16 +43,17 @@ pub struct NativeRuntimeParts {
 }
 
 /// Optional overrides for [`build_native_runtime`]. Defaults match the
-/// production call sites: `LocalAiProvider`, no preset socket path.
+/// production call sites: the host's default AI engine, no preset socket path.
 #[derive(Default)]
 pub struct NativeRuntimeOptions {
     /// Socket path threaded into the runtime so the IPC `Doctor` /
     /// `Health` reports can echo it back. Daemon callers pass the
     /// resolved endpoint; library callers (desktop) leave it unset.
     pub socket_path: Option<PathBuf>,
-    /// Override the AI provider. When `None`, `LocalAiProvider::default()`
-    /// is wired — matches both CLI and desktop production behaviour.
-    pub ai: Option<Arc<dyn AiProvider>>,
+    /// Override the AI engine. When `None`, the host default is wired: an
+    /// Apple Foundation Models engine on macOS, and no engine elsewhere
+    /// (AI actions are refused while quick actions stay available).
+    pub ai_engine: Option<Arc<dyn AiActionEngine>>,
 }
 
 /// Build a production runtime backed by the host OS's adapters.
@@ -226,19 +227,43 @@ where
     P: nagori_platform::PasteController + 'static,
     K: nagori_platform::PermissionChecker + 'static,
 {
-    let ai: Arc<dyn AiProvider> = options
-        .ai
-        .unwrap_or_else(|| Arc::new(LocalAiProvider::default()));
     let mut builder = NagoriRuntime::builder(store)
         .clipboard(clipboard)
         .paste(paste)
-        .ai(ai)
         .permissions(permissions)
         .capabilities(capabilities());
+    if let Some(engine) = options.ai_engine.or_else(default_ai_engine) {
+        builder = builder.ai_engine(engine);
+    }
     if let Some(socket_path) = options.socket_path {
         builder = builder.socket_path(socket_path);
     }
     builder.build()
+}
+
+/// The host's default AI engine, or `None` where no backend is wired.
+///
+/// macOS gets an Apple Foundation Models text-generation engine; Windows and
+/// Linux have no on-device backend yet, so AI actions are refused there (quick
+/// actions remain available) until the OpenAI-compatible provider lands.
+#[cfg(target_os = "macos")]
+// The non-macOS sibling returns `None`, so the call site needs `Option`; this
+// arm always wires an engine but must share that signature.
+#[allow(clippy::unnecessary_wraps)]
+pub fn default_ai_engine() -> Option<Arc<dyn AiActionEngine>> {
+    use nagori_ai::AiEngine;
+    use nagori_ai_apple::AppleFoundationBackend;
+    use nagori_core::AiProviderKind;
+
+    let engine = AiEngine::builder(AiProviderKind::AppleNative)
+        .text_generator(Arc::new(AppleFoundationBackend::new()))
+        .build();
+    Some(Arc::new(engine))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn default_ai_engine() -> Option<Arc<dyn AiActionEngine>> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -339,7 +364,7 @@ mod tests {
     fn options_default_is_empty() {
         let options = NativeRuntimeOptions::default();
         assert!(options.socket_path.is_none());
-        assert!(options.ai.is_none());
+        assert!(options.ai_engine.is_none());
     }
 
     // Smoke-test the host target's wiring: the helper must produce a

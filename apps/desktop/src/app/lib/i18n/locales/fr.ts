@@ -103,10 +103,24 @@ export const fr: Messages = {
   actionMenu: {
     title: 'Actions rapides',
     actions: {
-      Summarize: 'Résumer',
+      SummarizeFirstSentence: 'Résumer (première phrase)',
       FormatJson: 'Formater JSON',
       ExtractTasks: 'Extraire les tâches',
       RedactSecrets: 'Masquer les secrets',
+    },
+    aiTitle: 'IA',
+    aiSummarize: 'IA : Résumer',
+    aiCancel: 'Annuler',
+    aiUnavailable: 'Le résumé IA est indisponible pour le moment.',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'Activez Apple Intelligence dans Réglages Système pour utiliser les actions IA.',
+      'ai.unavailable.device_not_eligible':
+        'Ce Mac n’est pas compatible avec Apple Intelligence (puce Apple requise).',
+      'ai.unavailable.model_not_ready':
+        'Le modèle sur l’appareil est encore en cours de téléchargement. Réessayez bientôt.',
+      'ai.unavailable.asset_missing': 'Une ressource requise sur l’appareil est indisponible.',
+      'ai.unavailable.rate_limited': 'Le modèle sur l’appareil est occupé. Réessayez bientôt.',
     },
     tauriRequired: 'Les actions rapides nécessitent le runtime Tauri.',
     resultTitle: 'Résultat',
@@ -178,8 +192,28 @@ export const fr: Messages = {
       setup: 'Configuration',
       general: 'Général',
       privacy: 'Confidentialité',
+      ai: 'IA',
       cli: 'CLI',
       advanced: 'Avancé',
+    },
+    ai: {
+      legend: 'IA',
+      enabled: 'Activer les actions IA',
+      enabledHelp:
+        'Les actions basées sur un modèle comme Résumer s’exécutent entièrement sur l’appareil via Apple Intelligence. Désactivé par défaut.',
+      provider: 'Fournisseur',
+      providerDisabled: 'Désactivé',
+      providerApple: 'Apple (sur l’appareil)',
+      allowStreaming: 'Diffuser les résultats au fil de la génération',
+      allowStreamingHelp:
+        'Affiche la sortie partielle pendant que le modèle écrit. Désactivez pour n’afficher que le résultat final.',
+      semanticIndex: 'Index de recherche sémantique',
+      semanticIndexHelp:
+        'Crée des embeddings sur l’appareil pour la recherche sémantique. Pas encore disponible ; réservé à une version future.',
+      status: 'Disponibilité',
+      statusAvailable: 'Disponible',
+      statusUnavailable: 'Indisponible',
+      statusDisabled: 'Désactivé',
     },
     capture: {
       legend: 'Capture',

@@ -463,7 +463,7 @@ pub(crate) fn print_status(
                 "ok": true,
                 "db": db_path,
                 "capture_enabled": settings.capture_enabled,
-                "ai_enabled": settings.ai_enabled,
+                "ai_enabled": settings.ai.enabled,
                 "auto_paste_enabled": settings.auto_paste_enabled,
                 "history_retention_count": settings.history_retention_count,
             }))?

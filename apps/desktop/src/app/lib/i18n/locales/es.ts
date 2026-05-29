@@ -102,10 +102,25 @@ export const es: Messages = {
   actionMenu: {
     title: 'Acciones rápidas',
     actions: {
-      Summarize: 'Resumir',
+      SummarizeFirstSentence: 'Resumir (primera frase)',
       FormatJson: 'Formatear JSON',
       ExtractTasks: 'Extraer tareas',
       RedactSecrets: 'Ocultar secretos',
+    },
+    aiTitle: 'IA',
+    aiSummarize: 'IA: Resumir',
+    aiCancel: 'Cancelar',
+    aiUnavailable: 'El resumen con IA no está disponible en este momento.',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'Activa Apple Intelligence en Ajustes del sistema para usar acciones de IA.',
+      'ai.unavailable.device_not_eligible':
+        'Este Mac no es compatible con Apple Intelligence (se requiere Apple silicon).',
+      'ai.unavailable.model_not_ready':
+        'El modelo en el dispositivo aún se está descargando. Inténtalo de nuevo en breve.',
+      'ai.unavailable.asset_missing': 'Un recurso necesario en el dispositivo no está disponible.',
+      'ai.unavailable.rate_limited':
+        'El modelo en el dispositivo está ocupado. Inténtalo de nuevo en breve.',
     },
     tauriRequired: 'Las acciones rápidas requieren el runtime de Tauri.',
     resultTitle: 'Resultado',
@@ -177,8 +192,28 @@ export const es: Messages = {
       setup: 'Configuración',
       general: 'General',
       privacy: 'Privacidad',
+      ai: 'IA',
       cli: 'CLI',
       advanced: 'Avanzado',
+    },
+    ai: {
+      legend: 'IA',
+      enabled: 'Habilitar acciones de IA',
+      enabledHelp:
+        'Las acciones con modelo como Resumir se ejecutan totalmente en el dispositivo mediante Apple Intelligence. Desactivado por defecto.',
+      provider: 'Proveedor',
+      providerDisabled: 'Desactivado',
+      providerApple: 'Apple (en el dispositivo)',
+      allowStreaming: 'Transmitir los resultados a medida que se generan',
+      allowStreamingHelp:
+        'Muestra la salida parcial mientras el modelo escribe. Desactívalo para ver solo el resultado final.',
+      semanticIndex: 'Índice de búsqueda semántica',
+      semanticIndexHelp:
+        'Crea embeddings en el dispositivo para la búsqueda semántica. Aún no disponible; reservado para una versión futura.',
+      status: 'Disponibilidad',
+      statusAvailable: 'Disponible',
+      statusUnavailable: 'No disponible',
+      statusDisabled: 'Desactivado',
     },
     capture: {
       legend: 'Captura',

@@ -17,6 +17,7 @@ tauri-build = { workspace = true }
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
+futures = { workspace = true }
 nagori-ai = { path = "../../../crates/nagori-ai" }
 nagori-core = { path = "../../../crates/nagori-core" }
 nagori-daemon = { path = "../../../crates/nagori-daemon" }

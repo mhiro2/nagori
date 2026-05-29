@@ -93,10 +93,24 @@ export const ko: Messages = {
   actionMenu: {
     title: '빠른 동작',
     actions: {
-      Summarize: '요약',
+      SummarizeFirstSentence: '요약(첫 문장)',
       FormatJson: 'JSON 정리',
       ExtractTasks: '작업 추출',
       RedactSecrets: '비밀 정보 마스킹',
+    },
+    aiTitle: 'AI',
+    aiSummarize: 'AI: 요약',
+    aiCancel: '취소',
+    aiUnavailable: '지금은 AI 요약을 사용할 수 없습니다.',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'AI 동작을 사용하려면 시스템 설정에서 Apple Intelligence를 켜세요.',
+      'ai.unavailable.device_not_eligible':
+        '이 Mac은 Apple Intelligence를 지원하지 않습니다(Apple 실리콘 필요).',
+      'ai.unavailable.model_not_ready':
+        '온디바이스 모델을 다운로드 중입니다. 잠시 후 다시 시도하세요.',
+      'ai.unavailable.asset_missing': '필요한 온디바이스 자산을 사용할 수 없습니다.',
+      'ai.unavailable.rate_limited': '온디바이스 모델이 사용 중입니다. 잠시 후 다시 시도하세요.',
     },
     tauriRequired: '빠른 동작에는 Tauri 런타임이 필요합니다.',
     resultTitle: '결과',
@@ -165,8 +179,28 @@ export const ko: Messages = {
       setup: '설정 시작',
       general: '일반',
       privacy: '개인 정보',
+      ai: 'AI',
       cli: 'CLI',
       advanced: '고급',
+    },
+    ai: {
+      legend: 'AI',
+      enabled: 'AI 동작 사용',
+      enabledHelp:
+        '요약 같은 모델 기반 동작은 Apple Intelligence를 통해 기기에서 실행됩니다. 기본값은 꺼짐입니다.',
+      provider: '공급자',
+      providerDisabled: '사용 안 함',
+      providerApple: 'Apple(온디바이스)',
+      allowStreaming: '생성되는 대로 결과 스트리밍',
+      allowStreamingHelp:
+        '모델이 작성하는 동안 부분 출력을 표시합니다. 끄면 최종 결과만 표시합니다.',
+      semanticIndex: '시맨틱 검색 인덱스',
+      semanticIndexHelp:
+        '시맨틱 검색을 위한 온디바이스 임베딩을 만듭니다. 아직 제공되지 않으며 향후 릴리스를 위해 예약되어 있습니다.',
+      status: '사용 가능 여부',
+      statusAvailable: '사용 가능',
+      statusUnavailable: '사용 불가',
+      statusDisabled: '사용 안 함',
     },
     capture: {
       legend: '캡처',

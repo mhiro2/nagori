@@ -33,9 +33,16 @@ const baseSettings = (): AppSettings => ({
   pasteDelayMs: 50,
   appDenylist: [],
   regexDenylist: [],
-  aiProvider: 'none',
-  aiEnabled: true,
-  semanticSearchEnabled: false,
+  ai: {
+    enabled: true,
+    provider: 'disabled',
+    allowedActions: [],
+    allowStreaming: true,
+    requestTimeoutMs: 30000,
+    semanticIndexEnabled: false,
+    onboardingDismissed: false,
+    allowOpenaiFallbackPrompt: true,
+  },
   cliIpcEnabled: true,
   locale: 'en',
   recentOrder: 'by_recency',
@@ -90,7 +97,7 @@ describe('refreshSettings', () => {
     vi.mocked(getSettings).mockResolvedValue(baseSettings());
     vi.mocked(getPermissions).mockResolvedValue([accessibilityPerm('granted')]);
     await refreshSettings();
-    expect(settingsState.settings).toMatchObject({ aiEnabled: true });
+    expect(settingsState.settings).toMatchObject({ ai: { enabled: true } });
     expect(settingsState.permissions).toHaveLength(1);
     expect(settingsState.errorMessage).toBeUndefined();
     expect(settingsState.loaded).toBe(true);

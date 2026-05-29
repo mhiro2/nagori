@@ -1,39 +1,86 @@
 use std::collections::BTreeMap;
 
-use nagori_core::settings::{AiProviderSetting, OnboardingSettings};
+use nagori_core::settings::OnboardingSettings;
 use nagori_core::{
-    AppDenyRule, AppSettings, Appearance, Locale, PaletteHotkeyAction, PasteFormat, RecentOrder,
-    RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
+    AiActionId, AiProviderKind, AiSettings, AppDenyRule, AppSettings, Appearance, Locale,
+    PaletteHotkeyAction, PasteFormat, RecentOrder, RuleSource, SecondaryHotkeyAction,
+    SecretHandling, SourceAppIdKind, UpdateChannel,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{ContentKindDto, default_capture_kind_dtos};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum AiProviderSettingDto {
-    None,
-    Local,
-    Remote { name: String },
+pub enum AiProviderKindDto {
+    #[default]
+    Disabled,
+    AppleNative,
+    OpenAiCompatible,
 }
 
-impl From<AiProviderSetting> for AiProviderSettingDto {
-    fn from(value: AiProviderSetting) -> Self {
+impl From<AiProviderKind> for AiProviderKindDto {
+    fn from(value: AiProviderKind) -> Self {
         match value {
-            AiProviderSetting::None => Self::None,
-            AiProviderSetting::Local => Self::Local,
-            AiProviderSetting::Remote { name } => Self::Remote { name },
+            AiProviderKind::Disabled => Self::Disabled,
+            AiProviderKind::AppleNative => Self::AppleNative,
+            AiProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
         }
     }
 }
 
-impl From<AiProviderSettingDto> for AiProviderSetting {
-    fn from(value: AiProviderSettingDto) -> Self {
+impl From<AiProviderKindDto> for AiProviderKind {
+    fn from(value: AiProviderKindDto) -> Self {
         match value {
-            AiProviderSettingDto::None => Self::None,
-            AiProviderSettingDto::Local => Self::Local,
-            AiProviderSettingDto::Remote { name } => Self::Remote { name },
+            AiProviderKindDto::Disabled => Self::Disabled,
+            AiProviderKindDto::AppleNative => Self::AppleNative,
+            AiProviderKindDto::OpenAiCompatible => Self::OpenAiCompatible,
+        }
+    }
+}
+
+/// Wire shape of [`AiSettings`]. The renderer drives the AI settings tab and
+/// the palette's availability gating off this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsDto {
+    pub enabled: bool,
+    pub provider: AiProviderKindDto,
+    pub allowed_actions: Vec<AiActionId>,
+    pub allow_streaming: bool,
+    pub request_timeout_ms: u64,
+    pub semantic_index_enabled: bool,
+    pub onboarding_dismissed: bool,
+    pub allow_openai_fallback_prompt: bool,
+}
+
+impl From<AiSettings> for AiSettingsDto {
+    fn from(value: AiSettings) -> Self {
+        Self {
+            enabled: value.enabled,
+            provider: value.provider.into(),
+            allowed_actions: value.allowed_actions,
+            allow_streaming: value.allow_streaming,
+            request_timeout_ms: value.request_timeout_ms,
+            semantic_index_enabled: value.semantic_index_enabled,
+            onboarding_dismissed: value.onboarding_dismissed,
+            allow_openai_fallback_prompt: value.allow_openai_fallback_prompt,
+        }
+    }
+}
+
+impl From<AiSettingsDto> for AiSettings {
+    fn from(value: AiSettingsDto) -> Self {
+        Self {
+            enabled: value.enabled,
+            provider: value.provider.into(),
+            allowed_actions: value.allowed_actions,
+            allow_streaming: value.allow_streaming,
+            request_timeout_ms: value.request_timeout_ms,
+            semantic_index_enabled: value.semantic_index_enabled,
+            onboarding_dismissed: value.onboarding_dismissed,
+            allow_openai_fallback_prompt: value.allow_openai_fallback_prompt,
         }
     }
 }
@@ -390,9 +437,8 @@ pub struct AppSettingsDto {
     pub paste_delay_ms: u64,
     pub app_denylist: Vec<AppDenyRuleDto>,
     pub regex_denylist: Vec<String>,
-    pub ai_provider: AiProviderSettingDto,
-    pub ai_enabled: bool,
-    pub semantic_search_enabled: bool,
+    #[serde(default = "default_ai_settings_dto")]
+    pub ai: AiSettingsDto,
     pub cli_ipc_enabled: bool,
     pub locale: LocaleDto,
     #[serde(default)]
@@ -422,11 +468,16 @@ pub struct AppSettingsDto {
     pub update_channel: UpdateChannelDto,
     #[serde(default = "nagori_core::settings::default_max_thumbnail_total_bytes")]
     pub max_thumbnail_total_bytes: Option<u64>,
-    /// Onboarding lifecycle markers (Phase A). `#[serde(default)]` keeps
-    /// older settings snapshots forward-compatible — pre-Phase-A clients
-    /// simply omit the field, which deserialises to all-`None`.
+    /// Onboarding lifecycle markers. `#[serde(default)]` keeps older settings
+    /// snapshots forward-compatible — clients that predate the field simply
+    /// omit it, which deserialises to all-`None`.
     #[serde(default)]
     pub onboarding: OnboardingSettingsDto,
+}
+
+/// Default `ai` block for snapshots that predate the namespace.
+fn default_ai_settings_dto() -> AiSettingsDto {
+    AiSettings::default().into()
 }
 
 /// Wire shape of [`OnboardingSettings`]. Mirrors the camelCase field
@@ -487,9 +538,7 @@ impl From<AppSettings> for AppSettingsDto {
             paste_delay_ms: value.paste_delay_ms,
             app_denylist: value.app_denylist.into_iter().map(Into::into).collect(),
             regex_denylist: value.regex_denylist,
-            ai_provider: value.ai_provider.into(),
-            ai_enabled: value.ai_enabled,
-            semantic_search_enabled: value.semantic_search_enabled,
+            ai: value.ai.into(),
             cli_ipc_enabled: value.cli_ipc_enabled,
             locale: value.locale.into(),
             recent_order: value.recent_order.into(),
@@ -526,9 +575,7 @@ impl From<AppSettingsDto> for AppSettings {
             paste_delay_ms: value.paste_delay_ms,
             app_denylist: value.app_denylist.into_iter().map(Into::into).collect(),
             regex_denylist: value.regex_denylist,
-            ai_provider: value.ai_provider.into(),
-            ai_enabled: value.ai_enabled,
-            semantic_search_enabled: value.semantic_search_enabled,
+            ai: value.ai.into(),
             cli_ipc_enabled: value.cli_ipc_enabled,
             locale: value.locale.into(),
             recent_order: value.recent_order.into(),
@@ -599,11 +646,16 @@ mod tests {
                 },
             ],
             regex_denylist: vec!["INTERNAL-\\d+".to_owned()],
-            ai_provider: AiProviderSetting::Remote {
-                name: "anthropic".to_owned(),
+            ai: AiSettings {
+                enabled: true,
+                provider: AiProviderKind::AppleNative,
+                allowed_actions: vec![AiActionId::Summarize],
+                allow_streaming: false,
+                request_timeout_ms: 12_345,
+                semantic_index_enabled: true,
+                onboarding_dismissed: true,
+                allow_openai_fallback_prompt: false,
             },
-            ai_enabled: true,
-            semantic_search_enabled: true,
             cli_ipc_enabled: false,
             locale: nagori_core::Locale::Ja,
             recent_order: RecentOrder::ByUseCount,
@@ -647,15 +699,7 @@ mod tests {
         assert_eq!(restored.paste_delay_ms, original.paste_delay_ms);
         assert_eq!(restored.app_denylist, original.app_denylist);
         assert_eq!(restored.regex_denylist, original.regex_denylist);
-        assert!(matches!(
-            restored.ai_provider,
-            AiProviderSetting::Remote { ref name } if name == "anthropic",
-        ));
-        assert_eq!(restored.ai_enabled, original.ai_enabled);
-        assert_eq!(
-            restored.semantic_search_enabled,
-            original.semantic_search_enabled
-        );
+        assert_eq!(restored.ai, original.ai);
         assert_eq!(restored.cli_ipc_enabled, original.cli_ipc_enabled);
         assert!(matches!(restored.locale, nagori_core::Locale::Ja));
         assert!(matches!(restored.recent_order, RecentOrder::ByUseCount));
@@ -721,7 +765,8 @@ mod tests {
         let dto: AppSettingsDto = AppSettings::default().into();
         let json = serde_json::to_value(&dto).expect("serialize");
         assert_eq!(json["secretHandling"], json!("store_redacted"));
-        assert_eq!(json["aiProvider"], json!("none"));
+        assert_eq!(json["ai"]["provider"], json!("disabled"));
+        assert_eq!(json["ai"]["enabled"], json!(false));
         assert_eq!(json["locale"], json!("system"));
         assert_eq!(json["pasteFormatDefault"], json!("preserve"));
         assert_eq!(json["recentOrder"], json!("by_recency"));

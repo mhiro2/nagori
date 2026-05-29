@@ -1,7 +1,7 @@
 use nagori_core::{
-    AiOutput, ClipboardEntry, ContentKind, EntryId, RankReason, RepresentationRole,
-    RepresentationSummary, SearchFilters, SearchMode, SearchResult, Sensitivity,
-    safe_preview_for_dto,
+    AiActionId, AiAvailabilityReport, AiOutput, AiOverallStatus, ClipboardEntry, ContentKind,
+    EntryId, PerActionStatus, RankReason, RepresentationRole, RepresentationSummary, SearchFilters,
+    SearchMode, SearchResult, Sensitivity, safe_preview_for_dto,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -262,6 +262,49 @@ impl From<AiOutput> for AiActionResultDto {
             text: value.text,
             created_entry_id: value.created_entry,
             warnings: value.warnings,
+        }
+    }
+}
+
+/// Per-action availability, flattened for the renderer's gating logic.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiActionAvailabilityDto {
+    pub action: AiActionId,
+    pub status: PerActionStatus,
+    /// `true` only when the action can run right now.
+    pub available: bool,
+    /// i18n key for a UI remediation hint (e.g. "open System Settings"), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+/// Wire shape of [`AiAvailabilityReport`] for the desktop. Surfaces the overall
+/// status plus per-action availability so the palette can disable unavailable
+/// AI actions and show a reason.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAvailabilityDto {
+    pub provider: AiProviderKindDto,
+    pub overall_status: AiOverallStatus,
+    pub actions: Vec<AiActionAvailabilityDto>,
+}
+
+impl From<AiAvailabilityReport> for AiAvailabilityDto {
+    fn from(value: AiAvailabilityReport) -> Self {
+        Self {
+            provider: value.provider.into(),
+            overall_status: value.overall_status,
+            actions: value
+                .per_action
+                .into_iter()
+                .map(|entry| AiActionAvailabilityDto {
+                    available: entry.status == PerActionStatus::Available,
+                    action: entry.action,
+                    status: entry.status,
+                    remediation: entry.remediation.map(|rem| rem.i18n_key),
+                })
+                .collect(),
         }
     }
 }

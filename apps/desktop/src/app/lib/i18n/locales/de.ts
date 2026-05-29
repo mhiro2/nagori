@@ -101,10 +101,26 @@ export const de: Messages = {
   actionMenu: {
     title: 'Schnellaktionen',
     actions: {
-      Summarize: 'Zusammenfassen',
+      SummarizeFirstSentence: 'Zusammenfassen (erster Satz)',
       FormatJson: 'JSON formatieren',
       ExtractTasks: 'Aufgaben extrahieren',
       RedactSecrets: 'Geheimnisse maskieren',
+    },
+    aiTitle: 'KI',
+    aiSummarize: 'KI: Zusammenfassen',
+    aiCancel: 'Abbrechen',
+    aiUnavailable: 'KI-Zusammenfassen ist derzeit nicht verfügbar.',
+    aiRemediation: {
+      'ai.unavailable.apple_intelligence_not_enabled':
+        'Aktiviere Apple Intelligence in den Systemeinstellungen, um KI-Aktionen zu nutzen.',
+      'ai.unavailable.device_not_eligible':
+        'Dieser Mac ist nicht für Apple Intelligence geeignet (Apple Silicon erforderlich).',
+      'ai.unavailable.model_not_ready':
+        'Das geräteseitige Modell wird noch geladen. Bitte versuche es bald erneut.',
+      'ai.unavailable.asset_missing':
+        'Ein erforderliches geräteseitiges Asset ist nicht verfügbar.',
+      'ai.unavailable.rate_limited':
+        'Das geräteseitige Modell ist ausgelastet. Bitte versuche es bald erneut.',
     },
     tauriRequired: 'Schnellaktionen erfordern die Tauri-Laufzeit.',
     resultTitle: 'Ergebnis',
@@ -176,8 +192,28 @@ export const de: Messages = {
       setup: 'Einrichtung',
       general: 'Allgemein',
       privacy: 'Datenschutz',
+      ai: 'KI',
       cli: 'CLI',
       advanced: 'Erweitert',
+    },
+    ai: {
+      legend: 'KI',
+      enabled: 'KI-Aktionen aktivieren',
+      enabledHelp:
+        'Modellgestützte Aktionen wie Zusammenfassen laufen vollständig auf dem Gerät über Apple Intelligence. Standardmäßig aus.',
+      provider: 'Anbieter',
+      providerDisabled: 'Deaktiviert',
+      providerApple: 'Apple (auf dem Gerät)',
+      allowStreaming: 'Ergebnisse beim Erzeugen streamen',
+      allowStreamingHelp:
+        'Teilausgabe anzeigen, während das Modell schreibt. Ausschalten, um nur das Endergebnis zu zeigen.',
+      semanticIndex: 'Semantischer Suchindex',
+      semanticIndexHelp:
+        'Erzeugt geräteseitige Embeddings für die semantische Suche. Noch nicht verfügbar; für ein künftiges Release reserviert.',
+      status: 'Verfügbarkeit',
+      statusAvailable: 'Verfügbar',
+      statusUnavailable: 'Nicht verfügbar',
+      statusDisabled: 'Deaktiviert',
     },
     capture: {
       legend: 'Erfassung',
