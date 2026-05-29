@@ -26,11 +26,11 @@ pub mod resolver;
 pub(crate) mod redaction;
 
 pub use backend::{
-    BackendAvailability, BackendUnavailableReason, Embedder, EmbeddingInput, EmbeddingVector,
-    TextGenerationCapabilities, TextGenerationRequest, TextGenerator, TranslationOutput,
-    TranslationRequest, Translator,
+    BackendAvailability, BackendUnavailableReason, Embedder, EmbeddingInput,
+    EmbeddingModelMetadata, EmbeddingVector, TextGenerationCapabilities, TextGenerationRequest,
+    TextGenerator, TranslationOutput, TranslationRequest, Translator,
 };
 pub use engine::{AiActionEngine, AiActionRun, AiEngine, AiEngineBuilder, AiEventStream};
-pub use mock::{MockBackend, MockTranslator};
+pub use mock::{MockBackend, MockEmbedder, MockTranslator};
 pub use quick::QuickActionRunner;
 pub use resolver::{BackendKind, resolve_backend};

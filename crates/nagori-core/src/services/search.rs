@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 
 use crate::{
-    AppError, ClipboardEntry, EntryId, RecentOrder, Result, SearchFilters, SearchMode, SearchQuery,
+    ClipboardEntry, EntryId, RecentOrder, Result, SearchFilters, SearchMode, SearchQuery,
     SearchResult, text::normalize_text,
 };
 
@@ -113,18 +113,25 @@ pub enum SearchPlan {
     FullText,
     Fuzzy,
     Hybrid,
+    /// Vector-similarity ranking. Resolved by [`SearchService`] to *no*
+    /// text-candidate fan-out: semantic search needs a query embedding, which
+    /// only the daemon (where the `Embedder` backend lives) can produce. The
+    /// daemon routes `Semantic` queries to its own embed-then-rank path before
+    /// this service is reached, so a `Semantic` plan arriving here (a direct
+    /// store/test caller with no embedder) yields an empty result set rather
+    /// than an error.
+    Semantic,
 }
 
 impl SearchPlan {
-    /// Resolve a [`SearchMode`] into a concrete plan, or surface an explicit
-    /// `Unsupported` error for modes the build can't honour.
+    /// Resolve a [`SearchMode`] into a concrete plan.
     ///
-    /// `Semantic` previously aliased to `Hybrid`, which silently masked the
-    /// fact that no semantic indexer is wired into the live search path —
-    /// users requesting it would get text results indistinguishable from
-    /// `Auto`. Returning `Unsupported` lets the UI hide / disable the mode
-    /// instead of pretending it works.
-    pub fn try_resolve(mode: SearchMode, normalized: &str) -> Result<Self> {
+    /// `Semantic` resolves to [`SearchPlan::Semantic`]; the daemon's search
+    /// facade computes a query embedding and ranks against the on-device index
+    /// for that mode. Direct store/test callers that lack an embedder get an
+    /// empty result set (the service performs no text fan-out for the plan)
+    /// rather than the old hard `Unsupported` error.
+    pub const fn try_resolve(mode: SearchMode, normalized: &str) -> Result<Self> {
         if normalized.is_empty() {
             return Ok(Self::Recent);
         }
@@ -134,13 +141,7 @@ impl SearchPlan {
             SearchMode::FullText => Self::FullText,
             SearchMode::Fuzzy => Self::Fuzzy,
             SearchMode::Auto => Self::Hybrid,
-            SearchMode::Semantic => {
-                return Err(AppError::Unsupported(
-                    "semantic search is not enabled in this build; choose Auto, FullText, \
-                     Fuzzy, Exact, or Recent"
-                        .to_owned(),
-                ));
-            }
+            SearchMode::Semantic => Self::Semantic,
         })
     }
 }
@@ -537,11 +538,38 @@ mod tests {
             SearchPlan::try_resolve(SearchMode::Fuzzy, "needle").unwrap(),
             SearchPlan::Fuzzy,
         );
-        // Semantic must surface as Unsupported now that it no longer
-        // silently aliases to Hybrid.
-        assert!(matches!(
-            SearchPlan::try_resolve(SearchMode::Semantic, "needle"),
-            Err(AppError::Unsupported(_)),
-        ));
+        // Semantic resolves to its own plan; the daemon routes it to the
+        // embed-then-rank path, and direct callers get an empty result set.
+        assert_eq!(
+            SearchPlan::try_resolve(SearchMode::Semantic, "needle").unwrap(),
+            SearchPlan::Semantic,
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_plan_yields_no_text_candidates() {
+        let provider = StubProvider {
+            recent: vec![entry("alpha")],
+            substring: vec![entry("beta")],
+            fts: vec![FtsCandidate {
+                entry: entry("gamma"),
+                fts_score: -1.0,
+            }],
+            ngram: vec![NgramCandidate {
+                entry: entry("delta"),
+                ngram_overlap: 0.5,
+            }],
+            ..Default::default()
+        };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let mut q = SearchQuery::new("xyz", "xyz".to_owned(), 10);
+        q.mode = SearchMode::Semantic;
+        let results = svc.search(q).await.unwrap();
+
+        // No text fan-out runs for the semantic plan, so a caller without an
+        // embedder simply gets nothing rather than text results.
+        assert!(results.is_empty());
+        assert!(provider.seen.lock().unwrap().is_empty());
     }
 }

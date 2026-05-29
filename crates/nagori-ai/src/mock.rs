@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AiEventStream;
 use crate::backend::{
-    BackendAvailability, BackendUnavailableReason, TextGenerationCapabilities,
-    TextGenerationRequest, TextGenerator, TranslationOutput, TranslationRequest, Translator,
+    BackendAvailability, BackendUnavailableReason, Embedder, EmbeddingInput,
+    EmbeddingModelMetadata, EmbeddingVector, TextGenerationCapabilities, TextGenerationRequest,
+    TextGenerator, TranslationOutput, TranslationRequest, Translator,
 };
 
 /// A canned text-generation backend.
@@ -171,6 +172,125 @@ impl Translator for MockTranslator {
             text: format!("[{}] {}", req.target_language, req.input),
             detected_source_language: req.source_language.or_else(|| Some("en".to_owned())),
         })
+    }
+}
+
+/// A deterministic [`Embedder`] fixture for tests and CI.
+///
+/// Produces a normalised bag-of-characters vector so texts that share
+/// characters land closer in cosine space — enough for semantic-index smoke
+/// tests — without the `NLContextualEmbedding` framework. Can be put into any
+/// availability state, given a chosen dimension, or stamped with a revision so
+/// the index's "revision changed → rebuild" path can be exercised.
+#[derive(Debug, Clone)]
+pub struct MockEmbedder {
+    availability: BackendAvailability,
+    dimension: usize,
+    revision: u32,
+}
+
+impl Default for MockEmbedder {
+    fn default() -> Self {
+        Self {
+            availability: BackendAvailability::Available,
+            dimension: 8,
+            revision: 1,
+        }
+    }
+}
+
+impl MockEmbedder {
+    /// An available embedder with an 8-dimensional space, revision 1.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An available embedder producing `dimension`-wide vectors.
+    #[must_use]
+    pub fn with_dimension(dimension: usize) -> Self {
+        Self {
+            dimension: dimension.max(1),
+            ..Self::default()
+        }
+    }
+
+    /// An available embedder stamped with `revision` (for rebuild-on-change
+    /// tests).
+    #[must_use]
+    pub fn with_revision(revision: u32) -> Self {
+        Self {
+            revision,
+            ..Self::default()
+        }
+    }
+
+    /// An embedder that reports the given unavailable `reason`.
+    #[must_use]
+    pub const fn unavailable(reason: BackendUnavailableReason) -> Self {
+        Self {
+            availability: BackendAvailability::Unavailable(reason),
+            dimension: 8,
+            revision: 1,
+        }
+    }
+
+    fn embed_one(&self, text: &str) -> Vec<f32> {
+        let mut vector = vec![0.0_f32; self.dimension];
+        for ch in text.chars() {
+            let bucket = (ch as usize) % self.dimension;
+            vector[bucket] += 1.0;
+        }
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for value in &mut vector {
+                *value /= norm;
+            }
+        }
+        vector
+    }
+}
+
+#[async_trait]
+impl Embedder for MockEmbedder {
+    async fn availability(&self) -> BackendAvailability {
+        self.availability
+    }
+
+    async fn metadata(&self) -> Result<EmbeddingModelMetadata, nagori_core::AiError> {
+        if let BackendAvailability::Unavailable(reason) = self.availability {
+            return Err(reason.into_error());
+        }
+        Ok(EmbeddingModelMetadata {
+            model_identifier: "mock-embedder".to_owned(),
+            revision: self.revision,
+            dimension: self.dimension,
+            max_sequence_length: 256,
+            languages: vec!["en".to_owned(), "ja".to_owned()],
+        })
+    }
+
+    async fn embed_batch(
+        &self,
+        inputs: Vec<EmbeddingInput>,
+        cancel: CancellationToken,
+    ) -> Result<Vec<EmbeddingVector>, nagori_core::AiError> {
+        if let BackendAvailability::Unavailable(reason) = self.availability {
+            return Err(reason.into_error());
+        }
+        if cancel.is_cancelled() {
+            return Err(nagori_core::AiError::new(
+                nagori_core::AiErrorCode::Unknown,
+                "embedding cancelled",
+            ));
+        }
+        Ok(inputs
+            .into_iter()
+            .map(|input| EmbeddingVector {
+                vector: self.embed_one(&input.text),
+                id: input.id,
+            })
+            .collect())
     }
 }
 
@@ -341,5 +461,44 @@ mod tests {
             panic!("unavailable translator must error");
         };
         assert_eq!(err.code, nagori_core::AiErrorCode::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn embedder_batches_deterministic_unit_vectors() {
+        let backend = MockEmbedder::with_dimension(8);
+        let meta = backend.metadata().await.unwrap();
+        assert_eq!(meta.dimension, 8);
+        assert_eq!(backend.dimension().await.unwrap(), 8);
+
+        let inputs = vec![
+            EmbeddingInput {
+                id: "a".to_owned(),
+                text: "hello world".to_owned(),
+            },
+            EmbeddingInput {
+                id: "b".to_owned(),
+                text: "hello world".to_owned(),
+            },
+        ];
+        let out = backend
+            .embed_batch(inputs, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].vector.len(), 8);
+        // Same text → same (deterministic) vector.
+        assert_eq!(out[0].vector, out[1].vector);
+        // Unit-normalised.
+        let norm = out[0].vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn embedder_unavailable_errors() {
+        let backend = MockEmbedder::unavailable(BackendUnavailableReason::AssetMissing);
+        let Err(err) = backend.metadata().await else {
+            panic!("unavailable embedder must error on metadata");
+        };
+        assert_eq!(err.code, nagori_core::AiErrorCode::AssetMissing);
     }
 }

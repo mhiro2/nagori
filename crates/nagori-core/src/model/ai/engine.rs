@@ -357,8 +357,13 @@ pub enum PerActionStatus {
 pub enum SemanticIndexAvailability {
     /// Disabled in settings.
     Disabled,
-    /// Enabled in settings but not yet implemented in this build.
+    /// No embedder backend is wired on this host (everything but macOS today).
     NotImplemented,
+    /// Enabled but the embedder is currently unavailable (Apple Intelligence
+    /// off, embedding assets missing, device ineligible, …).
+    Unavailable,
+    /// Enabled and the embedder is ready to serve semantic queries.
+    Available,
 }
 
 /// A conservative estimate of how many tokens `input` will consume.

@@ -7,11 +7,13 @@ mod ai;
 mod content;
 mod representations;
 mod search;
+mod semantic;
 
 pub use ai::*;
 pub use content::*;
 pub use representations::*;
 pub use search::*;
+pub use semantic::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntryId(pub Uuid);

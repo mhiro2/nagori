@@ -62,6 +62,13 @@ pub trait AiActionEngine: Send + Sync {
 
     /// The union of technical capabilities the wired backends expose.
     fn capabilities(&self) -> AiCapabilitySet;
+
+    /// The embedding backend, when one is wired. The daemon's semantic index
+    /// pipeline drives this directly (embedding is not an `AiActionId`-level
+    /// streaming action) to embed queries and build the index.
+    fn embedder(&self) -> Option<Arc<dyn Embedder>> {
+        None
+    }
 }
 
 /// A provider-bound engine. Built for exactly one [`AiProviderKind`] with that
@@ -156,12 +163,11 @@ impl AiEngine {
                     }
                 }
             }
-            BackendKind::Embedding => self
-                .embedder
-                .as_ref()
-                .map_or((PerActionStatus::CapabilityMismatch, None), |_| {
-                    (PerActionStatus::Unknown, None)
-                }),
+            // No `AiActionId` resolves to the embedding backend (semantic
+            // search is driven directly by the daemon, not through `start`),
+            // so this arm is only reachable if a future `ActionSpec` maps an
+            // action here without an embedder wired.
+            BackendKind::Embedding => (PerActionStatus::CapabilityMismatch, None),
         }
     }
 }
@@ -330,7 +336,13 @@ impl AiActionEngine for AiEngine {
         };
 
         let semantic_index = if settings.semantic_index_enabled {
-            SemanticIndexAvailability::NotImplemented
+            match &self.embedder {
+                None => SemanticIndexAvailability::NotImplemented,
+                Some(backend) => match backend.availability().await {
+                    BackendAvailability::Available => SemanticIndexAvailability::Available,
+                    BackendAvailability::Unavailable(_) => SemanticIndexAvailability::Unavailable,
+                },
+            }
         } else {
             SemanticIndexAvailability::Disabled
         };
@@ -371,6 +383,10 @@ impl AiActionEngine for AiEngine {
             caps.insert(AiCapability::RequiresAssets);
         }
         AiCapabilitySet(caps)
+    }
+
+    fn embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder.clone()
     }
 }
 

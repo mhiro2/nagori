@@ -70,6 +70,26 @@ pub struct EmbeddingVector {
     pub vector: Vec<f32>,
 }
 
+/// Runtime-read identity of an embedding model.
+///
+/// Every field is read from the model at runtime (never baked) so the index
+/// can detect a model / revision / dimension change and rebuild rather than
+/// mixing incompatible embedding spaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingModelMetadata {
+    /// Opaque model identifier (Apple's `NLContextualEmbedding.modelIdentifier`).
+    pub model_identifier: String,
+    /// Model revision; a bump changes the embedding space.
+    pub revision: u32,
+    /// Vector dimensionality.
+    pub dimension: usize,
+    /// Token cap above which the model silently truncates; the indexer chunks
+    /// longer inputs instead of dropping the tail.
+    pub max_sequence_length: usize,
+    /// Locale identifiers the model covers.
+    pub languages: Vec<String>,
+}
+
 /// OS-level availability of a backend, independent of settings gating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendAvailability {
@@ -194,8 +214,13 @@ pub trait Translator: Send + Sync {
 #[async_trait]
 pub trait Embedder: Send + Sync {
     async fn availability(&self) -> BackendAvailability;
+    /// Full runtime metadata (identifier / revision / dimension / sequence
+    /// cap / languages), read from the model — never baked.
+    async fn metadata(&self) -> Result<EmbeddingModelMetadata, AiError>;
     /// Embedding dimensionality, read from the model at runtime (never baked).
-    async fn dimension(&self) -> Result<usize, AiError>;
+    async fn dimension(&self) -> Result<usize, AiError> {
+        Ok(self.metadata().await?.dimension)
+    }
     async fn embed_batch(
         &self,
         inputs: Vec<EmbeddingInput>,
