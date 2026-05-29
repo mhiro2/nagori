@@ -1009,7 +1009,10 @@ not duplicate runtime logic.
 **Frontend layout** (`apps/desktop/src/app/components/`):
 
 - `Palette.svelte` — top-level container. Stacks `SearchBox` →
-  `FilterChips` → (`ResultList` + `PreviewPane`) → `StatusBar`.
+  `FilterChips` → (`ResultList` + `PreviewPane`) → `StatusBar`. The body's
+  right column is shared: `ActionInspector.svelte` takes it over the preview
+  pane while the action inspector is open (and forces an expanded full-width
+  preview back to the list+panel split first).
 - `FilterChips.svelte` — quick-filter row directly under the search
   input. Single-select toggles for *Today* / *Last 7 days* / *Pinned*;
   the active preset feeds `currentFilters()` into every
@@ -1047,26 +1050,32 @@ not duplicate runtime logic.
   `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
   — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
   Non-Public entries hide both the Enter hint and the open button.
-- `ActionMenu.svelte` — a hotkey-triggered modal that runs actions
-  against the selected entry. It composes `CompactPreview.svelte` (the
-  target's kind / source / time and a short snippet, kept visible so the
-  user always sees what they are acting on), `ActionPicker.svelte` (one
-  flat list mixing the deterministic quick actions — Summarize first
-  sentence, Format JSON, Extract tasks, Redact secrets — with the
-  availability-gated, model-backed AI actions — *Summarize*, *Rewrite*,
-  *Format as Markdown*, *Organize tasks*, *Explain code* — each marked
-  with a small `AI` badge instead of a label prefix), and
-  `ActionRunPanel.svelte` (a single `idle / running / result / error`
-  work area). Streaming AI partials and the final result land in that one
-  area, so the output never jumps position on completion; the AI actions
-  stream over the `nagori://ai/*` events, and a fast deterministic run
-  skips the running indicator (shown only once it outlives ~120 ms). Each
-  AI button is disabled with a remediation tooltip when its action is
-  unavailable; Escape cancels an in-flight stream and otherwise closes the
-  modal. The result shows *Copy* (uses `navigator.clipboard`) and *Save as
-  new entry* (calls `save_ai_result`). Clearing the whole history is not
-  offered here — that global, destructive action lives on the tray menu
-  and the `clear-history` hotkey.
+- `ActionInspector.svelte` — a hotkey-triggered **docked panel** that runs
+  actions against the selected entry. It is not a modal: opening it (the
+  `open-actions` binding) takes the palette body's right column in place of
+  `PreviewPane.svelte` and hands it back the moment it closes, so the target
+  stays beside its source row and long results read against full panel height
+  rather than the bottom of an 80vh overlay. It composes
+  `CompactPreview.svelte` (the target's kind / source / time and a short
+  snippet, kept visible so the user always sees what they are acting on),
+  `ActionPicker.svelte` (one flat list mixing the deterministic quick actions
+  — Summarize first sentence, Format JSON, Extract tasks, Redact secrets —
+  with the availability-gated, model-backed AI actions — *Summarize*,
+  *Rewrite*, *Format as Markdown*, *Organize tasks*, *Explain code* — each
+  marked with a small `AI` badge instead of a label prefix), and
+  `ActionRunPanel.svelte` (a single `idle / running / result / error` work
+  area that grows to fill the panel). Streaming AI partials and the final
+  result land in that one area, so the output never jumps position on
+  completion; the AI actions stream over the `nagori://ai/*` events, and a
+  fast deterministic run skips the running indicator (shown only once it
+  outlives ~120 ms). Each AI button is disabled with a remediation tooltip
+  when its action is unavailable. The panel is a focusable non-modal
+  `role="dialog"` that stops keydowns from leaking into the palette's
+  window handler while focused; Escape cancels an in-flight stream and
+  otherwise closes the panel. The result shows *Copy* (uses
+  `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
+  Clearing the whole history is not offered here — that global, destructive
+  action lives on the tray menu and the `clear-history` hotkey.
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
   the `preview_entry` Tauri command, which is gated to the desktop
   process because the daemon does not host an AppKit event loop. The
@@ -1316,8 +1325,9 @@ runs before any backend sees the text, and the settings-aware
 `SensitivityClassifier::redact` — **not** the bare `Redactor` — is the caller
 surface for redaction (see [section 9](#9-sensitivity-and-redaction)).
 
-**Output.** When the user clicks *Save as new entry* in `ActionMenu.svelte`,
-the frontend invokes the separate `save_ai_result` Tauri command which writes
+**Output.** When the user clicks *Save as new entry* in
+`ActionInspector.svelte`, the frontend invokes the separate `save_ai_result`
+Tauri command which writes
 the text via `runtime.add_text()` and returns the resulting `EntryDto`. The
 persistence is intentionally a second user-driven step rather than a side effect
 of the action.
