@@ -60,11 +60,24 @@ impl MockBackend {
         }
     }
 
-    fn render(&self, input: &str) -> String {
-        self.output.clone().unwrap_or_else(|| {
-            let first = input.trim().lines().next().unwrap_or_default().trim();
-            format!("Summary: {first}")
-        })
+    /// Derives a recognisable, action-shaped output from the request so a test
+    /// can tell which action it exercised. A fixed `output` (from
+    /// [`Self::with_output`]) overrides this.
+    fn render(&self, req: &TextGenerationRequest) -> String {
+        use nagori_core::AiActionId;
+        if let Some(output) = &self.output {
+            return output.clone();
+        }
+        let first = req.input.trim().lines().next().unwrap_or_default().trim();
+        match req.action {
+            // `ExtractTasks` is prompt-steered toward a Markdown checklist; the
+            // mock mirrors that shape so consumers can be tested against it.
+            AiActionId::ExtractTasks => format!("- [ ] {first}"),
+            AiActionId::Rewrite => format!("Rewrite: {first}"),
+            AiActionId::FormatMarkdown => format!("# {first}"),
+            AiActionId::ExplainCode => format!("Explanation: {first}"),
+            _ => format!("Summary: {first}"),
+        }
     }
 }
 
@@ -73,6 +86,8 @@ impl TextGenerator for MockBackend {
     fn capabilities(&self) -> TextGenerationCapabilities {
         TextGenerationCapabilities {
             streaming: true,
+            // Mirrors the Apple backend, whose guided generation is gated on a
+            // build toolchain with the `@Generable` macro plugin.
             guided_generation: false,
             on_device: true,
         }
@@ -90,7 +105,7 @@ impl TextGenerator for MockBackend {
         if let BackendAvailability::Unavailable(reason) = self.availability {
             return Err(reason.into_error());
         }
-        Ok(stream_chars(&self.render(&req.input), cancel))
+        Ok(stream_chars(&self.render(&req), cancel))
     }
 }
 
@@ -354,13 +369,51 @@ mod tests {
     use nagori_core::{AiActionId, AiRequestOptions, RequestId};
 
     fn request(input: &str) -> TextGenerationRequest {
+        request_for(AiActionId::Summarize, input)
+    }
+
+    fn request_for(action: AiActionId, input: &str) -> TextGenerationRequest {
         TextGenerationRequest {
             request_id: RequestId::new(),
-            action: AiActionId::Summarize,
+            action,
             input: input.to_owned(),
             options: AiRequestOptions::default(),
             guided_schema: None,
         }
+    }
+
+    async fn collect_final(mut stream: AiEventStream) -> String {
+        while let Some(item) = stream.next().await {
+            match item.unwrap() {
+                AiEvent::Delta { .. } | AiEvent::Replace { .. } => {}
+                AiEvent::Done { final_text, .. } => return final_text,
+                AiEvent::Cancelled => panic!("unexpected cancel"),
+            }
+        }
+        panic!("stream ended without Done");
+    }
+
+    #[tokio::test]
+    async fn render_is_action_shaped() {
+        let backend = MockBackend::new();
+        let tasks = backend
+            .stream_text(
+                request_for(AiActionId::ExtractTasks, "ship the release"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // Guided extraction renders a Markdown checklist.
+        assert_eq!(collect_final(tasks).await, "- [ ] ship the release");
+
+        let rewrite = backend
+            .stream_text(
+                request_for(AiActionId::Rewrite, "make this better"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(collect_final(rewrite).await, "Rewrite: make this better");
     }
 
     #[tokio::test]

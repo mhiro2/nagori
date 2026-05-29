@@ -94,9 +94,12 @@ public func nagoriAppleStreamSnapshotsC(
     }
 }
 
-/// Summarize `promptPtr` with the on-device language model, streaming partial
-/// snapshots back through `onSnapshot`. The callback contract matches
-/// `nagori_apple_stream_snapshots_c`:
+/// Generate text from `promptPtr` with the on-device language model under the
+/// system prompt `instructionsPtr`, streaming partial snapshots back through
+/// `onSnapshot`. One export serves every plain text-generation action
+/// (summarize, rewrite, reformat, explain); the caller supplies the action's
+/// instructions so the prompt steering lives on the Rust side. The callback
+/// contract matches `nagori_apple_stream_snapshots_c`:
 ///
 /// - `isCancelled` (a Rust callback that performs the atomic load itself) is
 ///   polled before forwarding each snapshot; observing cancellation stops the
@@ -106,14 +109,16 @@ public func nagoriAppleStreamSnapshotsC(
 /// - `onDone` reports a terminal status code: 0 success, 1 cancelled, and
 ///   2–8 map `LanguageModelSession.GenerationError` cases onto stable codes the
 ///   Rust side translates into `AiError`s.
-@_cdecl("nagori_apple_summarize_c")
-public func nagoriAppleSummarizeC(
+@_cdecl("nagori_apple_generate_c")
+public func nagoriAppleGenerateC(
+    instructionsPtr: UnsafePointer<CChar>,
     promptPtr: UnsafePointer<CChar>,
     ctx: UnsafeMutableRawPointer?,
     isCancelled: @convention(c) (UnsafeMutableRawPointer?) -> UInt8,
     onSnapshot: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>, Int) -> Void,
     onDone: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
 ) {
+    let instructions = String(cString: instructionsPtr)
     let input = String(cString: promptPtr)
 
     let ctxCopy = ctx
@@ -122,12 +127,7 @@ public func nagoriAppleSummarizeC(
     let onDoneCopy = onDone
 
     Task.detached(priority: .userInitiated) {
-        let session = LanguageModelSession(
-            instructions: """
-            You are a concise summarizer. Summarize the user's text in its \
-            original language. Respond with only the summary and no preamble.
-            """
-        )
+        let session = LanguageModelSession(instructions: instructions)
         var doneCode: Int32 = 0
         do {
             let stream = session.streamResponse(to: input)
@@ -153,7 +153,7 @@ public func nagoriAppleSummarizeC(
 }
 
 /// Collapses a `GenerationError` into a stable status code shared with the Rust
-/// `AiError` mapping. Keep in sync with `bridge::summarize_terminal`.
+/// `AiError` mapping. Keep in sync with `bridge::generate_terminal`.
 private func generationErrorCode(_ error: LanguageModelSession.GenerationError) -> Int32 {
     switch error {
     case .exceededContextWindowSize:

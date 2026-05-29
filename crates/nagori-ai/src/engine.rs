@@ -519,16 +519,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_unwired_action_is_capability_mismatch() {
+    async fn start_text_generation_actions_stream_to_done() {
         let engine = apple_engine(MockBackend::new());
-        let cancel = CancellationToken::new();
-        let Err(err) = engine
-            .start(request(AiActionId::Rewrite, "x"), cancel)
-            .await
-        else {
-            panic!("rewrite is not wired");
-        };
-        assert_eq!(err.code, AiErrorCode::CapabilityMismatch);
+        for action in [
+            AiActionId::Summarize,
+            AiActionId::Rewrite,
+            AiActionId::FormatMarkdown,
+            AiActionId::ExtractTasks,
+            AiActionId::ExplainCode,
+        ] {
+            let run = engine
+                .start(request(action, "do the thing"), CancellationToken::new())
+                .await
+                .unwrap_or_else(|_| panic!("{action:?} should start"));
+            match drain_to_done(run.events).await {
+                AiEvent::Done { final_text, .. } => {
+                    assert!(!final_text.is_empty(), "{action:?} produced no text");
+                }
+                other => panic!("{action:?} expected Done, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -638,13 +648,21 @@ mod tests {
             .find(|entry| entry.action == AiActionId::Summarize)
             .unwrap();
         assert_eq!(summarize.status, PerActionStatus::Available);
-        // Unwired actions report a capability mismatch even when AI is on.
+        // Every text-generation action is wired, so it is available too.
         let rewrite = report
             .per_action
             .iter()
             .find(|entry| entry.action == AiActionId::Rewrite)
             .unwrap();
-        assert_eq!(rewrite.status, PerActionStatus::CapabilityMismatch);
+        assert_eq!(rewrite.status, PerActionStatus::Available);
+        // Translate has no translator wired on this text-only engine, so it
+        // still reports a capability mismatch even when AI is on.
+        let translate = report
+            .per_action
+            .iter()
+            .find(|entry| entry.action == AiActionId::Translate)
+            .unwrap();
+        assert_eq!(translate.status, PerActionStatus::CapabilityMismatch);
     }
 
     #[tokio::test]

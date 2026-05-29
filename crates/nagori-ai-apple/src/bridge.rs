@@ -34,7 +34,8 @@ unsafe extern "C" {
         on_snapshot: extern "C" fn(*mut c_void, *const u8, usize),
         on_done: extern "C" fn(*mut c_void, i32),
     );
-    fn nagori_apple_summarize_c(
+    fn nagori_apple_generate_c(
+        instructions_ptr: *const c_char,
         prompt_ptr: *const c_char,
         ctx: *mut c_void,
         is_cancelled: extern "C" fn(*mut c_void) -> u8,
@@ -196,10 +197,12 @@ fn spawn_bridge(text: &str, cancel: Arc<AtomicBool>) -> StreamHandle {
     StreamHandle::new(cancel, rx)
 }
 
-/// Opaque context handed to Swift for the duration of one summarize stream. It
-/// owns the event sender, the snapshot-delta pump, and a clone of the
-/// cancellation token Swift polls through [`summarize_is_cancelled`].
-struct SummarizeCtx {
+/// Opaque context handed to Swift for the duration of one text-generation
+/// stream. It owns the event sender, the snapshot-delta pump, and a clone of the
+/// cancellation token Swift polls through [`generate_is_cancelled`]. Shared by
+/// every text-generation export (plain generate and guided extract-tasks), which
+/// all use the same `isCancelled`/`onSnapshot`/`onDone` callback contract.
+struct GenerateCtx {
     tx: mpsc::UnboundedSender<Result<AiEvent, AiError>>,
     pump: SnapshotPump,
     cancel: CancellationToken,
@@ -207,26 +210,26 @@ struct SummarizeCtx {
 
 /// Polled by Swift before forwarding each snapshot. The token's atomic load
 /// happens entirely in Rust, so its bytes never cross the language boundary.
-extern "C" fn summarize_is_cancelled(ctx: *mut c_void) -> u8 {
+extern "C" fn generate_is_cancelled(ctx: *mut c_void) -> u8 {
     if ctx.is_null() {
         return 1;
     }
-    // SAFETY: `ctx` is the `SummarizeCtx` pointer handed to Swift; callbacks run
+    // SAFETY: `ctx` is the `GenerateCtx` pointer handed to Swift; callbacks run
     // sequentially on one task, so this shared borrow never overlaps the `&mut`
-    // reborrow in `summarize_on_snapshot`.
-    let ctx = unsafe { &*ctx.cast::<SummarizeCtx>() };
+    // reborrow in `generate_on_snapshot`.
+    let ctx = unsafe { &*ctx.cast::<GenerateCtx>() };
     u8::from(ctx.cancel.is_cancelled())
 }
 
 /// Receives one cumulative snapshot from Swift and forwards the streaming delta.
-extern "C" fn summarize_on_snapshot(ctx: *mut c_void, ptr: *const u8, len: usize) {
+extern "C" fn generate_on_snapshot(ctx: *mut c_void, ptr: *const u8, len: usize) {
     if ctx.is_null() || ptr.is_null() {
         return;
     }
-    // SAFETY: `ctx` is the `SummarizeCtx` pointer; Swift invokes callbacks
+    // SAFETY: `ctx` is the `GenerateCtx` pointer; Swift invokes callbacks
     // sequentially from a single task, so a unique `&mut` is sound. `ptr`/`len`
     // describe a buffer Swift keeps alive for the call's duration.
-    let ctx = unsafe { &mut *ctx.cast::<SummarizeCtx>() };
+    let ctx = unsafe { &mut *ctx.cast::<GenerateCtx>() };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     if let Ok(text) = std::str::from_utf8(bytes)
         && let Some(event) = ctx.pump.push(text)
@@ -238,19 +241,19 @@ extern "C" fn summarize_on_snapshot(ctx: *mut c_void, ptr: *const u8, len: usize
 
 /// Final callback: maps the terminal status code onto a terminal stream item
 /// and reclaims the box.
-extern "C" fn summarize_on_done(ctx: *mut c_void, code: i32) {
+extern "C" fn generate_on_done(ctx: *mut c_void, code: i32) {
     if ctx.is_null() {
         return;
     }
-    // SAFETY: `summarize_on_done` is the last callback for a stream, so
+    // SAFETY: `generate_on_done` is the last callback for a stream, so
     // reclaiming the box here is sound — Swift does not touch `ctx` afterwards.
-    let ctx = unsafe { Box::from_raw(ctx.cast::<SummarizeCtx>()) };
-    let SummarizeCtx {
+    let ctx = unsafe { Box::from_raw(ctx.cast::<GenerateCtx>()) };
+    let GenerateCtx {
         tx,
         pump,
         cancel: _,
     } = *ctx;
-    let _ = tx.send(summarize_terminal(code, pump.current().to_owned()));
+    let _ = tx.send(generate_terminal(code, pump.current().to_owned()));
 }
 
 /// Converts a streaming [`AppleStreamEvent`] into an [`AiEvent`]. The terminal
@@ -265,7 +268,7 @@ fn streaming_event(event: AppleStreamEvent) -> Option<AiEvent> {
 
 /// Maps the Swift terminal status code onto the stream's terminal item. Keep in
 /// sync with `generationErrorCode` in `Bridge.swift`.
-fn summarize_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> {
+fn generate_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> {
     match code {
         0 => Ok(AiEvent::Done {
             final_text,
@@ -300,41 +303,57 @@ fn summarize_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError>
     }
 }
 
-/// Streams a summary of `input` from the on-device language model.
+/// Drains a [`GenerateCtx`]'s receiver into the engine's [`AiEventStream`]. The
+/// stream ends after exactly one terminal item (`Ok(Done)` / `Ok(Cancelled)` /
+/// `Err`).
+fn generate_event_stream(rx: mpsc::UnboundedReceiver<Result<AiEvent, AiError>>) -> AiEventStream {
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+    .boxed()
+}
+
+/// Generates text from `input` under the system prompt `instructions` via the
+/// on-device language model. Serves every plain text-generation action
+/// (summarize, rewrite, reformat, explain); the action's steering lives in
+/// `instructions`.
 ///
 /// Cancellation is observed by polling `cancel` (a [`CancellationToken`] the
 /// caller owns) before each snapshot; the caller cancels it to stop the Swift
 /// task. The returned stream ends after exactly one terminal item
 /// (`Ok(Done)` / `Ok(Cancelled)` / `Err`).
-pub(crate) fn summarize_stream(input: &str, cancel: CancellationToken) -> AiEventStream {
+pub(crate) fn generate_stream(
+    instructions: &str,
+    input: &str,
+    cancel: CancellationToken,
+) -> AiEventStream {
     let (tx, rx) = mpsc::unbounded_channel::<Result<AiEvent, AiError>>();
-    let ctx = Box::new(SummarizeCtx {
+    let ctx = Box::new(GenerateCtx {
         tx,
         pump: SnapshotPump::new(),
         cancel,
     });
     let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
 
-    // Strip interior NULs so the C string survives intact.
+    // Strip interior NULs so the C strings survive intact.
+    let c_instructions = CString::new(instructions.replace('\0', " ")).unwrap_or_default();
     let source = CString::new(input.replace('\0', " ")).unwrap_or_default();
 
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
-    // the call (reclaimed in `summarize_on_done`), and the callbacks are plain
+    // the call (reclaimed in `generate_on_done`), and the callbacks are plain
     // `fn` items that read the cancel token through the ctx atomically.
     unsafe {
-        nagori_apple_summarize_c(
+        nagori_apple_generate_c(
+            c_instructions.as_ptr(),
             source.as_ptr(),
             ctx_ptr,
-            summarize_is_cancelled,
-            summarize_on_snapshot,
-            summarize_on_done,
+            generate_is_cancelled,
+            generate_on_snapshot,
+            generate_on_done,
         );
     }
 
-    futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    })
-    .boxed()
+    generate_event_stream(rx)
 }
 
 /// Opaque context handed to Swift for one translation. It owns the oneshot

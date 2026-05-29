@@ -122,12 +122,16 @@ impl AiActionId {
     /// fully local, so `allow_remote` is always `false`; the byte cap is a
     /// coarse guard, with the precise token-budget check applied separately
     /// (see [`engine::estimate_tokens`]).
+    ///
+    /// Every AI action requires redaction: the model sees the input text and
+    /// these actions preserve wording (so a denylisted token could be echoed
+    /// straight back), so the settings-aware classifier must shape the input
+    /// for all of them — including `FormatMarkdown`, which only reformats.
     #[must_use]
     pub const fn input_policy(self) -> AiInputPolicy {
-        let require_redaction = !matches!(self, Self::FormatMarkdown);
         AiInputPolicy {
             allow_remote: false,
-            require_redaction,
+            require_redaction: true,
             max_bytes: 64 * 1024,
         }
     }

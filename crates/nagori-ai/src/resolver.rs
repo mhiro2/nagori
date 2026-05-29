@@ -41,6 +41,26 @@ const ACTION_SPECS: &[ActionSpec] = &[
         provider: AiProviderKind::AppleNative,
         backend: BackendKind::Translation,
     },
+    ActionSpec {
+        action: AiActionId::Rewrite,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::TextGeneration,
+    },
+    ActionSpec {
+        action: AiActionId::FormatMarkdown,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::TextGeneration,
+    },
+    ActionSpec {
+        action: AiActionId::ExtractTasks,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::TextGeneration,
+    },
+    ActionSpec {
+        action: AiActionId::ExplainCode,
+        provider: AiProviderKind::AppleNative,
+        backend: BackendKind::TextGeneration,
+    },
 ];
 
 /// Resolves the backend family for `(action, provider)`, or `None` when no
@@ -75,12 +95,23 @@ mod tests {
     }
 
     #[test]
+    fn text_generation_actions_resolve_for_apple() {
+        for action in [
+            AiActionId::Rewrite,
+            AiActionId::FormatMarkdown,
+            AiActionId::ExtractTasks,
+            AiActionId::ExplainCode,
+        ] {
+            assert_eq!(
+                resolve_backend(action, AiProviderKind::AppleNative),
+                Some(BackendKind::TextGeneration),
+                "{action:?} should resolve to text generation under Apple"
+            );
+        }
+    }
+
+    #[test]
     fn unwired_pairs_resolve_to_none() {
-        // Rewrite's backend is not wired yet.
-        assert_eq!(
-            resolve_backend(AiActionId::Rewrite, AiProviderKind::AppleNative),
-            None
-        );
         // No provider is configured.
         assert_eq!(
             resolve_backend(AiActionId::Summarize, AiProviderKind::Disabled),
@@ -89,6 +120,11 @@ mod tests {
         // OpenAI-compatible has no backend wired yet.
         assert_eq!(
             resolve_backend(AiActionId::Summarize, AiProviderKind::OpenAiCompatible),
+            None
+        );
+        // Translate has no text-generation OpenAI backend either.
+        assert_eq!(
+            resolve_backend(AiActionId::Rewrite, AiProviderKind::OpenAiCompatible),
             None
         );
     }
