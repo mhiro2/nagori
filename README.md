@@ -12,6 +12,15 @@
 - Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
 - Quick actions on a selected entry: summarise, format JSON, extract tasks,
   redact secrets — all computed locally without any network calls.
+- macOS on-device AI actions (opt-in, off by default): summarise, rewrite,
+  reformat Markdown, extract tasks, explain code, and translate — backed by
+  Apple's on-device frameworks (Foundation Models for text generation, the
+  Translation framework for translate). Inference runs entirely on-device:
+  no clipboard text leaves the machine and the Private Cloud Compute path is
+  not used.
+- Optional on-device semantic search (opt-in, macOS): matches entries by
+  meaning using Apple's `NLContextualEmbedding`, indexed locally with
+  `sqlite-vec`.
 - URL preview shows host on its own row with a punycode badge when the
   displayed Unicode host differs from its ASCII form; press **Enter** in
   the expanded preview to open the URL in the default browser after a
@@ -120,6 +129,18 @@ integration is on the roadmap.
 The default mode stores matched secrets as `[REDACTED]` and re-derives hashes
 and search tokens from the scrubbed form. Switch to `Store full` only if you
 need the raw bytes — details in [`docs/privacy.md`](./docs/privacy.md).
+
+**Do the AI features send my clipboard to the cloud?**
+No. The macOS-only AI actions and semantic search are opt-in (off by default)
+and run Apple's on-device models locally — no clipboard text is sent to a
+remote API, and the Private Cloud Compute path is not used. The models and
+language packs themselves are downloaded and managed by macOS. They need
+macOS 26+; the text-generation actions additionally require Apple Silicon
+with Apple Intelligence enabled, while Translate and semantic search depend
+on their own OS-downloaded language packs and embedding assets. See
+[`docs/privacy.md`](./docs/privacy.md) and
+[`docs/platforms.md`](./docs/platforms.md) for the full contract and
+requirements.
 
 **Windows SmartScreen warns me on first launch.**
 The NSIS installer is not yet Authenticode-signed, so every fresh download

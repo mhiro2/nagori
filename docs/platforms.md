@@ -179,3 +179,43 @@ Known limitations:
   `xattr -d com.apple.quarantine /Applications/Nagori.app` to clear
   the quarantine attribute. Codesigning and notarization are not on
   the roadmap.
+
+### On-device AI features (opt-in)
+
+The model-backed AI actions (Summarize, Translate, Rewrite, Format
+Markdown, Extract tasks, Explain code) and semantic search are
+macOS-only and off by default. They are opt-in and experimental on the
+`0.0.x` canary line, and split across three Apple frameworks with
+**independent availability** — one being unavailable does not disable
+the others:
+
+- **Text generation** (Summarize, Rewrite, Format Markdown, Extract
+  tasks, Explain code) runs on Foundation Models / Apple Intelligence.
+  It requires **Apple Silicon (M1 or later)** — Intel Macs report
+  `deviceNotEligible` — and **Apple Intelligence enabled** in System
+  Settings, which Nagori cannot turn on programmatically. Until it is
+  on, **Settings → AI** shows the status as unavailable and `nagori
+  doctor` reports `appleIntelligenceNotEnabled`. The on-device model
+  needs **~7 GB of free space** and supports a fixed set of locales
+  (English, Japanese, Korean, Chinese, and major European languages),
+  with the device and Siri language required to match a supported
+  language; Japanese support landed in macOS 26.1, and mainland China
+  has additional restrictions.
+- **Translate** runs on the Translation framework, **independent of
+  Apple Intelligence**. It needs the relevant per-language pack
+  installed (downloaded and managed by macOS on first use); a missing
+  pair surfaces as an asset-missing error with a download remediation.
+- **Semantic search** runs on `NLContextualEmbedding`, also
+  **independent of Apple Intelligence**, and gates on its own
+  `semantic_index_enabled` toggle plus the embedding asset (downloaded
+  by macOS on first use). The embedder is pinned to one language/model
+  so every stored vector shares a comparable space.
+
+All model and language assets are downloaded and managed by macOS, not
+bundled with Nagori. When a capability is unavailable its AI action
+buttons are disabled with a tooltip explaining why, and `nagori doctor`
+reports text-generation, translation, and embedding availability
+separately. See
+[`docs/privacy.md`](./privacy.md#ai-actions-and-on-device-models-macos)
+for the privacy contract (on-device inference, no Private Cloud
+Compute, OS-managed model downloads).

@@ -53,6 +53,31 @@ feed that the in-app updater reads from
 The `publish` job depends on `updater`, so the draft is flipped to a
 real release only after the manifest lands.
 
+## Release notes and experimental features
+
+The macOS-only AI actions and semantic search (see
+[ARCHITECTURE.md §14](../ARCHITECTURE.md#14-quick-actions-and-ai-actions)
+and
+[`docs/privacy.md`](./privacy.md#ai-actions-and-on-device-models-macos))
+are opt-in and off by default. While the `0.0.x` canary line is in
+effect they are experimental and exercised only through manual
+dogfooding, not promoted as a stable feature.
+
+When a release promotes these features out of experimental, the
+release notes must state, at minimum:
+
+- that the AI actions and semantic search are macOS-only and opt-in,
+  requiring macOS 26+ — the text-generation actions additionally need
+  Apple Silicon with Apple Intelligence enabled, while Translate and
+  semantic search rely on OS-downloaded language packs / embedding
+  assets;
+- that inference is on-device and the Private Cloud Compute path is
+  not used;
+- that Apple's Translation framework may collect usage / performance
+  metrics (bundle id, language pair — not the translated text), and
+  that model and language-pack downloads are OS-managed and reach
+  Apple's servers.
+
 ## One-time setup
 
 ### 1. Generate the updater signing keypair
