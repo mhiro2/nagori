@@ -89,7 +89,7 @@ domain code. This leads to four design rules:
 | Crate | Role |
 |-------|------|
 | `nagori-core` | Domain model, sensitivity policy, repository traits, `SearchService` orchestration, settings, errors |
-| `nagori-storage` | SQLite (rusqlite) repositories, FTS5 / ngram tables, migrations, image blob handling |
+| `nagori-storage` | SQLite (rusqlite) repositories, FTS5 / ngram tables, migrations, image blob handling, and the `sqlite-vec`-backed semantic embedding index (`semantic-index` feature) |
 | `nagori-search` | Text normalization, CJK n-gram tokenizer, default ranker |
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
@@ -97,9 +97,9 @@ domain code. This leads to four design rules:
 | `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
-| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
+| `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device summaries via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), `AppleEmbedderBackend` (an `Embedder` over `NLContextualEmbedding` for semantic search), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
-| `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, IPC server, in-memory search cache |
+| `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, the background semantic-index worker, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
 | `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-`wl_data_control` hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
 
@@ -438,6 +438,8 @@ are forward-only; downgrades are not supported.
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
+| `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`; soft-deleted entries keep their vector but are filtered out at query time. |
+| `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) the stored vectors were produced with, so a model change clears the index and triggers a rebuild instead of mixing incompatible spaces. |
 | `settings` | Key/value persistence for `AppSettings`. |
 | `audit_events` | Capture / policy events (block, redact, etc.). Never stores raw clipboard content. |
 
@@ -505,6 +507,16 @@ concurrently via `tokio::try_join!`, and the storage layer hands each
 branch its own pooled SQLite connection so they run truly in parallel
 under WAL — readers do not block each other and an in-flight capture
 write does not stall search.
+
+**Semantic plan.** `SearchMode::Semantic` resolves to its own plan but
+needs a query embedding, so `NagoriRuntime::search` routes it ahead of the
+text pipeline: it embeds the query through the wired `Embedder` and ranks
+the stored vectors via `SqliteStore::semantic_search` (`sqlite-vec` cosine
+distance). The embedder is macOS-only and the index is opt-in, so when it
+is disabled or unavailable the runtime returns `Unsupported`; a direct
+store/test caller with no embedder gets an empty result set rather than an
+error. See [section 14](#14-quick-actions-and-ai-actions) for the index
+build pipeline.
 
 **Substring scan window.** Hybrid plans bound their substring branch to
 the most recent `SUBSTRING_SCAN_WINDOW` (5000) live entries via a CTE,
@@ -1222,9 +1234,9 @@ Two distinct, type-separated families:
 action to a backend family via the static `(action, provider) → backend` table,
 then dispatches to a `TextGenerator` / `Translator` / `Embedder` backend. The
 Apple backends (`nagori-ai-apple::AppleFoundationBackend` for text generation,
-`AppleTranslateBackend` for translation) are injected by `nagori-platform-native`
-on macOS; other platforms wire no engine, so AI actions are refused there while
-quick actions keep working.
+`AppleTranslateBackend` for translation, `AppleEmbedderBackend` for embeddings)
+are injected by `nagori-platform-native` on macOS; other platforms wire no
+engine, so AI actions are refused there while quick actions keep working.
 
 **Translation.** `AppleTranslateBackend` wraps the `Translation` framework's
 `TranslationSession`, detecting the source language with `NLLanguageRecognizer`
@@ -1235,6 +1247,26 @@ language pack surfaces as an `AssetMissing` error carrying a download
 remediation. `nagori ai translate <id> --to <lang> [--from <lang>]` drives it
 from the CLI. The framework requires the app-bundle runtime context, so live
 translation is exercised in the desktop app (Nightly), not the headless CLI.
+
+**Semantic search.** A separate, opt-in toggle (`ai.semantic_index_enabled`,
+distinct from the AI master switch) builds an on-device embedding index so
+search can match by meaning. `AppleEmbedderBackend` wraps `NLContextualEmbedding`
+via the Swift bridge, mean-pooling per-token vectors into one L2-normalised
+document vector; it is pinned to one language/model (the user's preferred
+language) so every stored vector shares a comparable embedding space. The
+embedder's runtime metadata (`model_identifier` / `revision` / `dimension` /
+`max_sequence_length`) is persisted alongside the vectors; a mismatch (model,
+revision, or dimension change) clears the index and rebuilds it rather than
+mixing incompatible spaces. Vectors live in `nagori-storage` as little-endian
+float32 BLOBs ranked by `sqlite-vec`'s `vec_distance_cosine` (a Cargo feature so
+the native extension stays optional). A background worker
+(`nagori-daemon::semantic_index`) embeds freshly-captured clips and backfills
+history in bounded batches, guarded by a battery check (AC-only by default), the
+embedding concurrency permit, and rate-limit backoff; the settings UI exposes a
+*Rebuild index* control plus live progress. At query time `SearchMode::Semantic`
+embeds the query and ranks the stored vectors; the embedder is macOS-only, so on
+other platforms (or when the model is unavailable) semantic search reports
+`Unsupported` and the text plans keep working.
 
 **Streaming + cancellation.** `NagoriRuntime::start_ai_action` gates on the
 `ai.enabled` master toggle, the allow-list, and the selected provider; shapes
