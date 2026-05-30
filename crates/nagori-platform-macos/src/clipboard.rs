@@ -64,6 +64,93 @@ impl MacosClipboard {
     }
 }
 
+/// Upper bound on a single blocking clipboard operation.
+///
+/// arboard + `AppKit` pasteboard calls run on the blocking pool via
+/// `spawn_blocking`. A healthy pasteboard answers in milliseconds, but a
+/// wedged `AppKit` clipboard (a frozen source app mid-publish, a modal
+/// pasteboard owner that never returns) would otherwise pin the blocking
+/// worker — and the `Arc<Mutex<Clipboard>>` guard it holds — indefinitely,
+/// cascading into every later capture / copy / paste that needs the same
+/// lock. We cap each operation so the daemon's async flow always gets a
+/// degraded result back within the window. This mirrors the Linux adapter's
+/// internal `PIPE_READ_TIMEOUT`; macOS / Windows previously lacked any
+/// equivalent.
+///
+/// On timeout the detached blocking thread (and the mutex guard it holds) is
+/// leaked until the OS call finally unwedges — `spawn_blocking` tasks cannot
+/// be aborted. That is acceptable for the realistic *transient* hang: the
+/// thread frees itself when the call returns, and the sequence-only poll
+/// path (`current_sequence`) does not take the mutex, so steady-state change
+/// detection keeps working through a hung body read.
+const CLIPBOARD_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Error surfaced by [`clipboard_blocking`] when a blocking clipboard op
+/// either panics on the pool or exceeds [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// Carries `Display` so the existing call-site
+/// `map_err(|err| AppError::Platform(err.to_string()))` keeps producing the
+/// same `AppError::Platform` shape it did when the join error was surfaced
+/// directly.
+enum BlockingError {
+    Join(tokio::task::JoinError),
+    Timeout { limit: std::time::Duration },
+}
+
+impl std::fmt::Display for BlockingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Join(err) => write!(f, "{err}"),
+            Self::Timeout { limit } => {
+                write!(
+                    f,
+                    "clipboard operation timed out after {} ms",
+                    limit.as_millis()
+                )
+            }
+        }
+    }
+}
+
+/// Run a blocking clipboard closure on the blocking pool, bounded by
+/// [`CLIPBOARD_OP_TIMEOUT`]. Drop-in replacement for
+/// `tokio::task::spawn_blocking` at the adapter's call sites: the returned
+/// future still resolves to `Result<T, _>` so the existing
+/// `.await.map_err(..)` tail is unchanged, but a wedged OS call now resolves
+/// to [`BlockingError::Timeout`] instead of hanging forever.
+async fn clipboard_blocking<F, T>(op: &'static str, f: F) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    clipboard_blocking_within(op, CLIPBOARD_OP_TIMEOUT, f).await
+}
+
+/// [`clipboard_blocking`] with an explicit deadline so the timeout path can
+/// be exercised in tests without sleeping out the full production window.
+async fn clipboard_blocking_within<F, T>(
+    op: &'static str,
+    limit: std::time::Duration,
+    f: F,
+) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(join_err)) => Err(BlockingError::Join(join_err)),
+        Err(_elapsed) => {
+            tracing::warn!(
+                op,
+                timeout_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+                "clipboard_op_timed_out",
+            );
+            Err(BlockingError::Timeout { limit })
+        }
+    }
+}
+
 #[async_trait]
 impl ClipboardReader for MacosClipboard {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
@@ -73,7 +160,7 @@ impl ClipboardReader for MacosClipboard {
         // tokio worker thread (the daemon only has a handful of workers,
         // and a stuck `current_snapshot` previously starved IPC handlers).
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<ClipboardSnapshot> {
+        clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
             // Hold the arboard mutex across `get_text` *and* the AppKit
             // extras read so a concurrent `write_image_bytes` cannot slip
             // its `clearContents`/`setData` pair between the two and stitch
@@ -116,7 +203,7 @@ impl ClipboardReader for MacosClipboard {
         // global state. Hop to a blocking thread for consistency with
         // `current_snapshot` so the polling loop can never block a tokio
         // worker even if AppKit hits an internal lock.
-        tokio::task::spawn_blocking(pasteboard_sequence)
+        clipboard_blocking("current_sequence", pasteboard_sequence)
             .await
             .map_err(|err| AppError::Platform(err.to_string()))
     }
@@ -133,108 +220,112 @@ impl ClipboardReader for MacosClipboard {
         // to catch torn snapshots and retry rather than store a stitched
         // entry whose representations came from different writes.
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<CapturedSnapshot> {
-            const MAX_RETRIES: usize = 3;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-                let before = pasteboard_sequence();
+        clipboard_blocking(
+            "current_snapshot_with_max",
+            move || -> Result<CapturedSnapshot> {
+                const MAX_RETRIES: usize = 3;
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                    let before = pasteboard_sequence();
 
-                // First pass: peek byte sizes without materialising payloads. On
-                // macOS, NSData backs each `dataForType` result with bytes
-                // already paged into our address space, but skipping `to_vec()`
-                // still avoids the second copy into a Rust `Vec<u8>` and lets
-                // NSData drop on scope exit, freeing both copies promptly.
-                // NSString::len() reports UTF-8 bytes without materialising a
-                // Rust String. This pass is still only an admission pre-filter:
-                // it catches oversized single reps and file URL aggregates
-                // before we allocate Rust payload buffers, while the capture
-                // loop's post-load check remains authoritative for the final
-                // ClipboardEntry payload.
-                #[cfg(target_os = "macos")]
-                if let Some(observed) = oversized_payload(max_bytes) {
+                    // First pass: peek byte sizes without materialising payloads. On
+                    // macOS, NSData backs each `dataForType` result with bytes
+                    // already paged into our address space, but skipping `to_vec()`
+                    // still avoids the second copy into a Rust `Vec<u8>` and lets
+                    // NSData drop on scope exit, freeing both copies promptly.
+                    // NSString::len() reports UTF-8 bytes without materialising a
+                    // Rust String. This pass is still only an admission pre-filter:
+                    // it catches oversized single reps and file URL aggregates
+                    // before we allocate Rust payload buffers, while the capture
+                    // loop's post-load check remains authoritative for the final
+                    // ClipboardEntry payload.
+                    #[cfg(target_os = "macos")]
+                    if let Some(observed) = oversized_payload(max_bytes) {
+                        let after = pasteboard_sequence();
+                        drop(guard);
+                        if before != after && attempt < MAX_RETRIES {
+                            // Foreign writer landed between the changeCount
+                            // baseline and the size probe — `observed` may
+                            // describe the previous publish event while
+                            // `after` already names the next one. Anchoring
+                            // `last_sequence` to `after` here would skip the
+                            // next clip on the very next tick because the
+                            // capture loop dedupes on sequence equality.
+                            continue;
+                        }
+                        return Ok(CapturedSnapshot::Oversized {
+                            sequence: after,
+                            observed_bytes: observed,
+                            limit: max_bytes,
+                        });
+                    }
+
+                    // Second pass: load the snapshot. The first pass only rejected
+                    // the obvious oversize cases; reps that pass it can still grow
+                    // past `max_bytes` once decoded to UTF-8, and the aggregate
+                    // of multiple reps is not bounded here at all. The capture
+                    // loop's post-load `payload_bytes > max_entry_size_bytes`
+                    // check is the authoritative limit — the first pass just spares
+                    // us the worst allocations. Mirror `current_snapshot`
+                    // exactly so the two entry points cannot drift.
+                    let plain = match guard.get_text() {
+                        Ok(text) => Some(text),
+                        Err(arboard::Error::ContentNotAvailable) => None,
+                        Err(err) => return Err(platform_err(&err)),
+                    };
+
+                    let mut representations = Vec::new();
+
+                    #[cfg(target_os = "macos")]
+                    if let Some(observed) =
+                        collect_macos_extras(&mut representations, Some(max_bytes))
+                    {
+                        let after = pasteboard_sequence();
+                        drop(guard);
+                        if before != after && attempt < MAX_RETRIES {
+                            continue;
+                        }
+                        return Ok(CapturedSnapshot::Oversized {
+                            sequence: after,
+                            observed_bytes: observed,
+                            limit: max_bytes,
+                        });
+                    }
+
+                    if let Some(text) = plain {
+                        representations.push(ClipboardRepresentation {
+                            mime_type: "text/plain".to_owned(),
+                            data: ClipboardData::Text(text),
+                        });
+                    }
+
                     let after = pasteboard_sequence();
                     drop(guard);
                     if before != after && attempt < MAX_RETRIES {
-                        // Foreign writer landed between the changeCount
-                        // baseline and the size probe — `observed` may
-                        // describe the previous publish event while
-                        // `after` already names the next one. Anchoring
-                        // `last_sequence` to `after` here would skip the
-                        // next clip on the very next tick because the
-                        // capture loop dedupes on sequence equality.
+                        // A foreign writer landed on the pasteboard between
+                        // our oversize probe and the rep load. The reps we
+                        // just collected are stitched across two distinct
+                        // publish events — discard and retry rather than
+                        // store an inconsistent entry. Bounded to MAX_RETRIES
+                        // so a write storm can't park the capture loop here
+                        // forever; the final attempt accepts whatever it
+                        // observed (matching Windows' behaviour) so torn
+                        // snapshots still surface as a normal entry rather
+                        // than as a hard error that pauses capture.
                         continue;
                     }
-                    return Ok(CapturedSnapshot::Oversized {
+                    let snapshot = ClipboardSnapshot {
                         sequence: after,
-                        observed_bytes: observed,
-                        limit: max_bytes,
-                    });
+                        captured_at: OffsetDateTime::now_utc(),
+                        source: None,
+                        representations,
+                    };
+                    return Ok(CapturedSnapshot::Captured(snapshot));
                 }
-
-                // Second pass: load the snapshot. The first pass only rejected
-                // the obvious oversize cases; reps that pass it can still grow
-                // past `max_bytes` once decoded to UTF-8, and the aggregate
-                // of multiple reps is not bounded here at all. The capture
-                // loop's post-load `payload_bytes > max_entry_size_bytes`
-                // check is the authoritative limit — the first pass just spares
-                // us the worst allocations. Mirror `current_snapshot`
-                // exactly so the two entry points cannot drift.
-                let plain = match guard.get_text() {
-                    Ok(text) => Some(text),
-                    Err(arboard::Error::ContentNotAvailable) => None,
-                    Err(err) => return Err(platform_err(&err)),
-                };
-
-                let mut representations = Vec::new();
-
-                #[cfg(target_os = "macos")]
-                if let Some(observed) = collect_macos_extras(&mut representations, Some(max_bytes))
-                {
-                    let after = pasteboard_sequence();
-                    drop(guard);
-                    if before != after && attempt < MAX_RETRIES {
-                        continue;
-                    }
-                    return Ok(CapturedSnapshot::Oversized {
-                        sequence: after,
-                        observed_bytes: observed,
-                        limit: max_bytes,
-                    });
-                }
-
-                if let Some(text) = plain {
-                    representations.push(ClipboardRepresentation {
-                        mime_type: "text/plain".to_owned(),
-                        data: ClipboardData::Text(text),
-                    });
-                }
-
-                let after = pasteboard_sequence();
-                drop(guard);
-                if before != after && attempt < MAX_RETRIES {
-                    // A foreign writer landed on the pasteboard between
-                    // our oversize probe and the rep load. The reps we
-                    // just collected are stitched across two distinct
-                    // publish events — discard and retry rather than
-                    // store an inconsistent entry. Bounded to MAX_RETRIES
-                    // so a write storm can't park the capture loop here
-                    // forever; the final attempt accepts whatever it
-                    // observed (matching Windows' behaviour) so torn
-                    // snapshots still surface as a normal entry rather
-                    // than as a hard error that pauses capture.
-                    continue;
-                }
-                let snapshot = ClipboardSnapshot {
-                    sequence: after,
-                    captured_at: OffsetDateTime::now_utc(),
-                    source: None,
-                    representations,
-                };
-                return Ok(CapturedSnapshot::Captured(snapshot));
-            }
-        })
+            },
+        )
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
     }
@@ -275,7 +366,7 @@ impl ClipboardWriter for MacosClipboard {
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        clipboard_blocking("write_text", move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?
@@ -310,7 +401,7 @@ impl MacosClipboard {
     async fn write_image_bytes(&self, bytes: Vec<u8>, mime: &str) -> Result<()> {
         let mime_owned = mime.to_owned();
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        clipboard_blocking("write_image_bytes", move || -> Result<()> {
             // Take the same arboard mutex `current_snapshot` and the text
             // path use so a concurrent reader/writer cannot race the
             // clearContents+setData pair below on the shared NSPasteboard.
@@ -382,7 +473,7 @@ impl MacosClipboard {
         representations: Vec<StoredClipboardRepresentation>,
     ) -> Result<()> {
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        clipboard_blocking("publish_representations", move || -> Result<()> {
             // Hold the arboard mutex across the whole clearContents + setData
             // batch so a concurrent reader cannot observe a partial state with
             // the primary published but the plain fallback still missing.
@@ -919,6 +1010,46 @@ fn platform_err(err: &arboard::Error) -> AppError {
 
 fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
     AppError::Platform(err.to_string())
+}
+
+#[cfg(test)]
+mod blocking_timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clipboard_blocking_times_out_on_a_wedged_op() {
+        // Regression: a wedged OS clipboard call inside `spawn_blocking`
+        // must not pin the caller forever. `clipboard_blocking` bounds it
+        // by `CLIPBOARD_OP_TIMEOUT` and surfaces a degraded
+        // `BlockingError::Timeout` so the daemon's capture / copy flow stays
+        // responsive (the detached blocking thread is leaked until the OS
+        // call unwedges — the documented trade-off). A short explicit limit
+        // exercises the real timeout path without sleeping out the 3 s
+        // production window; the `mpsc` channel models the stuck OS call so
+        // the test can release the worker cleanly once the timeout fires.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let limit = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        let result = clipboard_blocking_within("stuck_op", limit, move || -> Result<()> {
+            // Block exactly like a wedged OS call would, holding the worker
+            // until the test releases it.
+            let _ = rx.recv();
+            Ok(())
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(BlockingError::Timeout { .. })),
+            "a wedged clipboard op should surface BlockingError::Timeout",
+        );
+        assert!(
+            start.elapsed() >= limit,
+            "the timeout must elapse before giving up, not fail fast",
+        );
+        // Release the blocking worker so it returns instead of blocking on
+        // `recv` until the test process exits.
+        drop(tx);
+    }
 }
 
 #[cfg(test)]

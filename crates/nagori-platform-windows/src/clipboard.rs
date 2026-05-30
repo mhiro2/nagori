@@ -35,6 +35,133 @@ impl WindowsClipboard {
     }
 }
 
+/// Upper bound on a single blocking clipboard operation.
+///
+/// arboard + `Win32` clipboard calls run on the blocking pool via
+/// `spawn_blocking`. A healthy clipboard answers in milliseconds, but a
+/// foreground app that opens the global clipboard and never calls
+/// `CloseClipboard` (or a wedged `SetClipboardData` / `GetClipboardData`)
+/// would otherwise pin the blocking worker — and the `Arc<Mutex<Clipboard>>`
+/// guard it holds — indefinitely, cascading into every later capture / copy /
+/// paste that needs the same lock. We cap each operation so the daemon's
+/// async flow always gets a degraded result back within the window. This
+/// mirrors the Linux adapter's internal `PIPE_READ_TIMEOUT`; macOS / Windows
+/// previously lacked any equivalent.
+///
+/// On timeout the detached blocking thread (and the mutex guard it holds) is
+/// leaked until the OS call finally unwedges — `spawn_blocking` tasks cannot
+/// be aborted. That is acceptable for the realistic *transient* hang: the
+/// thread frees itself when the call returns, and the sequence-only poll
+/// path (`current_sequence`) does not take the mutex, so steady-state change
+/// detection keeps working through a hung body read.
+const CLIPBOARD_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Error surfaced by [`clipboard_blocking`] when a blocking clipboard op
+/// either panics on the pool or exceeds [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// Carries `Display` so the existing call-site
+/// `map_err(|err| AppError::Platform(err.to_string()))` keeps producing the
+/// same `AppError::Platform` shape it did when the join error was surfaced
+/// directly.
+enum BlockingError {
+    Join(tokio::task::JoinError),
+    Timeout { limit: std::time::Duration },
+}
+
+impl std::fmt::Display for BlockingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Join(err) => write!(f, "{err}"),
+            Self::Timeout { limit } => {
+                write!(
+                    f,
+                    "clipboard operation timed out after {} ms",
+                    limit.as_millis()
+                )
+            }
+        }
+    }
+}
+
+/// Run a blocking clipboard closure on the blocking pool, bounded by
+/// [`CLIPBOARD_OP_TIMEOUT`]. Drop-in replacement for
+/// `tokio::task::spawn_blocking` at the adapter's call sites: the returned
+/// future still resolves to `Result<T, _>` so the existing
+/// `.await.map_err(..)` tail is unchanged, but a wedged OS call now resolves
+/// to [`BlockingError::Timeout`] instead of hanging forever.
+async fn clipboard_blocking<F, T>(op: &'static str, f: F) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    clipboard_blocking_within(op, CLIPBOARD_OP_TIMEOUT, f).await
+}
+
+/// [`clipboard_blocking`] with an explicit deadline so the timeout path can
+/// be exercised in tests without sleeping out the full production window.
+async fn clipboard_blocking_within<F, T>(
+    op: &'static str,
+    limit: std::time::Duration,
+    f: F,
+) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(join_err)) => Err(BlockingError::Join(join_err)),
+        Err(_elapsed) => {
+            tracing::warn!(
+                op,
+                timeout_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+                "clipboard_op_timed_out",
+            );
+            Err(BlockingError::Timeout { limit })
+        }
+    }
+}
+
+#[cfg(test)]
+mod blocking_timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clipboard_blocking_times_out_on_a_wedged_op() {
+        // Regression: a wedged OS clipboard call inside `spawn_blocking`
+        // must not pin the caller forever. `clipboard_blocking` bounds it
+        // by `CLIPBOARD_OP_TIMEOUT` and surfaces a degraded
+        // `BlockingError::Timeout` so the daemon's capture / copy flow stays
+        // responsive (the detached blocking thread is leaked until the OS
+        // call unwedges — the documented trade-off). A short explicit limit
+        // exercises the real timeout path without sleeping out the 3 s
+        // production window; the `mpsc` channel models the stuck OS call so
+        // the test can release the worker cleanly once the timeout fires.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let limit = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        let result = clipboard_blocking_within("stuck_op", limit, move || -> Result<()> {
+            // Block exactly like a wedged OS call would, holding the worker
+            // until the test releases it.
+            let _ = rx.recv();
+            Ok(())
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(BlockingError::Timeout { .. })),
+            "a wedged clipboard op should surface BlockingError::Timeout",
+        );
+        assert!(
+            start.elapsed() >= limit,
+            "the timeout must elapse before giving up, not fail fast",
+        );
+        // Release the blocking worker so it returns instead of blocking on
+        // `recv` until the test process exits.
+        drop(tx);
+    }
+}
+
 #[async_trait]
 impl ClipboardReader for WindowsClipboard {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
@@ -54,7 +181,7 @@ impl ClipboardReader for WindowsClipboard {
         // last attempt. The retry bound prevents an infinite loop if a
         // process is steadily flooding the clipboard.
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<ClipboardSnapshot> {
+        clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
             match capture_snapshot(&clipboard, None)? {
                 CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
                 CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
@@ -68,7 +195,7 @@ impl ClipboardReader for WindowsClipboard {
         // `GetClipboardSequenceNumber` is documented thread-safe and does
         // not need `OpenClipboard`. We still route through the blocking
         // pool for consistency with `current_snapshot`.
-        tokio::task::spawn_blocking(|| {
+        clipboard_blocking("current_sequence", || {
             ClipboardSequence::native(i64::from(native_sequence_number()))
         })
         .await
@@ -77,9 +204,11 @@ impl ClipboardReader for WindowsClipboard {
 
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || capture_snapshot(&clipboard, Some(max_bytes)))
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?
+        clipboard_blocking("current_snapshot_with_max", move || {
+            capture_snapshot(&clipboard, Some(max_bytes))
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 }
 
@@ -117,7 +246,7 @@ impl ClipboardWriter for WindowsClipboard {
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        clipboard_blocking("write_text", move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?
@@ -144,16 +273,34 @@ impl ClipboardWriter for WindowsClipboard {
         }
         #[cfg(windows)]
         {
-            let clipboard = self.clipboard.clone();
+            // Decode the image reps to their `CF_DIBV5` payloads off the
+            // OS-hang timeout path (same rationale as `write_image_bytes`):
+            // image decode is the only CPU/memory-bound step here and it
+            // touches neither the clipboard mutex nor the Win32 clipboard.
+            // `render_dibv5_payloads` returns one slot per rep so the publish
+            // step can pair each image rep with its pre-decoded bitmap instead
+            // of decoding under the timeout / lock. `reps` is threaded back out
+            // so the publish step reuses it without a second clone.
             let reps = representations.to_vec();
-            tokio::task::spawn_blocking(move || -> Result<()> {
+            let (reps, dibv5) = tokio::task::spawn_blocking(
+                move || -> Result<(Vec<StoredClipboardRepresentation>, Vec<Option<Vec<u8>>>)> {
+                    let dibv5 = win::render_dibv5_payloads(&reps)?;
+                    Ok((reps, dibv5))
+                },
+            )
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
+
+            let clipboard = self.clipboard.clone();
+            clipboard_blocking("write_representations", move || -> Result<()> {
                 // Hold the arboard mutex across the entire OpenClipboard +
                 // EmptyClipboard + N × SetClipboardData batch so a concurrent
                 // text-write through arboard cannot land between our
                 // EmptyClipboard and the last SetClipboardData call and wipe
-                // a partial offer.
+                // a partial offer. Only the cheap HGLOBAL copies + Win32
+                // publish run here — the image decode already happened above.
                 let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-                win::write_multi_rep(&reps)
+                win::write_multi_rep(&reps, &dibv5)
             })
             .await
             .map_err(|err| AppError::Platform(err.to_string()))?
@@ -201,7 +348,7 @@ impl WindowsClipboard {
             ));
         }
         let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        clipboard_blocking("write_files", move || -> Result<()> {
             // Hold the arboard mutex across the whole `OpenClipboard +
             // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
             // concurrent text-write through arboard cannot land between
@@ -229,10 +376,17 @@ impl WindowsClipboard {
         // hand us decoded RGBA. The capture path stores encoded bytes
         // (image/png from this adapter, image/{tiff,jpeg,gif,webp} from
         // macOS sessions paste-restored on Windows) and `image` auto-detects
-        // the format. The decode runs on the blocking pool because
-        // `image::ImageReader::decode` is CPU-bound.
-        let clipboard = self.clipboard.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        // the format.
+        //
+        // The decode runs on a plain blocking task *outside*
+        // `CLIPBOARD_OP_TIMEOUT`: it is CPU/memory-bound (bounded by
+        // `MAX_DECODED_IMAGE_PIXELS`), touches neither the clipboard mutex nor
+        // the Win32 clipboard, and so is not the OS-hang the timeout guards
+        // against. Keeping it out of the timed section avoids a false timeout
+        // on a large-but-valid image and — critically — stops a detached
+        // decode task from landing a stale `SetClipboardData` after the caller
+        // already saw a timeout error.
+        let image_data = tokio::task::spawn_blocking(move || -> Result<ImageData<'static>> {
             // Probe dimensions first so an encoded payload whose advertised
             // canvas blows past `MAX_DECODED_IMAGE_PIXELS` (e.g. a 1 KB PNG
             // claiming 65535×65535) is rejected before `decode` allocates a
@@ -245,11 +399,18 @@ impl WindowsClipboard {
                 .map_err(|err| AppError::Platform(format!("image decode failed: {err}")))?
                 .to_rgba8();
             let (width, height) = rgba.dimensions();
-            let image_data = ImageData {
+            Ok(ImageData {
                 width: width as usize,
                 height: height as usize,
                 bytes: Cow::Owned(rgba.into_raw()),
-            };
+            })
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))??;
+
+        // Only the actual Win32 clipboard write is timeout-bounded.
+        let clipboard = self.clipboard.clone();
+        clipboard_blocking("write_image_bytes", move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?
@@ -879,8 +1040,33 @@ mod win {
     /// (e.g. an unreadable PNG blob) surfaces before we clear the user's
     /// previous selection — matching the macOS adapter's pre-scan
     /// guarantee.
-    pub(super) fn write_multi_rep(reps: &[StoredClipboardRepresentation]) -> Result<()> {
-        let handles = prepare_handles_for_reps(reps)?;
+    /// Decode every image rep to its `CF_DIBV5` payload, returning one slot
+    /// per input rep (image reps → `Some(dibv5_bytes)`, every other rep and
+    /// empty image blobs → `None`).
+    ///
+    /// Split out of [`prepare_one_rep`] so the CPU/memory-bound decode runs
+    /// off the `CLIPBOARD_OP_TIMEOUT` path — see the caller in
+    /// `write_representations`. The slots are positionally aligned with `reps`
+    /// so the publish step can pair each image rep with its bitmap.
+    pub(super) fn render_dibv5_payloads(
+        reps: &[StoredClipboardRepresentation],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        reps.iter()
+            .map(|rep| match (rep.mime_type.as_str(), &rep.data) {
+                (
+                    "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
+                    RepresentationDataRef::DatabaseBlob(bytes),
+                ) if !bytes.is_empty() => Ok(Some(build_dibv5_payload(bytes)?)),
+                _ => Ok(None),
+            })
+            .collect()
+    }
+
+    pub(super) fn write_multi_rep(
+        reps: &[StoredClipboardRepresentation],
+        dibv5: &[Option<Vec<u8>>],
+    ) -> Result<()> {
+        let handles = prepare_handles_for_reps(reps, dibv5)?;
         if handles.is_empty() {
             // Caller pre-scanned; reaching this branch means every rep
             // dropped through to `_ => {}` between the pre-scan and now,
@@ -903,11 +1089,13 @@ mod win {
     /// occurrence wins, subsequent duplicates are freed in place.
     fn prepare_handles_for_reps(
         reps: &[StoredClipboardRepresentation],
+        dibv5: &[Option<Vec<u8>>],
     ) -> Result<Vec<(u32, HANDLE)>> {
         let mut acquired: Vec<(u32, HANDLE)> = Vec::new();
         let result = (|| -> Result<()> {
-            for rep in reps {
-                prepare_one_rep(rep, &mut acquired)?;
+            for (index, rep) in reps.iter().enumerate() {
+                let rendered = dibv5.get(index).and_then(Option::as_deref);
+                prepare_one_rep(rep, rendered, &mut acquired)?;
             }
             Ok(())
         })();
@@ -931,6 +1119,7 @@ mod win {
     /// would win, leaking the first allocation).
     fn prepare_one_rep(
         rep: &StoredClipboardRepresentation,
+        rendered_dibv5: Option<&[u8]>,
         acquired: &mut Vec<(u32, HANDLE)>,
     ) -> Result<()> {
         match (rep.mime_type.as_str(), &rep.data) {
@@ -961,11 +1150,18 @@ mod win {
                 if bytes.is_empty() {
                     return Ok(());
                 }
-                // Decode once so both the "PNG" registered format (raw
-                // PNG) and the `CF_DIBV5` companion (encoded BGRA
-                // bottom-up) come from the same source.
-                let dibv5 = build_dibv5_payload(bytes)?;
-                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(&dibv5)?);
+                // The `CF_DIBV5` companion (BGRA bottom-up) was decoded
+                // up-front by `render_dibv5_payloads`; the registered "PNG"
+                // format ships the raw PNG bytes as-is. A non-empty image rep
+                // always has a `Some` slot, so a `None` here means the render
+                // / publish slices fell out of sync — fail loudly rather than
+                // silently drop the image.
+                let dibv5 = rendered_dibv5.ok_or_else(|| {
+                    AppError::Platform(
+                        "missing pre-rendered CF_DIBV5 payload for image/png rep".to_owned(),
+                    )
+                })?;
+                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(dibv5)?);
                 if let Some(png_id) = register_format("PNG") {
                     push_handle(acquired, png_id, prepare_byte_buffer(bytes)?);
                 }
@@ -979,11 +1175,16 @@ mod win {
                 }
                 // Non-PNG image formats lack a stable registered
                 // clipboard format on Windows, so we only publish a
-                // `CF_DIBV5` rendering. The pixel data is the decoded
+                // `CF_DIBV5` rendering — pre-decoded by
+                // `render_dibv5_payloads`. The pixel data is the decoded
                 // source, which is what Word / Paint pull from
                 // `CF_DIBV5` anyway.
-                let dibv5 = build_dibv5_payload(bytes)?;
-                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(&dibv5)?);
+                let dibv5 = rendered_dibv5.ok_or_else(|| {
+                    AppError::Platform(
+                        "missing pre-rendered CF_DIBV5 payload for image rep".to_owned(),
+                    )
+                })?;
+                push_handle(acquired, u32::from(CF_DIBV5), prepare_byte_buffer(dibv5)?);
             }
             ("text/uri-list", RepresentationDataRef::FilePaths(paths)) if !paths.is_empty() => {
                 push_handle(acquired, u32::from(CF_HDROP), prepare_cf_hdrop(paths)?);
