@@ -253,6 +253,15 @@ impl SensitivityClassifier {
     /// overwrite the preview with `classification.redacted_preview` before
     /// calling this, but a caller that invokes `apply_secret_handling` directly
     /// must not be able to persist a raw-secret preview under either policy.
+    ///
+    /// For the same reason, both persisting policies drop
+    /// `pending_representations` and realign `representation_set_hash` to the
+    /// (possibly redacted) primary content hash. The capture pipeline collects
+    /// the source's HTML / RTF / plain alternatives there verbatim, so a
+    /// `classify` that flagged the entry Secret because of a markup
+    /// alternative would otherwise leave the raw secret in a side
+    /// representation that `insert_pending_representations` persists — defeating
+    /// the redaction the primary body just went through.
     pub fn apply_secret_handling(
         &self,
         entry: &mut ClipboardEntry,
@@ -262,7 +271,7 @@ impl SensitivityClassifier {
             return SecretAction::Persist;
         }
         match handling {
-            SecretHandling::Block => SecretAction::Drop,
+            SecretHandling::Block => return SecretAction::Drop,
             SecretHandling::StoreFull => {
                 // Keep the raw body (the user opted in) but scrub the preview
                 // so the default DTO path — which shows the preview while
@@ -270,7 +279,6 @@ impl SensitivityClassifier {
                 // raw secret.
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
                 entry.search.preview = make_preview(&self.redact(&raw), 180);
-                SecretAction::Persist
             }
             SecretHandling::StoreRedacted => {
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
@@ -287,9 +295,16 @@ impl SensitivityClassifier {
                     .map(ToOwned::to_owned)
                     .collect();
                 entry.search.normalized_text = redacted_normalized;
-                SecretAction::Persist
             }
         }
+        // Both StoreFull and StoreRedacted fall through here (Block returned
+        // above). The source's HTML / RTF / plain alternatives still hold the
+        // raw secret verbatim — drop them and realign the set hash to the
+        // (now possibly redacted) primary so storage falls back to its
+        // primary-only insert path and no alternative can leak the secret.
+        entry.pending_representations.clear();
+        entry.metadata.representation_set_hash = Some(entry.metadata.content_hash.clone());
+        SecretAction::Persist
     }
 }
 
@@ -1163,6 +1178,104 @@ mod tests {
             entry.search.preview,
         );
         assert!(entry.search.preview.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn apply_secret_handling_store_redacted_scrubs_alternative_representations() {
+        // The capture pipeline persists a snapshot's HTML / RTF / plain
+        // alternatives in `pending_representations` verbatim. A redaction that
+        // only rewrote the primary body would leave the raw secret in those
+        // side reps, and `insert_pending_representations` would persist it —
+        // re-creating the leak the primary redaction just closed. The fix
+        // makes `apply_secret_handling` self-contained: it drops the
+        // alternatives and realigns `representation_set_hash` so a caller that
+        // doesn't go through the daemon capture loop still can't leak.
+        use crate::{RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation};
+
+        let secret = "token = ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let mut entry = EntryFactory::from_text(secret);
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText(secret.to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(format!("<p>{secret}</p>")),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/rtf".to_owned(),
+                ordinal: 2,
+                data: RepresentationDataRef::InlineText(format!("{{\\rtf1\\ansi {secret}}}")),
+            },
+        ];
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        entry.sensitivity = classifier.classify(&entry).sensitivity;
+        assert_eq!(entry.sensitivity, Sensitivity::Secret);
+
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+        assert_eq!(action, SecretAction::Persist);
+
+        // No alternative may survive to reach `entry_representations`.
+        assert!(
+            entry.pending_representations.is_empty(),
+            "raw-secret alternatives must be dropped, got: {:?}",
+            entry.pending_representations,
+        );
+        // The set hash must track the redacted primary (so storage falls back
+        // to its primary-only insert path), not the stale raw-rep hash.
+        assert_eq!(
+            entry.metadata.representation_set_hash.as_ref(),
+            Some(&entry.metadata.content_hash),
+            "representation_set_hash must realign to the redacted primary content hash",
+        );
+    }
+
+    #[test]
+    fn apply_secret_handling_store_full_also_drops_alternatives() {
+        // StoreFull keeps the raw *primary* body (the explicit opt-in) but
+        // must still drop the duplicate HTML / RTF / plain alternatives: they
+        // are extra raw copies the user didn't separately consent to persist,
+        // and keeping them widens the at-rest footprint of the secret.
+        use crate::{RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation};
+
+        let secret = "token = ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let mut entry = EntryFactory::from_text(secret);
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText(secret.to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(format!("<p>{secret}</p>")),
+            },
+        ];
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        entry.sensitivity = classifier.classify(&entry).sensitivity;
+        assert_eq!(entry.sensitivity, Sensitivity::Secret);
+
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreFull);
+        assert_eq!(action, SecretAction::Persist);
+        // Raw primary body is retained...
+        assert_eq!(entry.plain_text(), Some(secret));
+        // ...but the alternatives are dropped and the set hash realigned.
+        assert!(entry.pending_representations.is_empty());
+        assert_eq!(
+            entry.metadata.representation_set_hash.as_ref(),
+            Some(&entry.metadata.content_hash),
+        );
     }
 
     #[test]

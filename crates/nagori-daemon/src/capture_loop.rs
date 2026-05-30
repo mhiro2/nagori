@@ -787,19 +787,10 @@ where
             return Ok(None);
         }
 
-        // A Secret entry may have been kept (StoreFull) or had its primary
-        // body rewritten in place (StoreRedacted). Either way the original
-        // HTML / RTF / plain alternatives `from_snapshot` collected still
-        // hold the raw secret — persisting them would defeat redaction and
-        // recreate the leak. Drop the side reps and align the set hash with
-        // the primary's content hash so the storage layer falls back to its
-        // primary-only insert path.
-        if matches!(entry.sensitivity, Sensitivity::Secret)
-            && !entry.pending_representations.is_empty()
-        {
-            entry.pending_representations.clear();
-            entry.metadata.representation_set_hash = Some(entry.metadata.content_hash.clone());
-        }
+        // Secret entries had their `pending_representations` dropped (and the
+        // set hash realigned to the primary) inside `apply_secret_handling`,
+        // so the source's HTML / RTF / plain alternatives can no longer leak
+        // the raw secret here. Non-secret entries keep their alternatives.
 
         // Enforce the user's `max_entry_size_bytes` budget across the full
         // representation set, not just the primary. The pre-classify guard
