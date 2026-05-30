@@ -331,7 +331,7 @@ impl SqliteStore {
         let dimension = i64::try_from(query.len()).unwrap_or(i64::MAX);
         let blob = vector_to_blob(&query);
         let limit = i64::try_from(limit.clamp(1, super::MAX_READ_LIMIT)).unwrap_or(200);
-        let filter = build_filter_fragment(&filters);
+        let filter = build_filter_fragment(&filters)?;
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             // The `em.dimension = ?` guard keeps `vec_distance_cosine` from

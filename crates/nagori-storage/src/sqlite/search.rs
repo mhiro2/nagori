@@ -10,10 +10,9 @@ use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
 };
 use rusqlite::{Connection, ToSql, params};
-use time::format_description::well_known::Rfc3339;
 
 use super::SqliteStore;
-use super::convert::{fts_query, kind_to_str, row_to_entry, storage_err};
+use super::convert::{format_time, fts_query, kind_to_str, row_to_entry, storage_err};
 
 impl SqliteStore {
     /// Convenience wrapper that runs a [`SearchQuery`] through the canonical
@@ -83,7 +82,7 @@ impl SearchCandidateProvider for SqliteStore {
         order: RecentOrder,
         limit: usize,
     ) -> Result<Vec<ClipboardEntry>> {
-        let filter = build_filter_fragment(filters);
+        let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
@@ -99,7 +98,7 @@ impl SearchCandidateProvider for SqliteStore {
         limit: usize,
         bounded: bool,
     ) -> Result<Vec<ClipboardEntry>> {
-        let filter = build_filter_fragment(filters);
+        let filter = build_filter_fragment(filters)?;
         let like = format!("%{}%", escape_like(normalized));
         let limit_i64 = clamp_limit(limit);
         let scan_window = SUBSTRING_SCAN_WINDOW;
@@ -181,7 +180,7 @@ impl SearchCandidateProvider for SqliteStore {
         if fts.is_empty() {
             return Ok(Vec::new());
         }
-        let filter = build_filter_fragment(filters);
+        let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
@@ -240,7 +239,7 @@ impl SearchCandidateProvider for SqliteStore {
         if query_grams.is_empty() || !(has_cjk(normalized) || normalized.chars().count() <= 8) {
             return Ok(Vec::new());
         }
-        let filter = build_filter_fragment(filters);
+        let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
@@ -443,7 +442,7 @@ pub(super) struct FilterFragment {
     pub(super) params: Vec<Box<dyn ToSql + Send + Sync>>,
 }
 
-pub(super) fn build_filter_fragment(filters: &SearchFilters) -> FilterFragment {
+pub(super) fn build_filter_fragment(filters: &SearchFilters) -> Result<FilterFragment> {
     let mut fragment = FilterFragment::default();
     if !filters.kinds.is_empty() {
         let placeholders = std::iter::repeat_n("?", filters.kinds.len())
@@ -467,16 +466,17 @@ pub(super) fn build_filter_fragment(filters: &SearchFilters) -> FilterFragment {
         fragment.params.push(Box::new(source.clone()));
     }
     if let Some(after) = filters.created_after {
+        // Bind the RFC 3339 rendering, not an `unwrap_or_default()` empty
+        // string: `e.created_at >= ''` is always true, so a format failure
+        // would silently disable the lower bound instead of surfacing. The
+        // format is effectively infallible, but `format_time` returns the
+        // failure as a storage error so the filter never degrades to a no-op.
         fragment.sql.push_str(" AND e.created_at >= ?");
-        fragment
-            .params
-            .push(Box::new(after.format(&Rfc3339).unwrap_or_default()));
+        fragment.params.push(Box::new(format_time(after)?));
     }
     if let Some(before) = filters.created_before {
         fragment.sql.push_str(" AND e.created_at <= ?");
-        fragment
-            .params
-            .push(Box::new(before.format(&Rfc3339).unwrap_or_default()));
+        fragment.params.push(Box::new(format_time(before)?));
     }
-    fragment
+    Ok(fragment)
 }
