@@ -1,5 +1,5 @@
 import { cleanup, render, within } from '@testing-library/svelte';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { SearchResultDto } from '../lib/types';
 import ResultList from './ResultList.svelte';
@@ -84,5 +84,55 @@ describe('ResultList', () => {
     expect(getByRole('listbox')).toBeTruthy();
     const options = getAllByRole('option');
     expect(options.map((o) => o.getAttribute('aria-selected'))).toEqual(['false', 'true', 'false']);
+  });
+
+  it('auto-scrolls for navigation and new queries but not same-query refreshes', async () => {
+    const itemsA = [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })];
+    const spy = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const { rerender } = render(ResultList, {
+      props: {
+        items: itemsA,
+        selectedIndex: 0,
+        appliedQuery: 'q',
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    // Initial mount reads as a new query (undefined -> 'q'); ignore that run.
+    spy.mockClear();
+
+    // Navigation: same array reference, the cursor moved -> keep it visible.
+    await rerender({
+      items: itemsA,
+      selectedIndex: 2,
+      appliedQuery: 'q',
+      onSelect: () => {},
+      onConfirm: () => {},
+    });
+    expect(spy).toHaveBeenCalled();
+    spy.mockClear();
+
+    // Same-query refresh (pin/delete/clipboard): the array is replaced and the
+    // cursor reset, but the query is unchanged -> leave the scroll position.
+    await rerender({
+      items: [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })],
+      selectedIndex: 0,
+      appliedQuery: 'q',
+      onSelect: () => {},
+      onConfirm: () => {},
+    });
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockClear();
+
+    // New query: jump to the top of the fresh result set.
+    await rerender({
+      items: [sample({ id: 'x' })],
+      selectedIndex: 0,
+      appliedQuery: 'qq',
+      onSelect: () => {},
+      onConfirm: () => {},
+    });
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

@@ -11,6 +11,7 @@ export const ko: Messages = {
     hints: {
       navigate: '이동',
       paste: '붙여넣기',
+      pin: '고정',
       actions: '동작',
       settings: '설정',
     },

@@ -15,6 +15,14 @@
     loading: boolean;
     errorMessage: string | undefined;
     selectedCount?: number;
+    // Toggles the pin state of the current selection. When provided, the ⌘P
+    // hint becomes a button so pinning is reachable (and discoverable) by
+    // mouse, not only via the keyboard shortcut.
+    onTogglePin?: () => void;
+    // Accelerator string for the pin hint (wire format, e.g. `CmdOrCtrl+P`).
+    // Threaded from the palette so a user remap of `paletteHotkeys.pin` shows
+    // the real key; defaults to ⌘P / Ctrl+P.
+    pinAccelerator?: string;
     // Opens the action inspector. When provided, the ⌘K hint becomes a button
     // so the actions are reachable by mouse, not only the keyboard shortcut.
     onOpenActions?: () => void;
@@ -30,6 +38,8 @@
     loading,
     errorMessage,
     selectedCount = 0,
+    onTogglePin,
+    pinAccelerator = 'CmdOrCtrl+P',
     onOpenActions,
     onOpenSettings,
   }: Props = $props();
@@ -43,6 +53,7 @@
   const platform = $derived(capabilitiesState.capabilities?.platform);
   const hintActions = $derived(formatAccelerator('CmdOrCtrl+K', platform));
   const hintSettings = $derived(formatAccelerator('CmdOrCtrl+,', platform));
+  const hintPin = $derived(formatAccelerator(pinAccelerator, platform));
 
   // Outside Tauri there's no settings store to read from (refreshSettings
   // only flips `loaded`), so `localCapture` lets the demo chip still reflect
@@ -170,6 +181,27 @@
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}
+        {#if onTogglePin}
+          <button
+            type="button"
+            class="hint-button"
+            data-testid="status-toggle-pin"
+            aria-label={t.palette.hints.pin}
+            onclick={onTogglePin}
+            onkeydown={(event) => {
+              // The palette's keydown handler lives on `window`, so an Enter/Space
+              // press while this button has focus would bubble up and be read as
+              // `confirm` (paste) on top of the button's own activation. Keep the
+              // activation keys local to the button; arrows/Escape still bubble
+              // for global navigation.
+              if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+            }}
+          >
+            <kbd>{hintPin}</kbd>{t.palette.hints.pin}
+          </button>
+        {:else}
+          <kbd>{hintPin}</kbd>{t.palette.hints.pin}
+        {/if}
         {#if onOpenActions}
           <button
             type="button"

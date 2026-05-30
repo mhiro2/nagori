@@ -11,6 +11,7 @@ export const ja: Messages = {
     hints: {
       navigate: '選択',
       paste: 'ペースト',
+      pin: 'ピン留め',
       actions: 'アクション',
       settings: '設定',
     },

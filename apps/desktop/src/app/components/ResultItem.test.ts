@@ -54,6 +54,26 @@ describe('ResultItem', () => {
     expect(onSelect).toHaveBeenCalledWith(3);
   });
 
+  it('also selects the row when the cursor enters the pin column', async () => {
+    // The pin button is a sibling of the row button, so without its own
+    // mouse-enter, hovering the pin column would not select the row — leaving
+    // the pin reveal keyed off a different (or no) selected row.
+    const onSelect = vi.fn();
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ id: 'a' }),
+        index: 6,
+        selected: false,
+        onSelect,
+        onConfirm: () => {},
+      },
+    });
+    const toggle = container.querySelector('.pin-toggle');
+    expect(toggle).toBeTruthy();
+    await fireEvent.mouseEnter(toggle as Element);
+    expect(onSelect).toHaveBeenCalledWith(6);
+  });
+
   it('renders a domain + path split for url-kind entries', () => {
     const { getByText, container } = render(ResultItem, {
       props: {
@@ -112,7 +132,7 @@ describe('ResultItem', () => {
     expect(getByText('Secret')).toBeTruthy();
   });
 
-  it('renders a pin icon for pinned entries', () => {
+  it('marks the pin toggle active and pressed for pinned entries', () => {
     const { container } = render(ResultItem, {
       props: {
         item: sample({ pinned: true }),
@@ -122,7 +142,31 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    expect(container.querySelector('.pin[aria-label="pinned"]')).toBeTruthy();
+    const toggle = container.querySelector('.pin-toggle');
+    expect(toggle?.classList.contains('active')).toBe(true);
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('forwards onTogglePin with the row index without confirming the row', async () => {
+    const onTogglePin = vi.fn();
+    const onConfirm = vi.fn();
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 4,
+        selected: true,
+        onSelect: () => {},
+        onConfirm,
+        onTogglePin,
+      },
+    });
+    const toggle = container.querySelector('.pin-toggle');
+    expect(toggle).toBeTruthy();
+    await fireEvent.click(toggle as Element);
+    expect(onTogglePin).toHaveBeenCalledWith(4);
+    // The pin button is a sibling of the row button, so toggling pin must not
+    // also fire the row's paste/confirm path.
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it('applies the .selected class when selected is true', () => {

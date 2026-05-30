@@ -17,6 +17,7 @@
     deleteMultiSelection,
     deleteSelection,
     previewSelection,
+    togglePinAt,
     togglePinSelection,
   } from '../stores/searchActions';
   import {
@@ -157,6 +158,20 @@
   const handleSelect = (index: number): void => {
     selectByIndex(index);
   };
+
+  // The per-row pin button toggles whichever row was clicked, independent of
+  // the keyboard selection (so pinning row 5 doesn't move focus off row 2's
+  // preview). The footer hint, by contrast, acts on the current selection via
+  // `togglePinSelection`.
+  const handleTogglePin = (index: number): void => {
+    void togglePinAt(index);
+  };
+
+  // Accelerator shown on the status-bar pin hint. Pin is the one hint action
+  // users can remap (`paletteHotkeys.pin`), so reflect the override when set
+  // and otherwise fall back to the default ⌘P / Ctrl+P (its `CmdOrCtrl+P` wire
+  // form, which `formatAccelerator` renders per platform).
+  const pinAccelerator = $derived(settingsState.settings?.paletteHotkeys?.pin ?? 'CmdOrCtrl+P');
 
   const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
@@ -317,9 +332,11 @@
       <ResultList
         items={searchState.results}
         selectedIndex={searchState.selectedIndex}
+        appliedQuery={searchState.appliedQuery}
         multiSelected={multiSelectState.selected}
         onSelect={handleSelect}
         onConfirm={handleConfirm}
+        onTogglePin={handleTogglePin}
       />
     {/if}
     <!-- Right column. The inspector wins the slot whenever it is open; the
@@ -353,6 +370,8 @@
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}
+    {pinAccelerator}
+    onTogglePin={() => void togglePinSelection()}
     onOpenActions={openActions}
     onOpenSettings={openSettings}
   />

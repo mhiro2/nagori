@@ -66,9 +66,20 @@
     index: number;
     onSelect: (index: number) => void;
     onConfirm: (index: number, event?: MouseEvent) => void;
+    // `| undefined` is explicit so ResultList can forward its own optional
+    // prop straight through under `exactOptionalPropertyTypes`.
+    onTogglePin?: ((index: number) => void) | undefined;
   };
 
-  const { item, selected, marked = false, index, onSelect, onConfirm }: Props = $props();
+  const {
+    item,
+    selected,
+    marked = false,
+    index,
+    onSelect,
+    onConfirm,
+    onTogglePin = () => {},
+  }: Props = $props();
 
   const t = $derived(messages());
   const previewText = $derived(truncatePreview(collapseWhitespace(item.preview)));
@@ -78,52 +89,84 @@
   const repBadge = $derived(formatRepresentationBadge(item.representationSummary));
 </script>
 
-<button
-  type="button"
-  class="result-item"
-  class:selected
-  class:marked
-  role="option"
-  aria-selected={selected}
-  data-kind={item.kind}
-  data-sensitivity={item.sensitivity}
-  onmouseenter={() => onSelect(index)}
-  onclick={(event) => onConfirm(index, event)}
->
-  <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
-  <span class="kind-badge" aria-hidden="true">{badge(item.kind)}</span>
+<div class="result-row" class:selected>
+  <button
+    type="button"
+    class="result-item"
+    class:selected
+    class:marked
+    role="option"
+    aria-selected={selected}
+    data-kind={item.kind}
+    data-sensitivity={item.sensitivity}
+    onmouseenter={() => onSelect(index)}
+    onclick={(event) => onConfirm(index, event)}
+  >
+    <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
+    <span class="kind-badge" aria-hidden="true">{badge(item.kind)}</span>
 
-  {#if url}
-    <span class="preview url">
-      <span class="domain">{url.host}</span>
-      <span class="path">{url.pathname}{url.search}</span>
-    </span>
-  {:else if item.kind === 'code'}
-    <span class="preview code">
-      {#if codeLang}<span class="lang-badge">{codeLang}</span>{/if}
-      <code>{previewText}</code>
-    </span>
-  {:else}
-    <span class="preview">{previewText}</span>
-  {/if}
-
-  <span class="meta">
-    {#if repBadge}<span class="rep-badge" title={t.preview.fields.formats}>{repBadge}</span>{/if}
-    {#if item.pinned}<span class="pin" aria-label="pinned">📌</span>{/if}
-    {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-      <span class="sens">{item.sensitivity}</span>
+    {#if url}
+      <span class="preview url">
+        <span class="domain">{url.host}</span>
+        <span class="path">{url.pathname}{url.search}</span>
+      </span>
+    {:else if item.kind === 'code'}
+      <span class="preview code">
+        {#if codeLang}<span class="lang-badge">{codeLang}</span>{/if}
+        <code>{previewText}</code>
+      </span>
+    {:else}
+      <span class="preview">{previewText}</span>
     {/if}
-    {#if item.sourceAppName}<span class="source">{item.sourceAppName}</span>{/if}
-    <span class="time">{timeLabel}</span>
-  </span>
-</button>
+
+    <span class="meta">
+      {#if repBadge}<span class="rep-badge" title={t.preview.fields.formats}>{repBadge}</span>{/if}
+      {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
+        <span class="sens">{item.sensitivity}</span>
+      {/if}
+      {#if item.sourceAppName}<span class="source">{item.sourceAppName}</span>{/if}
+      <span class="time">{timeLabel}</span>
+    </span>
+  </button>
+
+  <!-- Dedicated trailing pin column. A sibling of the row button rather than a
+       child so it stays a real <button> (no button-in-button), and clicking it
+       toggles the pin without bubbling into the row's paste handler. Hidden
+       until the row is hovered/selected (hover selects the row via the button's
+       onmouseenter), shown solid once pinned — so the affordance is discoverable
+       by mouse, not only via the ⌘P shortcut. -->
+  <button
+    type="button"
+    class="pin-toggle"
+    class:active={item.pinned}
+    class:visible={selected && !item.pinned}
+    tabindex="-1"
+    aria-pressed={item.pinned}
+    aria-label={t.keybindings.togglePin}
+    title={t.keybindings.togglePin}
+    onmouseenter={() => onSelect(index)}
+    onclick={() => onTogglePin(index)}>📌</button
+  >
+</div>
 
 <style>
+  /* The row is a flex container so the pin toggle can sit in its own trailing
+     column; the selection highlight lives here (not on the button) so it spans
+     the pin column too and the row reads as one continuous selected band. */
+  .result-row {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+  }
+  .result-row.selected {
+    background: var(--bg-selected, rgba(120, 160, 255, 0.18));
+  }
   .result-item {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
     padding: 0.5rem 1rem;
     border: none;
     background: transparent;
@@ -132,11 +175,46 @@
     text-align: left;
     cursor: pointer;
   }
-  .result-item.selected {
-    background: var(--bg-selected, rgba(120, 160, 255, 0.18));
-  }
   .result-item.marked {
     box-shadow: inset 3px 0 0 var(--accent, #6c8dff);
+  }
+  /* Trailing pin affordance. Opacity is driven purely by reactive state, never
+     by a bare `:hover`: only the selected row (a single row at any time, since
+     hovering any part of a row — pin column included — selects it) shows its
+     pin. A bare `.pin-toggle:hover` would reveal *hidden* rows' pins, and a
+     stale `:hover` (WKWebView drops mouseleave on fast vertical moves) would
+     leave several stuck solid at once. Scoping the hover bump to `.visible`
+     means a hidden pin can never be lit by hover, so the reactive class is
+     always the source of truth. Width is reserved unconditionally so revealing
+     the ghost never shifts the row's layout. */
+  .pin-toggle {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 0.9rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s ease;
+  }
+  .pin-toggle.visible {
+    opacity: 0.45;
+  }
+  .pin-toggle.active {
+    opacity: 1;
+  }
+  /* Direct hover on the selected row's ghost pin commits it to full opacity as
+     a "you're about to click this" cue. Gated on `.visible` so it can only
+     ever brighten the one pin that is already showing. */
+  .pin-toggle.visible:hover {
+    opacity: 1;
   }
   .multi-mark {
     flex: none;

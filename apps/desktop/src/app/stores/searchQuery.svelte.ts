@@ -28,6 +28,13 @@ const fallbackFixture = (): SearchResultDto[] => [
 
 type SearchState = {
   query: string;
+  // The query that the entries currently in `results` were produced for. Unlike
+  // `query` (which `scheduleQuery` updates on the keystroke, before the debounced
+  // search runs), this only changes when a result set is actually applied — so
+  // consumers can tell a genuinely new search (scroll the list to the top) from
+  // a same-query refresh such as a pin toggle, delete, or clipboard capture
+  // (leave the scroll position alone) without racing the debounce.
+  appliedQuery: string;
   results: SearchResultDto[];
   selectedIndex: number;
   loading: boolean;
@@ -37,6 +44,7 @@ type SearchState = {
 
 export const searchState = $state<SearchState>({
   query: '',
+  appliedQuery: '',
   results: [],
   selectedIndex: 0,
   loading: false,
@@ -74,6 +82,7 @@ const runSearch = async (request: SearchRequest): Promise<void> => {
     });
     if (ticket !== inflight) return;
     searchState.results = response.results;
+    searchState.appliedQuery = request.query;
     searchState.selectedIndex = 0;
     searchState.lastElapsedMs = response.elapsedMs;
     reconcileMultiSelect(response.results.map((r) => r.id));
@@ -88,6 +97,7 @@ const runSearch = async (request: SearchRequest): Promise<void> => {
 export const refreshRecent = async (): Promise<void> => {
   if (!isTauri()) {
     searchState.results = fallbackFixture();
+    searchState.appliedQuery = '';
     searchState.selectedIndex = 0;
     reconcileMultiSelect(searchState.results.map((r) => r.id));
     return;
@@ -140,6 +150,7 @@ export const runQuery = async (raw: string): Promise<void> => {
   if (!isTauri()) {
     const lower = raw.toLowerCase();
     searchState.results = fallbackFixture().filter((r) => r.preview.toLowerCase().includes(lower));
+    searchState.appliedQuery = raw;
     searchState.selectedIndex = 0;
     reconcileMultiSelect(searchState.results.map((r) => r.id));
     return;

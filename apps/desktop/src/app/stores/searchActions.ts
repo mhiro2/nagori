@@ -52,9 +52,13 @@ export const copySelection = async (): Promise<void> => {
   }
 };
 
-export const togglePinSelection = async (): Promise<void> => {
-  const target = currentSelection();
-  if (!target || !isTauri()) return;
+// Flip the pin flag on a single row and refresh so the new pin ordering
+// lands. Shared by the keyboard/footer path (`togglePinSelection`, which
+// acts on the highlighted row) and the per-row pin button
+// (`togglePinAt`, which acts on whichever row was clicked regardless of
+// the current keyboard selection). On failure we surface the error and
+// skip the refresh so the row keeps its old state.
+const applyPinToggle = async (target: { id: string; pinned: boolean }): Promise<void> => {
   try {
     await pinEntryCmd(target.id, !target.pinned);
   } catch (err) {
@@ -62,6 +66,28 @@ export const togglePinSelection = async (): Promise<void> => {
     return;
   }
   await runQuery(searchState.query);
+  // `runQuery` snaps the cursor back to index 0, which would yank the selection
+  // onto the newest entry after every pin — jarring and making repeated
+  // toggling on one row impossible. Re-anchor to the entry we just toggled by
+  // id so the cursor stays on it (or follows it to its new slot when a
+  // pinned-first ordering floats it up). If the entry dropped out of the list
+  // (e.g. unpinning under the Pinned filter), leave the index where the refresh
+  // left it. ResultList leaves the scroll position alone on this same-query
+  // refresh, so the viewport doesn't jump.
+  const anchored = searchState.results.findIndex((r) => r.id === target.id);
+  if (anchored >= 0) searchState.selectedIndex = anchored;
+};
+
+export const togglePinSelection = async (): Promise<void> => {
+  const target = currentSelection();
+  if (!target || !isTauri()) return;
+  await applyPinToggle(target);
+};
+
+export const togglePinAt = async (index: number): Promise<void> => {
+  const target = searchState.results[index];
+  if (!target || !isTauri()) return;
+  await applyPinToggle(target);
 };
 
 export const deleteSelection = async (): Promise<void> => {

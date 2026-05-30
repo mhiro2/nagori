@@ -64,6 +64,7 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   cancelPendingQuery: vi.fn(),
   searchState: {
     query: '',
+    appliedQuery: '',
     results: [],
     selectedIndex: 0,
     loading: false,

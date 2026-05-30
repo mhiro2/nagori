@@ -201,6 +201,57 @@ describe('StatusBar', () => {
     expect(await findByText(/Capture paused/i)).toBeTruthy();
   });
 
+  it('renders the pin hint as a button that toggles the selection when wired', async () => {
+    const onTogglePin = vi.fn();
+    const { getByTestId } = render(StatusBar, {
+      props: {
+        entryCount: 3,
+        elapsedMs: undefined,
+        loading: false,
+        errorMessage: undefined,
+        onTogglePin,
+      },
+    });
+    await fireEvent.click(getByTestId('status-toggle-pin'));
+    expect(onTogglePin).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Enter on the pin hint from bubbling to the window key handler', async () => {
+    // The palette's keydown handler is on `window`; Enter on a focused footer
+    // button must not bubble there or it would paste on top of the button's
+    // own activation. Arrows still bubble for global list navigation.
+    const windowKeydown = vi.fn();
+    window.addEventListener('keydown', windowKeydown);
+    try {
+      const { getByTestId } = render(StatusBar, {
+        props: {
+          entryCount: 1,
+          elapsedMs: undefined,
+          loading: false,
+          errorMessage: undefined,
+          onTogglePin: vi.fn(),
+        },
+      });
+      const button = getByTestId('status-toggle-pin');
+      await fireEvent.keyDown(button, { key: 'Enter' });
+      expect(windowKeydown).not.toHaveBeenCalled();
+      await fireEvent.keyDown(button, { key: 'ArrowDown' });
+      expect(windowKeydown).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('keydown', windowKeydown);
+    }
+  });
+
+  it('renders the pin hint as static text when no toggle handler is provided', () => {
+    const { queryByTestId, container } = render(StatusBar, {
+      props: { entryCount: 3, elapsedMs: undefined, loading: false, errorMessage: undefined },
+    });
+    expect(queryByTestId('status-toggle-pin')).toBeNull();
+    // The label still shows in the hints strip so the ⌘P shortcut stays
+    // discoverable even without a click handler wired.
+    expect(container.querySelector('.hints')?.textContent).toMatch(/Pin/);
+  });
+
   it('surfaces a toggle failure on the error channel instead of throwing', async () => {
     vi.mocked(getSettings).mockResolvedValue(baseSettings({ captureEnabled: true }));
     vi.mocked(getPermissions).mockResolvedValue([]);

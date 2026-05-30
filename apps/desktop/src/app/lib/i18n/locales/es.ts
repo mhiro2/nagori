@@ -13,6 +13,7 @@ export const es: Messages = {
     hints: {
       navigate: 'Navegar',
       paste: 'Pegar',
+      pin: 'Fijar',
       actions: 'Acciones',
       settings: 'Ajustes',
     },

@@ -11,6 +11,7 @@ export const zhHant: Messages = {
     hints: {
       navigate: '瀏覽',
       paste: '貼上',
+      pin: '釘選',
       actions: '動作',
       settings: '設定',
     },

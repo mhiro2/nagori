@@ -14,6 +14,7 @@ export type Messages = {
     hints: {
       navigate: string;
       paste: string;
+      pin: string;
       actions: string;
       settings: string;
     };
@@ -457,6 +458,7 @@ export const en: Messages = {
     hints: {
       navigate: 'Navigate',
       paste: 'Paste',
+      pin: 'Pin',
       actions: 'Actions',
       settings: 'Settings',
     },

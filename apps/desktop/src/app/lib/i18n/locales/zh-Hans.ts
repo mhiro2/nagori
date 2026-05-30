@@ -11,6 +11,7 @@ export const zhHans: Messages = {
     hints: {
       navigate: '导航',
       paste: '粘贴',
+      pin: '固定',
       actions: '操作',
       settings: '设置',
     },

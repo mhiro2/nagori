@@ -35,6 +35,7 @@ import {
   deleteMultiSelection,
   deleteSelection,
   previewSelection,
+  togglePinAt,
   togglePinSelection,
 } from './searchActions';
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
@@ -111,6 +112,42 @@ describe('togglePinSelection', () => {
     vi.mocked(pinEntry).mockRejectedValue(new Error('pin denied'));
     await togglePinSelection();
     expect(searchState.errorMessage).toBe('pin denied');
+  });
+
+  it('keeps the selection on the toggled entry after the refresh re-sorts', async () => {
+    // 'b' is selected; pinning floats it to the top of the refreshed list.
+    // Without re-anchoring, runQuery would reset the cursor to index 0 and
+    // strand it on whatever now sits there — here it must follow 'b'.
+    searchState.results = [result({ id: 'a' }), result({ id: 'b' })];
+    searchState.selectedIndex = 1;
+    vi.mocked(pinEntry).mockResolvedValue();
+    vi.mocked(searchClipboard).mockResolvedValue({
+      results: [result({ id: 'b', pinned: true }), result({ id: 'a' })],
+      totalCandidates: 2,
+      elapsedMs: 0,
+    });
+    await togglePinSelection();
+    expect(pinEntry).toHaveBeenCalledWith('b', true);
+    expect(searchState.selectedIndex).toBe(0);
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('b');
+  });
+});
+
+describe('togglePinAt', () => {
+  it('flips the pinned flag on the row at the given index, not the selection', async () => {
+    // Selection sits on index 0; togglePinAt targets a different row so the
+    // per-row pin button can act independently of the keyboard cursor.
+    searchState.results = [result({ id: 'a' }), result({ id: 'b', pinned: true })];
+    searchState.selectedIndex = 0;
+    vi.mocked(pinEntry).mockResolvedValue();
+    await togglePinAt(1);
+    expect(pinEntry).toHaveBeenCalledWith('b', false);
+  });
+
+  it('does nothing when the index is out of range', async () => {
+    searchState.results = [result({ id: 'a' })];
+    await togglePinAt(5);
+    expect(pinEntry).not.toHaveBeenCalled();
   });
 });
 
