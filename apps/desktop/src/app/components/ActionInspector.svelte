@@ -28,9 +28,14 @@
     target: SearchResultDto | undefined;
     open: boolean;
     onClose: () => void;
+    // Recognises the `open-actions` chord (Cmd/Ctrl+K, or the user's remap).
+    // The panel swallows its own keydowns while focused, so it needs this to
+    // toggle itself closed on the same chord that opened it. Optional so the
+    // component still renders in isolation (tests/non-Tauri) without it.
+    matchesToggle?: (event: KeyboardEvent) => boolean;
   };
 
-  const { target, open, onClose }: Props = $props();
+  const { target, open, onClose, matchesToggle }: Props = $props();
 
   // Deterministic, on-device transforms. They run synchronously through the
   // daemon and never touch a language model.
@@ -518,6 +523,17 @@
         onEscape();
         return;
       }
+      // The open-actions chord pressed while the inspector holds focus toggles
+      // it closed. Swallow it so the window-level handler can't re-open it on
+      // the same keystroke, and dismiss outright: closing cancels any in-flight
+      // run (via the `open` effect), unlike Escape which only cancels the
+      // stream and keeps the panel up.
+      if (matchesToggle?.(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
       e.stopPropagation();
     }}
   >
@@ -528,15 +544,22 @@
       >
     </header>
 
-    <CompactPreview item={target} />
+    <!-- Everything above the work area is one scroll region. When a run/result
+         claims the panel below, this block yields its space (it shrinks first)
+         and scrolls its own overflow rather than letting the result collapse or
+         the panel clip — the picker stays fully reachable while the result
+         keeps a readable floor. -->
+    <div class="controls">
+      <CompactPreview item={target} compact={phase !== 'idle'} />
 
-    <div class="divider"></div>
+      <div class="divider"></div>
 
-    <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
+      <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
 
-    {#if aiUnavailableReason}
-      <p class="ai-reason">{aiUnavailableReason}</p>
-    {/if}
+      {#if aiUnavailableReason}
+        <p class="ai-reason">{aiUnavailableReason}</p>
+      {/if}
+    </div>
 
     <ActionRunPanel
       {phase}
@@ -573,7 +596,7 @@
   .action-inspector {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.625rem;
     /* Share the palette body with the result list. `flex: 1` splits the width
        with the list; full panel height (vs. the old 80vh modal) is what gives
        long results room to breathe. */
@@ -584,9 +607,20 @@
     border-left: 1px solid var(--border, rgba(255, 255, 255, 0.08));
     background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
     color: var(--fg, #f5f5f5);
-    /* Children scroll their own regions (the result `<pre>` in particular), so
-       the panel frame itself stays put. */
+    /* The two inner regions own their scroll (`.controls` and the result
+       `<pre>`), so the panel frame itself stays put. */
     overflow: hidden;
+  }
+  .controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+    /* Shrinks before the work area does (grow 0, shrink 1) and scrolls its
+       own overflow, so the picker is always reachable without ever stealing
+       the result's room or clipping against the panel edge. */
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
   .action-inspector:focus {
     outline: none;

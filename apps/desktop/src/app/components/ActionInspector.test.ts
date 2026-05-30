@@ -401,6 +401,24 @@ describe('ActionInspector', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('closes via onClose when the open-actions chord is pressed while focused', async () => {
+    // The inspector swallows its own keydowns, so it recognises the same chord
+    // that opened it (via `matchesToggle`) and toggles itself shut.
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const { getByTestId } = render(ActionInspector, {
+      props: {
+        open: true,
+        target: sample(),
+        onClose,
+        matchesToggle: (e: KeyboardEvent) => e.key === 'k' && e.metaKey,
+      },
+    });
+    expect(document.activeElement).toBe(getByTestId('action-inspector'));
+    await user.keyboard('{Meta>}k{/Meta}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('forwards the result body to saveAiResult on save', async () => {
     const user = userEvent.setup();
     vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
