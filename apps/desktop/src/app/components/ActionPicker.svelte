@@ -50,7 +50,7 @@
   .picker {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 0.5rem;
+    gap: 0.4375rem;
   }
   .picker.compact {
     gap: 0.375rem;
@@ -60,12 +60,13 @@
     align-items: center;
     gap: 0.4rem;
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.4375rem 0.625rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
     border-radius: 6px;
     background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
     color: inherit;
     font: inherit;
+    font-size: 0.8125rem;
     text-align: left;
     cursor: pointer;
     transition:
@@ -73,8 +74,7 @@
       border-color 0.12s ease;
   }
   .picker.compact .action {
-    padding: 0.375rem 0.625rem;
-    font-size: 0.8125rem;
+    padding: 0.3125rem 0.5rem;
   }
   .action:hover:not(:disabled) {
     background: color-mix(in srgb, var(--fg, #f5f5f5) 8%, transparent);
@@ -94,6 +94,12 @@
   .label {
     flex: 1;
     min-width: 0;
+    /* Keep every action one line tall so the grid stays dense; a label too
+       long for its half-column (long locales) ellipsizes rather than wrapping
+       into a second row. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .badge {
     flex: none;

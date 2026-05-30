@@ -10,9 +10,12 @@
   // stays visible the instant the menu opens.
   type Props = {
     item: SearchResultDto | undefined;
+    // Trims the snippet from three lines to two once a run/result occupies the
+    // work area below, freeing a little height for the result.
+    compact?: boolean;
   };
 
-  const { item }: Props = $props();
+  const { item, compact = false }: Props = $props();
   const t = $derived(messages());
 
   // Drop the parts the entry doesn't carry (e.g. a clip with no source app)
@@ -33,7 +36,7 @@
         {#if index > 0}<span class="sep" aria-hidden="true">·</span>{/if}<span>{part}</span>
       {/each}
     </p>
-    <p class="snippet">{item.preview}</p>
+    <p class="snippet" class:compact>{item.preview}</p>
   {:else}
     <p class="empty">{t.preview.empty}</p>
   {/if}
@@ -68,6 +71,10 @@
     font-size: 0.8125rem;
     line-height: 1.45;
     overflow-wrap: anywhere;
+  }
+  .snippet.compact {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
   .empty {
     margin: 0;

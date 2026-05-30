@@ -93,9 +93,12 @@
     flex-direction: column;
     gap: 0.5rem;
     /* Grow into the remaining inspector height so a long result fills the
-       panel and scrolls inside the `<pre>` rather than capping early. */
-    flex: 1;
-    min-height: 0;
+       panel and scrolls inside the `<pre>` rather than capping early. The
+       `min-height` floor (with a zero flex-basis) is what protects the result
+       when the panel is cramped: the picker block above shrinks and scrolls
+       first, and the result keeps a readable height instead of collapsing. */
+    flex: 1 1 0;
+    min-height: 8rem;
   }
   .run-head {
     display: flex;
