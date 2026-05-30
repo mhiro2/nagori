@@ -436,6 +436,54 @@ describe('Palette', () => {
     expect(container.querySelector('.preview-pane')).toBeTruthy();
   });
 
+  it('toggles the inspector closed on a second Cmd+K', async () => {
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+    // Same chord again dismisses it (the window handler owns the toggle when
+    // focus is outside the panel).
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
+  });
+
+  it('opens the inspector from the status-bar actions button', async () => {
+    const { container } = render(Palette);
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeNull();
+    const btn = container.querySelector('[data-testid="status-open-actions"]');
+    expect(btn).toBeTruthy();
+    await fireEvent.click(btn as HTMLElement);
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+  });
+
+  it('opens settings from the status-bar settings button', async () => {
+    const { container } = render(Palette);
+    const btn = container.querySelector('[data-testid="status-open-settings"]');
+    expect(btn).toBeTruthy();
+    // Non-Tauri test context falls back to the in-process view toggle.
+    await fireEvent.click(btn as HTMLElement);
+    expect(showSettings).toHaveBeenCalled();
+  });
+
+  it('opens the inspector from the preview-pane actions button', async () => {
+    const item = resultRow('r1', 'snippet');
+    vi.mocked(currentSelection).mockReturnValue(item);
+    searchState.results = [item];
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const btn = container.querySelector('[data-testid="preview-open-actions"]');
+    expect(btn).toBeTruthy();
+    await fireEvent.click(btn as HTMLElement);
+    // The inspector takes the right column and the preview steps aside.
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+    expect(container.querySelector('.preview-pane')).toBeNull();
+  });
+
   it('triggers Quick Look on Cmd+Y when the capability is available', async () => {
     vi.mocked(quickLookAvailable).mockReturnValue(true);
     const { container } = render(Palette);

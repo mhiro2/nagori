@@ -46,6 +46,11 @@
     expandedLoading?: boolean;
     expandedErrorMessage?: string | undefined;
     onExpandBody?: (entryId: string) => void;
+    // Opens the action inspector for the previewed entry. When provided, the
+    // header gains an "Actions" button so the quick actions are reachable by
+    // mouse, not just the keyboard shortcut. Omitted (so the button is hidden)
+    // in contexts that don't host the inspector.
+    onOpenActions?: () => void;
     // Bindable: true while a plain Enter in the expanded preview will open
     // the URL, so the palette can stand down its Enter-to-paste binding and
     // the two handlers don't both fire on the same keystroke.
@@ -61,6 +66,7 @@
     expandedLoading = false,
     expandedErrorMessage = undefined,
     onExpandBody,
+    onOpenActions,
     enterOpensUrl = $bindable(false),
   }: Props = $props();
   const t = $derived(messages());
@@ -214,7 +220,21 @@
   {#if item}
     <header class="head">
       <span class="kind">{preview?.title ?? item.kind}</span>
-      <span class="time">{formatRelativeTime(item.createdAt)}</span>
+      <span class="head-right">
+        {#if onOpenActions}
+          <button
+            type="button"
+            class="actions"
+            data-testid="preview-open-actions"
+            aria-label={t.actionMenu.title}
+            title={t.actionMenu.title}
+            onclick={onOpenActions}
+          >
+            {t.palette.hints.actions}
+          </button>
+        {/if}
+        <span class="time">{formatRelativeTime(item.createdAt)}</span>
+      </span>
     </header>
     {#if item.kind !== 'url'}
       <!-- Reserve the chip's line whenever the kind will carry one (every
@@ -354,10 +374,39 @@
   .head {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
+  }
+  .head-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .actions {
+    /* A mouse path to the inspector that mirrors the ⌘K shortcut. Sits in the
+       uppercase head row but renders as a normal-case pill so it reads as an
+       affordance, not a label. */
+    padding: 0.1rem 0.5rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font: inherit;
+    font-size: 0.75rem;
+    text-transform: none;
+    letter-spacing: 0;
+    cursor: pointer;
+  }
+  .actions:hover {
+    background: color-mix(in srgb, var(--fg, #f5f5f5) 8%, transparent);
+    color: var(--fg, #f5f5f5);
+  }
+  .actions:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
   }
   .summary {
     margin: 0;

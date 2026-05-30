@@ -176,6 +176,32 @@
   // a single Enter doesn't both open the URL and paste the entry.
   let previewEnterOpensUrl = $state(false);
 
+  // The single entry point that docks the inspector — shared by the keyboard
+  // chord and the mouse affordances (the preview-pane header button and the
+  // status-bar hint). Collapse the full-width preview first: the inspector
+  // docks into the right column and the two would otherwise fight over it.
+  const openActions = (): void => {
+    previewExpanded = false;
+    actionsOpen = true;
+  };
+
+  // True when an event resolves to the `open-actions` chord. The inspector
+  // owns the keyboard while focused (it stops its keydowns reaching this
+  // window handler), so it uses this predicate to recognise the same chord
+  // and toggle itself closed — honouring user remaps without hard-coding Cmd+K.
+  const matchesActionsToggle = (event: KeyboardEvent): boolean =>
+    resolveAction(event, paletteBindings) === 'open-actions';
+
+  // Shared by the `open-settings` chord and the status-bar hint so the click
+  // and the keystroke open the same surface. Settings is a separate native
+  // window under Tauri (own decorations, no always-on-top); fall back to the
+  // in-process viewState toggle in non-Tauri dev/test contexts so the unit
+  // tests that spy on `showSettings` still pass.
+  const openSettings = (): void => {
+    if (isTauri()) void openSettingsWindow();
+    else showSettings();
+  };
+
   const handleKeydown = (event: KeyboardEvent): void => {
     const action = resolveAction(event, paletteBindings);
     if (!action) return;
@@ -211,10 +237,13 @@
         else void copySelection();
         break;
       case 'open-actions':
-        // Collapse the full-width preview first: the inspector docks into the
-        // right column and the two would otherwise fight over it.
-        previewExpanded = false;
-        actionsOpen = true;
+        // Toggle: the same chord that docks the inspector also dismisses it,
+        // so a second press closes (like Cmd+K in a code editor's panels).
+        // When the inspector has focus it swallows its own keydowns and closes
+        // itself via `matchesActionsToggle` below; this window-level branch
+        // handles the chord when focus sits elsewhere (e.g. the result list).
+        if (actionsOpen) actionsOpen = false;
+        else openActions();
         break;
       case 'toggle-pin':
         void togglePinSelection();
@@ -233,12 +262,7 @@
         if (quickLookAvailable()) void previewSelection();
         break;
       case 'open-settings':
-        // Settings is a separate native window under Tauri (own
-        // decorations, no always-on-top). Fall back to the in-process
-        // viewState toggle in non-Tauri dev/test contexts so the unit
-        // tests that spy on `showSettings` still pass.
-        if (isTauri()) void openSettingsWindow();
-        else showSettings();
+        openSettings();
         break;
       case 'multi-toggle': {
         const id = currentSelection()?.id;
@@ -310,12 +334,18 @@
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
         onExpandBody={(id) => void expandPreview(id)}
+        onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
       />
     {/if}
     <!-- Kept mounted (it renders nothing while closed) so that toggling
          `open` off can cancel any in-flight AI run and reset its work area. -->
-    <ActionInspector open={actionsOpen} target={selected} onClose={() => (actionsOpen = false)} />
+    <ActionInspector
+      open={actionsOpen}
+      target={selected}
+      matchesToggle={matchesActionsToggle}
+      onClose={() => (actionsOpen = false)}
+    />
   </div>
   <StatusBar
     entryCount={searchState.results.length}
@@ -323,6 +353,8 @@
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}
+    onOpenActions={openActions}
+    onOpenSettings={openSettings}
   />
 </section>
 

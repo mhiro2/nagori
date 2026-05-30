@@ -15,9 +15,24 @@
     loading: boolean;
     errorMessage: string | undefined;
     selectedCount?: number;
+    // Opens the action inspector. When provided, the ⌘K hint becomes a button
+    // so the actions are reachable by mouse, not only the keyboard shortcut.
+    onOpenActions?: () => void;
+    // Opens settings. When provided, the ⌘, hint becomes a button too, so the
+    // two "open something" hints are both clickable rather than mixing a
+    // clickable Actions hint with a static Settings one.
+    onOpenSettings?: () => void;
   };
 
-  const { entryCount, elapsedMs, loading, errorMessage, selectedCount = 0 }: Props = $props();
+  const {
+    entryCount,
+    elapsedMs,
+    loading,
+    errorMessage,
+    selectedCount = 0,
+    onOpenActions,
+    onOpenSettings,
+  }: Props = $props();
   const t = $derived(messages());
 
   // Hint glyphs follow the host platform — `⌘K` / `⌘,` on macOS, `Ctrl+K`
@@ -155,8 +170,32 @@
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}
-        <kbd>{hintActions}</kbd>{t.palette.hints.actions}
-        <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
+        {#if onOpenActions}
+          <button
+            type="button"
+            class="hint-button"
+            data-testid="status-open-actions"
+            aria-label={t.actionMenu.title}
+            onclick={onOpenActions}
+          >
+            <kbd>{hintActions}</kbd>{t.palette.hints.actions}
+          </button>
+        {:else}
+          <kbd>{hintActions}</kbd>{t.palette.hints.actions}
+        {/if}
+        {#if onOpenSettings}
+          <button
+            type="button"
+            class="hint-button"
+            data-testid="status-open-settings"
+            aria-label={t.palette.hints.settings}
+            onclick={onOpenSettings}
+          >
+            <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
+          </button>
+        {:else}
+          <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
+        {/if}
       </span>
     {/if}
   </span>
@@ -275,5 +314,27 @@
     border-radius: 4px;
     font-family: inherit;
     font-size: 0.7rem;
+  }
+  /* The ⌘K hint, but clickable: a transparent wrapper that keeps the same
+     glyph+label rhythm as the static hints and only lights up on hover/focus. */
+  .hint-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.1rem 0.25rem;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+  }
+  .hint-button:hover {
+    background: color-mix(in srgb, var(--fg, #f5f5f5) 8%, transparent);
+  }
+  .hint-button:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
   }
 </style>

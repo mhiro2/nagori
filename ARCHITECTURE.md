@@ -1071,8 +1071,13 @@ not duplicate runtime logic.
   outlives ~120 ms). Each AI button is disabled with a remediation tooltip
   when its action is unavailable. The panel is a focusable non-modal
   `role="dialog"` that stops keydowns from leaking into the palette's
-  window handler while focused; Escape cancels an in-flight stream and
-  otherwise closes the panel. The result shows *Copy* (uses
+  window handler while focused. Escape cancels an in-flight stream and
+  otherwise closes the panel; pressing the `open-actions` chord again
+  toggles it shut (cancelling any run, unlike Escape's cancel-then-stay).
+  Opening is not keyboard-only: the *Actions* button in the preview-pane
+  header and the clickable ⌘K hint in the status bar both call the same
+  open path, so the entry gesture matches the mouse-driven action
+  selection. The result shows *Copy* (uses
   `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
   Clearing the whole history is not offered here — that global, destructive
   action lives on the tray menu and the `clear-history` hotkey.
