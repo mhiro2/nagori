@@ -35,6 +35,10 @@ features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# `test-util` enables `#[tokio::test(start_paused = true)]` so the
+# slow-reader write-timeout regression advances the virtual clock instead
+# of sleeping out the full `WRITE_TIMEOUT` in wall-clock time.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

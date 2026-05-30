@@ -509,6 +509,19 @@ const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 #[cfg(any(unix, windows))]
 const FIRST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Hard ceiling on how long a single connection can block while the
+/// response is written back. The read side is already bounded by
+/// `READ_TIMEOUT`, but `write_all` + `flush` block once the transport's
+/// socket / pipe buffer fills — so a client that authenticates, triggers a
+/// large response, then stops reading would otherwise pin its connection
+/// permit (one of the 32) and its handler task indefinitely. Thirty-two
+/// such slow-readers would starve the legitimate CLI. Sized in the same
+/// few-seconds band as `READ_TIMEOUT`: ample for the slowest realistic
+/// local writeback, tight enough that a wedged reader frees its permit
+/// promptly.
+#[cfg(any(unix, windows))]
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// RAII guard for the process umask. Restoring on drop is critical because
 /// `umask(2)` is process-global; if we tightened it during `bind` and then
 /// panicked, every other file the process creates would inherit the mask.
@@ -803,11 +816,26 @@ async fn handle_connection<S, F, Fut>(
         Err(_) => None,
     };
     if let Some(payload) = payload {
-        let _ = stream.write_all(&payload).await;
-        let _ = stream.write_all(b"\n").await;
-        // Best-effort flush so the client receives the response promptly
-        // even on transports (named pipes) that buffer until shutdown.
-        let _ = stream.flush().await;
+        // Bound the write-back the same way the read side is bounded. Once
+        // the transport buffer fills, `write_all` blocks on a client that
+        // has stopped reading; without a ceiling that handler — and the
+        // connection permit it holds — would be pinned forever. On timeout
+        // we fall through and return, dropping `stream` (closing the
+        // connection) and `_permit` (freeing the slot) so a starved CLI can
+        // make progress. Inner write errors stay best-effort, as before.
+        let write_back = async {
+            stream.write_all(&payload).await?;
+            stream.write_all(b"\n").await?;
+            // Best-effort flush so the client receives the response promptly
+            // even on transports (named pipes) that buffer until shutdown.
+            stream.flush().await
+        };
+        if timeout(WRITE_TIMEOUT, write_back).await.is_err() {
+            warn!(
+                timeout_ms = u64::try_from(WRITE_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                "ipc_write_timeout_dropping_slow_reader",
+            );
+        }
     }
 }
 
@@ -1781,6 +1809,103 @@ mod tests {
 
         shutdown.notify_waiters();
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+}
+
+/// Transport-agnostic tests for the shared [`handle_connection`] driver.
+///
+/// Both the Unix-socket and named-pipe servers funnel through
+/// `handle_connection`, so a `tokio::io::duplex` peer that authenticates
+/// but never reads the response exercises the same slow-reader write path
+/// for both. Compiled on every platform that has a server so the
+/// regression runs in both the Unix-socket and named-pipe CI matrices.
+#[cfg(all(test, any(unix, windows)))]
+mod tests_transport {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::IpcEnvelope;
+
+    fn test_token() -> AuthToken {
+        AuthToken::generate().expect("token should generate")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_reader_releases_permit_after_write_timeout() {
+        // Regression: before `WRITE_TIMEOUT`, the write-back path was a
+        // bare `write_all` + `flush`. A client that authenticated, drew a
+        // response, then stopped reading would fill the transport buffer
+        // and block the handler forever — pinning one of the 32
+        // connection permits. Thirty-two such peers would starve the
+        // legitimate CLI. The handler below returns a response far larger
+        // than the duplex buffer, the peer never reads it, and we assert
+        // the connection times out and frees its permit.
+        let token = Arc::new(test_token());
+        let handler = Arc::new(|_request: IpcRequest| async {
+            // ~1 KiB error response, well above the 16-byte duplex buffer
+            // and well under `MAX_IPC_RESPONSE_BYTES` (1 MiB) so it is
+            // written rather than rejected as oversized.
+            IpcResponse::Error(crate::IpcError {
+                code: "x".repeat(512),
+                message: "y".repeat(512),
+                recoverable: false,
+            })
+        });
+
+        // A single permit models the production semaphore: a permit that
+        // is never returned is exactly the starvation bug.
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let request = serde_json::to_vec(&IpcEnvelope {
+            token: token.as_str().to_owned(),
+            request: IpcRequest::Health,
+        })
+        .expect("serialise envelope");
+
+        // Tight buffer so even the small response cannot drain in one
+        // shot once the peer stops reading.
+        let (server_io, mut client_io) = tokio::io::duplex(16);
+
+        let start = tokio::time::Instant::now();
+        let server = handle_connection(server_io, permit, handler, token);
+        let client = async {
+            client_io
+                .write_all(&request)
+                .await
+                .expect("client should write the request envelope");
+            client_io
+                .write_all(b"\n")
+                .await
+                .expect("client should terminate the request line");
+            // Deliberately never read the response, holding the
+            // connection open so the server's write blocks on a full
+            // buffer. `pending` parks without a timer so the only timer
+            // left is the server's `WRITE_TIMEOUT`, which paused-time
+            // auto-advance fires.
+            std::future::pending::<()>().await;
+        };
+
+        tokio::select! {
+            () = server => {}
+            () = client => unreachable!("the slow reader never finishes on its own"),
+        }
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= WRITE_TIMEOUT,
+            "handle_connection must block until WRITE_TIMEOUT fires (not error out early): {elapsed:?}",
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the connection permit must be released once the slow reader times out",
+        );
     }
 }
 
