@@ -641,6 +641,30 @@ impl NagoriRuntime {
         Ok(())
     }
 
+    /// Read-modify-write the persisted settings under the settings write
+    /// lock, returning the post-update snapshot.
+    ///
+    /// The read happens *inside* the critical section, so `f` always
+    /// observes — and the follow-up save always carries — every other
+    /// field's latest value. That is the invariant a plain `get_settings`
+    /// → mutate → `save_settings` *outside* the lock breaks: a concurrent
+    /// write landing between the read and the save is silently rolled back
+    /// by the stale snapshot. Routing single-field toggles through here
+    /// (rather than round-tripping a full blob the caller read earlier)
+    /// keeps the tray's pause/resume from clobbering a `global_hotkey`
+    /// edit the desktop shell made in parallel, and vice versa.
+    async fn mutate_settings<F>(&self, f: F) -> Result<AppSettings>
+    where
+        F: FnOnce(&mut AppSettings),
+    {
+        let _guard = self.settings_write_lock.lock().await;
+        let mut settings = self.store.get_settings().await?;
+        f(&mut settings);
+        self.store.save_settings(settings.clone()).await?;
+        self.publish_settings(settings.clone());
+        Ok(settings)
+    }
+
     /// Apply `f` to the `onboarding` namespace under the settings write
     /// lock, reading the latest persisted state inside the critical
     /// section so a concurrent [`Self::save_settings`] cannot lose the
@@ -649,24 +673,21 @@ impl NagoriRuntime {
     where
         F: FnOnce(&mut OnboardingSettings),
     {
-        let _guard = self.settings_write_lock.lock().await;
-        let mut settings = self.store.get_settings().await?;
-        f(&mut settings.onboarding);
-        self.store.save_settings(settings.clone()).await?;
-        self.publish_settings(settings);
-        Ok(())
+        self.mutate_settings(|settings| f(&mut settings.onboarding))
+            .await
+            .map(|_| ())
     }
 
     /// Toggle `capture_enabled` without round-tripping the entire settings
     /// blob — used by the tray menu and the `set_capture_enabled` Tauri
     /// command. Returns the post-update settings.
+    ///
+    /// The read-modify-write runs inside [`Self::mutate_settings`], so a
+    /// concurrent `update_settings` can neither be rolled back by this
+    /// toggle nor leave the returned snapshot stale.
     pub async fn set_capture_enabled(&self, enabled: bool) -> Result<AppSettings> {
-        let mut settings = self.store.get_settings().await?;
-        if settings.capture_enabled != enabled {
-            settings.capture_enabled = enabled;
-            self.save_settings(settings.clone()).await?;
-        }
-        Ok(settings)
+        self.mutate_settings(|settings| settings.capture_enabled = enabled)
+            .await
     }
 
     /// Runs a deterministic [`QuickActionId`] on-device.
@@ -2742,6 +2763,43 @@ mod tests {
             after.accessibility_first_granted_at,
             Some(stamped),
             "save_settings must restore onboarding markers from the store",
+        );
+    }
+
+    #[tokio::test]
+    async fn set_capture_enabled_does_not_roll_back_concurrent_field_edits() {
+        // The tray's pause/resume toggles only `capture_enabled`. The old
+        // implementation read a full settings snapshot *outside* the write
+        // lock, then saved it — so a `save_settings` (e.g. an
+        // `update_settings` IPC editing `global_hotkey`) landing in between
+        // got silently rolled back by the stale blob. `mutate_settings`
+        // reads-modifies-writes inside the lock, so whichever op commits
+        // second still observes (and re-persists) the other's change.
+        let (runtime, _) = runtime_with_memory_clipboard();
+        assert!(runtime.current_settings().capture_enabled);
+
+        let mut edited = runtime.current_settings();
+        edited.global_hotkey = "CmdOrCtrl+Alt+V".to_owned();
+
+        let (toggled, saved) = tokio::join!(
+            runtime.set_capture_enabled(false),
+            runtime.save_settings(edited)
+        );
+        let toggled = toggled.expect("capture toggle should succeed");
+        saved.expect("concurrent settings save should succeed");
+
+        // The toggle's own return value must reflect the persisted state,
+        // not a pre-toggle snapshot.
+        assert!(!toggled.capture_enabled);
+
+        let persisted = runtime
+            .store()
+            .get_settings()
+            .await
+            .expect("settings should persist");
+        assert_eq!(
+            persisted.global_hotkey, "CmdOrCtrl+Alt+V",
+            "capture toggle must not roll back a concurrent global_hotkey edit",
         );
     }
 
