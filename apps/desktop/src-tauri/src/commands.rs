@@ -197,9 +197,16 @@ pub async fn paste_entry(
         Ok(s) => s,
         Err(err) => {
             tracing::warn!(error = %err, "paste_entry_settings_failed");
-            let message = format!("paste failed: could not load settings — {err}");
-            emit_paste_failed(&app, &message);
+            // Compose the toast from the *sanitized* `cmd_err.message`, not the
+            // raw `{err}` Display: an `AppError::Storage`/`Search`/`Platform`
+            // detail can carry DB paths, SQL fragments, or OS diagnostics, and
+            // the bare interpolation would leak them straight into the UI toast.
             let cmd_err: CommandError = err.into();
+            let message = format!(
+                "paste failed: could not load settings — {}",
+                cmd_err.message
+            );
+            emit_paste_failed(&app, &message);
             return Err(CommandError { message, ..cmd_err });
         }
     };
@@ -210,19 +217,21 @@ pub async fn paste_entry(
         .await
     {
         tracing::warn!(error = %err, "paste_entry_copy_failed");
-        let message = format!("copy failed: {err}");
-        emit_paste_failed(&app, &message);
         let cmd_err: CommandError = err.into();
+        let message = format!("copy failed: {}", cmd_err.message);
+        emit_paste_failed(&app, &message);
         return Err(CommandError { message, ..cmd_err });
     }
     if settings.auto_paste_enabled
         && let Err(err) = state.runtime.paste_frontmost().await
     {
         tracing::warn!(error = %err, "paste_entry_synth_failed");
-        let message =
-            format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {err}");
-        emit_paste_failed(&app, &message);
         let cmd_err: CommandError = err.into();
+        let message = format!(
+            "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
+            cmd_err.message
+        );
+        emit_paste_failed(&app, &message);
         return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);
@@ -329,11 +338,18 @@ pub async fn paste_entry_from_palette(
     // failure with the "copy succeeded" framing.
     if let Err(err) = restored {
         tracing::warn!(error = %err, "palette_previous_app_restore_failed");
+        // Sanitize before surfacing: the bare `{err}` Display can leak
+        // platform diagnostics into the toast. Convert through `CommandError`
+        // and reuse its curated `message`, preserving the underlying
+        // `code`/`recoverable` so the frontend's i18n + retry policy still
+        // see the real cause (same contract as the auto-paste block below).
+        let cmd_err: CommandError = err.into();
         let message = format!(
-            "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {err}"
+            "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
+            cmd_err.message
         );
         emit_paste_failed(&app, &message);
-        return Err(CommandError::internal(message));
+        return Err(CommandError { message, ..cmd_err });
     }
 
     // Defensive clamp at the use site: `save_settings` already rejects values
@@ -356,15 +372,18 @@ pub async fn paste_entry_from_palette(
     // window) with the "copy succeeded" framing intact.
     if let Err(err) = state.runtime.paste_frontmost().await {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
-        let message =
-            format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {err}");
-        emit_paste_failed(&app, &message);
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
-        // but swap the user-facing message in for the "copy succeeded"
-        // framing — the bare `AppError` text strands the user without
-        // hint that the clipboard write already landed.
+        // but build the user-facing message from the *sanitized*
+        // `cmd_err.message` (not the bare `AppError` Display, which can
+        // leak storage/platform diagnostics) and keep the "copy succeeded"
+        // framing so the user knows the clipboard write already landed.
         let cmd_err: CommandError = err.into();
+        let message = format!(
+            "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
+            cmd_err.message
+        );
+        emit_paste_failed(&app, &message);
         return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);
