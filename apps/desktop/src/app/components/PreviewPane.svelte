@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatByteCount, formatRelativeTime } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { isImeComposing } from '../lib/keybindings';
   import { rankReasonLabels } from '../lib/rankReason';
   import { dedupedRepresentationLabels } from '../lib/representations';
   import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from '../lib/types';
@@ -211,6 +212,9 @@
     if (typeof window === 'undefined') return;
     const handler = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter') return;
+      // The Enter that commits an IME 変換 belongs to the focused search input,
+      // not to opening the previewed URL.
+      if (isImeComposing(event)) return;
       // Leave modified Enter to the palette's copy / paste-as-plain bindings.
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       if (confirmOpenUrl) return;

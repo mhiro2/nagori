@@ -362,6 +362,28 @@ describe('Palette', () => {
     expect(confirmSelection).not.toHaveBeenCalled();
   });
 
+  it('lets the IME keep the Enter that commits a 変換 instead of pasting', async () => {
+    // Regression: with a Japanese IME, the Enter that confirms a candidate
+    // conversion arrives as a keydown flagged `isComposing`. The palette must
+    // stand down so the input commits the text rather than pasting the entry.
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    // Assert the target exists so this negative test can't pass vacuously if
+    // the selector ever stops matching and no keydown is dispatched.
+    expect(input).not.toBeNull();
+    await fireEvent.keyDown(input!, { key: 'Enter', isComposing: true });
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
+
+  it('does not close the palette when Escape cancels an IME conversion', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    expect(input).not.toBeNull();
+    await fireEvent.keyDown(input!, { key: 'Escape', isComposing: true });
+    expect(closePalette).not.toHaveBeenCalled();
+  });
+
   it('opens the standalone settings window on Cmd+, inside the Tauri runtime', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
     // Pin the platform: once `isTauri()` reports true, `paletteBindingsFor`

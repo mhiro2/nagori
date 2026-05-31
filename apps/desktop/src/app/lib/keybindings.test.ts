@@ -4,6 +4,7 @@ import {
   buildBindings,
   captureFromKeyboardEvent,
   formatAccelerator,
+  isImeComposing,
   isPrimaryModifierHeld,
   resolveAction,
 } from './keybindings';
@@ -88,6 +89,23 @@ describe('resolveAction', () => {
     expect(resolveAction(event({ key: 'P', metaKey: true, shiftKey: true }), overlaid)).toBe(
       'toggle-pin',
     );
+  });
+});
+
+describe('isImeComposing', () => {
+  it('flags keystrokes that are part of an IME composition', () => {
+    expect(isImeComposing(event({ key: 'Enter', isComposing: true }))).toBe(true);
+  });
+
+  it('treats the legacy keyCode 229 marker as composing', () => {
+    // Some engines clear `isComposing` on the committing keystroke but still
+    // report the keyCode 229 placeholder.
+    expect(isImeComposing(event({ key: 'Enter', keyCode: 229 }))).toBe(true);
+  });
+
+  it('passes through ordinary keystrokes', () => {
+    expect(isImeComposing(event({ key: 'Enter' }))).toBe(false);
+    expect(isImeComposing(event({ key: 'Escape' }))).toBe(false);
   });
 });
 

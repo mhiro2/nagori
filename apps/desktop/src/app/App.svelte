@@ -3,6 +3,7 @@
 
   import { hidePalette, openSettingsWindow } from './lib/commands';
   import { messages } from './lib/i18n/index.svelte';
+  import { isImeComposing } from './lib/keybindings';
   import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
   import PaletteRoute from './routes/PaletteRoute.svelte';
@@ -32,6 +33,9 @@
   // palette window.
   const handleEscape = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
+    // Escape while an IME conversion is open cancels the 変換 — it must reach
+    // the input, not hide the whole palette.
+    if (isImeComposing(event)) return;
     if (viewState.current === 'settings') {
       showPalette();
       return;

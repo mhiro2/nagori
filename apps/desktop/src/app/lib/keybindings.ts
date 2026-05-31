@@ -320,6 +320,17 @@ export const buildBindings = (
   return overlaid;
 };
 
+// True while a keystroke belongs to an in-progress IME composition
+// (Japanese/Chinese/Korean, etc.). During composition the input element owns
+// the keys: Enter commits the candidate conversion, Escape cancels it, and the
+// arrows move between candidates — so the window-level shortcut handlers must
+// stand down, or e.g. the Enter that confirms a 変換 would also paste the
+// selected entry. WKWebView flags these events with `isComposing`; the legacy
+// `keyCode === 229` is a belt-and-suspenders fallback for engines that clear
+// `isComposing` on the committing keystroke.
+export const isImeComposing = (event: KeyboardEvent): boolean =>
+  event.isComposing || event.keyCode === 229;
+
 export const resolveAction = (
   event: KeyboardEvent,
   bindings: readonly Binding[] = PALETTE_BINDINGS,

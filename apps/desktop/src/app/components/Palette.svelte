@@ -2,7 +2,12 @@
   import { onDestroy, onMount } from 'svelte';
 
   import { closePalette, openSettingsWindow } from '../lib/commands';
-  import { buildBindings, isPrimaryModifierHeld, resolveAction } from '../lib/keybindings';
+  import {
+    buildBindings,
+    isImeComposing,
+    isPrimaryModifierHeld,
+    resolveAction,
+  } from '../lib/keybindings';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
     capabilitiesState,
@@ -218,6 +223,11 @@
   };
 
   const handleKeydown = (event: KeyboardEvent): void => {
+    // Let the search input drive its IME: while a 変換 is open, Enter commits
+    // the candidate (not the palette's confirm/paste), Escape cancels it, and
+    // the arrows move between candidates. Bail before `resolveAction` so we
+    // never `preventDefault` a composition keystroke.
+    if (isImeComposing(event)) return;
     const action = resolveAction(event, paletteBindings);
     if (!action) return;
     event.preventDefault();
