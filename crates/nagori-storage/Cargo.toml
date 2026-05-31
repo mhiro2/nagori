@@ -39,7 +39,6 @@ semantic-index = ["dep:sqlite-vec"]
 libc = "0.2"
 
 [dev-dependencies]
-criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support"] }
 tempfile.workspace = true
 
 [[bench]]

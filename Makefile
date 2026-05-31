@@ -114,6 +114,16 @@ desktop-test: ## Run frontend tests (vitest).
 desktop-test-coverage: ## Run frontend tests with coverage and write apps/desktop/coverage/lcov.info.
 	pnpm --filter @nagori/desktop run test:coverage
 
+## Bench ##
+
+.PHONY: bench
+bench: ## Run the search-latency harness (representative subset: every dataset @10k + text @100k).
+	NAGORI_BENCH_SIZES=10000,100000 cargo bench -p nagori-storage --bench storage_search
+
+.PHONY: bench-full
+bench-full: ## Run the full search-latency matrix (every dataset at every size; heavy 100k populate).
+	NAGORI_BENCH_FULL=1 NAGORI_BENCH_SIZES=10000,100000 cargo bench -p nagori-storage --bench storage_search
+
 ## Build & Run ##
 
 .PHONY: build
