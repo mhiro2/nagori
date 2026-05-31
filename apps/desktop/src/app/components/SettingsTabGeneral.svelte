@@ -239,22 +239,11 @@
 </fieldset>
 
 <style>
-  /* Two-column grid for labeled controls in the General tab: keeps the
-     label width fixed so adjacent rows' inputs line up vertically, and
-     caps the control width so selects/text inputs don't stretch to the
-     fieldset edge. */
-  label.field-row {
-    display: grid;
-    grid-template-columns: minmax(8rem, 12rem) minmax(8rem, 14rem);
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-  }
-  label.field-row > input,
-  label.field-row > select {
-    width: 100%;
-    max-width: none;
-  }
+  /* `label.field-row` layout lives in SettingsView's `.tab-content`
+     :global block alongside the other shared form-control rules — see the
+     comment there. Scoping it here lost the cascade to that block's
+     `label { display: flex }` (equal specificity, defined later), so the
+     grid never applied and controls stretched to the full row width. */
   .subhead {
     margin: 0.25rem 0 0;
     font-size: 0.75rem;

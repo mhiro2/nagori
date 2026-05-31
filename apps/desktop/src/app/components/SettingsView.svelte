@@ -1189,6 +1189,26 @@
   .tab-content :global(select) {
     max-width: 22rem;
   }
+  /* Labeled control rows: a fixed label column keeps the controls aligned
+     across rows, while each control sizes to its own content and anchors
+     to the start of the control column. Without this the shared
+     `flex: 1` above stretches short selects (Theme, Default paste
+     format, …) out to the full row width. Anchored here rather than in
+     the child component so it outranks the `label { display: flex }` rule
+     above (equal specificity would otherwise let flex win). */
+  .tab-content :global(label.field-row) {
+    display: grid;
+    grid-template-columns: minmax(8rem, 12rem) 1fr;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .tab-content :global(label.field-row > input),
+  .tab-content :global(label.field-row > select) {
+    flex: none;
+    width: auto;
+    max-width: 100%;
+    justify-self: start;
+  }
   /* WKWebView desaturates native form controls when the window goes
      inactive, so the checked-state tint flickers between blue and gray
      each time focus returns. `accent-color` alone isn't enough on macOS
