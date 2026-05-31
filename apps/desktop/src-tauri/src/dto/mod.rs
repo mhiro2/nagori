@@ -245,7 +245,14 @@ pub struct SearchRequestDto {
 pub struct SearchResponseDto {
     pub results: Vec<SearchResultDto>,
     pub total_candidates: usize,
-    pub elapsed_ms: u64,
+    /// Time spent in the search pipeline itself (`NagoriRuntime::search`).
+    pub search_elapsed_ms: u64,
+    /// Time spent hydrating representation summaries for the result set.
+    pub summary_elapsed_ms: u64,
+    /// End-to-end time the command spent producing the response — the value
+    /// the UI surfaces. `total - (search + summary)` is the DTO-shaping
+    /// overhead, kept implicit rather than as a fourth field.
+    pub total_elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

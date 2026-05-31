@@ -62,7 +62,9 @@ beforeEach(() => {
   vi.mocked(searchClipboard).mockResolvedValue({
     results: [],
     totalCandidates: 0,
-    elapsedMs: 0,
+    searchElapsedMs: 0,
+    summaryElapsedMs: 0,
+    totalElapsedMs: 0,
   });
   searchState.query = '';
   searchState.results = [result()];
@@ -124,7 +126,9 @@ describe('togglePinSelection', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [result({ id: 'b', pinned: true }), result({ id: 'a' })],
       totalCandidates: 2,
-      elapsedMs: 0,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
     });
     await togglePinSelection();
     expect(pinEntry).toHaveBeenCalledWith('b', true);
@@ -218,7 +222,9 @@ describe('multi-select bulk actions', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [visible],
       totalCandidates: 1,
-      elapsedMs: 0,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
     });
     await copyMultiSelection();
     expect(searchState.errorMessage).toBe('clipboard busy');
@@ -262,7 +268,13 @@ describe('multi-select bulk actions', () => {
     vi.mocked(copyEntriesCombined).mockRejectedValue(new Error('clipboard busy'));
     vi.mocked(searchClipboard).mockImplementation(async () => {
       searchState.query = 'something else';
-      return { results: [], totalCandidates: 0, elapsedMs: 0 };
+      return {
+        results: [],
+        totalCandidates: 0,
+        searchElapsedMs: 0,
+        summaryElapsedMs: 0,
+        totalElapsedMs: 0,
+      };
     });
     await copyMultiSelection();
     expect(searchState.errorMessage).toBeUndefined();

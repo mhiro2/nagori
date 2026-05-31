@@ -34,7 +34,11 @@ const result = (id: string): SearchResultDto => ({
 const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({
   results: [],
   totalCandidates: 0,
-  elapsedMs: 5,
+  // Distinct values so a test asserting `lastElapsedMs` proves the UI reads
+  // `totalElapsedMs` (12), not the search-only breakdown (5).
+  searchElapsedMs: 5,
+  summaryElapsedMs: 7,
+  totalElapsedMs: 12,
   ...overrides,
 });
 
@@ -95,7 +99,7 @@ describe('runQuery', () => {
     await runQuery('match');
     expect(searchClipboard).toHaveBeenCalledWith({ query: 'match', mode: 'Auto', limit: 50 });
     expect(searchState.results[0]?.id).toBe('match');
-    expect(searchState.lastElapsedMs).toBe(5);
+    expect(searchState.lastElapsedMs).toBe(12);
   });
 
   it('uses a local-fixture filter outside the Tauri runtime', async () => {

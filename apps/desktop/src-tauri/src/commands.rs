@@ -42,14 +42,18 @@ pub async fn search_clipboard(
 
     let started = Instant::now();
     let results = state.runtime.search(query).await?;
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let search_elapsed = started.elapsed();
     let total_candidates = results.len();
     let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
+
+    let summary_started = Instant::now();
     let summaries = state
         .runtime
         .store()
         .list_representation_summaries(&ids)
         .await?;
+    let summary_elapsed = summary_started.elapsed();
+
     let dto_results: Vec<SearchResultDto> = results
         .into_iter()
         .map(|result| {
@@ -59,11 +63,32 @@ pub async fn search_clipboard(
         })
         .collect();
 
+    let search_elapsed_ms = millis_u64(search_elapsed);
+    let summary_elapsed_ms = millis_u64(summary_elapsed);
+    let total_elapsed_ms = millis_u64(started.elapsed());
+    // Breakdown for diagnosing whether the search pipeline or summary
+    // hydration dominates a slow query (vs. the single total the UI shows).
+    tracing::debug!(
+        search_ms = search_elapsed_ms,
+        summary_ms = summary_elapsed_ms,
+        total_ms = total_elapsed_ms,
+        candidates = total_candidates,
+        "search_clipboard_elapsed"
+    );
+
     Ok(SearchResponseDto {
         results: dto_results,
         total_candidates,
-        elapsed_ms,
+        search_elapsed_ms,
+        summary_elapsed_ms,
+        total_elapsed_ms,
     })
+}
+
+/// Saturating conversion of a `Duration` to whole milliseconds, so a wildly
+/// long search can't panic the command on the `u128 -> u64` narrowing.
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[tauri::command]

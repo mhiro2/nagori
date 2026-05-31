@@ -84,7 +84,7 @@ const runSearch = async (request: SearchRequest): Promise<void> => {
     searchState.results = response.results;
     searchState.appliedQuery = request.query;
     searchState.selectedIndex = 0;
-    searchState.lastElapsedMs = response.elapsedMs;
+    searchState.lastElapsedMs = response.totalElapsedMs;
     reconcileMultiSelect(response.results.map((r) => r.id));
   } catch (err) {
     if (ticket !== inflight) return;

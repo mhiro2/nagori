@@ -244,7 +244,13 @@ export type SearchRequest = {
 export type SearchResponse = {
   results: SearchResultDto[];
   totalCandidates: number;
-  elapsedMs: number;
+  // Timing breakdown from `search_clipboard`. `totalElapsedMs` is the
+  // end-to-end value the status bar shows; `searchElapsedMs` /
+  // `summaryElapsedMs` split it into the search pipeline vs. representation
+  // summary hydration for diagnosing which dominates a slow query.
+  searchElapsedMs: number;
+  summaryElapsedMs: number;
+  totalElapsedMs: number;
 };
 
 // Mirrors `SourceAppIdKind` (snake_case via serde) in `nagori-core`.

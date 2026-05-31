@@ -77,7 +77,9 @@ describe('refreshRecent', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [sampleEntry('a'), sampleEntry('b')].map(toResult),
       totalCandidates: 2,
-      elapsedMs: 5,
+      searchElapsedMs: 5,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 5,
     });
     searchState.selectedIndex = 5;
 
@@ -119,7 +121,9 @@ describe('runQuery', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [sampleEntry('a')].map(toResult),
       totalCandidates: 1,
-      elapsedMs: 5,
+      searchElapsedMs: 5,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 5,
     });
 
     await runQuery('   ');
@@ -144,7 +148,11 @@ describe('runQuery', () => {
         },
       ],
       totalCandidates: 1,
-      elapsedMs: 12,
+      // Distinct components so the `lastElapsedMs` assertion proves the UI
+      // reads `totalElapsedMs` (12), not the search-only breakdown (7).
+      searchElapsedMs: 7,
+      summaryElapsedMs: 5,
+      totalElapsedMs: 12,
     });
 
     await runQuery('needle');
@@ -231,7 +239,9 @@ describe('action helpers', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [],
       totalCandidates: 0,
-      elapsedMs: 0,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
     });
     await togglePinSelection();
     expect(pinEntryCmd).toHaveBeenCalledWith('b', false);
@@ -241,7 +251,9 @@ describe('action helpers', () => {
     vi.mocked(searchClipboard).mockResolvedValue({
       results: [],
       totalCandidates: 0,
-      elapsedMs: 0,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
     });
     await deleteSelection();
     expect(deleteEntryCmd).toHaveBeenCalledWith('a');
