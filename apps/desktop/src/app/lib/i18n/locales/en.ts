@@ -20,10 +20,37 @@ export type Messages = {
     };
     filters: {
       toolbarLabel: string;
+      // Date presets (single-select): clicking the active one clears it.
       today: string;
+      yesterday: string;
       last7days: string;
+      last30days: string;
       pinned: string;
+      // Content-kind chips (multi-select). Each chip maps to exactly one
+      // `ContentKind`; `richText` / `unknown` are intentionally not surfaced.
+      kindText: string;
+      kindUrl: string;
+      kindCode: string;
+      kindImage: string;
+      kindFiles: string;
+      // Group aria-labels for the chip sub-toolbars.
+      dateGroup: string;
+      typeGroup: string;
+      sourceGroup: string;
     };
+  };
+  // Short labels for `RankReason` variants. Shared by the per-row reason chip
+  // (ResultItem) and the full labelled list in the preview footer.
+  rankReason: {
+    exact: string;
+    prefix: string;
+    substring: string;
+    fullText: string;
+    fuzzy: string;
+    semantic: string;
+    recent: string;
+    frequent: string;
+    pinned: string;
   };
   preview: {
     empty: string;
@@ -465,9 +492,30 @@ export const en: Messages = {
     filters: {
       toolbarLabel: 'Quick filters',
       today: 'Today',
+      yesterday: 'Yesterday',
       last7days: 'Last 7 days',
+      last30days: 'Last 30 days',
       pinned: 'Pinned',
+      kindText: 'Text',
+      kindUrl: 'URL',
+      kindCode: 'Code',
+      kindImage: 'Image',
+      kindFiles: 'Files',
+      dateGroup: 'Date',
+      typeGroup: 'Type',
+      sourceGroup: 'Source app',
     },
+  },
+  rankReason: {
+    exact: 'Exact',
+    prefix: 'Prefix',
+    substring: 'Match',
+    fullText: 'Text',
+    fuzzy: 'Fuzzy',
+    semantic: 'Semantic',
+    recent: 'Recent',
+    frequent: 'Frequent',
+    pinned: 'Pinned',
   },
   preview: {
     empty: 'Select an item to preview.',

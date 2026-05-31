@@ -1014,9 +1014,16 @@ not duplicate runtime logic.
   pane while the action inspector is open (and forces an expanded full-width
   preview back to the list+panel split first).
 - `FilterChips.svelte` — quick-filter row directly under the search
-  input. Single-select toggles for *Today* / *Last 7 days* / *Pinned*;
-  the active preset feeds `currentFilters()` into every
-  `searchClipboard` call. Re-clicking the active chip clears it.
+  input. Composite filters that compose freely: a single-select date
+  window (*Today* / *Yesterday* / *Last 7 days* / *Last 30 days*),
+  multi-select content kinds (*Text* / *URL* / *Code* / *Image* /
+  *Files*, each mapping to one `ContentKind`), a *Pinned* toggle, and
+  source-app chips derived from the apps present in the current result
+  set (capped, with the active selection kept first so it survives the
+  results collapsing to a single app). All feed `currentFilters()` into
+  every `searchClipboard` call; the daemon's search-cache key compares
+  the full `SearchFilters` struct, so each combination caches
+  independently. Re-clicking the active date / source chip clears it.
 - `StatusBar.svelte` — entry count, last-search elapsed time, capture
   badge, AI badge, keyboard hints. Also hosts a one-row Accessibility
   indicator: when the OS grant that auto-paste needs is missing it
@@ -1028,7 +1035,11 @@ not duplicate runtime logic.
   nothing to chase. It replaces the former `OnboardingBanner` card.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise
   the domain; code rows show a heuristic language badge (TS, RS, PY,
-  JSON, …) inline.
+  JSON, …) inline. A small reason chip surfaces the strongest *match*
+  signal (*Exact* / *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*)
+  for query-driven rows; recent-listing rows stay chip-free since their
+  only reason is recency. Semantic / fuzzy hits get a distinct hue so
+  they read as a deliberate match type rather than a weaker one.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
@@ -1049,7 +1060,11 @@ not duplicate runtime logic.
   `Sensitivity::Public`, restricts the scheme allowlist to `https` /
   `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
   — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
-  Non-Public entries hide both the Enter hint and the open button.
+  Non-Public entries hide both the Enter hint and the open button. The
+  footer's *rank* row lists the entry's `RankReason`s as localised
+  labels (the same vocabulary as the row chip) so the full "why it
+  matched / why it ranked here" set — including the recency / frequency
+  / pin boosts the row chip omits — is visible on the focused entry.
 - `ActionInspector.svelte` — a hotkey-triggered **docked panel** that runs
   actions against the selected entry. It is not a modal: opening it (the
   `open-actions` binding) takes the palette body's right column in place of

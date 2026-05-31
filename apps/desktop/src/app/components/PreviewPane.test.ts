@@ -1104,7 +1104,10 @@ describe('PreviewPane', () => {
       },
     });
     expect(getByText('Safari')).toBeTruthy();
-    expect(container.querySelector('.foot')?.textContent).toMatch(/ExactMatch/);
+    // Reasons are rendered as localised labels, not raw enum variant names.
+    const foot = container.querySelector('.foot')?.textContent ?? '';
+    expect(foot).toMatch(/Exact, Recent/);
+    expect(foot).not.toMatch(/ExactMatch/);
   });
 
   it('shows a preserved-formats row when the entry kept multiple representations', () => {

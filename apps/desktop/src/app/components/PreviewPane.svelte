@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatByteCount, formatRelativeTime } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { rankReasonLabels } from '../lib/rankReason';
   import { dedupedRepresentationLabels } from '../lib/representations';
   import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from '../lib/types';
   import PreviewBodyFileList from './PreviewBodyFileList.svelte';
@@ -72,6 +73,11 @@
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
   const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
+  // Localised "why it matched" list, e.g. "Exact, Recent". Falls back to the
+  // em-dash placeholder when a result somehow carries no reasons.
+  const rankLabel = $derived(
+    item ? rankReasonLabels(item.rankReasons, t.rankReason).join(', ') : '',
+  );
 
   // Head summary chip: kind-specific one-liner that surfaces lineCount /
   // byteCount / dimensions / domain / file count without ever leaking
@@ -328,7 +334,7 @@
         <dt>{t.preview.fields.size}</dt>
         <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
         <dt>{t.preview.fields.rank}</dt>
-        <dd>{item.rankReasons.join(', ') || t.preview.none}</dd>
+        <dd>{rankLabel || t.preview.none}</dd>
         {#if preservedFormats}
           <dt>{t.preview.fields.formats}</dt>
           <dd>{preservedFormats}</dd>

@@ -132,6 +132,34 @@ describe('ResultItem', () => {
     expect(getByText('Secret')).toBeTruthy();
   });
 
+  it('shows the strongest match reason as a chip for query-driven rows', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ rankReasons: ['SubstringMatch', 'PrefixMatch', 'ExactMatch'] }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    const chip = container.querySelector('.rank-chip');
+    expect(chip?.textContent?.trim()).toBe('Exact');
+    expect(chip?.getAttribute('data-reason')).toBe('ExactMatch');
+  });
+
+  it('omits the reason chip for recent-listing rows (boost-only reasons)', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ rankReasons: ['Recent'] }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.rank-chip')).toBeNull();
+  });
+
   it('marks the pin toggle active and pressed for pinned entries', () => {
     const { container } = render(ResultItem, {
       props: {

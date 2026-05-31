@@ -57,6 +57,7 @@
 <script lang="ts">
   import { collapseWhitespace, formatRelativeTime, truncatePreview } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { primaryRankReason, rankReasonLabel } from '../lib/rankReason';
   import type { SearchResultDto } from '../lib/types';
 
   type Props = {
@@ -87,6 +88,12 @@
   const url = $derived(item.kind === 'url' ? safeUrl(item.preview) : undefined);
   const codeLang = $derived(item.kind === 'code' ? detectCodeLang(item.preview) : undefined);
   const repBadge = $derived(formatRepresentationBadge(item.representationSummary));
+  // Strongest *match* reason for this row. `undefined` for recent-listing rows
+  // (empty query) so they stay chip-free; pinned state has its own 📌 column.
+  const rankReason = $derived(primaryRankReason(item.rankReasons));
+  const rankChip = $derived(
+    rankReason !== undefined ? rankReasonLabel(rankReason, t.rankReason) : undefined,
+  );
 </script>
 
 <div class="result-row" class:selected>
@@ -120,6 +127,9 @@
     {/if}
 
     <span class="meta">
+      {#if rankChip}<span class="rank-chip" data-reason={rankReason} title={t.preview.fields.rank}
+          >{rankChip}</span
+        >{/if}
       {#if repBadge}<span class="rep-badge" title={t.preview.fields.formats}>{repBadge}</span>{/if}
       {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
         <span class="sens">{item.sensitivity}</span>
@@ -293,5 +303,23 @@
     color: var(--accent, #6c8dff);
     font-size: 0.65rem;
     letter-spacing: 0.04em;
+  }
+  /* "Why did this match" chip. Neutral by default so it never reads as a
+     warning; semantic / fuzzy hits get a distinct hue so they stand as a
+     deliberate, equal-standing match type rather than a lesser one. */
+  .rank-chip {
+    flex: none;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.18));
+    border-radius: 4px;
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.7));
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .rank-chip[data-reason='SemanticMatch'],
+  .rank-chip[data-reason='NgramMatch'] {
+    border-color: rgba(150, 130, 230, 0.45);
+    color: var(--accent-soft, #b3a4f0);
   }
 </style>
