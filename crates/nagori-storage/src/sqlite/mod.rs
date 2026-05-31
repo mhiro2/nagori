@@ -609,9 +609,32 @@ mod tests {
         let exact = store.search(query.clone()).await.unwrap();
         assert!(exact.is_empty());
 
+        // Fuzzy keeps ASCII ngram recall, so the whitespace-insensitive match
+        // on `quick` still surfaces there. Auto deliberately does not — see
+        // `auto_skips_ascii_ngram_only_match`.
+        query.mode = SearchMode::Fuzzy;
+        let fuzzy = store.search(query).await.unwrap();
+        assert!(!fuzzy.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_skips_ascii_ngram_only_match() {
+        // Regression for the P0 ngram fan-out fix: the Auto/Hybrid plan must
+        // not run ASCII ngram. `qui ck` reaches `the quick brown fox` only via
+        // whitespace-stripped ngram overlap (`quick`) — FTS sees the tokens
+        // `qui`/`ck` with no whole-token match, and the substring scan looks
+        // for the literal `qui ck`. So Auto now returns nothing; ASCII
+        // partial/typo recall lives in explicit Fuzzy.
+        let store = SqliteStore::open_memory().unwrap();
+        let _ = insert_text(&store, "the quick brown fox").await;
+
+        let mut query = SearchQuery::new("qui ck", normalize_text("qui ck"), 10);
         query.mode = SearchMode::Auto;
         let auto = store.search(query).await.unwrap();
-        assert!(!auto.is_empty());
+        assert!(
+            auto.is_empty(),
+            "Auto no longer chases ASCII ngram-only matches",
+        );
     }
 
     #[tokio::test]
@@ -641,6 +664,69 @@ mod tests {
         // regressions where the bounded path swallows older matches.
         assert_eq!(bounded.len(), 1);
         assert_eq!(unbounded.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ngram_cjk_only_mode_drops_ascii_grams() {
+        // Directly pins the P0 gram filter. `CjkOnly` (the Auto/Hybrid policy)
+        // keeps only CJK-bearing grams, so a pure-ASCII query yields nothing
+        // while a mixed query still matches on its CJK / boundary grams. The
+        // `Full` mode (explicit Fuzzy) keeps ASCII grams so the same ASCII
+        // query matches there.
+        use nagori_core::{NgramQueryMode, SearchCandidateProvider};
+        let store = SqliteStore::open_memory().unwrap();
+        let mixed = {
+            let mut entry = EntryFactory::from_text("メモ alpha 設計");
+            entry.search.normalized_text = normalize_text(entry.plain_text().unwrap());
+            store.insert(entry).await.unwrap()
+        };
+        let ascii = insert_text(&store, "needle in a haystack").await;
+
+        // Pure-ASCII query under CjkOnly: every gram is filtered out → empty.
+        let ascii_cjk_only = store
+            .ngram_candidates(
+                "needle",
+                &SearchFilters::default(),
+                10,
+                NgramQueryMode::CjkOnly,
+            )
+            .await
+            .unwrap();
+        assert!(
+            ascii_cjk_only.is_empty(),
+            "CjkOnly must drop every ASCII gram",
+        );
+
+        // Same ASCII query under Full still matches via the full gram set.
+        let ascii_full = store
+            .ngram_candidates(
+                "needle",
+                &SearchFilters::default(),
+                10,
+                NgramQueryMode::Full,
+            )
+            .await
+            .unwrap();
+        assert!(
+            ascii_full.iter().any(|c| c.entry.id == ascii),
+            "Full keeps ASCII grams so the ASCII entry still matches",
+        );
+
+        // Mixed query under CjkOnly keeps the `設計` / boundary grams, so the
+        // mixed entry is still reachable through ngram alone.
+        let mixed_cjk_only = store
+            .ngram_candidates(
+                &normalize_text("alpha 設計"),
+                &SearchFilters::default(),
+                10,
+                NgramQueryMode::CjkOnly,
+            )
+            .await
+            .unwrap();
+        assert!(
+            mixed_cjk_only.iter().any(|c| c.entry.id == mixed),
+            "CjkOnly must keep CJK-bearing grams for mixed queries",
+        );
     }
 
     #[tokio::test]

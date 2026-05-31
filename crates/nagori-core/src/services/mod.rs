@@ -7,5 +7,6 @@
 pub mod search;
 
 pub use search::{
-    FtsCandidate, NgramCandidate, Ranker, SearchCandidateProvider, SearchPlan, SearchService,
+    FtsCandidate, NgramCandidate, NgramQueryMode, Ranker, SearchCandidateProvider, SearchPlan,
+    SearchService,
 };

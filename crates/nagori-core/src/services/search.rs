@@ -5,7 +5,8 @@ use time::OffsetDateTime;
 
 use crate::{
     ClipboardEntry, EntryId, RecentOrder, Result, SearchFilters, SearchMode, SearchQuery,
-    SearchResult, text::normalize_text,
+    SearchResult,
+    text::{has_cjk, normalize_text},
 };
 
 /// Maximum number of `SearchResult`s returned regardless of caller-requested
@@ -30,13 +31,33 @@ pub struct FtsCandidate {
 /// Ngram hit returned by a [`SearchCandidateProvider`].
 ///
 /// `ngram_overlap` is the ratio in `[0.0, 1.0]` of query ngrams matched in the
-/// document. The provider is responsible for the heuristic of when ngram
-/// matching is worthwhile (e.g. CJK or short queries) and may return an empty
-/// vector when it isn't.
+/// document. The orchestrator passes a [`NgramQueryMode`] to encode the
+/// plan-level policy (which grams to use); the provider applies it plus its own
+/// "is this worth running at all" net and may return an empty vector.
 #[derive(Debug, Clone)]
 pub struct NgramCandidate {
     pub entry: ClipboardEntry,
     pub ngram_overlap: f32,
+}
+
+/// How the ngram candidate fetch should treat the query's grams.
+///
+/// The orchestrator owns this policy because it depends on the resolved
+/// [`SearchPlan`], which the provider never sees:
+///
+/// * `Full` — use every query gram. The explicit `Fuzzy` plan needs this so
+///   short ASCII typos (`needel` → `needle`) still match via gram overlap.
+/// * `CjkOnly` — keep only grams that contain a CJK character. The implicit
+///   `Hybrid` (Auto) plan uses this: ASCII word recall is already covered by
+///   FTS + the bounded substring scan, and common ASCII bigrams own huge
+///   posting lists that make the `gram IN (...)` union explode on large
+///   histories. Filtering to CJK grams preserves CJK and mixed-script recall
+///   while shedding that cost. A pure-ASCII query yields no CJK grams, so the
+///   fetch short-circuits to empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NgramQueryMode {
+    Full,
+    CjkOnly,
 }
 
 /// Storage-facing seam for search.
@@ -80,13 +101,17 @@ pub trait SearchCandidateProvider: Send + Sync {
         limit: usize,
     ) -> Result<Vec<FtsCandidate>>;
 
-    /// Ngram-overlap matches. May return empty when the implementation deems
-    /// ngram fan-out unprofitable (long ASCII queries are the canonical case).
+    /// Ngram-overlap matches. `mode` carries the plan-level gram policy (see
+    /// [`NgramQueryMode`]). May return empty when no usable grams survive the
+    /// mode filter or when the implementation deems the fan-out unprofitable
+    /// (long ASCII queries under [`NgramQueryMode::Full`] are the canonical
+    /// case).
     async fn ngram_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
+        mode: NgramQueryMode,
     ) -> Result<Vec<NgramCandidate>>;
 }
 
@@ -203,7 +228,23 @@ where
             SearchPlan::Exact | SearchPlan::Fuzzy | SearchPlan::Hybrid
         );
         let want_fts = matches!(plan, SearchPlan::FullText | SearchPlan::Hybrid);
-        let want_ngram = matches!(plan, SearchPlan::Fuzzy | SearchPlan::Hybrid);
+        // Ngram fan-out runs for `Fuzzy` (full grams — its typo tolerance comes
+        // from gram overlap) and for `Hybrid` *only when the query carries CJK*.
+        // A pure-ASCII `Hybrid` query is fully served by FTS + bounded
+        // substring, so we skip even dispatching the blocking ngram fetch and
+        // dodge the common-bigram posting-list explosion on large histories.
+        // Mixed CJK+ASCII queries still reach the provider, where
+        // `NgramQueryMode::CjkOnly` strips the costly ASCII grams.
+        let want_ngram = match plan {
+            SearchPlan::Fuzzy => true,
+            SearchPlan::Hybrid => has_cjk(&normalized),
+            _ => false,
+        };
+        let ngram_mode = if matches!(plan, SearchPlan::Hybrid) {
+            NgramQueryMode::CjkOnly
+        } else {
+            NgramQueryMode::Full
+        };
 
         // Only the implicit `Hybrid` plan opts into the recent-window
         // bound. There FTS gives word-level recall and ngram gives CJK
@@ -238,7 +279,7 @@ where
         let ngram_fut = async {
             if want_ngram {
                 self.provider
-                    .ngram_candidates(&normalized, filters, candidate_limit)
+                    .ngram_candidates(&normalized, filters, candidate_limit, ngram_mode)
                     .await
             } else {
                 Ok(Vec::new())
@@ -331,6 +372,7 @@ mod tests {
         fts: Vec<FtsCandidate>,
         ngram: Vec<NgramCandidate>,
         seen: Mutex<Vec<&'static str>>,
+        ngram_mode: Mutex<Option<NgramQueryMode>>,
     }
 
     #[async_trait]
@@ -371,8 +413,10 @@ mod tests {
             _normalized: &str,
             _filters: &SearchFilters,
             _limit: usize,
+            mode: NgramQueryMode,
         ) -> Result<Vec<NgramCandidate>> {
             self.seen.lock().unwrap().push("ngram");
+            *self.ngram_mode.lock().unwrap() = Some(mode);
             Ok(self.ngram.clone())
         }
     }
@@ -434,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_plan_fans_out_substring_fts_and_ngram() {
+    async fn hybrid_cjk_query_fans_out_substring_fts_and_ngram() {
         let a = entry("alpha");
         let b = entry("beta");
         let c = entry("gamma");
@@ -452,12 +496,74 @@ mod tests {
         };
         let svc = SearchService::new(&provider, &SumRanker);
 
-        let q = SearchQuery::new("xyz", "xyz".to_owned(), 10);
+        // A CJK query keeps ngram in the Auto/Hybrid fan-out, and the
+        // orchestrator must ask for CJK-only grams there.
+        let q = SearchQuery::new("検索", "検索".to_owned(), 10);
         let results = svc.search(q).await.unwrap();
         let calls = provider.seen.lock().unwrap().clone();
 
         assert_eq!(calls, vec!["substring", "fts", "ngram"]);
+        assert_eq!(
+            *provider.ngram_mode.lock().unwrap(),
+            Some(NgramQueryMode::CjkOnly)
+        );
         assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn hybrid_ascii_query_skips_ngram() {
+        // Pure-ASCII Auto queries are served by FTS + bounded substring; ngram
+        // is not dispatched at all, so the common-bigram posting-list scan
+        // never runs. This is the P0 fix for the 100k fan-out blowup.
+        let provider = StubProvider {
+            substring: vec![entry("alpha")],
+            fts: vec![FtsCandidate {
+                entry: entry("beta"),
+                fts_score: -1.5,
+            }],
+            ngram: vec![NgramCandidate {
+                entry: entry("gamma"),
+                ngram_overlap: 0.75,
+            }],
+            ..Default::default()
+        };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let q = SearchQuery::new("needle", "needle".to_owned(), 10);
+        let results = svc.search(q).await.unwrap();
+        let calls = provider.seen.lock().unwrap().clone();
+
+        assert_eq!(calls, vec!["substring", "fts"], "ngram must not run");
+        assert!(provider.ngram_mode.lock().unwrap().is_none());
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fuzzy_ascii_query_uses_full_ngram_mode() {
+        // Explicit Fuzzy keeps ngram for ASCII (its typo tolerance lives there)
+        // and must request the full gram set, not the CJK-only subset.
+        let provider = StubProvider {
+            substring: vec![entry("alpha")],
+            ngram: vec![NgramCandidate {
+                entry: entry("gamma"),
+                ngram_overlap: 0.75,
+            }],
+            ..Default::default()
+        };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let mut q = SearchQuery::new("needel", "needel".to_owned(), 10);
+        q.mode = SearchMode::Fuzzy;
+        let results = svc.search(q).await.unwrap();
+        let calls = provider.seen.lock().unwrap().clone();
+
+        // Fuzzy fans out substring + ngram (no FTS branch).
+        assert_eq!(calls, vec!["substring", "ngram"]);
+        assert_eq!(
+            *provider.ngram_mode.lock().unwrap(),
+            Some(NgramQueryMode::Full)
+        );
+        assert_eq!(results.len(), 2);
     }
 
     #[tokio::test]
@@ -477,7 +583,10 @@ mod tests {
         };
         let svc = SearchService::new(&provider, &SumRanker);
 
-        let q = SearchQuery::new("xyz", "xyz".to_owned(), 10);
+        // A CJK query exercises all three branches (substring + FTS + ngram)
+        // in the Auto/Hybrid plan, so the dedup collapses every signal onto the
+        // one shared entry.
+        let q = SearchQuery::new("検索", "検索".to_owned(), 10);
         let results = svc.search(q).await.unwrap();
 
         assert_eq!(results.len(), 1, "deduped to a single entry");

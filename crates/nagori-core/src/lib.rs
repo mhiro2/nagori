@@ -22,7 +22,8 @@ pub use policy::{
 };
 pub use repositories::{AuditLog, EntryRepository, SearchRepository, SettingsRepository};
 pub use services::{
-    FtsCandidate, NgramCandidate, Ranker, SearchCandidateProvider, SearchPlan, SearchService,
+    FtsCandidate, NgramCandidate, NgramQueryMode, Ranker, SearchCandidateProvider, SearchPlan,
+    SearchService,
 };
 pub use settings::{
     AiSettings, AppDenyRule, AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT,
@@ -31,4 +32,4 @@ pub use settings::{
     RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
     password_manager_preset_rules, validate_hotkey,
 };
-pub use text::normalize_text;
+pub use text::{has_cjk, normalize_text};

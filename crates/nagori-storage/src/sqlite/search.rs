@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use nagori_core::{
-    ClipboardEntry, EntryId, FtsCandidate, NgramCandidate, RecentOrder, Result,
+    ClipboardEntry, EntryId, FtsCandidate, NgramCandidate, NgramQueryMode, RecentOrder, Result,
     SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
     SearchResult, SearchService,
 };
@@ -231,13 +231,34 @@ impl SearchCandidateProvider for SqliteStore {
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
+        mode: NgramQueryMode,
     ) -> Result<Vec<NgramCandidate>> {
-        let query_grams = generate_ngrams(normalized);
-        // Ngram fan-out only pays off for CJK or very short queries — long
-        // ASCII queries return huge candidate sets that LIKE/FTS already
-        // cover, so we shortcut to an empty result instead of doing the work.
-        if query_grams.is_empty() || !(has_cjk(normalized) || normalized.chars().count() <= 8) {
+        let mut query_grams = generate_ngrams(normalized);
+        if query_grams.is_empty() {
             return Ok(Vec::new());
+        }
+        match mode {
+            // Hybrid (Auto): keep only grams that carry a CJK character. ASCII
+            // word recall is already served by FTS + the bounded substring
+            // scan, and common ASCII bigrams own huge posting lists whose
+            // `gram IN (...)` union explodes on large histories (the 100k
+            // fan-out blowup). A pure-ASCII query leaves no grams here and
+            // short-circuits to empty; mixed CJK+ASCII queries keep just their
+            // CJK / boundary grams, so the costly ASCII postings never load.
+            NgramQueryMode::CjkOnly => {
+                query_grams.retain(|gram| has_cjk(gram));
+                if query_grams.is_empty() {
+                    return Ok(Vec::new());
+                }
+            }
+            // Explicit Fuzzy: use the full gram set so ASCII typos still match
+            // via overlap, but skip long ASCII queries (LIKE/FTS already cover
+            // them) to keep the fan-out bounded.
+            NgramQueryMode::Full => {
+                if !(has_cjk(normalized) || normalized.chars().count() <= 8) {
+                    return Ok(Vec::new());
+                }
+            }
         }
         let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);

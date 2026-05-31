@@ -508,6 +508,18 @@ branch its own pooled SQLite connection so they run truly in parallel
 under WAL — readers do not block each other and an in-flight capture
 write does not stall search.
 
+**Hybrid ngram is CJK-scoped.** In the implicit `Hybrid` (Auto) plan the
+ngram branch only fires for queries that carry a CJK character, and the
+orchestrator passes `NgramQueryMode::CjkOnly` so the provider keeps just
+the grams that contain a CJK char. ASCII word recall is already served by
+FTS (whole-token) plus the bounded substring scan, while common ASCII
+bigrams own huge posting lists whose `gram IN (...)` union explodes on
+large histories. Filtering to CJK grams preserves CJK and mixed-script
+recall while shedding that cost; a pure-ASCII Auto query skips ngram
+entirely. ASCII partial / typo recall therefore lives in explicit
+`SearchMode::Fuzzy`, which still runs the full gram set
+(`NgramQueryMode::Full`).
+
 **Semantic plan.** `SearchMode::Semantic` resolves to its own plan but
 needs a query embedding, so `NagoriRuntime::search` routes it ahead of the
 text pipeline: it embeds the query through the wired `Embedder` and ranks
@@ -569,7 +581,10 @@ where applicable. CJK substrings are indexed as 2- and 3-grams capped at
 `MAX_NGRAM_INPUT_CHARS` (4096) non-whitespace characters per entry,
 which keeps a 512KB paste from exploding `ngrams` to ~1M rows. Queries
 generate the same grams and rank by overlap before re-ranking with
-exact substring + recency.
+exact substring + recency. In the Auto plan only CJK-bearing query grams
+are used (see *Hybrid ngram is CJK-scoped* above); explicit `Fuzzy`
+matches on the full gram set, which is what backs ASCII partial / typo
+recall.
 
 ---
 

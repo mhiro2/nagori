@@ -1,11 +1,6 @@
-pub fn has_cjk(input: &str) -> bool {
-    input.chars().any(|ch| {
-        matches!(
-            ch as u32,
-            0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af
-        )
-    })
-}
+// `has_cjk` now lives in `nagori_core::text` (search plan dispatch in core
+// needs it and core cannot depend on this crate). Re-exported via `lib.rs` so
+// existing `nagori_search::has_cjk` call sites keep compiling.
 
 /// Hard cap on how many leading non-whitespace characters a single document
 /// contributes to the ngram index.
