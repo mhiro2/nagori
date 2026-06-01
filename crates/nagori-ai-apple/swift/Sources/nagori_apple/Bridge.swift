@@ -94,6 +94,29 @@ public func nagoriAppleStreamSnapshotsC(
     }
 }
 
+/// Hard cap on how long one text generation may run before the bridge cancels
+/// it. `LanguageModelSession.streamResponse` can wedge — outside an app bundle,
+/// or if the framework stops yielding snapshots — and because the Rust-side
+/// cancel flag is only polled *between* snapshots, a stream that never yields
+/// one would never observe it and the work task would never fire `onDone`,
+/// leaking the `GenerateCtx` box and the detached task. After this deadline the
+/// timeout task cancels the work `Task`; for any framework that honours Swift
+/// task cancellation the pending `await` then throws, the work task unwinds,
+/// fires `onDone`, and the Rust box is reclaimed. Kept at the same 20s as the
+/// translate / embed timeouts; the daemon's consumer-side request timeout is
+/// the deadline that normally fires first.
+///
+/// Crucially the timeout never calls `onDone` itself — the work task is the
+/// *sole* caller. Unlike the one-shot translate / embed paths (which touch
+/// `ctx` only through their single terminal callback), the streaming work task
+/// dereferences `ctx` through `isCancelled` / `onSnapshot` on every iteration.
+/// Letting the timeout fire `onDone` — which frees the box on the Rust side —
+/// while the work task might still touch `ctx` would be a use-after-free. A
+/// framework that ignores cancellation outright is therefore abandoned with its
+/// box still held; that residual leak is unavoidable without a use-after-free,
+/// and the consumer-side timeout still unblocks the caller.
+private let generateTimeoutNanoseconds: UInt64 = 20_000_000_000
+
 /// Generate text from `promptPtr` with the on-device language model under the
 /// system prompt `instructionsPtr`, streaming partial snapshots back through
 /// `onSnapshot`. One export serves every plain text-generation action
@@ -106,9 +129,16 @@ public func nagoriAppleStreamSnapshotsC(
 ///   loop and reports `onDone(ctx, 1)`.
 /// - `onSnapshot` receives the cumulative partial text so far (not a delta);
 ///   the Rust longest-common-prefix pump turns it into ordered deltas.
-/// - `onDone` reports a terminal status code: 0 success, 1 cancelled, and
-///   2–8 map `LanguageModelSession.GenerationError` cases onto stable codes the
-///   Rust side translates into `AiError`s.
+/// - `onDone` reports a terminal status code (fired exactly once, always by the
+///   work task): 0 success, 1 cancelled (an observed Rust-side cancel, or a
+///   timeout-cancelled `await`), and 2–8 map `LanguageModelSession`
+///   `.GenerationError` cases onto stable codes the Rust side translates into
+///   `AiError`s.
+///
+/// A timeout task races the generation: when it wins it cancels the work `Task`
+/// so a pending `await` throws and the work task unwinds to its single `onDone`
+/// call. See `generateTimeoutNanoseconds` for why the timeout must not call
+/// `onDone` directly.
 @_cdecl("nagori_apple_generate_c")
 public func nagoriAppleGenerateC(
     instructionsPtr: UnsafePointer<CChar>,
@@ -126,7 +156,7 @@ public func nagoriAppleGenerateC(
     let onSnapshotCopy = onSnapshot
     let onDoneCopy = onDone
 
-    Task.detached(priority: .userInitiated) {
+    let work = Task.detached(priority: .userInitiated) {
         let session = LanguageModelSession(instructions: instructions)
         var doneCode: Int32 = 0
         do {
@@ -143,12 +173,25 @@ public func nagoriAppleGenerateC(
                     }
                 }
             }
+        } catch is CancellationError {
+            // Timeout (or any task cancellation) reached us mid-`await`.
+            doneCode = 1
         } catch let error as LanguageModelSession.GenerationError {
             doneCode = generationErrorCode(error)
         } catch {
             doneCode = 2
         }
+        // The work task is the only `onDone` caller, so the Rust box is freed
+        // exactly once and never while another task could still touch `ctx`.
         onDoneCopy(ctxCopy, doneCode)
+    }
+
+    Task.detached(priority: .utility) {
+        try? await Task.sleep(nanoseconds: generateTimeoutNanoseconds)
+        // Break a wedged stream out of its pending `await`; the work task then
+        // unwinds and fires `onDone` itself. The timeout deliberately does not
+        // call `onDone` — see `generateTimeoutNanoseconds`.
+        work.cancel()
     }
 }
 
