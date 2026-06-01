@@ -4,7 +4,7 @@ import App from './app/App.svelte';
 import { getSettings } from './app/lib/commands';
 import { setLocale } from './app/lib/i18n/index.svelte';
 import { isTauri } from './app/lib/tauri';
-import { applyAppearance } from './app/lib/theme';
+import { applyAppearance, watchSystemTheme } from './app/lib/theme';
 
 import './styles/app.css';
 
@@ -15,6 +15,10 @@ import './styles/app.css';
 setLocale('system');
 
 if (isTauri()) {
+  // Track OS light/dark switches up front so `system` appearance follows the
+  // OS even before settings load — and on Windows, where the webview's
+  // `prefers-color-scheme` only updates the rendered theme on restart.
+  watchSystemTheme();
   void getSettings()
     .then((settings) => {
       setLocale(settings.locale);

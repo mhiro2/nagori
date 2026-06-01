@@ -1452,9 +1452,14 @@ canonical disambiguator for Simplified vs. Traditional Chinese.
 not a dictionary key — the frontend resolves it to a concrete locale
 on every load by re-reading the OS / WebView language preferences, so
 changing the OS language follows through without touching settings.
-`Appearance::System` is the only mode that consults
-`prefers-color-scheme`; explicit light or dark sets `<html data-theme>`
-directly.
+`Appearance::System` follows the OS theme; explicit light or dark sets
+`<html data-theme>` directly. System mode paints from
+`prefers-color-scheme` on first load, then pins the concrete OS theme
+read via Tauri's `Window.theme()` and re-applies it on every
+`onThemeChanged` event. The Tauri path is what makes a live OS light/dark
+switch land on Windows, where WebView2 only samples
+`prefers-color-scheme` when the webview is created — so the media query
+alone went stale until the app was restarted.
 
 **Negotiation.** Whenever the resolved locale is needed (`'system'`
 preference or first paint with no settings yet), read
