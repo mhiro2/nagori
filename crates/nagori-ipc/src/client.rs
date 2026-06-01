@@ -8,6 +8,13 @@ use crate::{AuthToken, IpcEnvelope, IpcRequest, IpcResponse};
 
 const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
 
+/// Upper bound for a single outgoing request payload. The server's bounded
+/// reader counts only the payload bytes (the trailing `\n` delimiter is
+/// excluded) and rejects anything larger, so pre-checking against the same
+/// bound here lets the CLI fail fast with a deterministic error instead of
+/// writing a request the daemon will only drop.
+const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
+
 /// Total budget for connect+write+read on a single IPC round trip. Without a
 /// cap, a half-alive daemon (or a malicious peer that accepts but never
 /// answers) would pin the CLI forever.
@@ -127,6 +134,17 @@ where
     };
     let payload =
         serde_json::to_vec(&envelope).map_err(|err| AppError::InvalidInput(err.to_string()))?;
+    // The server's bounded reader caps the payload (the trailing `\n` is not
+    // counted), so mirror that exact bound and reject before we touch the
+    // socket — otherwise we write a request the daemon is guaranteed to drop
+    // and the caller sees an opaque connection error instead of a clear size
+    // violation.
+    if payload.len() > MAX_IPC_REQUEST_BYTES {
+        return Err(AppError::InvalidInput(format!(
+            "IPC request is {} bytes, exceeds the limit of {MAX_IPC_REQUEST_BYTES} bytes",
+            payload.len()
+        )));
+    }
     stream
         .write_all(&payload)
         .await
@@ -219,6 +237,29 @@ mod tests {
 
         assert!(matches!(err, AppError::Platform(message) if message.contains("too large")));
         writer.await.expect("writer task should finish");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn oversized_request_is_rejected_before_send() {
+        // A request whose serialized payload exceeds the server's line cap must
+        // be rejected locally — before any bytes hit the socket — so the caller
+        // sees a clear size violation instead of an opaque dropped connection.
+        let token = AuthToken::generate().expect("token");
+        let huge = "a".repeat(MAX_IPC_REQUEST_BYTES + 1);
+        let request = IpcRequest::AddEntry(crate::AddEntryRequest { text: huge });
+
+        // The peer never reads. With a tiny duplex buffer a real `write_all`
+        // would block, so resolving to the error at all proves the size
+        // pre-check fired before any write was attempted.
+        let (client, _server) = tokio::io::duplex(64);
+        let err = exchange_envelope(client, &token, request)
+            .await
+            .expect_err("oversized request must be rejected");
+
+        assert!(
+            matches!(err, AppError::InvalidInput(message) if message.contains("exceeds the limit"))
+        );
     }
 
     #[cfg(unix)]

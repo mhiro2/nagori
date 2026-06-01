@@ -10,8 +10,9 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use futures::StreamExt;
 use nagori_core::{
-    AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository, QuickActionId,
-    SearchQuery, SettingsRepository, is_text_safe_for_default_output,
+    AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository,
+    MAX_ENTRY_SIZE_BYTES, QuickActionId, SearchQuery, SettingsRepository,
+    is_text_safe_for_default_output,
 };
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_daemon::run_daemon;
@@ -921,9 +922,28 @@ impl OutputFormat {
 fn read_text(args: AddArgs) -> Result<String> {
     if args.stdin {
         use std::io::Read;
-        let mut buffer = String::new();
-        std::io::stdin().read_to_string(&mut buffer)?;
-        Ok(buffer)
+        // Bound the read so an unbounded or hostile stdin (e.g. `cat /dev/zero |
+        // nagori add --stdin`) cannot OOM the CLI process. The daemon's bounded
+        // reader only protects the server side; this guards the client itself.
+        // Read one byte past the ceiling so a payload sitting exactly at the cap
+        // is still accepted while anything larger is rejected.
+        //
+        // Read raw bytes rather than straight into a `String`: `read_to_string`
+        // validates UTF-8 while it fills the buffer, so an oversized input whose
+        // `cap + 1` boundary splits a multi-byte char would surface as a UTF-8
+        // error (exit 8) before the size check runs, escaping the "oversize =>
+        // exit 2" contract. Check the length first, then validate UTF-8.
+        let mut buffer = Vec::new();
+        std::io::stdin()
+            .take(MAX_ENTRY_SIZE_BYTES as u64 + 1)
+            .read_to_end(&mut buffer)?;
+        if buffer.len() > MAX_ENTRY_SIZE_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "stdin input exceeds the maximum entry size of {MAX_ENTRY_SIZE_BYTES} bytes"
+            ))
+            .into());
+        }
+        String::from_utf8(buffer).map_err(|err| anyhow!("stdin input is not valid UTF-8: {err}"))
     } else {
         args.text
             .ok_or_else(|| anyhow!("either --text or --stdin must be provided"))
