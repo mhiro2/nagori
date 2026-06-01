@@ -7,7 +7,7 @@
         "img-src": ["'self'", "asset:", "data:", "https://asset.localhost"],
         "font-src": ["'self'", "data:"],
         "style-src": ["'self'", "'unsafe-inline'"],
-        "script-src": ["'self'", "'wasm-unsafe-eval'"],
+        "script-src": ["'self'"],
         "connect-src": [
           "'self'",
           "ipc:",
