@@ -754,15 +754,32 @@ fn collect_macos_extras(
             // File URLs come through per-pasteboard-item; the pasteboard-level
             // accessors only return the first one.
             if let Some(items) = pb.pasteboardItems() {
-                let paths = match collect_file_url_paths(&items, max_file_url_bytes) {
-                    FileUrlPaths::Captured(paths) => paths,
-                    FileUrlPaths::Oversized(observed) => return Some(observed),
-                };
-                if !paths.is_empty() {
-                    out.push(ClipboardRepresentation {
-                        mime_type: "text/uri-list".to_owned(),
-                        data: ClipboardData::FilePaths(paths),
-                    });
+                match collect_file_url_paths(&items, max_file_url_bytes) {
+                    FileUrlPaths::Captured(paths) => {
+                        if !paths.is_empty() {
+                            out.push(ClipboardRepresentation {
+                                mime_type: "text/uri-list".to_owned(),
+                                data: ClipboardData::FilePaths(paths),
+                            });
+                        }
+                    }
+                    // `collect_file_url_paths` returns as soon as the byte
+                    // budget or the unconditional `MAX_FILE_URL_ITEMS` count cap
+                    // trips, so memory is already bounded by the time we get
+                    // here. What differs is how an oversized file-list should be
+                    // surfaced:
+                    // - bounded (`Some`) path: the whole snapshot is rejected,
+                    //   so propagate `observed` and let the caller turn it into
+                    //   `CapturedSnapshot::Oversized`.
+                    // - unbounded (`None`) `current_snapshot` path: there is no
+                    //   budget to reject against, so drop just the oversized
+                    //   file-list and keep collecting the remaining extras
+                    //   (HTML / RTF / image) rather than silently losing them.
+                    FileUrlPaths::Oversized(observed) => {
+                        if max_file_url_bytes.is_some() {
+                            return Some(observed);
+                        }
+                    }
                 }
             }
 
@@ -894,13 +911,21 @@ fn collect_file_url_paths(
         file_url_count = file_url_count.saturating_add(1);
         observed_bytes = observed_bytes.saturating_add(string.len());
 
-        if let Some(limit) = max_bytes {
-            if file_url_count > MAX_FILE_URL_ITEMS {
-                return FileUrlPaths::Oversized(observed_bytes.max(limit_exceeded_bytes(limit)));
-            }
-            if observed_bytes > limit {
-                return FileUrlPaths::Oversized(observed_bytes);
-            }
+        // Cap the item count unconditionally — including the unbounded
+        // (`max_bytes == None`) `current_snapshot` path — so a pasteboard
+        // advertising millions of file URLs cannot grow `paths` without bound.
+        // Mirrors Windows' unconditional `MAX_PATHS` cap; the byte-budget check
+        // below still only runs when a caller passes a limit.
+        if file_url_count > MAX_FILE_URL_ITEMS {
+            let observed = max_bytes.map_or(observed_bytes, |limit| {
+                observed_bytes.max(limit_exceeded_bytes(limit))
+            });
+            return FileUrlPaths::Oversized(observed);
+        }
+        if let Some(limit) = max_bytes
+            && observed_bytes > limit
+        {
+            return FileUrlPaths::Oversized(observed_bytes);
         }
 
         let raw = string.to_string();
@@ -1527,5 +1552,32 @@ mod tests {
             panic!("bounded file URL collection must reject excessive item counts");
         };
         assert_eq!(collected_observed, observed);
+    }
+
+    #[test]
+    fn unbounded_file_url_collection_still_caps_item_count() {
+        // The `current_snapshot` path passes `max_bytes = None`. Without an
+        // unconditional count cap a pasteboard advertising millions of file
+        // URLs would grow `paths` without bound, so the cap must fire even
+        // when no byte budget is supplied.
+        let urls = (0..=MAX_FILE_URL_ITEMS)
+            .map(|index| format!("file:///tmp/nagori-{index}"))
+            .collect::<Vec<_>>();
+        let items = file_url_items(&urls);
+
+        let FileUrlPaths::Oversized(observed) = collect_file_url_paths(&items, None) else {
+            panic!("unbounded file URL collection must still reject excessive item counts");
+        };
+        assert!(observed > 0);
+
+        // A list at or below the cap is still captured on the unbounded path.
+        let few = (0..8)
+            .map(|index| format!("file:///tmp/nagori-{index}"))
+            .collect::<Vec<_>>();
+        let few_items = file_url_items(&few);
+        let FileUrlPaths::Captured(paths) = collect_file_url_paths(&few_items, None) else {
+            panic!("a small file URL list must be captured on the unbounded path");
+        };
+        assert_eq!(paths.len(), few.len());
     }
 }
