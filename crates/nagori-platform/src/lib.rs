@@ -7,7 +7,8 @@ pub mod preview;
 pub mod window;
 
 pub use capability::{
-    Capability, Platform, PlatformCapabilities, SupportTier, unsupported_capabilities,
+    Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
+    unsupported_capabilities,
 };
 pub use clipboard::{CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard};
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};

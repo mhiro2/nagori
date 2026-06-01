@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::ai_registry::AiRequestRegistry;
 use nagori_ipc::IpcServerHealth;
 use nagori_platform::{
-    ClipboardWriter, MemoryClipboard, NoopPasteController, PasteController, PermissionCheckContext,
-    PermissionChecker, PermissionKind, PermissionState, PermissionStatus, PlatformCapabilities,
-    unsupported_capabilities,
+    Capability, ClipboardWriter, MemoryClipboard, NO_AI_ENGINE_REASON, NoopPasteController,
+    PasteController, PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState,
+    PermissionStatus, PlatformCapabilities, unsupported_capabilities,
 };
 use nagori_storage::SqliteStore;
 use time::OffsetDateTime;
@@ -1196,7 +1196,23 @@ impl NagoriRuntimeBuilder {
         // forcing those sites to wire a value they don't need.
         // Production paths flow through `nagori-platform-native::
         // build_native_runtime`, which sets the host's real report.
-        let capabilities = Arc::new(self.capabilities.unwrap_or_else(unsupported_capabilities));
+        let mut capabilities = self.capabilities.unwrap_or_else(unsupported_capabilities);
+        // Reconcile the AI capability with the *actually wired* engine so
+        // the desktop's gate (and the capability matrix) can never claim
+        // AI on a host with no backend, and lights up automatically on any
+        // host that gains one — today macOS, a future runtime-configured
+        // (e.g. OpenAI-compatible) provider tomorrow. This is the single
+        // switch: wiring `ai_engine` is all it takes, with no per-OS edit
+        // to the static report. Live model readiness stays on the separate
+        // `AiAvailabilityReport` channel.
+        capabilities.ai_actions = if self.ai_engine.is_some() {
+            Capability::Available
+        } else {
+            Capability::Unsupported {
+                reason: NO_AI_ENGINE_REASON.to_owned(),
+            }
+        };
+        let capabilities = Arc::new(capabilities);
         NagoriRuntime {
             store: self.store,
             clipboard,
@@ -1989,8 +2005,11 @@ mod tests {
         // Builder-supplied capabilities must round-trip through the
         // dispatcher — that's the contract the desktop + CLI rely on,
         // so they can render exactly what the daemon was started with
-        // rather than reprobing the OS in two places.
-        use nagori_platform::{Capability, Platform, SupportTier};
+        // rather than reprobing the OS in two places. `ai_actions` is the
+        // sole exception: the builder reconciles it against the wired
+        // engine (none here → `Unsupported`), so `expected` matches the
+        // reconciled value rather than an echoed input.
+        use nagori_platform::{Capability, NO_AI_ENGINE_REASON, Platform, SupportTier};
 
         let store = SqliteStore::open_memory().expect("memory store should open");
         let expected = PlatformCapabilities {
@@ -2008,6 +2027,9 @@ mod tests {
             permissions_ui: Capability::Available,
             update_check: Capability::Available,
             preview_quick_look: Capability::Available,
+            ai_actions: Capability::Unsupported {
+                reason: NO_AI_ENGINE_REASON.to_owned(),
+            },
         };
         let runtime = NagoriRuntime::builder(store)
             .clipboard(Arc::new(MemoryClipboard::new()))
@@ -2019,6 +2041,32 @@ mod tests {
             panic!("expected Capabilities response");
         };
         assert_eq!(*actual, expected);
+    }
+
+    #[test]
+    fn ai_actions_capability_tracks_the_wired_engine() {
+        // The desktop hides every AI surface unless this row is supported.
+        // It must reflect the actually-wired engine — not a static per-OS
+        // guess — so a host that gains a backend (a test-injected mock
+        // today, a runtime-configured provider tomorrow) lights AI up with
+        // no second edit, and a host with none never offers a dead toggle.
+        let (with_engine, _) = runtime_with_mock_ai();
+        assert!(
+            with_engine
+                .capabilities()
+                .ai_actions
+                .is_supported_by_platform(),
+            "a wired engine must mark ai_actions supported"
+        );
+
+        let (without_engine, _) = runtime_with_memory_clipboard();
+        assert!(
+            matches!(
+                without_engine.capabilities().ai_actions,
+                Capability::Unsupported { .. }
+            ),
+            "no engine must mark ai_actions Unsupported"
+        );
     }
 
     #[tokio::test]

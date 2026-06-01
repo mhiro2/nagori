@@ -449,6 +449,10 @@ export type PlatformCapabilities = {
   permissionsUi: Capability;
   updateCheck: Capability;
   previewQuickLook: Capability;
+  // Whether model-backed AI actions have a wired backend on this host.
+  // Reflects the actually-wired engine (today macOS only); the desktop
+  // hides every AI surface when this is `unsupported`.
+  aiActions: Capability;
 };
 
 export type CommandError = {

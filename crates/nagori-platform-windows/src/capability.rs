@@ -11,7 +11,9 @@
 //! launch). There is no first-class permission UI: Windows does not
 //! gate clipboard / input synthesis behind a user-managed permission.
 
-use nagori_platform::{Capability, Platform, PlatformCapabilities, SupportTier};
+use nagori_platform::{
+    Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
+};
 
 #[must_use]
 pub fn report_capabilities() -> PlatformCapabilities {
@@ -53,6 +55,13 @@ pub fn report_capabilities() -> PlatformCapabilities {
             reason: "Windows has no OS-provided Quick-Look-equivalent overlay; \
                  the palette's preview shortcut is disabled."
                 .to_owned(),
+        },
+        // No on-device AI backend on Windows yet — `default_ai_engine`
+        // wires `None` here, so model-backed AI actions are refused and
+        // the desktop hides the AI surfaces. Lights up automatically once
+        // a provider (e.g. OpenAI-compatible) is wired.
+        ai_actions: Capability::Unsupported {
+            reason: NO_AI_ENGINE_REASON.to_owned(),
         },
     }
 }

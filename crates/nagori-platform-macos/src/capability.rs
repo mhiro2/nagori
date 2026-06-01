@@ -45,6 +45,12 @@ pub fn report_capabilities() -> PlatformCapabilities {
         // onto it directly. No permission gate beyond the implicit
         // file-system read for the temp preview file.
         preview_quick_look: Capability::Available,
+        // macOS is the one host that ships a model-backed AI engine (the
+        // Apple on-device backend wired by `nagori-platform-native::
+        // default_ai_engine`). The runtime re-confirms this against the
+        // actually-wired engine; live model readiness (Apple Intelligence
+        // downloaded) rides the separate `AiAvailabilityReport` channel.
+        ai_actions: Capability::Available,
     }
 }
 

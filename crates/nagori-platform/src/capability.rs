@@ -171,7 +171,29 @@ pub struct PlatformCapabilities {
     /// no cross-application overlay equivalent, so the desktop palette
     /// suppresses the shortcut when this row is `Unsupported`.
     pub preview_quick_look: Capability,
+    /// Whether model-backed AI actions (Summarize / Rewrite / Translate
+    /// / semantic search) have a wired backend on this host.
+    ///
+    /// Today only macOS ships one (the Apple on-device engine); Windows
+    /// and Linux report `Unsupported` until an OpenAI-compatible (or
+    /// other) provider lands. The per-OS `report_capabilities` value is a
+    /// static baseline — the runtime reconciles this row against the
+    /// **actually wired** `ai_engine` in `NagoriRuntimeBuilder`, so it
+    /// flips to `Available` on any host that gains a backend (including
+    /// a test-injected or future runtime-configured engine) without a
+    /// second edit. The desktop hides every AI surface when this row is
+    /// `Unsupported`. Live model readiness (e.g. Apple Intelligence
+    /// downloaded) stays on the separate `AiAvailabilityReport` channel.
+    pub ai_actions: Capability,
 }
+
+/// Reason surfaced for [`PlatformCapabilities::ai_actions`] when no
+/// model-backed AI engine is wired on the host.
+///
+/// Shared by the platform reports and the runtime's capability
+/// reconciliation so the copy stays identical across the static matrix
+/// and the live runtime value.
+pub const NO_AI_ENGINE_REASON: &str = "no model-backed AI backend is wired for this platform yet";
 
 /// Capability report for targets nagori does not build for.
 ///
@@ -203,6 +225,7 @@ pub fn unsupported_capabilities() -> PlatformCapabilities {
         permissions_ui: unsupported(),
         update_check: unsupported(),
         preview_quick_look: unsupported(),
+        ai_actions: unsupported(),
     }
 }
 
@@ -254,6 +277,7 @@ mod tests {
             &caps.permissions_ui,
             &caps.update_check,
             &caps.preview_quick_look,
+            &caps.ai_actions,
         ] {
             assert!(!cap.is_usable());
             assert!(!cap.is_supported_by_platform());
