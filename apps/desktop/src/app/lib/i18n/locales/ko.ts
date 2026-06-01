@@ -30,6 +30,9 @@ export const ko: Messages = {
       dateGroup: '날짜',
       typeGroup: '유형',
       sourceGroup: '출처 앱',
+      sourceShort: '앱',
+      allApps: '모든 앱',
+      clear: '필터 지우기',
     },
   },
   rankReason: {

@@ -30,6 +30,9 @@ export const zhHant: Messages = {
       dateGroup: '日期',
       typeGroup: '類型',
       sourceGroup: '來源應用程式',
+      sourceShort: '應用程式',
+      allApps: '所有應用程式',
+      clear: '清除篩選',
     },
   },
   rankReason: {

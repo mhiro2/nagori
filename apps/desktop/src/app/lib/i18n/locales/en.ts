@@ -37,6 +37,13 @@ export type Messages = {
       dateGroup: string;
       typeGroup: string;
       sourceGroup: string;
+      // Short trigger label for the source-app dropdown when nothing is picked.
+      sourceShort: string;
+      // Leading "no app filter" option in the source-app dropdown, so a
+      // single-select source app can be cleared without an obscure re-click.
+      allApps: string;
+      // Clears every active filter (shown only when some filter is active).
+      clear: string;
     };
   };
   // Short labels for `RankReason` variants. Shared by the per-row reason chip
@@ -505,6 +512,9 @@ export const en: Messages = {
       dateGroup: 'Date',
       typeGroup: 'Type',
       sourceGroup: 'Source app',
+      sourceShort: 'App',
+      allApps: 'All apps',
+      clear: 'Clear filters',
     },
   },
   rankReason: {

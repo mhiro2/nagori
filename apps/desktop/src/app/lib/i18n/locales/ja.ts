@@ -30,6 +30,9 @@ export const ja: Messages = {
       dateGroup: '日付',
       typeGroup: '種類',
       sourceGroup: 'コピー元アプリ',
+      sourceShort: 'アプリ',
+      allApps: 'すべてのアプリ',
+      clear: 'フィルタをクリア',
     },
   },
   rankReason: {

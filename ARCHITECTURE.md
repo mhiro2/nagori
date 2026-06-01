@@ -1036,17 +1036,34 @@ not duplicate runtime logic.
   right column is shared: `ActionInspector.svelte` takes it over the preview
   pane while the action inspector is open (and forces an expanded full-width
   preview back to the list+panel split first).
-- `FilterChips.svelte` — quick-filter row directly under the search
-  input. Composite filters that compose freely: a single-select date
-  window (*Today* / *Yesterday* / *Last 7 days* / *Last 30 days*),
-  multi-select content kinds (*Text* / *URL* / *Code* / *Image* /
-  *Files*, each mapping to one `ContentKind`), a *Pinned* toggle, and
-  source-app chips derived from the apps present in the current result
-  set (capped, with the active selection kept first so it survives the
-  results collapsing to a single app). All feed `currentFilters()` into
-  every `searchClipboard` call; the daemon's search-cache key compares
-  the full `SearchFilters` struct, so each combination caches
-  independently. Re-clicking the active date / source chip clears it.
+- `FilterChips.svelte` — single-line quick-filter row directly under the
+  search input. Composite filters that compose freely, split by cardinality:
+  the low-churn axes stay as one-click chips — a single-select date window
+  (*Today* / *Yesterday* / *Last 7 days* / *Last 30 days*) and a *Pinned*
+  toggle — while the high-cardinality axes collapse into `FilterDropdown`
+  menus so the row never wraps: multi-select content kinds (*Text* / *URL* /
+  *Code* / *Image* / *Files*, each mapping to one `ContentKind`) and a
+  single-select source app. The source-app options are retained from the last
+  search that was *not* itself source-app-filtered (`recordSourceApps`, capped)
+  rather than read from the live results — otherwise selecting an app would
+  collapse the results, and the menu, to that one app and hide the others; this
+  way the open menu keeps offering every app to switch to. A leading *All apps*
+  row clears the selection, so the single-select axis has a discoverable reset
+  instead of an obscure re-click. Each dropdown folds its selection into the
+  trigger label (none → axis name, one → that value, many → `<axis> <n>`,
+  avoiding per-locale plural forms). A *Clear* control appears only while some
+  filter is active. All feed `currentFilters()` into every `searchClipboard`
+  call; the daemon's search-cache key compares the full `SearchFilters`
+  struct, so each combination caches independently. Re-clicking the active
+  date chip clears it.
+- `FilterDropdown.svelte` — reusable popover used by `FilterChips` for the
+  content-kind and source-app axes. A trigger button (`aria-haspopup="menu"`)
+  opens an opaque `--bg-overlay` menu of `menuitemcheckbox` (multi) or
+  `menuitemradio` (single) rows. It owns its own keyboard handling and stops
+  those keydowns from bubbling — the palette routes arrows / Enter / Escape at
+  the window level, so an un-stopped menu keystroke would otherwise move the
+  result selection or dismiss the palette (mirrors `ActionInspector`). Escape
+  closes only the menu; a click outside dismisses it.
 - `StatusBar.svelte` — entry count, last-search elapsed time, capture
   badge, AI badge, keyboard hints. Also hosts a one-row Accessibility
   indicator: when the OS grant that auto-paste needs is missing it

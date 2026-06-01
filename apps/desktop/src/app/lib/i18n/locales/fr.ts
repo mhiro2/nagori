@@ -31,6 +31,9 @@ export const fr: Messages = {
       dateGroup: 'Date',
       typeGroup: 'Type',
       sourceGroup: 'Application source',
+      sourceShort: 'App',
+      allApps: 'Toutes les apps',
+      clear: 'Effacer les filtres',
     },
   },
   rankReason: {
