@@ -1085,7 +1085,12 @@ not duplicate runtime logic.
   `open-actions` binding) takes the palette body's right column in place of
   `PreviewPane.svelte` and hands it back the moment it closes, so the target
   stays beside its source row and long results read against full panel height
-  rather than the bottom of an 80vh overlay. It composes
+  rather than the bottom of an 80vh overlay. While it is open the result list
+  becomes a reference surface — the target row lifts and the rest recede, and
+  hover no longer moves the selection, so a stray mouse move can't silently
+  re-target (and cancel a running action or discard a finished result); ↑/↓
+  stay the deliberate re-target path and Escape returns to live browsing. It
+  composes
   `CompactPreview.svelte` (the target's kind / source / time and a short
   snippet, kept visible so the user always sees what they are acting on),
   `ActionPicker.svelte` (one flat list mixing the deterministic quick actions

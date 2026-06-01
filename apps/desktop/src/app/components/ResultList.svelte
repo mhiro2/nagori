@@ -16,6 +16,10 @@
     onTogglePin?: (index: number) => void;
     multiSelected?: ReadonlySet<string>;
     emptyMessage?: string;
+    // The action inspector owns the right column: the list becomes a reference
+    // surface (selected row lifted, the rest receded) rather than a live,
+    // hover-driven list. Purely visual — the palette gates hover selection.
+    locked?: boolean;
   };
 
   const {
@@ -27,6 +31,7 @@
     onTogglePin,
     multiSelected,
     emptyMessage,
+    locked = false,
   }: Props = $props();
 
   const effectiveEmpty = $derived(emptyMessage ?? messages().palette.empty);
@@ -74,6 +79,7 @@
         {index}
         selected={index === selectedIndex}
         marked={multiSelected?.has(item.id) ?? false}
+        {locked}
         {onSelect}
         {onConfirm}
         {onTogglePin}

@@ -70,6 +70,10 @@
     // `| undefined` is explicit so ResultList can forward its own optional
     // prop straight through under `exactOptionalPropertyTypes`.
     onTogglePin?: ((index: number) => void) | undefined;
+    // Reference mode: the action inspector is open, so the selected row lifts
+    // and the rest recede. Visual only — `onSelect` still fires on hover; the
+    // palette decides whether to honour it.
+    locked?: boolean | undefined;
   };
 
   const {
@@ -80,6 +84,7 @@
     onSelect,
     onConfirm,
     onTogglePin = () => {},
+    locked = false,
   }: Props = $props();
 
   const t = $derived(messages());
@@ -96,7 +101,7 @@
   );
 </script>
 
-<div class="result-row" class:selected>
+<div class="result-row" class:selected class:locked>
   <button
     type="button"
     class="result-item"
@@ -167,9 +172,24 @@
     display: flex;
     align-items: stretch;
     width: 100%;
+    /* Smooth the recede when the action inspector opens/closes. */
+    transition: opacity 0.12s ease;
   }
   .result-row.selected {
     background: var(--bg-selected, rgba(120, 160, 255, 0.18));
+  }
+  /* Reference mode (action inspector open). The non-target rows recede so the
+     list reads as "acting on this clip" rather than a live hover list, and the
+     target row lifts above them with a soft shadow. Hover affordances stay
+     suppressed here because the palette freezes hover selection while open, so
+     no stale `:hover` can light a receded row. */
+  .result-row.locked:not(.selected) {
+    opacity: 0.4;
+  }
+  .result-row.locked.selected {
+    position: relative;
+    z-index: 1;
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
   }
   .result-item {
     display: flex;

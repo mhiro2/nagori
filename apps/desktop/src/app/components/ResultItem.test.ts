@@ -197,6 +197,39 @@ describe('ResultItem', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it('applies the .locked class for reference mode', () => {
+    // The action inspector is open: the row carries `locked` so the recede/lift
+    // styling applies. Whether hover actually re-selects is the palette's call,
+    // not the row's — see the `onSelect` test below.
+    const { getByRole } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 0,
+        selected: true,
+        locked: true,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(getByRole('option').closest('.result-row')?.classList.contains('locked')).toBe(true);
+  });
+
+  it('still forwards onSelect on mouse-enter while locked (the palette owns the gate)', async () => {
+    const onSelect = vi.fn();
+    const { getByRole } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 2,
+        selected: false,
+        locked: true,
+        onSelect,
+        onConfirm: () => {},
+      },
+    });
+    await fireEvent.mouseEnter(getByRole('option'));
+    expect(onSelect).toHaveBeenCalledWith(2);
+  });
+
   it('applies the .selected class when selected is true', () => {
     const { getByRole } = render(ResultItem, {
       props: {

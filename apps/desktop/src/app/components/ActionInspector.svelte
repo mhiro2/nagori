@@ -392,13 +392,15 @@
   });
 
   // Because the inspector is docked (not a modal), the user can re-target it
-  // by clicking another row while it stays open — the palette feeds it the
-  // live selection. The work area belongs to the *previous* target, so when
-  // the id changes under an open inspector we cancel any run and clear it
-  // rather than leave a stale result (or land a finishing run) against the new
-  // entry. `lastSeenTargetId` tracks the id while closed too, so reopening on
-  // the same entry (the common case) is not treated as a change. `untrack`
-  // keeps this effect's dependencies to `open` + `target.id` only.
+  // with ↑/↓ while it stays open — the palette feeds it the live selection.
+  // (Hover does not re-target: the palette freezes hover selection while the
+  // inspector is open, so a stray mouse move can't silently re-target in
+  // place.) The work area belongs to the *previous* target, so when the id
+  // changes under an open inspector we cancel any run and clear it rather than
+  // leave a stale result (or land a finishing run) against the new entry.
+  // `lastSeenTargetId` tracks the id while closed too, so reopening on the same
+  // entry (the common case) is not treated as a change. `untrack` keeps this
+  // effect's dependencies to `open` + `target.id` only.
   let lastSeenTargetId: string | undefined = undefined;
   $effect(() => {
     const id = target?.id;

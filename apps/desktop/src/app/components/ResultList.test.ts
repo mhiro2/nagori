@@ -73,6 +73,14 @@ describe('ResultList', () => {
     expect(options[2]?.classList.contains('selected')).toBe(true);
   });
 
+  it('forwards locked to every row for reference-mode styling', () => {
+    const items = [sample({ id: 'a' }), sample({ id: 'b' })];
+    const { container } = render(ResultList, {
+      props: { items, selectedIndex: 0, locked: true, onSelect: () => {}, onConfirm: () => {} },
+    });
+    expect(container.querySelectorAll('.result-row.locked')).toHaveLength(2);
+  });
+
   it('exposes a listbox containing options with aria-selected reflecting selectedIndex', () => {
     const items = [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })];
     const { getByRole, getAllByRole } = render(ResultList, {

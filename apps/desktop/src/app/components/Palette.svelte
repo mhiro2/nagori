@@ -161,6 +161,15 @@
   };
 
   const handleSelect = (index: number): void => {
+    // While the action inspector owns the right column the preview pane is
+    // hidden (see the body markup below), so a hovered row has nothing to feed
+    // and hover-to-select's only remaining effect would be to silently
+    // re-target the inspector — cancelling an in-flight run or discarding a
+    // just-finished result as the cursor crosses the list. Freeze hover
+    // selection for the whole open session; ↑/↓ still re-target deliberately
+    // (and reset the run) and Escape returns to normal browsing where hover
+    // resumes. Deliberate re-targeting stays available via ↑/↓ while open.
+    if (actionsOpen) return;
     selectByIndex(index);
   };
 
@@ -344,6 +353,7 @@
         selectedIndex={searchState.selectedIndex}
         appliedQuery={searchState.appliedQuery}
         multiSelected={multiSelectState.selected}
+        locked={actionsOpen}
         onSelect={handleSelect}
         onConfirm={handleConfirm}
         onTogglePin={handleTogglePin}

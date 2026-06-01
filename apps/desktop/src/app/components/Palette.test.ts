@@ -118,6 +118,7 @@ import { previewState } from '../stores/searchPreview.svelte';
 import { refreshCurrent, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
 import {
   currentSelection,
+  selectByIndex,
   selectFirst,
   selectLast,
   selectNext,
@@ -486,6 +487,80 @@ describe('Palette', () => {
     // Non-Tauri test context falls back to the in-process view toggle.
     await fireEvent.click(btn as HTMLElement);
     expect(showSettings).toHaveBeenCalled();
+  });
+
+  it('freezes hover selection while the action inspector is open', async () => {
+    // Regression: with the inspector docked there is no preview pane for a
+    // hovered row to feed, so hover-to-select would only silently re-target the
+    // inspector — cancelling an in-flight run or discarding a finished result
+    // as the cursor crossed the list. Hover must be inert while it is open.
+    const a = resultRow('a', 'alpha');
+    const b = resultRow('b', 'bravo');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, b];
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    expect(container.querySelector('[data-testid="action-inspector"]')).toBeTruthy();
+
+    vi.mocked(selectByIndex).mockClear();
+    const rows = container.querySelectorAll('[role="option"]');
+    expect(rows.length).toBe(2);
+    await fireEvent.mouseEnter(rows[1] as Element);
+    expect(selectByIndex).not.toHaveBeenCalled();
+  });
+
+  it('selects on hover again once the inspector is closed', async () => {
+    const a = resultRow('a', 'alpha');
+    const b = resultRow('b', 'bravo');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, b];
+
+    const { container } = render(Palette);
+    const rows = container.querySelectorAll('[role="option"]');
+    vi.mocked(selectByIndex).mockClear();
+    await fireEvent.mouseEnter(rows[1] as Element);
+    expect(selectByIndex).toHaveBeenCalledWith(1);
+  });
+
+  it('still re-targets with the arrow keys while the inspector is open', async () => {
+    // ↑/↓ stay live as the deliberate re-target path (cancelling the run is the
+    // expected cost of an intentional move); only passive hover is frozen.
+    const a = resultRow('a', 'alpha');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, resultRow('b', 'bravo')];
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    vi.mocked(selectNext).mockClear();
+    if (input) await fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(selectNext).toHaveBeenCalled();
+  });
+
+  it('puts the result list into reference mode while the inspector is open', async () => {
+    const a = resultRow('a', 'alpha');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, resultRow('b', 'bravo')];
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    // Closed: rows are live, not locked.
+    expect(container.querySelector('.result-row.locked')).toBeNull();
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    // Open: every row carries the locked class so the recede/lift applies.
+    expect(container.querySelectorAll('.result-row.locked').length).toBe(2);
   });
 
   it('opens the inspector from the preview-pane actions button', async () => {
