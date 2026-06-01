@@ -1086,11 +1086,11 @@ not duplicate runtime logic.
   `PreviewPane.svelte` and hands it back the moment it closes, so the target
   stays beside its source row and long results read against full panel height
   rather than the bottom of an 80vh overlay. While it is open the result list
-  becomes a reference surface — the target row lifts and the rest recede, and
-  hover no longer moves the selection, so a stray mouse move can't silently
-  re-target (and cancel a running action or discard a finished result); ↑/↓
-  stay the deliberate re-target path and Escape returns to live browsing. It
-  composes
+  becomes a read-only reference surface — the target row lifts and the rest
+  recede, and hover, row clicks, and the per-row pin button are all inert, so a
+  stray mouse move or click can't silently re-target (and cancel a running
+  action or discard a finished result) or tear down the palette; ↑/↓ stay the
+  deliberate re-target path and Escape returns to live browsing. It composes
   `CompactPreview.svelte` (the target's kind / source / time and a short
   snippet, kept visible so the user always sees what they are acting on),
   `ActionPicker.svelte` (one flat list mixing the deterministic quick actions

@@ -33,6 +33,7 @@ vi.mock('../stores/searchActions', () => ({
   confirmSelectionWithAlternateFormat: vi.fn(async () => undefined),
   copySelection: vi.fn(async () => undefined),
   togglePinSelection: vi.fn(async () => undefined),
+  togglePinAt: vi.fn(async () => undefined),
   deleteSelection: vi.fn(async () => undefined),
   previewSelection: vi.fn(async () => undefined),
 }));
@@ -112,6 +113,7 @@ import {
   copySelection,
   deleteSelection,
   previewSelection,
+  togglePinAt,
   togglePinSelection,
 } from '../stores/searchActions';
 import { previewState } from '../stores/searchPreview.svelte';
@@ -561,6 +563,72 @@ describe('Palette', () => {
     if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
     // Open: every row carries the locked class so the recede/lift applies.
     expect(container.querySelectorAll('.result-row.locked').length).toBe(2);
+  });
+
+  it('ignores list clicks while the inspector is open (no paste, no re-target)', async () => {
+    // The list is a read-only reference surface while the inspector owns the
+    // column: a click must not paste-and-dismiss (tearing down the palette) nor
+    // re-target (cancelling a run). Both plain and modifier clicks are inert.
+    const a = resultRow('a', 'alpha');
+    const b = resultRow('b', 'bravo');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, b];
+    capabilitiesState.capabilities = { platform: 'macos' } as PlatformCapabilities;
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+
+    vi.mocked(selectByIndex).mockClear();
+    const rows = container.querySelectorAll('[role="option"]');
+    await fireEvent.click(rows[1] as Element);
+    await fireEvent.click(rows[1] as Element, { metaKey: true });
+    expect(selectByIndex).not.toHaveBeenCalled();
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
+
+  it('makes per-row pin toggles inert while the inspector is open', async () => {
+    // `togglePinAt` refreshes via `runQuery`, which publishes a transient
+    // `selectedIndex = 0` before re-anchoring by id — observable across the
+    // await — so even pinning the target row would briefly re-target and cancel
+    // the run. The whole per-row pin affordance stands down while open.
+    const a = resultRow('a', 'alpha');
+    const b = resultRow('b', 'bravo');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, b];
+    searchState.selectedIndex = 0;
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: {},
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+
+    const pins = container.querySelectorAll('.pin-toggle');
+    expect(pins.length).toBe(2);
+    await fireEvent.click(pins[0] as Element);
+    await fireEvent.click(pins[1] as Element);
+    expect(togglePinAt).not.toHaveBeenCalled();
+  });
+
+  it('toggles a pin from its row button while the inspector is closed', async () => {
+    const a = resultRow('a', 'alpha');
+    const b = resultRow('b', 'bravo');
+    vi.mocked(currentSelection).mockReturnValue(a);
+    searchState.results = [a, b];
+
+    const { container } = render(Palette);
+    const pins = container.querySelectorAll('.pin-toggle');
+    await fireEvent.click(pins[1] as Element);
+    expect(togglePinAt).toHaveBeenCalledWith(1);
   });
 
   it('opens the inspector from the preview-pane actions button', async () => {

@@ -393,9 +393,10 @@
 
   // Because the inspector is docked (not a modal), the user can re-target it
   // with ↑/↓ while it stays open — the palette feeds it the live selection.
-  // (Hover does not re-target: the palette freezes hover selection while the
-  // inspector is open, so a stray mouse move can't silently re-target in
-  // place.) The work area belongs to the *previous* target, so when the id
+  // (The list is a read-only reference surface while open: the palette freezes
+  // hover selection and makes row clicks and the per-row pin button inert, so
+  // none of them re-target in place or tear down the palette.) The work area
+  // belongs to the *previous* target, so when the id
   // changes under an open inspector we cancel any run and clear it rather than
   // leave a stale result (or land a finishing run) against the new entry.
   // `lastSeenTargetId` tracks the id while closed too, so reopening on the same

@@ -191,6 +191,27 @@
     z-index: 1;
     box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
   }
+  /* Clicks are inert while open (the palette gates them in `handleConfirm`).
+     Make the row itself non-interactive to the pointer so a click cannot even
+     focus the row button: a focused list button would pull keyboard ownership
+     away from the inspector, routing Enter/Escape to the palette's window
+     handler (paste-and-close / plain-close) instead of the panel. The JS guard
+     stays as defence in depth (and for environments that ignore this). */
+  .result-row.locked .result-item {
+    pointer-events: none;
+  }
+  /* In reference mode pinning is not part of the single-target action surface:
+     the per-row pin is inert (`handleTogglePin` guards it too — a toggle would
+     re-anchor the selection through `runQuery` and cancel the run). Drop
+     pointer events on every locked row's pin and hide the hover-ghost so
+     nothing reads as a live affordance; the solid 📌 on already-pinned rows
+     stays as a state indicator. */
+  .result-row.locked .pin-toggle {
+    pointer-events: none;
+  }
+  .result-row.locked .pin-toggle:not(.active) {
+    opacity: 0;
+  }
   .result-item {
     display: flex;
     align-items: center;

@@ -139,6 +139,12 @@
   };
 
   const handleConfirm = (index: number, event?: MouseEvent): void => {
+    // While the action inspector owns the column the list is a read-only
+    // reference surface, so a click does nothing — matching the frozen hover.
+    // A stray click must never paste-and-dismiss (tearing down the palette) nor
+    // re-target (cancelling a run). Re-target with ↑/↓; Escape returns to live
+    // browsing where clicks paste again.
+    if (actionsOpen) return;
     selectByIndex(index);
     const id = searchState.results[index]?.id;
     if (id !== undefined) {
@@ -168,7 +174,8 @@
     // just-finished result as the cursor crosses the list. Freeze hover
     // selection for the whole open session; ↑/↓ still re-target deliberately
     // (and reset the run) and Escape returns to normal browsing where hover
-    // resumes. Deliberate re-targeting stays available via ↑/↓ while open.
+    // resumes. Clicks are inert too (`handleConfirm`), so the list is a fully
+    // read-only reference surface while the inspector is open.
     if (actionsOpen) return;
     selectByIndex(index);
   };
@@ -178,6 +185,14 @@
   // preview). The footer hint, by contrast, acts on the current selection via
   // `togglePinSelection`.
   const handleTogglePin = (index: number): void => {
+    // While the inspector is open the list is single-target, so the per-row pin
+    // button is inert. `togglePinAt` refreshes via `runQuery`, which publishes
+    // an intermediate `selectedIndex = 0` before re-anchoring by id; that
+    // transient is observable across the await, so even pinning the *target*
+    // row would briefly re-target the inspector and cancel the run. Drop the
+    // whole per-row pin affordance here (the rows are also `pointer-events:
+    // none` under `.locked`); ⌘P and the status-bar hint still pin the target.
+    if (actionsOpen) return;
     void togglePinAt(index);
   };
 
