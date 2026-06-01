@@ -8,6 +8,7 @@ use crate::ContentKind;
 use crate::errors::{AppError, Result};
 use crate::limits::MAX_ENTRY_SIZE_BYTES;
 use crate::model::{AiActionId, AiProviderKind};
+use crate::policy::compile_user_regex;
 
 /// Maximum entries the user can ask retention to keep. Beyond this the
 /// retention sweep would no longer fit in a single transaction without
@@ -30,6 +31,15 @@ pub const MAX_PASTE_DELAY_MS: u64 = 1000;
 /// Visible row range for the palette result list. Below 1 the palette is
 /// empty; above 64 layout overflows the popup and wastes the LRU.
 pub const MAX_PALETTE_ROW_COUNT: u32 = 64;
+
+/// Upper bound for `ai.request_timeout_ms`.
+///
+/// A zero timeout collapses every AI request into an instant deadline (the
+/// `Duration::from_millis(0)` the daemon hands `guard_event_stream`), so it
+/// is rejected separately. Ten minutes is far longer than any on-device or
+/// remote action should need; beyond it a wedged provider could pin a
+/// concurrency permit for an unreasonable stretch.
+pub const MAX_AI_REQUEST_TIMEOUT_MS: u64 = 600_000;
 
 /// Identifier kind for a [`AppDenyRule::SourceApp`] entry.
 ///
@@ -603,8 +613,17 @@ impl AppSettings {
     /// and the desktop / CLI startup load — so a hand-edited config file or
     /// a buggy frontend cannot wedge the daemon with values like
     /// `paste_delay_ms = u64::MAX` or `palette_row_count = 0`.
+    ///
+    /// Besides the scalar ranges this also rejects the structural mistakes
+    /// that would otherwise only surface much later (or silently): malformed
+    /// auxiliary hotkeys, an empty `capture_kinds` set that would capture
+    /// nothing while `capture_enabled` is still on, a degenerate AI request
+    /// timeout, and `regex_denylist` patterns that fail to compile under the
+    /// same DoS-resistant limits the classifier applies — so a corrupt rule is
+    /// caught at the validation boundary rather than when the capture loop
+    /// next refreshes settings.
     pub fn validate(&self) -> Result<()> {
-        validate_hotkey(&self.global_hotkey)?;
+        validate_accelerator("global_hotkey", &self.global_hotkey)?;
         if !(1..=MAX_RETENTION_COUNT).contains(&self.history_retention_count) {
             return Err(AppError::InvalidInput(format!(
                 "history_retention_count must be between 1 and {MAX_RETENTION_COUNT}"
@@ -632,6 +651,53 @@ impl AppSettings {
                 "palette_row_count must be between 1 and {MAX_PALETTE_ROW_COUNT}"
             )));
         }
+        if self.capture_kinds.is_empty() {
+            return Err(AppError::InvalidInput(
+                "capture_kinds must list at least one content kind; use capture_enabled=false to pause capture instead".to_owned(),
+            ));
+        }
+        if self.ai.request_timeout_ms == 0 {
+            return Err(AppError::InvalidInput(
+                "ai.request_timeout_ms must be greater than 0".to_owned(),
+            ));
+        }
+        if self.ai.request_timeout_ms > MAX_AI_REQUEST_TIMEOUT_MS {
+            return Err(AppError::InvalidInput(format!(
+                "ai.request_timeout_ms must be <= {MAX_AI_REQUEST_TIMEOUT_MS}"
+            )));
+        }
+        // `max_total_bytes` and `max_thumbnail_total_bytes` are intentionally
+        // not cross-validated: the desktop UI exposes the former but not the
+        // latter (default 64 MiB), so requiring `thumb <= total` would make an
+        // otherwise-reasonable small total budget unsavable with no UI knob to
+        // fix it. The two budgets govern independent tables and eviction
+        // sweeps, so an inverted pair is suboptimal, not incoherent.
+        //
+        // Auxiliary shortcuts share `global_hotkey`'s accelerator grammar.
+        // Empty values mean "unset" (the binding falls back to its built-in
+        // default), so they are skipped rather than rejected.
+        for (action, accel) in &self.palette_hotkeys {
+            if accel.trim().is_empty() {
+                continue;
+            }
+            validate_accelerator(&format!("palette_hotkeys[{action:?}]"), accel)?;
+        }
+        for (action, accel) in &self.secondary_hotkeys {
+            if accel.trim().is_empty() {
+                continue;
+            }
+            validate_accelerator(&format!("secondary_hotkeys[{action:?}]"), accel)?;
+        }
+        // Compile every denylist pattern under the same length / nesting /
+        // DFA-size limits the classifier enforces, mapping the policy-shaped
+        // failure onto an input-validation error so a hostile or malformed
+        // rule cannot be persisted or loaded.
+        for pattern in &self.regex_denylist {
+            compile_user_regex(pattern).map_err(|err| match err {
+                AppError::Policy(msg) => AppError::InvalidInput(msg),
+                other => other,
+            })?;
+        }
         Ok(())
     }
 }
@@ -645,43 +711,47 @@ impl AppSettings {
 /// settings UI never lands in storage and silently disables the feature
 /// after the next restart.
 pub fn validate_hotkey(raw: &str) -> Result<()> {
+    validate_accelerator("global_hotkey", raw)
+}
+
+/// Shape-check an accelerator string, attributing any failure to `field` so
+/// the error names the setting at fault (`global_hotkey`, a `palette_hotkeys`
+/// entry, …). See [`validate_hotkey`] for the format the check enforces.
+fn validate_accelerator(field: &str, raw: &str) -> Result<()> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not be empty".to_owned(),
-        ));
+        return Err(AppError::InvalidInput(format!("{field} must not be empty")));
     }
     if trimmed != raw {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not have leading/trailing whitespace".to_owned(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "{field} must not have leading/trailing whitespace"
+        )));
     }
     let segments: Vec<&str> = trimmed.split('+').collect();
     if segments.iter().any(|s| s.is_empty()) {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must not contain empty `+` segments".to_owned(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "{field} must not contain empty `+` segments"
+        )));
     }
     let (key, mods) = segments.split_last().expect("non-empty after trim check");
     let mut seen = std::collections::HashSet::new();
     for m in mods {
-        let canonical = canonical_modifier(m).ok_or_else(|| {
-            AppError::InvalidInput(format!("global_hotkey: unknown modifier `{m}`"))
-        })?;
+        let canonical = canonical_modifier(m)
+            .ok_or_else(|| AppError::InvalidInput(format!("{field}: unknown modifier `{m}`")))?;
         if !seen.insert(canonical) {
             return Err(AppError::InvalidInput(format!(
-                "global_hotkey: duplicate modifier `{m}`"
+                "{field}: duplicate modifier `{m}`"
             )));
         }
     }
     if canonical_modifier(key).is_some() {
-        return Err(AppError::InvalidInput(
-            "global_hotkey must end with a non-modifier key".to_owned(),
-        ));
+        return Err(AppError::InvalidInput(format!(
+            "{field} must end with a non-modifier key"
+        )));
     }
     if !is_valid_hotkey_key(key) {
         return Err(AppError::InvalidInput(format!(
-            "global_hotkey: invalid key `{key}`"
+            "{field}: invalid key `{key}`"
         )));
     }
     Ok(())
@@ -854,5 +924,94 @@ mod tests {
                 "expected `{bad}` to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn validate_accepts_defaults() {
+        AppSettings::default()
+            .validate()
+            .expect("default settings must validate");
+    }
+
+    #[test]
+    fn validate_rejects_empty_capture_kinds() {
+        let mut settings = AppSettings::default();
+        settings.capture_kinds.clear();
+        assert!(matches!(
+            settings.validate(),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_degenerate_ai_timeout() {
+        let mut settings = AppSettings::default();
+        settings.ai.request_timeout_ms = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(AppError::InvalidInput(_))
+        ));
+
+        settings.ai.request_timeout_ms = MAX_AI_REQUEST_TIMEOUT_MS + 1;
+        assert!(matches!(
+            settings.validate(),
+            Err(AppError::InvalidInput(_))
+        ));
+
+        settings.ai.request_timeout_ms = MAX_AI_REQUEST_TIMEOUT_MS;
+        settings
+            .validate()
+            .expect("the boundary value must validate");
+    }
+
+    #[test]
+    fn validate_allows_thumbnail_budget_above_total() {
+        // The two byte budgets are not cross-validated (the UI exposes only
+        // `max_total_bytes`), so a small total with the default thumbnail cap
+        // must still save.
+        let settings = AppSettings {
+            max_total_bytes: Some(1_000),
+            max_thumbnail_total_bytes: Some(64 * 1024 * 1024),
+            ..AppSettings::default()
+        };
+        settings
+            .validate()
+            .expect("independent byte budgets must validate");
+    }
+
+    #[test]
+    fn validate_rejects_uncompilable_regex_denylist() {
+        let settings = AppSettings {
+            regex_denylist: vec!["valid".to_owned(), "(".to_owned()],
+            ..AppSettings::default()
+        };
+        assert!(matches!(
+            settings.validate(),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn validate_checks_auxiliary_hotkeys_but_skips_empty() {
+        let mut settings = AppSettings::default();
+        // A malformed binding is rejected and attributed to the field.
+        settings
+            .palette_hotkeys
+            .insert(PaletteHotkeyAction::Pin, "Cmd+".to_owned());
+        match settings.validate() {
+            Err(AppError::InvalidInput(msg)) => {
+                assert!(msg.contains("palette_hotkeys"), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        // An empty value means "unset" and is skipped, not rejected.
+        let mut settings = AppSettings::default();
+        settings
+            .secondary_hotkeys
+            .insert(SecondaryHotkeyAction::RepasteLast, String::new());
+        settings
+            .validate()
+            .expect("empty auxiliary hotkey must be treated as unset");
     }
 }

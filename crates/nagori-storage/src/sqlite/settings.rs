@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use nagori_core::{AppError, AppSettings, Result, SettingsRepository, compile_user_regex};
+use nagori_core::{AppSettings, Result, SettingsRepository};
 use rusqlite::{OptionalExtension, params};
 use time::OffsetDateTime;
 
@@ -33,17 +33,12 @@ impl SettingsRepository for SqliteStore {
     }
 
     async fn save_settings(&self, settings: AppSettings) -> Result<()> {
+        // `validate` also compiles every `regex_denylist` pattern under the
+        // same DoS-resistant limits (max length / nesting depth / DFA size)
+        // the in-memory classifier applies, so a hostile pattern can't be
+        // persisted and then triggered when the daemon next refreshes
+        // settings.
         settings.validate()?;
-        for pattern in &settings.regex_denylist {
-            // `compile_user_regex` enforces the same DoS-resistant limits
-            // (max length / nesting depth / DFA size) the in-memory
-            // classifier applies, so a hostile pattern can't be persisted
-            // and then triggered when the daemon next refreshes settings.
-            compile_user_regex(pattern).map_err(|err| match err {
-                AppError::Policy(msg) => AppError::InvalidInput(msg),
-                other => other,
-            })?;
-        }
         self.run_blocking(move |store| {
             let value = serde_json::to_string_pretty(&settings).map_err(|err| json_err(&err))?;
             let now = format_time(OffsetDateTime::now_utc())?;
