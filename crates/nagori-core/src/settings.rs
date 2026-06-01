@@ -573,6 +573,29 @@ pub enum Locale {
     Es,
 }
 
+impl Locale {
+    /// The persisted wire tag for this locale, matching the `serde` rename
+    /// (`"system"`, `"ja"`, `"zh-Hans"`, …).
+    ///
+    /// Used to hand the UI-language preference to backends that take a plain
+    /// string rather than this enum — notably the AI output-language hint,
+    /// where the `system` sentinel is resolved to the OS language downstream.
+    #[must_use]
+    pub const fn as_tag(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::En => "en",
+            Self::Ja => "ja",
+            Self::Ko => "ko",
+            Self::ZhHans => "zh-Hans",
+            Self::ZhHant => "zh-Hant",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Es => "es",
+        }
+    }
+}
+
 impl AppSettings {
     /// Validate value-range invariants that the wire format alone cannot
     /// enforce. Run on every entry point that mutates persisted settings —

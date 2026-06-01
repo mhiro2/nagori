@@ -78,12 +78,16 @@ pub struct AiActionRequest {
     pub options: AiRequestOptions,
 }
 
-/// Per-request overrides — **tightening only**.
+/// Per-request overrides — **tightening only**, with one exception.
 ///
-/// Every field can make a request *more* restrictive than the settings /
-/// `ActionSpec` defaults (lower token caps, streaming off, a shorter timeout)
-/// but never looser — in particular there is no `allow_remote` override, since
-/// on/off-device routing is a settings-level decision, not a per-request one.
+/// Every restrictive field can make a request *more* restrictive than the
+/// settings / `ActionSpec` defaults (lower token caps, streaming off, a shorter
+/// timeout) but never looser — in particular there is no `allow_remote`
+/// override, since on/off-device routing is a settings-level decision, not a
+/// per-request one. The lone non-restrictive field is [`output_language`], a
+/// hint that steers which language a generated response is written in.
+///
+/// [`output_language`]: AiRequestOptions::output_language
 // No `Eq`: `temperature` is an `f32`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -95,6 +99,20 @@ pub struct AiRequestOptions {
     pub streaming: Option<bool>,
     pub source_language: Option<String>,
     pub target_language: Option<String>,
+    /// Preferred output language for text-generation actions.
+    ///
+    /// Carries a locale wire tag ([`Locale::as_tag`]) — including the `system`
+    /// sentinel, which the backend resolves to the OS language. The daemon
+    /// fills this from the UI-language setting when a caller leaves it unset;
+    /// `None` means "respond in the input's own language". Every generation
+    /// action (summary, rewrite, reformat, task extraction, code explanation)
+    /// follows it: an indirect "keep the original language" hint does not stop
+    /// the on-device model from defaulting to English, so the language is named
+    /// explicitly. The trade-off is that input in a different language than the
+    /// setting is translated rather than preserved.
+    ///
+    /// [`Locale::as_tag`]: crate::Locale::as_tag
+    pub output_language: Option<String>,
     pub guided_schema: Option<GuidedSchema>,
     pub create_entry: bool,
     pub priority: AiPriority,

@@ -770,6 +770,14 @@ impl NagoriRuntime {
         let classifier = SensitivityClassifier::try_new(settings.clone())?;
         let input = shape_ai_input(&entry, &classifier, &policy)?;
 
+        // Steer the generated text toward the UI-language setting instead of
+        // letting the on-device model default to English; a caller that set
+        // this explicitly wins.
+        let mut options = options;
+        if options.output_language.is_none() {
+            options.output_language = Some(settings.locale.as_tag().to_owned());
+        }
+
         let request_id = RequestId::new();
         let req = AiActionRequest {
             request_id,

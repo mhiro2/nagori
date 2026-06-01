@@ -1298,7 +1298,16 @@ Two distinct, type-separated families:
   The text-generation actions differ only by their system prompt; `ExtractTasks`
   prompts for a Markdown checklist (guided generation via Apple's `@Generable`
   needs the macro compiler plugin, which ships only with full Xcode, not the
-  Command Line Tools the bridge builds against).
+  Command Line Tools the bridge builds against). Each prompt closes with an
+  explicit output-language directive naming the UI-language setting
+  (`AiRequestOptions::output_language`, filled by the daemon from
+  `settings.locale`, with the `system` sentinel resolved to the OS language);
+  an indirect "keep the original language" hint does not hold the on-device
+  model, which then defaults to English even on non-English input, so every
+  action names the target language instead. The trade-off is that input in a
+  different language than the setting is translated rather than preserved —
+  reliably keeping a foreign input's language would need per-input detection
+  the bridge does not expose.
 
 **Engine layering.** `nagori-ai` is provider-agnostic. `AiEngine` resolves an
 action to a backend family via the static `(action, provider) → backend` table,
