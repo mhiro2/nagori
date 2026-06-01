@@ -100,10 +100,12 @@ Mutate metadata. `delete` is soft (sets `deleted_at`).
 the platform paste shortcut into the frontmost app — Cmd+V on macOS
 (via `CGEventPost`) or Ctrl+V on Windows (via `SendInput`).
 
-### `nagori clear [--older-than-days N]`
+### `nagori clear (--all | --older-than-days N)`
 
-Soft-delete unpinned entries. With no flag, deletes everything that is not
-pinned. With `--older-than-days`, deletes entries created before that cutoff.
+Soft-delete unpinned entries. One scope flag is required: `--all` deletes
+every unpinned entry, while `--older-than-days N` deletes only unpinned
+entries created before that cutoff. A bare `nagori clear` with no flag is
+rejected at parse time so the command can't wipe history by accident.
 
 ### `nagori quick <action> <id>`
 
@@ -199,8 +201,8 @@ otherwise.
 
 Boot the daemon. Holds the SQLite handle, runs the capture loop, and serves
 the IPC endpoint (Unix socket on macOS / Linux, named pipe on Windows).
-Available on macOS and Windows; other platforms exit with
-"daemon run is only available on macOS and Windows in this build".
+Available on macOS, Windows, and Linux; other platforms exit with
+"daemon run is only available on macOS, Windows, and Linux in this build".
 
 `--capture-interval-ms` accepts `1`–`3600000` (default `500`) and
 `--maintenance-interval-min` accepts `1`–`525600` (default `30`); `0` is
@@ -218,16 +220,15 @@ Print IPC endpoint and DB metadata without contacting a daemon.
 
 The CLI returns the following exit codes. Codes `2`, `4`, `5`, `6`, `7`,
 and `8` map onto the typed `AppError` variants returned from the
-`nagori-core` services; `1` is the fallback when an underlying error
-cannot be classified.
+`nagori-core` services. Any error that cannot be classified as a typed
+`AppError` is treated as an internal failure and also returns `8`.
 
 | Code | Meaning            | Underlying `AppError`                                |
 |------|--------------------|------------------------------------------------------|
 | 0    | Success            | —                                                    |
-| 1    | Generic error      | (untyped `anyhow::Error`)                            |
 | 2    | Invalid input      | `InvalidInput`                                       |
 | 4    | Not found          | `NotFound`                                           |
 | 5    | Policy violation   | `Policy`                                             |
 | 6    | Permission denied  | `Permission`                                         |
 | 7    | Unsupported        | `Unsupported` (e.g. unsupported `SearchMode`)        |
-| 8    | Internal error     | `Storage`, `Search`, `Platform`, `Ai`                |
+| 8    | Internal error     | `Storage`, `Search`, `Platform`, `Ai`, `Configuration`, or any unclassified error |

@@ -95,8 +95,8 @@ compatibility matrix and troubleshooting.
    navigate, **Enter** to paste the highlighted entry back into the previous
    window.
 3. Use **Settings** for privacy and hotkey configuration. Run
-   `nagori doctor` if something feels off (the desktop app's
-   **Settings → Advanced → Diagnostics** runs the same probe).
+   `nagori doctor` if something feels off; the desktop app surfaces the
+   same capability matrix under **Settings → Advanced → Capabilities**.
 
 The `nagori` CLI ships inside the desktop app bundle. Homebrew cask installs
 link it onto your PATH automatically; for direct `.dmg` installs, open
