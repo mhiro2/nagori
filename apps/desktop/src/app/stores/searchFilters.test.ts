@@ -5,8 +5,10 @@ import {
   currentFilters,
   filterState,
   hasActiveFilters,
+  recordSourceApps,
   setDatePreset,
   setSourceApp,
+  sourceAppOptions,
   toggleKind,
   togglePinnedOnly,
 } from './searchFilters.svelte';
@@ -41,13 +43,43 @@ describe('toggleKind', () => {
 });
 
 describe('setSourceApp', () => {
-  it('selects a source app and clears it when re-selected', () => {
+  it('assigns the source app and clears it only when passed undefined', () => {
     setSourceApp('Chrome');
     expect(filterState.sourceApp).toBe('Chrome');
     setSourceApp('Slack');
     expect(filterState.sourceApp).toBe('Slack');
+    // Re-selecting the active app is a no-op (radio semantics), not a toggle-off.
     setSourceApp('Slack');
+    expect(filterState.sourceApp).toBe('Slack');
+    setSourceApp(undefined);
     expect(filterState.sourceApp).toBeUndefined();
+  });
+});
+
+describe('recordSourceApps', () => {
+  beforeEach(() => {
+    sourceAppOptions.apps = [];
+  });
+
+  it('captures deduped apps from an unfiltered search', () => {
+    recordSourceApps(['Chrome', 'Slack', 'Chrome', undefined], false);
+    expect(sourceAppOptions.apps).toEqual(['Chrome', 'Slack']);
+  });
+
+  it('retains the full set when a search is source-app filtered', () => {
+    recordSourceApps(['Chrome', 'Slack'], false);
+    setSourceApp('Chrome');
+    // A filtered search only returns the active app; the menu must keep the
+    // others so the user can switch without clearing first.
+    recordSourceApps(['Chrome'], true);
+    expect(sourceAppOptions.apps).toEqual(['Chrome', 'Slack']);
+  });
+
+  it('adds an active app missing from the retained set on a filtered search', () => {
+    recordSourceApps(['Chrome', 'Slack'], false);
+    setSourceApp('Notes');
+    recordSourceApps(['Notes'], true);
+    expect(sourceAppOptions.apps).toEqual(['Notes', 'Chrome', 'Slack']);
   });
 });
 

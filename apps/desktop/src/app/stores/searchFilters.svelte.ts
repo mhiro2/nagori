@@ -45,9 +45,50 @@ export const toggleKind = (kind: ContentKind): void => {
     : [...filterState.kinds, kind];
 };
 
-// Single-select source app; clicking the active one clears it.
+// Set (or clear, with `undefined`) the single-select source app. Assigns
+// rather than toggles: the dropdown's "All apps" row is the explicit clear, so
+// re-picking the active app should be a no-op (standard radio semantics) rather
+// than a hidden toggle-off.
 export const setSourceApp = (app: string | undefined): void => {
-  filterState.sourceApp = filterState.sourceApp === app ? undefined : app;
+  filterState.sourceApp = app;
+};
+
+// Capacity for the source-app dropdown so a noisy result set can't make the
+// menu unwieldy.
+export const MAX_SOURCE_OPTIONS = 8;
+
+// Candidate source apps for the dropdown. The live result set collapses to the
+// single selected app once a source filter is applied, which would hide every
+// other app and force a clear-then-reselect round trip just to switch apps. We
+// instead remember the apps from the most recent search that was NOT
+// source-app filtered — the complete set for the current query/date/kind — so
+// the open menu keeps offering every app to switch to.
+export const sourceAppOptions = $state<{ apps: string[] }>({ apps: [] });
+
+// Record the apps seen in a completed search. A source-app-filtered search only
+// returns the active app, so keep the previously-recorded set (just ensuring
+// the active app is present) instead of shrinking the menu; an unfiltered
+// search refreshes the full set. Dedupes in first-seen order and caps the list.
+export const recordSourceApps = (
+  resultApps: readonly (string | undefined)[],
+  appFiltered: boolean,
+): void => {
+  if (appFiltered) {
+    const active = filterState.sourceApp;
+    if (active !== undefined && !sourceAppOptions.apps.includes(active)) {
+      sourceAppOptions.apps = [active, ...sourceAppOptions.apps].slice(0, MAX_SOURCE_OPTIONS);
+    }
+    return;
+  }
+  const seen = new Set<string>();
+  const apps: string[] = [];
+  for (const name of resultApps) {
+    if (name === undefined || seen.has(name)) continue;
+    seen.add(name);
+    apps.push(name);
+    if (apps.length >= MAX_SOURCE_OPTIONS) break;
+  }
+  sourceAppOptions.apps = apps;
 };
 
 export const togglePinnedOnly = (): void => {

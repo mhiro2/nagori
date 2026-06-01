@@ -9,7 +9,7 @@ import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
 import type { SearchRequest, SearchResultDto } from '../lib/types';
-import { currentFilters } from './searchFilters.svelte';
+import { currentFilters, recordSourceApps } from './searchFilters.svelte';
 import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
 const fallbackFixture = (): SearchResultDto[] => [
@@ -86,6 +86,13 @@ const runSearch = async (request: SearchRequest): Promise<void> => {
     searchState.selectedIndex = 0;
     searchState.lastElapsedMs = response.totalElapsedMs;
     reconcileMultiSelect(response.results.map((r) => r.id));
+    // Feed the source-app dropdown. When this search was itself app-filtered
+    // the results only carry the active app, so the recorder retains the full
+    // set last seen unfiltered instead of collapsing the menu to one app.
+    recordSourceApps(
+      response.results.map((r) => r.sourceAppName),
+      filters?.sourceApp !== undefined,
+    );
   } catch (err) {
     if (ticket !== inflight) return;
     searchState.errorMessage = describeError(err);
