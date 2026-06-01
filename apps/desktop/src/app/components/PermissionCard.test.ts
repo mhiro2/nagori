@@ -109,6 +109,7 @@ const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapab
     permissionsUi: cap,
     updateCheck: cap,
     previewQuickLook: cap,
+    aiActions: cap,
   };
 };
 
@@ -202,6 +203,17 @@ describe('PermissionCard accessibility — 5-state rendering', () => {
     const { getByText } = render(PermissionCard, { props: { kind: 'accessibility' } });
     expect(getByText('Not applicable')).toBeTruthy();
     expect(getByText(/Auto-paste on Linux depends on the `wtype` helper/)).toBeTruthy();
+  });
+
+  it('renders the Windows copy — never the macOS dialog text — on Windows', () => {
+    seed({ kind: 'accessibility', state: 'unsupported' }, {}, 'windows');
+    const { getByText, queryByText } = render(PermissionCard, {
+      props: { kind: 'accessibility' },
+    });
+    expect(getByText('Not applicable')).toBeTruthy();
+    // The Windows description must replace the macOS "open the dialog" copy.
+    expect(getByText(/On Windows, Nagori pastes into the focused app/)).toBeTruthy();
+    expect(queryByText(/open the macOS dialog/)).toBeNull();
   });
 });
 

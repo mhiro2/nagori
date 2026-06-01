@@ -172,6 +172,8 @@ export const es: Messages = {
         'Habilitar Accesibilidad permite que Nagori pegue entradas del historial directamente en la app activa. Pulsa «Conceder Accesibilidad» para abrir el diálogo de macOS y activa el interruptor de Nagori.',
       descriptionLinux:
         'Instala el paquete `wtype` en una sesión Wayland para que Nagori pueda sintetizar Ctrl+V en la app activa.',
+      descriptionWindows:
+        'En Windows, Nagori pega en la app activa sin ningún permiso equivalente a Accesibilidad: aquí no hay nada que configurar.',
       screenshotAlt:
         'Ajustes del Sistema → Privacidad y seguridad → Accesibilidad con el interruptor de Nagori resaltado.',
       grantButton: 'Conceder Accesibilidad…',

@@ -132,6 +132,7 @@ const macosCapabilities = (): PlatformCapabilities => ({
   permissionsUi: { status: 'available' },
   updateCheck: { status: 'available' },
   previewQuickLook: { status: 'available' },
+  aiActions: { status: 'available' },
 });
 
 const windowsCapabilities = (): PlatformCapabilities => ({
@@ -161,6 +162,10 @@ const windowsCapabilities = (): PlatformCapabilities => ({
     status: 'unsupported',
     reason:
       "Windows has no OS-provided Quick-Look-equivalent overlay; the palette's preview shortcut is disabled.",
+  },
+  aiActions: {
+    status: 'unsupported',
+    reason: 'no model-backed AI backend is wired for this platform yet',
   },
 });
 
@@ -196,6 +201,10 @@ const linuxWaylandCapabilities = (): PlatformCapabilities => ({
     status: 'unsupported',
     reason:
       "Linux Wayland has no DE-agnostic Quick-Look-equivalent overlay; the palette's preview shortcut is disabled.",
+  },
+  aiActions: {
+    status: 'unsupported',
+    reason: 'no model-backed AI backend is wired for this platform yet',
   },
 });
 
@@ -299,6 +308,52 @@ describe('SettingsView', () => {
     await fireEvent.click(privacyTab);
     expect(queryByText('Custom patterns')).toBeTruthy();
     expect(privacyTab.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('lands on the Setup tab on first launch where setup is needed (macOS)', async () => {
+    // Onboarding incomplete + macOS auto-paste needs Accessibility, so the
+    // first-launch heuristic should resolve onto the Setup tab once the
+    // capability snapshot confirms it is visible.
+    vi.mocked(getSettings).mockResolvedValue({
+      ...baseSettings(),
+      onboarding: {
+        accessibilityPromptedAt: null,
+        accessibilityFirstGrantedAt: null,
+        completedAt: null,
+      },
+    });
+    const { findByRole } = render(SettingsView);
+    const setupTab = await findByRole('tab', { name: 'Setup' });
+    await waitFor(() => {
+      expect(setupTab.getAttribute('aria-selected')).toBe('true');
+    });
+  });
+
+  it('never shows the Setup tab on a host with no setup step (Windows)', async () => {
+    // Same incomplete onboarding, but Windows auto-paste just works — the
+    // Setup tab (and its macOS Accessibility copy) must never render, and the
+    // first-launch request must not land there. Regression guard: the
+    // deferred-request resolver drops the parked Setup request once the
+    // Windows capability snapshot proves the tab hidden.
+    vi.mocked(getSettings).mockResolvedValue({
+      ...baseSettings(),
+      onboarding: {
+        accessibilityPromptedAt: null,
+        accessibilityFirstGrantedAt: null,
+        completedAt: null,
+      },
+    });
+    vi.mocked(getCapabilities).mockResolvedValue(windowsCapabilities());
+    const { findByRole, queryByRole, queryByText } = render(SettingsView);
+    const generalTab = await findByRole('tab', { name: 'General' });
+    await waitFor(() => {
+      expect(queryByRole('tab', { name: 'Setup' })).toBeNull();
+      expect(generalTab.getAttribute('aria-selected')).toBe('true');
+    });
+    // AI is gated the same way on a backendless host.
+    expect(queryByRole('tab', { name: 'AI' })).toBeNull();
+    // The macOS "open the dialog" copy must never reach the screen.
+    expect(queryByText(/open the macOS dialog/)).toBeNull();
   });
 
   it('auto-saves a checkbox change with no debounce', async () => {

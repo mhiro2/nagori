@@ -172,6 +172,8 @@ export const fr: Messages = {
         'Activer l’Accessibilité permet à Nagori de coller les entrées de l’historique directement dans l’application active. Cliquez sur « Accorder l’Accessibilité… » pour afficher la fenêtre macOS, puis activez l’interrupteur Nagori.',
       descriptionLinux:
         'Installez le paquet `wtype` dans une session Wayland pour que Nagori puisse synthétiser Ctrl+V dans l’application active.',
+      descriptionWindows:
+        'Sous Windows, Nagori colle dans l’application active sans aucune autorisation de type Accessibilité — il n’y a rien à configurer ici.',
       screenshotAlt:
         'Réglages Système → Confidentialité et sécurité → Accessibilité avec l’interrupteur Nagori mis en évidence.',
       grantButton: 'Accorder l’Accessibilité…',

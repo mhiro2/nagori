@@ -41,6 +41,7 @@ const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapab
     permissionsUi: cap,
     updateCheck: cap,
     previewQuickLook: cap,
+    aiActions: cap,
   };
 };
 

@@ -42,6 +42,10 @@ vi.mock('../stores/capabilities.svelte', () => ({
   capabilitiesState: { capabilities: undefined, loaded: true },
   refreshCapabilities: vi.fn(async () => undefined),
   quickLookAvailable: vi.fn(() => true),
+  // The action inspector (rendered by the palette) gates its AI actions on
+  // this. Default false — matching the real helper when no capability
+  // snapshot is loaded — so these tests exercise the quick-action path.
+  aiActionsSupported: vi.fn(() => false),
 }));
 
 vi.mock('../stores/searchPreview.svelte', () => ({

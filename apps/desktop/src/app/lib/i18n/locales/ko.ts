@@ -162,6 +162,8 @@ export const ko: Messages = {
         '접근성을 허용하면 Nagori가 기록을 포커스된 앱에 직접 붙여넣을 수 있습니다. “접근성 허용…”을 눌러 macOS 대화상자를 열고 Nagori 스위치를 켜세요.',
       descriptionLinux:
         'Wayland 세션에서 `wtype` 패키지를 설치하면 Nagori가 포커스된 앱에 Ctrl+V를 합성할 수 있습니다.',
+      descriptionWindows:
+        'Windows에서는 접근성에 해당하는 권한 없이도 Nagori가 포커스된 앱에 붙여넣을 수 있습니다. 여기서 설정할 항목은 없습니다.',
       screenshotAlt:
         '시스템 설정 → 개인 정보 보호 및 보안 → 접근성에서 Nagori 토글을 강조 표시한 스크린샷.',
       grantButton: '접근성 허용…',

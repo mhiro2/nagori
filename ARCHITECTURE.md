@@ -797,7 +797,7 @@ struct PlatformCapabilities {
     auto_paste: Capability,
     global_hotkey: Capability, frontmost_app: Capability,
     permissions_ui: Capability, update_check: Capability,
-    preview_quick_look: Capability,
+    preview_quick_look: Capability, ai_actions: Capability,
 }
 
 enum Capability {
@@ -811,7 +811,15 @@ enum Capability {
 
 `nagori_platform_native::capabilities()` aggregates per-OS reporters
 (`nagori_platform_{macos,windows,linux}`) at build time and caches the
-matrix on the `NagoriRuntime`. The result is exposed on three surfaces:
+matrix on the `NagoriRuntime`. One row is reconciled rather than static:
+`NagoriRuntimeBuilder` overwrites `ai_actions` from whether an `ai_engine`
+is actually wired (`Available` if so, else `Unsupported`). That keeps the
+matrix honest about a host's *real* AI backend — it is the single switch,
+so a host that gains one (today macOS; a future cross-OS provider) lights
+the desktop's AI surfaces up with no second edit, and a host with none
+never advertises a backend it lacks. Live model readiness (Apple
+Intelligence downloaded, etc.) stays on the separate `AiAvailabilityReport`
+channel. The result is exposed on three surfaces:
 
 - `runtime.capabilities()` — in-process access for the daemon and the
   Tauri shell.
@@ -1321,6 +1329,18 @@ Apple backends (`nagori-ai-apple::AppleFoundationBackend` for text generation,
 `AppleTranslateBackend` for translation, `AppleEmbedderBackend` for embeddings)
 are injected by `nagori-platform-native` on macOS; other platforms wire no
 engine, so AI actions are refused there while quick actions keep working.
+
+**Desktop gating.** Refusal is the backstop, not the user-facing story: the
+desktop hides every AI surface where no engine is wired rather than offering
+controls that can only fail. The wired-engine fact reaches the frontend as the
+`ai_actions` capability (see §11), and `aiActionsSupported()` gates on it — the
+Settings *AI* tab and the action menu's AI actions disappear on a backendless
+host. Because the gate reads the capability, not a hardcoded platform, a host
+that wires an engine later restores those surfaces automatically. The Settings
+*Setup* tab is gated independently on whether its lone prerequisite needs
+action (`auto_paste` ∈ {`RequiresPermission`, `RequiresExternalTool`}): shown
+for the macOS Accessibility grant and the Linux `wtype` helper, hidden on
+Windows where auto-paste just works.
 
 **Translation.** `AppleTranslateBackend` wraps the `Translation` framework's
 `TranslationSession`, detecting the source language with `NLLanguageRecognizer`

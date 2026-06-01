@@ -159,6 +159,8 @@ export const zhHant: Messages = {
         '啟用輔助使用後，Nagori 可將歷史條目直接貼上到目前的應用程式。點按「授予輔助使用…」開啟 macOS 對話框，並開啟 Nagori 開關。',
       descriptionLinux:
         '在 Wayland 工作階段中安裝 `wtype` 套件，Nagori 便可向目前焦點的應用程式合成 Ctrl+V。',
+      descriptionWindows:
+        '在 Windows 上，Nagori 無需任何輔助使用類權限即可貼上到目前焦點的應用程式，這裡無需設定。',
       screenshotAlt: '「系統設定 → 隱私權與安全性 → 輔助使用」中突顯 Nagori 開關的截圖。',
       grantButton: '授予輔助使用…',
       grantButtonRetry: '開啟系統設定',

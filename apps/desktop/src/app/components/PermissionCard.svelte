@@ -119,12 +119,16 @@
   // already toggled the switch but the poller has been throttled.
   const showRecheckButton = $derived(uiState !== 'Granted' && uiState !== 'Unavailable');
 
-  // `description` swaps to the Linux copy when there is no macOS
-  // Accessibility pane to drive (Linux relies on the `wtype` helper).
+  // `description` is per-platform: the macOS copy walks the user through
+  // the TCC dialog, but there is no such pane on Windows (auto-paste needs
+  // no permission) or Linux (it relies on the `wtype` helper), so those
+  // hosts must not be told to "open the macOS dialog".
   const description = $derived(
     platform === 'linuxWayland'
       ? t.setup.accessibility.descriptionLinux
-      : t.setup.accessibility.description,
+      : platform === 'windows'
+        ? t.setup.accessibility.descriptionWindows
+        : t.setup.accessibility.description,
   );
 
   const showScreenshot = $derived(platform === 'macos' && uiState !== 'Granted');

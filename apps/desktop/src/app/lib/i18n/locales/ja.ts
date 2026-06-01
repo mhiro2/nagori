@@ -163,6 +163,8 @@ export const ja: Messages = {
         'アクセシビリティを有効にすると、Nagori が履歴をフォーカス中のアプリへ直接ペーストできます。「アクセシビリティを許可…」を押して macOS のダイアログを表示し、Nagori のスイッチをオンにしてください。',
       descriptionLinux:
         'Wayland セッションで `wtype` パッケージをインストールすると、Nagori がフォーカス中のアプリへ Ctrl+V を合成できます。',
+      descriptionWindows:
+        'Windows では、アクセシビリティ相当の権限なしで Nagori がフォーカス中のアプリへペーストできます。ここで設定する項目はありません。',
       screenshotAlt:
         'システム設定 → プライバシーとセキュリティ → アクセシビリティ で Nagori のトグルを強調表示したスクリーンショット。',
       grantButton: 'アクセシビリティを許可…',

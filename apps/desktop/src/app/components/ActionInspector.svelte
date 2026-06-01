@@ -20,6 +20,7 @@
     QuickActionId,
     SearchResultDto,
   } from '../lib/types';
+  import { aiActionsSupported } from '../stores/capabilities.svelte';
   import ActionPicker from './ActionPicker.svelte';
   import ActionRunPanel from './ActionRunPanel.svelte';
   import CompactPreview from './CompactPreview.svelte';
@@ -139,23 +140,28 @@
   };
 
   // One descriptor per AI text action, gated by its own availability.
+  // Empty on hosts with no AI backend (today non-macOS) so the menu shows
+  // only quick actions — no dead AI buttons, no "unavailable" footnote.
   const aiActionList = $derived(
-    AI_ACTION_IDS.map((action) => {
-      const entry = availability?.actions.find((e) => e.action === action);
-      return {
-        action,
-        label: t.actionMenu.aiActions[action],
-        available: entry?.available ?? false,
-        reason: reasonFor(entry),
-      };
-    }),
+    aiActionsSupported()
+      ? AI_ACTION_IDS.map((action) => {
+          const entry = availability?.actions.find((e) => e.action === action);
+          return {
+            action,
+            label: t.actionMenu.aiActions[action],
+            available: entry?.available ?? false,
+            reason: reasonFor(entry),
+          };
+        })
+      : [],
   );
   const anyAiAvailable = $derived(aiActionList.some((item) => item.available));
   // Shown once below the list when nothing is runnable. The text actions all
   // resolve to the same on-device backend, so the first hint represents them
-  // all (e.g. "enable Apple Intelligence").
+  // all (e.g. "enable Apple Intelligence"). Suppressed entirely where AI has
+  // no backend — the actions are hidden there, so a footnote would be noise.
   const aiUnavailableReason = $derived(
-    anyAiAvailable
+    !aiActionsSupported() || anyAiAvailable
       ? undefined
       : (aiActionList.find((item) => item.reason)?.reason ?? t.actionMenu.aiUnavailable),
   );
@@ -416,8 +422,10 @@
 
   // Probe AI availability each time the inspector opens so the AI buttons
   // reflect the live Apple Intelligence / provider state (disabled + reason).
+  // Skipped where AI has no backend: the actions are hidden there, so the
+  // probe would only ever report "unavailable" to a list nobody renders.
   $effect(() => {
-    if (!open || !isTauri()) return;
+    if (!open || !isTauri() || !aiActionsSupported()) return;
     void (async () => {
       try {
         availability = await getAiAvailability();

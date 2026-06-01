@@ -624,15 +624,30 @@ fn spawn_tray_health_refresher(handle: &tauri::AppHandle) {
 /// `SettingsView` uses for its default tab (`completed_at` +
 /// `accessibility_first_granted_at` both unset) rather than `completed_at`
 /// alone — `completed_at` is reserved for a future explicit dismissal, so
-/// keying on it would re-pop the window on every launch until then. The
-/// daemon / hotkey registration is intentionally left running (§3.1); this
-/// only surfaces the window, and the Setup tab default selection lives in
-/// `SettingsView` so the two stay in sync.
+/// keying on it would re-pop the window on every launch until then.
+///
+/// Also gated on the host actually having a setup step: the Setup tab only
+/// exists where auto-paste needs user action (macOS Accessibility, Linux
+/// `wtype`), so a host where it just works (Windows) would otherwise pop an
+/// empty Settings window on every fresh launch. This mirrors `SettingsView`'s
+/// `setupNeeded` gate so the window-surface and the tab-visibility decisions
+/// stay in sync. The daemon / hotkey registration is intentionally left
+/// running (§3.1); this only surfaces the window.
 fn surface_first_launch_setup(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         // No state means setup() bailed before `manage(state)` ran.
         return;
     };
+    // Nothing to set up means no Setup tab to land on — don't surface the
+    // window. Matches `SettingsView`'s capability-driven Setup gate.
+    let setup_needed = matches!(
+        state.runtime.capabilities().auto_paste,
+        nagori_platform::Capability::RequiresPermission { .. }
+            | nagori_platform::Capability::RequiresExternalTool { .. }
+    );
+    if !setup_needed {
+        return;
+    }
     let onboarding = state.runtime.current_settings().onboarding;
     if onboarding.completed_at.is_some() || onboarding.accessibility_first_granted_at.is_some() {
         return;

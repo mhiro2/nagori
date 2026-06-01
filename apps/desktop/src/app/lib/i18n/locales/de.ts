@@ -172,6 +172,8 @@ export const de: Messages = {
         'Mit aktivierten Bedienungshilfen kann Nagori Verlaufseinträge direkt in die aktive App einfügen. Klicken Sie auf „Bedienungshilfen erteilen“, um den macOS-Dialog zu öffnen, und aktivieren Sie den Schalter für Nagori.',
       descriptionLinux:
         'Installieren Sie das Paket `wtype` in einer Wayland-Sitzung, damit Nagori Strg+V in die aktive App senden kann.',
+      descriptionWindows:
+        'Unter Windows fügt Nagori ohne eine Berechtigung à la Bedienungshilfen in die aktive App ein – hier ist nichts einzurichten.',
       screenshotAlt:
         'Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen mit hervorgehobenem Nagori-Schalter.',
       grantButton: 'Bedienungshilfen erteilen…',

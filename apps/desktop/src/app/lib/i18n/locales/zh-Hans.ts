@@ -159,6 +159,8 @@ export const zhHans: Messages = {
         '启用辅助功能后，Nagori 可直接将历史条目粘贴到当前应用。点击“授予辅助功能…”打开 macOS 对话框，然后开启 Nagori 开关。',
       descriptionLinux:
         '在 Wayland 会话中安装 `wtype` 软件包，Nagori 即可向当前焦点应用合成 Ctrl+V。',
+      descriptionWindows:
+        '在 Windows 上，Nagori 无需任何辅助功能类权限即可粘贴到当前焦点应用，这里无需设置。',
       screenshotAlt: '“系统设置 → 隐私与安全性 → 辅助功能”中突出显示 Nagori 开关的截图。',
       grantButton: '授予辅助功能…',
       grantButtonRetry: '打开系统设置',

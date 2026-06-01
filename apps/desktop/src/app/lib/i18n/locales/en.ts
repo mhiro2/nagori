@@ -179,6 +179,7 @@ export type Messages = {
       required: string;
       description: string;
       descriptionLinux: string;
+      descriptionWindows: string;
       screenshotAlt: string;
       grantButton: string;
       grantButtonRetry: string;
@@ -626,6 +627,8 @@ export const en: Messages = {
         'Enabling Accessibility lets Nagori paste history entries directly into the focused app. Click Grant Accessibility to open the macOS dialog, then turn the Nagori switch on.',
       descriptionLinux:
         'Install the `wtype` package on a Wayland session so Nagori can synthesize Ctrl+V into the focused app.',
+      descriptionWindows:
+        'On Windows, Nagori pastes into the focused app without any Accessibility-style permission — there is nothing to set up here.',
       screenshotAlt:
         'System Settings → Privacy & Security → Accessibility with the Nagori toggle highlighted.',
       grantButton: 'Grant Accessibility…',

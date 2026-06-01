@@ -118,7 +118,10 @@ that batches `CF_UNICODETEXT` + `CF_HTML` + `Rich Text Format` +
 single `OpenClipboard` / `EmptyClipboard` / N × `SetClipboardData`
 transaction so Preserve copy-back keeps every stored representation
 on the clipboard. Auto-paste is `SendInput` Ctrl+V and global
-shortcuts use the Tauri global-shortcut plugin.
+shortcuts use the Tauri global-shortcut plugin. `SendInput` needs no
+Accessibility-style permission, so auto-paste works out of the box and
+the desktop omits the Settings **Setup** tab entirely on Windows (there
+is nothing to grant or install).
 
 Supported environment:
 
@@ -212,10 +215,15 @@ the others:
   so every stored vector shares a comparable space.
 
 All model and language assets are downloaded and managed by macOS, not
-bundled with Nagori. When a capability is unavailable its AI action
-buttons are disabled with a tooltip explaining why, and `nagori doctor`
-reports text-generation, translation, and embedding availability
-separately. See
+bundled with Nagori. On macOS, when a capability is unavailable (e.g.
+Apple Intelligence not yet enabled) its AI action buttons are disabled
+with a tooltip explaining why, and `nagori doctor` reports
+text-generation, translation, and embedding availability separately. On
+Windows and Linux — where no AI engine is wired — the AI surfaces are
+hidden outright rather than shown disabled: the **Settings → AI** tab and
+the action menu's AI actions do not appear at all. (The desktop gates this
+on the `ai_actions` platform capability, so a future cross-OS backend
+would restore the surfaces automatically.) See
 [`docs/privacy.md`](./privacy.md#ai-actions-and-on-device-models-macos)
 for the privacy contract (on-device inference, no Private Cloud
 Compute, OS-managed model downloads).

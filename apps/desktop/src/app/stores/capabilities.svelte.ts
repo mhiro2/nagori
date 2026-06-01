@@ -36,3 +36,14 @@ export const refreshCapabilities = async (): Promise<void> => {
 
 export const quickLookAvailable = (): boolean =>
   capabilitiesState.capabilities?.previewQuickLook.status === 'available';
+
+// Whether model-backed AI actions have a wired backend on this host.
+// Drives whether the desktop exposes any AI surface (the Settings AI tab,
+// the action-menu AI actions). Currently only macOS ships an engine, but
+// gating on the capability — not a hardcoded platform — keeps the door
+// open: a host that wires a backend later lights AI up automatically.
+// Stays `false` until the capability snapshot loads (and outside Tauri),
+// so AI surfaces never flash on a platform that can't run them.
+export const aiActionsSupported = (): boolean =>
+  capabilitiesState.capabilities?.aiActions.status !== undefined &&
+  capabilitiesState.capabilities.aiActions.status !== 'unsupported';

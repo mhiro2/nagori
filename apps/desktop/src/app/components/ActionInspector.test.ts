@@ -38,6 +38,12 @@ vi.mock('../lib/commands', () => ({
   saveAiResult: vi.fn(),
 }));
 
+// AI surfaces gate on a wired backend. Default to supported (macOS) so the
+// AI-action tests render the buttons; the gating test flips it to false.
+vi.mock('../stores/capabilities.svelte', () => ({
+  aiActionsSupported: vi.fn(() => true),
+}));
+
 import {
   cancelAiAction,
   getAiAvailability,
@@ -47,6 +53,7 @@ import {
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
+import { aiActionsSupported } from '../stores/capabilities.svelte';
 import ActionInspector from './ActionInspector.svelte';
 
 const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
@@ -92,6 +99,7 @@ beforeEach(() => {
   for (const key of Object.keys(handlers)) delete handlers[key];
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(getAiAvailability).mockResolvedValue(availability(true));
+  vi.mocked(aiActionsSupported).mockReturnValue(true);
 });
 
 afterEach(cleanup);
@@ -124,6 +132,24 @@ describe('ActionInspector', () => {
     expect(getByText('Format as Markdown')).toBeTruthy();
     expect(getByText('Organize tasks')).toBeTruthy();
     expect(getByText('Explain code')).toBeTruthy();
+  });
+
+  it('hides AI actions (and the unavailable footnote) when no backend is wired', async () => {
+    vi.mocked(aiActionsSupported).mockReturnValue(false);
+    const { getByTestId, queryByTestId, queryByText } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await flush(); // let any availability effect settle
+    // Quick actions still render.
+    expect(getByTestId('quick-FormatJson')).toBeTruthy();
+    // No AI action buttons.
+    for (const action of TEXT_ACTIONS) {
+      expect(queryByTestId(`ai-${action}`)).toBeNull();
+    }
+    // The "AI unavailable" footnote is suppressed, not just empty.
+    expect(queryByText('AI actions are unavailable right now.')).toBeNull();
+    // And the probe is never even issued.
+    expect(getAiAvailability).not.toHaveBeenCalled();
   });
 
   it('shows the target summary for the selected entry', () => {

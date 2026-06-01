@@ -227,6 +227,62 @@
   // hides rather than spamming the user with a non-actionable error.
   let capabilities: PlatformCapabilities | null = $state(null);
   let activeTab: Tab = $state('general');
+  // A tab asked for before the capability snapshot loaded — by the
+  // first-launch Setup heuristic or a `navigate` hint. It is parked here
+  // and applied once capabilities arrive, so (a) a gated tab never flashes
+  // its content before its capability is known (e.g. Windows must not show
+  // the macOS Accessibility copy for even a frame), and (b) a hint for a
+  // genuinely-visible tab is not dropped just because it raced the probe.
+  let requestedTab: Tab | null = $state(null);
+
+  // AI is a per-host capability: the tab only appears where a backend is
+  // wired (today macOS). Gating on the capability — not a hardcoded
+  // platform — keeps the door open for a future cross-OS provider. Hidden
+  // until the snapshot loads so it never flashes on a host that can't run
+  // it; a host with no backend never offers a toggle that can't work.
+  const aiSupported = $derived.by(() => {
+    if (!capabilities) return false;
+    return capabilities.aiActions.status !== 'unsupported';
+  });
+  // Setup hosts only the auto-paste prerequisite card today, so it is worth
+  // a tab only where that prerequisite needs user action: the macOS
+  // Accessibility grant (`requiresPermission`) or the Linux `wtype` helper
+  // (`requiresExternalTool`). Where auto-paste just works (Windows) there is
+  // nothing to set up. Capability-gated, not platform-hardcoded, so the tab
+  // returns automatically if a host ever grows a real prerequisite. The
+  // static capability (not the live grant) is intentional: macOS keeps the
+  // tab after granting so the user can revisit / re-grant.
+  const setupNeeded = $derived.by(() => {
+    if (!capabilities) return false;
+    const status = capabilities.autoPaste.status;
+    return status === 'requiresPermission' || status === 'requiresExternalTool';
+  });
+  const visibleTabs = $derived(
+    TABS.filter((tab) => {
+      if (tab === 'ai') return aiSupported;
+      if (tab === 'setup') return setupNeeded;
+      return true;
+    }),
+  );
+  // Apply a parked tab request once capabilities are known: switch to it if
+  // it proved visible, otherwise drop it (a hidden tab simply leaves the
+  // user on the default). This is what makes the deferred Setup heuristic
+  // and a raced `navigate` hint land correctly without ever flashing a
+  // gated tab's content. Clearing `requestedTab` makes it one-shot, so a
+  // later manual tab click is never second-guessed.
+  $effect(() => {
+    if (requestedTab === null || !capabilities) return;
+    const tab = requestedTab;
+    requestedTab = null;
+    if ((visibleTabs as readonly Tab[]).includes(tab)) activeTab = tab;
+  });
+  // Bounce off a hidden tab onto General once the snapshot loads — covers an
+  // activeTab that was already set to a now-hidden tab through some path
+  // other than `requestedTab` (e.g. settings synced from another OS).
+  $effect(() => {
+    if (!capabilities) return;
+    if (!(visibleTabs as readonly Tab[]).includes(activeTab)) activeTab = 'general';
+  });
   // Flips true once the initial-tab heuristic has run so a later
   // `onboarding.completedAt` change (e.g. the user clicked through Setup
   // mid-session) does not rip them back to the Setup tab.
@@ -434,14 +490,17 @@
         // gate on both fields rather than `completedAt` alone (otherwise every
         // launch lands on Setup even after the user is fully onboarded).
         // Only runs once per Settings session so we never override an
-        // explicit tab click later in the same window.
+        // explicit tab click later in the same window. We *request* Setup
+        // rather than switch to it directly: the resolver applies it only
+        // once capabilities confirm Setup is visible, so a host with nothing
+        // to set up (Windows) never even briefly renders the card.
         if (!initialTabResolved) {
           initialTabResolved = true;
           if (
             s.onboarding.completedAt === null &&
             s.onboarding.accessibilityFirstGrantedAt === null
           ) {
-            activeTab = 'setup';
+            requestedTab = 'setup';
           }
         }
         appDenylistPresetEnabled = presetEnabled(s.appDenylist);
@@ -829,8 +888,13 @@
     const offNavigate = subscribe<string>(TAURI_EVENTS.navigate, (payload) => {
       if (typeof payload !== 'string') return;
       const tab = payload as Tab;
+      // Accept any known tab; visibility is enforced by the resolver. Route
+      // through `requestedTab` rather than asserting `activeTab` here so a
+      // hint that beats the capability probe (e.g. the StatusBar Setup
+      // affordance clicked right as Settings opens) is not silently dropped
+      // — it applies the moment the snapshot lands.
       if ((TABS as readonly string[]).includes(tab)) {
-        activeTab = tab;
+        requestedTab = tab;
         // Mark the initial-tab heuristic resolved so a later
         // `getSettings` callback inside the same Settings session does
         // not snap the user back to its default selection.
@@ -900,7 +964,7 @@
 
   {#if settings}
     <div class="tabs" role="tablist">
-      {#each TABS as tab (tab)}
+      {#each visibleTabs as tab (tab)}
         <button
           type="button"
           role="tab"
