@@ -6,6 +6,8 @@
   import { isImeComposing } from './lib/keybindings';
   import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
+  import { applyAppearance } from './lib/theme';
+  import type { AppSettings } from './lib/types';
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
   import { capabilitiesState } from './stores/capabilities.svelte';
@@ -107,6 +109,14 @@
       if (suppressPasteFailureToast) return;
       pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
     });
+    // Settings lives in its own webview, so a theme change made there reaches
+    // this palette webview only through the broadcast `settingsChanged` event.
+    // Without this the palette kept its startup theme until the next launch
+    // (`main.ts` applies appearance once on load). OS-level light/dark switches
+    // in `system` mode are handled separately by `watchSystemTheme`.
+    const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, (next) => {
+      applyAppearance(next.appearance);
+    });
 
     return () => {
       window.removeEventListener('keydown', handleEscape);
@@ -114,6 +124,7 @@
       window.removeEventListener('focus', handleFocus);
       offNavigate();
       offPasteFailed();
+      offSettings();
       offHotkeyFailure();
     };
   });
