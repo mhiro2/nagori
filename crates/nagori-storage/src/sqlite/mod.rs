@@ -1802,6 +1802,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_thumbnail_skips_sensitive_entries() {
+        // The storage write is gated to Public/Unknown rows, so a direct
+        // `put_thumbnail` for a Secret / Private / Blocked entry is a silent
+        // no-op — a derived image of sensitive content never lands at rest
+        // even if a caller bypasses the daemon generator's gate.
+        let store = SqliteStore::open_memory().unwrap();
+        let record = ThumbnailRecord {
+            payload: vec![0xAB; 256],
+            mime_type: "image/png".to_owned(),
+            width: 16,
+            height: 16,
+        };
+
+        for withheld in ["secret", "private", "blocked"] {
+            let id = insert_text(&store, "host entry").await;
+            {
+                let conn = store.conn().unwrap();
+                conn.execute(
+                    "UPDATE entries SET sensitivity = ?1 WHERE id = ?2",
+                    params![withheld, id.to_string()],
+                )
+                .unwrap();
+            }
+            store.put_thumbnail(id, record.clone()).await.unwrap();
+            assert!(
+                store.get_thumbnail(id).await.unwrap().is_none(),
+                "thumbnail must not persist for a `{withheld}` entry"
+            );
+        }
+
+        // Public entries still store normally (Unknown is covered by the
+        // roundtrip test, which seeds via `insert_text`).
+        let public_id = insert_text(&store, "public entry").await;
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE entries SET sensitivity = 'public' WHERE id = ?1",
+                params![public_id.to_string()],
+            )
+            .unwrap();
+        }
+        store
+            .put_thumbnail(public_id, record.clone())
+            .await
+            .unwrap();
+        assert!(store.get_thumbnail(public_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn thumbnail_cascades_on_entry_purge() {
         // Soft-delete leaves the thumbnail row alone; only the final
         // `DELETE FROM entries` (e.g. via `purge_deleted`) should

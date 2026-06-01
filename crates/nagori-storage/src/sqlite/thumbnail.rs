@@ -52,9 +52,15 @@ impl SqliteStore {
 
     /// Persist a thumbnail for `id`, replacing any existing row.
     ///
-    /// The caller is responsible for sensitivity gating (Public only) and
-    /// for clamping the byte count before this call — the storage layer
-    /// trusts what it is asked to write.
+    /// The write is gated on the entry's live sensitivity: it only lands for
+    /// `public` / `unknown` rows, mirroring `is_text_safe_for_default_output`
+    /// (the same Public-or-Unknown set the daemon's generator checks before
+    /// calling here). The gate is a conditional `INSERT ... SELECT`, so a
+    /// `Private` / `Secret` / `Blocked` (or absent) entry is a no-op rather
+    /// than an error — closing the window where a caller bypassing the daemon
+    /// (a direct CLI/plugin path) could persist a derived image of sensitive
+    /// content at rest. The caller is still responsible for clamping the byte
+    /// count before this call.
     pub async fn put_thumbnail(&self, id: EntryId, record: ThumbnailRecord) -> Result<()> {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
@@ -68,7 +74,10 @@ impl SqliteStore {
                 "INSERT OR REPLACE INTO entry_thumbnails (
                     entry_id, payload_blob, mime_type,
                     width, height, byte_count, created_at, last_accessed_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                 )
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7
+                 FROM entries
+                 WHERE id = ?1 AND sensitivity IN ('public', 'unknown')",
                 params![
                     id.to_string(),
                     record.payload,
