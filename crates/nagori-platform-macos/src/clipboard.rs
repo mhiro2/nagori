@@ -406,53 +406,61 @@ impl MacosClipboard {
             // path use so a concurrent reader/writer cannot race the
             // clearContents+setData pair below on the shared NSPasteboard.
             let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-            // SAFETY: AppKit FFI calls into the shared NSPasteboard.
-            // - `NSPasteboardTypePNG`/`NSPasteboardTypeTIFF` are static
-            //   extern constants whose backing storage lives for the
-            //   lifetime of the AppKit framework.
-            // - `NSData::with_bytes` copies our `&bytes` slice into a
-            //   fresh ObjC heap buffer, so the resulting `Retained<NSData>`
-            //   does not depend on any Rust lifetime once it leaves this
-            //   call. Handing it to `setData_forType` only requires a
-            //   shared reference, and AppKit retains its own copy of the
-            //   data on the pasteboard before returning.
-            unsafe {
-                // Dynamic UTI strings (JPEG/GIF/WebP) outlive the call by
-                // virtue of `Retained<NSString>` keeping the backing buffer
-                // alive across `setData_forType` — AppKit copies the type
-                // string before returning. Static `NSPasteboardType*` constants
-                // are handed straight back to AppKit by reference.
-                let pb = NSPasteboard::generalPasteboard();
-                pb.clearContents();
-                let data = NSData::with_bytes(&bytes);
-                let accepted = match mime_owned.as_str() {
-                    "image/png" => pb.setData_forType(Some(&data), NSPasteboardTypePNG),
-                    "image/tiff" => pb.setData_forType(Some(&data), NSPasteboardTypeTIFF),
-                    "image/jpeg" => {
-                        let ty = NSString::from_str(UTI_JPEG);
-                        pb.setData_forType(Some(&data), &ty)
+            // Drain the AppKit autoreleased temporaries (`generalPasteboard`,
+            // the `NSData` copy, dynamic-UTI `NSString`s) on every call. The
+            // capture/copy work runs on a tokio blocking-pool thread with no
+            // implicit pool, so without this each image copy would leak its
+            // temporaries into a pool that never drains — matching the read
+            // side (`current_snapshot` / `oversized_payload`).
+            objc2::rc::autoreleasepool(|_pool| {
+                // SAFETY: AppKit FFI calls into the shared NSPasteboard.
+                // - `NSPasteboardTypePNG`/`NSPasteboardTypeTIFF` are static
+                //   extern constants whose backing storage lives for the
+                //   lifetime of the AppKit framework.
+                // - `NSData::with_bytes` copies our `&bytes` slice into a
+                //   fresh ObjC heap buffer, so the resulting `Retained<NSData>`
+                //   does not depend on any Rust lifetime once it leaves this
+                //   call. Handing it to `setData_forType` only requires a
+                //   shared reference, and AppKit retains its own copy of the
+                //   data on the pasteboard before returning.
+                unsafe {
+                    // Dynamic UTI strings (JPEG/GIF/WebP) outlive the call by
+                    // virtue of `Retained<NSString>` keeping the backing buffer
+                    // alive across `setData_forType` — AppKit copies the type
+                    // string before returning. Static `NSPasteboardType*` constants
+                    // are handed straight back to AppKit by reference.
+                    let pb = NSPasteboard::generalPasteboard();
+                    pb.clearContents();
+                    let data = NSData::with_bytes(&bytes);
+                    let accepted = match mime_owned.as_str() {
+                        "image/png" => pb.setData_forType(Some(&data), NSPasteboardTypePNG),
+                        "image/tiff" => pb.setData_forType(Some(&data), NSPasteboardTypeTIFF),
+                        "image/jpeg" => {
+                            let ty = NSString::from_str(UTI_JPEG);
+                            pb.setData_forType(Some(&data), &ty)
+                        }
+                        "image/gif" => {
+                            let ty = NSString::from_str(UTI_GIF);
+                            pb.setData_forType(Some(&data), &ty)
+                        }
+                        "image/webp" => {
+                            let ty = NSString::from_str(UTI_WEBP);
+                            pb.setData_forType(Some(&data), &ty)
+                        }
+                        other => {
+                            return Err(AppError::Unsupported(format!(
+                                "unsupported image clipboard mime type: {other}"
+                            )));
+                        }
+                    };
+                    if !accepted {
+                        return Err(AppError::Platform(
+                            "NSPasteboard::setData failed for image type".to_owned(),
+                        ));
                     }
-                    "image/gif" => {
-                        let ty = NSString::from_str(UTI_GIF);
-                        pb.setData_forType(Some(&data), &ty)
-                    }
-                    "image/webp" => {
-                        let ty = NSString::from_str(UTI_WEBP);
-                        pb.setData_forType(Some(&data), &ty)
-                    }
-                    other => {
-                        return Err(AppError::Unsupported(format!(
-                            "unsupported image clipboard mime type: {other}"
-                        )));
-                    }
-                };
-                if !accepted {
-                    return Err(AppError::Platform(
-                        "NSPasteboard::setData failed for image type".to_owned(),
-                    ));
+                    Ok(())
                 }
-                Ok(())
-            }
+            })
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
