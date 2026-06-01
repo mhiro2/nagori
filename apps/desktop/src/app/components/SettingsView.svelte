@@ -1338,7 +1338,10 @@
     border: 1px solid transparent;
     border-radius: 6px;
     background: var(--accent, #6c8dff);
-    color: var(--bg, #14161a);
+    /* On-accent foreground, not --bg: --accent stays blue in both themes, so
+       --bg text (near-white in light) drops to ~2.9:1 on it. --accent-fg is
+       #14161a in both themes — identical to --bg in dark, legible in light. */
+    color: var(--accent-fg, #14161a);
     font: inherit;
     font-weight: 600;
     cursor: pointer;

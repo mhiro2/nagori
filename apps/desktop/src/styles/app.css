@@ -16,11 +16,37 @@
   --accent: #6c8dff;
   --warning: #f59e0b;
   --danger: #f87171;
-  /* Secondary foreground for dimmed labels, the lines·bytes summary and the
-     neutral directory dot. Defined per theme so it stays legible in light mode
-     — call sites carry only a dark-oriented fallback that washes out on a light
-     background. */
+  /* Secondary tokens. Components reference these but historically carried only
+     a dark-oriented fallback, so they washed out in light mode. Defined here
+     for the dark theme (values equal the former fallbacks, so dark is
+     unchanged) and overridden per light theme below. Tokens whose call sites
+     used divergent fallbacks (--card-border, --muted-bg, --warning-bg) are
+     defined only in the light blocks, so dark keeps each site's own fallback. */
   --fg-secondary: rgba(255, 255, 255, 0.72);
+  --accent-fg: #14161a;
+  --accent-soft: #b3a4f0;
+  --accent-strong: #93c5fd;
+  --bg-accent-soft: rgba(106, 166, 255, 0.16);
+  --ok: #86d29a;
+  --success: #34c759;
+  --success-bg: rgba(48, 209, 88, 0.07);
+  --success-border: rgba(48, 209, 88, 0.45);
+  --success-pill-bg: rgba(48, 209, 88, 0.18);
+  --warn: #f5c97b;
+  --warning-border: rgba(245, 158, 11, 0.4);
+  --border-hover: rgba(255, 255, 255, 0.32);
+  --border-strong: rgba(255, 255, 255, 0.24);
+  --card-bg: rgba(255, 255, 255, 0.03);
+  --card-hover: rgba(255, 255, 255, 0.06);
+  --muted-border: rgba(255, 255, 255, 0.08);
+  --screenshot-bg: rgba(255, 255, 255, 0.04);
+  --surface-muted: rgba(255, 255, 255, 0.06);
+  --syntax-kw: #c08bff;
+  --syntax-str: #f0a07b;
+  --syntax-num: #f7c97a;
+  --syntax-punct: rgba(255, 255, 255, 0.55);
+  --syntax-comment: rgba(170, 170, 170, 0.7);
+  --syntax-link: #7ec8ff;
 }
 
 :root[data-theme='light'] {
@@ -34,6 +60,31 @@
   --muted: rgba(0, 0, 0, 0.55);
   --border: rgba(0, 0, 0, 0.1);
   --fg-secondary: rgba(0, 0, 0, 0.72);
+  --accent-soft: #6a4fd6;
+  --accent-strong: #1d4ed8;
+  --bg-accent-soft: rgba(108, 141, 255, 0.14);
+  --ok: #1a7f37;
+  --success: #137333;
+  --warn: #8a5e00;
+  /* #f59e0b reads at ~2:1 as text on light surfaces; darken for AA. Used only
+     as text/border/outline, so the bg/border amber tokens are unaffected. */
+  --warning: #8a5e00;
+  --border-hover: rgba(0, 0, 0, 0.28);
+  --border-strong: rgba(0, 0, 0, 0.22);
+  --card-bg: rgba(0, 0, 0, 0.02);
+  --card-border: rgba(0, 0, 0, 0.12);
+  --card-hover: rgba(0, 0, 0, 0.04);
+  --muted-bg: rgba(0, 0, 0, 0.04);
+  --muted-border: rgba(0, 0, 0, 0.1);
+  --screenshot-bg: rgba(0, 0, 0, 0.04);
+  --surface-muted: rgba(0, 0, 0, 0.05);
+  --warning-bg: rgba(245, 158, 11, 0.16);
+  --syntax-kw: #6d28d9;
+  --syntax-str: #9a3412;
+  --syntax-num: #8a5300;
+  --syntax-punct: rgba(0, 0, 0, 0.6);
+  --syntax-comment: #586069;
+  --syntax-link: #0a58ca;
 }
 
 :root[data-theme='dark'] {
@@ -52,6 +103,29 @@
     --muted: rgba(0, 0, 0, 0.55);
     --border: rgba(0, 0, 0, 0.1);
     --fg-secondary: rgba(0, 0, 0, 0.72);
+    --accent-soft: #6a4fd6;
+    --accent-strong: #1d4ed8;
+    --bg-accent-soft: rgba(108, 141, 255, 0.14);
+    --ok: #1a7f37;
+    --success: #137333;
+    --warn: #8a5e00;
+    --warning: #8a5e00;
+    --border-hover: rgba(0, 0, 0, 0.28);
+    --border-strong: rgba(0, 0, 0, 0.22);
+    --card-bg: rgba(0, 0, 0, 0.02);
+    --card-border: rgba(0, 0, 0, 0.12);
+    --card-hover: rgba(0, 0, 0, 0.04);
+    --muted-bg: rgba(0, 0, 0, 0.04);
+    --muted-border: rgba(0, 0, 0, 0.1);
+    --screenshot-bg: rgba(0, 0, 0, 0.04);
+    --surface-muted: rgba(0, 0, 0, 0.05);
+    --warning-bg: rgba(245, 158, 11, 0.16);
+    --syntax-kw: #6d28d9;
+    --syntax-str: #9a3412;
+    --syntax-num: #8a5300;
+    --syntax-punct: rgba(0, 0, 0, 0.6);
+    --syntax-comment: #586069;
+    --syntax-link: #0a58ca;
   }
 }
 

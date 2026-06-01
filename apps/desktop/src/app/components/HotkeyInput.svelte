@@ -156,7 +156,7 @@
   }
   .display.recording {
     border-color: var(--accent, #6aa6ff);
-    background: var(--accent-soft, rgba(106, 166, 255, 0.16));
+    background: var(--bg-accent-soft, rgba(106, 166, 255, 0.16));
   }
   .display.empty .hint,
   .display .hint {
