@@ -16,6 +16,11 @@
   --accent: #6c8dff;
   --warning: #f59e0b;
   --danger: #f87171;
+  /* Secondary foreground for dimmed labels, the lines·bytes summary and the
+     neutral directory dot. Defined per theme so it stays legible in light mode
+     — call sites carry only a dark-oriented fallback that washes out on a light
+     background. */
+  --fg-secondary: rgba(255, 255, 255, 0.72);
 }
 
 :root[data-theme='light'] {
@@ -28,6 +33,7 @@
   --fg: #0f1115;
   --muted: rgba(0, 0, 0, 0.55);
   --border: rgba(0, 0, 0, 0.1);
+  --fg-secondary: rgba(0, 0, 0, 0.72);
 }
 
 :root[data-theme='dark'] {
@@ -45,6 +51,7 @@
     --fg: #0f1115;
     --muted: rgba(0, 0, 0, 0.55);
     --border: rgba(0, 0, 0, 0.1);
+    --fg-secondary: rgba(0, 0, 0, 0.72);
   }
 }
 

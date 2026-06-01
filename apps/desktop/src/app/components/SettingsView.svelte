@@ -1252,6 +1252,16 @@
   }
   .tab-content :global(select) {
     max-width: 22rem;
+    /* Native <select> popups can't composite a translucent background: on
+       Windows/Linux the option list collapses to near-identical fg/bg and the
+       labels disappear. Paint the control and its options with solid theme
+       colors so the dropdown stays legible on every platform. */
+    background: var(--bg-overlay, #1d1f23);
+    color: var(--fg, #f5f5f5);
+  }
+  .tab-content :global(select option) {
+    background: var(--bg-overlay, #1d1f23);
+    color: var(--fg, #f5f5f5);
   }
   /* Labeled control rows: a fixed label column keeps the controls aligned
      across rows, while each control sizes to its own content and anchors
