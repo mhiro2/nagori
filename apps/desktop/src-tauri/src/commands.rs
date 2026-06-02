@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use nagori_core::{
     AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository, MAX_PASTE_DELAY_MS,
-    QuickActionId, RequestId, SearchQuery, Sensitivity, is_text_safe_for_default_output,
+    PasteFailureReason, QuickActionId, RequestId, SearchQuery, Sensitivity,
+    is_text_safe_for_default_output,
 };
 use nagori_platform::PreviewItem;
 use nagori_search::normalize_text;
@@ -251,12 +252,13 @@ pub async fn paste_entry(
         && let Err(err) = state.runtime.paste_frontmost().await
     {
         tracing::warn!(error = %err, "paste_entry_synth_failed");
+        let reason = paste_failure_reason(&err);
         let cmd_err: CommandError = err.into();
         let message = format!(
             "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed(&app, &message);
+        emit_paste_failed_with_reason(&app, &message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);
@@ -277,12 +279,46 @@ pub async fn paste_entry(
 /// between sessions but never destroyed, so the toast surfaces on the
 /// next palette open. Targeting "settings" here would strand the message
 /// in a window that no longer subscribes to the event.
+///
+/// Emits a toast-only failure with **no** `reason`, for paste-command errors
+/// that are not auto-paste-synthesis failures — a clipboard-write (copy)
+/// failure or a settings-load failure, where the clipboard was never updated
+/// so "copy succeeded — paste manually" would be wrong. The renderer toasts
+/// these but does not leave a `StatusBar` diagnostic chip. Genuine synthesis
+/// failures use [`emit_paste_failed_with_reason`] instead.
 pub(crate) fn emit_paste_failed(app: &AppHandle, message: &str) {
     let _ = app.emit_to(
         "main",
         crate::PASTE_FAILED_EVENT,
         serde_json::json!({ "error": message }),
     );
+}
+
+/// Like [`emit_paste_failed`] but carries the classified failure `reason` so
+/// the renderer can show a per-reason hint (and the `StatusBar` can leave a
+/// persistent diagnostic chip) instead of only a generic toast. The payload
+/// is `{ error, reason, tool? }`: `reason` is the stable machine token,
+/// `tool` is present only for `ToolMissing` (e.g. `wtype`).
+pub(crate) fn emit_paste_failed_with_reason(
+    app: &AppHandle,
+    message: &str,
+    reason: &PasteFailureReason,
+) {
+    let mut payload = serde_json::json!({ "error": message, "reason": reason.token() });
+    if let PasteFailureReason::ToolMissing { tool } = reason {
+        payload["tool"] = serde_json::Value::String(tool.clone());
+    }
+    let _ = app.emit_to("main", crate::PASTE_FAILED_EVENT, payload);
+}
+
+/// Pull the classified [`PasteFailureReason`] out of an auto-paste failure.
+/// The platform adapters raise `AppError::Paste { reason, .. }`; anything else
+/// reaching a paste site is unexpected, so it falls back to `Unknown`.
+pub(crate) fn paste_failure_reason(err: &AppError) -> PasteFailureReason {
+    match err {
+        AppError::Paste { reason, .. } => reason.clone(),
+        _ => PasteFailureReason::Unknown,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -368,12 +404,16 @@ pub async fn paste_entry_from_palette(
         // and reuse its curated `message`, preserving the underlying
         // `code`/`recoverable` so the frontend's i18n + retry policy still
         // see the real cause (same contract as the auto-paste block below).
+        // The failure mode here is specifically "couldn't re-focus the source
+        // app", so tag it `PreviousAppLost` regardless of the underlying
+        // adapter error. (The `None` branch above is the normal Wayland path
+        // and never reaches here.)
         let cmd_err: CommandError = err.into();
         let message = format!(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed(&app, &message);
+        emit_paste_failed_with_reason(&app, &message, &PasteFailureReason::PreviousAppLost);
         return Err(CommandError { message, ..cmd_err });
     }
 
@@ -403,12 +443,13 @@ pub async fn paste_entry_from_palette(
         // `cmd_err.message` (not the bare `AppError` Display, which can
         // leak storage/platform diagnostics) and keep the "copy succeeded"
         // framing so the user knows the clipboard write already landed.
+        let reason = paste_failure_reason(&err);
         let cmd_err: CommandError = err.into();
         let message = format!(
             "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed(&app, &message);
+        emit_paste_failed_with_reason(&app, &message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);

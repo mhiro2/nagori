@@ -115,6 +115,19 @@ export const zhHans: Messages = {
     autoPasteOff: '自动粘贴已关闭 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自动粘贴已关闭',
     autoPasteOffSetupAria: '自动粘贴已关闭：需要 Accessibility 权限。打开设置。',
+    pasteDiagnostics: {
+      label: '⚠ 自动粘贴失败',
+      toolFallback: '粘贴工具',
+      hint: {
+        accessibilityMissing: '自动粘贴失败：需要 Accessibility 权限。已复制 — 请手动粘贴。',
+        toolMissing: ({ tool }) =>
+          `自动粘贴失败：未安装 ${tool}。已复制 — 请安装 ${tool} 或手动粘贴。`,
+        timeout: '自动粘贴超时——合成器可能正忙。已复制 — 请手动粘贴或重试。',
+        synthUnsupported: '此平台不支持自动粘贴。已复制 — 请手动粘贴。',
+        previousAppLost: '已跳过自动粘贴：无法切回源应用。已复制 — 请手动粘贴。',
+        unknown: '自动粘贴失败。已复制 — 请手动粘贴。',
+      },
+    },
   },
   actionMenu: {
     title: '快捷操作',

@@ -16,6 +16,11 @@
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
+  import {
+    clearPasteDiagnostics,
+    normalizePasteReason,
+    recordPasteFailure,
+  } from './stores/pasteDiagnostics.svelte';
   import { cancelPendingQuery } from './stores/searchQuery.svelte';
   import { accessibilityState, refreshSettings, settingsState } from './stores/settings.svelte';
   import { showPalette, showSettings, viewState } from './stores/view.svelte';
@@ -105,10 +110,27 @@
     // indicator covers that case, so a toast would just double up (§3.4).
     // A failure while the grant IS in place (e.g. the target app rejected
     // the synthetic paste) is genuinely unexpected and still toasts.
-    const offPasteFailed = subscribe<{ error?: string }>(TAURI_EVENTS.pasteFailed, (payload) => {
-      if (suppressPasteFailureToast) return;
-      pasteFailureMessage = payload?.error ?? messages().toasts.autoPasteFailedFallback;
-    });
+    const offPasteFailed = subscribe<{ error?: string; reason?: string; tool?: string }>(
+      TAURI_EVENTS.pasteFailed,
+      (payload) => {
+        const reason = normalizePasteReason(payload?.reason);
+        const message = payload?.error ?? messages().toasts.autoPasteFailedFallback;
+        // Only classified auto-paste-synthesis failures carry a `reason` and
+        // earn a persistent StatusBar diagnostic chip. Reason-less events are
+        // copy / settings failures where the clipboard was never updated — they
+        // toast (so the hidden palette's error still surfaces) but leave no
+        // chip, since "copy succeeded — paste manually" would be wrong there.
+        if (payload?.reason !== undefined) {
+          recordPasteFailure({
+            reason,
+            message,
+            ...(payload?.tool !== undefined ? { tool: payload.tool } : {}),
+          });
+        }
+        if (shouldSuppressPasteToast(reason)) return;
+        pasteFailureMessage = message;
+      },
+    );
     // Settings lives in its own webview, so a theme change made there reaches
     // this palette webview only through the broadcast `settingsChanged` event.
     // Without this the palette kept its startup theme until the next launch
@@ -139,17 +161,22 @@
       capabilitiesState.capabilities?.platform,
     ),
   );
-  // Suppress the auto-paste failure toast only for the not-yet-granted
-  // states the StatusBar indicator already explains, where a toast would
-  // just double up (§3.4). `RevokedAfterGranted` is deliberately *not*
-  // suppressed: the revoke itself is detected passively without a toast,
-  // but the next real paste attempt that fails should surface one so the
-  // failure is tied to the user's intent (S4 step 5). `Unavailable`
-  // platforms (Windows, Wayland sans `wtype`) also fall through — a paste
-  // failure there is a genuine error, not a missing-permission no-op.
-  const suppressPasteFailureToast = $derived(
-    accessibilityUiState === 'NotRequested' || accessibilityUiState === 'PromptShownNotGranted',
-  );
+  // Suppress the auto-paste failure toast only for an `accessibilityMissing`
+  // failure in the not-yet-granted states the StatusBar accessibility chip
+  // already explains, where a toast would just double up (§3.4).
+  // `RevokedAfterGranted` is deliberately *not* suppressed: the revoke itself
+  // is detected passively without a toast, but the next real paste attempt
+  // that fails should surface one so the failure is tied to the user's intent
+  // (S4 step 5). Every other reason — a missing `wtype`, a timeout, an
+  // unrecoverable synth failure — is a genuine error the StatusBar's own
+  // diagnostic chip surfaces silently, so the toast still fires to confirm the
+  // copy succeeded and explain what to do next.
+  const shouldSuppressPasteToast = (reason: ReturnType<typeof normalizePasteReason>): boolean => {
+    if (reason !== 'accessibilityMissing') return false;
+    return (
+      accessibilityUiState === 'NotRequested' || accessibilityUiState === 'PromptShownNotGranted'
+    );
+  };
 
   // Brief success confirmation: when the grant flips to `Granted` from a
   // not-yet-granted state, flash a ✓ toast for 2 s so the user gets
@@ -176,6 +203,9 @@
     previousAccessibilityState = current;
     if (previous === undefined) return; // first real observation — seed only
     if (previous === 'Granted' || current !== 'Granted') return;
+    // The grant lands: any lingering accessibility-driven paste diagnostic is
+    // now stale, so clear the StatusBar chip alongside the ✓ confirmation.
+    clearPasteDiagnostics();
     accessibilityConfirmMessage = messages().toasts.accessibilityGrantedTitle;
     if (accessibilityConfirmTimer !== undefined) clearTimeout(accessibilityConfirmTimer);
     accessibilityConfirmTimer = setTimeout(() => {

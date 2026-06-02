@@ -10,6 +10,7 @@ import {
 import { describeError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
 import type { PasteFormat } from '../lib/types';
+import { clearPasteDiagnostics } from './pasteDiagnostics.svelte';
 import { clearMultiSelect, multiSelectState } from './searchMultiSelect.svelte';
 import { cancelPendingQuery, runQuery, searchState } from './searchQuery.svelte';
 import { currentSelection } from './searchSelection';
@@ -30,6 +31,9 @@ export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   cancelPendingQuery();
   try {
     await pasteEntryCmd(target.id, format);
+    // A clean paste makes any prior failure diagnostic stale — drop the
+    // StatusBar chip so it doesn't linger across a now-working paste.
+    clearPasteDiagnostics();
   } catch (err) {
     searchState.errorMessage = describeError(err);
   }

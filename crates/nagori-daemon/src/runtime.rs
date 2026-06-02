@@ -1345,9 +1345,15 @@ fn ensure_pasted(result: nagori_platform::PasteResult) -> Result<()> {
     if result.pasted {
         Ok(())
     } else {
-        Err(AppError::Platform(result.message.unwrap_or_else(|| {
-            "auto-paste did not run; OS paste controller reported pasted=false".to_owned()
-        })))
+        // `pasted == false` is the no-op controller branch (Noop on a host
+        // without a wired paste adapter), i.e. synthetic paste is not
+        // available here at all — classify it as such so the UI hint matches.
+        Err(AppError::Paste {
+            reason: nagori_core::PasteFailureReason::SynthUnsupported,
+            message: result.message.unwrap_or_else(|| {
+                "auto-paste did not run; OS paste controller reported pasted=false".to_owned()
+            }),
+        })
     }
 }
 
@@ -2502,15 +2508,25 @@ mod tests {
         // message: ...}`. Historically `paste_frontmost` discarded the bool
         // and returned Ok(()), so non-macOS paths and any future "tried but
         // OS blocked" outcome silently looked like success. Regression: the
-        // runtime must promote `pasted=false` to a Platform error so the UI
-        // can warn the user instead of pretending to paste.
+        // runtime must promote `pasted=false` to a classified `Paste` error
+        // (synthesis unsupported here) so the UI can warn the user instead of
+        // pretending to paste.
         let store = SqliteStore::open_memory().expect("memory store");
         let runtime = NagoriRuntime::builder(store).build_for_test();
         let err = runtime
             .paste_frontmost()
             .await
             .expect_err("Noop paste must surface as error");
-        assert!(matches!(err, AppError::Platform(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                AppError::Paste {
+                    reason: nagori_core::PasteFailureReason::SynthUnsupported,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

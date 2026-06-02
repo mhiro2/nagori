@@ -94,7 +94,11 @@ reports trace back to one of them.
   protocol`, auto-paste will fail at runtime even though the binary
   is installed. Without `wtype`, or when the virtual-keyboard
   protocol is missing, Enter in the palette copies the entry to the
-  clipboard but does not paste into the previous window.
+  clipboard but does not paste into the previous window. The palette
+  classifies the failure (missing tool vs. timeout vs. …) and leaves a
+  StatusBar diagnostic chip whose tooltip names the fix — a missing
+  `wtype` reads as "install `wtype`", matching this section and the
+  `nagori doctor` capability row.
 - **In-app global shortcuts don't register.**
   `tauri-plugin-global-shortcut` is X11-only upstream; on pure
   Wayland sessions `register_primary_hotkey` fails and the desktop

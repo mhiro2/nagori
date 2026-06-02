@@ -123,6 +123,23 @@ export const de: Messages = {
     autoPasteOffShort: '⚠ Auto-Einfügen aus',
     autoPasteOffSetupAria:
       'Auto-Einfügen aus: Accessibility-Berechtigung erforderlich. Einrichtung öffnen.',
+    pasteDiagnostics: {
+      label: '⚠ Auto-Einfügen fehlgeschlagen',
+      toolFallback: 'das Einfüge-Tool',
+      hint: {
+        accessibilityMissing:
+          'Auto-Einfügen fehlgeschlagen: Accessibility-Berechtigung erforderlich. Kopiert — manuell einfügen.',
+        toolMissing: ({ tool }) =>
+          `Auto-Einfügen fehlgeschlagen: ${tool} ist nicht installiert. Kopiert — ${tool} installieren oder manuell einfügen.`,
+        timeout:
+          'Auto-Einfügen hat das Zeitlimit überschritten — der Compositor ist evtl. beschäftigt. Kopiert — manuell einfügen oder erneut versuchen.',
+        synthUnsupported:
+          'Auto-Einfügen ist auf dieser Plattform nicht verfügbar. Kopiert — manuell einfügen.',
+        previousAppLost:
+          'Auto-Einfügen übersprungen: Quell-App konnte nicht reaktiviert werden. Kopiert — manuell einfügen.',
+        unknown: 'Auto-Einfügen fehlgeschlagen. Kopiert — manuell einfügen.',
+      },
+    },
   },
   actionMenu: {
     title: 'Schnellaktionen',

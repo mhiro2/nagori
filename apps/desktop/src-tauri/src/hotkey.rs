@@ -404,7 +404,13 @@ pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: Secon
                     Ok(()) | Err(nagori_core::AppError::NotFound) => {}
                     Err(err) => {
                         tracing::warn!(error = %err, "repaste_last_paste_failed");
-                        commands::emit_paste_failed(&app, &err.to_string());
+                        // Classify before sanitising so the StatusBar chip gets
+                        // the same per-reason hint as the palette paste path,
+                        // and surface the curated `CommandError` message rather
+                        // than the raw `AppError` Display.
+                        let reason = commands::paste_failure_reason(&err);
+                        let cmd_err: crate::error::CommandError = err.into();
+                        commands::emit_paste_failed_with_reason(&app, &cmd_err.message, &reason);
                     }
                 }
             }

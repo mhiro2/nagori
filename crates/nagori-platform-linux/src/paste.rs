@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use nagori_core::{AppError, Result};
+use nagori_core::{AppError, PasteFailureReason, Result};
 use nagori_platform::{PasteController, PasteResult};
 
 /// Synthesize Ctrl+V into the frontmost Wayland surface via `wtype`.
@@ -54,12 +54,15 @@ impl PasteController for LinuxPasteController {
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|err| {
-                    AppError::Platform(format!(
+                .map_err(|err| AppError::Paste {
+                    reason: PasteFailureReason::ToolMissing {
+                        tool: "wtype".to_owned(),
+                    },
+                    message: format!(
                         "auto-paste failed: could not invoke `wtype` ({err}). Install the \
                          `wtype` package and ensure the compositor exposes \
                          zwp_virtual_keyboard_v1.",
-                    ))
+                    ),
                 })?;
             // Drain stderr concurrently with `wait()`. If we read stderr
             // only after the child exits, a chatty `wtype` whose output
@@ -99,19 +102,23 @@ impl PasteController for LinuxPasteController {
                     // every variant.
                     let buf = collect_stderr(stderr_task).await;
                     let stderr = String::from_utf8_lossy(&buf);
-                    Err(AppError::Platform(format!(
-                        "auto-paste failed: wtype exited with {} ({}).",
-                        status,
-                        stderr.trim(),
-                    )))
+                    Err(AppError::Paste {
+                        reason: PasteFailureReason::Unknown,
+                        message: format!(
+                            "auto-paste failed: wtype exited with {} ({}).",
+                            status,
+                            stderr.trim(),
+                        ),
+                    })
                 }
                 Ok(Err(err)) => {
                     if let Some(task) = stderr_task {
                         task.abort();
                     }
-                    Err(AppError::Platform(format!(
-                        "auto-paste failed: wtype wait error ({err}).",
-                    )))
+                    Err(AppError::Paste {
+                        reason: PasteFailureReason::Unknown,
+                        message: format!("auto-paste failed: wtype wait error ({err})."),
+                    })
                 }
                 Err(_elapsed) => {
                     // Compositor (or wtype) is wedged. SIGKILL + reap so
@@ -134,19 +141,23 @@ impl PasteController for LinuxPasteController {
                     } else {
                         format!(" ({stderr_tail})")
                     };
-                    Err(AppError::Platform(format!(
-                        "auto-paste failed: wtype did not return within {}s. The compositor or \
-                         virtual-keyboard handshake may be stuck.{detail}",
-                        WTYPE_TIMEOUT.as_secs(),
-                    )))
+                    Err(AppError::Paste {
+                        reason: PasteFailureReason::Timeout,
+                        message: format!(
+                            "auto-paste failed: wtype did not return within {}s. The compositor \
+                             or virtual-keyboard handshake may be stuck.{detail}",
+                            WTYPE_TIMEOUT.as_secs(),
+                        ),
+                    })
                 }
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err(AppError::Unsupported(
-                "Linux auto-paste is only available on Linux".to_owned(),
-            ))
+            Err(AppError::Paste {
+                reason: PasteFailureReason::SynthUnsupported,
+                message: "Linux auto-paste is only available on Linux".to_owned(),
+            })
         }
     }
 }

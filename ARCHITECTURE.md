@@ -1089,7 +1089,13 @@ not duplicate runtime logic.
   `nagori://navigate`). The row resolves the shared 5-state
   `resolvePermissionUiState`, so it hides once the grant lands and on
   `Unavailable` platforms (Windows, Wayland sans `wtype`) where there is
-  nothing to chase. It replaces the former `OnboardingBanner` card.
+  nothing to chase. It replaces the former `OnboardingBanner` card. It
+  also hosts a persistent auto-paste **diagnostic chip** driven by the
+  `pasteDiagnostics` store: when a paste fails, the chip carries the
+  localized per-reason remediation in its `title` and outlives the toast
+  (priority paste-diagnostic > accessibility warning > hints; an
+  `accessibilityMissing` reason folds into the accessibility chip so the
+  two never stack). Clicking it dismisses the diagnostic.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise the
   domain and add a strong-brand badge (GitHub / YouTube / …) derived from
   the hostname alone (`lib/urlCategory`, no network). Code rows show a
@@ -1614,10 +1620,25 @@ change.
   flips. Auto-paste failures emit `nagori://paste_failed`, which
   `emit_paste_failed` always routes to the palette (`"main"`) webview —
   toasts are palette-only, so the Settings window never subscribes. The
-  palette suppresses the toast only for the not-yet-granted states the
-  StatusBar indicator already explains (`NotRequested` /
-  `PromptShownNotGranted`); an unexpected failure while the grant is in
-  place — and a genuine failure after a passive revoke
+  payload carries a classified `reason`
+  (`nagori_core::PasteFailureReason` → camelCase token:
+  `accessibilityMissing` / `toolMissing` (+ `tool`) / `timeout` /
+  `synthUnsupported` / `previousAppLost` / `unknown`) alongside the
+  curated `error` string. Platform adapters raise
+  `AppError::Paste { reason, message }` so the classification survives the
+  `AppError → CommandError` collapse (which otherwise genericises
+  `Platform` detail); the desktop command layer adds `PreviousAppLost`
+  for a focus-restore failure that lives above the adapter. App.svelte
+  records every failure in the `pasteDiagnostics` store so the StatusBar
+  can leave a persistent diagnostic chip whose `title` is the localized
+  per-reason remediation (e.g. "install `wtype`"); the chip is cleared on
+  the next successful paste, on an Accessibility grant, or by manual
+  dismiss, and an `accessibilityMissing` reason folds into the dedicated
+  accessibility chip rather than stacking a second one. The
+  palette suppresses the *toast* only for an `accessibilityMissing`
+  failure in the not-yet-granted states the StatusBar accessibility chip
+  already explains (`NotRequested` / `PromptShownNotGranted`); every other
+  reason — and a genuine failure after a passive revoke
   (`RevokedAfterGranted`, whose detection is itself silent) — still
   renders, so the toast stays tied to a real paste attempt. A brief ✓
   toast confirms a fresh grant on the NotGranted→Granted transition,

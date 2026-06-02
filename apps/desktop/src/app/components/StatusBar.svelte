@@ -6,6 +6,7 @@
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
+  import { clearPasteDiagnostics, pasteDiagnosticsState } from '../stores/pasteDiagnostics.svelte';
   import { accessibilityState, captureEnabled, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
 
@@ -90,6 +91,37 @@
         accessibilityUiState === 'RevokedAfterGranted'),
   );
 
+  // Persistent auto-paste diagnostic. The daemon emits a classified failure on
+  // `nagori://paste_failed`; App.svelte records it in the store and we leave a
+  // short chip here so "copy worked, auto-paste didn't" stays visible after the
+  // toast fades. The `accessibilityMissing` case is already explained (and
+  // fixed) by the accessibility chip below, so it folds into that rather than
+  // stacking a second chip — every other reason gets its own.
+  const pasteFailure = $derived(pasteDiagnosticsState.failure);
+  const showPasteDiagnostic = $derived(
+    pasteFailure !== null && pasteFailure.reason !== 'accessibilityMissing',
+  );
+  const pasteHint = $derived.by((): string => {
+    if (!pasteFailure) return '';
+    const hint = t.status.pasteDiagnostics.hint;
+    switch (pasteFailure.reason) {
+      case 'toolMissing':
+        return hint.toolMissing({
+          tool: pasteFailure.tool ?? t.status.pasteDiagnostics.toolFallback,
+        });
+      case 'timeout':
+        return hint.timeout;
+      case 'synthUnsupported':
+        return hint.synthUnsupported;
+      case 'previousAppLost':
+        return hint.previousAppLost;
+      case 'accessibilityMissing':
+        return hint.accessibilityMissing;
+      default:
+        return hint.unknown;
+    }
+  });
+
   const openSetup = (): void => {
     // Standalone Settings window under Tauri (own decorations, no
     // always-on-top). The `'setup'` route hint asks SettingsView to land
@@ -149,7 +181,22 @@
         {/if}
       {/if}
     </span>
-    {#if showAccessibilityWarning}
+    {#if showPasteDiagnostic}
+      <!-- Highest-priority left-column chip: a real auto-paste failure the
+           user just hit. Click dismisses it; the localized hint (incl. the
+           remediation for a missing tool) rides in the title. -->
+      <button
+        type="button"
+        class="chip warning-chip"
+        data-testid="paste-diagnostic-chip"
+        data-reason={pasteFailure?.reason}
+        title={pasteHint}
+        aria-label={`${t.status.pasteDiagnostics.label}: ${pasteHint}`}
+        onclick={clearPasteDiagnostics}
+      >
+        {t.status.pasteDiagnostics.label}
+      </button>
+    {:else if showAccessibilityWarning}
       <button
         type="button"
         class="chip warning-chip"
@@ -175,9 +222,10 @@
       {capture ? t.status.captureOn : t.status.capturePaused}
     </button>
     <!-- Keyboard hints are the lowest-priority row content: drop them while
-         the warning chip is present so the bar never wraps on a narrow
-         palette (priority: warning > capture > summary > hints). -->
-    {#if !showAccessibilityWarning}
+         a left-column warning chip (paste diagnostic or accessibility) is
+         present so the bar never wraps on a narrow palette
+         (priority: warning > capture > summary > hints). -->
+    {#if !showAccessibilityWarning && !showPasteDiagnostic}
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}

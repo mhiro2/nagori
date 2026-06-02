@@ -144,6 +144,25 @@ export type Messages = {
     autoPasteOff: string;
     autoPasteOffShort: string;
     autoPasteOffSetupAria: string;
+    // Persistent auto-paste failure diagnostic. The daemon classifies why a
+    // synthetic paste failed (`PasteFailureReason`); the palette leaves a chip
+    // in the StatusBar so the failure outlives the toast. `label` is the chip
+    // text, `hint` (keyed by the camelCase reason token) is the per-reason
+    // remediation surfaced in the chip `title`, and `toolFallback` stands in
+    // for a missing tool name. `accessibilityMissing` folds into the dedicated
+    // accessibility chip, so its hint is only a fallback.
+    pasteDiagnostics: {
+      label: string;
+      toolFallback: string;
+      hint: {
+        accessibilityMissing: string;
+        toolMissing: (params: { tool: string }) => string;
+        timeout: string;
+        synthUnsupported: string;
+        previousAppLost: string;
+        unknown: string;
+      };
+    };
   };
   actionMenu: {
     title: string;
@@ -590,6 +609,22 @@ export const en: Messages = {
     autoPasteOff: 'Auto-paste off — Accessibility not granted',
     autoPasteOffShort: '⚠ Auto-paste off',
     autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',
+    pasteDiagnostics: {
+      label: '⚠ Auto-paste failed',
+      toolFallback: 'the paste tool',
+      hint: {
+        accessibilityMissing:
+          'Auto-paste failed: Accessibility permission required. Copied — paste manually.',
+        toolMissing: ({ tool }) =>
+          `Auto-paste failed: ${tool} is not installed. Copied — install ${tool} or paste manually.`,
+        timeout:
+          'Auto-paste timed out — the compositor may be busy. Copied — paste manually or retry.',
+        synthUnsupported: 'Auto-paste is not available on this platform. Copied — paste manually.',
+        previousAppLost:
+          'Auto-paste skipped: could not refocus the source app. Copied — paste manually.',
+        unknown: 'Auto-paste failed. Copied — paste manually.',
+      },
+    },
   },
   actionMenu: {
     title: 'Quick actions',

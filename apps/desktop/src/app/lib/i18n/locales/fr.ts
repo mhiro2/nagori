@@ -125,6 +125,23 @@ export const fr: Messages = {
     autoPasteOffShort: '⚠ Collage automatique désactivé',
     autoPasteOffSetupAria:
       'Collage automatique désactivé : autorisation Accessibilité requise. Ouvrir la configuration.',
+    pasteDiagnostics: {
+      label: '⚠ Échec du collage automatique',
+      toolFallback: "l'outil de collage",
+      hint: {
+        accessibilityMissing:
+          'Échec du collage automatique : autorisation Accessibilité requise. Copié — collez manuellement.',
+        toolMissing: ({ tool }) =>
+          `Échec du collage automatique : ${tool} n'est pas installé. Copié — installez ${tool} ou collez manuellement.`,
+        timeout:
+          'Le collage automatique a expiré — le compositeur est peut-être occupé. Copié — collez manuellement ou réessayez.',
+        synthUnsupported:
+          "Le collage automatique n'est pas disponible sur cette plateforme. Copié — collez manuellement.",
+        previousAppLost:
+          "Collage automatique ignoré : impossible de revenir à l'app source. Copié — collez manuellement.",
+        unknown: 'Échec du collage automatique. Copié — collez manuellement.',
+      },
+    },
   },
   actionMenu: {
     title: 'Actions rapides',

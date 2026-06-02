@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use nagori_core::{AppError, Result};
+use nagori_core::{AppError, PasteFailureReason, Result};
 use nagori_platform::{PasteController, PasteResult};
 
 /// Synthesize Ctrl+V into the foreground window via `SendInput`.
@@ -18,7 +18,10 @@ impl PasteController for WindowsPasteController {
     async fn paste_frontmost(&self) -> Result<PasteResult> {
         let result = tokio::task::spawn_blocking(synthesize_ctrl_v)
             .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
+            .map_err(|err| AppError::Paste {
+                reason: PasteFailureReason::Unknown,
+                message: format!("auto-paste failed: synthesis task did not run ({err})"),
+            })?;
         match result {
             Ok(()) => Ok(PasteResult {
                 pasted: true,
@@ -41,16 +44,20 @@ impl PasteController for WindowsPasteController {
                          held — press Ctrl once to release it. Cleanup error: {release_error}"
                     ),
                 };
-                Err(AppError::Platform(message))
+                Err(AppError::Paste {
+                    reason: PasteFailureReason::Unknown,
+                    message,
+                })
             }
         }
     }
 
     #[cfg(not(windows))]
     async fn paste_frontmost(&self) -> Result<PasteResult> {
-        Err(AppError::Unsupported(
-            "Windows auto-paste is only available on Windows".to_owned(),
-        ))
+        Err(AppError::Paste {
+            reason: PasteFailureReason::SynthUnsupported,
+            message: "Windows auto-paste is only available on Windows".to_owned(),
+        })
     }
 }
 

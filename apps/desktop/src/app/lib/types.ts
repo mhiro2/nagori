@@ -308,6 +308,18 @@ export type LocaleSetting = Locale | 'system';
 // variants. Keep this string-union in lockstep with the Rust enum.
 export type SecretHandling = 'block' | 'store_redacted' | 'store_full';
 export type PasteFormat = 'preserve' | 'plain_text';
+
+// Classified reason an auto-paste attempt failed, mirroring
+// `nagori_core::PasteFailureReason::token()`. Rides on the
+// `nagori://paste_failed` event payload so the StatusBar can render a
+// per-reason hint. Keep in lockstep with the Rust tokens.
+export type PasteFailureReason =
+  | 'accessibilityMissing'
+  | 'toolMissing'
+  | 'timeout'
+  | 'synthUnsupported'
+  | 'previousAppLost'
+  | 'unknown';
 export type RecentOrder = 'by_recency' | 'by_use_count' | 'pinned_first_then_recency';
 export type Appearance = 'light' | 'dark' | 'system';
 export type UpdateChannel = 'stable';

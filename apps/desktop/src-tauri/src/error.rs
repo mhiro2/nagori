@@ -84,6 +84,7 @@ const fn error_code(err: &AppError) -> &'static str {
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
         AppError::Configuration(_) => "configuration_error",
+        AppError::Paste { .. } => "paste_error",
     }
 }
 
@@ -114,6 +115,12 @@ fn user_message(err: &AppError) -> String {
         AppError::Permission(msg) | AppError::InvalidInput(msg) | AppError::Unsupported(msg) => {
             msg.clone()
         }
+        // Paste messages are composed by the platform adapters as actionable
+        // hints ("install the `wtype` package", "Accessibility permission may
+        // be missing"); the structured `reason` drives the localized UI hint,
+        // and this string is the human-readable fallback. No DB/SQL detail
+        // flows through this path, so forwarding it is safe.
+        AppError::Paste { message, .. } => message.clone(),
     }
 }
 
@@ -158,6 +165,25 @@ mod tests {
         let cmd: CommandError = AppError::Permission("paste blocked".to_owned()).into();
         assert!(cmd.recoverable, "auto-paste failure must be recoverable");
         assert_eq!(cmd.code, "permission_error");
+    }
+
+    #[test]
+    fn paste_failure_keeps_curated_message_and_paste_code() {
+        // Auto-paste failures carry a classified reason plus an actionable,
+        // already-curated message ("install the `wtype` package", …). The
+        // command layer forwards that message verbatim and tags a stable
+        // `paste_error` code so the renderer can localise per reason while the
+        // message stays as a human-readable fallback.
+        let cmd: CommandError = AppError::Paste {
+            reason: nagori_core::PasteFailureReason::ToolMissing {
+                tool: "wtype".to_owned(),
+            },
+            message: "auto-paste failed: could not invoke `wtype`.".to_owned(),
+        }
+        .into();
+        assert_eq!(cmd.code, "paste_error");
+        assert_eq!(cmd.message, "auto-paste failed: could not invoke `wtype`.");
+        assert!(cmd.recoverable, "auto-paste failure must be recoverable");
     }
 
     #[test]

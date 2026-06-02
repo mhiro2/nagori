@@ -46,6 +46,7 @@ import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
 import type { PermissionStatus } from './lib/types';
 import { dismissHotkeyFailure, hotkeyFailureState } from './stores/hotkeyFailure.svelte';
+import { clearPasteDiagnostics, pasteDiagnosticsState } from './stores/pasteDiagnostics.svelte';
 import { settingsState } from './stores/settings.svelte';
 import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
@@ -62,6 +63,7 @@ beforeEach(() => {
   settingsState.permissionsErrorMessage = undefined;
   settingsState.loaded = false;
   dismissHotkeyFailure();
+  clearPasteDiagnostics();
   showPalette();
 });
 
@@ -107,11 +109,12 @@ const captureHotkeyFailureHandler = (): {
 
 // Capture the `nagori://paste_failed` handler so a test can fire a paste
 // failure into App's palette-window listener.
-const capturePasteFailedHandler = (): { fire: (payload: { error?: string }) => void } => {
-  const slot: { handler?: (payload: { error?: string }) => void } = {};
+type PasteFailedPayload = { error?: string; reason?: string; tool?: string };
+const capturePasteFailedHandler = (): { fire: (payload: PasteFailedPayload) => void } => {
+  const slot: { handler?: (payload: PasteFailedPayload) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
     if (event === 'nagori://paste_failed') {
-      slot.handler = handler as (payload: { error?: string }) => void;
+      slot.handler = handler as (payload: PasteFailedPayload) => void;
     }
     onReady?.();
     return () => {};
@@ -426,16 +429,30 @@ describe('App shell', () => {
 });
 
 describe('App auto-paste toast rules', () => {
-  it('suppresses the auto-paste toast when Accessibility is not granted', async () => {
-    // No permission seeded → resolver reads `NotRequested`, which the
-    // StatusBar indicator already covers, so the toast must stay quiet.
+  it('suppresses the accessibility-missing toast when Accessibility is not granted', async () => {
+    // No permission seeded → resolver reads `NotRequested`. The
+    // `accessibilityMissing` reason is exactly what the StatusBar indicator
+    // already covers, so the toast must stay quiet — but the failure is still
+    // recorded so the StatusBar can fold it into its accessibility chip.
     const { fire } = capturePasteFailedHandler();
     const { queryByText } = render(App);
-    fire({ error: 'paste rejected' });
+    fire({ error: 'paste rejected', reason: 'accessibilityMissing' });
     await Promise.resolve();
     await Promise.resolve();
     expect(queryByText('Auto-paste failed')).toBeNull();
     expect(queryByText('paste rejected')).toBeNull();
+    expect(pasteDiagnosticsState.failure?.reason).toBe('accessibilityMissing');
+  });
+
+  it('still toasts a non-accessibility failure even when Accessibility is not granted', async () => {
+    // A missing `wtype` (or any non-accessibility reason) is a genuine error
+    // the accessibility chip does NOT explain, so the toast fires regardless
+    // of grant state and the tool rides through to the recorded diagnostic.
+    const { fire } = capturePasteFailedHandler();
+    const { findByText } = render(App);
+    fire({ error: 'wtype is not installed', reason: 'toolMissing', tool: 'wtype' });
+    await findByText('wtype is not installed');
+    expect(pasteDiagnosticsState.failure?.tool).toBe('wtype');
   });
 
   it('shows the auto-paste toast when the grant is in place (unexpected failure)', async () => {

@@ -85,7 +85,10 @@ impl CaptureErrorKind {
         match err {
             AppError::Storage(_) => Self::Storage,
             AppError::Search(_) => Self::Search,
-            AppError::Platform(_) => Self::Platform,
+            // Auto-paste never runs inside the capture loop, so a `Paste` error
+            // here would only be a wiring mistake; bucket it with the other
+            // adapter-level failures rather than adding a dead variant.
+            AppError::Platform(_) | AppError::Paste { .. } => Self::Platform,
             AppError::Permission(_) => Self::Permission,
             AppError::Ai(_) => Self::Ai,
             AppError::Policy(_) => Self::Policy,

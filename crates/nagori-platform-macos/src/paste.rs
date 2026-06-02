@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 #[cfg(target_os = "macos")]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-use nagori_core::{AppError, Result};
+use nagori_core::{AppError, PasteFailureReason, Result};
 use nagori_platform::{PasteController, PasteResult};
 #[cfg(target_os = "macos")]
 use tracing::warn;
@@ -18,23 +18,30 @@ impl PasteController for MacosPasteController {
         // process. Failures usually indicate the permission is missing.
         let result = tokio::task::spawn_blocking(synthesize_cmd_v)
             .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
+            .map_err(|err| AppError::Paste {
+                reason: PasteFailureReason::Unknown,
+                message: format!("auto-paste failed: synthesis task did not run ({err})"),
+            })?;
         match result {
             Ok(()) => Ok(PasteResult {
                 pasted: true,
                 message: None,
             }),
-            Err(err) => Err(AppError::Permission(format!(
-                "auto-paste failed (Accessibility permission may be missing): {err}"
-            ))),
+            Err(err) => Err(AppError::Paste {
+                reason: PasteFailureReason::AccessibilityMissing,
+                message: format!(
+                    "auto-paste failed (Accessibility permission may be missing): {err}"
+                ),
+            }),
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     async fn paste_frontmost(&self) -> Result<PasteResult> {
-        Err(AppError::Unsupported(
-            "macOS auto-paste is only available on macOS".to_owned(),
-        ))
+        Err(AppError::Paste {
+            reason: PasteFailureReason::SynthUnsupported,
+            message: "macOS auto-paste is only available on macOS".to_owned(),
+        })
     }
 }
 

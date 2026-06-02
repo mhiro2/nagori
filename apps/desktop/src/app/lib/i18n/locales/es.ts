@@ -124,6 +124,23 @@ export const es: Messages = {
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:
       'Pegado automático desactivado: se requiere permiso de Accesibilidad. Abrir configuración.',
+    pasteDiagnostics: {
+      label: '⚠ Falló el pegado automático',
+      toolFallback: 'la herramienta de pegado',
+      hint: {
+        accessibilityMissing:
+          'Falló el pegado automático: se requiere permiso de Accesibilidad. Copiado — pega manualmente.',
+        toolMissing: ({ tool }) =>
+          `Falló el pegado automático: ${tool} no está instalado. Copiado — instala ${tool} o pega manualmente.`,
+        timeout:
+          'El pegado automático agotó el tiempo de espera; el compositor puede estar ocupado. Copiado — pega manualmente o reintenta.',
+        synthUnsupported:
+          'El pegado automático no está disponible en esta plataforma. Copiado — pega manualmente.',
+        previousAppLost:
+          'Pegado automático omitido: no se pudo volver a la app de origen. Copiado — pega manualmente.',
+        unknown: 'Falló el pegado automático. Copiado — pega manualmente.',
+      },
+    },
   },
   actionMenu: {
     title: 'Acciones rápidas',

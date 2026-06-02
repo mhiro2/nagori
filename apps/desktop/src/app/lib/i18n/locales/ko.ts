@@ -115,6 +115,23 @@ export const ko: Messages = {
     autoPasteOff: '자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
     autoPasteOffShort: '⚠ 자동 붙여넣기 꺼짐',
     autoPasteOffSetupAria: '자동 붙여넣기 꺼짐: Accessibility 권한이 필요합니다. 설정 열기.',
+    pasteDiagnostics: {
+      label: '⚠ 자동 붙여넣기 실패',
+      toolFallback: '붙여넣기 도구',
+      hint: {
+        accessibilityMissing:
+          '자동 붙여넣기 실패: Accessibility 권한이 필요합니다. 복사됨 — 수동으로 붙여넣으세요.',
+        toolMissing: ({ tool }) =>
+          `자동 붙여넣기 실패: ${tool}이(가) 설치되어 있지 않습니다. 복사됨 — ${tool}을(를) 설치하거나 수동으로 붙여넣으세요.`,
+        timeout:
+          '자동 붙여넣기가 시간 초과되었습니다. 컴포지터가 바쁠 수 있습니다. 복사됨 — 수동으로 붙여넣거나 다시 시도하세요.',
+        synthUnsupported:
+          '이 플랫폼에서는 자동 붙여넣기를 사용할 수 없습니다. 복사됨 — 수동으로 붙여넣으세요.',
+        previousAppLost:
+          '자동 붙여넣기 건너뜀: 원본 앱으로 포커스를 되돌리지 못했습니다. 복사됨 — 수동으로 붙여넣으세요.',
+        unknown: '자동 붙여넣기 실패. 복사됨 — 수동으로 붙여넣으세요.',
+      },
+    },
   },
   actionMenu: {
     title: '빠른 동작',

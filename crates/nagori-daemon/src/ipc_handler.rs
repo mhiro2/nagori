@@ -349,5 +349,6 @@ pub(crate) const fn error_code(err: &AppError) -> &'static str {
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
         AppError::Configuration(_) => "configuration_error",
+        AppError::Paste { .. } => "paste_error",
     }
 }

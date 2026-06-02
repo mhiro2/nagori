@@ -9,7 +9,7 @@ pub mod services;
 pub mod settings;
 pub mod text;
 
-pub use errors::{AppError, Result};
+pub use errors::{AppError, PasteFailureReason, Result};
 pub use factory::EntryFactory;
 pub use image_signature::{
     ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,

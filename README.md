@@ -87,9 +87,12 @@ compatibility matrix and troubleshooting.
   fails (restore-target lost, target app refused the paste, …), the
   entry is still copied to the clipboard and a `paste_failed` toast
   prompts you to paste manually — there is no automatic retry. The
-  missing-Accessibility case is handled separately: the palette's
-  status bar shows a persistent warning with a *Setup* shortcut instead
-  of a transient toast.
+  failure is classified (Accessibility missing, paste tool missing,
+  timeout, source-app lost, …) and the palette's status bar keeps a
+  persistent diagnostic chip whose tooltip names the fix (e.g. "install
+  `wtype`"); it clears on the next successful paste or by clicking it.
+  The missing-Accessibility case folds into the dedicated Accessibility
+  warning chip, which carries a *Setup* shortcut.
 
 ## Usage
 

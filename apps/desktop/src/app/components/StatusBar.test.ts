@@ -21,6 +21,11 @@ import {
 } from '../lib/commands';
 import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
 import { capabilitiesState } from '../stores/capabilities.svelte';
+import {
+  clearPasteDiagnostics,
+  pasteDiagnosticsState,
+  recordPasteFailure,
+} from '../stores/pasteDiagnostics.svelte';
 import { refreshSettings, settingsState } from '../stores/settings.svelte';
 import StatusBar from './StatusBar.svelte';
 
@@ -123,6 +128,7 @@ beforeEach(() => {
   settingsState.errorMessage = undefined;
   capabilitiesState.capabilities = undefined;
   capabilitiesState.loaded = false;
+  clearPasteDiagnostics();
 });
 
 afterEach(cleanup);
@@ -329,5 +335,42 @@ describe('StatusBar accessibility indicator', () => {
     const { getByRole } = render(StatusBar, { props });
     await fireEvent.click(getByRole('button', { name: /Accessibility permission required/ }));
     expect(openSettingsWindow).toHaveBeenCalledWith('setup');
+  });
+});
+
+describe('StatusBar paste diagnostic', () => {
+  const props = { entryCount: 5, elapsedMs: undefined, loading: false, errorMessage: undefined };
+
+  it('shows the diagnostic chip with a tool-specific hint for a missing tool', () => {
+    recordPasteFailure({ reason: 'toolMissing', message: 'raw detail', tool: 'wtype' });
+    const { getByTestId } = render(StatusBar, { props });
+    const chip = getByTestId('paste-diagnostic-chip');
+    expect(chip.getAttribute('data-reason')).toBe('toolMissing');
+    // The remediation rides in the title and names the missing tool.
+    expect(chip.getAttribute('title')).toMatch(/wtype/);
+  });
+
+  it('dismisses the diagnostic when the chip is clicked', async () => {
+    recordPasteFailure({ reason: 'timeout', message: 'timed out' });
+    const { getByTestId, queryByTestId } = render(StatusBar, { props });
+    await fireEvent.click(getByTestId('paste-diagnostic-chip'));
+    expect(pasteDiagnosticsState.failure).toBeNull();
+    expect(queryByTestId('paste-diagnostic-chip')).toBeNull();
+  });
+
+  it('drops the keyboard hints while the diagnostic chip is showing', () => {
+    recordPasteFailure({ reason: 'unknown', message: 'failed' });
+    const { container } = render(StatusBar, { props });
+    expect(container.querySelector('.hints')).toBeNull();
+  });
+
+  it('folds an accessibilityMissing failure into the accessibility chip (no second chip)', () => {
+    // The accessibility chip already explains + fixes this case, so the paste
+    // diagnostic must defer rather than stack a redundant second chip.
+    seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
+    recordPasteFailure({ reason: 'accessibilityMissing', message: 'grant required' });
+    const { queryByTestId, getByRole } = render(StatusBar, { props });
+    expect(queryByTestId('paste-diagnostic-chip')).toBeNull();
+    expect(getByRole('button', { name: /Accessibility permission required/ })).toBeTruthy();
   });
 });

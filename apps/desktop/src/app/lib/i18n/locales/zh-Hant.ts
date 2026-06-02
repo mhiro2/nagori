@@ -115,6 +115,19 @@ export const zhHant: Messages = {
     autoPasteOff: '自動貼上已關閉 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自動貼上已關閉',
     autoPasteOffSetupAria: '自動貼上已關閉：需要 Accessibility 權限。開啟設定。',
+    pasteDiagnostics: {
+      label: '⚠ 自動貼上失敗',
+      toolFallback: '貼上工具',
+      hint: {
+        accessibilityMissing: '自動貼上失敗：需要 Accessibility 權限。已複製 — 請手動貼上。',
+        toolMissing: ({ tool }) =>
+          `自動貼上失敗：未安裝 ${tool}。已複製 — 請安裝 ${tool} 或手動貼上。`,
+        timeout: '自動貼上逾時——合成器可能忙碌中。已複製 — 請手動貼上或重試。',
+        synthUnsupported: '此平台不支援自動貼上。已複製 — 請手動貼上。',
+        previousAppLost: '已略過自動貼上：無法切回來源應用程式。已複製 — 請手動貼上。',
+        unknown: '自動貼上失敗。已複製 — 請手動貼上。',
+      },
+    },
   },
   actionMenu: {
     title: '快速動作',

@@ -115,6 +115,23 @@ export const ja: Messages = {
     autoPasteOff: '自動ペースト OFF — Accessibility 未許可',
     autoPasteOffShort: '⚠ 自動ペースト OFF',
     autoPasteOffSetupAria: '自動ペースト OFF: Accessibility の許可が必要です。セットアップを開く。',
+    pasteDiagnostics: {
+      label: '⚠ 自動ペースト失敗',
+      toolFallback: 'ペーストツール',
+      hint: {
+        accessibilityMissing:
+          '自動ペースト失敗: Accessibility の許可が必要です。コピー済み — 手動で貼り付けてください。',
+        toolMissing: ({ tool }) =>
+          `自動ペースト失敗: ${tool} が未インストールです。コピー済み — ${tool} を導入するか手動で貼り付けてください。`,
+        timeout:
+          '自動ペーストがタイムアウトしました（コンポジタが応答していない可能性）。コピー済み — 手動で貼り付けるか再試行してください。',
+        synthUnsupported:
+          'このプラットフォームでは自動ペーストを利用できません。コピー済み — 手動で貼り付けてください。',
+        previousAppLost:
+          '自動ペーストをスキップ: 元のアプリに復帰できませんでした。コピー済み — 手動で貼り付けてください。',
+        unknown: '自動ペースト失敗。コピー済み — 手動で貼り付けてください。',
+      },
+    },
   },
   actionMenu: {
     title: 'クイックアクション',
