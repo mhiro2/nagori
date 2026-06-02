@@ -14,6 +14,7 @@ use nagori_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::ai_registry::AiRequestRegistry;
+use crate::ipc_handler::result_code;
 use nagori_ipc::IpcServerHealth;
 use nagori_platform::{
     Capability, ClipboardWriter, MemoryClipboard, NO_AI_ENGINE_REASON, NoopPasteController,
@@ -475,13 +476,21 @@ impl NagoriRuntime {
     /// queries fall through to `SQLite` directly because the working set
     /// turns over too quickly for caching to help.
     pub async fn search(&self, mut query: SearchQuery) -> Result<Vec<SearchResult>> {
+        let started = Instant::now();
+        // Log only the mode (an enum), the cache outcome, the row count, and
+        // the cost — never `query.raw`/`normalized`, which carry the typed
+        // text. That keeps the search path's observability free of clipboard
+        // contents while still surfacing slow or cache-missing queries.
+        let mode = query.mode;
         query.recent_order = self.store.get_settings().await?.recent_order;
         // Semantic mode needs a query embedding (only available here, where the
         // embedder lives), so it routes to its own embed-then-rank path rather
         // than the text-candidate cache. An empty query falls through to the
         // normal Recent path below.
         if query.mode == SearchMode::Semantic && !query.raw.trim().is_empty() {
-            return self.semantic_search_results(query).await;
+            let results = self.semantic_search_results(query).await?;
+            log_search(mode, false, results.len(), started);
+            return Ok(results);
         }
         let key = CacheKey::from_query(&query);
         // Capture the epoch we observed at miss time so the post-query `put`
@@ -492,7 +501,12 @@ impl NagoriRuntime {
         let cached_epoch = if key.is_eligible() {
             let mut cache = lock_or_recover(&self.search_cache);
             match cache.lookup(&key) {
-                CacheLookup::Hit(hit) => return Ok(hit),
+                CacheLookup::Hit(hit) => {
+                    // Release the cache mutex before logging.
+                    drop(cache);
+                    log_search(mode, true, hit.len(), started);
+                    return Ok(hit);
+                }
                 CacheLookup::Miss { epoch } => Some(epoch),
             }
         } else {
@@ -502,6 +516,7 @@ impl NagoriRuntime {
         if let Some(epoch) = cached_epoch {
             lock_or_recover(&self.search_cache).put_if_epoch(key, results.clone(), epoch);
         }
+        log_search(mode, false, results.len(), started);
         Ok(results)
     }
 
@@ -696,6 +711,22 @@ impl NagoriRuntime {
     /// independent of the AI provider configuration. Input is still shaped by
     /// the settings-aware redaction classifier and the per-action size cap.
     pub async fn run_quick_action(&self, id: EntryId, action: QuickActionId) -> Result<AiOutput> {
+        // Wrap the body so *every* exit — policy refusals, a missing entry, and
+        // size-cap rejections, not just the runner's own result — is logged.
+        // `action.slug()` is a fixed identifier and `result_code` collapses to
+        // a static label, so the quick-action log never carries the entry text.
+        let started = Instant::now();
+        let result = self.run_quick_action_inner(id, action).await;
+        tracing::debug!(
+            action = action.slug(),
+            result_code = result_code(&result),
+            elapsed_ms = elapsed_ms(started),
+            "quick_action"
+        );
+        result
+    }
+
+    async fn run_quick_action_inner(&self, id: EntryId, action: QuickActionId) -> Result<AiOutput> {
         let settings = self.store.get_settings().await?;
         let policy = action.input_policy();
         let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
@@ -742,6 +773,7 @@ impl NagoriRuntime {
         action: AiActionId,
         options: AiRequestOptions,
     ) -> Result<AiActionRun> {
+        let started = Instant::now();
         let settings = self.store.get_settings().await?;
         if !settings.ai.enabled {
             return Err(AppError::Policy(
@@ -848,6 +880,15 @@ impl NagoriRuntime {
             request_id,
             cancel,
         };
+        // Record that a model-backed action started, with its provider, so the
+        // AI path is observable end-to-end. `action.slug()` and the provider
+        // enum are fixed identifiers — no prompt, input, or output text.
+        tracing::debug!(
+            action = action.slug(),
+            provider = ?engine.provider(),
+            elapsed_ms = elapsed_ms(started),
+            "ai_action_started"
+        );
         let events = guard_event_stream(run.events, guard, timeout);
         Ok(AiActionRun { request_id, events })
     }
@@ -919,6 +960,25 @@ impl NagoriRuntime {
 /// input above this budget rather than letting the model drop text. The margin
 /// below 4,096 leaves room for the instructions and the generated summary.
 const MAX_AI_INPUT_TOKENS: usize = 3_500;
+
+/// Saturating `Instant`-since → whole-millisecond conversion for structured
+/// log fields, mirroring the desktop command layer's helper so a pathological
+/// duration can't panic the narrowing.
+pub(crate) fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Emit the per-search observability event. `mode` is an enum discriminant and
+/// the remaining fields are counts/timings, so this never records query text.
+fn log_search(mode: SearchMode, cache_hit: bool, row_count: usize, started: Instant) {
+    tracing::debug!(
+        mode = ?mode,
+        cache_hit,
+        row_count,
+        elapsed_ms = elapsed_ms(started),
+        "runtime_search"
+    );
+}
 
 /// Shapes an entry's text for a model-backed AI action: redacts per
 /// sensitivity, enforces the byte cap, and refuses input over the token budget.

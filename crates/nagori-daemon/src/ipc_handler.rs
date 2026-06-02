@@ -11,13 +11,32 @@ use nagori_ipc::{
 };
 use nagori_platform::PermissionCheckContext;
 use nagori_search::normalize_text;
+use std::time::Instant;
 use time::OffsetDateTime;
 
-use crate::runtime::NagoriRuntime;
+use crate::runtime::{NagoriRuntime, elapsed_ms};
 
 impl NagoriRuntime {
     pub async fn handle_ipc(&self, request: IpcRequest) -> IpcResponse {
-        match self.handle_ipc_result(request).await {
+        // Single observability point for every IPC request. We log only the
+        // request *kind* (an enum discriminant, never the payload), the
+        // outcome code, and the wall-clock cost — no entry text, query
+        // string, or settings blob — so operators can spot slow or failing
+        // request classes without the log capturing clipboard contents.
+        let kind = request_kind(&request);
+        let started = Instant::now();
+        let result = self.handle_ipc_result(request).await;
+        let result_code = match &result {
+            Ok(_) => "ok",
+            Err(err) => error_code(err),
+        };
+        tracing::debug!(
+            request_kind = kind,
+            result_code,
+            elapsed_ms = elapsed_ms(started),
+            "ipc_request"
+        );
+        match result {
             Ok(response) => response,
             Err(err) => IpcResponse::Error(IpcError {
                 code: error_code(&err).to_owned(),
@@ -286,7 +305,39 @@ const fn is_ipc_control_request(request: &IpcRequest) -> bool {
     )
 }
 
-const fn error_code(err: &AppError) -> &'static str {
+/// Static, payload-free label for an IPC request, used as the `request_kind`
+/// log field. Only the variant is exposed — never the request body — so the
+/// dispatch log can never leak clipboard text, queries, or settings.
+const fn request_kind(request: &IpcRequest) -> &'static str {
+    match request {
+        IpcRequest::Search(_) => "search",
+        IpcRequest::GetEntry(_) => "get_entry",
+        IpcRequest::ListRecent(_) => "list_recent",
+        IpcRequest::ListPinned(_) => "list_pinned",
+        IpcRequest::AddEntry(_) => "add_entry",
+        IpcRequest::CopyEntry(_) => "copy_entry",
+        IpcRequest::PasteEntry(_) => "paste_entry",
+        IpcRequest::DeleteEntry(_) => "delete_entry",
+        IpcRequest::PinEntry(_) => "pin_entry",
+        IpcRequest::RunQuickAction(_) => "run_quick_action",
+        IpcRequest::RunAiAction(_) => "run_ai_action",
+        IpcRequest::GetSettings => "get_settings",
+        IpcRequest::UpdateSettings(_) => "update_settings",
+        IpcRequest::Clear(_) => "clear",
+        IpcRequest::Doctor => "doctor",
+        IpcRequest::Capabilities => "capabilities",
+        IpcRequest::Health => "health",
+        IpcRequest::Shutdown => "shutdown",
+    }
+}
+
+/// Map a `Result` to the same static outcome label used by the IPC dispatch
+/// log so runtime methods can record `result_code` without re-deriving it.
+pub(crate) fn result_code<T>(result: &Result<T>) -> &'static str {
+    result.as_ref().map_or_else(|err| error_code(err), |_| "ok")
+}
+
+pub(crate) const fn error_code(err: &AppError) -> &'static str {
     match err {
         AppError::Storage(_) => "storage_error",
         AppError::Search(_) => "search_error",
