@@ -47,12 +47,17 @@
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
   import { domainCategory } from '../lib/urlCategory';
+  import HighlightedText from './HighlightedText.svelte';
 
   type Props = {
     item: SearchResultDto;
     selected: boolean;
     marked?: boolean;
     index: number;
+    // The query the current results were produced for (searchState.appliedQuery,
+    // threaded through ResultList). Drives the in-row match highlight; empty /
+    // undefined for the recent listing so those rows render plain.
+    query?: string | undefined;
     onSelect: (index: number) => void;
     onConfirm: (index: number, event?: MouseEvent) => void;
     // `| undefined` is explicit so ResultList can forward its own optional
@@ -69,6 +74,7 @@
     selected,
     marked = false,
     index,
+    query,
     onSelect,
     onConfirm,
     onTogglePin = () => {},
@@ -132,13 +138,13 @@
     {#if url}
       <span class="preview url">
         {#if urlBrand}<span class="brand-badge" data-testid="url-brand">{urlBrand}</span>{/if}
-        <span class="domain">{url.host}</span>
-        <span class="path">{url.pathname}{url.search}</span>
+        <span class="domain"><HighlightedText text={url.host} {query} /></span>
+        <span class="path"><HighlightedText text={`${url.pathname}${url.search}`} {query} /></span>
       </span>
     {:else if item.kind === 'code'}
       <span class="preview code">
         {#if codeBadge}<span class="lang-badge">{codeBadge}</span>{/if}
-        <code>{previewText}</code>
+        <code><HighlightedText text={previewText} {query} /></code>
       </span>
     {:else if item.kind === 'image'}
       <span class="preview image">
@@ -147,10 +153,12 @@
           >{/if}
         {#if imageDims}<span class="img-dims" data-testid="image-dims">{imageDims}</span>{/if}
         {#if imageSize}<span class="img-size">{imageSize}</span>{/if}
-        {#if !imageDims && !imageSize}<span class="img-fallback">{previewText}</span>{/if}
+        {#if !imageDims && !imageSize}<span class="img-fallback"
+            ><HighlightedText text={previewText} {query} /></span
+          >{/if}
       </span>
     {:else}
-      <span class="preview">{previewText}</span>
+      <span class="preview"><HighlightedText text={previewText} {query} /></span>
     {/if}
 
     <span class="meta">

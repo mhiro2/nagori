@@ -314,6 +314,50 @@ describe('ResultItem', () => {
     expect(onSelect).toHaveBeenCalledWith(2);
   });
 
+  it('marks the query match inside the row preview', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ preview: 'the needle in the haystack' }),
+        index: 0,
+        selected: false,
+        query: 'needle',
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    const marks = container.querySelectorAll('.preview mark.match');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]?.textContent).toBe('needle');
+  });
+
+  it('highlights the host and path of a url row', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ kind: 'url', preview: 'https://example.com/docs/needle' }),
+        index: 0,
+        selected: false,
+        query: 'example needle',
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.preview.url .domain mark.match')?.textContent).toBe('example');
+    expect(container.querySelector('.preview.url .path mark.match')?.textContent).toBe('needle');
+  });
+
+  it('renders no marks when there is no query', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ preview: 'plain recent row' }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('mark.match')).toBeNull();
+  });
+
   it('applies the .selected class when selected is true', () => {
     const { getByRole } = render(ResultItem, {
       props: {

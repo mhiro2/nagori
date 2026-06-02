@@ -7,9 +7,10 @@
     items: SearchResultDto[];
     selectedIndex: number;
     // The query the current `items` were produced for (searchState.appliedQuery,
-    // not the live keystroke query). Used only to tell a brand-new search
-    // (scroll to the top of the fresh list) apart from a same-query refresh such
-    // as a pin toggle or delete (leave the scroll position untouched).
+    // not the live keystroke query). Used to tell a brand-new search (scroll to
+    // the top of the fresh list) apart from a same-query refresh such as a pin
+    // toggle or delete (leave the scroll position untouched), and forwarded to
+    // each row as the query its match highlight is computed against.
     appliedQuery?: string;
     onSelect: (index: number) => void;
     onConfirm: (index: number, event?: MouseEvent) => void;
@@ -79,6 +80,7 @@
         {index}
         selected={index === selectedIndex}
         marked={multiSelected?.has(item.id) ?? false}
+        query={appliedQuery}
         {locked}
         {onSelect}
         {onConfirm}

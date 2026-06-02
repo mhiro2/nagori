@@ -1,15 +1,22 @@
 <script lang="ts">
+  import HighlightedText from './HighlightedText.svelte';
   import { tokenize, type Span } from './tokenize';
 
   type Props = {
     text: string;
     language: string | null;
-    // Drives the highlight + line-number gutter rendering. Non-code bodies
-    // (text / richText / unknown) collapse to the unhighlighted `<pre>`.
+    // Drives the syntax highlight + line-number gutter rendering. Non-code
+    // bodies (text / richText / unknown) collapse to a `<pre>` carrying only
+    // the query-match highlight.
     isCode: boolean;
+    // The query the preview belongs to (searchState.appliedQuery), so the
+    // body marks the same hits the result row does. Applied to non-code bodies
+    // only; code bodies keep their grammar colouring instead. `highlightQuery`
+    // caps its own scan, so a large body stays bounded.
+    query?: string | undefined;
   };
 
-  let { text, language, isCode }: Props = $props();
+  let { text, language, isCode, query }: Props = $props();
 
   const tokens = $derived(isCode ? tokenize(text, language) : []);
   // Line numbers only make sense for the multi-line code body. The url body
@@ -51,7 +58,7 @@
       >{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code
     ></pre>
 {:else}
-  <pre class="body">{text}</pre>
+  <pre class="body"><HighlightedText {text} {query} /></pre>
 {/if}
 
 <style>

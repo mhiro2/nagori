@@ -57,6 +57,9 @@
     // the URL, so the palette can stand down its Enter-to-paste binding and
     // the two handlers don't both fire on the same keystroke.
     enterOpensUrl?: boolean;
+    // The query the visible results were produced for (searchState.appliedQuery),
+    // forwarded to the text body so the preview marks the same hits as the row.
+    query?: string | undefined;
   };
 
   let {
@@ -70,6 +73,7 @@
     onExpandBody,
     onOpenActions,
     enterOpensUrl = $bindable(false),
+    query,
   }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
@@ -290,7 +294,7 @@
           moreFilesLabel={t.preview.fileList.moreFiles}
         />
       {:else}
-        <PreviewBodyText text={bodyText} language={codeLanguage} isCode={isCodeBody} />
+        <PreviewBodyText text={bodyText} language={codeLanguage} isCode={isCodeBody} {query} />
       {/if}
     </div>
     {#if preview && truncationNote}

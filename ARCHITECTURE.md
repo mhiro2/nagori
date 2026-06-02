@@ -1103,7 +1103,15 @@ not duplicate runtime logic.
   *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*) for query-driven
   rows; recent-listing rows stay chip-free since their only reason is
   recency. Semantic / fuzzy hits get a distinct hue so they read as a
-  deliberate match type rather than a weaker one. Rows carry
+  deliberate match type rather than a weaker one. The row's preview text
+  is run through the shared `lib/highlightQuery` helper — a
+  case-insensitive raw-substring scan (one pass per whitespace term,
+  overlapping ranges merged) — so exact / substring / CJK hits are marked
+  in place via `HighlightedText.svelte`; FTS / semantic hits that have no
+  literal substring simply show no marks and lean on the reason chip. The
+  query is `searchState.appliedQuery` (the query the visible results were
+  produced for), threaded through `ResultList`, and the same helper marks
+  the preview pane body, so list and preview stay in lockstep. Rows carry
   `content-visibility: auto` + `contain-intrinsic-size` so off-screen
   rows skip layout/paint: with the search limit at 50 (palette row cap
   64) this keeps arrow-key navigation cheap **without** the keyboard-nav /
@@ -1114,7 +1122,11 @@ not duplicate runtime logic.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
-  highlighter for `code` kinds. When a search query matches text
+  highlighter for `code` kinds; non-code bodies (text / richText /
+  unknown) instead run through the shared `lib/highlightQuery` helper so
+  the same query match the result row marks is visible in the full body
+  (the helper caps its own scan at 32 KiB so a large body stays bounded).
+  When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
   warning. For Public text entries the pane offers an "expand" button that
   fetches the body up to 1 MiB via `get_entry_preview_full`; non-Public

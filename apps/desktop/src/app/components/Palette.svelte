@@ -388,6 +388,7 @@
         onExpandBody={(id) => void expandPreview(id)}
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
+        query={searchState.appliedQuery}
       />
     {/if}
     <!-- Kept mounted (it renders nothing while closed) so that toggling
