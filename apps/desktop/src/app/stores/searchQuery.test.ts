@@ -42,11 +42,22 @@ const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({
   ...overrides,
 });
 
+// A promise whose resolution the test drives, so we can hold a backend search
+// "in flight" and observe how concurrent requests coalesce around it.
+const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   vi.mocked(isTauri).mockReturnValue(true);
   searchState.query = '';
+  searchState.appliedQuery = '';
   searchState.results = [];
   searchState.selectedIndex = 0;
   searchState.loading = false;
@@ -153,5 +164,70 @@ describe('scheduleQuery + cancelPendingQuery', () => {
       mode: 'Auto',
       limit: 50,
     });
+  });
+});
+
+describe('latest-only search queue', () => {
+  it('coalesces overlapping searches into the first plus the latest queued', async () => {
+    const first = deferred<SearchResponse>();
+    const latest = deferred<SearchResponse>();
+    vi.mocked(searchClipboard)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(latest.promise);
+
+    const p1 = runQuery('a'); // runs immediately
+    const p2 = runQuery('b'); // queued behind 'a'
+    const p3 = runQuery('c'); // supersedes the queued 'b'
+
+    // Only 'a' has reached the backend while it is still in flight.
+    expect(searchClipboard).toHaveBeenCalledTimes(1);
+    expect(searchClipboard).toHaveBeenNthCalledWith(1, { query: 'a', mode: 'Auto', limit: 50 });
+
+    // 'b' was superseded before running, so its promise settles without a call.
+    await p2;
+    expect(searchClipboard).toHaveBeenCalledTimes(1);
+
+    first.resolve(response({ results: [result('a')] }));
+    await p1;
+
+    // Finishing 'a' drains the queued latest ('c'); 'b' never runs, and the UI
+    // stays in the loading state across the coalesced run.
+    expect(searchClipboard).toHaveBeenCalledTimes(2);
+    expect(searchClipboard).toHaveBeenNthCalledWith(2, { query: 'c', mode: 'Auto', limit: 50 });
+    expect(searchState.loading).toBe(true);
+    // 'a' resolved while 'c' was queued, so its now-stale results must not be
+    // applied — the list stays empty until 'c' completes.
+    expect(searchState.results).toHaveLength(0);
+    expect(searchState.appliedQuery).toBe('');
+
+    latest.resolve(response({ results: [result('c')] }));
+    await p3;
+    expect(searchState.results).toHaveLength(1);
+    expect(searchState.results[0]?.id).toBe('c');
+    expect(searchState.appliedQuery).toBe('c');
+    expect(searchState.loading).toBe(false);
+  });
+
+  it('applies only the latest query regardless of backend completion order', async () => {
+    const older = deferred<SearchResponse>();
+    const latest = deferred<SearchResponse>();
+    vi.mocked(searchClipboard)
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(latest.promise);
+
+    const p1 = runQuery('old'); // in flight
+    const p2 = runQuery('new'); // queued behind 'old'
+
+    // Resolve the queued search's backend response before the in-flight one to
+    // model out-of-order completion. Serializing the invokes (plus the ticket
+    // guard as defense-in-depth) guarantees the final state reflects 'new'.
+    latest.resolve(response({ results: [result('fresh')] }));
+    older.resolve(response({ results: [result('stale')] }));
+
+    await Promise.all([p1, p2]);
+
+    expect(searchState.results).toHaveLength(1);
+    expect(searchState.results[0]?.id).toBe('fresh');
+    expect(searchState.appliedQuery).toBe('new');
   });
 });

@@ -52,7 +52,17 @@ export const searchState = $state<SearchState>({
   lastElapsedMs: undefined,
 });
 
+// Latest-only search queue. The palette fires a backend search per debounced
+// keystroke; on a large history a single search can outlast the debounce
+// window, so without coalescing a fast typist stacks several concurrent SQLite
+// scans whose results are all discarded but one. We keep at most one search in
+// flight and remember only the most recent request that arrived while it was
+// running — intermediate keystrokes' searches never reach the backend. The
+// `inflight` ticket still tags every run so a late response (e.g. one that
+// resolves after the palette moved on) is dropped as defense-in-depth.
 let inflight = 0;
+let searchRunning = false;
+let queuedSearch: { request: SearchRequest; resolve: () => void } | undefined;
 
 // Debounce keystrokes before hitting `searchClipboard`. The backend
 // serializes SQLite work behind a single `Mutex<Connection>`, so a burst of
@@ -70,7 +80,30 @@ const setQuery = (raw: string): void => {
   if (searchState.query !== raw) searchState.query = raw;
 };
 
-const runSearch = async (request: SearchRequest): Promise<void> => {
+// Entry point for every search. Collapses a burst of overlapping requests to
+// a single in-flight backend invoke plus at most one queued "latest". The
+// returned promise resolves when this request's search settles, or — if it was
+// superseded while queued — as soon as a newer request replaces it (its
+// results would be stale, so there is nothing to await).
+// A finished search may apply its results only if it is still the most recent
+// request: its ticket has not been superseded by a later run and nothing newer
+// is waiting in the queue.
+const isFreshest = (ticket: number): boolean => ticket === inflight && queuedSearch === undefined;
+
+const runSearch = (request: SearchRequest): Promise<void> => {
+  if (searchRunning) {
+    // Drop the previously queued request: only the newest pending one matters.
+    // Resolve its awaiter so a caller blocked on it doesn't hang forever.
+    queuedSearch?.resolve();
+    return new Promise<void>((resolve) => {
+      queuedSearch = { request, resolve };
+    });
+  }
+  return executeSearch(request);
+};
+
+const executeSearch = async (request: SearchRequest): Promise<void> => {
+  searchRunning = true;
   const ticket = ++inflight;
   searchState.loading = true;
   searchState.errorMessage = undefined;
@@ -80,24 +113,38 @@ const runSearch = async (request: SearchRequest): Promise<void> => {
       ...request,
       ...(filters !== undefined ? { filters } : {}),
     });
-    if (ticket !== inflight) return;
-    searchState.results = response.results;
-    searchState.appliedQuery = request.query;
-    searchState.selectedIndex = 0;
-    searchState.lastElapsedMs = response.totalElapsedMs;
-    reconcileMultiSelect(response.results.map((r) => r.id));
-    // Feed the source-app dropdown. When this search was itself app-filtered
-    // the results only carry the active app, so the recorder retains the full
-    // set last seen unfiltered instead of collapsing the menu to one app.
-    recordSourceApps(
-      response.results.map((r) => r.sourceAppName),
-      filters?.sourceApp !== undefined,
-    );
+    // Apply only when this is still the freshest request: the ticket must
+    // match *and* no newer request must have been queued behind us while we
+    // awaited. A queued request means the typed query already moved on, so
+    // writing these now-stale results — even briefly — would let the user act
+    // on the wrong list before the queued search overwrites it.
+    if (isFreshest(ticket)) {
+      searchState.results = response.results;
+      searchState.appliedQuery = request.query;
+      searchState.selectedIndex = 0;
+      searchState.lastElapsedMs = response.totalElapsedMs;
+      reconcileMultiSelect(response.results.map((r) => r.id));
+      // Feed the source-app dropdown. When this search was itself app-filtered
+      // the results only carry the active app, so the recorder retains the full
+      // set last seen unfiltered instead of collapsing the menu to one app.
+      recordSourceApps(
+        response.results.map((r) => r.sourceAppName),
+        filters?.sourceApp !== undefined,
+      );
+    }
   } catch (err) {
-    if (ticket !== inflight) return;
-    searchState.errorMessage = describeError(err);
+    if (isFreshest(ticket)) searchState.errorMessage = describeError(err);
   } finally {
-    if (ticket === inflight) searchState.loading = false;
+    searchRunning = false;
+    const next = queuedSearch;
+    queuedSearch = undefined;
+    if (next !== undefined) {
+      // Drain the queued latest request, then settle its awaiter. Loading
+      // stays true across the coalesced run so the UI doesn't flicker.
+      void executeSearch(next.request).then(next.resolve);
+    } else if (ticket === inflight) {
+      searchState.loading = false;
+    }
   }
 };
 
