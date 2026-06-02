@@ -1,5 +1,6 @@
 use nagori_core::{
-    ClipboardEntry, ContentKind, EntryId, RankReason, Ranker, RecentOrder, SearchResult,
+    ClipboardContent, ClipboardEntry, ContentKind, EntryId, RankReason, Ranker, RecentOrder,
+    SearchResult,
 };
 use time::OffsetDateTime;
 use tracing::debug;
@@ -85,6 +86,14 @@ impl Ranker for DefaultRanker {
         }
         if matches!(entry.content_kind(), ContentKind::Code) && query.len() > 1 {
             score += 3.0;
+            // Nagori leans developer-oriented: a code snippet copied from an
+            // editor / terminal / IDE is a stronger recall target than the
+            // same text pasted from a chat window. Keep the bump small and
+            // strictly code-scoped so it nudges ties without letting ordinary
+            // prose copied in a dev app outrank a real text match.
+            if is_developer_source_app(&entry) {
+                score += 2.0;
+            }
         }
 
         // Length penalty: very long entries receive a small score reduction
@@ -153,6 +162,14 @@ fn result(entry: ClipboardEntry, score: f32, rank_reason: Vec<RankReason>) -> Se
         .source
         .as_ref()
         .and_then(|source| source.name.clone());
+    // Surface the canonical code language and image dimensions so the result
+    // row can show the same metadata the preview pane does without a second
+    // round-trip. Both come straight off the stored entry (no decoding here).
+    let language = entry.search.language.clone();
+    let (image_width, image_height) = match &entry.content {
+        ClipboardContent::Image(image) => (image.width, image.height),
+        _ => (None, None),
+    };
     SearchResult {
         entry_id: entry.id,
         score,
@@ -163,7 +180,54 @@ fn result(entry: ClipboardEntry, score: f32, rank_reason: Vec<RankReason>) -> Se
         pinned: entry.lifecycle.pinned,
         sensitivity: entry.sensitivity,
         source_app_name,
+        language,
+        image_width,
+        image_height,
     }
+}
+
+/// Whether the clip's source app is a developer tool (editor, terminal, IDE).
+///
+/// Matched case-insensitively against a small substring set covering the
+/// common macOS / Windows / Linux apps. Substring (not exact) so variants
+/// like "Visual Studio Code - Insiders" or "iTerm2" still match; the set is
+/// deliberately narrow to avoid sweeping in general-purpose apps.
+fn is_developer_source_app(entry: &ClipboardEntry) -> bool {
+    const DEV_APP_MARKERS: &[&str] = &[
+        "code",     // VS Code / VSCodium / "Visual Studio Code"
+        "terminal", // macOS Terminal, GNOME Terminal
+        "iterm",    // iTerm2
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "warp",
+        "ghostty",
+        "jetbrains",
+        "intellij",
+        "pycharm",
+        "goland",
+        "rustrover",
+        "webstorm",
+        "android studio",
+        "xcode",
+        "sublime text",
+        "zed",
+        "neovim",
+        "nvim",
+        "vim",
+        "emacs",
+        "windows terminal",
+        "powershell",
+        "konsole",
+    ];
+    let Some(source) = entry.metadata.source.as_ref() else {
+        return false;
+    };
+    let Some(name) = source.name.as_deref() else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    DEV_APP_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 #[cfg(test)]
@@ -287,6 +351,89 @@ mod tests {
 
         assert!(result.score > 0.0);
         assert!(result.rank_reason.contains(&RankReason::PrefixMatch));
+    }
+
+    #[test]
+    fn code_from_developer_source_app_outranks_same_code_from_chat() {
+        // A code snippet copied from an editor is a stronger recall target
+        // than the identical snippet pasted from a chat app, but the bump is
+        // small and strictly code-scoped so it only nudges ties.
+        use nagori_core::SourceApp;
+        let dev_source = SourceApp {
+            bundle_id: Some("com.microsoft.VSCode".to_owned()),
+            name: Some("Visual Studio Code".to_owned()),
+            executable_path: None,
+        };
+        let chat_source = SourceApp {
+            bundle_id: Some("com.tinyspeck.slackmacgap".to_owned()),
+            name: Some("Slack".to_owned()),
+            executable_path: None,
+        };
+        let body = "fn main() {\n    handler();\n}";
+        let mut from_editor = entry(body);
+        from_editor.metadata.source = Some(dev_source);
+        let mut from_chat = entry(body);
+        from_chat.metadata.source = Some(chat_source);
+        assert_eq!(from_editor.content_kind(), ContentKind::Code);
+
+        let editor = rank(
+            "handler",
+            from_editor,
+            0.0,
+            0.0,
+            now(),
+            RecentOrder::ByRecency,
+        )
+        .expect("code match");
+        let chat = rank(
+            "handler",
+            from_chat,
+            0.0,
+            0.0,
+            now(),
+            RecentOrder::ByRecency,
+        )
+        .expect("code match");
+        assert!(
+            editor.score > chat.score,
+            "developer-source code should score higher: editor={} chat={}",
+            editor.score,
+            chat.score
+        );
+    }
+
+    #[test]
+    fn developer_source_boost_does_not_apply_to_plain_text() {
+        // The dev-source bump is gated on `ContentKind::Code`; a plain text
+        // clip from a terminal must not get it, so ordinary prose copied in a
+        // dev app never outranks a real text match elsewhere.
+        use nagori_core::SourceApp;
+        let term_source = SourceApp {
+            bundle_id: Some("com.googlecode.iterm2".to_owned()),
+            name: Some("iTerm2".to_owned()),
+            executable_path: None,
+        };
+        let body = "just a plain sentence about handler stuff";
+        let mut from_term = entry(body);
+        from_term.metadata.source = Some(term_source);
+        let plain = entry(body);
+        assert_eq!(from_term.content_kind(), ContentKind::Text);
+
+        let term = rank(
+            "handler",
+            from_term,
+            0.0,
+            0.0,
+            now(),
+            RecentOrder::ByRecency,
+        )
+        .expect("text match");
+        let none =
+            rank("handler", plain, 0.0, 0.0, now(), RecentOrder::ByRecency).expect("text match");
+        assert!(
+            (term.score - none.score).abs() < f32::EPSILON,
+            "source app must not affect non-code ranking",
+        );
     }
 
     #[test]

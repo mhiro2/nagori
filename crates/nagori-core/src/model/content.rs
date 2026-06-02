@@ -24,7 +24,8 @@ impl ClipboardContent {
         if let Some(url) = UrlContent::parse(&text) {
             Self::Url(url)
         } else if CodeContent::looks_like_code(&text) {
-            Self::Code(CodeContent::new(text, None))
+            let language_hint = super::code_language::detect(&text);
+            Self::Code(CodeContent::new(text, language_hint))
         } else {
             Self::Text(TextContent::new(text))
         }
@@ -123,6 +124,13 @@ impl CodeContent {
         // identifier (`fn foo`, `class Foo`), never by `/` or `?`.
         const KEYWORDS: &[&str] = &["fn", "function", "class", "package"];
         let trimmed = text.trim();
+        // Minified JSON arrives on a single line, so the newline gate below
+        // would miss it. Treat a structurally JSON-ish body as code first so
+        // `{"a":1}` and `[1,2,3]` get the code kind (and a `json` language
+        // hint), enabling the JSON badge / highlight even when not pretty.
+        if super::code_language::looks_like_json(trimmed) {
+            return true;
+        }
         if !trimmed.contains('\n') {
             return false;
         }

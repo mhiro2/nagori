@@ -451,8 +451,11 @@ mod tests {
                 created_at: entry.metadata.created_at,
                 pinned: entry.lifecycle.pinned,
                 sensitivity: entry.sensitivity,
-                preview: entry.search.preview,
                 source_app_name,
+                language: entry.search.language,
+                preview: entry.search.preview,
+                image_width: None,
+                image_height: None,
             })
         }
     }

@@ -368,6 +368,11 @@ impl SqliteStore {
                         .source
                         .as_ref()
                         .and_then(|source| source.name.clone());
+                    let language = entry.search.language.clone();
+                    let (image_width, image_height) = match &entry.content {
+                        nagori_core::ClipboardContent::Image(image) => (image.width, image.height),
+                        _ => (None, None),
+                    };
                     Ok(SearchResult {
                         entry_id: entry.id,
                         score,
@@ -378,6 +383,9 @@ impl SqliteStore {
                         sensitivity: entry.sensitivity,
                         preview: entry.search.preview,
                         source_app_name,
+                        language,
+                        image_width,
+                        image_height,
                     })
                 })
                 .map_err(|err| storage_err(&err))?;

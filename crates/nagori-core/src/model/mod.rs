@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod ai;
+pub mod code_language;
 mod content;
 mod representations;
 mod search;
@@ -333,6 +334,50 @@ mod tests {
         assert_eq!(
             content.plain_text(),
             Some("fn main() {\n    println!(\"hi\");\n}")
+        );
+    }
+
+    #[test]
+    fn plain_text_sets_language_hint_for_code() {
+        // Code-kind clips now carry a canonical language id so the preview
+        // pane, result-row badge, and ranker all read the same value.
+        let ClipboardContent::Code(code) =
+            ClipboardContent::from_plain_text("fn main() {\n    println!(\"hi\");\n}")
+        else {
+            panic!("expected Code content");
+        };
+        assert_eq!(code.language_hint.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn plain_text_classifies_minified_json_as_code() {
+        // Single-line minified JSON has no newline, so it used to fall through
+        // to plain Text. It now classifies as Code with a `json` hint so the
+        // JSON badge / highlight light up even when the body isn't pretty.
+        let content = ClipboardContent::from_plain_text("{\"name\":\"nagori\",\"n\":1}");
+        assert_eq!(content.kind(), ContentKind::Code);
+        let ClipboardContent::Code(code) = content else {
+            panic!("expected Code content");
+        };
+        assert_eq!(code.language_hint.as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn plain_text_keeps_brace_prose_as_text() {
+        // Bracketed bodies that do not *parse* as JSON must stay Text rather
+        // than being mislabelled as code: a brace-wrapped note, an array of
+        // bare words, and broken JSON.
+        assert_eq!(
+            ClipboardContent::from_plain_text("{just a note}").kind(),
+            ContentKind::Text
+        );
+        assert_eq!(
+            ClipboardContent::from_plain_text("[foo, bar]").kind(),
+            ContentKind::Text
+        );
+        assert_eq!(
+            ClipboardContent::from_plain_text("{\"a\":}").kind(),
+            ContentKind::Text
         );
     }
 

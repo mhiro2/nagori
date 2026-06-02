@@ -261,6 +261,9 @@ mod tests {
                 pinned: false,
                 sensitivity: Sensitivity::Public,
                 source_app_name: None,
+                language: None,
+                image_width: None,
+                image_height: None,
             }],
         );
         cache

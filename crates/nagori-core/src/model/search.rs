@@ -145,6 +145,19 @@ pub struct SearchResult {
     /// query removes the "from 1Password" hint that recent listing shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_app_name: Option<String>,
+    /// Canonical language id (`json`, `rust`, …) for `Code` rows, mirrored
+    /// from [`SearchDocument::language`]. `None` for non-code rows and for
+    /// legacy code rows captured before language detection landed; the
+    /// result row falls back to a client-side sniff in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Pixel dimensions for `Image` rows, when a header probe captured them.
+    /// `None` for non-image rows and for images captured before the probe
+    /// landed. The two are populated together or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

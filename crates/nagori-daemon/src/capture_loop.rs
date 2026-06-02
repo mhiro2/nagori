@@ -803,6 +803,20 @@ where
             entry.metadata.representation_set_hash = Some(new_hash);
         }
 
+        // Record image pixel dimensions from a header-only probe so the
+        // preview pane and result rows can show "1920×1080" without decoding
+        // the full payload. Done here (just before insert) so dropped clips
+        // never pay for the probe; the factory leaves `width`/`height` `None`
+        // because `nagori-core` deliberately has no `image` dependency.
+        if let ClipboardContent::Image(image) = &mut entry.content
+            && image.width.is_none()
+            && let Some(bytes) = image.pending_bytes.as_deref()
+            && let Some((w, h)) = probe_image_dimensions(bytes)
+        {
+            image.width = Some(w);
+            image.height = Some(h);
+        }
+
         // Invalidate before *and* after the insert. Without the pre-call,
         // a concurrent `runtime.search()` could lock the cache between
         // SQLite commit and our post-invalidate and serve a pre-insert hit
@@ -901,6 +915,31 @@ fn effective_dedupe_hash(entry: &nagori_core::ClipboardEntry) -> String {
         || entry.metadata.content_hash.value.clone(),
         |hash| hash.value.clone(),
     )
+}
+
+/// Read an encoded image's pixel dimensions from its header alone.
+///
+/// Header-only (`into_dimensions`) so even a multi-MB screenshot costs a few
+/// bytes, not a full decode. Returns `None` for formats `image` can't parse a
+/// header for, or for a payload whose advertised canvas exceeds
+/// [`MAX_DECODED_IMAGE_PIXELS`] — the same forged-dimension guard the
+/// thumbnail pipeline applies, so a bogus IHDR can't poison the stored
+/// metadata. Capture proceeds with `None` dimensions on any failure.
+fn probe_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    use std::io::Cursor;
+
+    use image::ImageReader;
+
+    let (width, height) = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels == 0 || pixels > nagori_core::MAX_DECODED_IMAGE_PIXELS {
+        return None;
+    }
+    Some((width, height))
 }
 
 #[cfg(test)]
@@ -1736,6 +1775,105 @@ mod tests {
         assert_eq!(payload, Some((bytes, "image/png".to_owned())));
     }
 
+    #[test]
+    fn probe_image_dimensions_reads_png_header_only() {
+        use image::ImageEncoder as _;
+        // A real, fully-encoded PNG so the header probe can read its IHDR.
+        let img = image::RgbImage::new(7, 5);
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(img.as_raw(), 7, 5, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        assert_eq!(super::probe_image_dimensions(&bytes), Some((7, 5)));
+    }
+
+    #[test]
+    fn probe_image_dimensions_returns_none_for_unparseable_bytes() {
+        // The truncated PNG magic used elsewhere in these tests has no
+        // decodable header, so the probe declines and capture proceeds with
+        // `None` dimensions rather than erroring.
+        assert_eq!(
+            super::probe_image_dimensions(&[137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]),
+            None
+        );
+        assert_eq!(super::probe_image_dimensions(b"not an image"), None);
+    }
+
+    #[tokio::test]
+    async fn capture_once_records_image_dimensions_from_header() {
+        // A valid PNG must land in the store with its pixel dimensions filled
+        // in by the capture-time header probe (the factory leaves them `None`).
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct PngReader {
+            bytes: Vec<u8>,
+            seq_called: Mutex<bool>,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for PngReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                Ok(ClipboardSnapshot {
+                    sequence: ClipboardSequence::content_hash(
+                        ContentHash::sha256(&self.bytes).value,
+                    ),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: vec![ClipboardRepresentation {
+                        mime_type: "image/png".to_owned(),
+                        data: ClipboardData::Bytes(self.bytes.clone()),
+                    }],
+                })
+            }
+
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                let mut guard = self.seq_called.lock().unwrap();
+                let _ = &*guard;
+                *guard = true;
+                Ok(ClipboardSequence::content_hash(
+                    ContentHash::sha256(&self.bytes).value,
+                ))
+            }
+        }
+
+        use image::ImageEncoder as _;
+        let img = image::RgbImage::new(24, 16);
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(img.as_raw(), 24, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let reader = PngReader {
+            bytes,
+            seq_called: Mutex::new(false),
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ =
+            CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default());
+
+        let id = loop_
+            .capture_once()
+            .await
+            .unwrap()
+            .expect("image entry should be inserted");
+        let stored = store.get(id).await.unwrap().expect("row");
+        match &stored.content {
+            ClipboardContent::Image(img) => {
+                assert_eq!(img.width, Some(24));
+                assert_eq!(img.height, Some(16));
+            }
+            other => panic!("expected Image content, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn capture_once_skips_oversized_image_payloads() {
         // The size guard must be denominated in image byte_count for image
@@ -1901,6 +2039,9 @@ mod tests {
                 pinned: false,
                 sensitivity: Sensitivity::Public,
                 source_app_name: None,
+                language: None,
+                image_width: None,
+                image_height: None,
             }],
         );
         assert_eq!(cache.lock().unwrap().len(), 1);
