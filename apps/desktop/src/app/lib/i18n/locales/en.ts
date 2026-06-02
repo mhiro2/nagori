@@ -11,6 +11,9 @@ export type Messages = {
     elapsed: (ms: number) => string;
     empty: string;
     fallback: string;
+    // Compact badge on image result rows whose source app is a screenshot
+    // tool, so "the screenshot I just took" is scannable in the list.
+    screenshotBadge: string;
     hints: {
       navigate: string;
       paste: string;
@@ -490,6 +493,7 @@ export const en: Messages = {
     elapsed: (ms) => `${ms.toFixed(0)} ms`,
     empty: 'No history yet.',
     fallback: '(Tauri runtime not started) Recently copied items will appear here.',
+    screenshotBadge: 'Screenshot',
     hints: {
       navigate: 'Navigate',
       paste: 'Paste',

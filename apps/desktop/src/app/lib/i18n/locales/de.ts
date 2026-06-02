@@ -9,6 +9,7 @@ export const de: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: 'Noch kein Verlauf.',
     fallback: '(Tauri-Laufzeit nicht gestartet) Zuletzt kopierte Einträge erscheinen hier.',
+    screenshotBadge: 'Screenshot',
     hints: {
       navigate: 'Navigieren',
       paste: 'Einfügen',

@@ -1,4 +1,4 @@
-import { cleanup, render, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { SearchResultDto } from '../lib/types';
@@ -141,6 +141,33 @@ describe('ResultList', () => {
       onConfirm: () => {},
     });
     expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps navigation and hover selection correct at 200 rows', async () => {
+    // The list is reused for large result sets; rows carry
+    // `content-visibility: auto` (see ARCHITECTURE.md §12) instead of being
+    // windowed, so every row stays in the DOM and the scroll/selection logic
+    // must remain correct at scale.
+    const items = Array.from({ length: 200 }, (_, i) =>
+      sample({ id: `id-${i}`, preview: `row ${i}` }),
+    );
+    const spy = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const onSelect = vi.fn();
+    const { rerender, container, getAllByRole } = render(ResultList, {
+      props: { items, selectedIndex: 0, appliedQuery: 'q', onSelect, onConfirm: () => {} },
+    });
+    expect(getAllByRole('option')).toHaveLength(200);
+    spy.mockClear();
+
+    // Arrow far down the list: same array, cursor moved -> scroll into view.
+    await rerender({ items, selectedIndex: 150, appliedQuery: 'q', onSelect, onConfirm: () => {} });
+    expect(spy).toHaveBeenCalled();
+    expect(container.querySelector('[aria-selected="true"]')?.textContent).toContain('row 150');
+
+    // Hovering any row (even far down) still drives selection through onSelect.
+    await fireEvent.mouseEnter(getAllByRole('option')[180] as Element);
+    expect(onSelect).toHaveBeenCalledWith(180);
     spy.mockRestore();
   });
 });

@@ -13,9 +13,10 @@
     expanded: boolean;
     altText: string;
     unavailableText: string;
+    loadingText: string;
   };
 
-  let { entryId, body, expanded, altText, unavailableText }: Props = $props();
+  let { entryId, body, expanded, altText, unavailableText, loadingText }: Props = $props();
 
   // Image bytes are streamed by the `nagori-image://` custom URI scheme
   // registered in src-tauri/src/lib.rs. In the inline preview we request
@@ -123,6 +124,13 @@
       onload={() => (imageLoaded = true)}
       onerror={handleImageError}
     />
+    {#if !imageLoaded}
+      <!-- Explicit "loading" caption over the checkerboard skeleton. While a
+           thumbnail miss is being (re)generated the <img> stays blank for up
+           to ~1s per retry, so a worded status reads as "working on it"
+           rather than a stuck/blank frame. -->
+      <p class="overlay" role="status">{loadingText}</p>
+    {/if}
   </div>
 {:else}
   <p class="state" role="status">{unavailableText}</p>
@@ -171,6 +179,22 @@
   }
   .image-frame:not(.loaded) .image {
     opacity: 0;
+  }
+  /* Centred "loading…" caption shown over the skeleton until the <img>
+     decodes. Pointer-events off so it never intercepts clicks meant for the
+     frame. */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0.5rem;
+    color: var(--muted, rgba(255, 255, 255, 0.7));
+    font-size: 0.8125rem;
+    text-align: center;
+    pointer-events: none;
   }
   .image-frame.loaded .image {
     opacity: 1;

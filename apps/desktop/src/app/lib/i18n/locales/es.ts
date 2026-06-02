@@ -10,6 +10,7 @@ export const es: Messages = {
     empty: 'Aún no hay historial.',
     fallback:
       '(Runtime de Tauri no iniciado) Los elementos copiados recientemente aparecerán aquí.',
+    screenshotBadge: 'Captura',
     hints: {
       navigate: 'Navegar',
       paste: 'Pegar',

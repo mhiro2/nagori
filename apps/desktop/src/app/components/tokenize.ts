@@ -10,7 +10,7 @@ export type Span = {
 // Language profiles. The default set is intentionally narrow: keywords that
 // are nearly universal across the languages we care about, so unlabeled
 // snippets get a tasteful amount of colour without false positives.
-type LanguageId = 'default' | 'rust' | 'typescript' | 'python' | 'go' | 'shell' | 'json';
+type LanguageId = 'default' | 'rust' | 'typescript' | 'python' | 'go' | 'shell' | 'json' | 'sql';
 
 const KEYWORDS: Record<LanguageId, ReadonlySet<string>> = {
   default: new Set(['if', 'else', 'for', 'while', 'return', 'true', 'false', 'null']),
@@ -192,7 +192,68 @@ const KEYWORDS: Record<LanguageId, ReadonlySet<string>> = {
     'false',
   ]),
   json: new Set(['true', 'false', 'null']),
+  // SQL keywords are stored lower-case and looked up case-insensitively (see
+  // CASE_INSENSITIVE_KW_LANGS) because SQL is written in either case.
+  sql: new Set([
+    'select',
+    'from',
+    'where',
+    'insert',
+    'into',
+    'values',
+    'update',
+    'set',
+    'delete',
+    'create',
+    'table',
+    'alter',
+    'drop',
+    'join',
+    'left',
+    'right',
+    'inner',
+    'outer',
+    'full',
+    'on',
+    'as',
+    'and',
+    'or',
+    'not',
+    'null',
+    'is',
+    'in',
+    'like',
+    'between',
+    'group',
+    'by',
+    'order',
+    'having',
+    'limit',
+    'offset',
+    'distinct',
+    'union',
+    'all',
+    'primary',
+    'key',
+    'foreign',
+    'references',
+    'index',
+    'view',
+    'with',
+    'case',
+    'when',
+    'then',
+    'else',
+    'end',
+    'exists',
+    'default',
+  ]),
 };
+
+// Languages whose keywords match regardless of case. Only SQL today — it is
+// conventionally written upper-case (`SELECT … FROM`) as often as lower, and
+// the `KEYWORDS.sql` set is stored lower-case to support the folded lookup.
+const CASE_INSENSITIVE_KW_LANGS: ReadonlySet<LanguageId> = new Set<LanguageId>(['sql']);
 
 const normalizeLanguage = (lang: string | null | undefined): LanguageId => {
   if (!lang) return 'default';
@@ -221,6 +282,8 @@ const normalizeLanguage = (lang: string | null | undefined): LanguageId => {
       return 'shell';
     case 'json':
       return 'json';
+    case 'sql':
+      return 'sql';
     default:
       return 'default';
   }
@@ -296,6 +359,7 @@ const scanBlockComment = (
 export const tokenize = (source: string, language?: string | null): Span[] => {
   const lang = normalizeLanguage(language);
   const keywords = KEYWORDS[lang];
+  const caseInsensitiveKw = CASE_INSENSITIVE_KW_LANGS.has(lang);
   const hashComment = HASH_COMMENT_LANGS.has(lang);
   const tripleQuote = TRIPLE_QUOTE_LANGS.has(lang);
   const out: Span[] = [];
@@ -405,7 +469,8 @@ export const tokenize = (source: string, language?: string | null): Span[] => {
       let j = i;
       while (j < len && isIdentPart(source.charCodeAt(j))) j += 1;
       const word = source.slice(i, j);
-      out.push({ kind: keywords.has(word) ? 'kw' : 'text', text: word });
+      const isKeyword = caseInsensitiveKw ? keywords.has(word.toLowerCase()) : keywords.has(word);
+      out.push({ kind: isKeyword ? 'kw' : 'text', text: word });
       i = j;
       continue;
     }

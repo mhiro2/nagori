@@ -119,6 +119,90 @@ describe('ResultItem', () => {
     expect(getByText('JSON')).toBeTruthy();
   });
 
+  it('prefers the backend-detected language for the code badge', () => {
+    // When the daemon ships a canonical `language`, the badge uses it rather
+    // than re-sniffing the preview text (here the preview would not sniff SQL).
+    const { getByText } = render(ResultItem, {
+      props: {
+        item: sample({ kind: 'code', preview: 'value', language: 'sql' }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(getByText('SQL')).toBeTruthy();
+  });
+
+  it('shows a strong-brand badge for known URL hosts', () => {
+    const { getByTestId } = render(ResultItem, {
+      props: {
+        item: sample({ kind: 'url', preview: 'https://www.youtube.com/watch?v=abc' }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(getByTestId('url-brand').textContent).toBe('YouTube');
+  });
+
+  it('omits the brand badge for unknown URL hosts', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ kind: 'url', preview: 'https://example.com/foo' }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('[data-testid="url-brand"]')).toBeNull();
+  });
+
+  it('shows dimensions, size, and a screenshot badge for image rows', () => {
+    const { getByTestId, getByText } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'image',
+          preview: '',
+          imageWidth: 1920,
+          imageHeight: 1080,
+          sourceAppName: 'CleanShot X',
+          representationSummary: [{ mimeType: 'image/png', role: 'primary', byteCount: 2_400_000 }],
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(getByTestId('image-dims').textContent).toBe('1920×1080');
+    expect(getByText('2.3 MB')).toBeTruthy();
+    // Screenshot badge uses the localized label (English default in tests).
+    expect(getByText('Screenshot')).toBeTruthy();
+  });
+
+  it('degrades gracefully for image rows without dimensions', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'image',
+          preview: '',
+          sourceAppName: 'Safari',
+          representationSummary: [{ mimeType: 'image/png', role: 'primary', byteCount: 512 }],
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    // No dimensions probed, not a screenshot source — only the size shows.
+    expect(container.querySelector('[data-testid="image-dims"]')).toBeNull();
+    expect(container.textContent).toContain('512 B');
+  });
+
   it('annotates Secret sensitivity in the meta strip', () => {
     const { getByText } = render(ResultItem, {
       props: {

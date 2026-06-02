@@ -280,6 +280,7 @@
           {expanded}
           altText={t.preview.image.alt}
           unavailableText={t.preview.image.unavailable}
+          loadingText={t.preview.image.loading}
         />
       {:else if preview && preview.body.type === 'fileList'}
         <PreviewBodyFileList

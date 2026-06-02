@@ -9,6 +9,7 @@ export const fr: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: 'Aucun historique pour le moment.',
     fallback: '(Runtime Tauri non démarré) Les éléments récemment copiés apparaîtront ici.',
+    screenshotBadge: 'Capture',
     hints: {
       navigate: 'Naviguer',
       paste: 'Coller',

@@ -14,6 +14,21 @@ describe('tokenize - basics', () => {
     expect(tokens.find((t) => t.text === 'foo')?.kind).toBe('text');
   });
 
+  it('highlights SQL keywords case-insensitively', () => {
+    // SQL is written upper- or lower-case; the sql profile folds case so both
+    // `SELECT` and `from` paint as keywords while column names stay text.
+    const tokens = tokenize('SELECT id from users', 'sql');
+    expect(tokens.find((t) => t.text === 'SELECT')?.kind).toBe('kw');
+    expect(tokens.find((t) => t.text === 'from')?.kind).toBe('kw');
+    expect(tokens.find((t) => t.text === 'users')?.kind).toBe('text');
+  });
+
+  it('does not fold case for non-SQL languages', () => {
+    // `Let` (capitalised) is not a TS keyword; only the sql profile folds case.
+    const tokens = tokenize('Let foo', 'typescript');
+    expect(tokens.find((t) => t.text === 'Let')?.kind).toBe('text');
+  });
+
   it('treats double-quoted strings as a single str span', () => {
     const tokens = tokenize('"hi"');
     expect(tokens).toEqual([{ kind: 'str', text: '"hi"' }]);

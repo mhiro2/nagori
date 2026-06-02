@@ -8,6 +8,7 @@ export const zhHant: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: '尚無歷史紀錄。',
     fallback: '(Tauri 執行階段未啟動) 最近複製的項目將在此顯示。',
+    screenshotBadge: '螢幕截圖',
     hints: {
       navigate: '瀏覽',
       paste: '貼上',

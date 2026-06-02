@@ -8,6 +8,7 @@ export const ko: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: '기록이 아직 없습니다.',
     fallback: '(Tauri 런타임이 시작되지 않음) 최근에 복사한 항목이 여기에 표시됩니다.',
+    screenshotBadge: '스크린샷',
     hints: {
       navigate: '이동',
       paste: '붙여넣기',

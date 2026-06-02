@@ -15,26 +15,6 @@
   };
   const badge = (kind: string): string => KIND_BADGE[kind] ?? '?';
 
-  // Cheap language sniff for the in-row badge. We deliberately keep this
-  // shallower than the daemon's classifier — the goal is just to tell the
-  // user "this looks like JSON / SQL / TS" at a glance.
-  const CODE_HEURISTICS: ReadonlyArray<{ tag: string; pattern: RegExp }> = [
-    { tag: 'JSON', pattern: /^\s*[{[]/ },
-    { tag: 'TS', pattern: /\b(?:const|let|interface|type|import)\b/ },
-    { tag: 'RS', pattern: /\b(?:fn|impl|struct|enum|let mut)\b/ },
-    { tag: 'PY', pattern: /\b(?:def|import|class|self)\b/ },
-    { tag: 'SH', pattern: /^\s*(?:#!|\$ )/ },
-    { tag: 'SQL', pattern: /\b(?:select|insert|update|delete|create)\b/i },
-    { tag: 'HTML', pattern: /<\/?[a-z][^>]*>/i },
-  ];
-
-  const detectCodeLang = (preview: string): string | undefined => {
-    for (const { tag, pattern } of CODE_HEURISTICS) {
-      if (pattern.test(preview)) return tag;
-    }
-    return undefined;
-  };
-
   const safeUrl = (raw: string): URL | undefined => {
     try {
       return new URL(raw.trim());
@@ -55,10 +35,18 @@
 </script>
 
 <script lang="ts">
-  import { collapseWhitespace, formatRelativeTime, truncatePreview } from '../lib/formatting';
+  import { codeLanguageLabel, detectCodeLanguage } from '../lib/codeLanguage';
+  import {
+    collapseWhitespace,
+    formatByteCount,
+    formatRelativeTime,
+    truncatePreview,
+  } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
   import { primaryRankReason, rankReasonLabel } from '../lib/rankReason';
+  import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
+  import { domainCategory } from '../lib/urlCategory';
 
   type Props = {
     item: SearchResultDto;
@@ -91,7 +79,31 @@
   const previewText = $derived(truncatePreview(collapseWhitespace(item.preview)));
   const timeLabel = $derived(formatRelativeTime(item.createdAt));
   const url = $derived(item.kind === 'url' ? safeUrl(item.preview) : undefined);
-  const codeLang = $derived(item.kind === 'code' ? detectCodeLang(item.preview) : undefined);
+  // Strong-brand badge for URL rows (GitHub / YouTube / …). Hostname only —
+  // no network. `undefined` for unknown hosts so they just show the domain.
+  const urlBrand = $derived(url ? domainCategory(url.hostname) : undefined);
+  // Code language badge: prefer the daemon's canonical `language`; fall back
+  // to a client-side sniff only for legacy rows that predate detection.
+  const codeBadge = $derived(
+    item.kind === 'code'
+      ? (codeLanguageLabel(item.language) ?? codeLanguageLabel(detectCodeLanguage(item.preview)))
+      : undefined,
+  );
+  // Image rows carry almost no preview text, so surface the pixel dimensions
+  // (from a capture-time header probe) and the primary payload's byte size so
+  // a screenshot is identifiable at a glance. Either may be absent on legacy
+  // rows; the row degrades gracefully to whatever is known.
+  const imageDims = $derived(
+    item.kind === 'image' && item.imageWidth != null && item.imageHeight != null
+      ? `${item.imageWidth}×${item.imageHeight}`
+      : undefined,
+  );
+  const imageSize = $derived.by((): string | undefined => {
+    if (item.kind !== 'image') return undefined;
+    const primary = item.representationSummary.find((rep) => rep.role === 'primary');
+    return primary ? formatByteCount(primary.byteCount) : undefined;
+  });
+  const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
   const repBadge = $derived(formatRepresentationBadge(item.representationSummary));
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
@@ -119,13 +131,23 @@
 
     {#if url}
       <span class="preview url">
+        {#if urlBrand}<span class="brand-badge" data-testid="url-brand">{urlBrand}</span>{/if}
         <span class="domain">{url.host}</span>
         <span class="path">{url.pathname}{url.search}</span>
       </span>
     {:else if item.kind === 'code'}
       <span class="preview code">
-        {#if codeLang}<span class="lang-badge">{codeLang}</span>{/if}
+        {#if codeBadge}<span class="lang-badge">{codeBadge}</span>{/if}
         <code>{previewText}</code>
+      </span>
+    {:else if item.kind === 'image'}
+      <span class="preview image">
+        {#if isScreenshot}<span class="shot-badge" title={t.palette.screenshotBadge}
+            >{t.palette.screenshotBadge}</span
+          >{/if}
+        {#if imageDims}<span class="img-dims" data-testid="image-dims">{imageDims}</span>{/if}
+        {#if imageSize}<span class="img-size">{imageSize}</span>{/if}
+        {#if !imageDims && !imageSize}<span class="img-fallback">{previewText}</span>{/if}
       </span>
     {:else}
       <span class="preview">{previewText}</span>
@@ -174,6 +196,15 @@
     width: 100%;
     /* Smooth the recede when the action inspector opens/closes. */
     transition: opacity 0.12s ease;
+    /* Skip layout/paint for rows scrolled out of view so a long result set
+       (the palette caps the search limit at 50 today, but ResultList is
+       reused for larger lists) stays smooth under arrow-key navigation.
+       `contain-intrinsic-size` gives the browser a ~3rem placeholder height
+       so the scrollbar and `scrollIntoView` math stay correct before an
+       off-screen row is rendered. See ARCHITECTURE.md §12 for why we use this
+       instead of windowing. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3rem;
   }
   .result-row.selected {
     background: var(--bg-selected, rgba(120, 160, 255, 0.18));
@@ -304,6 +335,21 @@
     text-overflow: ellipsis;
     color: var(--muted, rgba(255, 255, 255, 0.6));
   }
+  /* Strong-brand pill for known URL hosts (GitHub, YouTube, …). Filled accent
+     so it reads as a recognised destination, distinct from the neutral domain
+     text it sits beside. */
+  .brand-badge {
+    flex: none;
+    align-self: center;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent, #6c8dff) 22%, transparent);
+    color: var(--accent-soft, #b3c2ff);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
   .preview.code {
     display: inline-flex;
     align-items: center;
@@ -317,14 +363,42 @@
     font-size: 0.8125rem;
     color: var(--fg, #f5f5f5);
   }
+  /* Code-language badge. Filled green pill (was a thin outline) so the
+     language reads at a glance — Nagori leans developer-oriented and the
+     language is a primary recall cue for code rows. */
   .lang-badge {
     flex: none;
-    padding: 0.05rem 0.35rem;
-    border: 1px solid rgba(120, 200, 140, 0.4);
+    padding: 0.05rem 0.4rem;
     border-radius: 4px;
+    background: color-mix(in srgb, var(--ok, #86d29a) 20%, transparent);
     color: var(--ok, #86d29a);
-    font-size: 0.65rem;
+    font-size: 0.66rem;
+    font-weight: 700;
     letter-spacing: 0.04em;
+  }
+  /* Image rows have no body text, so the dims/size/screenshot strip stands in
+     for the preview. */
+  .preview.image {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    overflow: hidden;
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+    font-variant-numeric: tabular-nums;
+  }
+  .preview.image .img-dims {
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font-weight: 600;
+  }
+  .shot-badge {
+    flex: none;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent, #6c8dff) 18%, transparent);
+    color: var(--accent-soft, #b3c2ff);
+    font-size: 0.65rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
   .meta {
     display: flex;

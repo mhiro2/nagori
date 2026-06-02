@@ -8,6 +8,7 @@ export const zhHans: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: '暂无历史记录。',
     fallback: '(Tauri 运行时未启动) 最近复制的项目将在此处显示。',
+    screenshotBadge: '截图',
     hints: {
       navigate: '导航',
       paste: '粘贴',

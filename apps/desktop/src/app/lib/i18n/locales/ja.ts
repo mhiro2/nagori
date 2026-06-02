@@ -8,6 +8,7 @@ export const ja: Messages = {
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
     empty: '履歴がまだありません。',
     fallback: '（Tauri ランタイム未起動）ここに最近コピーした項目が並びます。',
+    screenshotBadge: 'スクショ',
     hints: {
       navigate: '選択',
       paste: 'ペースト',
