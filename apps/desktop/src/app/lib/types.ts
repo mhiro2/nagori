@@ -139,6 +139,16 @@ export type SearchResultDto = {
   sensitivity: Sensitivity;
   rankReasons: RankReason[];
   sourceAppName?: string;
+  // Canonical code language id (`json`, `rust`, …) for `code` rows, detected
+  // by the daemon. Drives the result-row language badge; absent for non-code
+  // rows and for legacy code rows captured before detection landed (the row
+  // falls back to a client-side sniff then).
+  language?: string;
+  // Pixel dimensions for `image` rows when a capture-time header probe
+  // recorded them. Absent for non-image rows and for images captured before
+  // the probe landed.
+  imageWidth?: number;
+  imageHeight?: number;
   representationSummary: RepresentationSummary[];
 };
 

@@ -170,6 +170,17 @@ pub struct SearchResultDto {
     pub rank_reasons: Vec<RankReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app_name: Option<String>,
+    /// Canonical code language id (`json`, `rust`, …) for `Code` rows. Drives
+    /// the result-row language badge; `None` for non-code rows and for legacy
+    /// code rows captured before language detection landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Pixel dimensions for `Image` rows when a capture-time header probe
+    /// recorded them. Surfaced alongside the file size in the result row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_height: Option<u32>,
     pub representation_summary: Vec<RepresentationSummaryDto>,
 }
 
@@ -185,6 +196,9 @@ impl From<SearchResult> for SearchResultDto {
             sensitivity: value.sensitivity,
             rank_reasons: value.rank_reason,
             source_app_name: value.source_app_name,
+            language: value.language,
+            image_width: value.image_width,
+            image_height: value.image_height,
             representation_summary: Vec::new(),
         }
     }

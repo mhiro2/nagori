@@ -441,6 +441,17 @@ pub struct SearchResultDto {
     pub rank_reasons: Vec<RankReason>,
     #[serde(default)]
     pub source_app_name: Option<String>,
+    /// Canonical code language id (`json`, `rust`, …) for `Code` rows; mirrors
+    /// the core `SearchResult` field so IPC/CLI JSON keeps parity with the
+    /// desktop DTO instead of silently dropping the metadata.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Pixel dimensions for `Image` rows when a capture-time header probe
+    /// recorded them.
+    #[serde(default)]
+    pub image_width: Option<u32>,
+    #[serde(default)]
+    pub image_height: Option<u32>,
     #[serde(default)]
     pub representation_summary: Vec<RepresentationSummaryDto>,
 }
@@ -457,6 +468,9 @@ impl From<SearchResult> for SearchResultDto {
             sensitivity: value.sensitivity,
             rank_reasons: value.rank_reason,
             source_app_name: value.source_app_name,
+            language: value.language,
+            image_width: value.image_width,
+            image_height: value.image_height,
             representation_summary: Vec::new(),
         }
     }
