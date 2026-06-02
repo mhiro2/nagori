@@ -6,6 +6,12 @@
 
 - Persistent clipboard history (text, images, file lists) stored locally in SQLite.
 - Full-text search and pinning from a desktop palette or the `nagori` CLI.
+- Recall-oriented result rows: a language badge on code (JSON / SQL / Rust /
+  …, detected on-device with the same canonical id the preview highlighter
+  uses), a strong-brand badge on known URLs (GitHub / YouTube / …, from the
+  hostname alone — no network), and pixel dimensions, file size, and a
+  *Screenshot* hint on image rows so "the screenshot I just took" is
+  scannable in the list.
 - Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
   PEM blocks, credit-card numbers, and OTPs before they hit disk.
 - User regex denylist for project-specific patterns.

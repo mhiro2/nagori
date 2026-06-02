@@ -230,7 +230,18 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   to the password manager / denylisted app.
 - `EntryFactory` performs decoding + content-hash + search-document
   construction; it does **not** consult settings. Size cap and
-  classification both live in the capture loop.
+  classification both live in the capture loop. Code-kind bodies are
+  given a canonical `language_hint` (`json` / `rust` / `sql` / …) by the
+  dependency-free `model::code_language::detect`; the hint flows into
+  `SearchDocument::language` and downstream into the preview highlighter,
+  the result-row language badge, and the ranker.
+- Image entries get their pixel `width`/`height` from a **header-only**
+  probe (`image::ImageReader::into_dimensions`) run in the capture loop
+  just before insert — `nagori-core` deliberately has no `image`
+  dependency, so the factory leaves both `None`. The probe is bounded by
+  `MAX_DECODED_IMAGE_PIXELS` (a forged-dimension guard) and fails open to
+  `None`, so capture never stalls on an unreadable header. Pre-probe rows
+  keep `None` and degrade gracefully in the UI.
 - `app_denylist` is enforced inside `SensitivityClassifier::classify`
   against the snapshot's `source` (bundle id / name), not in the
   factory.
@@ -300,11 +311,17 @@ Types live in `nagori-core` (`model.rs`, `settings.rs`, `policy.rs`,
 `Text` / `Url` / `Code` / `Image` / `FileList` / `RichText` / `Unknown`.
 
 - `TextContent` / `UrlContent` / `CodeContent` carry plain strings plus
-  derived metadata (counts, normalized URL, language hint).
+  derived metadata (counts, normalized URL, language hint). `CodeContent`'s
+  `language_hint` is filled by `model::code_language::detect` at
+  classification time (see [section 4](#4-capture-pipeline)); minified
+  single-line JSON also tips `looks_like_code` so it lands as `Code` with a
+  `json` hint rather than plain `Text`.
 - `ImageContent` carries optional in-memory `pending_bytes` that flow
   from capture → factory → storage; after insertion the bytes live in
   `entry_representations.payload_blob` (the `role = 'primary'` row owned
-  by the entry) and the field is always `None` post-deserialisation.
+  by the entry) and the field is always `None` post-deserialisation. Its
+  `width`/`height` are populated by the capture-loop header probe (see
+  [section 4](#4-capture-pipeline)), not the factory.
 - `RichTextContent` keeps `plain_text` (for FTS / ngrams) and an optional
   `markup` payload tagged `Html` or `Rtf` for preview rendering.
 - `FileListContent` flattens `NSPasteboardTypeFileURL` URLs into POSIX
@@ -1073,13 +1090,27 @@ not duplicate runtime logic.
   `resolvePermissionUiState`, so it hides once the grant lands and on
   `Unavailable` platforms (Windows, Wayland sans `wtype`) where there is
   nothing to chase. It replaces the former `OnboardingBanner` card.
-- `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise
-  the domain; code rows show a heuristic language badge (TS, RS, PY,
-  JSON, …) inline. A small reason chip surfaces the strongest *match*
-  signal (*Exact* / *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*)
-  for query-driven rows; recent-listing rows stay chip-free since their
-  only reason is recency. Semantic / fuzzy hits get a distinct hue so
-  they read as a deliberate match type rather than a weaker one.
+- `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise the
+  domain and add a strong-brand badge (GitHub / YouTube / …) derived from
+  the hostname alone (`lib/urlCategory`, no network). Code rows show a
+  language badge sourced from the backend `language` (the same canonical
+  id the preview highlighter uses), falling back to a client-side sniff
+  (`lib/codeLanguage`) only for legacy rows that predate detection. Image
+  rows — which carry no body text — surface the probed `width×height`
+  dimensions, the primary payload's byte size, and a *Screenshot* badge
+  when the source app looks like a screenshot tool (`lib/screenshotSource`).
+  A small reason chip surfaces the strongest *match* signal (*Exact* /
+  *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*) for query-driven
+  rows; recent-listing rows stay chip-free since their only reason is
+  recency. Semantic / fuzzy hits get a distinct hue so they read as a
+  deliberate match type rather than a weaker one. Rows carry
+  `content-visibility: auto` + `contain-intrinsic-size` so off-screen
+  rows skip layout/paint: with the search limit at 50 (palette row cap
+  64) this keeps arrow-key navigation cheap **without** the keyboard-nav /
+  `scrollIntoView` / hover-selection regression risk that true windowing
+  would carry against `ResultList`'s carefully-tuned scroll effect. If a
+  future surface raises the result limit into the hundreds, revisit
+  windowing then; the row-level containment is the low-risk first step.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
