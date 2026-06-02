@@ -633,7 +633,25 @@ async fn pipe_read_multi_pass_internal(
             && !state.aborted()
             && let Some(body) = read_text(&mut state)?
         {
-            let text = String::from_utf8(body).unwrap_or_default();
+            // A `text/*` MIME promised UTF-8 but a publisher can still hand
+            // us malformed bytes (truncated transfers, a broken X11 bridge,
+            // a mislabelled latin-1 source). Recover lossily rather than
+            // dropping the whole text representation to an empty string —
+            // the image and uri-list drop paths warn instead of staying
+            // silent, so keep this branch symmetric.
+            let text = match String::from_utf8(body) {
+                Ok(text) => text,
+                Err(err) => {
+                    let valid_up_to = err.utf8_error().valid_up_to();
+                    let bytes = err.into_bytes();
+                    tracing::warn!(
+                        valid_up_to,
+                        byte_len = bytes.len(),
+                        "clipboard_text_invalid_utf8_lossy"
+                    );
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+            };
             if !text.is_empty() {
                 representations.push(ClipboardRepresentation {
                     mime_type: "text/plain".to_owned(),
