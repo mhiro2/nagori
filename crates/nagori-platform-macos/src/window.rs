@@ -19,8 +19,19 @@ use objc2_foundation::NSString;
 /// directly) because each call can take a few ms when `AppKit`'s lock is
 /// contended, and pinning a tokio worker for that long starves the IPC
 /// handler. The blocking pool is the right place for short, sync FFI work.
+///
+/// Each hop is also bounded by [`WINDOW_OP_TIMEOUT`] so a *wedged* (not merely
+/// contended) `AppKit` lock cannot leave the `spawn_blocking` pending forever —
+/// the detached worker is leaked until the lock frees, but the async caller is
+/// released within the window.
 #[derive(Debug, Default)]
 pub struct MacosWindowBehavior;
+
+/// Upper bound on a blocking `NSWorkspace` / `activateWithOptions` call.
+/// Frontmost-app probing happens at palette-open and focus restore happens
+/// just before the synthesised ⌘V; a healthy call answers in a few ms, so 3 s
+/// is generous headroom while still bounding a wedged `AppKit` lock.
+const WINDOW_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl MacosWindowBehavior {
     #[must_use]
@@ -68,10 +79,15 @@ impl MacosWindowBehavior {
 impl WindowBehavior for MacosWindowBehavior {
     async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
         // Hop off the tokio worker so a contended AppKit lock can't stall
-        // IPC handlers running in parallel.
-        tokio::task::spawn_blocking(frontmost_app_sync)
-            .await
-            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+        // IPC handlers running in parallel, and bound it so a *wedged* lock
+        // (a frozen frontmost app) can't leave the hop pending forever.
+        nagori_platform::run_blocking_with_timeout(
+            "frontmost_app",
+            WINDOW_OP_TIMEOUT,
+            frontmost_app_sync,
+        )
+        .await
+        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
     }
 
     // The Tauri shell controls the palette window directly via its own
@@ -87,10 +103,16 @@ impl WindowBehavior for MacosWindowBehavior {
 
     async fn activate_app(&self, bundle_id: &str) -> Result<()> {
         let bundle_id = bundle_id.to_owned();
-        tokio::task::spawn_blocking(move || activate_app_sync(&bundle_id))
-            .await
-            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
-        Ok(())
+        // Focus restore (`activateWithOptions`) runs after the palette hides
+        // and before the synthesised ⌘V. Bound it so a wedged AppKit lock
+        // can't hang the paste flow — on timeout we surface a platform error
+        // and the desktop aborts the paste rather than letting ⌘V land in
+        // whatever window kept focus.
+        nagori_platform::run_blocking_with_timeout("activate_app", WINDOW_OP_TIMEOUT, move || {
+            activate_app_sync(&bundle_id);
+        })
+        .await
+        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
     }
 
     async fn frontmost_focused_is_secure(&self) -> Result<bool> {

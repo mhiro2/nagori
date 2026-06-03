@@ -26,6 +26,13 @@ use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
 #[derive(Debug, Default)]
 pub struct WindowsWindowBehavior;
 
+/// Upper bound on a blocking Win32 window op (`GetForegroundWindow` probing,
+/// `SetForegroundWindow` focus restore). A healthy call answers in a few ms;
+/// bounding the `spawn_blocking` hop keeps a wedged `USER32` lock from leaving
+/// the focus-restore step — which runs just before the synthesised Ctrl+V —
+/// pending forever.
+const WINDOW_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl WindowsWindowBehavior {
     #[must_use]
     pub const fn new() -> Self {
@@ -63,9 +70,13 @@ impl WindowsWindowBehavior {
 #[async_trait]
 impl WindowBehavior for WindowsWindowBehavior {
     async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
-        tokio::task::spawn_blocking(frontmost_app_sync)
-            .await
-            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+        nagori_platform::run_blocking_with_timeout(
+            "frontmost_app",
+            WINDOW_OP_TIMEOUT,
+            frontmost_app_sync,
+        )
+        .await
+        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
     }
 
     async fn show_palette(&self) -> Result<()> {
@@ -82,9 +93,16 @@ impl WindowBehavior for WindowsWindowBehavior {
         };
         let snapshot_pid = target.snapshot_pid;
         let snapshot_exe = target.source.executable_path.clone();
-        tokio::task::spawn_blocking(move || {
-            activate_hwnd_sync(handle, snapshot_pid, snapshot_exe.as_deref())
-        })
+        // Focus restore runs after the palette hides and before the
+        // synthesised Ctrl+V. Bound it so a wedged USER32 lock can't hang the
+        // paste flow — on timeout we surface a platform error and the desktop
+        // aborts the paste rather than spraying Ctrl+V into whatever window
+        // kept focus.
+        nagori_platform::run_blocking_with_timeout(
+            "activate_restore_target",
+            WINDOW_OP_TIMEOUT,
+            move || activate_hwnd_sync(handle, snapshot_pid, snapshot_exe.as_deref()),
+        )
         .await
         .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?
         .map_err(nagori_core::AppError::Platform)

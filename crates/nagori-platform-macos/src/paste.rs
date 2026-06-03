@@ -16,6 +16,18 @@ impl PasteController for MacosPasteController {
         // enigo synthesises CGEvents to send Cmd+V to the focused app, which
         // requires the user to grant Accessibility permission to the running
         // process. Failures usually indicate the permission is missing.
+        //
+        // This is deliberately NOT bounded by a timeout the way focus-restore,
+        // `frontmost_app`, and clipboard writes are. `spawn_blocking` cannot
+        // cancel synthetic input: a timed-out synthesis would still post its
+        // ⌘V once the wedge clears, landing the clipboard content in whatever
+        // app is frontmost by then. A stray paste of (possibly sensitive)
+        // history into an unrelated window is worse than the rare bounded
+        // wait, and — unlike the Linux `wtype` path, which kills its
+        // subprocess on timeout — the in-process `CGEvent` post has no safe
+        // cancellation. Synthesis only runs on an explicit user paste, never
+        // on a hot path, and a wedged WindowServer freezes the whole UI
+        // anyway, so the user cannot move focus mid-wedge.
         let result = tokio::task::spawn_blocking(synthesize_cmd_v)
             .await
             .map_err(|err| AppError::Paste {

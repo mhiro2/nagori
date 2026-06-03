@@ -249,6 +249,40 @@ impl ClipboardReader for LinuxClipboard {
     }
 }
 
+/// Upper bound on a `wl-clipboard` write (`copy::copy` / `copy::copy_multi`).
+///
+/// `copy::copy` returns once the offer is registered with the compositor;
+/// under a healthy Wayland session that is near-instant, but a *wedged*
+/// compositor (a frozen Wayland server mid-handshake) would otherwise leave
+/// the `spawn_blocking` hop pending forever — freezing copy-back, the AI
+/// result write-back, and the paste serialisation that depends on them. The
+/// read side already bounds its pipe via `PIPE_READ_TIMEOUT` + `poll(2)`; this
+/// is the write-side equivalent. The detached worker is leaked until the
+/// compositor unwedges (`spawn_blocking` tasks cannot be aborted), but the
+/// async caller is freed within the window.
+#[cfg(target_os = "linux")]
+const CLIPBOARD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Run a `wl-clipboard` write closure on the blocking pool, bounded by
+/// [`CLIPBOARD_WRITE_TIMEOUT`]. Maps a timeout / panic onto `AppError::Platform`
+/// so the daemon's copy-back path surfaces a degraded result instead of
+/// hanging.
+#[cfg(target_os = "linux")]
+async fn run_clipboard_write<F>(op: &'static str, f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
+    match nagori_platform::run_blocking_with_timeout(op, CLIPBOARD_WRITE_TIMEOUT, f).await {
+        Ok(inner) => inner,
+        Err(err @ nagori_platform::BlockingError::Timeout { .. }) => Err(AppError::Platform(
+            format!("{err}; the Wayland compositor may be wedged, the copy did not complete"),
+        )),
+        Err(err @ nagori_platform::BlockingError::Panicked { .. }) => Err(AppError::Platform(
+            format!("wl-clipboard write failed: {err}"),
+        )),
+    }
+}
+
 #[async_trait]
 impl ClipboardWriter for LinuxClipboard {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()> {
@@ -300,7 +334,7 @@ impl ClipboardWriter for LinuxClipboard {
         #[cfg(target_os = "linux")]
         {
             let bytes = text.as_bytes().to_vec().into_boxed_slice();
-            tokio::task::spawn_blocking(move || -> Result<()> {
+            run_clipboard_write("write_text", move || -> Result<()> {
                 // `copy::copy` spawns a background thread that holds
                 // the data offer alive until the selection is
                 // overwritten; when it returns Ok the offer is
@@ -312,7 +346,6 @@ impl ClipboardWriter for LinuxClipboard {
                     .map_err(|err| AppError::Platform(format!("wl-clipboard copy failed: {err}")))
             })
             .await
-            .map_err(|err| AppError::Platform(err.to_string()))?
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -370,12 +403,11 @@ impl LinuxClipboard {
                 "no representable bytes for Wayland multi-rep publish".to_owned(),
             ));
         }
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        run_clipboard_write("publish_representations", move || -> Result<()> {
             copy::copy_multi(Options::new(), sources)
                 .map_err(|err| AppError::Platform(format!("wl-clipboard copy_multi failed: {err}")))
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 
     async fn write_files(&self, paths: Vec<String>) -> Result<()> {
@@ -391,7 +423,7 @@ impl LinuxClipboard {
         }
         let body = serialize_uri_list(&paths)?;
         let bytes = body.into_bytes().into_boxed_slice();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        run_clipboard_write("write_files", move || -> Result<()> {
             copy::copy(
                 Options::new(),
                 Source::Bytes(bytes),
@@ -400,7 +432,6 @@ impl LinuxClipboard {
             .map_err(|err| AppError::Platform(format!("wl-clipboard file-list copy failed: {err}")))
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 
     async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
@@ -413,7 +444,7 @@ impl LinuxClipboard {
         // silent mismatch on copy-back.
         let mime = guess_image_mime(&bytes)?;
         let boxed = bytes.into_boxed_slice();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        run_clipboard_write("write_image_bytes", move || -> Result<()> {
             copy::copy(
                 Options::new(),
                 Source::Bytes(boxed),
@@ -422,7 +453,6 @@ impl LinuxClipboard {
             .map_err(|err| AppError::Platform(format!("wl-clipboard image copy failed: {err}")))
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 }
 

@@ -16,6 +16,15 @@ pub struct WindowsPasteController;
 impl PasteController for WindowsPasteController {
     #[cfg(windows)]
     async fn paste_frontmost(&self) -> Result<PasteResult> {
+        // Deliberately NOT bounded by a timeout (unlike focus-restore /
+        // `frontmost_app`): `spawn_blocking` cannot cancel `SendInput`, so a
+        // timed-out synthesis would still inject its Ctrl+V once unwedged,
+        // landing the clipboard content in whatever window is foreground by
+        // then. A stray paste of (possibly sensitive) history is worse than
+        // the rare bounded wait, and the in-process `SendInput` has no safe
+        // cancellation the way the Linux `wtype` subprocess does. In practice
+        // `SendInput` queues its events atomically and returns immediately, so
+        // the wedge this would guard against is near-unreachable anyway.
         let result = tokio::task::spawn_blocking(synthesize_ctrl_v)
             .await
             .map_err(|err| AppError::Paste {

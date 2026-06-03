@@ -2950,6 +2950,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
