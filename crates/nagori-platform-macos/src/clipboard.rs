@@ -15,9 +15,14 @@ use nagori_core::{
 };
 use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
 #[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::ProtocolObject;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboardWriting,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSData, NSString};
@@ -346,6 +351,13 @@ impl ClipboardWriter for MacosClipboard {
                 .unwrap_or_else(|| "image/png".to_owned());
             return self.write_image_bytes(bytes, &mime).await;
         }
+        if let ClipboardContent::FileList(files) = &entry.content {
+            // Republish the stored POSIX paths as `NSPasteboardTypeFileURL`
+            // pasteboard items so Finder accepts a file paste. Without this
+            // branch the entry fell through to `plain_text()` and pasted the
+            // paths as text — which never lands in Finder as files.
+            return self.write_files(files.paths.clone()).await;
+        }
         let Some(text) = entry.plain_text() else {
             return Err(AppError::Unsupported(
                 "clipboard entry has no representable payload".to_owned(),
@@ -476,66 +488,103 @@ impl MacosClipboard {
     }
 
     #[cfg(target_os = "macos")]
+    async fn write_files(&self, paths: Vec<String>) -> Result<()> {
+        // A copy-back of a zero-path file list would blank the pasteboard with
+        // an empty offer that downstream readers surface as "empty file list".
+        // Refuse it up front so the caller keeps the previous clipboard rather
+        // than clearing it for nothing — mirrors the Linux adapter's
+        // `write_files` contract.
+        if paths.is_empty() {
+            return Err(AppError::Unsupported(
+                "file-list clipboard entry has no paths".to_owned(),
+            ));
+        }
+        let clipboard = self.clipboard.clone();
+        clipboard_blocking("write_files", move || -> Result<()> {
+            // Hold the arboard mutex across `clearContents` + `writeObjects`
+            // so a concurrent reader cannot observe the cleared-but-not-yet-
+            // written window, matching `write_image_bytes` /
+            // `publish_representations`.
+            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            // Drain AppKit autoreleased temporaries (`generalPasteboard`, the
+            // per-path `NSPasteboardItem` / `NSString`s) on every call: the
+            // copy work runs on a tokio blocking-pool thread with no implicit
+            // pool, so without this each file-list copy would leak them.
+            objc2::rc::autoreleasepool(|_pool| -> Result<()> {
+                let items = file_url_pasteboard_items(&paths);
+                if items.is_empty() {
+                    // Every path failed `url::Url::from_file_path` (all
+                    // relative / malformed, e.g. a corrupted history row).
+                    // Leave the pasteboard untouched and surface the failure.
+                    return Err(AppError::Platform(
+                        "no stored file path could be represented as a file URL".to_owned(),
+                    ));
+                }
+                let pb = NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                if write_pasteboard_items(&pb, items) {
+                    Ok(())
+                } else {
+                    Err(AppError::Platform(
+                        "NSPasteboard rejected the file-list writeObjects batch".to_owned(),
+                    ))
+                }
+            })
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+
+    // Keep this async so the cfg-neutral caller can await both platform variants.
+    #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unused_async)]
+    async fn write_files(&self, _paths: Vec<String>) -> Result<()> {
+        Err(AppError::Unsupported(
+            "file-list clipboard writes are macOS-only".to_owned(),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
     async fn publish_representations(
         &self,
         representations: Vec<StoredClipboardRepresentation>,
     ) -> Result<()> {
         let clipboard = self.clipboard.clone();
         clipboard_blocking("publish_representations", move || -> Result<()> {
-            // Hold the arboard mutex across the whole clearContents + setData
-            // batch so a concurrent reader cannot observe a partial state with
-            // the primary published but the plain fallback still missing.
+            // Hold the arboard mutex across the whole clearContents +
+            // writeObjects batch so a concurrent reader cannot observe a
+            // partial state with the primary published but the plain
+            // fallback still missing.
             let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
             objc2::rc::autoreleasepool(|_pool| -> Result<()> {
-                // SAFETY: AppKit FFI on the shared `NSPasteboard`. The pasteboard
-                // type constants are `'static` extern symbols owned by AppKit, and
-                // every `NSString`/`NSData` we hand off is freshly retained on the
-                // ObjC heap so it does not depend on any Rust lifetime once the
-                // call returns. `clearContents` plus the per-type set calls happen
-                // under the arboard mutex above, so no concurrent writer can race
-                // a torn batch between them.
-                unsafe {
-                    let pb = NSPasteboard::generalPasteboard();
-                    pb.clearContents();
-                    let mut published = 0_usize;
-                    for rep in &representations {
-                        match publish_one_representation(&pb, rep) {
-                            PublishOutcome::Published => {
-                                published = published.saturating_add(1);
-                            }
-                            PublishOutcome::Skipped => {}
-                            PublishOutcome::Failed => {
-                                // AppKit accepted the mapping but
-                                // `setString` / `setData` returned NO — keep
-                                // going so the rest of the rep set still
-                                // lands on the pasteboard, but surface the
-                                // failure at warn so a primary HTML / image
-                                // drop is visible in logs instead of being
-                                // hidden behind the surviving plain
-                                // fallback.
-                                tracing::warn!(
-                                    mime = %rep.mime_type,
-                                    role = ?rep.role,
-                                    ordinal = rep.ordinal,
-                                    "NSPasteboard rejected setString/setData for stored representation",
-                                );
-                            }
-                        }
-                    }
-                    if published == 0 {
-                        // Pre-scan in `write_representations` rules this out
-                        // in normal use; the only way to reach it now is if
-                        // every mapped rep above hit `Failed`. The pasteboard
-                        // is already empty — surface the platform error so
-                        // the daemon's `copy_entry_with_format` propagates
-                        // it instead of silently leaving the user with no
-                        // clipboard contents.
-                        return Err(AppError::Platform(
-                            "NSPasteboard rejected every mapped representation"
-                                .to_owned(),
-                        ));
-                    }
+                // Build every pasteboard item off-pasteboard first, then
+                // publish the whole batch atomically with `writeObjects`.
+                // Inline reps (text / HTML / RTF / image) share one
+                // `NSPasteboardItem` — one value per type — while a
+                // `text/uri-list` rep fans out to one item per file URL so a
+                // multi-file copy-back keeps every path instead of collapsing
+                // to the last URL the legacy `setString_forType` loop kept.
+                let PreparedRepresentations { items, published } =
+                    prepare_representation_items(&representations);
+                if published == 0 {
+                    // Pre-scan in `write_representations` rules this out in
+                    // normal use; the only way to reach it now is if every
+                    // mapped rep was rejected by AppKit while building its
+                    // item. The pasteboard is still intact — we have not
+                    // cleared it — so surface the platform error and leave
+                    // the user's clipboard untouched rather than blanking it.
+                    return Err(AppError::Platform(
+                        "NSPasteboard rejected every mapped representation".to_owned(),
+                    ));
+                }
+                let pb = NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                if write_pasteboard_items(&pb, items) {
                     Ok(())
+                } else {
+                    Err(AppError::Platform(
+                        "NSPasteboard rejected the representation writeObjects batch".to_owned(),
+                    ))
                 }
             })
         })
@@ -555,12 +604,14 @@ impl MacosClipboard {
     }
 }
 
-/// Result of attempting to publish one stored representation.
+/// Result of mapping one inline stored representation onto an
+/// `NSPasteboardItem`.
 ///
 /// `Skipped` and `Failed` are kept distinct so the caller can warn about a
 /// MIME we promised to publish but `AppKit` rejected, without spamming a warn
-/// every time a `text/uri-list` rep flows through (we know we can't publish
-/// those — that is a `Skipped`, not a bug).
+/// for a rep with no `NSPasteboardType` mapping (that is a `Skipped`, not a
+/// bug). `text/uri-list` reps never reach this enum — they fan out to one
+/// item per file URL in [`prepare_representation_items`].
 #[cfg(target_os = "macos")]
 enum PublishOutcome {
     /// Mapped to a known `NSPasteboardType` and `AppKit` accepted the bytes.
@@ -598,90 +649,133 @@ fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> boo
         })
 }
 
-/// Publish a single stored representation onto the shared `NSPasteboard`.
+/// The pasteboard items built for a multi-rep `writeObjects` batch, plus
+/// the count of stored reps that actually mapped onto an item.
+///
+/// `published` lets the caller distinguish "nothing landed, leave the
+/// pasteboard intact" from "at least one rep is publishable, clear and
+/// write" without re-walking the items: a single inline-data item can carry
+/// several reps (text + HTML + image), and a `text/uri-list` rep fans out to
+/// many items, so the item count alone is not the rep count.
+#[cfg(target_os = "macos")]
+struct PreparedRepresentations {
+    items: Vec<Retained<NSPasteboardItem>>,
+    published: usize,
+}
+
+/// Build the `NSPasteboardItem` batch for a stored representation set.
+///
+/// Inline reps (text/plain, text/html, application/rtf, and the image MIMEs)
+/// share a single `NSPasteboardItem` — one value per type, exactly how a rich
+/// single clip is modelled — so a paste target that wants HTML still sees it
+/// alongside the plain-text fallback. A `text/uri-list` rep fans out to one
+/// `NSPasteboardItem` per file URL, which is the Apple-documented way to put
+/// multiple files on the pasteboard; this is what fixes the old
+/// "multi-file list collapses to its last URL" limitation. The inline-data
+/// item is ordered first so a text-only paste target reads it as the primary
+/// item; in practice file reps and inline reps do not co-occur, so the order
+/// only matters for the degenerate mixed case.
+#[cfg(target_os = "macos")]
+fn prepare_representation_items(reps: &[StoredClipboardRepresentation]) -> PreparedRepresentations {
+    let data_item = NSPasteboardItem::new();
+    let mut data_item_types = 0_usize;
+    let mut file_items: Vec<Retained<NSPasteboardItem>> = Vec::new();
+    let mut published = 0_usize;
+
+    for rep in reps {
+        if let ("text/uri-list", RepresentationDataRef::FilePaths(paths)) =
+            (rep.mime_type.as_str(), &rep.data)
+        {
+            for path in paths {
+                let Some(item) = file_url_pasteboard_item(path) else {
+                    continue;
+                };
+                file_items.push(item);
+                published = published.saturating_add(1);
+            }
+            continue;
+        }
+        match publish_inline_representation(&data_item, rep) {
+            PublishOutcome::Published => {
+                data_item_types = data_item_types.saturating_add(1);
+                published = published.saturating_add(1);
+            }
+            PublishOutcome::Skipped => {}
+            PublishOutcome::Failed => {
+                // AppKit accepted the mapping but `setString` / `setData`
+                // returned NO — keep going so the rest of the rep set still
+                // lands, but surface the failure at warn so a primary HTML /
+                // image drop is visible in logs instead of being hidden
+                // behind the surviving plain fallback.
+                tracing::warn!(
+                    mime = %rep.mime_type,
+                    role = ?rep.role,
+                    ordinal = rep.ordinal,
+                    "NSPasteboardItem rejected setString/setData for stored representation",
+                );
+            }
+        }
+    }
+
+    let mut items = Vec::with_capacity(file_items.len() + 1);
+    if data_item_types > 0 {
+        items.push(data_item);
+    }
+    items.extend(file_items);
+    PreparedRepresentations { items, published }
+}
+
+/// Map one inline (non-file) stored representation onto `item`.
 ///
 /// The MIME → `NSPasteboardType` table covers plain text, HTML, RTF, PNG,
-/// TIFF, JPEG, GIF, WebP, and `text/uri-list` file lists. Image MIMEs that
-/// lack a static `NSPasteboardType*` constant (JPEG/GIF/WebP) are published
-/// against their canonical Uniform Type Identifier strings — `AppKit` copies
-/// the type name, so the dynamic `NSString` only has to outlive
-/// `setData_forType`. File paths fan out per-item via `setString_forType`
-/// on `NSPasteboardTypeFileURL`; multi-file lists currently keep only the
-/// last URL on the implicit pasteboard item, which is the multi-file
-/// limitation documented in ARCHITECTURE.md and addressed once
-/// `NSPasteboardItem` batches replace the per-rep `setString` loop.
+/// TIFF, JPEG, GIF, and WebP. Image MIMEs that lack a static
+/// `NSPasteboardType*` constant (JPEG/GIF/WebP) are published against their
+/// canonical Uniform Type Identifier strings — `AppKit` copies the type name,
+/// so the dynamic `NSString` only has to outlive `setData_forType`.
+/// `text/uri-list` reps are handled by the caller's per-file fan-out, so they
+/// fall through to `Skipped` here.
 #[cfg(target_os = "macos")]
-unsafe fn publish_one_representation(
-    pb: &NSPasteboard,
+fn publish_inline_representation(
+    item: &NSPasteboardItem,
     rep: &StoredClipboardRepresentation,
 ) -> PublishOutcome {
     let accepted = match (rep.mime_type.as_str(), &rep.data) {
         ("text/plain", RepresentationDataRef::InlineText(text)) => {
             let value = NSString::from_str(text);
-            // SAFETY: `pb` is the shared general pasteboard already cleared by
-            // the caller, `value` is a freshly retained NSString that AppKit
-            // copies, and `NSPasteboardTypeString` is a static framework
-            // constant.
-            unsafe { pb.setString_forType(&value, NSPasteboardTypeString) }
+            // SAFETY: `NSPasteboardTypeString` is a `'static` AppKit constant
+            // and `value` is a freshly retained NSString copied by the item.
+            item.setString_forType(&value, unsafe { NSPasteboardTypeString })
         }
         ("text/html", RepresentationDataRef::InlineText(text)) => {
             let value = NSString::from_str(text);
-            unsafe { pb.setString_forType(&value, NSPasteboardTypeHTML) }
+            item.setString_forType(&value, unsafe { NSPasteboardTypeHTML })
         }
         ("application/rtf", RepresentationDataRef::InlineText(text)) => {
             let value = NSString::from_str(text);
-            unsafe { pb.setString_forType(&value, NSPasteboardTypeRTF) }
+            item.setString_forType(&value, unsafe { NSPasteboardTypeRTF })
         }
         ("image/png", RepresentationDataRef::DatabaseBlob(bytes)) => {
             let data = NSData::with_bytes(bytes);
-            unsafe { pb.setData_forType(Some(&data), NSPasteboardTypePNG) }
+            item.setData_forType(&data, unsafe { NSPasteboardTypePNG })
         }
         ("image/tiff", RepresentationDataRef::DatabaseBlob(bytes)) => {
             let data = NSData::with_bytes(bytes);
-            unsafe { pb.setData_forType(Some(&data), NSPasteboardTypeTIFF) }
+            item.setData_forType(&data, unsafe { NSPasteboardTypeTIFF })
         }
         ("image/jpeg", RepresentationDataRef::DatabaseBlob(bytes)) => {
-            // `NSString::from_str` returns a freshly retained NSString
-            // that AppKit copies on `setData_forType`. No static-borrow
-            // requirements, hence no inner `unsafe` block.
             let data = NSData::with_bytes(bytes);
             let ty = NSString::from_str(UTI_JPEG);
-            pb.setData_forType(Some(&data), &ty)
+            item.setData_forType(&data, &ty)
         }
         ("image/gif", RepresentationDataRef::DatabaseBlob(bytes)) => {
             let data = NSData::with_bytes(bytes);
             let ty = NSString::from_str(UTI_GIF);
-            pb.setData_forType(Some(&data), &ty)
+            item.setData_forType(&data, &ty)
         }
         ("image/webp", RepresentationDataRef::DatabaseBlob(bytes)) => {
             let data = NSData::with_bytes(bytes);
             let ty = NSString::from_str(UTI_WEBP);
-            pb.setData_forType(Some(&data), &ty)
-        }
-        ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => {
-            // The simple file-URL path: write each file URL via
-            // `setString_forType(NSPasteboardTypeFileURL)`. AppKit holds
-            // one value per type on the implicit pasteboard item, so a
-            // multi-file list collapses to its last URL — Finder / TextEdit
-            // still accept a single-file paste, which is the common case
-            // and a strict improvement over the previous "skip every
-            // file-list rep" behaviour. Switching to `NSPasteboardItem`
-            // batches for true multi-file paste is left for a future
-            // change.
-            let mut any_accepted = false;
-            for path in paths {
-                let Some(url) = path_to_file_url(path) else {
-                    continue;
-                };
-                let value = NSString::from_str(&url);
-                // SAFETY: `NSPasteboardTypeFileURL` is a `'static` AppKit
-                // constant, and `value` is a freshly retained NSString
-                // copied by AppKit before the call returns.
-                if unsafe { pb.setString_forType(&value, NSPasteboardTypeFileURL) } {
-                    any_accepted = true;
-                }
-            }
-            any_accepted
+            item.setData_forType(&data, &ty)
         }
         (mime, _) => {
             tracing::debug!(
@@ -698,6 +792,57 @@ unsafe fn publish_one_representation(
     } else {
         PublishOutcome::Failed
     }
+}
+
+/// Build one `NSPasteboardItem` carrying a single file's `file://` URL.
+///
+/// Returns `None` when the stored path is not representable as a file URL
+/// (relative / malformed entry from a corrupted history row) or `AppKit`
+/// rejects the `setString` — the caller skips it so a single bad path does
+/// not abort the rest of the file list.
+#[cfg(target_os = "macos")]
+fn file_url_pasteboard_item(path: &str) -> Option<Retained<NSPasteboardItem>> {
+    let url = path_to_file_url(path)?;
+    let item = NSPasteboardItem::new();
+    let value = NSString::from_str(&url);
+    // SAFETY: `NSPasteboardTypeFileURL` is a `'static` AppKit constant and
+    // `value` is a freshly retained NSString copied by the item.
+    if item.setString_forType(&value, unsafe { NSPasteboardTypeFileURL }) {
+        Some(item)
+    } else {
+        tracing::warn!(%path, "NSPasteboardItem rejected file URL");
+        None
+    }
+}
+
+/// Build the `NSPasteboardItem`s for a list of file paths.
+///
+/// Drops paths that cannot be turned into a file URL (logged per-path by
+/// [`file_url_pasteboard_item`]); the caller treats an all-dropped result as
+/// a publish failure rather than clearing the pasteboard for nothing.
+#[cfg(target_os = "macos")]
+fn file_url_pasteboard_items(paths: &[String]) -> Vec<Retained<NSPasteboardItem>> {
+    paths
+        .iter()
+        .filter_map(|p| file_url_pasteboard_item(p))
+        .collect()
+}
+
+/// Clear-then-`writeObjects` the prepared items onto the shared pasteboard.
+///
+/// `NSPasteboardItem` conforms to `NSPasteboardWriting`, so the batch is
+/// type-erased through `ProtocolObject` and handed to `writeObjects` in one
+/// transaction. Returns the `writeObjects` success flag. The caller holds the
+/// arboard mutex and has already drained the autorelease pool, and is
+/// responsible for the preceding `clearContents`.
+#[cfg(target_os = "macos")]
+fn write_pasteboard_items(pb: &NSPasteboard, items: Vec<Retained<NSPasteboardItem>>) -> bool {
+    let writers: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
+        .into_iter()
+        .map(ProtocolObject::from_retained)
+        .collect();
+    let array = NSArray::from_retained_slice(&writers);
+    pb.writeObjects(&array)
 }
 
 /// Convert a filesystem path string into a `file://` URL string suitable
@@ -1215,11 +1360,10 @@ mod tests {
         ns_data_to_vec(&data)
     }
 
-    /// Read the first file URL string parked on the implicit pasteboard
-    /// item. Used to verify `text/uri-list` round-trips without going
-    /// through `current_snapshot`, which collects file URLs across every
-    /// pasteboard item — the per-rep `setString_forType` publish path only
-    /// produces a single implicit item.
+    /// Read the file URL string from the first pasteboard item. Used to
+    /// verify a single-file `text/uri-list` round-trip; `stringForType`
+    /// reports the value from the first item that carries the type, which is
+    /// the file item the `writeObjects` batch produced.
     fn read_pasteboard_file_url_string() -> Option<String> {
         // SAFETY: AppKit FFI on the shared pasteboard. `NSPasteboardTypeFileURL`
         // is a `'static` extern constant; the returned `Retained<NSString>`
@@ -1434,11 +1578,10 @@ mod tests {
             "empty rep list should publish entry plain text via write_entry",
         );
 
-        // Round-trip a single-file `text/uri-list` rep. The publisher
-        // writes each path via `setString_forType(NSPasteboardTypeFileURL)`,
-        // so a single-file list lands on the implicit pasteboard item and
-        // any Finder / TextEdit paste target sees the same URL it would
-        // get from a Finder copy.
+        // Round-trip a single-file `text/uri-list` rep. The publisher writes
+        // one `NSPasteboardItem` per file URL via `writeObjects`, so a
+        // single-file list produces a single file item any Finder / TextEdit
+        // paste target reads the same way it would a Finder copy.
         let file_url_entry = EntryFactory::from_text("/tmp/nagori-uri-list-roundtrip");
         let file_url_reps = vec![StoredClipboardRepresentation {
             role: RepresentationRole::Primary,
@@ -1459,6 +1602,97 @@ mod tests {
             url_back.as_deref(),
             Some("file:///tmp/nagori-uri-list-roundtrip"),
             "text/uri-list rep must publish a file:// URL on NSPasteboardTypeFileURL"
+        );
+
+        // Multi-file `text/uri-list` round-trip through the multi-rep path.
+        // The old per-rep `setString_forType` loop collapsed every path onto
+        // the implicit item's single file-URL slot; the `NSPasteboardItem`
+        // batch must instead keep every path so Finder pastes all of them.
+        let multi_paths = vec![
+            "/tmp/nagori-multi-one".to_owned(),
+            "/tmp/nagori-multi-two".to_owned(),
+            "/tmp/nagori-multi-three".to_owned(),
+        ];
+        let multi_entry = EntryFactory::from_text("/tmp/nagori-multi-one");
+        let multi_reps = vec![StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::FilePaths(multi_paths.clone()),
+        }];
+        clipboard
+            .write_representations(&multi_entry, &multi_reps)
+            .await
+            .expect("write_representations multi-file uri-list");
+        let multi_back = clipboard
+            .current_snapshot()
+            .await
+            .expect("snapshot after multi-file uri-list write");
+        let captured = multi_back
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::FilePaths(paths) if rep.mime_type == "text/uri-list" => {
+                    Some(paths.clone())
+                }
+                _ => None,
+            })
+            .expect("text/uri-list missing after multi-file write");
+        assert_eq!(
+            captured, multi_paths,
+            "every file path must survive the multi-file copy-back, not collapse to the last URL",
+        );
+
+        // The primary-only `write_entry` FileList branch must publish files
+        // too — before the fix it fell through to `plain_text()` and pasted
+        // the paths as text, which never lands in Finder as files.
+        let file_list_entry = EntryFactory::from_content(
+            ClipboardContent::FileList(nagori_core::FileListContent {
+                paths: multi_paths.clone(),
+                display_text: multi_paths.join("\n"),
+            }),
+            None,
+            None,
+        );
+        clipboard
+            .write_entry(&file_list_entry)
+            .await
+            .expect("write_entry FileList branch");
+        let entry_back = clipboard
+            .current_snapshot()
+            .await
+            .expect("snapshot after write_entry FileList");
+        let entry_paths = entry_back
+            .representations
+            .iter()
+            .find_map(|rep| match &rep.data {
+                ClipboardData::FilePaths(paths) if rep.mime_type == "text/uri-list" => {
+                    Some(paths.clone())
+                }
+                _ => None,
+            })
+            .expect("text/uri-list missing after write_entry FileList");
+        assert_eq!(
+            entry_paths, multi_paths,
+            "write_entry must republish a FileList as file URLs, not plain text",
+        );
+
+        // An empty FileList must be refused rather than blanking the clipboard.
+        let empty_file_list = EntryFactory::from_content(
+            ClipboardContent::FileList(nagori_core::FileListContent {
+                paths: vec![],
+                display_text: String::new(),
+            }),
+            None,
+            None,
+        );
+        let empty_err = clipboard
+            .write_entry(&empty_file_list)
+            .await
+            .expect_err("empty file-list copy-back must be refused");
+        assert!(
+            matches!(empty_err, AppError::Unsupported(_)),
+            "expected AppError::Unsupported for an empty file list, got {empty_err:?}"
         );
 
         // A rep set whose MIMEs are all outside the NSPasteboard publisher's

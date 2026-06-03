@@ -665,7 +665,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + per-rep `setData_forType` under the arboard mutex; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`; Windows — `OpenClipboard` + `EmptyClipboard` + N × `SetClipboardData` against `CF_UNICODETEXT` / `CF_HTML` / `Rich Text Format` / `CF_DIBV5` (plus a registered `"PNG"` companion) / `CF_HDROP` under the arboard mutex), with a default impl that falls back to `write_entry` on any adapter that does not advertise the capability. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + `writeObjects` over an `NSPasteboardItem` batch under the arboard mutex, with inline reps sharing one item and each file URL fanning out to its own item so a multi-file list keeps every path; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`; Windows — `OpenClipboard` + `EmptyClipboard` + N × `SetClipboardData` against `CF_UNICODETEXT` / `CF_HTML` / `Rich Text Format` / `CF_DIBV5` (plus a registered `"PNG"` companion) / `CF_HDROP` under the arboard mutex), with a default impl that falls back to `write_entry` on any adapter that does not advertise the capability. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -863,19 +863,23 @@ clipboard transaction. The macOS adapter
 (`clipboard_multi_representation_write = Available`) publishes the
 intersection of {`text/plain`, `text/html`, `application/rtf`,
 `image/png`, `image/tiff`, `image/jpeg`, `image/gif`, `image/webp`,
-`text/uri-list`} with the stored set; static types go through
-`setString:forType:` / `setData:forType:`, while JPEG/GIF/WebP are
-declared via dynamic UTIs (`public.jpeg` / `com.compuserve.gif` /
-`org.webmproject.webp`) so a downstream paste target that asks for any
-of those MIMEs still gets the bytes the source originally advertised.
-File-list reps are republished by looping `setString_forType` with the
-`file://` URL for each stored POSIX path against
-`NSPasteboardTypeFileURL`. AppKit's implicit first pasteboard item only
-holds one value per type, so the last URL written is the one a paste
-target reads back: Finder / TextEdit accept a single-file drop, which
-covers the common case and is a strict improvement over the previous
-"skip every file-list rep" behaviour. True multi-file batches via
-`NSPasteboardItem` are deferred. The Windows adapter
+`text/uri-list`} with the stored set. The reps are assembled into
+`NSPasteboardItem`s off-pasteboard and then published in one
+`clearContents` + `writeObjects` transaction: the inline reps (text /
+HTML / RTF / image) share a single item — one value per type, set via
+`setString:forType:` / `setData:forType:`, with JPEG/GIF/WebP declared
+via dynamic UTIs (`public.jpeg` / `com.compuserve.gif` /
+`org.webmproject.webp`) — while a `text/uri-list` rep fans out to one
+item per file URL, the Apple-documented way to put multiple files on
+the pasteboard. A multi-file copy-back therefore keeps every path
+(Finder pastes all of them) instead of collapsing to the last URL the
+way the earlier per-rep `setString_forType` loop on the implicit item
+did. The `write_entry` FileList branch uses the same per-file
+`NSPasteboardItem` batch (an empty path list is refused rather than
+blanking the clipboard), so a primary-only copy-back of a file list
+republishes as file URLs instead of pasting the paths as plain text.
+Because the batch is built before `clearContents`, a rep set every item
+of which AppKit rejects leaves the clipboard untouched. The Windows adapter
 (`clipboard_multi_representation_write = Available`) builds every
 `HGLOBAL` first — `CF_UNICODETEXT` for `text/plain`, `CF_HTML` (with
 the documented `Version` / `StartHTML` / `EndHTML` / `StartFragment` /
