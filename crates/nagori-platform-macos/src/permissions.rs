@@ -2,9 +2,20 @@ use async_trait::async_trait;
 use nagori_core::Result;
 use nagori_platform::{
     PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+    run_blocking_with_timeout,
 };
+use std::time::Duration;
 
 const ACCESSIBILITY_SETUP_ROUTE: &str = "setup/accessibility";
+
+/// Upper bound on how long a synchronous permission probe may block the
+/// async runtime. `AXIsProcessTrusted` and `arboard::Clipboard::new` both
+/// reach into the OS (the TCC database, the pasteboard server); a wedged
+/// `WindowServer` or a stuck pasteboard would otherwise pin the tokio worker
+/// for the whole `nagori doctor` / onboarding / Settings call. The clipboard
+/// adapter already bounds its own ops via `CLIPBOARD_OP_TIMEOUT`; this mirrors
+/// that for the probe path so the two never diverge.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct MacosPermissionChecker;
@@ -12,28 +23,8 @@ pub struct MacosPermissionChecker;
 #[async_trait]
 impl PermissionChecker for MacosPermissionChecker {
     async fn check(&self, ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
-        let accessibility = accessibility_status(ctx);
-        // Clipboard: probe arboard. macOS doesn't actually gate the
-        // pasteboard via TCC, but `Clipboard::new()` returns Err in some
-        // sandboxed setups, which is a useful real signal.
-        let clipboard = match clipboard_probe() {
-            Ok(()) => PermissionStatus {
-                kind: PermissionKind::Clipboard,
-                state: PermissionState::Granted,
-                message: None,
-                reason_code: None,
-                setup_route: None,
-                docs_url: None,
-            },
-            Err(message) => PermissionStatus {
-                kind: PermissionKind::Clipboard,
-                state: PermissionState::Denied,
-                message: Some(message),
-                reason_code: Some("clipboard_init_failed".to_owned()),
-                setup_route: None,
-                docs_url: None,
-            },
-        };
+        let accessibility = accessibility_status(ctx).await;
+        let clipboard = clipboard_status().await;
         Ok(vec![
             clipboard,
             accessibility,
@@ -113,8 +104,35 @@ impl PermissionChecker for MacosPermissionChecker {
 /// `AXIsProcessTrustedWithOptions(prompt: true)` call we begin treating
 /// `false` as `Denied` so the Setup card switches its copy from
 /// `NotRequested` to `PromptShownNotGranted`.
-fn accessibility_status(ctx: &PermissionCheckContext) -> PermissionStatus {
-    if accessibility_trusted() {
+async fn accessibility_status(ctx: &PermissionCheckContext) -> PermissionStatus {
+    // `AXIsProcessTrusted()` is a synchronous FFI call into the
+    // Accessibility/TCC subsystem; bound it so a wedged WindowServer can't
+    // pin the runtime. A timed-out probe can't be read as either Granted or
+    // Denied, so surface a degraded row (the Setup card still deep-links the
+    // user into System Settings) rather than a misleading "granted".
+    let trusted = match run_blocking_with_timeout(
+        "macos_accessibility_probe",
+        PROBE_TIMEOUT,
+        accessibility_trusted,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Denied,
+                message: Some(format!(
+                    "Accessibility probe did not complete ({})",
+                    err.describe()
+                )),
+                reason_code: Some("probe_timed_out".to_owned()),
+                setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+                docs_url: None,
+            };
+        }
+    };
+    if trusted {
         return PermissionStatus {
             kind: PermissionKind::Accessibility,
             state: PermissionState::Granted,
@@ -141,6 +159,42 @@ fn accessibility_status(ctx: &PermissionCheckContext) -> PermissionStatus {
         reason_code: Some("accessibility_not_trusted".to_owned()),
         setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
         docs_url: None,
+    }
+}
+
+/// Clipboard row of the permission report. macOS doesn't gate the pasteboard
+/// via TCC, but `Clipboard::new()` returns `Err` in some sandboxed setups,
+/// which is a useful real signal. The probe is bounded so a stuck pasteboard
+/// server degrades the row instead of hanging the report.
+async fn clipboard_status() -> PermissionStatus {
+    match run_blocking_with_timeout("macos_clipboard_probe", PROBE_TIMEOUT, clipboard_probe).await {
+        Ok(Ok(())) => PermissionStatus {
+            kind: PermissionKind::Clipboard,
+            state: PermissionState::Granted,
+            message: None,
+            reason_code: None,
+            setup_route: None,
+            docs_url: None,
+        },
+        Ok(Err(message)) => PermissionStatus {
+            kind: PermissionKind::Clipboard,
+            state: PermissionState::Denied,
+            message: Some(message),
+            reason_code: Some("clipboard_init_failed".to_owned()),
+            setup_route: None,
+            docs_url: None,
+        },
+        Err(err) => PermissionStatus {
+            kind: PermissionKind::Clipboard,
+            state: PermissionState::Denied,
+            message: Some(format!(
+                "clipboard probe did not complete ({})",
+                err.describe()
+            )),
+            reason_code: Some("probe_timed_out".to_owned()),
+            setup_route: None,
+            docs_url: None,
+        },
     }
 }
 

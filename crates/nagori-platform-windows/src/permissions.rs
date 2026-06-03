@@ -2,7 +2,16 @@ use async_trait::async_trait;
 use nagori_core::Result;
 use nagori_platform::{
     PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
+    run_blocking_with_timeout,
 };
+use std::time::Duration;
+
+/// Upper bound on how long the clipboard probe may block the async runtime.
+/// `arboard::Clipboard::new()` opens the Win32 clipboard; if another process
+/// is holding it open, the call can stall. Bounding it keeps the doctor /
+/// onboarding / Settings call responsive, mirroring the clipboard adapter's
+/// own `CLIPBOARD_OP_TIMEOUT`.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Reports `Granted` for kinds that Windows doesn't gate behind user prompts.
 ///
@@ -17,24 +26,42 @@ pub struct WindowsPermissionChecker;
 #[async_trait]
 impl PermissionChecker for WindowsPermissionChecker {
     async fn check(&self, _ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
-        let clipboard = match arboard::Clipboard::new() {
-            Ok(_) => PermissionStatus {
-                kind: PermissionKind::Clipboard,
-                state: PermissionState::Granted,
-                message: None,
-                reason_code: None,
-                setup_route: None,
-                docs_url: None,
-            },
-            Err(err) => PermissionStatus {
-                kind: PermissionKind::Clipboard,
-                state: PermissionState::Denied,
-                message: Some(err.to_string()),
-                reason_code: Some("clipboard_init_failed".to_owned()),
-                setup_route: None,
-                docs_url: None,
-            },
-        };
+        let clipboard =
+            match run_blocking_with_timeout("windows_clipboard_probe", PROBE_TIMEOUT, || {
+                arboard::Clipboard::new()
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            })
+            .await
+            {
+                Ok(Ok(())) => PermissionStatus {
+                    kind: PermissionKind::Clipboard,
+                    state: PermissionState::Granted,
+                    message: None,
+                    reason_code: None,
+                    setup_route: None,
+                    docs_url: None,
+                },
+                Ok(Err(message)) => PermissionStatus {
+                    kind: PermissionKind::Clipboard,
+                    state: PermissionState::Denied,
+                    message: Some(message),
+                    reason_code: Some("clipboard_init_failed".to_owned()),
+                    setup_route: None,
+                    docs_url: None,
+                },
+                Err(err) => PermissionStatus {
+                    kind: PermissionKind::Clipboard,
+                    state: PermissionState::Denied,
+                    message: Some(format!(
+                        "clipboard probe did not complete ({})",
+                        err.describe()
+                    )),
+                    reason_code: Some("probe_timed_out".to_owned()),
+                    setup_route: None,
+                    docs_url: None,
+                },
+            };
         Ok(vec![
             clipboard,
             // Accessibility on macOS gates `SendInput`-equivalent input

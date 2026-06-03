@@ -1,10 +1,22 @@
 use async_trait::async_trait;
 use nagori_core::Result;
+#[cfg(target_os = "linux")]
+use nagori_platform::run_blocking_with_timeout;
 use nagori_platform::{
     PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
 };
 #[cfg(target_os = "linux")]
+use std::time::Duration;
+#[cfg(target_os = "linux")]
 use wl_clipboard_rs::paste;
+
+/// Upper bound on how long a synchronous permission probe may block the async
+/// runtime. `get_mime_types` does a Wayland protocol round-trip and `wtype
+/// --help` spawns a subprocess; a wedged compositor or a hung `wtype` would
+/// otherwise pin the tokio worker for the whole `nagori doctor` / onboarding /
+/// Settings call. Mirrors the clipboard adapter's `PIPE_READ_TIMEOUT`.
+#[cfg(target_os = "linux")]
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Linux permission probe.
 ///
@@ -25,7 +37,7 @@ pub struct LinuxPermissionChecker;
 impl PermissionChecker for LinuxPermissionChecker {
     async fn check(&self, _ctx: &PermissionCheckContext) -> Result<Vec<PermissionStatus>> {
         Ok(vec![
-            check_clipboard(),
+            check_clipboard().await,
             check_accessibility().await,
             PermissionStatus {
                 kind: PermissionKind::InputMonitoring,
@@ -70,7 +82,32 @@ impl PermissionChecker for LinuxPermissionChecker {
 }
 
 #[cfg(target_os = "linux")]
-fn check_clipboard() -> PermissionStatus {
+async fn check_clipboard() -> PermissionStatus {
+    // `get_mime_types` does a synchronous Wayland protocol round-trip; a
+    // wedged compositor would otherwise pin the tokio worker for the whole
+    // report. Bound it on the blocking pool the same way the clipboard
+    // adapter bounds its own ops, degrading to a `probe_timed_out` row on
+    // overrun instead of hanging the doctor / onboarding call.
+    match run_blocking_with_timeout("linux_clipboard_probe", PROBE_TIMEOUT, probe_clipboard_mime)
+        .await
+    {
+        Ok(status) => status,
+        Err(err) => PermissionStatus {
+            kind: PermissionKind::Clipboard,
+            state: PermissionState::Denied,
+            message: Some(format!(
+                "Wayland clipboard probe did not complete ({}).",
+                err.describe()
+            )),
+            reason_code: Some("probe_timed_out".to_owned()),
+            setup_route: None,
+            docs_url: None,
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_clipboard_mime() -> PermissionStatus {
     // Probe the same Wayland-only path the capture loop uses, so the
     // doctor surfaces the actionable error when the compositor lacks
     // wlr-data-control / ext-data-control (GNOME's current default).
@@ -124,7 +161,8 @@ fn check_clipboard() -> PermissionStatus {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn check_clipboard() -> PermissionStatus {
+#[allow(clippy::unused_async)] // await lives behind the linux cfg branch
+async fn check_clipboard() -> PermissionStatus {
     PermissionStatus {
         kind: PermissionKind::Clipboard,
         state: PermissionState::Unsupported,
@@ -146,12 +184,16 @@ async fn check_accessibility() -> PermissionStatus {
     // attempt the paste; the compositor may still refuse it".
     #[cfg(target_os = "linux")]
     {
-        match tokio::process::Command::new("wtype")
+        // Bound the subprocess probe: a hung `wtype` (or a host under heavy
+        // fork pressure) must not pin the runtime for the whole report.
+        // `kill_on_drop` reaps the child if the deadline elapses and the
+        // future is dropped.
+        let probe = tokio::process::Command::new("wtype")
             .arg("--help")
-            .output()
-            .await
-        {
-            Ok(_) => PermissionStatus {
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+            Ok(Ok(_)) => PermissionStatus {
                 kind: PermissionKind::Accessibility,
                 state: PermissionState::Granted,
                 message: Some(
@@ -163,7 +205,7 @@ async fn check_accessibility() -> PermissionStatus {
                 setup_route: None,
                 docs_url: None,
             },
-            Err(err) => PermissionStatus {
+            Ok(Err(err)) => PermissionStatus {
                 kind: PermissionKind::Accessibility,
                 state: PermissionState::Denied,
                 message: Some(format!(
@@ -171,6 +213,17 @@ async fn check_accessibility() -> PermissionStatus {
                      copy-only. Install the `wtype` package to enable Ctrl+V synthesis."
                 )),
                 reason_code: Some("accessibility_wtype_missing".to_owned()),
+                setup_route: Some("setup/accessibility".to_owned()),
+                docs_url: None,
+            },
+            Err(_elapsed) => PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Denied,
+                message: Some(
+                    "checking for wtype timed out; auto-paste will fall back to copy-only."
+                        .to_owned(),
+                ),
+                reason_code: Some("probe_timed_out".to_owned()),
                 setup_route: Some("setup/accessibility".to_owned()),
                 docs_url: None,
             },
