@@ -13,6 +13,7 @@ vi.mock('./lib/tauri', () => ({
     pasteFailed: 'nagori://paste_failed',
     hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
     hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
+    settingsChanged: 'nagori://settings_changed',
   },
 }));
 
@@ -41,12 +42,22 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
+// The palette re-issues the current query when a `settings_changed` event
+// flips `recentOrder` (the sort order is applied backend-side as a search
+// runs, so the visible list otherwise keeps its old order). Mock the store so
+// the tests can assert the re-query without driving a real search.
+vi.mock('./stores/searchQuery.svelte', () => ({
+  cancelPendingQuery: vi.fn(),
+  refreshCurrent: vi.fn(async () => undefined),
+}));
+
 import App from './App.svelte';
 import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
-import type { PermissionStatus } from './lib/types';
+import type { AppSettings, PermissionStatus } from './lib/types';
 import { dismissHotkeyFailure, hotkeyFailureState } from './stores/hotkeyFailure.svelte';
 import { clearPasteDiagnostics, pasteDiagnosticsState } from './stores/pasteDiagnostics.svelte';
+import { refreshCurrent } from './stores/searchQuery.svelte';
 import { settingsState } from './stores/settings.svelte';
 import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
@@ -126,6 +137,31 @@ const capturePasteFailedHandler = (): { fire: (payload: PasteFailedPayload) => v
     },
   };
 };
+
+// Capture the `nagori://settings_changed` handler so a test can fire a
+// backend-published settings snapshot into App's palette-window listener.
+const captureSettingsChangedHandler = (): { fire: (payload: AppSettings) => void } => {
+  const slot: { handler?: (payload: AppSettings) => void } = {};
+  vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
+    if (event === 'nagori://settings_changed') {
+      slot.handler = handler as (payload: AppSettings) => void;
+    }
+    onReady?.();
+    return () => {};
+  });
+  return {
+    fire: (payload) => {
+      if (!slot.handler) throw new Error('settings_changed handler not registered');
+      slot.handler(payload);
+    },
+  };
+};
+
+// Minimal settings snapshot — cast through `unknown` like the other tests so a
+// case can override just the fields it exercises without spelling out every
+// AppSettings key.
+const settingsSnapshot = (overrides: Partial<AppSettings>): AppSettings =>
+  overrides as unknown as AppSettings;
 
 const grantedPermission: PermissionStatus = { kind: 'accessibility', state: 'granted' };
 
@@ -530,5 +566,58 @@ describe('App auto-paste toast rules', () => {
     const { findByText } = render(App);
     fire({ error: 'paste rejected after revoke' });
     await findByText('paste rejected after revoke');
+  });
+});
+
+describe('App settings_changed propagation', () => {
+  it('adopts the snapshot so palette-config reads update live', async () => {
+    // Settings runs in its own webview; the palette only learns of a change
+    // through the broadcast event. Adopting the payload keeps the
+    // `settingsState`-driven surfaces (row count, preview pane, palette
+    // hotkeys, paste-format default) live instead of stale until relaunch.
+    const { fire } = captureSettingsChangedHandler();
+    render(App);
+    fire(settingsSnapshot({ recentOrder: 'by_recency', paletteRowCount: 12 }));
+    await waitFor(() => {
+      expect(settingsState.settings?.paletteRowCount).toBe(12);
+    });
+  });
+
+  it('re-runs the current query when recentOrder changes', async () => {
+    // The sort order is applied backend-side as a search runs, so the visible
+    // list keeps its old order until the palette re-issues the query.
+    settingsState.settings = settingsSnapshot({ recentOrder: 'by_recency' });
+    const { fire } = captureSettingsChangedHandler();
+    render(App);
+    fire(settingsSnapshot({ recentOrder: 'by_use_count' }));
+    await waitFor(() => {
+      expect(refreshCurrent).toHaveBeenCalled();
+    });
+  });
+
+  it('re-runs the current query when a snapshot arrives before settings hydrate', async () => {
+    // settingsState.settings is still undefined (the snapshot beat the
+    // mount-time refresh). A `settings_changed` event only fires on a real
+    // edit, so any results already on screen need re-sorting — the unknown
+    // previous order must not skip the re-query.
+    const { fire } = captureSettingsChangedHandler();
+    render(App);
+    fire(settingsSnapshot({ recentOrder: 'by_recency' }));
+    await waitFor(() => {
+      expect(refreshCurrent).toHaveBeenCalled();
+    });
+  });
+
+  it('does not re-run the query when recentOrder is unchanged', async () => {
+    // A snapshot that only flips an unrelated field must adopt live without
+    // paying for a redundant backend search.
+    settingsState.settings = settingsSnapshot({ recentOrder: 'by_recency', paletteRowCount: 8 });
+    const { fire } = captureSettingsChangedHandler();
+    render(App);
+    fire(settingsSnapshot({ recentOrder: 'by_recency', paletteRowCount: 16 }));
+    await waitFor(() => {
+      expect(settingsState.settings?.paletteRowCount).toBe(16);
+    });
+    expect(refreshCurrent).not.toHaveBeenCalled();
   });
 });

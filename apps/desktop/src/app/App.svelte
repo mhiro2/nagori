@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
 
   import { hidePalette, openSettingsWindow } from './lib/commands';
-  import { messages } from './lib/i18n/index.svelte';
+  import { messages, setLocale } from './lib/i18n/index.svelte';
   import { isImeComposing } from './lib/keybindings';
   import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
@@ -21,8 +21,13 @@
     normalizePasteReason,
     recordPasteFailure,
   } from './stores/pasteDiagnostics.svelte';
-  import { cancelPendingQuery } from './stores/searchQuery.svelte';
-  import { accessibilityState, refreshSettings, settingsState } from './stores/settings.svelte';
+  import { cancelPendingQuery, refreshCurrent } from './stores/searchQuery.svelte';
+  import {
+    accessibilityState,
+    applySettingsSnapshot,
+    refreshSettings,
+    settingsState,
+  } from './stores/settings.svelte';
   import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
   // Settings runs in its own native window (`label: "settings"` in
@@ -131,13 +136,31 @@
         pasteFailureMessage = message;
       },
     );
-    // Settings lives in its own webview, so a theme change made there reaches
-    // this palette webview only through the broadcast `settingsChanged` event.
-    // Without this the palette kept its startup theme until the next launch
-    // (`main.ts` applies appearance once on load). OS-level light/dark switches
+    // Settings lives in its own webview, so a change made there reaches this
+    // palette webview only through the broadcast `settingsChanged` event.
+    // Without re-applying here the palette kept its startup configuration until
+    // the next launch. Appearance and locale don't live in `settingsState`
+    // (the theme is DOM/CSS state, the locale is the i18n module's own
+    // `$state`), so they're re-applied from the payload directly. Everything
+    // else the palette reads — row count, preview pane, palette hotkeys,
+    // paste-format default — flows from `settingsState`, so adopting the
+    // snapshot makes those `$derived` surfaces update live. `recentOrder` is
+    // applied backend-side as a search runs, so the visible list keeps its old
+    // order until we re-issue the current query. OS-level light/dark switches
     // in `system` mode are handled separately by `watchSystemTheme`.
     const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, (next) => {
       applyAppearance(next.appearance);
+      setLocale(next.locale);
+      const previousRecentOrder = settingsState.settings?.recentOrder;
+      applySettingsSnapshot(next);
+      // Re-sort the visible list when the order changed. A `settings_changed`
+      // event only fires on a real edit, so an unknown previous value (the
+      // snapshot arrived before the first `refreshSettings` hydrated
+      // `settingsState`) still means the order changed under any results
+      // already on screen — re-issue the query rather than skip.
+      if (previousRecentOrder !== next.recentOrder) {
+        void refreshCurrent();
+      }
     });
 
     return () => {

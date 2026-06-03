@@ -1557,6 +1557,24 @@ match in `SUPPORTED_LOCALES`. `zh-*` splits on the script subtag —
 `en`. `document.documentElement.lang` is updated whenever `setLocale`
 is called so WebView accessibility / spellcheck behave correctly.
 
+**Live propagation across webviews.** Settings runs in its own webview
+with its own module stores, so a change made there reaches the palette
+only through the `nagori://settings_changed` broadcast (the same
+`AppSettings` watch-channel snapshot the tray / hotkey reconcile
+consumes). On each broadcast `App.svelte` re-applies `appearance` and
+`locale` straight from the payload — both live *outside* `settingsState`
+(the theme is `<html data-theme>` / CSS state, the locale is the i18n
+module's own `$state`) — and adopts the rest of the snapshot into
+`settingsState` via `applySettingsSnapshot` (no extra `getSettings`
+round-trip), so the `$derived` palette surfaces (row count, preview
+pane, palette hotkeys, paste-format default) update live instead of
+staying pinned to the launch-time values. `recentOrder` is applied
+backend-side as a search runs, so the palette re-issues the current
+query when it changes to re-sort the visible list. A generation counter
+guards the adoption: a slow in-flight `refreshSettings` (kicked off at
+palette mount or on window focus) discards its own stale settings
+write-back rather than clobbering a fresher broadcast.
+
 **Adding a locale.**
 
 1. Add `apps/desktop/src/app/lib/i18n/locales/<tag>.ts` typed
