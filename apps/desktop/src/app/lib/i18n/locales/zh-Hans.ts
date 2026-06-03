@@ -148,6 +148,11 @@ export const zhHans: Messages = {
     aiBadge: 'AI',
     aiCancel: '取消',
     aiUnavailable: '当前无法使用 AI 操作。',
+    notApplicable: {
+      image: '操作不适用于图像。',
+      fileList: '操作不适用于文件。',
+      url: '此操作不适用于网址。',
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         '请在系统设置中启用 Apple Intelligence 以使用 AI 操作。',

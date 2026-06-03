@@ -152,6 +152,11 @@ export const ja: Messages = {
     aiBadge: 'AI',
     aiCancel: 'キャンセル',
     aiUnavailable: '現在 AI アクションは利用できません。',
+    notApplicable: {
+      image: '画像には適用できません。',
+      fileList: 'ファイルには適用できません。',
+      url: 'この操作は URL には適用できません。',
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'AI アクションを使うには、システム設定で Apple Intelligence を有効化してください。',

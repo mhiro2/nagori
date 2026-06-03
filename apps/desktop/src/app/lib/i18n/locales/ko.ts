@@ -152,6 +152,11 @@ export const ko: Messages = {
     aiBadge: 'AI',
     aiCancel: '취소',
     aiUnavailable: '지금은 AI 작업을 사용할 수 없습니다.',
+    notApplicable: {
+      image: '이미지에는 적용할 수 없습니다.',
+      fileList: '파일에는 적용할 수 없습니다.',
+      url: '이 작업은 URL에 적용할 수 없습니다.',
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'AI 동작을 사용하려면 시스템 설정에서 Apple Intelligence를 켜세요.',

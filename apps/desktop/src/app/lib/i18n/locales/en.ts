@@ -186,6 +186,15 @@ export type Messages = {
     aiBadge: string;
     aiCancel: string;
     aiUnavailable: string;
+    // Hover hint when an action can't run on the focused entry's content kind:
+    // an image carries no text, and file lists / bare URLs only carry incidental
+    // text (paths, the URL itself) the text actions would mangle. Keyed by the
+    // kinds the action picker actually gates.
+    notApplicable: {
+      image: string;
+      fileList: string;
+      url: string;
+    };
     // Localized remediation hints, keyed by the backend's `Remediation.i18n_key`.
     aiRemediation: Record<string, string>;
     tauriRequired: string;
@@ -648,6 +657,11 @@ export const en: Messages = {
     aiBadge: 'AI',
     aiCancel: 'Cancel',
     aiUnavailable: 'AI actions are unavailable right now.',
+    notApplicable: {
+      image: "Actions don't apply to images.",
+      fileList: "Actions don't apply to files.",
+      url: "This action doesn't apply to URLs.",
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Enable Apple Intelligence in System Settings to use AI actions.',

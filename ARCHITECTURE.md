@@ -1417,7 +1417,12 @@ controls that can only fail. The wired-engine fact reaches the frontend as the
 `ai_actions` capability (see §11), and `aiActionsSupported()` gates on it — the
 Settings *AI* tab and the action menu's AI actions disappear on a backendless
 host. Because the gate reads the capability, not a hardcoded platform, a host
-that wires an engine later restores those surfaces automatically. The Settings
+that wires an engine later restores those surfaces automatically. Actions are
+also gated by the focused entry's `ContentKind`: `ActionInspector` disables (with
+a reason hint) every action on an image or file list, and on a bare URL all but
+`RedactSecrets` — the one transform that is meaningful on a token-bearing URL.
+This is a UX layer over the daemon's `actionable_text` refusal, not the safety
+boundary. The Settings
 *Setup* tab is gated independently on whether its lone prerequisite needs
 action (`auto_paste` ∈ {`RequiresPermission`, `RequiresExternalTool`}): shown
 for the macOS Accessibility grant and the Linux `wtype` helper, hidden on

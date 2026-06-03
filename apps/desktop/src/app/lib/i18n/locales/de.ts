@@ -160,6 +160,11 @@ export const de: Messages = {
     aiBadge: 'KI',
     aiCancel: 'Abbrechen',
     aiUnavailable: 'KI-Aktionen sind derzeit nicht verfügbar.',
+    notApplicable: {
+      image: 'Aktionen sind für Bilder nicht verfügbar.',
+      fileList: 'Aktionen sind für Dateien nicht verfügbar.',
+      url: 'Diese Aktion ist für URLs nicht verfügbar.',
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Aktiviere Apple Intelligence in den Systemeinstellungen, um KI-Aktionen zu nutzen.',

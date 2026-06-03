@@ -17,6 +17,7 @@
     AiDoneEvent,
     AiErrorEvent,
     AiReplaceEvent,
+    ContentKind,
     QuickActionId,
     SearchResultDto,
   } from '../lib/types';
@@ -139,6 +140,40 @@
       : t.actionMenu.aiUnavailable;
   };
 
+  // Actions operate on an entry's text representation, so a content kind with
+  // no usable text gets its button disabled (with a reason) rather than
+  // silently running on an empty or meaningless string. Images carry no text;
+  // file lists and bare URLs carry only incidental text (paths, the URL itself)
+  // the text transforms would mangle — the lone exception is `RedactSecrets`,
+  // which is exactly what you want on a URL holding a token. The daemon also
+  // refuses text-less content, so this is UX, not the safety boundary.
+  const actionAppliesToKind = (kind: ContentKind, id: string): boolean => {
+    switch (kind) {
+      case 'image':
+      case 'fileList':
+        return false;
+      case 'url':
+        return id === 'RedactSecrets';
+      default:
+        return true;
+    }
+  };
+
+  // The localized hover hint for an action disabled because it can't run on the
+  // focused entry's content kind. `undefined` for kinds we never gate.
+  const inapplicableReason = (kind: ContentKind): string | undefined => {
+    switch (kind) {
+      case 'image':
+        return t.actionMenu.notApplicable.image;
+      case 'fileList':
+        return t.actionMenu.notApplicable.fileList;
+      case 'url':
+        return t.actionMenu.notApplicable.url;
+      default:
+        return undefined;
+    }
+  };
+
   // One descriptor per AI text action, gated by its own availability.
   // Empty on hosts with no AI backend (today non-macOS) so the menu shows
   // only quick actions — no dead AI buttons, no "unavailable" footnote.
@@ -156,12 +191,20 @@
       : [],
   );
   const anyAiAvailable = $derived(aiActionList.some((item) => item.available));
+  // True when the focused entry's content kind gates every surfaced AI action
+  // off (an image / file list / bare URL). The per-button "doesn't apply"
+  // reason already explains that, so the AI-availability footnote below would
+  // only contradict it.
+  const aiGatedByKind = $derived(
+    !!target && aiActionList.every((item) => !actionAppliesToKind(target.kind, item.action)),
+  );
   // Shown once below the list when nothing is runnable. The text actions all
   // resolve to the same on-device backend, so the first hint represents them
-  // all (e.g. "enable Apple Intelligence"). Suppressed entirely where AI has
-  // no backend — the actions are hidden there, so a footnote would be noise.
+  // all (e.g. "enable Apple Intelligence"). Suppressed where AI has no backend
+  // (the actions are hidden there, so a footnote would be noise) and where the
+  // content kind already gates every AI action off.
   const aiUnavailableReason = $derived(
-    !aiActionsSupported() || anyAiAvailable
+    !aiActionsSupported() || anyAiAvailable || aiGatedByKind
       ? undefined
       : (aiActionList.find((item) => item.reason)?.reason ?? t.actionMenu.aiUnavailable),
   );
@@ -299,23 +342,32 @@
   // One flat list of buttons: deterministic actions first, then AI actions
   // (each badged). The user scans by intent, not by section.
   const pickerItems = $derived([
-    ...QUICK_ACTION_IDS.map((id) => ({
-      key: `quick-${id}`,
-      label: t.actionMenu.actions[id],
-      isAi: false,
-      disabled: !target || busy,
-      pending: pending === id,
-      run: () => void run(id),
-    })),
-    ...aiActionList.map((item) => ({
-      key: `ai-${item.action}`,
-      label: item.label,
-      isAi: true,
-      disabled: !target || busy || !item.available,
-      reason: item.reason,
-      pending: aiPendingAction === item.action,
-      run: () => void runAiAction(item.action),
-    })),
+    ...QUICK_ACTION_IDS.map((id) => {
+      const applies = !target || actionAppliesToKind(target.kind, id);
+      return {
+        key: `quick-${id}`,
+        label: t.actionMenu.actions[id],
+        isAi: false,
+        disabled: !target || busy || !applies,
+        reason: target && !applies ? inapplicableReason(target.kind) : undefined,
+        pending: pending === id,
+        run: () => void run(id),
+      };
+    }),
+    ...aiActionList.map((item) => {
+      const applies = !target || actionAppliesToKind(target.kind, item.action);
+      return {
+        key: `ai-${item.action}`,
+        label: item.label,
+        isAi: true,
+        disabled: !target || busy || !item.available || !applies,
+        // A content mismatch is the more relevant explanation than the generic
+        // AI-availability hint, so it wins when both apply.
+        reason: target && !applies ? inapplicableReason(target.kind) : item.reason,
+        pending: aiPendingAction === item.action,
+        run: () => void runAiAction(item.action),
+      };
+    }),
   ]);
 
   // Reset feedback after a beat so repeated actions still flash visibly.

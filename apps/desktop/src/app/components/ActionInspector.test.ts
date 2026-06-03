@@ -267,6 +267,51 @@ describe('ActionInspector', () => {
     ).toBeTruthy();
   });
 
+  it('disables every action with a reason for an image target', async () => {
+    const { getByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'image' }), onClose: () => {} },
+    });
+    await flush();
+    const picker = getByTestId('action-picker');
+    const buttons = within(picker).getAllByRole('button');
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const btn of buttons) {
+      expect((btn as HTMLButtonElement).disabled).toBe(true);
+      expect(btn.getAttribute('title')).toBe("Actions don't apply to images.");
+    }
+  });
+
+  it('suppresses the AI-unavailable footnote when the kind gates every AI action off', async () => {
+    // AI is unavailable *and* the target is an image: the per-button reason
+    // already explains the image case, so the AI-availability footnote (which
+    // would say "enable Apple Intelligence") must not also appear.
+    vi.mocked(getAiAvailability).mockResolvedValue(availability(false));
+    const { queryByText } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'image' }), onClose: () => {} },
+    });
+    await flush();
+    expect(
+      queryByText('Enable Apple Intelligence in System Settings to use AI actions.'),
+    ).toBeNull();
+    expect(queryByText('AI actions are unavailable right now.')).toBeNull();
+  });
+
+  it('leaves only Redact secrets runnable for a URL target', async () => {
+    const { getByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'url' }), onClose: () => {} },
+    });
+    await flush();
+    // Redacting a token-bearing URL is meaningful, so that one stays enabled.
+    expect((getByTestId('quick-RedactSecrets') as HTMLButtonElement).disabled).toBe(false);
+    // The text transforms would mangle a bare URL, so they are gated off.
+    const gated = getByTestId('quick-FormatJson') as HTMLButtonElement;
+    expect(gated.disabled).toBe(true);
+    expect(gated.getAttribute('title')).toBe("This action doesn't apply to URLs.");
+    for (const action of TEXT_ACTIONS) {
+      expect((getByTestId(`ai-${action}`) as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
   it('cancels the in-flight AI run from the work area', async () => {
     const user = userEvent.setup();
     vi.mocked(startAiAction).mockResolvedValue('req-9');

@@ -161,6 +161,11 @@ export const es: Messages = {
     aiBadge: 'IA',
     aiCancel: 'Cancelar',
     aiUnavailable: 'Las acciones de IA no están disponibles en este momento.',
+    notApplicable: {
+      image: 'Las acciones no se aplican a imágenes.',
+      fileList: 'Las acciones no se aplican a archivos.',
+      url: 'Esta acción no se aplica a las URL.',
+    },
     aiRemediation: {
       'ai.unavailable.apple_intelligence_not_enabled':
         'Activa Apple Intelligence en Ajustes del sistema para usar acciones de IA.',
