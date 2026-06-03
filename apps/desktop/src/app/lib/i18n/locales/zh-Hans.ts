@@ -470,6 +470,9 @@ export const zhHans: Messages = {
     invalidInput: '输入无效。',
     unsupported: '当前平台不支持。',
     configuration: '配置错误。这是构建缺陷，请提交问题报告。',
+    internal: '出现错误。请重试。',
+    forbidden: '此条目不可用。',
+    paste: '自动粘贴失败。已复制 — 请手动粘贴。',
   },
   locales: {
     system: '系统（跟随操作系统）',

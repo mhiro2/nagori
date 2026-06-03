@@ -507,6 +507,9 @@ export const es: Messages = {
     invalidInput: 'Entrada no válida.',
     unsupported: 'No compatible con esta plataforma.',
     configuration: 'Error de configuración. Es un defecto de compilación — por favor, repórtalo.',
+    internal: 'Algo salió mal. Inténtalo de nuevo.',
+    forbidden: 'No disponible para esta entrada.',
+    paste: 'Falló el pegado automático. Copiado — pega manualmente.',
   },
   locales: {
     system: 'Sistema (seguir el SO)',

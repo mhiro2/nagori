@@ -489,6 +489,9 @@ export const ko: Messages = {
     invalidInput: '입력이 올바르지 않습니다.',
     unsupported: '이 플랫폼에서는 지원되지 않습니다.',
     configuration: '구성 오류입니다. 빌드 결함이므로 이슈로 보고해 주세요.',
+    internal: '문제가 발생했습니다. 다시 시도해 주세요.',
+    forbidden: '이 항목에서는 사용할 수 없습니다.',
+    paste: '자동 붙여넣기에 실패했습니다. 복사됨 — 수동으로 붙여넣으세요.',
   },
   locales: {
     system: '시스템 (OS 따름)',

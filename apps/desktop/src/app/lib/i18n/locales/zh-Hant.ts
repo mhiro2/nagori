@@ -471,6 +471,9 @@ export const zhHant: Messages = {
     invalidInput: '輸入無效。',
     unsupported: '目前的平台不支援。',
     configuration: '設定錯誤。這是建置缺陷，請提交問題回報。',
+    internal: '發生錯誤。請重試。',
+    forbidden: '此項目無法使用。',
+    paste: '自動貼上失敗。已複製 — 請手動貼上。',
   },
   locales: {
     system: '系統（跟隨作業系統）',

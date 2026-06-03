@@ -507,6 +507,9 @@ export const de: Messages = {
     invalidInput: 'Ungültige Eingabe.',
     unsupported: 'Auf dieser Plattform nicht unterstützt.',
     configuration: 'Konfigurationsfehler. Dies ist ein Build-Defekt — bitte melden.',
+    internal: 'Etwas ist schiefgelaufen. Bitte erneut versuchen.',
+    forbidden: 'Für diesen Eintrag nicht verfügbar.',
+    paste: 'Automatisches Einfügen fehlgeschlagen. Kopiert — bitte manuell einfügen.',
   },
   locales: {
     system: 'System (Betriebssystem folgen)',

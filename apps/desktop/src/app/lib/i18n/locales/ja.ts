@@ -492,6 +492,9 @@ export const ja: Messages = {
     invalidInput: '入力内容が無効です。',
     unsupported: 'このプラットフォームでは未対応です。',
     configuration: '設定エラー（ビルド側の不具合）です。Issue として報告してください。',
+    internal: '問題が発生しました。もう一度お試しください。',
+    forbidden: 'この項目では利用できません。',
+    paste: '自動ペーストに失敗しました。コピー済み — 手動で貼り付けてください。',
   },
   locales: {
     system: 'システム（OS に追従）',

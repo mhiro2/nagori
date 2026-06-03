@@ -1,5 +1,6 @@
 <script lang="ts">
   import { openUrlExternal } from '../lib/commands';
+  import { describeError } from '../lib/errors';
 
   type UrlBody = {
     type: 'url';
@@ -46,7 +47,23 @@
       await openUrlExternal(entryId, body.url);
       onClose();
     } catch (err) {
-      openUrlError = (err as { message?: string } | null)?.message ?? labels.openFailed;
+      // Route backend `CommandError`s through `describeError` so an
+      // `internal_error` from the OS opener — whose message embeds the raw
+      // URL and OS-level detail — is collapsed to a safe, code-keyed string
+      // instead of being rendered verbatim, while `forbidden` (non-Public
+      // entry) keeps its curated message. Transport-level `TauriBridgeError`s
+      // (`tauri.unknown` / `tauri.unavailable`, see lib/tauri.ts) carry a raw
+      // framework string that `describeError`'s unknown-code fallback would
+      // surface verbatim, so they — and any non-structured rejection — fall
+      // back to the contextual "could not open" label instead.
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? (err as { code: unknown }).code
+          : undefined;
+      openUrlError =
+        typeof code === 'string' && !code.startsWith('tauri.')
+          ? describeError(err)
+          : labels.openFailed;
     } finally {
       openingUrl = false;
     }

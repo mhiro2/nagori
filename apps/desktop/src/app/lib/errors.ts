@@ -23,6 +23,27 @@ export const describeError = (err: unknown): string => {
         return t.policy;
       case 'not_found':
         return t.notFound;
+      case 'internal_error':
+        // `internal_error` is the one variant whose backend message is built
+        // from raw OS detail — absolute paths (`install_cli`), updater feed
+        // URLs / signature-verification internals (`run_update`), symlink
+        // targets, preview temp-dir paths. None of that is actionable for the
+        // user and it leaks the local filesystem layout into the WebView, so
+        // always show a generic sentence and leave the verbatim cause to the
+        // backend `tracing` logs. Never fall through to the raw message.
+        return t.internal;
+      case 'forbidden':
+        // `forbidden` messages are static, curated strings composed by the
+        // command handler (e.g. "expanded preview is only available for Public
+        // entries"); safe to surface verbatim, with a translation fallback when
+        // the backend attached none.
+        return hasStringField(err, 'message') && err.message.length > 0 ? err.message : t.forbidden;
+      case 'paste_error':
+        // Auto-paste failures carry an actionable, already-curated hint
+        // ("install the `wtype` package", "Accessibility permission may be
+        // missing"); no DB/SQL/path detail flows through this path, so the
+        // message is safe to surface, with a generic fallback.
+        return hasStringField(err, 'message') && err.message.length > 0 ? err.message : t.paste;
       case 'invalid_input':
         // Backend `invalid_input` payloads tend to be actionable (e.g. the
         // regex_denylist limit messages produced by `compile_user_regex`).

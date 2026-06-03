@@ -507,6 +507,9 @@ export const fr: Messages = {
     unsupported: 'Non pris en charge sur cette plateforme.',
     configuration:
       'Erreur de configuration. Il s’agit d’un défaut de build — veuillez le signaler.',
+    internal: 'Une erreur est survenue. Veuillez réessayer.',
+    forbidden: 'Indisponible pour cette entrée.',
+    paste: 'Échec du collage automatique. Copié — collez manuellement.',
   },
   locales: {
     system: 'Système (suivre l’OS)',

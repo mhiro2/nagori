@@ -62,6 +62,49 @@ describe('describeError', () => {
     expect(describeError({ code: 'invalid_input', message: '' })).toBe(t().invalidInput);
   });
 
+  // `internal_error` is the one code whose backend message is built from raw
+  // OS detail (absolute install paths, updater feed URLs, symlink targets), so
+  // it must NEVER surface the message — always the generic localized string,
+  // even when a message is attached.
+  it('never surfaces the raw message for the internal_error code', () => {
+    expect(
+      describeError({ code: 'internal_error', message: 'failed to replace /Users/me/.local/bin' }),
+    ).toBe(t().internal);
+    expect(describeError({ code: 'internal_error' })).toBe(t().internal);
+  });
+
+  // `forbidden` messages are static curated strings composed by the command
+  // handler (e.g. the Public-only preview gate), so they are safe to surface.
+  it('prefers the backend message for the forbidden code', () => {
+    expect(
+      describeError({
+        code: 'forbidden',
+        message: 'expanded preview is only available for Public entries',
+      }),
+    ).toBe('expanded preview is only available for Public entries');
+  });
+
+  it('falls back to the localized label for forbidden when message is missing', () => {
+    expect(describeError({ code: 'forbidden' })).toBe(t().forbidden);
+    expect(describeError({ code: 'forbidden', message: '' })).toBe(t().forbidden);
+  });
+
+  // `paste_error` carries an actionable, already-curated hint with no
+  // path/SQL detail, so the message is safe to surface verbatim.
+  it('prefers the backend message for the paste_error code', () => {
+    expect(
+      describeError({
+        code: 'paste_error',
+        message: 'auto-paste failed: install the `wtype` package',
+      }),
+    ).toBe('auto-paste failed: install the `wtype` package');
+  });
+
+  it('falls back to the localized label for paste_error when message is missing', () => {
+    expect(describeError({ code: 'paste_error' })).toBe(t().paste);
+    expect(describeError({ code: 'paste_error', message: '' })).toBe(t().paste);
+  });
+
   it('falls back to the raw message for unrecognised codes', () => {
     expect(describeError({ code: 'something_else', message: 'fallback msg' })).toBe('fallback msg');
   });

@@ -478,6 +478,9 @@ export type Messages = {
     invalidInput: string;
     unsupported: string;
     configuration: string;
+    internal: string;
+    forbidden: string;
+    paste: string;
   };
   locales: {
     system: string;
@@ -984,6 +987,9 @@ export const en: Messages = {
     invalidInput: 'Invalid input.',
     unsupported: 'Unsupported on this platform.',
     configuration: 'Configuration error. This is a build defect — please report it.',
+    internal: 'Something went wrong. Please try again.',
+    forbidden: 'Not available for this entry.',
+    paste: 'Auto-paste failed. Copied — paste manually.',
   },
   locales: {
     system: 'System (follow OS)',
