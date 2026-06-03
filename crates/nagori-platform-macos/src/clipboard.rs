@@ -25,7 +25,7 @@ use objc2_app_kit::{
     NSPasteboardWriting,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 use time::OffsetDateTime;
 
 #[cfg(target_os = "macos")]
@@ -1073,7 +1073,15 @@ fn collect_file_url_paths(
             return FileUrlPaths::Oversized(observed_bytes);
         }
 
-        let raw = string.to_string();
+        // Finder frequently lands a *file reference URL* on the pasteboard;
+        // resolve it to a path-based URL before decoding so the palette shows
+        // the real path instead of the `/.file/id=…` handle. An unresolvable
+        // reference URL is dropped so the handle never leaks to the palette.
+        let raw = match resolve_file_url(&string) {
+            FileUrlResolution::Resolved(resolved) => resolved,
+            FileUrlResolution::Raw => string.to_string(),
+            FileUrlResolution::Drop => continue,
+        };
         if let Some(path) = file_url_to_path(&raw) {
             paths.push(path);
         }
@@ -1168,6 +1176,48 @@ fn ns_data_to_vec(data: &objc2_foundation::NSData) -> Option<Vec<u8>> {
         return None;
     }
     Some(data.to_vec())
+}
+
+/// Outcome of inspecting a pasteboard file URL string.
+#[cfg(target_os = "macos")]
+enum FileUrlResolution {
+    /// A file reference URL resolved to this path-based `file://` URL string.
+    Resolved(String),
+    /// Not a reference URL (or unparseable as an `NSURL`) — decode the raw
+    /// pasteboard string directly, preserving prior behaviour for plain path
+    /// URLs.
+    Raw,
+    /// A file reference URL whose target no longer resolves (deleted file,
+    /// unmounted volume). There is no real path to show, so the entry is
+    /// dropped rather than leaking the `/.file/id=…` handle.
+    Drop,
+}
+
+/// Resolve a pasteboard file URL string to a path-based `file://` URL.
+///
+/// Finder copies often publish a *file reference URL*
+/// (`file:///.file/id=6571367.5488049`, an inode-based handle) rather than a
+/// path URL. The `url` crate can't resolve that form, so [`file_url_to_path`]
+/// would surface the literal `/.file/id=…` to the palette even though pasting
+/// the entry elsewhere yields the real path. `NSURL::filePathURL` resolves a
+/// reference URL to its path-based equivalent; only file reference URLs are
+/// routed through it so an unresolvable handle is dropped while plain path
+/// URLs keep their existing raw-string decode.
+#[cfg(target_os = "macos")]
+fn resolve_file_url(raw: &NSString) -> FileUrlResolution {
+    let Some(url) = NSURL::URLWithString(raw) else {
+        return FileUrlResolution::Raw;
+    };
+    if !url.isFileReferenceURL() {
+        return FileUrlResolution::Raw;
+    }
+    match url
+        .filePathURL()
+        .and_then(|resolved| resolved.absoluteString())
+    {
+        Some(abs) => FileUrlResolution::Resolved(abs.to_string()),
+        None => FileUrlResolution::Drop,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1729,6 +1779,71 @@ mod tests {
             fallback_back,
             "write_representations falls back to write_entry when no rep is publishable",
             "all-skipped rep set should publish entry plain text via write_entry",
+        );
+    }
+
+    /// A Finder copy usually lands a *file reference URL*
+    /// (`file:///.file/id=…`) on the pasteboard rather than a path URL.
+    /// `collect_file_url_paths` must resolve it to the real filesystem path
+    /// instead of surfacing the literal `/.file/id=…` handle.
+    #[test]
+    fn file_reference_url_is_resolved_to_real_path() {
+        // A reference URL only resolves while its target exists, so back it
+        // with a real file. A unique name keeps parallel test binaries apart.
+        let path = std::env::temp_dir().join(format!("nagori-file-ref-{}", std::process::id()));
+        std::fs::write(&path, b"nagori").expect("write temp file");
+        let real = std::fs::canonicalize(&path).expect("canonicalize temp file");
+
+        // Mint the reference URL the way Finder does and grab its string form.
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+        let path_url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
+        let Some(reference) = path_url.fileReferenceURL() else {
+            // Some volumes (e.g. network mounts on CI) can't vend reference
+            // URLs; there's nothing to assert in that environment.
+            std::fs::remove_file(&path).ok();
+            return;
+        };
+        let reference_string = reference
+            .absoluteString()
+            .expect("reference URL has an absolute string")
+            .to_string();
+        assert!(
+            reference_string.contains("/.file/id="),
+            "expected a file reference URL, got {reference_string}"
+        );
+
+        let items = file_url_items(&[reference_string]);
+        let captured = collect_file_url_paths(&items, Some(64 * 1024));
+        let FileUrlPaths::Captured(paths) = captured else {
+            std::fs::remove_file(&path).ok();
+            panic!("a single resolvable file reference URL must be captured");
+        };
+        assert_eq!(paths.len(), 1, "expected exactly one resolved path");
+        let resolved = std::fs::canonicalize(&paths[0]).expect("resolved path exists");
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            !paths[0].contains("/.file/id="),
+            "file reference URL leaked unresolved: {}",
+            paths[0]
+        );
+        assert_eq!(resolved, real);
+    }
+
+    /// A file reference URL whose target can't be resolved (here a bogus id)
+    /// must be dropped rather than leaking the `/.file/id=…` handle that the
+    /// `url` crate would otherwise decode verbatim.
+    #[test]
+    fn unresolvable_file_reference_url_is_dropped() {
+        let bogus = "file:///.file/id=999999999.999999999".to_owned();
+        let items = file_url_items(&[bogus]);
+
+        let FileUrlPaths::Captured(paths) = collect_file_url_paths(&items, Some(64 * 1024)) else {
+            panic!("a single file URL must be captured under the limits");
+        };
+        assert!(
+            paths.is_empty(),
+            "an unresolvable reference URL should be dropped, got {paths:?}"
         );
     }
 
