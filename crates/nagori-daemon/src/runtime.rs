@@ -731,7 +731,7 @@ impl NagoriRuntime {
         let policy = action.input_policy();
         let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
         let classifier = SensitivityClassifier::try_new(settings)?;
-        let raw = entry.plain_text().unwrap_or_default();
+        let raw = actionable_text(&entry)?;
         // Secrets must be redacted (or refused); private entries are redacted
         // unconditionally; `require_redaction` forces redaction even on Public
         // entries. `RedactSecrets` is the one action allowed to consume a
@@ -980,6 +980,17 @@ fn log_search(mode: SearchMode, cache_hit: bool, row_count: usize, started: Inst
     );
 }
 
+/// The entry's text for an action to operate on, or [`AppError::InvalidInput`]
+/// when the content has no text representation (e.g. an image). Callers
+/// previously defaulted a missing representation to an empty string, which let
+/// actions run silently on nothing; surfacing the refusal lets the UI explain
+/// why an action can't run.
+fn actionable_text(entry: &ClipboardEntry) -> Result<&str> {
+    entry
+        .plain_text()
+        .ok_or_else(|| AppError::InvalidInput("this entry has no text to act on".to_owned()))
+}
+
 /// Shapes an entry's text for a model-backed AI action: redacts per
 /// sensitivity, enforces the byte cap, and refuses input over the token budget.
 fn shape_ai_input(
@@ -987,7 +998,7 @@ fn shape_ai_input(
     classifier: &SensitivityClassifier,
     policy: &AiInputPolicy,
 ) -> Result<String> {
-    let raw = entry.plain_text().unwrap_or_default();
+    let raw = actionable_text(entry)?;
     let input = match entry.sensitivity {
         Sensitivity::Secret | Sensitivity::Blocked => {
             return Err(AppError::Policy(
@@ -2159,6 +2170,52 @@ mod tests {
                 .await
                 .unwrap_or_else(|err| panic!("{action:?} must run under defaults; got {err:?}"));
         }
+    }
+
+    /// Inserts a minimal image entry (no text representation) and returns its id.
+    async fn add_image_entry(runtime: &NagoriRuntime) -> EntryId {
+        let content = ClipboardContent::Image(nagori_core::ImageContent {
+            width: Some(1),
+            height: Some(1),
+            byte_count: 4,
+            mime_type: Some("image/png".to_owned()),
+            pending_bytes: Some(vec![0u8, 1, 2, 3]),
+        });
+        runtime
+            .store
+            .insert(EntryFactory::from_content(content, None, None))
+            .await
+            .expect("image entry should be inserted")
+    }
+
+    #[tokio::test]
+    async fn quick_action_on_image_is_invalid_input() {
+        use nagori_core::QuickActionId;
+        // Images have no text representation, so a quick action must refuse with
+        // InvalidInput rather than silently running on an empty string.
+        let (runtime, _) = runtime_with_memory_clipboard();
+        let id = add_image_entry(&runtime).await;
+        let err = runtime
+            .run_quick_action(id, QuickActionId::SummarizeFirstSentence)
+            .await
+            .expect_err("quick action on an image must be refused");
+        assert!(matches!(err, AppError::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn ai_action_on_image_is_invalid_input() {
+        // Same guard on the model-backed path: an image carries no text to shape.
+        let (runtime, _) = runtime_with_mock_ai();
+        runtime
+            .save_settings(ai_enabled_settings(AppSettings::default()))
+            .await
+            .expect("save settings");
+        let id = add_image_entry(&runtime).await;
+        let err = runtime
+            .run_ai_action(id, AiActionId::Summarize)
+            .await
+            .expect_err("ai action on an image must be refused");
+        assert!(matches!(err, AppError::InvalidInput(_)), "got {err:?}");
     }
 
     #[tokio::test]

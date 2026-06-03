@@ -1379,7 +1379,10 @@ Two distinct, type-separated families:
   language model and are always available, independent of the AI provider
   configuration. `NagoriRuntime::run_quick_action` shapes the input through the
   settings-aware redaction classifier and the per-action `max_bytes` cap before
-  the runner sees it.
+  the runner sees it. Both action families operate on the entry's text
+  representation, so content with none (an image) is refused with `InvalidInput`
+  rather than run on an empty string — `shape_ai_input` and the quick-action path
+  share the same `actionable_text` guard.
 - **AI actions** (`AiActionId`: `Summarize`, `Translate`, `Rewrite`,
   `FormatMarkdown`, `ExtractTasks`, `ExplainCode`) are model-backed and resolved
   through the `AiActionEngine`. On macOS the text-generation actions
