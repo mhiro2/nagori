@@ -1,5 +1,6 @@
 use nagori_core::{
-    AiProviderKind, AppError, AppSettings, EntryRepository, Result, SearchQuery,
+    AiProviderKind, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository,
+    MAX_ENTRY_SIZE_BYTES, RepresentationSummary, Result, SearchQuery,
     is_text_safe_for_default_output,
 };
 use nagori_ipc::{
@@ -11,6 +12,7 @@ use nagori_ipc::{
 };
 use nagori_platform::PermissionCheckContext;
 use nagori_search::normalize_text;
+use std::collections::HashMap;
 use std::time::Instant;
 use time::OffsetDateTime;
 
@@ -97,34 +99,14 @@ impl NagoriRuntime {
                 let entries = self.list_recent(limit).await?;
                 let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
                 let summaries = self.store.list_representation_summaries(&ids).await?;
-                let dtos = entries
-                    .into_iter()
-                    .map(|entry| {
-                        let include_text =
-                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                        let entry_id = entry.id;
-                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-                        EntryDto::from_entry(entry, include_text)
-                            .with_representation_summaries(reps)
-                    })
-                    .collect();
+                let dtos = entry_dtos_within_budget(entries, &summaries, include_sensitive);
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::ListPinned(ListPinnedRequest { include_sensitive }) => {
                 let entries = self.list_pinned().await?;
                 let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
                 let summaries = self.store.list_representation_summaries(&ids).await?;
-                let dtos = entries
-                    .into_iter()
-                    .map(|entry| {
-                        let include_text =
-                            include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                        let entry_id = entry.id;
-                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-                        EntryDto::from_entry(entry, include_text)
-                            .with_representation_summaries(reps)
-                    })
-                    .collect();
+                let dtos = entry_dtos_within_budget(entries, &summaries, include_sensitive);
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::AddEntry(AddEntryRequest { text }) => {
@@ -298,6 +280,57 @@ impl NagoriRuntime {
     }
 }
 
+/// Materialise a list of entries into `EntryDto`s while bounding the peak
+/// heap the daemon pays to do so.
+///
+/// `EntryDto::from_entry` clones each row's full plain text (up to
+/// `MAX_ENTRY_SIZE_BYTES` ≈ 768 KiB). A `list_recent` / `list_pinned`
+/// response capped at `MAX_READ_LIMIT` (200) rows of large entries could
+/// otherwise pull >100 MiB of text into RSS *before* the post-serialize wire
+/// guard (`MAX_IPC_RESPONSE_BYTES`) rejects the whole payload — that guard
+/// protects the wire and the client's bounded reader, not daemon memory.
+///
+/// We stop including rows once the cumulative *materialised text* would
+/// exceed `MAX_ENTRY_SIZE_BYTES` — the same ceiling a single entry's text is
+/// held to, sized so the JSON-escaped payload still fits `MAX_IPC_BYTES`. The
+/// client therefore receives a bounded prefix instead of a `response_too_large`
+/// rejection, and the peak text allocation is held near one entry's worth
+/// rather than scaling with the row count. The first row is always included
+/// even when it alone exceeds the budget, so a single large pinned entry never
+/// collapses the list to empty. Each candidate's text length is read without
+/// cloning, so an over-budget row is never materialised.
+fn entry_dtos_within_budget(
+    entries: Vec<ClipboardEntry>,
+    summaries: &HashMap<EntryId, Vec<RepresentationSummary>>,
+    include_sensitive: bool,
+) -> Vec<EntryDto> {
+    let total = entries.len();
+    let mut dtos = Vec::with_capacity(total);
+    let mut used: usize = 0;
+    for entry in entries {
+        let include_text = include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
+        let text_len = if include_text {
+            entry.plain_text().map_or(0, str::len)
+        } else {
+            0
+        };
+        if !dtos.is_empty() && used.saturating_add(text_len) > MAX_ENTRY_SIZE_BYTES {
+            tracing::warn!(
+                returned = dtos.len(),
+                dropped = total - dtos.len(),
+                budget_bytes = MAX_ENTRY_SIZE_BYTES,
+                "ipc_list_truncated_to_byte_budget"
+            );
+            break;
+        }
+        used = used.saturating_add(text_len);
+        let entry_id = entry.id;
+        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+        dtos.push(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps));
+    }
+    dtos
+}
+
 const fn is_ipc_control_request(request: &IpcRequest) -> bool {
     matches!(
         request,
@@ -350,5 +383,77 @@ pub(crate) const fn error_code(err: &AppError) -> &'static str {
         AppError::Unsupported(_) => "unsupported",
         AppError::Configuration(_) => "configuration_error",
         AppError::Paste { .. } => "paste_error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nagori_core::EntryFactory;
+
+    fn entry_with_text(len: usize) -> ClipboardEntry {
+        // `from_text` tags the row `Sensitivity::Unknown`, which
+        // `is_text_safe_for_default_output` admits, so the DTO carries the
+        // full text and exercises the cloning path the budget bounds.
+        EntryFactory::from_text("a".repeat(len))
+    }
+
+    #[test]
+    fn keeps_every_row_when_under_budget() {
+        let entries = vec![
+            entry_with_text(16),
+            entry_with_text(16),
+            entry_with_text(16),
+        ];
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        assert_eq!(dtos.len(), 3);
+        assert!(dtos.iter().all(|d| d.text.is_some()));
+    }
+
+    #[test]
+    fn truncates_once_cumulative_text_exceeds_budget() {
+        // Three rows at 300 KiB each: 300 + 300 = 600 KiB fits under the
+        // 768 KiB ceiling, the third (900 KiB total) does not.
+        let chunk = 300 * 1024;
+        let entries = vec![
+            entry_with_text(chunk),
+            entry_with_text(chunk),
+            entry_with_text(chunk),
+        ];
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        assert_eq!(dtos.len(), 2, "the third row must be dropped at the budget");
+    }
+
+    #[test]
+    fn always_keeps_the_first_row_even_when_oversized() {
+        // A single row whose text alone exceeds the budget must still be
+        // returned — dropping it would yield a confusing empty list.
+        let entries = vec![
+            entry_with_text(MAX_ENTRY_SIZE_BYTES + 1024),
+            entry_with_text(16),
+        ];
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        assert_eq!(dtos.len(), 1);
+        assert!(dtos[0].text.is_some());
+    }
+
+    #[test]
+    fn sensitive_rows_cost_nothing_when_text_is_withheld() {
+        // When text is withheld (sensitive row, `include_sensitive = false`)
+        // the row contributes no text bytes, so a long list of them is not
+        // truncated by the text budget.
+        let mut entries = Vec::new();
+        for _ in 0..8 {
+            let mut entry = entry_with_text(300 * 1024);
+            entry.sensitivity = nagori_core::Sensitivity::Secret;
+            entries.push(entry);
+        }
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        assert_eq!(
+            dtos.len(),
+            8,
+            "withheld-text rows must not consume the budget"
+        );
+        assert!(dtos.iter().all(|d| d.text.is_none()));
     }
 }
