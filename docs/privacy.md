@@ -144,6 +144,15 @@ denylist is an `OR` of every line.
   cache: an LRU sweep bounded by `max_thumbnail_total_bytes`
   (default 64 MiB) evicts cold rows, and `ON DELETE CASCADE`
   removes the thumbnail whenever the source entry is deleted.
+- Quick Look (macOS Cmd+Y) materialises the previewed `Public`
+  entry to a plaintext temp file under
+  `std::env::temp_dir()/nagori-preview/<entry_id>.<ext>` so the OS
+  preview generator can read it. That cache is scrubbed at every
+  history-erasure point so a previewed body does not outlive its
+  row: the whole directory is wiped at app launch, `delete` removes
+  the entry's file, and **Clear history** / **clear-on-quit** purge
+  the directory. The files are regenerated on demand on the next
+  preview, so the scrub is lossless.
 - The "open URL in browser" action from the expanded preview is
   also gated to `Public` entries with an `https` / `http` scheme,
   and the desktop pops a confirm dialog that shows the resolved host

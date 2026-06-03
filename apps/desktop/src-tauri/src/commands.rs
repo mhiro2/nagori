@@ -542,9 +542,25 @@ pub async fn add_entry(state: State<'_, AppState>, text: String) -> CommandResul
 #[tauri::command]
 pub async fn delete_entry(state: State<'_, AppState>, id: String) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
-    state.runtime.delete_entry(entry_id).await?;
-    state.clear_last_pasted_if(entry_id);
-    Ok(())
+    match state.runtime.delete_entry(entry_id).await {
+        Ok(()) => {
+            state.clear_last_pasted_if(entry_id);
+            // Drop the plaintext Quick Look temp file (if the entry was
+            // previewed) so it does not outlive the now-deleted history row.
+            remove_preview_temp_files_for(entry_id);
+            Ok(())
+        }
+        // The row was already gone (retention / another delete raced us), but
+        // its plaintext preview temp file may still be on disk — drop it for
+        // the same reason as the Ok path, matching `delete_entries`' NotFound
+        // handling. Still surface NotFound so the frontend reconciles its list.
+        Err(AppError::NotFound) => {
+            state.clear_last_pasted_if(entry_id);
+            remove_preview_temp_files_for(entry_id);
+            Err(AppError::NotFound.into())
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Bulk-delete a list of entries. Used by the palette's multi-select mode
@@ -565,10 +581,12 @@ pub async fn delete_entries(state: State<'_, AppState>, ids: Vec<String>) -> Com
         match state.runtime.delete_entry(entry_id).await {
             Ok(()) => {
                 state.clear_last_pasted_if(entry_id);
+                remove_preview_temp_files_for(entry_id);
                 purged += 1;
             }
             Err(AppError::NotFound) => {
                 state.clear_last_pasted_if(entry_id);
+                remove_preview_temp_files_for(entry_id);
             }
             Err(err) => return Err(err.into()),
         }
@@ -648,11 +666,24 @@ pub async fn copy_entries_combined(
 /// entries are intentionally preserved.
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AppState>) -> CommandResult<usize> {
+    Ok(clear_non_pinned_and_previews(&state).await?)
+}
+
+/// Soft-delete every non-pinned entry, drop the tracked last-pasted pointer,
+/// and wipe the plaintext Quick Look preview cache. Returns the purged count.
+///
+/// This is the single clear-history primitive shared by the `clear_history`
+/// Tauri command, the tray "Clear History" item, and the `ClearHistory`
+/// secondary hotkey, so the three surfaces cannot drift on which cleanup steps
+/// they run — in particular so none of them can skip the preview-cache purge
+/// and leave a cleared `Public` body in `/tmp`. Dropping the last-pasted
+/// pointer keeps a later repaste from resolving an evicted id; the cache purge
+/// may also drop a pinned entry's temp file, but that file regenerates on the
+/// next preview, so the purge is lossless.
+pub(crate) async fn clear_non_pinned_and_previews(state: &AppState) -> Result<usize, AppError> {
     let purged = state.runtime.clear_non_pinned().await?;
-    // Bulk-clear may have removed the tracked last-pasted entry. Drop the
-    // pointer so the next repaste falls through to the recency fallback
-    // instead of returning NotFound for an evicted id.
     state.clear_last_pasted();
+    purge_preview_temp_dir();
     Ok(purged)
 }
 
@@ -991,7 +1022,16 @@ fn extension_for_image_mime(mime: &str) -> &'static str {
     }
 }
 
-/// Write `bytes` to `~/.../nagori-preview/<entry>.<ext>` and return the
+/// Directory holding the Quick Look preview temp files (`<entry_id>.<ext>`).
+///
+/// Lives under `std::env::temp_dir()` so it survives only as long as the OS
+/// keeps `/tmp`; nagori additionally wipes it at startup and prunes it on
+/// delete / clear so a previewed `Public` body never outlives its history row.
+pub(crate) fn preview_temp_dir() -> PathBuf {
+    std::env::temp_dir().join("nagori-preview")
+}
+
+/// Write `bytes` to `<preview_temp_dir>/<entry>.<ext>` and return the
 /// path. The directory is created with the same private-mode helper the
 /// `SQLite` store uses so the temp payload is not world-readable; reusing
 /// the entry id as the filename means repeated previews of the same
@@ -1001,7 +1041,7 @@ fn write_preview_temp_file(
     bytes: &[u8],
     extension: &str,
 ) -> Result<PathBuf, CommandError> {
-    let dir = std::env::temp_dir().join("nagori-preview");
+    let dir = preview_temp_dir();
     nagori_storage::ensure_private_directory(&dir).map_err(|err| {
         CommandError::internal(format!(
             "could not prepare preview temp dir {}: {err}",
@@ -1016,6 +1056,66 @@ fn write_preview_temp_file(
         ))
     })?;
     Ok(file)
+}
+
+/// Remove the entire preview temp directory.
+///
+/// Called at startup (wipe the previous session's leftovers), from
+/// `clear_history`, and from the `clear_on_quit` exit path so the palette's
+/// "clear history" promise extends to the plaintext Quick Look cache. These
+/// files are an ephemeral cache — a previewed entry regenerates its temp file
+/// on the next `preview_entry` — so removal is purely a security-hygiene step
+/// and is best-effort: a missing dir is a no-op and any IO error is logged at
+/// debug rather than surfaced.
+pub(crate) fn purge_preview_temp_dir() {
+    purge_preview_temp_dir_in(&preview_temp_dir());
+}
+
+fn purge_preview_temp_dir_in(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::debug!(
+            dir = %dir.display(),
+            error = %err,
+            "preview_temp_dir_purge_failed",
+        ),
+    }
+}
+
+/// Remove any preview temp file keyed on `entry_id` (`<entry_id>.<ext>`,
+/// regardless of extension) so a deleted entry's previously-previewed body
+/// does not linger in `/tmp`. Best-effort, matching [`purge_preview_temp_dir`]:
+/// a missing directory / file is a no-op and IO errors are logged at debug.
+pub(crate) fn remove_preview_temp_files_for(entry_id: EntryId) {
+    remove_preview_temp_files_in(&preview_temp_dir(), entry_id);
+}
+
+fn remove_preview_temp_files_in(dir: &Path, entry_id: EntryId) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = entry_id.to_string();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        // Match exactly `<entry_id>.<ext>`: strip the id and require a literal
+        // dot next, so id `…0001` cannot also sweep id `…00010`'s file.
+        let matches = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(&prefix))
+            .is_some_and(|rest| rest.starts_with('.'));
+        if matches
+            && let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(
+                path = %path.display(),
+                error = %err,
+                "preview_temp_file_remove_failed",
+            );
+        }
+    }
 }
 
 // Tauri injects `WebviewWindow` by value into command parameters, so the
@@ -1872,6 +1972,63 @@ mod helper_tests {
         let original = EntryId::new();
         let parsed = parse_entry_id(&original.to_string()).expect("uuid parses");
         assert_eq!(parsed, original);
+    }
+
+    /// Unique scratch dir under the OS temp root so preview-cleanup tests
+    /// never touch the real `nagori-preview/` dir or race each other.
+    fn scratch_preview_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nagori-preview-test-{}", EntryId::new()));
+        std::fs::create_dir_all(&dir).expect("create scratch preview dir");
+        dir
+    }
+
+    #[test]
+    fn remove_preview_temp_files_targets_only_the_entry_id() {
+        let dir = scratch_preview_dir();
+        let target = EntryId::new();
+        let other = EntryId::new();
+        // The target's image + text temp files, plus another entry's file and
+        // a file whose name merely *starts with* the target id followed by a
+        // non-dot character — that last one must survive (prefix-collision
+        // guard).
+        let target_png = dir.join(format!("{target}.png"));
+        let target_txt = dir.join(format!("{target}.txt"));
+        let other_txt = dir.join(format!("{other}.txt"));
+        let look_alike = dir.join(format!("{target}-decoy.txt"));
+        for path in [&target_png, &target_txt, &other_txt, &look_alike] {
+            std::fs::write(path, b"x").expect("write fixture");
+        }
+
+        remove_preview_temp_files_in(&dir, target);
+
+        assert!(
+            !target_png.exists(),
+            "target image temp file must be removed"
+        );
+        assert!(
+            !target_txt.exists(),
+            "target text temp file must be removed"
+        );
+        assert!(other_txt.exists(), "an unrelated entry's file must survive");
+        assert!(
+            look_alike.exists(),
+            "a name that only shares the id prefix must not be swept",
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_preview_temp_dir_removes_everything_and_tolerates_a_missing_dir() {
+        let dir = scratch_preview_dir();
+        std::fs::write(dir.join(format!("{}.txt", EntryId::new())), b"x").expect("write fixture");
+
+        purge_preview_temp_dir_in(&dir);
+        assert!(!dir.exists(), "purge must remove the whole preview dir");
+
+        // Second call on the now-missing dir must be a silent no-op, matching
+        // the best-effort contract (startup runs it before the dir exists).
+        purge_preview_temp_dir_in(&dir);
     }
 
     fn url_entry(raw: &str) -> nagori_core::ClipboardEntry {

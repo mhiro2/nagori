@@ -299,18 +299,19 @@ fn clear_history(app: &AppHandle) {
     use tauri_plugin_notification::NotificationExt;
 
     // Mirrors the `SecondaryHotkeyAction::ClearHistory` flow in `hotkey.rs`:
-    // soft-delete every non-pinned entry (pinned rows are intentionally
-    // preserved), drop the tracked last-pasted pointer so a later repaste
-    // doesn't resolve an evicted id, and confirm with a notification since
-    // the tray click gives no other feedback. We additionally emit
+    // both route through `commands::clear_non_pinned_and_previews` so the
+    // soft-delete, the last-pasted reset, and the plaintext preview-cache
+    // purge always run together (a tray-only path skipping the purge would
+    // leave cleared `Public` bodies in `/tmp`). We additionally emit
     // `CLIPBOARD_CHANGED_EVENT` so an open palette re-runs its query and the
-    // cleared rows disappear live rather than lingering until the next open.
+    // cleared rows disappear live rather than lingering until the next open,
+    // and confirm with a notification since the tray click gives no other
+    // feedback.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        match state.runtime.clear_non_pinned().await {
+        match crate::commands::clear_non_pinned_and_previews(&state).await {
             Ok(purged) => {
-                state.clear_last_pasted();
                 let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
                 let _ = app
                     .notification()

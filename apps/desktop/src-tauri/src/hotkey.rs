@@ -414,26 +414,31 @@ pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: Secon
                     }
                 }
             }
-            SecondaryHotkeyAction::ClearHistory => match state.runtime.clear_non_pinned().await {
-                Ok(purged) => {
-                    state.clear_last_pasted();
-                    // Re-run an open palette's query so the cleared rows
-                    // disappear live, matching the tray "Clear History" item.
-                    {
-                        use tauri::Emitter;
-                        let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+            // Route through the shared clear-history primitive (same one the
+            // `clear_history` command and the tray item use) so the
+            // soft-delete, last-pasted reset, and plaintext preview-cache
+            // purge always run together.
+            SecondaryHotkeyAction::ClearHistory => {
+                match crate::commands::clear_non_pinned_and_previews(&state).await {
+                    Ok(purged) => {
+                        // Re-run an open palette's query so the cleared rows
+                        // disappear live, matching the tray "Clear History" item.
+                        {
+                            use tauri::Emitter;
+                            let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+                        }
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("Nagori")
+                            .body(format!("Cleared {purged} non-pinned entries."))
+                            .show();
                     }
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("Nagori")
-                        .body(format!("Cleared {purged} non-pinned entries."))
-                        .show();
+                    Err(err) => {
+                        tracing::warn!(error = %err, "clear_history_failed");
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(error = %err, "clear_history_failed");
-                }
-            },
+            }
         }
     });
 }

@@ -88,6 +88,13 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Wipe any plaintext Quick Look preview temp files left by a
+            // previous run before anything else. These are an ephemeral cache
+            // (`preview_entry` regenerates them on demand), so clearing them
+            // unconditionally at launch means a crashed / force-quit session
+            // never leaves a previewed `Public` body lingering in `/tmp`.
+            commands::purge_preview_temp_dir();
+
             let state = match AppState::try_new() {
                 Ok(state) => state,
                 Err(err) => {
@@ -359,6 +366,10 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
                 runtime.clear_non_pinned(),
             )
             .await;
+            // `clear_on_quit` promises a clean slate on exit; extend that to
+            // the plaintext Quick Look cache so a previewed Public body is not
+            // left behind in `/tmp` for the next user of the machine.
+            commands::purge_preview_temp_dir();
         }
     });
 }

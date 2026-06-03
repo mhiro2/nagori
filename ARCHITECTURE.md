@@ -1207,7 +1207,15 @@ not duplicate runtime logic.
   `preview_quick_look = Unsupported` (Windows has no OS-provided
   overlay; Linux lacks a desktop-environment-agnostic equivalent), and
   the palette gates the keybinding on the capability snapshot so the
-  shortcut becomes inert outside macOS.
+  shortcut becomes inert outside macOS. The `<entry_id>.<ext>` temp files
+  are a plaintext cache, so they are scrubbed on every history-erasure
+  surface rather than left to accumulate: the desktop `setup` hook wipes
+  the whole `nagori-preview/` dir at launch (clearing a crashed session's
+  leftovers), `delete_entry` / `delete_entries` remove the matching
+  `<entry_id>.*` file, `clear_history` purges the whole dir, and the
+  `clear_on_quit` exit path purges it again. A regenerate-on-demand cache
+  means a pinned entry's temp file removed by `clear_history` is simply
+  rebuilt on its next preview.
 - `SettingsView.svelte` — tabbed *Setup* / *General* / *Privacy* / *CLI* /
   *Advanced* settings panel. The Setup tab mounts `SetupRoute`, which
   hosts a `PermissionCard` per OS permission and is selected by default
@@ -1613,8 +1621,9 @@ change.
   hotkey.
 - **Clear-on-quit** — when `AppSettings.clear_on_quit` is true,
   `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
-  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries before
-  the tokio runtime tears down. Pinned entries are always preserved.
+  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries and
+  purges the `nagori-preview/` plaintext temp cache before the tokio
+  runtime tears down. Pinned entries are always preserved.
   `WindowEvent::CloseRequested` is *not* a delete trigger: the same
   handler intercepts it on every OS, calls `prevent_close` and hides the
   main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the
