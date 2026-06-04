@@ -204,9 +204,9 @@ pub fn run() {
             commands::close_palette,
             commands::paste_entry_from_palette,
             commands::copy_entry_from_palette,
-            commands::get_entry_preview,
-            commands::get_entry_preview_full,
-            commands::preview_entry,
+            commands::preview::get_entry_preview,
+            commands::preview::get_entry_preview_full,
+            commands::preview::preview_entry,
             commands::add_entry,
             commands::delete_entry,
             commands::delete_entries,
@@ -234,9 +234,9 @@ pub fn run() {
             commands::hide_palette,
             commands::open_settings,
             commands::close_settings,
-            commands::check_for_updates,
-            commands::cli_install_status,
-            commands::install_cli,
+            commands::updater::check_for_updates,
+            commands::installer::cli_install_status,
+            commands::installer::install_cli,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
