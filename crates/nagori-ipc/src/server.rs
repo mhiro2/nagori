@@ -237,7 +237,9 @@ impl IpcServerHealth {
     /// storing it. Test-only — the production accept loops use
     /// [`Self::record_redacted_panic`] so the same redacted string also
     /// reaches the `tracing` warn line, not just the health surface.
-    #[cfg(test)]
+    /// Gated to the Unix test module that owns its only callers; without
+    /// the `unix` bound it reads as dead code in the Windows test build.
+    #[cfg(all(test, unix))]
     fn record_panic(&self, message: &str) {
         self.record_redacted_panic(redact_panic_message(message));
     }

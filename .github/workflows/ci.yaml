@@ -75,6 +75,8 @@ jobs:
         run: cargo clippy -p nagori-platform-windows --all-targets -- -D warnings
       - name: Run tests (Windows platform crate)
         run: cargo test -p nagori-platform-windows
+      - name: Run tests (cross-platform crates)
+        run: cargo test -p nagori-core -p nagori-search -p nagori-storage -p nagori-ipc
 
   deny-check:
     runs-on: ubuntu-latest
