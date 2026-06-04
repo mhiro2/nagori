@@ -31,6 +31,7 @@ jobs:
     # path entirely (see `if (tagName && !releaseId)` in tauri-action), so the
     # draft is authored exactly once here.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       releaseId: ${{ steps.draft.outputs.releaseId }}
     steps:
@@ -207,6 +208,7 @@ jobs:
     name: Generate updater manifest
     needs: bundle
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Build and upload latest.json
         # `tauri-action`'s `uploadVersionJSON` does a read-modify-write on the
@@ -284,6 +286,7 @@ jobs:
     name: Publish release
     needs: updater
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Publish draft release
         run: gh release edit "${GITHUB_REF_NAME}" --draft=false --repo "${GITHUB_REPOSITORY}"
