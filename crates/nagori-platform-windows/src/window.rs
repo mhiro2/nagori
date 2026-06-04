@@ -109,6 +109,25 @@ impl WindowBehavior for WindowsWindowBehavior {
     }
 }
 
+/// Derive a process display name from its executable path via the file
+/// stem (`C:/Program Files/App/app.exe` → `app`).
+///
+/// Shared by `frontmost_app_sync` and `capture_restore_target_sync`.
+/// Gated to `any(windows, test)`: the only non-test callers are the
+/// Windows FFI paths, so an unconditional definition reads as dead code
+/// on other hosts, while `test` keeps it reachable from the unit test on
+/// every host. Separator handling follows `std::path`, so backslash paths
+/// only split on Windows — the Windows callers feed it native paths.
+#[cfg(any(windows, test))]
+fn app_name_from_exe(executable_path: Option<&str>) -> Option<String> {
+    executable_path.and_then(|p| {
+        std::path::Path::new(p)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned)
+    })
+}
+
 #[cfg(windows)]
 fn frontmost_app_sync() -> Option<FrontmostApp> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -130,12 +149,7 @@ fn frontmost_app_sync() -> Option<FrontmostApp> {
         (query_process_image_path(pid), query_window_title(hwnd))
     };
 
-    let name = executable_path.as_deref().and_then(|p| {
-        std::path::Path::new(p)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_owned)
-    });
+    let name = app_name_from_exe(executable_path.as_deref());
 
     Some(FrontmostApp {
         source: SourceApp {
@@ -178,12 +192,7 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
         )
     };
 
-    let name = executable_path.as_deref().and_then(|p| {
-        std::path::Path::new(p)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_owned)
-    });
+    let name = app_name_from_exe(executable_path.as_deref());
 
     // HWND is a pointer-sized opaque on both 32- and 64-bit Windows. We
     // round-trip via `usize` so the cast is exact regardless of pointer
@@ -401,5 +410,43 @@ unsafe fn query_window_title(hwnd: *mut core::ffi::c_void) -> Option<String> {
         let written_usize = usize::try_from(written).expect("written > 0 fits in usize");
         buf.truncate(written_usize);
         OsString::from_wide(&buf).into_string().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_name_from_exe_takes_the_file_stem() {
+        // Forward slashes split on every host, so these assertions hold on
+        // the Windows runner and the macOS / Linux CI alike.
+        assert_eq!(
+            app_name_from_exe(Some("C:/Program Files/Notepad/notepad.exe")),
+            Some("notepad".to_owned()),
+        );
+        assert_eq!(
+            app_name_from_exe(Some("/usr/bin/foo")),
+            Some("foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn app_name_from_exe_handles_missing_or_stemless_paths() {
+        assert_eq!(app_name_from_exe(None), None);
+        // A bare separator has no file stem.
+        assert_eq!(app_name_from_exe(Some("/")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn app_name_from_exe_splits_native_backslash_paths() {
+        // The production callers pass Win32 paths, which use backslashes;
+        // those only split as separators on Windows, so lock the real
+        // behaviour down on the Windows runner.
+        assert_eq!(
+            app_name_from_exe(Some(r"C:\Program Files\Notepad\notepad.exe")),
+            Some("notepad".to_owned()),
+        );
     }
 }

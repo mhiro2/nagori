@@ -1951,4 +1951,126 @@ mod tests {
         // BGRA(0xCC,0xBB,0xAA,0xDD).
         assert_eq!(&payload[124..128], &[0xCC, 0xBB, 0xAA, 0xDD]);
     }
+
+    fn snapshot_with(reps: Vec<ClipboardRepresentation>) -> ClipboardSnapshot {
+        ClipboardSnapshot {
+            sequence: ClipboardSequence::native(7),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: reps,
+        }
+    }
+
+    #[test]
+    fn total_payload_bytes_sums_text_image_and_file_paths() {
+        // The byte-budget check in `capture_snapshot` leans on this sum
+        // counting every representation: UTF-8 text length, raw image
+        // bytes, and the concatenated path lengths.
+        let snapshot = snapshot_with(vec![
+            ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text("hello".to_owned()), // 5
+            },
+            ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(vec![0u8; 10]), // 10
+            },
+            ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(vec!["abc".to_owned(), "de".to_owned()]), // 3 + 2
+            },
+        ]);
+        assert_eq!(total_payload_bytes(&snapshot), 5 + 10 + 3 + 2);
+    }
+
+    #[test]
+    fn total_payload_bytes_is_zero_for_an_empty_snapshot() {
+        assert_eq!(total_payload_bytes(&snapshot_with(Vec::new())), 0);
+    }
+
+    #[test]
+    fn encode_rgba_to_png_round_trips_a_small_image() {
+        // 2×1 RGBA: red then green, both opaque. The capture path hands
+        // `encode_rgba_to_png` arboard's raw RGBA and expects a decodable
+        // PNG that preserves dimensions and pixel order.
+        let raw = vec![
+            0xFF, 0x00, 0x00, 0xFF, // red
+            0x00, 0xFF, 0x00, 0xFF, // green
+        ];
+        let png = encode_rgba_to_png(ImageData {
+            width: 2,
+            height: 1,
+            bytes: Cow::Owned(raw),
+        })
+        .expect("encode succeeds for a well-formed RGBA buffer");
+
+        let decoded = ImageReader::new(Cursor::new(&png))
+            .with_guessed_format()
+            .expect("guess format")
+            .decode()
+            .expect("decode PNG")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [0xFF, 0x00, 0x00, 0xFF]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0x00, 0xFF, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn encode_rgba_to_png_rejects_a_buffer_that_underfills_its_dimensions() {
+        // `RgbaImage::from_raw` returns None when the buffer is too small
+        // for width × height × 4, so the encoder must surface None rather
+        // than publish a torn image.
+        let png = encode_rgba_to_png(ImageData {
+            width: 4,
+            height: 4,
+            bytes: Cow::Owned(vec![0u8; 4]), // needs 64 bytes
+        });
+        assert!(png.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_cf_html_offsets_are_byte_based_for_multibyte_fragments() {
+        // CF_HTML header offsets are *byte* offsets, so a multi-byte UTF-8
+        // fragment must still satisfy EndFragment - StartFragment ==
+        // fragment.len() (bytes). A char-count regression would misplace
+        // the offsets Word / Outlook use to locate the fragment.
+        let fragment = "café 日本語 <b>x</b>";
+        assert!(
+            fragment.len() > fragment.chars().count(),
+            "fixture must contain multi-byte characters",
+        );
+        let wrapped = win::build_cf_html(fragment);
+
+        let find_value = |key: &str| -> usize {
+            let needle = format!("{key}:");
+            let start = wrapped.find(&needle).expect("header line present") + needle.len();
+            let end = wrapped[start..].find("\r\n").expect("CRLF terminated") + start;
+            wrapped[start..end]
+                .parse::<usize>()
+                .expect("decimal offset")
+        };
+        let start_fragment = find_value("StartFragment");
+        let end_fragment = find_value("EndFragment");
+        assert_eq!(end_fragment - start_fragment, fragment.len());
+        assert_eq!(
+            &wrapped.as_bytes()[start_fragment..end_fragment],
+            fragment.as_bytes(),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepare_cf_hdrop_rejects_interior_nul_and_overlong_paths() {
+        // Both rejections fire before any Win32 allocation, so they are
+        // safe to exercise without a real clipboard. An interior NUL would
+        // truncate the wide path mid-string; an over-long path exceeds the
+        // Win32 long-path cap and signals a corrupt / hostile DROPFILES.
+        let interior_nul = win::prepare_cf_hdrop(&["a\u{0}b".to_owned()]);
+        assert!(matches!(interior_nul, Err(AppError::Unsupported(_))));
+
+        let overlong = format!("C:\\{}", "a".repeat(33_000));
+        let too_long = win::prepare_cf_hdrop(&[overlong]);
+        assert!(matches!(too_long, Err(AppError::Unsupported(_))));
+    }
 }
