@@ -21,7 +21,7 @@ serde_json.workspace = true
 # Pinned exactly: 0.1.10-alpha.4 fails to vendor `sqlite-vec-diskann.c`, so the
 # C extension won't compile. 0.1.6 bundles a self-contained amalgamation and
 # ships the rusqlite auto-extension integration we rely on.
-sqlite-vec = { version = "=0.1.6", optional = true }
+sqlite-vec = { version = "=0.1.9", optional = true }
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
