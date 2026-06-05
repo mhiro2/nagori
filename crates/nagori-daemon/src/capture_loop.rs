@@ -699,6 +699,19 @@ where
         }
 
         let Some(mut entry) = EntryFactory::from_snapshot(snapshot) else {
+            // An empty snapshot can mean we read the pasteboard mid-write: an
+            // external writer's `clearContents()` advanced the changeCount but
+            // the following `writeObjects()` / `setData` hasn't landed yet, and
+            // on macOS the whole clear-then-write is a *single* changeCount
+            // bump. We anchored `last_sequence` to that changeCount above, so
+            // without intervention the next tick would dedup-skip the real
+            // content that lands at the *same* changeCount and the clip would
+            // be stranded until some later, unrelated copy. Arm the one-shot
+            // body re-read so the following tick re-examines the sequence
+            // instead of trusting the dedup; it clears as soon as a snapshot
+            // yields content (or stays armed harmlessly while the clipboard is
+            // genuinely empty).
+            self.force_content_check = true;
             return Ok(None);
         };
         // Wake-gap content cross-check: if a sleep gap forced the body read
@@ -2424,6 +2437,95 @@ mod tests {
             .expect("post-wake clip should land on the retry tick");
         let stored = store.get(post_id).await.unwrap().expect("stored row");
         assert_eq!(stored.plain_text(), Some("post-wake clip"));
+    }
+
+    #[tokio::test]
+    async fn empty_midwrite_snapshot_does_not_strand_content_at_same_sequence() {
+        // Regression: on macOS `clearContents()` + `writeObjects()` is a
+        // *single* changeCount bump. If the capture loop polls between the two
+        // — observing an empty pasteboard at the new changeCount — it anchors
+        // that changeCount, and the real content then lands at the *same*
+        // changeCount. Without the empty-snapshot body re-read, the next tick
+        // dedup-skips it and the clip is stranded (the file-list E2E flake).
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+        use nagori_platform::ClipboardReader;
+        use time::OffsetDateTime;
+
+        struct MidWriteReader {
+            sequence: Mutex<ClipboardSequence>,
+            // `None` models the empty pasteboard observed mid-write.
+            text: Mutex<Option<String>>,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for MidWriteReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                let snapshot_text = self.text.lock().unwrap().clone();
+                let representations = match snapshot_text {
+                    Some(text) => vec![ClipboardRepresentation {
+                        mime_type: "text/plain".to_owned(),
+                        data: ClipboardData::Text(text),
+                    }],
+                    None => Vec::new(),
+                };
+                Ok(ClipboardSnapshot {
+                    sequence: self.sequence.lock().unwrap().clone(),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations,
+                })
+            }
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                Ok(self.sequence.lock().unwrap().clone())
+            }
+        }
+
+        let reader = MidWriteReader {
+            sequence: Mutex::new(ClipboardSequence::content_hash("seq-baseline")),
+            text: Mutex::new(Some("baseline clip".to_owned())),
+        };
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut loop_ =
+            CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default());
+
+        let t0 = SystemTime::now();
+        // Tick 1: baseline clip captured, anchoring `last_sequence`.
+        loop_
+            .capture_once_at(t0)
+            .await
+            .unwrap()
+            .expect("baseline capture");
+
+        // An external writer takes pasteboard ownership: the changeCount
+        // advances, but we observe the brief empty window before the content
+        // lands. Small time gaps keep the wake-resync from arming
+        // `force_content_check`, so the only thing that can save tick 3 is the
+        // empty-snapshot re-read under test.
+        *loop_.reader.sequence.lock().unwrap() = ClipboardSequence::content_hash("seq-after-clear");
+        *loop_.reader.text.lock().unwrap() = None;
+        assert!(
+            loop_
+                .capture_once_at(t0 + Duration::from_secs(1))
+                .await
+                .unwrap()
+                .is_none(),
+            "an empty mid-write snapshot inserts nothing",
+        );
+
+        // The write lands at the SAME changeCount (single bump on macOS).
+        *loop_.reader.text.lock().unwrap() = Some("file-url clip".to_owned());
+        let id = loop_
+            .capture_once_at(t0 + Duration::from_secs(2))
+            .await
+            .unwrap()
+            .expect("content landing at the read-empty changeCount must be captured");
+        let stored = store.get(id).await.unwrap().expect("stored row");
+        assert_eq!(stored.plain_text(), Some("file-url clip"));
     }
 
     #[tokio::test]
