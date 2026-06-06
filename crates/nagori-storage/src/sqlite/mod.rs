@@ -422,6 +422,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn katakana_entry_is_found_by_hiragana_query() {
+        // Kana folding lives in the ngram generator: a Katakana clip and a
+        // Hiragana query share folded grams even though `normalize_text` (NFKC)
+        // leaves the two scripts distinct.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "クリップボード履歴").await;
+
+        let query = SearchQuery::new("くりっぷ", normalize_text("くりっぷ"), 10);
+        let results = store.search(query).await.unwrap();
+        assert!(
+            results.iter().any(|r| r.entry_id == id),
+            "hiragana query should recall the katakana entry via folded ngrams",
+        );
+    }
+
+    #[tokio::test]
+    async fn single_kanji_query_recalls_entry() {
+        // A lone ideograph matches the document-side Han 1-gram, so it recalls
+        // even though `unicode61` FTS collapses the run to one token and the
+        // 2/3-gram path needs ≥ 2 chars.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "設計資料のメモ").await;
+
+        let query = SearchQuery::new("設", normalize_text("設"), 10);
+        let results = store.search(query).await.unwrap();
+        assert!(
+            results.iter().any(|r| r.entry_id == id),
+            "single-kanji query should recall the entry via the Han 1-gram",
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_stale_ngrams_drains_and_restamps() {
+        // Simulate a pre-upgrade document: grams produced by an older generator
+        // and a stale per-row version marker. The background rebuild must
+        // regenerate the grams from the stored normalized_text and restamp the
+        // row, without touching normalized_text / preview.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "設計資料のメモ").await;
+        let (preview_before, normalized_before) = {
+            let conn = store.conn().unwrap();
+            conn.execute("DELETE FROM ngrams", []).unwrap();
+            conn.execute("UPDATE search_documents SET ngram_index_version = 0", [])
+                .unwrap();
+            conn.query_row(
+                "SELECT preview, normalized_text FROM search_documents WHERE entry_id = ?1",
+                rusqlite::params![id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(store.pending_ngram_rebuild().await.unwrap(), 1);
+
+        let mut drained = 0;
+        loop {
+            let n = store.rebuild_stale_ngrams().await.unwrap();
+            if n == 0 {
+                break;
+            }
+            drained += n;
+        }
+        assert_eq!(drained, 1);
+        assert_eq!(store.pending_ngram_rebuild().await.unwrap(), 0);
+
+        // Grams regenerated, and preview/normalized_text untouched.
+        let conn = store.conn().unwrap();
+        let gram_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ngrams", [], |row| row.get(0))
+            .unwrap();
+        assert!(gram_count > 0, "rebuild should regenerate grams");
+        let (preview_after, normalized_after): (String, String) = conn
+            .query_row(
+                "SELECT preview, normalized_text FROM search_documents WHERE entry_id = ?1",
+                rusqlite::params![id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preview_before, preview_after);
+        assert_eq!(normalized_before, normalized_after);
+    }
+
+    #[tokio::test]
     async fn duplicate_insert_returns_existing_id() {
         let store = SqliteStore::open_memory().unwrap();
         let first_id = insert_text(&store, "same clipboard value").await;

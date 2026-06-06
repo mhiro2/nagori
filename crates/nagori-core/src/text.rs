@@ -18,7 +18,7 @@ pub fn normalize_text(input: &str) -> String {
 /// Returns `true` if `input` contains any CJK character.
 ///
 /// Recognizes Hiragana, Katakana, Hangul syllables, and CJK ideographs —
-/// including Extension A–G, the compatibility blocks, and the
+/// including Extension A–J, the compatibility blocks, and the
 /// supplementary-plane extensions.
 ///
 /// Lives in core (next to [`normalize_text`]) because the search plan dispatch
@@ -28,9 +28,9 @@ pub fn normalize_text(input: &str) -> String {
 ///
 /// The range set must stay broad: it gates whether the Auto/Hybrid plan runs
 /// ngram at all, so a CJK char it fails to recognize would silently disable
-/// ngram recall for that query. The document side (`generate_ngrams`) indexes
-/// every non-whitespace char regardless of script, so any narrower definition
-/// here would desync the query gate from what is actually indexed.
+/// ngram recall for that query. The document side (`generate_document_ngrams`)
+/// indexes every non-whitespace char regardless of script, so any narrower
+/// definition here would desync the query gate from what is actually indexed.
 #[must_use]
 pub fn has_cjk(input: &str) -> bool {
     input.chars().any(|ch| {
@@ -41,9 +41,9 @@ pub fn has_cjk(input: &str) -> bool {
             | 0x4e00..=0x9fff    // CJK Unified Ideographs
             | 0xac00..=0xd7af    // Hangul Syllables
             | 0xf900..=0xfaff    // CJK Compatibility Ideographs
-            | 0x20000..=0x2ebef  // CJK Unified Ideographs Extension B–F
+            | 0x20000..=0x2ee5d  // CJK Unified Ideographs Extension B–F + I
             | 0x2f800..=0x2fa1f  // CJK Compatibility Ideographs Supplement
-            | 0x30000..=0x3134f  // CJK Unified Ideographs Extension G
+            | 0x30000..=0x33479  // CJK Unified Ideographs Extension G + H + J
         )
     })
 }

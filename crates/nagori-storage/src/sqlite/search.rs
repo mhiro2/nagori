@@ -7,12 +7,29 @@ use nagori_core::{
     SearchResult, SearchService,
 };
 use nagori_search::{
-    DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_ngrams, has_cjk, ngram_input_was_truncated,
+    DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_document_ngrams, generate_query_ngrams, has_cjk,
+    ngram_input_was_truncated,
 };
-use rusqlite::{Connection, ToSql, params};
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 
 use super::SqliteStore;
 use super::convert::{format_time, fts_query, kind_to_str, row_to_entry, storage_err};
+
+/// Current ngram-generator revision. Bump whenever
+/// [`generate_document_ngrams`]'s output for a given `normalized_text` changes
+/// (kana folding, Han 1-grams, …). [`upsert_document_blocking`] stamps it on
+/// every freshly-written document; rows left at a lower value are rebuilt in
+/// the background by [`SqliteStore::rebuild_stale_ngrams`].
+pub(crate) const NGRAM_INDEX_VERSION: i64 = 1;
+
+/// Documents regenerated per [`SqliteStore::rebuild_stale_ngrams`] call. Kept
+/// small so each rebuild transaction holds the single `SQLite` writer lock only
+/// briefly against concurrent captures (the daemon worker sleeps between
+/// batches); the gram CPU work happens outside the transaction. Index
+/// maintenance on the `ngrams` table dominates the per-row cost and grows with
+/// the table, so this stays modest to bound the writer-lock hold on very large
+/// histories rather than maximizing rebuild throughput.
+pub(crate) const NGRAM_REBUILD_BATCH: usize = 50;
 
 impl SqliteStore {
     /// Convenience wrapper that runs a [`SearchQuery`] through the canonical
@@ -22,13 +39,134 @@ impl SqliteStore {
     pub async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         SearchService::new(self, &DefaultRanker).search(query).await
     }
+
+    /// Number of documents whose grams predate [`NGRAM_INDEX_VERSION`] and
+    /// therefore still need regenerating. `0` means the ngram index is fully
+    /// current. Cheap: an index range scan over
+    /// `idx_search_documents_ngram_version_doc_id`.
+    pub async fn pending_ngram_rebuild(&self) -> Result<u64> {
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM search_documents WHERE ngram_index_version < ?1",
+                    params![NGRAM_INDEX_VERSION],
+                    |row| row.get(0),
+                )
+                .map_err(|err| storage_err(&err))?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+        .await
+    }
+
+    /// Regenerate grams for up to [`NGRAM_REBUILD_BATCH`] documents whose
+    /// `ngram_index_version` is stale, returning how many rows were fetched
+    /// (`0` once the index is fully current). Call in a loop until it returns
+    /// `0`.
+    ///
+    /// Only the `ngrams` table and the per-row version marker change — the
+    /// stored `normalized_text`, FTS index, previews (including the redacted
+    /// previews `StoreFull` keeps over a raw body), and semantic vectors are
+    /// left untouched, since the grams are regenerated from the already-stored
+    /// `normalized_text`. The gram CPU work runs outside the write transaction;
+    /// inside it, each row's version is re-checked under the writer lock and
+    /// skipped if a concurrent capture already refreshed it (whose grams are
+    /// then authoritative), so the worker never clobbers a newer write.
+    pub async fn rebuild_stale_ngrams(&self) -> Result<usize> {
+        self.run_blocking(move |store| {
+            let mut conn = store.conn()?;
+            // Read the next stale batch (autocommit) so the CPU-heavy gram
+            // generation below doesn't hold the writer lock.
+            let batch: Vec<(String, String)> = {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT entry_id, normalized_text
+                         FROM search_documents
+                         WHERE ngram_index_version < ?1
+                         ORDER BY doc_id
+                         LIMIT ?2",
+                    )
+                    .map_err(|err| storage_err(&err))?;
+                let limit = i64::try_from(NGRAM_REBUILD_BATCH).unwrap_or(i64::MAX);
+                let rows = stmt
+                    .query_map(params![NGRAM_INDEX_VERSION, limit], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|err| storage_err(&err))?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|err| storage_err(&err))?);
+                }
+                out
+            };
+            if batch.is_empty() {
+                return Ok(0);
+            }
+            let fetched = batch.len();
+            // Generate grams before opening the write transaction.
+            let prepared: Vec<(String, Vec<String>)> = batch
+                .into_iter()
+                .map(|(entry_id, normalized)| (entry_id, generate_document_ngrams(&normalized)))
+                .collect();
+
+            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            {
+                let mut current = tx
+                    .prepare_cached(
+                        "SELECT ngram_index_version FROM search_documents WHERE entry_id = ?1",
+                    )
+                    .map_err(|err| storage_err(&err))?;
+                let mut delete = tx
+                    .prepare_cached("DELETE FROM ngrams WHERE entry_id = ?1")
+                    .map_err(|err| storage_err(&err))?;
+                let mut insert = tx
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO ngrams (gram, entry_id, position) VALUES (?1, ?2, ?3)",
+                    )
+                    .map_err(|err| storage_err(&err))?;
+                let mut stamp = tx
+                    .prepare_cached(
+                        "UPDATE search_documents SET ngram_index_version = ?2 WHERE entry_id = ?1",
+                    )
+                    .map_err(|err| storage_err(&err))?;
+                for (entry_id, grams) in &prepared {
+                    // Under the writer lock this read is authoritative: if a
+                    // capture refreshed the row since we fetched it (stamping
+                    // the current version), its grams are already correct, so
+                    // skip rather than overwrite with grams from stale text.
+                    let version: i64 = current
+                        .query_row(params![entry_id], |row| row.get(0))
+                        .optional()
+                        .map_err(|err| storage_err(&err))?
+                        .unwrap_or(NGRAM_INDEX_VERSION);
+                    if version >= NGRAM_INDEX_VERSION {
+                        continue;
+                    }
+                    delete
+                        .execute(params![entry_id])
+                        .map_err(|err| storage_err(&err))?;
+                    for (position, gram) in grams.iter().enumerate() {
+                        insert
+                            .execute(params![gram, entry_id, position as i64])
+                            .map_err(|err| storage_err(&err))?;
+                    }
+                    stamp
+                        .execute(params![entry_id, NGRAM_INDEX_VERSION])
+                        .map_err(|err| storage_err(&err))?;
+                }
+            }
+            tx.commit().map_err(|err| storage_err(&err))?;
+            Ok(fetched)
+        })
+        .await
+    }
 }
 
 #[async_trait]
 impl SearchRepository for SqliteStore {
     async fn upsert_document(&self, doc: SearchDocument) -> Result<()> {
         // Detect ngram truncation *before* moving `doc` into the blocking
-        // closure. The blocking section runs `generate_ngrams` and silently
+        // closure. The blocking section runs `generate_document_ngrams` and silently
         // discards everything past `MAX_NGRAM_INPUT_CHARS`; if we did not
         // record a breadcrumb here, a user whose paste is longer than the
         // cap would notice "fuzzy search misses the tail of my entry" with
@@ -233,7 +371,7 @@ impl SearchCandidateProvider for SqliteStore {
         limit: usize,
         mode: NgramQueryMode,
     ) -> Result<Vec<NgramCandidate>> {
-        let mut query_grams = generate_ngrams(normalized);
+        let mut query_grams = generate_query_ngrams(normalized);
         if query_grams.is_empty() {
             return Ok(Vec::new());
         }
@@ -319,20 +457,27 @@ pub(super) fn upsert_document_blocking(
     // `search_fts` is an external-content FTS5 over `search_documents`;
     // the ai/ad/au triggers keep it in sync, so we only upsert the
     // content row here.
+    // Stamp the current generator revision in the same statement that writes
+    // the grams below, so a freshly-captured document is never seen as stale by
+    // the background rebuild worker (which fetches rows with
+    // `ngram_index_version < NGRAM_INDEX_VERSION`).
     tx.execute(
-        "INSERT INTO search_documents (entry_id, title, preview, normalized_text, language)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO search_documents
+            (entry_id, title, preview, normalized_text, language, ngram_index_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(entry_id) DO UPDATE SET
             title = excluded.title,
             preview = excluded.preview,
             normalized_text = excluded.normalized_text,
-            language = excluded.language",
+            language = excluded.language,
+            ngram_index_version = excluded.ngram_index_version",
         params![
             entry_id,
             doc.title,
             doc.preview,
             doc.normalized_text,
             doc.language,
+            NGRAM_INDEX_VERSION,
         ],
     )
     .map_err(|err| storage_err(&err))?;
@@ -341,7 +486,10 @@ pub(super) fn upsert_document_blocking(
     let mut stmt = tx
         .prepare("INSERT OR IGNORE INTO ngrams (gram, entry_id, position) VALUES (?1, ?2, ?3)")
         .map_err(|err| storage_err(&err))?;
-    for (position, gram) in generate_ngrams(&doc.normalized_text).iter().enumerate() {
+    for (position, gram) in generate_document_ngrams(&doc.normalized_text)
+        .iter()
+        .enumerate()
+    {
         stmt.execute(params![gram, entry_id, position as i64])
             .map_err(|err| storage_err(&err))?;
     }

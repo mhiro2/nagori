@@ -20,7 +20,7 @@ use super::convert::storage_err;
 /// and fails loud at startup rather than silently running the new
 /// code against an old shape. Operators are expected to delete the
 /// local DB and let it be recreated on next launch.
-pub(crate) const MIGRATIONS: &[(i64, &str)] = &[(100, SCHEMA_V1)];
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[(100, SCHEMA_V1), (101, ADD_NGRAM_INDEX_VERSION)];
 
 /// Highest schema version supported by this binary. A DB whose
 /// `user_version` already exceeds this is from a newer build and we refuse
@@ -397,4 +397,19 @@ CREATE TABLE IF NOT EXISTS semantic_index_meta (
     index_version INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
+";
+
+/// Per-row marker recording which ngram-generator revision built a document's
+/// grams. Existing rows default to `0` (stale) so the background rebuild worker
+/// regenerates them once after an upgrade that changes the generator (kana
+/// folding, Han 1-grams); fresh captures stamp the current revision in the same
+/// transaction as the grams, so they are never re-processed. The
+/// `(ngram_index_version, doc_id)` index makes "fetch the next stale batch" an
+/// index range scan. Appended as migration 101 rather than edited into
+/// `SCHEMA_V1` so it reaches pre-release databases already at `user_version =
+/// 100`.
+const ADD_NGRAM_INDEX_VERSION: &str = r"
+ALTER TABLE search_documents ADD COLUMN ngram_index_version INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_search_documents_ngram_version_doc_id
+    ON search_documents(ngram_index_version, doc_id);
 ";
