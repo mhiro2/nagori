@@ -19,11 +19,14 @@
 //! * `NAGORI_BENCH_SIZES=10000,100000` — override corpus sizes.
 //! * `NAGORI_BENCH_DATASETS=text,url` — restrict to named datasets.
 
+use std::io::Write;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nagori_core::{EntryFactory, EntryRepository, SearchMode, SearchQuery};
 use nagori_search::normalize_text;
 use nagori_storage::SqliteStore;
+use rusqlite::Connection;
 use tokio::runtime::{Builder, Runtime};
 
 /// How the runner classifies a query so it can attach the acceptance target
@@ -88,7 +91,13 @@ fn gen_cjk(idx: usize) -> String {
         1 => "正規表現",
         _ => "サンプル",
     };
-    format!("クリップボード履歴の項目{idx} {marker} 日本語テキストのテスト{idx:04x}")
+    // `日` appears in every row (`日本語`) → a dense single-Han posting list;
+    // `検` only in the ~0.1% `検索エンジン` rows → a rare one. The `巒` sentinel
+    // sits only in the oldest entry (idx 0), far outside the 5000-row substring
+    // window, so a recall check for it proves the Han 1-gram reaches history no
+    // other branch can (unicode61 FTS collapses the run to a single token).
+    let sentinel = if idx == 0 { "巒" } else { "" };
+    format!("クリップボード履歴の項目{idx} {marker}{sentinel} 日本語テキストのテスト{idx:04x}")
 }
 
 fn gen_code(idx: usize) -> String {
@@ -191,8 +200,17 @@ const Q_CJK: &[QueryCase] = &[
         kind: QueryKind::Empty,
     },
     QueryCase {
-        name: "jp-one-char",
+        // Rare single-Han 1-gram: small posting list.
+        name: "jp-1char-rare",
         raw: "検",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Probe,
+    },
+    QueryCase {
+        // Dense single-Han 1-gram: `日` is in every row, the worst-case posting
+        // list for the Han 1-gram fan-out.
+        name: "jp-1char-dense",
+        raw: "日",
         mode: SearchMode::Auto,
         kind: QueryKind::Probe,
     },
@@ -205,6 +223,14 @@ const Q_CJK: &[QueryCase] = &[
     QueryCase {
         name: "jp-phrase",
         raw: "検索エンジン",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Probe,
+    },
+    QueryCase {
+        // Kana fold: a Hiragana query against the Katakana `クリップ` in every
+        // row — exercises the folded-gram fan-out over a dense posting list.
+        name: "jp-kana-fold",
+        raw: "くりっぷ",
         mode: SearchMode::Auto,
         kind: QueryKind::Probe,
     },
@@ -320,6 +346,11 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
 /// Acceptance target for `(kind, size)`, or `None` when there is no hard goal.
 const fn target_p95_ms(kind: QueryKind, size: usize) -> Option<f64> {
     match (kind, size) {
@@ -360,6 +391,10 @@ fn measure(store: &SqliteStore, case: &QueryCase, size: usize, iters: usize, rt:
         ms(max),
         marker,
     );
+    // Flush per query so progress streams live to a redirected log (stdout is
+    // block-buffered to a file/pipe, so without this nothing appears until the
+    // buffer fills or the process exits).
+    let _ = std::io::stdout().flush();
 }
 
 /// Optional `NAGORI_BENCH_DATASETS=text,url` allowlist restricting which
@@ -414,6 +449,66 @@ fn plan(sizes: &[usize], full: bool) -> Vec<(&'static Dataset, usize)> {
     combos
 }
 
+/// Total on-disk footprint of the DB and its WAL/SHM sidecars.
+fn db_size_bytes(path: &Path) -> u64 {
+    let mut total = std::fs::metadata(path).map_or(0, |m| m.len());
+    for suffix in ["-wal", "-shm"] {
+        let side = format!("{}{suffix}", path.display());
+        total += std::fs::metadata(&side).map_or(0, |m| m.len());
+    }
+    total
+}
+
+/// `ngrams` row count from a read-only connection so the harness can surface
+/// index bloat (Han 1-grams + kana fold) alongside latency.
+fn ngram_row_count(path: &Path) -> i64 {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open ro");
+    conn.query_row("SELECT COUNT(*) FROM ngrams", [], |row| row.get(0))
+        .unwrap_or(-1)
+}
+
+/// Time the background ngram rebuild that runs once after an upgrade: mark
+/// every document stale (as the migration's `DEFAULT 0` does for pre-upgrade
+/// rows), then drain it through the same batched API the daemon worker uses.
+/// This is now off the startup path, but the absolute cost is still worth
+/// surfacing.
+fn measure_rebuild(path: &Path, rt: &Runtime) -> (Duration, i64) {
+    {
+        let conn = Connection::open(path).expect("open rw");
+        conn.execute("DELETE FROM ngrams", [])
+            .expect("clear ngrams");
+        conn.execute("UPDATE search_documents SET ngram_index_version = 0", [])
+            .expect("mark stale");
+    }
+    let store = SqliteStore::open(path).expect("reopen");
+    let start = Instant::now();
+    rt.block_on(async { while store.rebuild_stale_ngrams().await.expect("rebuild batch") > 0 {} });
+    let elapsed = start.elapsed();
+    (elapsed, ngram_row_count(path))
+}
+
+/// Assert the CJK recall features actually return rows (not just that they're
+/// fast). Validates kana folding end-to-end and that the Han 1-gram reaches the
+/// oldest entry, beyond the substring window.
+fn verify_cjk_recall(store: &SqliteStore, size: usize, rt: &Runtime) {
+    rt.block_on(async {
+        let kana = SearchQuery::new("くりっぷ", normalize_text("くりっぷ"), 50);
+        assert!(
+            !store.search(kana).await.expect("search").is_empty(),
+            "kana-fold query returned no results at size={size}",
+        );
+
+        let sentinel = SearchQuery::new("巒", normalize_text("巒"), 50);
+        assert!(
+            !store.search(sentinel).await.expect("search").is_empty(),
+            "single-Han sentinel (oldest entry, outside the {} substring window) \
+             not recalled at size={size} — Han 1-gram regression?",
+            5_000,
+        );
+    });
+}
+
 fn main() {
     let rt = Builder::new_multi_thread()
         .enable_all()
@@ -444,12 +539,35 @@ fn main() {
     for (dataset, size) in combos {
         eprintln!("populating dataset={} size={size} ...", dataset.name);
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = SqliteStore::open(dir.path().join("bench.db")).expect("open store");
+        let db_path = dir.path().join("bench.db");
+        let store = SqliteStore::open(&db_path).expect("open store");
         populate(&store, dataset, size, &rt);
+
+        if dataset.name == "cjk" {
+            verify_cjk_recall(&store, size, &rt);
+        }
 
         println!("\ndataset={} size={size}", dataset.name);
         for case in dataset.queries {
             measure(&store, case, size, iters, &rt);
         }
+
+        let ngram_rows = ngram_row_count(&db_path);
+        let bytes = db_size_bytes(&db_path);
+        println!(
+            "  {:<14}        ngram_rows={ngram_rows:>10}  db={:>8.1}MiB",
+            "index",
+            mib(bytes),
+        );
+
+        // Free the populate pool before reopening so the rebuild reopen owns the
+        // file. Measured last because it mutates the index.
+        drop(store);
+        let (rebuild, rebuilt_rows) = measure_rebuild(&db_path, &rt);
+        println!(
+            "  {:<14}        rebuild={:>8.1}ms  ngram_rows={rebuilt_rows:>10}",
+            "reindex",
+            ms(rebuild),
+        );
     }
 }
