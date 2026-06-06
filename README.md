@@ -6,6 +6,9 @@
 
 - Persistent clipboard history (text, images, file lists) stored locally in SQLite.
 - Full-text search and pinning from a desktop palette or the `nagori` CLI.
+- Japanese / CJK partial-match search: kana-insensitive (a Katakana clip is
+  found by a Hiragana query and vice versa) with single-kanji recall, on top of
+  full-text and ASCII fuzzy matching.
 - Recall-oriented result rows: a language badge on code (JSON / SQL / Rust /
   …, detected on-device with the same canonical id the preview highlighter
   uses), a strong-brand badge on known URLs (GitHub / YouTube / …, from the

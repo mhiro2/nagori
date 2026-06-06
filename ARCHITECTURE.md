@@ -452,7 +452,7 @@ are forward-only; downgrades are not supported.
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
-| `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. |
+| `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
 | `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`; soft-deleted entries keep their vector but are filtered out at query time. |
@@ -602,6 +602,31 @@ exact substring + recency. In the Auto plan only CJK-bearing query grams
 are used (see *Hybrid ngram is CJK-scoped* above); explicit `Fuzzy`
 matches on the full gram set, which is what backs ASCII partial / typo
 recall.
+
+Two refinements live in the gram generator (not in `normalize_text`, so
+the stored `normalized_text`, FTS index, previews, and semantic embedding
+input are untouched). **Kana folding:** Katakana is folded to Hiragana
+before gramming, so a Katakana clip recalls against a Hiragana query and
+vice versa (`クリップ` ⇄ `くりっぷ`); the prolonged sound mark, middle dot,
+and the rare `ヷヸヹヺ` pass through. **Han 1-grams:** documents also index
+a 1-gram for each Han ideograph, so a lone-kanji query (`検`) recalls
+entries beyond the bounded substring window — `unicode61` FTS collapses a
+CJK run to one token, and the 2/3-gram path needs ≥ 2 chars. The 1-grams
+stop at Han: kana 1-grams would be near-universal posting lists (`の`/`は`),
+made worse by the fold. A 2+ char query keeps only its 2/3-grams so the
+overlap denominator is unchanged.
+
+**Ngram index versioning.** `search_documents.ngram_index_version` records
+which generator revision built a row's grams; fresh captures stamp the
+current revision in the same transaction as the grams. When the generator
+changes (the kana fold / Han 1-grams above), pre-upgrade rows default to
+`0` and a one-shot daemon worker (spawned after serving starts, so startup
+never blocks) regenerates them in small batches from the stored
+`normalized_text`, restamping each row and yielding the writer lock between
+batches. CJK recall for not-yet-rebuilt rows is briefly incomplete and
+self-heals as batches land. The direct/local CLI search path drains any
+pending rebuild before querying (a single zero-row check once a daemon has
+already run), so it never serves stale grams.
 
 ---
 
