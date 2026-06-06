@@ -777,6 +777,16 @@ where
         tokio::spawn(async move { runtime.run_semantic_indexer(shutdown).await })
     };
 
+    // One-shot backfill that regenerates ngrams left stale by a generator
+    // upgrade (kana folding / Han 1-grams). Spawned after serving has started
+    // so it never blocks daemon startup; it drains the backlog in small batches
+    // and then exits.
+    let ngram_rebuild_handle = {
+        let runtime = runtime.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runtime.run_ngram_rebuild(shutdown).await })
+    };
+
     let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
         Some(spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await?)
     } else {
@@ -810,6 +820,7 @@ where
         capture_handle,
         maintenance_handle,
         semantic_handle,
+        ngram_rebuild_handle,
         config.shutdown_grace,
     )
     .await;
@@ -842,6 +853,7 @@ async fn drain_workers(
     capture_handle: tokio::task::JoinHandle<()>,
     maintenance_handle: tokio::task::JoinHandle<()>,
     semantic_handle: tokio::task::JoinHandle<()>,
+    ngram_rebuild_handle: tokio::task::JoinHandle<()>,
     grace: Duration,
 ) {
     drain_one(
@@ -854,6 +866,7 @@ async fn drain_workers(
         drain_one("capture", capture_handle, grace),
         drain_one("maintenance", maintenance_handle, grace),
         drain_one("semantic", semantic_handle, grace),
+        drain_one("ngram_rebuild", ngram_rebuild_handle, grace),
     );
 }
 

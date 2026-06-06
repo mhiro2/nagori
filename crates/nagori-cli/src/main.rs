@@ -398,6 +398,13 @@ async fn run_local_command(cli: Cli) -> Result<()> {
             print_entries(entries, format, args.include_sensitive)?;
         }
         Command::Search(args) => {
+            // The direct/local search path must not serve stale CJK grams: drain
+            // any ngram rebuild left pending by a generator upgrade (kana folding
+            // / Han 1-grams) before querying. When a daemon has already rebuilt —
+            // the common case — this is a single zero-row check; only an offline
+            // `--db` DB that no daemon has touched pays the one-time rebuild here.
+            // Other direct commands (list/get) don't need current grams.
+            while store.rebuild_stale_ngrams().await? > 0 {}
             let query = SearchQuery::new(&args.query, normalize_text(&args.query), args.limit);
             let results = store.search(query).await?;
             print_search_results(results, format)?;

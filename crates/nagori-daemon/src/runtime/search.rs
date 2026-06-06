@@ -1,12 +1,12 @@
 //! The runtime's cached search entry point and the recent-search cache handle.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nagori_core::{Result, SearchMode, SearchQuery, SearchResult, SettingsRepository};
 
 use crate::search_cache::{CacheKey, CacheLookup, SharedSearchCache, lock_or_recover};
 
-use super::{NagoriRuntime, elapsed_ms};
+use super::{NagoriRuntime, ShutdownHandle, elapsed_ms};
 
 impl NagoriRuntime {
     /// Shared handle to the recent-search cache so out-of-runtime mutators
@@ -80,6 +80,60 @@ impl NagoriRuntime {
         }
         log_search(mode, false, results.len(), started);
         Ok(results)
+    }
+
+    /// One-shot background pass that regenerates ngrams left stale by a
+    /// generator-revision upgrade (kana folding / Han 1-grams).
+    ///
+    /// Pre-upgrade documents carry `ngram_index_version = 0` (the migration's
+    /// column default); fresh captures are stamped current, so once this drains
+    /// the backlog there is nothing left to do — there is no steady-state tick.
+    /// It runs *after* the daemon is already serving, so startup is never
+    /// blocked; CJK recall for not-yet-rebuilt rows is briefly incomplete and
+    /// self-heals as batches land. A failed or interrupted pass simply leaves
+    /// the rows stale for the next daemon start to retry.
+    pub async fn run_ngram_rebuild(self, mut shutdown: ShutdownHandle) {
+        // Yield the single SQLite writer lock between batches so concurrent
+        // captures aren't starved by the backfill.
+        const BATCH_PAUSE: Duration = Duration::from_millis(10);
+
+        let pending = match self.store.pending_ngram_rebuild().await {
+            Ok(0) => return,
+            Ok(pending) => pending,
+            Err(err) => {
+                tracing::warn!(error = %err, "ngram_rebuild_pending_check_failed");
+                return;
+            }
+        };
+        tracing::info!(pending, "ngram_rebuild_started");
+
+        let mut done: u64 = 0;
+        loop {
+            if shutdown.is_cancelled() {
+                tracing::info!(done, pending, "ngram_rebuild_interrupted");
+                return;
+            }
+            match self.store.rebuild_stale_ngrams().await {
+                Ok(0) => break,
+                Ok(batch) => done += u64::try_from(batch).unwrap_or(0),
+                Err(err) => {
+                    tracing::warn!(error = %err, done, "ngram_rebuild_batch_failed");
+                    return;
+                }
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    tracing::info!(done, pending, "ngram_rebuild_interrupted");
+                    return;
+                }
+                () = tokio::time::sleep(BATCH_PAUSE) => {}
+            }
+        }
+
+        // Searches cached before the backfill may have missed folded / single
+        // Han hits; drop them so the next query re-runs against fresh grams.
+        self.invalidate_search_cache();
+        tracing::info!(done, "ngram_rebuild_completed");
     }
 }
 

@@ -166,6 +166,7 @@ struct BackgroundTasks {
     capture: tauri::async_runtime::JoinHandle<()>,
     maintenance: tauri::async_runtime::JoinHandle<()>,
     semantic: tauri::async_runtime::JoinHandle<()>,
+    ngram_rebuild: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl AppState {
@@ -390,10 +391,22 @@ impl AppState {
             runtime.run_semantic_indexer(shutdown).await;
         });
 
+        // One-shot backfill of ngrams left stale by a generator upgrade (kana
+        // folding / Han 1-grams). The desktop app drives `NagoriRuntime`
+        // directly without the CLI daemon's serve loop, so it must spawn this
+        // worker itself — otherwise a desktop-only history never gets its old
+        // rows rebuilt and CJK search improvements don't apply to them.
+        let runtime = self.runtime.clone();
+        let ngram_rebuild = tauri::async_runtime::spawn(async move {
+            let shutdown = runtime.shutdown_handle();
+            runtime.run_ngram_rebuild(shutdown).await;
+        });
+
         *tasks_slot = Some(BackgroundTasks {
             capture,
             maintenance,
             semantic,
+            ngram_rebuild,
         });
     }
 
@@ -409,6 +422,7 @@ impl AppState {
             drain_background_task("capture", tasks.capture, grace),
             drain_background_task("maintenance", tasks.maintenance, grace),
             drain_background_task("semantic", tasks.semantic, grace),
+            drain_background_task("ngram_rebuild", tasks.ngram_rebuild, grace),
         );
     }
 
