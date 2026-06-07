@@ -45,6 +45,9 @@
   zooms toward the pointer — pinch the trackpad (or **⌘/Ctrl** + scroll),
   double-click to toggle fit ↔ 2×, or use the keyboard (**⌘/Ctrl** with
   **+** / **−** / **0**); a zoomed image pans with the scrollbar / trackpad.
+  When a copied file also carried an image render (e.g. a presentation
+  copied from Finder), the file preview pane shows it as a small
+  supplementary thumbnail.
 - Long-text preview shows head and tail with a middle-elided marker so
   the end of large logs / pastes stays visible; when the active search
   hit lands inside the elided range the preview flags it so you can

@@ -114,6 +114,7 @@ export const es: Messages = {
       location: 'Ubicación',
       fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
         location ? `${name}, en ${location}` : name,
+      thumbnailAlt: 'Imagen adjunta',
     },
     url: {
       punycodeBadge: 'punycode',

@@ -137,7 +137,10 @@ denylist is an `OR` of every line.
 
 - Image entries get a 512px cached thumbnail under
   `entry_thumbnails` so the preview pane stays responsive on
-  multi-megabyte screenshots. Generation is gated by sensitivity —
+  multi-megabyte screenshots. File lists that carried an image
+  render alongside the file URLs (e.g. a presentation copied from
+  Finder) reuse the same thumbnail cache for that accompanying
+  image. Generation is gated by sensitivity —
   the daemon refuses to derive a thumbnail for `Private`, `Secret`,
   or `Blocked` entries, so image bytes from those entries never
   leak into the cached preview surface. The table is a regenerable

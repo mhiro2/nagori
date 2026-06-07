@@ -1311,6 +1311,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_alternate_image_payload_returns_file_list_image() {
+        // A presentation copied from Finder: the file URL is the primary
+        // representation, an `image/png` render rides along as an
+        // alternative. The thumbnail generator reaches the image through
+        // this lookup because the primary-only `get_payload` can't.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let image = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]; // PNG signature
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("file-list-with-image"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/uri-list".to_owned(),
+                    data: ClipboardData::FilePaths(vec!["/Users/me/deck.pptx".to_owned()]),
+                },
+                ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(image.clone()),
+                },
+            ],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield file list");
+        let id = entry.id;
+        let store = SqliteStore::open_memory().unwrap();
+        store.insert(entry).await.unwrap();
+
+        // The primary is the file URL list (text), so the primary-only
+        // lookup finds nothing...
+        assert_eq!(store.get_payload(id).await.unwrap(), None);
+        // ...but the accompanying image is reachable for the thumbnail path.
+        assert_eq!(
+            store.get_alternate_image_payload(id).await.unwrap(),
+            Some((image, "image/png".to_owned())),
+        );
+    }
+
+    #[tokio::test]
+    async fn get_alternate_image_payload_ignores_non_image_alternatives() {
+        // An HTML + plain clip carries alternatives, but none are images, so
+        // the image-only lookup must return None rather than a text row.
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        };
+
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("text-no-image"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text("<p>hi</p>".to_owned()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("hi".to_owned()),
+                },
+            ],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
+        let id = entry.id;
+        let store = SqliteStore::open_memory().unwrap();
+        store.insert(entry).await.unwrap();
+
+        assert_eq!(store.get_alternate_image_payload(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn snapshot_multi_rep_writes_one_row_per_representation() {
         // HTML + plain + RTF snapshot must produce three persisted rows so
         // a later copy-back path can re-publish whichever flavour the user

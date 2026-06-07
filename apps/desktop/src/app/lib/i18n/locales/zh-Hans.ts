@@ -107,6 +107,7 @@ export const zhHans: Messages = {
       location: '位置',
       fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
         location ? `${name}，位于 ${location}` : name,
+      thumbnailAlt: '附带的图片',
     },
     url: {
       punycodeBadge: 'punycode',

@@ -592,6 +592,60 @@ describe('PreviewPane', () => {
     }
   });
 
+  it('shows an accompanying-image thumbnail when the file clip kept an image', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({
+          kind: 'fileList',
+          // A file copy that also placed an image render on the clipboard:
+          // the file URL is primary, the image rides along as an alternative.
+          representationSummary: [
+            { mimeType: 'text/uri-list', role: 'primary', byteCount: 20 },
+            { mimeType: 'image/png', role: 'alternative', byteCount: 4096 },
+          ],
+        }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            entries: [fileEntry({ name: 'deck.pptx', parentDisplay: '~/Documents' })],
+            total: 1,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const thumb = container.querySelector('[data-testid="preview-files-thumb"]');
+    expect(thumb).toBeTruthy();
+    // Requests the shared thumbnail endpoint for this entry id.
+    expect(thumb?.getAttribute('src')).toContain('thumb/entry-id');
+    // Carries a non-empty accessible name rather than relying on a title.
+    expect(thumb?.getAttribute('alt')).toBeTruthy();
+  });
+
+  it('omits the thumbnail when the file clip carried no image', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({
+          kind: 'fileList',
+          representationSummary: [{ mimeType: 'text/uri-list', role: 'primary', byteCount: 20 }],
+        }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            entries: [fileEntry({ name: 'notes.txt', parentDisplay: '~/Documents' })],
+            total: 1,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-files-thumb"]')).toBeNull();
+  });
+
   it('labels multi-file rows with a basename-first accessible name', () => {
     const { container } = render(PreviewPane, {
       props: {

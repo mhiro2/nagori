@@ -36,8 +36,8 @@ use image::{
     imageops::FilterType,
 };
 use nagori_core::{
-    AppError, EntryId, EntryRepository, MAX_DECODED_IMAGE_PIXELS, Result, ThumbnailRecord,
-    is_text_safe_for_default_output,
+    AppError, ContentKind, EntryId, EntryRepository, MAX_DECODED_IMAGE_PIXELS, Result,
+    ThumbnailRecord, is_text_safe_for_default_output,
 };
 use nagori_storage::SqliteStore;
 
@@ -143,11 +143,15 @@ impl Drop for ThumbnailGateGuard {
     }
 }
 
-/// Generate-and-store a thumbnail for `id` from the entry's primary
-/// image payload.
+/// Generate-and-store a thumbnail for `id`.
+///
+/// The source is the entry's primary image payload. File lists keep their
+/// primary as the joined paths (text), so for that kind the function falls
+/// back to an accompanying image the clip carried alongside the file URLs
+/// (e.g. a presentation that also placed a slide render on the clipboard).
 ///
 /// Returns `Ok(Some(record))` on success, `Ok(None)` when generation was
-/// skipped (non-image kind, sensitivity-withheld, oversized after
+/// skipped (no image to thumbnail, sensitivity-withheld, oversized after
 /// retry), and `Err(_)` on a hard storage or decode failure that the
 /// caller should log.
 ///
@@ -185,7 +189,21 @@ pub async fn generate_thumbnail(
     if !is_text_safe_for_default_output(entry.sensitivity) {
         return Ok(None);
     }
-    let Some((bytes, _mime)) = store.get_payload(id).await? else {
+    let payload = match store.get_payload(id).await? {
+        Some(payload) => Some(payload),
+        // A file list keeps its primary as the joined paths (text), so it
+        // never has a primary image payload — but a file copy often also
+        // carried an image render of the same content (a presentation slide,
+        // a document page). Use that accompanying image as the thumbnail
+        // source so the preview pane can show it. Scoped to file lists: it is
+        // the kind where the image is reliably a render of the copied object
+        // rather than incidental clipboard noise.
+        None if entry.content.kind() == ContentKind::FileList => {
+            store.get_alternate_image_payload(id).await?
+        }
+        None => None,
+    };
+    let Some((bytes, _mime)) = payload else {
         return Ok(None);
     };
     // Decode + re-encode is CPU-bound; hand it to the blocking pool so
@@ -550,15 +568,9 @@ mod tests {
 
         let store = SqliteStore::open_memory().expect("memory store");
 
-        // A tiny 1x1 transparent PNG; the contents don't matter because
-        // the sensitivity gate runs before decode.
-        let png_bytes: Vec<u8> = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
-            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-        ];
+        // The contents don't matter because the sensitivity gate runs
+        // before decode.
+        let png_bytes = tiny_transparent_png();
 
         for blocked in [
             Sensitivity::Private,
@@ -590,5 +602,127 @@ mod tests {
                 "no row should be persisted for {blocked:?} entries",
             );
         }
+    }
+
+    /// A file copy that also carried an image render — e.g. a presentation
+    /// dragged from Finder that placed an `image/png` on the clipboard
+    /// alongside the file URL — keeps that image as a non-primary
+    /// representation, so the primary-only payload lookup never finds it.
+    /// The generator must fall back to the accompanying image so the
+    /// preview pane can still show a thumbnail for the file list.
+    #[tokio::test]
+    async fn generate_thumbnail_uses_file_list_alternate_image() {
+        use nagori_core::{
+            ClipboardContent, EntryFactory, EntryRepository, FileListContent,
+            RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+        };
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().expect("memory store");
+        let content = ClipboardContent::FileList(FileListContent {
+            paths: vec!["~/Documents/deck.pptx".to_owned()],
+            display_text: "~/Documents/deck.pptx".to_owned(),
+        });
+        let mut entry = EntryFactory::from_content(content, None, None);
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/uri-list".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::FilePaths(vec!["~/Documents/deck.pptx".to_owned()]),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "image/png".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png()),
+            },
+        ];
+        let id = store.insert(entry).await.expect("insert");
+
+        // The primary representation is the joined paths, so the
+        // primary-only lookup finds no image to thumbnail...
+        assert!(
+            store.get_payload(id).await.expect("payload").is_none(),
+            "a file list has no primary image payload",
+        );
+        // ...but the generator falls back to the accompanying image.
+        let record = generate_thumbnail(&store, id)
+            .await
+            .expect("no error")
+            .expect("file-list thumbnail from the accompanying image");
+        assert!(record.width <= MAX_THUMBNAIL_DIMENSION);
+        assert!(record.height <= MAX_THUMBNAIL_DIMENSION);
+        assert!(
+            store.get_thumbnail(id).await.expect("lookup").is_some(),
+            "the derived thumbnail row should be persisted",
+        );
+    }
+
+    /// The accompanying-image fallback is intentionally scoped to file
+    /// lists. Other text-shaped kinds can pick up an incidental image
+    /// representation (a rich-text paste, a browser drag) that is not a
+    /// render of the copied object, so the generator must leave them
+    /// without a thumbnail.
+    #[tokio::test]
+    async fn generate_thumbnail_ignores_alternate_image_for_non_file_list() {
+        use nagori_core::{
+            ClipboardContent, EntryFactory, EntryRepository, RepresentationDataRef,
+            RepresentationRole, StoredClipboardRepresentation,
+        };
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().expect("memory store");
+        let mut entry =
+            EntryFactory::from_content(ClipboardContent::text("just some copied text"), None, None);
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("just some copied text".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "image/png".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png()),
+            },
+        ];
+        let id = store.insert(entry).await.expect("insert");
+
+        assert!(
+            generate_thumbnail(&store, id)
+                .await
+                .expect("no error")
+                .is_none(),
+            "non-file-list kinds must not derive a thumbnail from an incidental image",
+        );
+        assert!(
+            store.get_thumbnail(id).await.expect("lookup").is_none(),
+            "no thumbnail row should be persisted",
+        );
+    }
+
+    /// A small RGBA PNG built by the encoder so it actually decodes — used
+    /// as the accompanying-image payload in the fallback tests. The
+    /// sensitivity test also reuses it, where any bytes would do (the gate
+    /// short-circuits before decode).
+    fn tiny_transparent_png() -> Vec<u8> {
+        let mut img = image::RgbaImage::new(4, 4);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            let alpha: u8 = if (x + y) % 2 == 0 { 0 } else { 0xff };
+            *pixel = image::Rgba([0x33, 0x66, 0x99, alpha]);
+        }
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("test PNG must encode");
+        bytes
     }
 }

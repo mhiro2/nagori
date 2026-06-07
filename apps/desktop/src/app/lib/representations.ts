@@ -36,3 +36,29 @@ export const additionalClipboardCategories = (
   }
   return categories;
 };
+
+// Image MIME types the daemon's thumbnail pipeline can actually decode —
+// mirrors `nagori_core::SUPPORTED_IMAGE_MIMES`. A clip can carry an image in a
+// format the pipeline rejects (SVG can host script; HEIC is unsupported), so
+// gating on this set rather than a bare `image/` prefix avoids asking for a
+// `/thumb/<id>` the generator can never produce (the storage-side lookup
+// filters to this same set).
+const THUMBNAILABLE_IMAGE_MIMES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/tiff',
+]);
+
+// Whether the clip kept a thumbnailable image alongside (not as) its primary
+// content — e.g. a file copy that also carried an `image/png` render of the
+// copied object. The file-list preview uses this to show a small supplementary
+// thumbnail. The primary representation is excluded on purpose: an image-kind
+// entry already renders its own image, so this only reports a *secondary*
+// image.
+export const hasAccompanyingImage = (
+  summary: readonly RepresentationSummary[] | undefined,
+): boolean =>
+  summary?.some((rep) => rep.role !== 'primary' && THUMBNAILABLE_IMAGE_MIMES.has(rep.mimeType)) ??
+  false;

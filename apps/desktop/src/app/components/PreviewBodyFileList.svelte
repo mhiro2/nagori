@@ -1,6 +1,7 @@
 <script lang="ts">
   import { categoryForExtension, type FileCategory } from '../lib/filePath';
   import type { FileEntry } from '../lib/types';
+  import PreviewFileThumbnail from './PreviewFileThumbnail.svelte';
 
   type Props = {
     // Basename-first file rows, already split and home-folded by the backend.
@@ -15,6 +16,13 @@
     // Accessible name for a file row (basename-first). `location` is the
     // parent directory, or null when the path has no parent segment.
     fileRowAria: (parts: { name: string; location: string | null }) => string;
+    // Entry id, used to fetch the accompanying-image thumbnail.
+    entryId: string;
+    // True when the clip kept an image render alongside the file list; gates
+    // the supplementary thumbnail at the top of the pane.
+    hasImage: boolean;
+    // Accessible name for that thumbnail.
+    thumbnailAlt: string;
   };
 
   let {
@@ -25,6 +33,9 @@
     moreFilesLabel,
     locationLabel,
     fileRowAria,
+    entryId,
+    hasImage,
+    thumbnailAlt,
   }: Props = $props();
 
   const startsWithSep = (s: string): boolean => s.startsWith('/') || s.startsWith('\\');
@@ -71,6 +82,9 @@
   const overflow = $derived(Math.max(0, total - entries.length));
 </script>
 
+{#if hasImage}
+  <PreviewFileThumbnail {entryId} alt={thumbnailAlt} />
+{/if}
 {#if single}
   <div class="single-file" data-testid="preview-files-single">
     <p class="single-head">

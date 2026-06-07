@@ -131,6 +131,9 @@ export type Messages = {
       // parent directory (trailing separator already stripped) or null when
       // the path has no parent segment.
       fileRowAria: (parts: { name: string; location: string | null }) => string;
+      // Accessible name for the supplementary thumbnail shown when the clip
+      // kept an image render alongside the file list.
+      thumbnailAlt: string;
     };
     url: {
       // Phishing-resistance badge surfaced when the IDN punycode form
@@ -665,6 +668,7 @@ export const en: Messages = {
       inFolder: (prefix) => `in ${prefix}`,
       location: 'Location',
       fileRowAria: ({ name, location }) => (location ? `${name}, in ${location}` : name),
+      thumbnailAlt: 'Accompanying image',
     },
     url: {
       punycodeBadge: 'punycode',

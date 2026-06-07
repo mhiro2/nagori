@@ -107,6 +107,7 @@ export const ja: Messages = {
       location: '場所',
       fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
         location ? `${name}、${location} 配下` : name,
+      thumbnailAlt: '付随する画像',
     },
     url: {
       punycodeBadge: 'punycode',

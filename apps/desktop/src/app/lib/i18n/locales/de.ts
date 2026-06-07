@@ -112,6 +112,7 @@ export const de: Messages = {
       location: 'Ort',
       fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
         location ? `${name}, in ${location}` : name,
+      thumbnailAlt: 'Beigefügtes Bild',
     },
     url: {
       punycodeBadge: 'Punycode',

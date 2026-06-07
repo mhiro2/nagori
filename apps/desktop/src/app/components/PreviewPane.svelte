@@ -4,7 +4,7 @@
   import { isImeComposing } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
   import { rankReasonLabels } from '../lib/rankReason';
-  import { additionalClipboardCategories } from '../lib/representations';
+  import { additionalClipboardCategories, hasAccompanyingImage } from '../lib/representations';
   import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
   import { capabilitiesState } from '../stores/capabilities.svelte';
   import PreviewBodyFileList from './PreviewBodyFileList.svelte';
@@ -300,6 +300,9 @@
           moreFilesLabel={t.preview.fileList.moreFiles}
           locationLabel={t.preview.fileList.location}
           fileRowAria={t.preview.fileList.fileRowAria}
+          entryId={preview.id}
+          hasImage={hasAccompanyingImage(item.representationSummary)}
+          thumbnailAlt={t.preview.fileList.thumbnailAlt}
         />
       {:else}
         <PreviewBodyText text={bodyText} language={codeLanguage} isCode={isCodeBody} {query} />

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
 
+  import { buildImageUrl } from '../lib/imageUrl';
   import {
     isImeComposing,
     isPrimaryModifierHeld,
@@ -284,24 +285,6 @@
       return;
     }
     imageFailed = true;
-  }
-
-  function buildImageUrl(id: string, useThumb: boolean, attempt: number): string {
-    // macOS / iOS / Linux origin: scheme://localhost/<path>
-    // Windows / Android origin: http://<scheme>.localhost/<path>
-    // We pick the platform-specific form so the webview's Origin matches the
-    // fetched URL (otherwise SecurityError on Win/Android).
-    const isWinAndroid =
-      typeof navigator !== 'undefined' && /Windows|Android/i.test(navigator.userAgent);
-    const origin = isWinAndroid ? 'http://nagori-image.localhost' : 'nagori-image://localhost';
-    const segment = useThumb ? `thumb/${id}` : id;
-    // The cache-buster only matters for the post-503 retry: without a
-    // unique URL the webview may short-circuit the second fetch even
-    // though the response was `Cache-Control: no-store`. The Rust
-    // handler ignores the query string (`parse_image_entry_id` reads
-    // only the path), so this is a free no-op for the first attempt.
-    const suffix = attempt > 0 ? `?v=${attempt}` : '';
-    return `${origin}/${segment}${suffix}`;
   }
 </script>
 

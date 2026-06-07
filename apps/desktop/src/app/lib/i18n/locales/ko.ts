@@ -107,6 +107,7 @@ export const ko: Messages = {
       location: '위치',
       fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
         location ? `${name}, ${location} 하위` : name,
+      thumbnailAlt: '함께 복사된 이미지',
     },
     url: {
       punycodeBadge: 'punycode',

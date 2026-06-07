@@ -95,6 +95,63 @@ impl SqliteStore {
         })
         .await
     }
+
+    /// Returns the bytes and recorded MIME of the first non-primary image
+    /// representation for an entry, or `None` when the entry carries none.
+    ///
+    /// A file copy frequently rides alongside an image render of the same
+    /// content (e.g. a presentation copied from Finder also places an
+    /// `image/png` on the clipboard). That image is kept as a non-primary
+    /// representation, so [`Self::get_payload`] — which only reads the
+    /// primary row — never finds it. The thumbnail generator falls back to
+    /// this lookup so such entries can still show a preview image.
+    ///
+    /// Candidates are restricted to the MIME allow-list the preview scheme
+    /// will actually serve, and ordered by `(ordinal, role)` so the first
+    /// image the clipboard provider attached wins.
+    pub async fn get_alternate_image_payload(
+        &self,
+        id: EntryId,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            // Bind the allow-list rather than inlining the MIME strings so
+            // the set stays the single source of truth in `nagori_core` and
+            // can't drift from the signature detector / scheme handler.
+            let placeholders = (0..nagori_core::SUPPORTED_IMAGE_MIMES.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT r.payload_blob, r.mime_type
+                 FROM entry_representations r
+                 JOIN entries e ON e.id = r.entry_id
+                 WHERE e.id = ?1
+                   AND e.deleted_at IS NULL
+                   AND r.role <> 'primary'
+                   AND r.payload_blob IS NOT NULL
+                   AND LOWER(r.mime_type) IN ({placeholders})
+                 ORDER BY r.ordinal, r.role
+                 LIMIT 1"
+            );
+            let id_str = id.to_string();
+            let mut sql_params: Vec<&dyn ToSql> =
+                Vec::with_capacity(nagori_core::SUPPORTED_IMAGE_MIMES.len() + 1);
+            sql_params.push(&id_str);
+            for mime in nagori_core::SUPPORTED_IMAGE_MIMES {
+                sql_params.push(mime);
+            }
+            conn.query_row(&sql, sql_params.as_slice(), |row| {
+                let blob: Option<Vec<u8>> = row.get(0)?;
+                let mime: Option<String> = row.get(1)?;
+                Ok(blob.zip(mime))
+            })
+            .optional()
+            .map_err(|err| storage_err(&err))
+            .map(Option::flatten)
+        })
+        .await
+    }
 }
 
 #[async_trait]

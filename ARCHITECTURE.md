@@ -451,7 +451,7 @@ are forward-only; downgrades are not supported.
 |-------|---------|
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
-| `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
+| `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
@@ -486,7 +486,15 @@ preview opens collapses to one decoder, and the same
 `is_text_safe_for_default_output` sensitivity check that gates the
 original-payload scheme handler is re-asserted inside the generator
 before the thumbnail is written so a Private / Secret / Blocked
-entry never produces a derived artifact. The scheme handler returns
+entry never produces a derived artifact. The thumbnail source is
+normally the entry's primary image payload; a file list keeps its
+primary as the joined paths (text), so for that kind the generator
+falls back to an `image/*` representation the clip carried alongside
+the file URLs (e.g. a presentation copied from Finder that also placed
+a slide render on the clipboard). The file-list preview pane surfaces
+that as a small supplementary thumbnail; the fallback reuses the same
+sensitivity gate and signature validation, so it adds no new exposure.
+The scheme handler returns
 `503 Service Unavailable` + `Retry-After: 1` on miss; the frontend
 re-fetches once on a fixed cadence (the `<img onerror>` event exposes
 neither the status code nor headers), and on a second miss falls
