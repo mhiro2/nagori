@@ -15,6 +15,7 @@ export const ja: Messages = {
       pin: 'ピン留め',
       actions: 'アクション',
       settings: '設定',
+      preview: 'プレビュー',
     },
     filters: {
       toolbarLabel: 'クイックフィルタ',

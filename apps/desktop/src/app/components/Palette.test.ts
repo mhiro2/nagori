@@ -350,8 +350,8 @@ describe('Palette', () => {
     searchState.results = [item];
     previewState.entryId = 'u1';
     previewState.preview = urlPreview('u1', 'https://example.com/');
-    // Bind `open-preview` to a plain key (no default binding ships for it) so
-    // the test can toggle the expanded pane via the keyboard.
+    // Remap `open-preview` to a plain key (its default is Cmd/Ctrl+E) so the
+    // test can toggle the expanded pane with a single unmodified keystroke.
     settingsState.settings = {
       showPreviewPane: true,
       paletteRowCount: 8,

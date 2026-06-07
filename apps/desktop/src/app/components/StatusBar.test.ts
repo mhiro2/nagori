@@ -249,6 +249,62 @@ describe('StatusBar', () => {
     }
   });
 
+  it('renders the preview hint as a button that toggles the expanded preview', async () => {
+    const onOpenPreview = vi.fn();
+    const { getByTestId } = render(StatusBar, {
+      props: {
+        entryCount: 3,
+        elapsedMs: undefined,
+        loading: false,
+        errorMessage: undefined,
+        onOpenPreview,
+      },
+    });
+    await fireEvent.click(getByTestId('status-open-preview'));
+    expect(onOpenPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the preview hint as static text (with its accelerator) when not wired', () => {
+    const { queryByTestId, container } = render(StatusBar, {
+      props: {
+        entryCount: 3,
+        elapsedMs: undefined,
+        loading: false,
+        errorMessage: undefined,
+        previewHint: '⌘E',
+      },
+    });
+    expect(queryByTestId('status-open-preview')).toBeNull();
+    // The label keeps the expanded-preview affordance discoverable even without
+    // a click handler wired, and the resolved accelerator shows alongside it.
+    const hints = container.querySelector('.hints')?.textContent ?? '';
+    expect(hints).toMatch(/Preview/);
+    expect(hints).toContain('⌘E');
+  });
+
+  it('exposes the preview toggle state via aria-expanded', async () => {
+    const { getByTestId, rerender } = render(StatusBar, {
+      props: {
+        entryCount: 3,
+        elapsedMs: undefined,
+        loading: false,
+        errorMessage: undefined,
+        onOpenPreview: vi.fn(),
+        previewExpanded: false,
+      },
+    });
+    expect(getByTestId('status-open-preview').getAttribute('aria-expanded')).toBe('false');
+    await rerender({
+      entryCount: 3,
+      elapsedMs: undefined,
+      loading: false,
+      errorMessage: undefined,
+      onOpenPreview: vi.fn(),
+      previewExpanded: true,
+    });
+    expect(getByTestId('status-open-preview').getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('renders the pin hint as static text when no toggle handler is provided', () => {
     const { queryByTestId, container } = render(StatusBar, {
       props: { entryCount: 3, elapsedMs: undefined, loading: false, errorMessage: undefined },

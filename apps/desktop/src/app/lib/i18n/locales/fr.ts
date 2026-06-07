@@ -16,6 +16,7 @@ export const fr: Messages = {
       pin: 'Épingler',
       actions: 'Actions',
       settings: 'Paramètres',
+      preview: 'Aperçu',
     },
     filters: {
       toolbarLabel: 'Filtres rapides',

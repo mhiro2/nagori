@@ -15,6 +15,7 @@ export const ko: Messages = {
       pin: '고정',
       actions: '동작',
       settings: '설정',
+      preview: '미리보기',
     },
     filters: {
       toolbarLabel: '빠른 필터',

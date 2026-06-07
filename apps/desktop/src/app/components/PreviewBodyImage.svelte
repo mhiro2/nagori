@@ -1,4 +1,13 @@
 <script lang="ts">
+  import {
+    isImeComposing,
+    isPrimaryModifierHeld,
+    paletteBindingsFor,
+    resolveAction,
+  } from '../lib/keybindings';
+  import type { Binding } from '../lib/keybindings';
+  import type { Platform } from '../lib/types';
+
   type ImageBody = {
     type: 'image';
     mimeType?: string | null;
@@ -14,15 +23,70 @@
     altText: string;
     unavailableText: string;
     loadingText: string;
+    // Host platform, so the keyboard zoom chord uses the primary modifier the
+    // user actually presses (Cmd on macOS, Ctrl elsewhere). `undefined` until
+    // the capability snapshot hydrates — `isPrimaryModifierHeld` treats that
+    // as non-mac (Ctrl).
+    platform?: Platform | undefined;
+    // The palette's resolved key bindings. The zoom chord yields to any of them
+    // so a user who remaps an action onto `Cmd+=`/`-`/`0` gets that action,
+    // not a double-fire of zoom + the action (both listen on `window`).
+    bindings?: readonly Binding[] | undefined;
   };
 
-  let { entryId, body, expanded, altText, unavailableText, loadingText }: Props = $props();
+  let {
+    entryId,
+    body,
+    expanded,
+    altText,
+    unavailableText,
+    loadingText,
+    platform,
+    bindings,
+  }: Props = $props();
+
+  // Zoom for the expanded original payload, as a multiple of the fit-to-pane
+  // size. Trackpad pinch / Ctrl-wheel drive it continuously; the keyboard
+  // chords snap to discrete steps (so the readout lands on clean 150 % / 200 %
+  // values); double-click toggles fit ↔ 2×. Zoom is applied by sizing the
+  // scroll stage in CSS (not a `transform`), so the pane's `overflow: auto`
+  // becomes real scroll-to-pan once the image is larger than the frame.
+  // The named bounds also dodge a computed tuple index (which
+  // `noUncheckedIndexedAccess` widens to `number | undefined`).
+  const ZOOM_MIN = 1;
+  const ZOOM_MAX = 8;
+  const ZOOM_STEPS = [ZOOM_MIN, 1.5, 2, 3, 4, 6, ZOOM_MAX] as const;
+  const DOUBLE_CLICK_ZOOM = 2;
+  let zoom = $state(ZOOM_MIN);
+  const zoomed = $derived(zoom > ZOOM_MIN);
+  const zoomPercent = $derived(Math.round(zoom * 100));
+
+  const clampZoom = (value: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
+
+  function zoomIn(): void {
+    const next = ZOOM_STEPS.find((step) => step > zoom);
+    zoom = next ?? ZOOM_MAX;
+  }
+  function zoomOut(): void {
+    let next: number = ZOOM_MIN;
+    for (const step of ZOOM_STEPS) if (step < zoom) next = step;
+    zoom = next;
+  }
+  function resetZoom(): void {
+    zoom = ZOOM_MIN;
+  }
+  function toggleZoom(): void {
+    zoom = zoomed ? ZOOM_MIN : DOUBLE_CLICK_ZOOM;
+  }
+
+  // The scroll-container element, used to attach the pointer zoom gestures.
+  let frameEl: HTMLDivElement | undefined = $state();
 
   // Image bytes are streamed by the `nagori-image://` custom URI scheme
   // registered in src-tauri/src/lib.rs. In the inline preview we request
   // the daemon's cached 512px thumbnail (`/thumb/<id>`); the expanded
-  // preview window switches to the original payload so a click-to-zoom
-  // delivers full resolution. The Rust handler enforces sensitivity
+  // preview switches to the full-resolution original payload that the
+  // keyboard zoom below scales. The Rust handler enforces sensitivity
   // gating on both paths.
   //
   // Attempt ladder for the non-expanded path:
@@ -59,11 +123,103 @@
     imageAttempt = 0;
     imageLoaded = false;
     imageFailed = false;
+    zoom = ZOOM_MIN;
     return () => {
       if (retryTimer !== undefined) {
         window.clearTimeout(retryTimer);
         retryTimer = undefined;
       }
+    };
+  });
+
+  // While expanded, the primary-modifier zoom chords (⌘/Ctrl + `=`/`+` in,
+  // `-` out, `0` fit) drive the zoom. The chord — rather than a bare key —
+  // is deliberate: the search box keeps focus throughout the palette, and a
+  // bare `0` / `-` there is an ordinary search character we must not swallow.
+  // A modifier chord types nothing into the field, so the listener can live on
+  // `window` and stay correct no matter where focus sits (or as the selection
+  // remounts this component on entry navigation). Tauri ships with webview
+  // zoom hotkeys disabled, so ⌘/Ctrl +/-/0 reach us instead of resizing the
+  // whole UI; `preventDefault` guards the rest. The listener only exists while
+  // an image is expanded (the component unmounts for every other kind).
+  $effect(() => {
+    if (!expanded) return;
+    if (typeof window === 'undefined') return;
+    const handler = (event: KeyboardEvent): void => {
+      if (isImeComposing(event)) return;
+      if (!isPrimaryModifierHeld(event, platform)) return;
+      if (event.altKey) return;
+      // Yield to the palette: if this chord is bound to a palette action (e.g.
+      // a user remapped `delete` onto `Cmd+=`), let that action own it rather
+      // than also zooming — both handlers sit on `window`, so `preventDefault`
+      // can't stop the other. Fall back to the platform's default bindings so
+      // the check stays correct (Ctrl-shaped on Windows/Linux) if a caller
+      // omits `bindings`.
+      if (resolveAction(event, bindings ?? paletteBindingsFor(platform))) return;
+      switch (event.key) {
+        case '+':
+        case '=':
+          zoomIn();
+          break;
+        case '-':
+        case '_':
+          zoomOut();
+          break;
+        case '0':
+          resetZoom();
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  });
+
+  // Pointer zoom on the expanded image. Three gestures, all scoped to the
+  // frame so plain two-finger scrolling still pans the zoomed image:
+  //   • trackpad pinch — WebKit (macOS/Linux WKWebView) delivers this as the
+  //     non-standard `gesturechange` event with a cumulative `event.scale`,
+  //     because wry leaves WKWebView's native magnification off. We multiply
+  //     the zoom captured at `gesturestart` by that scale.
+  //   • Ctrl/Cmd + wheel — the cross-platform fallback (this is exactly what a
+  //     Chromium/WebView2 pinch emits, and what an explicit Ctrl-scroll does
+  //     everywhere). A wheel without the modifier is left alone so it pans.
+  //   • double-click — toggles fit ↔ 2×.
+  // `passive: false` lets us `preventDefault` so the gesture zooms the image
+  // instead of the page.
+  $effect(() => {
+    if (!expanded || !frameEl) return;
+    const el = frameEl;
+    let pinchBase = ZOOM_MIN;
+    const onWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      zoom = clampZoom(zoom * Math.pow(1.0015, -event.deltaY));
+    };
+    const onGestureStart = (event: Event): void => {
+      event.preventDefault();
+      pinchBase = zoom;
+    };
+    const onGestureChange = (event: Event): void => {
+      event.preventDefault();
+      const scale = (event as unknown as { scale?: number }).scale ?? 1;
+      zoom = clampZoom(pinchBase * scale);
+    };
+    const onDoubleClick = (event: MouseEvent): void => {
+      event.preventDefault();
+      toggleZoom();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('gesturestart', onGestureStart, { passive: false });
+    el.addEventListener('gesturechange', onGestureChange, { passive: false });
+    el.addEventListener('dblclick', onDoubleClick);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('gesturestart', onGestureStart);
+      el.removeEventListener('gesturechange', onGestureChange);
+      el.removeEventListener('dblclick', onDoubleClick);
     };
   });
 
@@ -112,24 +268,35 @@
 </script>
 
 {#if imageSrc && !imageFailed}
-  <div class="image-frame" class:loaded={imageLoaded}>
-    <img
-      class="image"
-      src={imageSrc}
-      alt={altText}
-      loading="lazy"
-      decoding="async"
-      width={imageDimensions?.width}
-      height={imageDimensions?.height}
-      onload={() => (imageLoaded = true)}
-      onerror={handleImageError}
-    />
-    {#if !imageLoaded}
-      <!-- Explicit "loading" caption over the checkerboard skeleton. While a
-           thumbnail miss is being (re)generated the <img> stays blank for up
-           to ~1s per retry, so a worded status reads as "working on it"
-           rather than a stuck/blank frame. -->
-      <p class="overlay" role="status">{loadingText}</p>
+  <div class="image-viewer" class:expanded>
+    <div class="image-frame" class:expanded class:loaded={imageLoaded} bind:this={frameEl}>
+      <div class="image-stage" style:--zoom-pct={zoomPercent}>
+        <img
+          class="image"
+          src={imageSrc}
+          alt={altText}
+          loading="lazy"
+          decoding="async"
+          width={imageDimensions?.width}
+          height={imageDimensions?.height}
+          onload={() => (imageLoaded = true)}
+          onerror={handleImageError}
+        />
+      </div>
+      {#if !imageLoaded}
+        <!-- Explicit "loading" caption over the checkerboard skeleton. While a
+             thumbnail miss is being (re)generated the <img> stays blank for up
+             to ~1s per retry, so a worded status reads as "working on it"
+             rather than a stuck/blank frame. -->
+        <p class="overlay" role="status">{loadingText}</p>
+      {/if}
+    </div>
+    {#if expanded && zoomed}
+      <!-- Current zoom level. A sibling of the (scrolling) frame, absolutely
+           positioned on the non-scrolling viewer, so it stays pinned to the
+           corner while a zoomed image pans. `role="status"` live region so a
+           screen reader hears the level change as the user pinches / steps. -->
+      <span class="zoom-level" role="status" aria-live="polite">{zoomPercent}%</span>
     {/if}
   </div>
 {:else}
@@ -137,6 +304,19 @@
 {/if}
 
 <style>
+  /* Inline preview: the viewer is transparent (`display: contents`) so the
+     frame lays out exactly as before. Expanded: it becomes a flex column that
+     fills the pane and parks the zoom bar below the scrollable frame. */
+  .image-viewer {
+    display: contents;
+  }
+  .image-viewer.expanded {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+  }
   .image-frame {
     position: relative;
     display: flex;
@@ -144,6 +324,16 @@
     justify-content: center;
     min-height: 80px;
     background: rgba(0, 0, 0, 0.4);
+  }
+  /* Expanded: the frame is the scroll container so a zoomed stage can be
+     panned with the trackpad / scrollbar. A grid container plus the stage's
+     `margin: auto` keeps a fit-sized image centred while staying scrollable
+     from every edge once it overflows. */
+  .image-viewer.expanded .image-frame {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    overflow: auto;
   }
   /* Checkerboard placeholder shown until the lazy <img> finishes decoding.
      Pure CSS so we never reference an external skeleton image (CSP-safe). */
@@ -165,6 +355,22 @@
       -8px 0;
     pointer-events: none;
   }
+  /* Inline: the stage is transparent so the <img> is a direct child of the
+     frame (unchanged layout). Expanded: the stage is the zoom box — its side
+     is `zoom%` of the frame (never below 100 %) so the frame overflows and
+     scrolls once zoomed past fit. */
+  .image-stage {
+    display: contents;
+  }
+  .image-viewer.expanded .image-stage {
+    display: grid;
+    place-items: center;
+    margin: auto;
+    width: calc(var(--zoom-pct, 100) * 1%);
+    height: calc(var(--zoom-pct, 100) * 1%);
+    min-width: 100%;
+    min-height: 100%;
+  }
   .image {
     display: block;
     max-width: 100%;
@@ -176,6 +382,15 @@
        within the aspect ratio rather than collapsing to 0×0. */
     height: auto;
     width: auto;
+  }
+  /* Expanded: fill the zoom stage (object-fit keeps the aspect) so the image
+     scales uniformly with the stage — including upscaling small images past
+     their natural size when zoomed in. */
+  .image-viewer.expanded .image {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
   }
   .image-frame:not(.loaded) .image {
     opacity: 0;
@@ -199,6 +414,22 @@
   .image-frame.loaded .image {
     opacity: 1;
     transition: opacity 120ms linear;
+  }
+  /* Current zoom level, pinned to the bottom-right corner. Absolute on the
+     (position: relative) viewer — a sibling of the scrolling frame, not a child
+     of it — so it stays in the corner while a zoomed image pans. Pointer-events
+     off so it never eats a pinch / double-click meant for the image. */
+  .zoom-level {
+    position: absolute;
+    right: 0.4rem;
+    bottom: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.55);
+    color: var(--fg, #f5f5f5);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
   /* The image-unavailable fallback shares the `.state` visual primitive
      with the parent's loading/error rows. Duplicated here so the child

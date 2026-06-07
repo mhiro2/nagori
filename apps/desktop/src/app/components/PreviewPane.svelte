@@ -2,9 +2,11 @@
   import { formatByteCount, formatRelativeTime } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
   import { isImeComposing } from '../lib/keybindings';
+  import type { Binding } from '../lib/keybindings';
   import { rankReasonLabels } from '../lib/rankReason';
   import { dedupedRepresentationLabels } from '../lib/representations';
   import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from '../lib/types';
+  import { capabilitiesState } from '../stores/capabilities.svelte';
   import PreviewBodyFileList from './PreviewBodyFileList.svelte';
   import PreviewBodyImage from './PreviewBodyImage.svelte';
   import PreviewBodyText from './PreviewBodyText.svelte';
@@ -60,6 +62,9 @@
     // The query the visible results were produced for (searchState.appliedQuery),
     // forwarded to the text body so the preview marks the same hits as the row.
     query?: string | undefined;
+    // Resolved palette key bindings, forwarded to the image body so its zoom
+    // chord yields to any palette action mapped onto the same keys.
+    bindings?: readonly Binding[] | undefined;
   };
 
   let {
@@ -74,6 +79,7 @@
     onOpenActions,
     enterOpensUrl = $bindable(false),
     query,
+    bindings,
   }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
@@ -83,6 +89,10 @@
   const rankLabel = $derived(
     item ? rankReasonLabels(item.rankReasons, t.rankReason).join(', ') : '',
   );
+
+  // Host platform for the expanded image's keyboard zoom chord (Cmd on macOS,
+  // Ctrl elsewhere); pinch / Ctrl-wheel / double-click need no platform input.
+  const imagePlatform = $derived(capabilitiesState.capabilities?.platform);
 
   // Head summary chip: kind-specific one-liner that surfaces lineCount /
   // byteCount / dimensions / domain / file count without ever leaking
@@ -285,6 +295,8 @@
           altText={t.preview.image.alt}
           unavailableText={t.preview.image.unavailable}
           loadingText={t.preview.image.loading}
+          platform={imagePlatform}
+          {bindings}
         />
       {:else if preview && preview.body.type === 'fileList'}
         <PreviewBodyFileList

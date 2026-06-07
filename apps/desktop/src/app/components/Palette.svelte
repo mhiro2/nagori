@@ -4,10 +4,12 @@
   import { closePalette, openSettingsWindow } from '../lib/commands';
   import {
     buildBindings,
+    formatBinding,
     isImeComposing,
     isPrimaryModifierHeld,
     resolveAction,
   } from '../lib/keybindings';
+  import type { Binding } from '../lib/keybindings';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
     capabilitiesState,
@@ -196,12 +198,6 @@
     void togglePinAt(index);
   };
 
-  // Accelerator shown on the status-bar pin hint. Pin is the one hint action
-  // users can remap (`paletteHotkeys.pin`), so reflect the override when set
-  // and otherwise fall back to the default ⌘P / Ctrl+P (its `CmdOrCtrl+P` wire
-  // form, which `formatAccelerator` renders per platform).
-  const pinAccelerator = $derived(settingsState.settings?.paletteHotkeys?.pin ?? 'CmdOrCtrl+P');
-
   const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
@@ -214,6 +210,17 @@
       capabilitiesState.capabilities?.platform,
     ),
   );
+  // Status-bar hint accelerators: render the *effective* binding from
+  // `paletteBindings`, not the raw setting — so if a remap clobbered an action's
+  // shortcut (collision → `buildBindings` drops it) the hint shows the surviving
+  // key (or `undefined`, which hides the kbd) instead of a key that now does
+  // something else. Both the pin and the expand-preview hints go through this.
+  const hintAccelerator = (action: Binding['action']): string | undefined => {
+    const binding = paletteBindings.find((b) => b.action === action);
+    return binding ? formatBinding(binding, capabilitiesState.capabilities?.platform) : undefined;
+  };
+  const pinHint = $derived(hintAccelerator('toggle-pin'));
+  const previewHint = $derived(hintAccelerator('open-preview'));
   let previewExpanded = $state(false);
   // Set by PreviewPane while a plain Enter in the expanded preview will open
   // the highlighted URL. We then suppress the palette's own Enter-to-paste so
@@ -389,6 +396,7 @@
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
         query={searchState.appliedQuery}
+        bindings={paletteBindings}
       />
     {/if}
     <!-- Kept mounted (it renders nothing while closed) so that toggling
@@ -406,10 +414,13 @@
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}
-    {pinAccelerator}
+    {pinHint}
+    {previewHint}
+    {previewExpanded}
     onTogglePin={() => void togglePinSelection()}
     onOpenActions={openActions}
     onOpenSettings={openSettings}
+    onOpenPreview={() => (previewExpanded = !previewExpanded)}
   />
 </section>
 

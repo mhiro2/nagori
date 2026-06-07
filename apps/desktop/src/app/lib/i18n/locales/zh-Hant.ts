@@ -15,6 +15,7 @@ export const zhHant: Messages = {
       pin: '釘選',
       actions: '動作',
       settings: '設定',
+      preview: '預覽',
     },
     filters: {
       toolbarLabel: '快速篩選',

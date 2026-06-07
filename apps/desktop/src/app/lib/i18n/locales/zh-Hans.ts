@@ -15,6 +15,7 @@ export const zhHans: Messages = {
       pin: '固定',
       actions: '操作',
       settings: '设置',
+      preview: '预览',
     },
     filters: {
       toolbarLabel: '快速筛选',

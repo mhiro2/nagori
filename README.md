@@ -35,8 +35,12 @@
   the expanded preview to open the URL in the default browser after a
   confirm dialog (Public entries only, `https` / `http` only).
 - Image preview uses a daemon-cached 512px thumbnail on row navigation so
-  the palette stays responsive on multi-megabyte screenshots; the
-  expanded preview switches to the original payload for click-to-zoom.
+  the palette stays responsive on multi-megabyte screenshots, with a
+  `dimensions · format · size` summary chip. **⌘/Ctrl E** opens the
+  full-width expanded preview, which switches to the original payload and
+  zooms — pinch the trackpad (or **⌘/Ctrl** + scroll), double-click to
+  toggle fit ↔ 2×, or use the keyboard (**⌘/Ctrl** with **+** / **−** /
+  **0**); a zoomed image pans with the scrollbar / trackpad.
 - Long-text preview shows head and tail with a middle-elided marker so
   the end of large logs / pastes stays visible; when the active search
   hit lands inside the elided range the preview flags it so you can

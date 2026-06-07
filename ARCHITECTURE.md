@@ -1179,7 +1179,28 @@ not duplicate runtime logic.
   `http`, and dispatches via `open --` (macOS), `ShellExecuteW` (Windows
   — avoids the `cmd.exe` argument parser), or `xdg-open` (Linux).
   Non-Public entries hide both the Enter hint and the open button. The
-  footer's *rank* row lists the entry's `RankReason`s as localised
+  full-width expanded preview is toggled by the `open-preview` binding
+  (default `CmdOrCtrl+E`, remappable via `paletteHotkeys`, also reachable
+  from the status-bar **Preview** hint button); the status bar surfaces the
+  resolved accelerator so the feature is discoverable rather than buried.
+  Image kinds render through `PreviewBodyImage.svelte`, whose summary chip
+  shows `dimensions · format · size`; in the expanded preview it zooms the
+  original payload. The primary gestures are pointer-driven — a trackpad
+  pinch (WebKit delivers this as the non-standard `gesturechange` event with
+  a cumulative `event.scale`, since wry leaves WKWebView's native
+  magnification off), `Ctrl`/`Cmd` + wheel (the cross-platform / Chromium
+  pinch path), and double-click to toggle fit ↔ 2×. A keyboard chord
+  (`CmdOrCtrl` + `=` / `+` in, `-` out, `0` refit) is the secondary,
+  keyboard-first path — a *chord* rather than a bare key because the search
+  box keeps focus across the palette, so a bare `0` / `-` would be an
+  ordinary search character, whereas a modifier chord types nothing into the
+  field and lets the `window` listener stay correct no matter where focus
+  sits (Tauri ships with webview zoom hotkeys disabled, so the chord reaches
+  the app instead of resizing the whole UI). Zoom sizes a scroll *stage* in
+  CSS rather than applying a `transform`, so the frame's `overflow: auto`
+  becomes real scroll-to-pan once the image is larger than the pane; a small
+  percentage readout (a `role="status"` live region) surfaces while zoomed.
+  The footer's *rank* row lists the entry's `RankReason`s as localised
   labels (the same vocabulary as the row chip) so the full "why it
   matched / why it ranked here" set — including the recency / frequency
   / pin boosts the row chip omits — is visible on the focused entry.

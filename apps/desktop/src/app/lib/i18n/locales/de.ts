@@ -16,6 +16,7 @@ export const de: Messages = {
       pin: 'Anheften',
       actions: 'Aktionen',
       settings: 'Einstellungen',
+      preview: 'Vorschau',
     },
     filters: {
       toolbarLabel: 'Schnellfilter',

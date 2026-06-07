@@ -20,6 +20,7 @@ export type Messages = {
       pin: string;
       actions: string;
       settings: string;
+      preview: string;
     };
     filters: {
       toolbarLabel: string;
@@ -531,6 +532,7 @@ export const en: Messages = {
       pin: 'Pin',
       actions: 'Actions',
       settings: 'Settings',
+      preview: 'Preview',
     },
     filters: {
       toolbarLabel: 'Quick filters',

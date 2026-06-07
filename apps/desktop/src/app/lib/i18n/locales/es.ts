@@ -17,6 +17,7 @@ export const es: Messages = {
       pin: 'Fijar',
       actions: 'Acciones',
       settings: 'Ajustes',
+      preview: 'Vista previa',
     },
     filters: {
       toolbarLabel: 'Filtros rápidos',

@@ -69,6 +69,10 @@ export const PALETTE_BINDINGS: readonly Binding[] = [
   // intentionally avoided here for the same reason multi-toggle uses
   // Cmd+J rather than Space.
   { action: 'preview-quick-look', key: 'y', meta: true },
+  // Toggle the full-width expanded preview (where image keyboard zoom lives).
+  // `e` for "expand"; Cmd+E / Ctrl+E has no OS-reserved palette meaning. Like
+  // the other overridable actions it can be remapped via `paletteHotkeys`.
+  { action: 'open-preview', key: 'e', meta: true },
   { action: 'close', key: 'Escape' },
 ];
 
@@ -441,6 +445,32 @@ export const formatAccelerator = (accelerator: string, platform?: Platform): str
   if (mods.meta) parts.push(platform === 'windows' ? 'Win' : 'Super');
   if (mods.alt) parts.push('Alt');
   if (mods.shift) parts.push('Shift');
+  parts.push(displayKey);
+  return parts.join('+');
+};
+
+// Render an already-resolved `Binding` (post-`buildBindings`, so its modifiers
+// are the literal ones the user presses on this platform) for display. Use this
+// over `formatAccelerator` when a hint must reflect the *effective* binding —
+// e.g. after a remap may have dropped an action's shortcut entirely — rather
+// than the raw wire string from settings.
+export const formatBinding = (binding: Binding, platform?: Platform): string => {
+  const isMac = macOsLikePlatform(platform);
+  const displayKey = formatKeyForDisplay(binding.key, isMac);
+  if (isMac) {
+    const parts: string[] = [];
+    if (binding.ctrl) parts.push(MAC_MODIFIER_GLYPHS.ctrl);
+    if (binding.alt) parts.push(MAC_MODIFIER_GLYPHS.alt);
+    if (binding.shift) parts.push(MAC_MODIFIER_GLYPHS.shift);
+    if (binding.meta) parts.push(MAC_MODIFIER_GLYPHS.meta);
+    parts.push(displayKey);
+    return parts.join('');
+  }
+  const parts: string[] = [];
+  if (binding.ctrl) parts.push('Ctrl');
+  if (binding.meta) parts.push(platform === 'windows' ? 'Win' : 'Super');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
   parts.push(displayKey);
   return parts.join('+');
 };

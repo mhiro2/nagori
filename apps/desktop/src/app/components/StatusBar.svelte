@@ -20,10 +20,11 @@
     // hint becomes a button so pinning is reachable (and discoverable) by
     // mouse, not only via the keyboard shortcut.
     onTogglePin?: () => void;
-    // Accelerator string for the pin hint (wire format, e.g. `CmdOrCtrl+P`).
-    // Threaded from the palette so a user remap of `paletteHotkeys.pin` shows
-    // the real key; defaults to ⌘P / Ctrl+P.
-    pinAccelerator?: string;
+    // The pin shortcut, already rendered for the host platform from the
+    // *effective* binding (same contract as `previewHint`): the palette
+    // resolves it so a remap that collided and got dropped surfaces the
+    // surviving key, or `undefined` to drop the glyph. Display string.
+    pinHint?: string | undefined;
     // Opens the action inspector. When provided, the ⌘K hint becomes a button
     // so the actions are reachable by mouse, not only the keyboard shortcut.
     onOpenActions?: () => void;
@@ -31,6 +32,18 @@
     // two "open something" hints are both clickable rather than mixing a
     // clickable Actions hint with a static Settings one.
     onOpenSettings?: () => void;
+    // Toggles the full-width expanded preview (where image keyboard zoom
+    // lives). When provided, the ⌘E hint becomes a button so the feature is
+    // reachable — and discoverable — by mouse, not only the keyboard shortcut.
+    onOpenPreview?: () => void;
+    // Whether the expanded preview is currently open, surfaced as the button's
+    // `aria-expanded` so assistive tech announces the toggle state.
+    previewExpanded?: boolean;
+    // The expanded-preview shortcut, already rendered for the host platform
+    // from the *effective* binding (the palette resolves it so a remap that
+    // clobbered the default surfaces the surviving key, or `undefined` to drop
+    // the glyph). Display string, not a wire accelerator.
+    previewHint?: string | undefined;
   };
 
   const {
@@ -40,9 +53,12 @@
     errorMessage,
     selectedCount = 0,
     onTogglePin,
-    pinAccelerator = 'CmdOrCtrl+P',
+    pinHint,
     onOpenActions,
     onOpenSettings,
+    onOpenPreview,
+    previewExpanded = false,
+    previewHint,
   }: Props = $props();
   const t = $derived(messages());
 
@@ -54,7 +70,9 @@
   const platform = $derived(capabilitiesState.capabilities?.platform);
   const hintActions = $derived(formatAccelerator('CmdOrCtrl+K', platform));
   const hintSettings = $derived(formatAccelerator('CmdOrCtrl+,', platform));
-  const hintPin = $derived(formatAccelerator(pinAccelerator, platform));
+  // The expanded-preview label (clearer than the bare "Preview" pill text)
+  // doubles as the button's aria-label.
+  const previewLabel = $derived(t.settings.hotkeys.paletteActions['open-preview']);
 
   // Outside Tauri there's no settings store to read from (refreshSettings
   // only flips `loaded`), so `localCapture` lets the demo chip still reflect
@@ -229,6 +247,26 @@
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}
+        {#if onOpenPreview}
+          <button
+            type="button"
+            class="hint-button"
+            data-testid="status-open-preview"
+            aria-label={previewLabel}
+            aria-expanded={previewExpanded}
+            onclick={onOpenPreview}
+            onkeydown={(event) => {
+              // Keep Enter/Space activation local (the palette's window handler
+              // would otherwise read them as confirm/paste); arrows/Escape still
+              // bubble for global navigation. Mirrors the pin button above.
+              if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+            }}
+          >
+            {#if previewHint}<kbd>{previewHint}</kbd>{/if}{t.palette.hints.preview}
+          </button>
+        {:else}
+          {#if previewHint}<kbd>{previewHint}</kbd>{/if}{t.palette.hints.preview}
+        {/if}
         {#if onTogglePin}
           <button
             type="button"
@@ -245,10 +283,10 @@
               if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
             }}
           >
-            <kbd>{hintPin}</kbd>{t.palette.hints.pin}
+            {#if pinHint}<kbd>{pinHint}</kbd>{/if}{t.palette.hints.pin}
           </button>
         {:else}
-          <kbd>{hintPin}</kbd>{t.palette.hints.pin}
+          {#if pinHint}<kbd>{pinHint}</kbd>{/if}{t.palette.hints.pin}
         {/if}
         {#if onOpenActions}
           <button
