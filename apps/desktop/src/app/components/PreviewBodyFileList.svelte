@@ -1,4 +1,12 @@
 <script lang="ts">
+  import {
+    classifyExtension,
+    findCommonParent,
+    parentForDisplay,
+    splitPath,
+    type FileCategory,
+  } from '../lib/filePath';
+
   type Props = {
     paths: readonly string[];
     total: number;
@@ -13,164 +21,14 @@
 
   let { paths, total, inFolderLabel, moreFilesLabel, locationLabel, fileRowAria }: Props = $props();
 
-  // Split on the last `/` or `\` so Windows-style file lists also light up
-  // the basename emphasis. The dir portion keeps its trailing separator so
-  // the visual order is "<dim>parent/</dim><strong>basename</strong>".
-  // A path ending in one or more separators represents a directory; we strip
-  // the whole trailing run before splitting and return a single representative
-  // separator in `trailing` so the template can re-attach it to the basename
-  // (`foo/` rather than `foo`). Collapsing the run keeps a non-normalised
-  // `…/dir//` from yielding an empty basename.
-  const splitPath = (path: string): { dir: string; base: string; trailing: string } => {
-    const body = path.replace(/[/\\]+$/, '');
-    const isDir = body.length < path.length;
-    // The first stripped char stands in for the (possibly repeated) trailing run.
-    const trailing = isDir ? path.charAt(body.length) : '';
-    const lastSlash = Math.max(body.lastIndexOf('/'), body.lastIndexOf('\\'));
-    if (lastSlash < 0) return { dir: '', base: body, trailing };
-    return {
-      dir: body.slice(0, lastSlash + 1),
-      base: body.slice(lastSlash + 1),
-      trailing,
-    };
-  };
-
-  // Index just past the last separator that delimits parent-from-basename
-  // in `s`, or 0 if none. A trailing separator (e.g. `/proj/build/`) is
-  // treated as part of the directory's own name rather than as the
-  // delimiter, so the parent extracted from `/proj/build/` is `/proj/` and
-  // the entry can render under that header without becoming an empty row.
-  const dirEndOf = (s: string): number => {
-    const len = s.length;
-    const limit = len > 0 && (s[len - 1] === '/' || s[len - 1] === '\\') ? len - 1 : len;
-    const trunc = s.slice(0, limit);
-    const last = Math.max(trunc.lastIndexOf('/'), trunc.lastIndexOf('\\'));
-    return last < 0 ? 0 : last + 1;
-  };
-
-  // A lone filesystem root (`/`, `\`, or a Windows drive root like `C:\`)
-  // is too noisy to surface as a common-parent header — every row would
-  // still need its own absolute prefix to be readable. Collapse to `''`.
-  const isRootOnlyPrefix = (s: string): boolean =>
-    s === '/' || s === '\\' || /^[A-Za-z]:[\\/]$/.test(s);
-
-  // Longest common directory prefix shared by every path in the list. We
-  // compare each entry's *parent-directory candidate* (`dirEndOf`-trimmed
-  // slice) rather than the raw path so the algorithm is order-independent —
-  // otherwise a directory entry appearing later than its sibling file would
-  // pin the prefix at the directory itself and collapse that row to empty.
-  // Operates on character ranges between separators so we never split
-  // inside a path segment.
-  const findCommonParent = (input: readonly string[]): string => {
-    if (input.length < 2) return '';
-    const parents = input.map((p) => p.slice(0, dirEndOf(p)));
-    let prefix = parents[0]!;
-    for (let i = 1; i < parents.length && prefix.length > 0; i += 1) {
-      const parent = parents[i]!;
-      while (prefix.length > 0 && !parent.startsWith(prefix)) {
-        // Shrink to the next-shorter directory by dropping the trailing
-        // separator and re-finding the previous one.
-        const trimmed = prefix.slice(0, -1);
-        prefix = trimmed.slice(0, dirEndOf(trimmed));
-      }
-    }
-    if (isRootOnlyPrefix(prefix)) return '';
-    return prefix;
-  };
-
-  // Map filename extensions to a small set of categories so the row can
-  // sport a colour-coded dot without pulling in icon fonts. A path ending
-  // in a separator is treated as a directory regardless of extension.
-  const EXT_CATEGORY: Record<string, 'image' | 'code' | 'archive' | 'document'> = {
-    png: 'image',
-    jpg: 'image',
-    jpeg: 'image',
-    gif: 'image',
-    webp: 'image',
-    svg: 'image',
-    bmp: 'image',
-    ico: 'image',
-    heic: 'image',
-    tiff: 'image',
-    tif: 'image',
-    avif: 'image',
-    ts: 'code',
-    tsx: 'code',
-    js: 'code',
-    jsx: 'code',
-    mjs: 'code',
-    cjs: 'code',
-    rs: 'code',
-    go: 'code',
-    py: 'code',
-    rb: 'code',
-    java: 'code',
-    kt: 'code',
-    swift: 'code',
-    c: 'code',
-    cpp: 'code',
-    cc: 'code',
-    h: 'code',
-    hpp: 'code',
-    cs: 'code',
-    php: 'code',
-    sh: 'code',
-    bash: 'code',
-    zsh: 'code',
-    sql: 'code',
-    json: 'code',
-    xml: 'code',
-    yaml: 'code',
-    yml: 'code',
-    toml: 'code',
-    html: 'code',
-    htm: 'code',
-    css: 'code',
-    scss: 'code',
-    sass: 'code',
-    less: 'code',
-    vue: 'code',
-    svelte: 'code',
-    md: 'code',
-    rst: 'code',
-    zip: 'archive',
-    tar: 'archive',
-    gz: 'archive',
-    tgz: 'archive',
-    bz2: 'archive',
-    xz: 'archive',
-    '7z': 'archive',
-    rar: 'archive',
-    dmg: 'archive',
-    iso: 'archive',
-    pdf: 'document',
-    doc: 'document',
-    docx: 'document',
-    xls: 'document',
-    xlsx: 'document',
-    ppt: 'document',
-    pptx: 'document',
-    txt: 'document',
-    rtf: 'document',
-    odt: 'document',
-    ods: 'document',
-    odp: 'document',
-    csv: 'document',
-    tsv: 'document',
-  };
-
-  const classifyPath = (
-    path: string,
-  ): 'image' | 'code' | 'archive' | 'document' | 'unknown' | 'directory' => {
+  // Colour category for the row's dot. A trailing separator is the only
+  // directory hint a captured path carries and it is not reliable, so the
+  // folder treatment stays a preview-local cosmetic (the dot squares off);
+  // everything else defers to the shared extension classifier.
+  const classifyRow = (path: string): FileCategory | 'directory' => {
     const last = path.length > 0 ? path[path.length - 1] : '';
     if (last === '/' || last === '\\') return 'directory';
-    const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-    const dot = path.lastIndexOf('.');
-    // Leading-dot files (`.env`) and dots that live inside a parent dir
-    // (`/some.dir/Makefile`) don't expose an extension worth colouring.
-    if (dot <= lastSlash + 1) return 'unknown';
-    if (dot === path.length - 1) return 'unknown';
-    return EXT_CATEGORY[path.slice(dot + 1).toLowerCase()] ?? 'unknown';
+    return classifyExtension(path);
   };
 
   const commonParent = $derived(findCommonParent(paths));
@@ -178,19 +36,12 @@
   // the DTO crosses the IPC boundary.
   const overflow = $derived(Math.max(0, total - paths.length));
 
-  // Parent directory formatted as a location: drop the trailing separator
-  // (`/tmp/` → `/tmp`) so it reads as a place, but keep a filesystem root
-  // intact — `/`, `\`, and `C:\` are meaningful as-is and `C:\` must not
-  // collapse to the drive-relative `C:`.
-  const parentForDisplay = (dir: string): string =>
-    isRootOnlyPrefix(dir) ? dir : dir.replace(/[/\\]+$/, '');
-
   // A single file gets a dedicated card: the basename is the heading and the
   // parent directory drops to its own "Location" row, so the filename is no
   // longer wedged onto the same line as a long absolute path. Multi-file
   // lists keep the common-parent header + per-row layout below.
   const single = $derived(total === 1 && paths.length === 1 ? splitPath(paths[0]!) : null);
-  const singleCategory = $derived(paths.length === 1 ? classifyPath(paths[0]!) : 'unknown');
+  const singleCategory = $derived(paths.length === 1 ? classifyRow(paths[0]!) : 'unknown');
   const singleLocation = $derived(single && single.dir ? parentForDisplay(single.dir) : '');
 </script>
 
@@ -220,7 +71,7 @@
       {@const relative = commonParent ? path.slice(commonParent.length) : path}
       {@const parts = splitPath(relative)}
       {@const full = splitPath(path)}
-      {@const category = classifyPath(path)}
+      {@const category = classifyRow(path)}
       <!-- `title` is a mouse hover affordance only; screen readers do not
            announce it reliably, so the accessible name comes from the
            basename-first `aria-label`. -->

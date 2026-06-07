@@ -36,7 +36,7 @@
 
 <script lang="ts">
   import { codeLanguageLabel, detectCodeLanguage } from '../lib/codeLanguage';
-  import { fileExtensionBadge } from '../lib/fileSummary';
+  import { fileExtensionBadge } from '../lib/filePath';
   import {
     collapseWhitespace,
     formatByteCount,
