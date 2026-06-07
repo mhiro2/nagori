@@ -99,6 +99,9 @@ export const de: Messages = {
       moreFiles: (count: number): string =>
         count === 1 ? '+1 weitere Datei' : `+${count.toLocaleString('de')} weitere Dateien`,
       inFolder: (prefix: string): string => `in ${prefix}`,
+      location: 'Ort',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}, in ${location}` : name,
     },
     url: {
       punycodeBadge: 'Punycode',

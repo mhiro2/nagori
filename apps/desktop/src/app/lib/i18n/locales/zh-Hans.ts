@@ -94,6 +94,9 @@ export const zhHans: Messages = {
           : `${shown.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')} 个文件`,
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hans')} 个`,
       inFolder: (prefix: string): string => `位于 ${prefix}`,
+      location: '位置',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}，位于 ${location}` : name,
     },
     url: {
       punycodeBadge: 'punycode',

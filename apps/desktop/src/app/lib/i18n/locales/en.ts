@@ -107,6 +107,12 @@ export type Messages = {
       // same directory prefix. The prefix string already includes the
       // trailing separator.
       inFolder: (prefix: string) => string;
+      // Visible label for the single-file "Location" row in the preview pane.
+      location: string;
+      // Accessible name for a file row, basename-first. `location` is the
+      // parent directory (trailing separator already stripped) or null when
+      // the path has no parent segment.
+      fileRowAria: (parts: { name: string; location: string | null }) => string;
     };
     url: {
       // Phishing-resistance badge surfaced when the IDN punycode form
@@ -603,6 +609,8 @@ export const en: Messages = {
       moreFiles: (count) =>
         count === 1 ? '+1 more file' : `+${count.toLocaleString('en')} more files`,
       inFolder: (prefix) => `in ${prefix}`,
+      location: 'Location',
+      fileRowAria: ({ name, location }) => (location ? `${name}, in ${location}` : name),
     },
     url: {
       punycodeBadge: 'punycode',

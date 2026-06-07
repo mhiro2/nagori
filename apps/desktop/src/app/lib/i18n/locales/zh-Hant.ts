@@ -94,6 +94,9 @@ export const zhHant: Messages = {
           : `${shown.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')} 個檔案`,
       moreFiles: (count: number): string => `+${count.toLocaleString('zh-Hant')} 個`,
       inFolder: (prefix: string): string => `位於 ${prefix}`,
+      location: '位置',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}，位於 ${location}` : name,
     },
     url: {
       punycodeBadge: 'punycode',

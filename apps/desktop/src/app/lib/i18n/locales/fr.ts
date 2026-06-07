@@ -101,6 +101,9 @@ export const fr: Messages = {
           ? `+${count} fichier de plus`
           : `+${count.toLocaleString('fr')} fichiers de plus`,
       inFolder: (prefix: string): string => `dans ${prefix}`,
+      location: 'Emplacement',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}, dans ${location}` : name,
     },
     url: {
       punycodeBadge: 'punycode',

@@ -94,6 +94,9 @@ export const ko: Messages = {
           : `${shown.toLocaleString('ko')} / ${total.toLocaleString('ko')}개`,
       moreFiles: (count: number): string => `+${count.toLocaleString('ko')}개 더`,
       inFolder: (prefix: string): string => `${prefix} 하위`,
+      location: '위치',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}, ${location} 하위` : name,
     },
     url: {
       punycodeBadge: 'punycode',

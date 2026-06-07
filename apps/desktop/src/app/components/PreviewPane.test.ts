@@ -491,7 +491,7 @@ describe('PreviewPane', () => {
     expect(items[0]?.querySelector('strong.base')?.textContent).toBe('a.txt');
   });
 
-  it('omits the common-parent header when there is only a single path', () => {
+  it('renders a single file as a basename heading with a separate Location row', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'fileList' }),
@@ -503,8 +503,97 @@ describe('PreviewPane', () => {
         errorMessage: undefined,
       },
     });
+    // No common-parent header and no list — the single-file card takes over.
     expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
-    expect(container.querySelector('ul.files > li span.dim')?.textContent).toBe('/tmp/');
+    expect(container.querySelector('ul.files')).toBeNull();
+    // Basename is the heading; the parent directory drops to a Location row
+    // with its trailing separator stripped for display.
+    const card = container.querySelector('[data-testid="preview-files-single"]');
+    expect(card?.querySelector('strong.single-base')?.textContent).toBe('only.txt');
+    const location = container.querySelector('[data-testid="preview-files-location"]');
+    expect(location?.textContent?.trim()).toBe('/tmp');
+    // The full parent (with separator) stays available on hover via `title`.
+    expect(location?.getAttribute('title')).toBe('/tmp/');
+  });
+
+  it('omits the Location row for a single file with no parent directory', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'fileList', paths: ['bare.txt'], total: 1 },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const card = container.querySelector('[data-testid="preview-files-single"]');
+    expect(card?.querySelector('strong.single-base')?.textContent).toBe('bare.txt');
+    expect(container.querySelector('[data-testid="preview-files-location"]')).toBeNull();
+  });
+
+  it('keeps the filesystem root intact in the single-file Location', () => {
+    // A file at the POSIX root must show `/` (not collapse to empty) and a
+    // Windows drive root must show `C:\` (not the drive-relative `C:`).
+    for (const [path, expected] of [
+      ['/a.txt', '/'],
+      ['C:\\a.txt', 'C:\\'],
+    ] as const) {
+      const { container, unmount } = render(PreviewPane, {
+        props: {
+          item: sampleItem({ kind: 'fileList' }),
+          preview: samplePreview({
+            previewText: '',
+            body: { type: 'fileList', paths: [path], total: 1 },
+          }),
+          loading: false,
+          errorMessage: undefined,
+        },
+      });
+      const location = container.querySelector('[data-testid="preview-files-location"]');
+      expect(location?.textContent?.trim()).toBe(expected);
+      expect(location?.getAttribute('title')).toBe(expected);
+      unmount();
+    }
+  });
+
+  it('labels multi-file rows with a basename-first accessible name', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            paths: ['/tmp/proj/a.txt', '/tmp/other/b.txt'],
+            total: 2,
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    // aria-label is basename-first and names the full parent, independent of
+    // the common-parent prefix stripped from the visible row.
+    expect(items[0]?.getAttribute('aria-label')).toBe('a.txt, in /tmp/proj');
+  });
+
+  it('keeps the root in a multi-file row aria-label', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: { type: 'fileList', paths: ['/a.txt', '/b.txt'], total: 2 },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.getAttribute('aria-label')).toBe('a.txt, in /');
   });
 
   it('omits the common-parent header when the only shared prefix is the root', () => {

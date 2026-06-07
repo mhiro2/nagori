@@ -304,6 +304,8 @@
           total={preview.body.total}
           inFolderLabel={t.preview.fileList.inFolder}
           moreFilesLabel={t.preview.fileList.moreFiles}
+          locationLabel={t.preview.fileList.location}
+          fileRowAria={t.preview.fileList.fileRowAria}
         />
       {:else}
         <PreviewBodyText text={bodyText} language={codeLanguage} isCode={isCodeBody} {query} />

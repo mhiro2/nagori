@@ -94,6 +94,9 @@ export const ja: Messages = {
           : `${shown.toLocaleString('ja')} / ${total.toLocaleString('ja')} 件`,
       moreFiles: (count: number): string => `他 ${count.toLocaleString('ja')} 件`,
       inFolder: (prefix: string): string => `${prefix} 配下`,
+      location: '場所',
+      fileRowAria: ({ name, location }: { name: string; location: string | null }): string =>
+        location ? `${name}、${location} 配下` : name,
     },
     url: {
       punycodeBadge: 'punycode',
