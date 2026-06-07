@@ -75,7 +75,8 @@
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
   // Coarse, user-facing categories of the extra formats the clip kept beyond
   // its primary kind (e.g. a file list that also carried an image + text).
-  // Shown in Details only; empty when nothing rides along the primary.
+  // Surfaced in the resting footer when present (informational, not a paste-
+  // picker affordance); empty when nothing rides along the primary.
   const additionalData = $derived(additionalClipboardCategories(item?.representationSummary));
   // Localised "why it matched" list, e.g. "Exact, Recent". Falls back to the
   // em-dash placeholder when a result somehow carries no reasons.
@@ -238,6 +239,17 @@
     <header class="head">
       <span class="kind">{preview?.title ?? item.kind}</span>
       <span class="head-right">
+        {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
+          <!-- Resting privacy warning, mirroring the palette row's Secret/Blocked
+               cue. The full sensitivity value (including Public/Unknown/Private)
+               still lives in Details; the absence of this badge is deliberately
+               not a "Public" claim. -->
+          <span
+            class="sens-badge"
+            data-testid="preview-sensitivity"
+            title={t.preview.fields.sensitivity}>{item.sensitivity}</span
+          >
+        {/if}
         {#if onOpenActions}
           <button
             type="button"
@@ -339,12 +351,24 @@
           {t.preview.url.openHint}
         </p>
       {/if}
-      {#if item.sourceAppName}
-        <!-- The one piece of provenance worth surfacing up front; the rest of
-             the technical metadata folds into Details below. -->
+      {#if item.sourceAppName || additionalData.length > 0}
+        <!-- Resting provenance worth surfacing without opening Details: the
+             source app, and (when the clip kept more than its primary kind) the
+             extra-format categories. The latter is informational — it reports
+             what the clip carried, not that a paste-format picker will open (the
+             ⇧⌘⏎ picker appears only for ≥2 pasteable formats). Raw diagnostics
+             still fold away below. -->
         <dl class="primary">
-          <dt>{t.preview.fields.source}</dt>
-          <dd>{item.sourceAppName}</dd>
+          {#if item.sourceAppName}
+            <dt>{t.preview.fields.source}</dt>
+            <dd>{item.sourceAppName}</dd>
+          {/if}
+          {#if additionalData.length > 0}
+            <dt>{t.preview.additionalData}</dt>
+            <dd>
+              {additionalData.map((category) => t.preview.clipboardCategory[category]).join(', ')}
+            </dd>
+          {/if}
         </dl>
       {/if}
       <details class="details">
@@ -358,12 +382,6 @@
           <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
           <dt>{t.preview.fields.rank}</dt>
           <dd>{rankLabel || t.preview.none}</dd>
-          {#if additionalData.length > 0}
-            <dt>{t.preview.additionalData}</dt>
-            <dd>
-              {additionalData.map((category) => t.preview.clipboardCategory[category]).join(', ')}
-            </dd>
-          {/if}
         </dl>
       </details>
     </footer>
@@ -416,6 +434,17 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+  .sens-badge {
+    /* Resting privacy warning. Mirrors the palette row's Secret/Blocked cue but
+       reads as a small bordered chip in the preview header (which already
+       uppercases its text). */
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 45%, transparent);
+    border-radius: 4px;
+    color: var(--warning, #f59e0b);
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
   }
   .actions {
     /* A mouse path to the inspector that mirrors the ⌘K shortcut. Sits in the
@@ -517,9 +546,9 @@
     margin: 0;
     overflow-wrap: anywhere;
   }
-  /* The technical fields (id / sensitivity / size / rank / formats) live in a
-     collapsed disclosure so the resting pane leads with the body and the source
-     line, not a wall of diagnostics. The grid above styles the inner <dl>. */
+  /* The technical fields (id / sensitivity / size / rank) live in a collapsed
+     disclosure so the resting pane leads with the body and the resting footer,
+     not a wall of diagnostics. The grid above styles the inner <dl>. */
   .details summary {
     color: var(--muted, rgba(255, 255, 255, 0.45));
     font-size: 0.75rem;

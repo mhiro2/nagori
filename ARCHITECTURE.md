@@ -1251,16 +1251,21 @@ not duplicate runtime logic.
   server-side (basename / parent / longest-common-parent / `~` folding /
   extension), the same width-independent rules `lib/filePath.ts` keeps for
   the palette badge and colour dot.
-  The footer keeps the *source* line visible and folds the technical fields
-  — id, sensitivity, size, *rank* (the entry's `RankReason`s as localised
-  labels, the same vocabulary as the row chip, so the full "why it matched /
-  why it ranked here" set including the recency / frequency / pin boosts the
-  row chip omits is recoverable), and *additional clipboard data* — into a
-  collapsed **Details** disclosure so the resting pane leads with the body
-  rather than diagnostics. That last row lists the coarse, user-facing
+  The footer keeps the resting identification aids visible — the *source*
+  line, and *additional clipboard data* when present: the coarse, user-facing
   categories (Image / Text / Files) a clip kept *beyond* its primary kind,
-  rather than the raw MIME list; result rows no longer carry that chip at all
-  (it was an internal-format dump with little bearing on selection).
+  rather than the raw MIME list (result rows no longer carry that chip at all,
+  as it was an internal-format dump with little bearing on selection). That
+  row is informational, not a paste-format picker affordance — the ⇧⌘⏎ picker
+  opens only for ≥2 pasteable formats. The header carries a resting privacy
+  badge for `Secret` / `Blocked` entries, mirroring the row chip; its absence
+  is deliberately not a "Public" claim. The remaining technical fields — id,
+  sensitivity (the full value, every entry), size, and *rank* (the entry's
+  `RankReason`s as localised labels, the same vocabulary as the row chip, so
+  the full "why it matched / why it ranked here" set including the recency /
+  frequency / pin boosts the row chip omits is recoverable) — fold into a
+  collapsed **Details** disclosure so the resting pane leads with the body
+  rather than diagnostics.
 - `ActionInspector.svelte` — a hotkey-triggered **docked panel** that runs
   actions against the selected entry. It is not a modal: opening it (the
   `open-actions` binding) takes the palette body's right column in place of

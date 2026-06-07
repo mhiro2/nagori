@@ -78,7 +78,7 @@ export type Messages = {
     empty: string;
     loading: string;
     // Summary label for the collapsible holding the technical fields
-    // (id / sensitivity / size / rank / additional clipboard data).
+    // (id / sensitivity / size / rank).
     details: string;
     truncated: string;
     truncation: {
@@ -101,8 +101,9 @@ export type Messages = {
       rank: string;
     };
     // Label + coarse value categories for the "extra formats this clip kept
-    // beyond its primary kind" row in Details (e.g. "Additional clipboard
-    // data: Image, Text"). Categories are user-facing, never raw MIME types.
+    // beyond its primary kind" row in the resting footer (e.g. "Additional
+    // clipboard data: Image, Text"). Categories are user-facing, never raw MIME
+    // types.
     additionalData: string;
     clipboardCategory: { image: string; text: string; files: string };
     none: string;

@@ -2,8 +2,8 @@
 // content. A copy often carries several representations (e.g. a file list that
 // also brought a PNG render and a plain-text fallback); rather than dumping the
 // raw MIME list ("PNG + Plain") onto every row, we surface only the additional
-// data — folded into coarse, translatable categories — and only in the preview
-// pane's Details. The primary representation's own category is excluded so we
+// data — folded into coarse, translatable categories — in the preview pane's
+// resting footer. The primary representation's own category is excluded so we
 // never echo the kind the row already shows.
 
 import type { RepresentationSummary } from './types';

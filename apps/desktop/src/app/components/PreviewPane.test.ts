@@ -1306,8 +1306,8 @@ describe('PreviewPane', () => {
 
   it('lists the additional clipboard data as user-facing categories, excluding the primary kind', () => {
     // A file list that also carried an image render and a plain-text fallback:
-    // Details surfaces "Image, Text" (the extras), never the raw MIME list and
-    // never echoing the primary's own "Files" category.
+    // the resting footer surfaces "Image, Text" (the extras), never the raw MIME
+    // list and never echoing the primary's own "Files" category.
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({
@@ -1323,11 +1323,15 @@ describe('PreviewPane', () => {
         errorMessage: undefined,
       },
     });
-    const foot = container.querySelector('.foot')?.textContent ?? '';
-    expect(foot).toContain('Additional clipboard data');
-    expect(foot).toMatch(/Image, Text/);
+    // Surfaced at rest in the primary footer row, not buried in the collapsed
+    // diagnostics disclosure.
+    const primary = container.querySelector('.foot dl.primary')?.textContent ?? '';
+    expect(primary).toContain('Additional clipboard data');
+    expect(primary).toMatch(/Image, Text/);
+    const details = container.querySelector('.foot details')?.textContent ?? '';
+    expect(details).not.toMatch(/Additional clipboard data/);
     // No raw MIME labels leak through.
-    expect(foot).not.toMatch(/PNG|Plain|uri-list/);
+    expect(primary).not.toMatch(/PNG|Plain|uri-list/);
   });
 
   it('omits the additional-data row when nothing rides beyond the primary kind', () => {
@@ -1346,5 +1350,39 @@ describe('PreviewPane', () => {
       },
     });
     expect(container.querySelector('.foot')?.textContent).not.toMatch(/Additional clipboard data/);
+  });
+
+  it('shows a resting sensitivity badge only for Secret/Blocked entries', () => {
+    // Secret/Blocked get a warning chip at rest (matching the palette row);
+    // every other value stays badge-less — including Private, which the palette
+    // also leaves un-chipped — so the badge's absence never doubles as a
+    // "Public" claim. The full value still lives in Details for every entry.
+    for (const sensitivity of ['Secret', 'Blocked'] as const) {
+      const { container, unmount } = render(PreviewPane, {
+        props: {
+          item: sampleItem({ sensitivity }),
+          preview: samplePreview(),
+          loading: false,
+          errorMessage: undefined,
+        },
+      });
+      const badge = container.querySelector('[data-testid="preview-sensitivity"]');
+      expect(badge?.textContent).toBe(sensitivity);
+      // Still recorded in the collapsed diagnostics regardless of the badge.
+      expect(container.querySelector('.foot details')?.textContent).toContain(sensitivity);
+      unmount();
+    }
+    for (const sensitivity of ['Public', 'Unknown', 'Private'] as const) {
+      const { container, unmount } = render(PreviewPane, {
+        props: {
+          item: sampleItem({ sensitivity }),
+          preview: samplePreview(),
+          loading: false,
+          errorMessage: undefined,
+        },
+      });
+      expect(container.querySelector('[data-testid="preview-sensitivity"]')).toBeNull();
+      unmount();
+    }
   });
 });
