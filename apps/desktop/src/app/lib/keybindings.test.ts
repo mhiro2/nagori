@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildBindings,
   captureFromKeyboardEvent,
+  defaultPaletteAccelerator,
   formatAccelerator,
   isImeComposing,
   isPrimaryModifierHeld,
@@ -416,5 +417,27 @@ describe('captureFromKeyboardEvent', () => {
         'macos',
       ),
     ).toBeNull();
+  });
+});
+
+describe('defaultPaletteAccelerator', () => {
+  it('formats the built-in default in the macOS idiom', () => {
+    expect(defaultPaletteAccelerator('pin', 'macos')).toBe('⌘P');
+    expect(defaultPaletteAccelerator('delete', 'macos')).toBe('⌘⌫');
+    expect(defaultPaletteAccelerator('paste-as-plain', 'macos')).toBe('⇧⌘↩');
+    expect(defaultPaletteAccelerator('copy-without-paste', 'macos')).toBe('⌘↩');
+    expect(defaultPaletteAccelerator('open-preview', 'macos')).toBe('⌘E');
+  });
+
+  it('swaps Cmd for Ctrl on non-macOS hosts', () => {
+    expect(defaultPaletteAccelerator('pin', 'windows')).toBe('Ctrl+P');
+    expect(defaultPaletteAccelerator('open-preview', 'linuxWayland')).toBe('Ctrl+E');
+  });
+
+  it('returns null for actions that ship without a default', () => {
+    // `clear` (clear-query) has no entry in PALETTE_BINDINGS, so the editor
+    // must render it as "not set" rather than inventing a binding.
+    expect(defaultPaletteAccelerator('clear', 'macos')).toBeNull();
+    expect(defaultPaletteAccelerator('clear', 'windows')).toBeNull();
   });
 });

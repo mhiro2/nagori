@@ -127,6 +127,23 @@ const ACTION_FROM_OVERRIDE: Record<PaletteHotkeyAction, PaletteAction> = {
 const isPaletteHotkeyAction = (value: string): value is PaletteHotkeyAction =>
   Object.prototype.hasOwnProperty.call(ACTION_FROM_OVERRIDE, value);
 
+// Resolve the built-in default accelerator for an overridable palette action,
+// already formatted in the platform's idiom (`⌘P` on macOS, `Ctrl+P` on
+// Windows/Linux). Returns `null` for actions that ship without a default —
+// today only `clear`, whose `clear-query` behaviour exists in the palette but
+// has no entry in `PALETTE_BINDINGS`, so the Settings UI shows it as "not set"
+// instead of inventing a binding. Derived from the same `ACTION_FROM_OVERRIDE`
+// + `paletteBindingsFor` data the live matcher consumes, so the displayed
+// default can never drift from the binding that actually fires.
+export const defaultPaletteAccelerator = (
+  action: PaletteHotkeyAction,
+  platform?: Platform,
+): string | null => {
+  const target = ACTION_FROM_OVERRIDE[action];
+  const binding = paletteBindingsFor(platform).find((b) => b.action === target);
+  return binding ? formatBinding(binding, platform) : null;
+};
+
 // Always compare keys case-insensitively so a binding stored as `p` still
 // matches `event.key === 'P'` when Shift is held — `KeyboardEvent.key`
 // follows the OS' shifted output, which would otherwise dodge the binding.
