@@ -126,6 +126,21 @@ describe('HotkeyInput', () => {
     expect(onChange).toHaveBeenCalledWith('');
   });
 
+  it('restores focus to the recording button after clearing the value', async () => {
+    // The component is controlled, so the parent normally drops `value` in
+    // response to onChange — which unmounts this very trailing button. The fix
+    // hands focus back to the persistent recording button *during* the click,
+    // so focus is never stranded on <body> regardless of when the prop
+    // updates. Asserting focus right after the click captures exactly that.
+    const { container } = render(HotkeyInput, {
+      props: { ...defaultProps, value: 'CmdOrCtrl+V' },
+    });
+    const display = container.querySelector('.display') as HTMLButtonElement;
+    const clear = container.querySelector('.clear') as HTMLButtonElement;
+    await fireEvent.click(clear);
+    expect(document.activeElement).toBe(display);
+  });
+
   it('hides the clear button while recording so the click target is unambiguous', async () => {
     const { container } = render(HotkeyInput, {
       props: { ...defaultProps, value: 'CmdOrCtrl+V' },
@@ -152,5 +167,125 @@ describe('HotkeyInput', () => {
       ctrlKey: true,
     });
     expect(onChange).toHaveBeenCalledWith('CmdOrCtrl+Ctrl+K');
+  });
+});
+
+describe('HotkeyInput — group variants', () => {
+  // Group-aware props shared by every variant. `defaultDisplay` is added per
+  // test rather than here — under `exactOptionalPropertyTypes` an optional
+  // prop can be omitted but not explicitly set to `undefined`, and the
+  // secondary variant (like its SettingsTabGeneral call site) omits it.
+  const baseProps = {
+    platform: 'macos' as const,
+    target: 'palette-binding' as const,
+    ariaLabel: 'Toggle pin shortcut',
+    placeholder: 'Set shortcut',
+    recordingLabel: 'Press shortcut…',
+    recordingCancelHint: 'Esc to cancel',
+    clearLabel: 'Clear shortcut',
+    defaultMarker: 'Default',
+    disabledMarker: 'Disabled',
+    notSet: 'Not set',
+    restoreText: 'Reset',
+    restoreLabel: 'Restore default for Toggle pin',
+    removeLabel: 'Remove shortcut for Toggle pin',
+    onChange: () => {},
+  };
+
+  it('palette: shows the muted default key + Default marker, no trailing control, when not overridden', () => {
+    const { container } = render(HotkeyInput, {
+      props: { ...baseProps, variant: 'palette', defaultDisplay: '⌘P', value: '' },
+    });
+    const combo = container.querySelector('.combo');
+    expect(combo?.textContent).toBe('⌘P');
+    expect(combo?.classList.contains('muted')).toBe(true);
+    expect(container.querySelector('.marker')?.textContent).toBe('Default');
+    expect(container.querySelector('.clear')).toBeNull();
+  });
+
+  it('palette: shows the custom key (not muted) + a restore-default control when overridden', async () => {
+    const onChange = vi.fn();
+    const { container } = render(HotkeyInput, {
+      props: {
+        ...baseProps,
+        variant: 'palette',
+        defaultDisplay: '⌘P',
+        value: 'CmdOrCtrl+Shift+P',
+        onChange,
+      },
+    });
+    const combo = container.querySelector('.combo');
+    expect(combo?.textContent).toBe('⇧⌘P');
+    expect(combo?.classList.contains('muted')).toBe(false);
+    expect(container.querySelector('.marker')).toBeNull();
+    const reset = container.querySelector('.clear') as HTMLButtonElement;
+    expect(reset.getAttribute('aria-label')).toBe('Restore default for Toggle pin');
+    // Restore is a short action-word text chip ("Reset"), distinct from the
+    // in-field "Default" status marker and not a glyph.
+    expect(reset.classList.contains('text-chip')).toBe(true);
+    expect(reset.textContent?.trim()).toBe('Reset');
+    await fireEvent.click(reset);
+    expect(onChange).toHaveBeenCalledWith('');
+  });
+
+  it('palette-optional: shows "Not set" with no marker / control when unset', () => {
+    const { container } = render(HotkeyInput, {
+      props: { ...baseProps, variant: 'palette-optional', defaultDisplay: null, value: '' },
+    });
+    expect(container.querySelector('.hint')?.textContent).toBe('Not set');
+    expect(container.querySelector('.marker')).toBeNull();
+    expect(container.querySelector('.clear')).toBeNull();
+  });
+
+  it('palette-optional: shows a × remove-shortcut control when set', () => {
+    const { container } = render(HotkeyInput, {
+      props: {
+        ...baseProps,
+        variant: 'palette-optional',
+        defaultDisplay: null,
+        value: 'CmdOrCtrl+Backspace',
+      },
+    });
+    const remove = container.querySelector('.clear') as HTMLButtonElement;
+    expect(remove.getAttribute('aria-label')).toBe('Remove shortcut for Toggle pin');
+    expect(remove.textContent?.trim()).toBe('×');
+  });
+
+  it('secondary: shows "Not set" + a Disabled marker, no control, when unset', () => {
+    const { container } = render(HotkeyInput, {
+      props: {
+        ...baseProps,
+        variant: 'secondary',
+        ariaLabel: 'Repaste latest item shortcut',
+        removeLabel: 'Disable Repaste latest item',
+        value: '',
+      },
+    });
+    expect(container.querySelector('.hint')?.textContent).toBe('Not set');
+    expect(container.querySelector('.marker')?.textContent).toBe('Disabled');
+    expect(container.querySelector('.clear')).toBeNull();
+  });
+
+  it('secondary: shows a × disable control when set', () => {
+    const { container } = render(HotkeyInput, {
+      props: {
+        ...baseProps,
+        variant: 'secondary',
+        ariaLabel: 'Repaste latest item shortcut',
+        removeLabel: 'Disable Repaste latest item',
+        value: 'CmdOrCtrl+Shift+R',
+      },
+    });
+    const disable = container.querySelector('.clear') as HTMLButtonElement;
+    expect(disable.getAttribute('aria-label')).toBe('Disable Repaste latest item');
+    expect(disable.textContent?.trim()).toBe('×');
+  });
+
+  it('folds the action name and current state into the accessible name', () => {
+    const { container } = render(HotkeyInput, {
+      props: { ...baseProps, variant: 'palette', defaultDisplay: '⌘P', value: '' },
+    });
+    const display = container.querySelector('.display') as HTMLButtonElement;
+    expect(display.getAttribute('aria-label')).toBe('Toggle pin shortcut, ⌘P, Default');
   });
 });

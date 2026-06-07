@@ -1,6 +1,7 @@
 <script lang="ts">
   import { LOCALE_PREFERENCES } from '../lib/i18n/index.svelte';
   import type { Messages } from '../lib/i18n/locales/en';
+  import { defaultPaletteAccelerator } from '../lib/keybindings';
   import {
     type Appearance,
     type AppSettings,
@@ -46,6 +47,10 @@
     onPaletteHotkeyChange,
     onSecondaryHotkeyChange,
   }: Props = $props();
+
+  // Fold the action label into an accessible-name / tooltip template
+  // (`Restore default for {action}` etc.) the same way the update strings do.
+  const sub = (template: string, action: string): string => template.replace('{action}', action);
 </script>
 
 <fieldset>
@@ -87,6 +92,7 @@
       target="tauri-global"
       placeholder={t.settings.hotkeys.placeholder}
       recordingLabel={t.settings.hotkeys.recordingHint}
+      recordingCancelHint={t.settings.hotkeys.recordingCancelHint}
       clearLabel={t.settings.hotkeys.clearAriaLabel}
       onChange={onGlobalHotkeyChange}
     />
@@ -141,38 +147,56 @@
   <legend>{t.settings.hotkeys.legend}</legend>
   <p class="subhead">{t.settings.hotkeys.paletteHeading}</p>
   <p class="help">{t.settings.hotkeys.paletteHelp}</p>
-  <div class="hotkey-grid">
+  <div class="hotkey-list">
     {#each paletteHotkeyActions as action (action)}
-      <label class="hotkey-row">
-        <span class="hotkey-label">{t.settings.hotkeys.paletteActions[action]}</span>
+      {@const label = t.settings.hotkeys.paletteActions[action]}
+      {@const def = defaultPaletteAccelerator(action, capabilities?.platform)}
+      <div class="hotkey-row">
+        <span class="hotkey-label">{label}</span>
         <HotkeyInput
           value={settings.paletteHotkeys[action] ?? ''}
           platform={capabilities?.platform}
           target="palette-binding"
+          variant={def !== null ? 'palette' : 'palette-optional'}
+          defaultDisplay={def}
+          ariaLabel={sub(t.settings.hotkeys.fieldAriaLabel, label)}
           placeholder={t.settings.hotkeys.placeholder}
           recordingLabel={t.settings.hotkeys.recordingHint}
+          recordingCancelHint={t.settings.hotkeys.recordingCancelHint}
           clearLabel={t.settings.hotkeys.clearAriaLabel}
+          defaultMarker={t.settings.hotkeys.defaultMarker}
+          notSet={t.settings.hotkeys.notSet}
+          restoreText={t.settings.hotkeys.reset}
+          restoreLabel={sub(t.settings.hotkeys.restoreDefault, label)}
+          removeLabel={sub(t.settings.hotkeys.removeShortcut, label)}
           onChange={(next) => onPaletteHotkeyChange(action, next)}
         />
-      </label>
+      </div>
     {/each}
   </div>
   <p class="subhead">{t.settings.hotkeys.secondaryHeading}</p>
   <p class="help">{t.settings.hotkeys.secondaryHelp}</p>
-  <div class="hotkey-grid">
+  <div class="hotkey-list">
     {#each secondaryHotkeyActions as action (action)}
-      <label class="hotkey-row">
-        <span class="hotkey-label">{t.settings.hotkeys.secondaryActions[action]}</span>
+      {@const label = t.settings.hotkeys.secondaryActions[action]}
+      <div class="hotkey-row">
+        <span class="hotkey-label">{label}</span>
         <HotkeyInput
           value={settings.secondaryHotkeys[action] ?? ''}
           platform={capabilities?.platform}
           target="tauri-global"
+          variant="secondary"
+          ariaLabel={sub(t.settings.hotkeys.fieldAriaLabel, label)}
           placeholder={t.settings.hotkeys.placeholder}
           recordingLabel={t.settings.hotkeys.recordingHint}
+          recordingCancelHint={t.settings.hotkeys.recordingCancelHint}
           clearLabel={t.settings.hotkeys.clearAriaLabel}
+          disabledMarker={t.settings.hotkeys.disabledMarker}
+          notSet={t.settings.hotkeys.notSet}
+          removeLabel={sub(t.settings.hotkeys.disableShortcut, label)}
           onChange={(next) => onSecondaryHotkeyChange(action, next)}
         />
-      </label>
+      </div>
     {/each}
   </div>
 </fieldset>
@@ -251,16 +275,23 @@
     letter-spacing: 0.05em;
     color: var(--muted, rgba(255, 255, 255, 0.65));
   }
-  .hotkey-grid {
-    display: grid;
-    grid-template-columns: minmax(11rem, 1fr) 2fr;
-    gap: 0.4rem 0.6rem;
+  /* One row per action stacked vertically (label over input). A 2-column
+     grid drifted out of alignment once the localized labels varied in width,
+     so the layout stays single-column on every viewport for predictable
+     localization rather than reviving a label column on wider screens. */
+  .hotkey-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    margin: 0.1rem 0 0.5rem;
   }
   .hotkey-row {
-    display: contents;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
   }
   .hotkey-label {
-    align-self: center;
     font-size: 0.875rem;
   }
 </style>
