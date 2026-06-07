@@ -78,8 +78,9 @@ export const fr: Messages = {
       source: 'source',
       size: 'taille',
       rank: 'rang',
-      formats: 'formats conservés',
     },
+    additionalData: 'Autres données du presse-papiers',
+    clipboardCategory: { image: 'Image', text: 'Texte', files: 'Fichiers' },
     none: '—',
     summary: {
       lines: (count: number): string =>

@@ -78,7 +78,7 @@ export type Messages = {
     empty: string;
     loading: string;
     // Summary label for the collapsible holding the technical fields
-    // (id / sensitivity / size / rank / preserved formats).
+    // (id / sensitivity / size / rank / additional clipboard data).
     details: string;
     truncated: string;
     truncation: {
@@ -99,8 +99,12 @@ export type Messages = {
       source: string;
       size: string;
       rank: string;
-      formats: string;
     };
+    // Label + coarse value categories for the "extra formats this clip kept
+    // beyond its primary kind" row in Details (e.g. "Additional clipboard
+    // data: Image, Text"). Categories are user-facing, never raw MIME types.
+    additionalData: string;
+    clipboardCategory: { image: string; text: string; files: string };
     none: string;
     summary: {
       lines: CountFormatter;
@@ -621,8 +625,9 @@ export const en: Messages = {
       source: 'source',
       size: 'size',
       rank: 'rank',
-      formats: 'preserved formats',
     },
+    additionalData: 'Additional clipboard data',
+    clipboardCategory: { image: 'Image', text: 'Text', files: 'Files' },
     none: '—',
     summary: {
       lines: (count) => (count === 1 ? '1 line' : `${count.toLocaleString('en')} lines`),

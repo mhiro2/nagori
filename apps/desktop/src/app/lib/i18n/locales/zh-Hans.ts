@@ -76,8 +76,9 @@ export const zhHans: Messages = {
       source: '来源',
       size: '大小',
       rank: '排名',
-      formats: '保留的格式',
     },
+    additionalData: '其他剪贴板数据',
+    clipboardCategory: { image: '图像', text: '文本', files: '文件' },
     none: '—',
     summary: {
       lines: (count: number): string => `${count.toLocaleString('zh-Hans')} 行`,

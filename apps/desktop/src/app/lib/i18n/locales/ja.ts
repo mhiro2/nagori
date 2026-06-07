@@ -76,8 +76,9 @@ export const ja: Messages = {
       source: '送信元',
       size: 'サイズ',
       rank: 'ランク',
-      formats: '保持された形式',
     },
+    additionalData: 'その他のクリップボードデータ',
+    clipboardCategory: { image: '画像', text: 'テキスト', files: 'ファイル' },
     none: '—',
     summary: {
       lines: (count: number): string => `${count.toLocaleString('ja')} 行`,

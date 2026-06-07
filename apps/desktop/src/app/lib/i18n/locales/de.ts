@@ -77,8 +77,9 @@ export const de: Messages = {
       source: 'Quelle',
       size: 'Größe',
       rank: 'Rang',
-      formats: 'Erhaltene Formate',
     },
+    additionalData: 'Weitere Daten in der Zwischenablage',
+    clipboardCategory: { image: 'Bild', text: 'Text', files: 'Dateien' },
     none: '—',
     summary: {
       lines: (count: number): string =>

@@ -1,7 +1,4 @@
 <script module lang="ts">
-  import { dedupedRepresentationLabels } from '../lib/representations';
-  import type { RepresentationSummary } from '../lib/types';
-
   // Per-kind label for the leading badge. Keep these short so the column
   // stays a fixed width regardless of the active locale.
   const KIND_BADGE: Record<string, string> = {
@@ -21,16 +18,6 @@
     } catch {
       return undefined;
     }
-  };
-
-  // Trailing "HTML + Plain" chip for rows that kept more than one format.
-  // Single-format rows (the common case for plain text) get `undefined` so
-  // the meta strip stays uncluttered.
-  export const formatRepresentationBadge = (
-    summary: readonly RepresentationSummary[] | undefined,
-  ): string | undefined => {
-    const labels = dedupedRepresentationLabels(summary);
-    return labels.length > 1 ? labels.join(' + ') : undefined;
   };
 </script>
 
@@ -111,12 +98,6 @@
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
-  // File rows drop the representation chip: the row already carries the FILES
-  // kind-badge, so a trailing "Files + PNG + Plain" rep-badge doubles "Files"
-  // and steals horizontal room from the path. Other kinds keep the chip.
-  const repBadge = $derived(
-    item.kind === 'fileList' ? undefined : formatRepresentationBadge(item.representationSummary),
-  );
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
   const rankReason = $derived(primaryRankReason(item.rankReasons));
@@ -219,7 +200,6 @@
       {#if rankChip}<span class="rank-chip" data-reason={rankReason} title={t.preview.fields.rank}
           >{rankChip}</span
         >{/if}
-      {#if repBadge}<span class="rep-badge" title={t.preview.fields.formats}>{repBadge}</span>{/if}
       {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
         <span class="sens">{item.sensitivity}</span>
       {/if}
@@ -509,14 +489,6 @@
   }
   .sens {
     color: var(--warning, #f59e0b);
-  }
-  .rep-badge {
-    padding: 0.05rem 0.35rem;
-    border: 1px solid rgba(120, 160, 255, 0.35);
-    border-radius: 4px;
-    color: var(--accent, #6c8dff);
-    font-size: 0.65rem;
-    letter-spacing: 0.04em;
   }
   /* "Why did this match" chip. Neutral by default so it never reads as a
      warning; semantic / fuzzy hits get a distinct hue so they stand as a

@@ -1,44 +1,38 @@
-// Short labels for the per-MIME chips that show "this clip also kept HTML,
-// RTF, etc." in the palette row and the preview pane. The publisher already
-// collapses primary + plain_fallback pairs that share a MIME, but we dedupe
-// labels too so e.g. a primary text/plain + alternative text/plain renders
-// once rather than "Plain, Plain".
+// User-facing summary of the *extra* formats a clip kept beyond its main
+// content. A copy often carries several representations (e.g. a file list that
+// also brought a PNG render and a plain-text fallback); rather than dumping the
+// raw MIME list ("PNG + Plain") onto every row, we surface only the additional
+// data — folded into coarse, translatable categories — and only in the preview
+// pane's Details. The primary representation's own category is excluded so we
+// never echo the kind the row already shows.
 
 import type { RepresentationSummary } from './types';
 
-const REP_LABEL_BY_MIME: Record<string, string> = {
-  'text/plain': 'Plain',
-  'text/html': 'HTML',
-  'application/rtf': 'RTF',
-  'text/uri-list': 'Files',
-  'image/png': 'PNG',
-  'image/jpeg': 'JPEG',
-  'image/gif': 'GIF',
-  'image/webp': 'WebP',
-  'image/tiff': 'TIFF',
+// Coarse, user-facing buckets. The localised label for each lives in the i18n
+// `preview.clipboardCategory` map so the renderer never shows a raw MIME type.
+export type ClipboardCategory = 'image' | 'text' | 'files';
+
+const categoryOf = (mime: string): ClipboardCategory => {
+  if (mime.startsWith('image/')) return 'image';
+  if (mime === 'text/uri-list') return 'files';
+  // Everything else allowlisted is text-shaped (plain / html / rtf).
+  return 'text';
 };
 
-export const representationLabel = (mime: string): string => {
-  const known = REP_LABEL_BY_MIME[mime];
-  if (known !== undefined) return known;
-  if (mime.startsWith('image/')) return 'IMG';
-  return mime;
-};
-
-// Returns the de-duplicated label list, preserving the input order. Empty
-// when the entry only has its primary representation — callers decide how
-// to render the "single format" case (usually: don't show the row at all).
-export const dedupedRepresentationLabels = (
+// The additional-data categories present in `summary`, excluding the primary
+// representation's own category and de-duplicated in clipboard order. Empty when
+// the entry carries nothing beyond its primary kind — callers then hide the row.
+export const additionalClipboardCategories = (
   summary: readonly RepresentationSummary[] | undefined,
-): string[] => {
+): ClipboardCategory[] => {
   if (!summary || summary.length === 0) return [];
-  const seen = new Set<string>();
-  const labels: string[] = [];
+  const primary = summary.find((rep) => rep.role === 'primary');
+  const primaryCategory = primary ? categoryOf(primary.mimeType) : undefined;
+  const categories: ClipboardCategory[] = [];
   for (const rep of summary) {
-    const label = representationLabel(rep.mimeType);
-    if (seen.has(label)) continue;
-    seen.add(label);
-    labels.push(label);
+    const category = categoryOf(rep.mimeType);
+    if (category === primaryCategory) continue;
+    if (!categories.includes(category)) categories.push(category);
   }
-  return labels;
+  return categories;
 };

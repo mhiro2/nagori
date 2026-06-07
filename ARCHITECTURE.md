@@ -1224,9 +1224,12 @@ not duplicate runtime logic.
   — id, sensitivity, size, *rank* (the entry's `RankReason`s as localised
   labels, the same vocabulary as the row chip, so the full "why it matched /
   why it ranked here" set including the recency / frequency / pin boosts the
-  row chip omits is recoverable), and preserved formats — into a collapsed
-  **Details** disclosure so the resting pane leads with the body rather than
-  diagnostics.
+  row chip omits is recoverable), and *additional clipboard data* — into a
+  collapsed **Details** disclosure so the resting pane leads with the body
+  rather than diagnostics. That last row lists the coarse, user-facing
+  categories (Image / Text / Files) a clip kept *beyond* its primary kind,
+  rather than the raw MIME list; result rows no longer carry that chip at all
+  (it was an internal-format dump with little bearing on selection).
 - `ActionInspector.svelte` — a hotkey-triggered **docked panel** that runs
   actions against the selected entry. It is not a modal: opening it (the
   `open-actions` binding) takes the palette body's right column in place of

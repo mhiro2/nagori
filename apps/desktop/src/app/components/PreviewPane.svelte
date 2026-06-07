@@ -4,8 +4,8 @@
   import { isImeComposing } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
   import { rankReasonLabels } from '../lib/rankReason';
-  import { dedupedRepresentationLabels } from '../lib/representations';
-  import type { EntryPreviewDto, RepresentationSummary, SearchResultDto } from '../lib/types';
+  import { additionalClipboardCategories } from '../lib/representations';
+  import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
   import { capabilitiesState } from '../stores/capabilities.svelte';
   import PreviewBodyFileList from './PreviewBodyFileList.svelte';
   import PreviewBodyImage from './PreviewBodyImage.svelte';
@@ -18,16 +18,6 @@
   // forged invoke can't escape — keeping the list here lets us hide
   // the trigger entirely when the user couldn't act on it anyway.
   const URL_OPEN_SCHEMES = new Set(['https', 'http']);
-
-  // Comma-joined "preserved formats" footer line. Only shown when an entry
-  // kept more than its primary representation so single-format clips don't
-  // clutter the row.
-  const formatPreservedList = (
-    summary: readonly RepresentationSummary[] | undefined,
-  ): string | undefined => {
-    const labels = dedupedRepresentationLabels(summary);
-    return labels.length > 1 ? labels.join(', ') : undefined;
-  };
 
   // `image/png` → `PNG`. Strip the `+xml` / `+json` structured-syntax suffix
   // so `image/svg+xml` renders as `SVG`. Used by the head summary chip.
@@ -83,7 +73,10 @@
   }: Props = $props();
   const t = $derived(messages());
   const bodyText = $derived(preview?.previewText ?? item?.preview ?? '');
-  const preservedFormats = $derived(formatPreservedList(item?.representationSummary));
+  // Coarse, user-facing categories of the extra formats the clip kept beyond
+  // its primary kind (e.g. a file list that also carried an image + text).
+  // Shown in Details only; empty when nothing rides along the primary.
+  const additionalData = $derived(additionalClipboardCategories(item?.representationSummary));
   // Localised "why it matched" list, e.g. "Exact, Recent". Falls back to the
   // em-dash placeholder when a result somehow carries no reasons.
   const rankLabel = $derived(
@@ -362,9 +355,11 @@
           <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
           <dt>{t.preview.fields.rank}</dt>
           <dd>{rankLabel || t.preview.none}</dd>
-          {#if preservedFormats}
-            <dt>{t.preview.fields.formats}</dt>
-            <dd>{preservedFormats}</dd>
+          {#if additionalData.length > 0}
+            <dt>{t.preview.additionalData}</dt>
+            <dd>
+              {additionalData.map((category) => t.preview.clipboardCategory[category]).join(', ')}
+            </dd>
           {/if}
         </dl>
       </details>

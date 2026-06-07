@@ -76,8 +76,9 @@ export const zhHant: Messages = {
       source: '來源',
       size: '大小',
       rank: '排名',
-      formats: '保留的格式',
     },
+    additionalData: '其他剪貼簿資料',
+    clipboardCategory: { image: '影像', text: '文字', files: '檔案' },
     none: '—',
     summary: {
       lines: (count: number): string => `${count.toLocaleString('zh-Hant')} 行`,

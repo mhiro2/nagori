@@ -79,8 +79,9 @@ export const es: Messages = {
       source: 'origen',
       size: 'tamaño',
       rank: 'rango',
-      formats: 'formatos conservados',
     },
+    additionalData: 'Otros datos del portapapeles',
+    clipboardCategory: { image: 'Imagen', text: 'Texto', files: 'Archivos' },
     none: '—',
     summary: {
       lines: (count: number): string =>

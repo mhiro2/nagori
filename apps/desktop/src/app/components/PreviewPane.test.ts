@@ -1250,10 +1250,37 @@ describe('PreviewPane', () => {
     expect(details?.querySelector('dl')?.textContent).not.toContain('Safari');
   });
 
-  it('shows a preserved-formats row when the entry kept multiple representations', () => {
+  it('lists the additional clipboard data as user-facing categories, excluding the primary kind', () => {
+    // A file list that also carried an image render and a plain-text fallback:
+    // Details surfaces "Image, Text" (the extras), never the raw MIME list and
+    // never echoing the primary's own "Files" category.
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({
+          kind: 'fileList',
+          representationSummary: [
+            { mimeType: 'text/uri-list', role: 'primary', byteCount: 40 },
+            { mimeType: 'image/png', role: 'alternative', byteCount: 2000 },
+            { mimeType: 'text/plain', role: 'plainFallback', byteCount: 20 },
+          ],
+        }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const foot = container.querySelector('.foot')?.textContent ?? '';
+    expect(foot).toContain('Additional clipboard data');
+    expect(foot).toMatch(/Image, Text/);
+    // No raw MIME labels leak through.
+    expect(foot).not.toMatch(/PNG|Plain|uri-list/);
+  });
+
+  it('omits the additional-data row when nothing rides beyond the primary kind', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({
+          // Primary plus a same-category alternative: no new category to show.
           representationSummary: [
             { mimeType: 'text/plain', role: 'primary', byteCount: 5 },
             { mimeType: 'text/html', role: 'alternative', byteCount: 20 },
@@ -1264,23 +1291,6 @@ describe('PreviewPane', () => {
         errorMessage: undefined,
       },
     });
-    const foot = container.querySelector('.foot')?.textContent ?? '';
-    expect(foot).toMatch(/Plain.*HTML|HTML.*Plain/);
-  });
-
-  it('omits the preserved-formats row for single-format entries', () => {
-    const { container } = render(PreviewPane, {
-      props: {
-        item: sampleItem({
-          representationSummary: [{ mimeType: 'text/plain', role: 'primary', byteCount: 5 }],
-        }),
-        preview: samplePreview(),
-        loading: false,
-        errorMessage: undefined,
-      },
-    });
-    // The dt label for the formats row is keyed off t.preview.fields.formats
-    // ("preserved formats" in en); it must not appear when there's only one.
-    expect(container.querySelector('.foot')?.textContent).not.toMatch(/preserved formats/);
+    expect(container.querySelector('.foot')?.textContent).not.toMatch(/Additional clipboard data/);
   });
 });
