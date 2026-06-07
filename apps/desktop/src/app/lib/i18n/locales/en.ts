@@ -422,7 +422,16 @@ export type Messages = {
       secondaryHelp: string;
       placeholder: string;
       recordingHint: string;
+      recordingCancelHint: string;
       clearAriaLabel: string;
+      defaultMarker: string;
+      disabledMarker: string;
+      notSet: string;
+      reset: string;
+      fieldAriaLabel: string;
+      restoreDefault: string;
+      removeShortcut: string;
+      disableShortcut: string;
       paletteActions: {
         pin: string;
         delete: string;
@@ -942,24 +951,34 @@ export const en: Messages = {
     hotkeys: {
       legend: 'Hotkeys',
       paletteHeading: 'Palette shortcuts',
-      paletteHelp: 'Override the in-palette accelerators. Leave a field empty to keep the default.',
+      paletteHelp:
+        'Shortcuts used within the palette. Actions you have not customized use their default keys.',
       secondaryHeading: 'Secondary global hotkeys',
       secondaryHelp:
-        'Optional system-wide accelerators registered alongside the main palette hotkey.',
-      placeholder: 'Click to record',
-      recordingHint: 'Press shortcut… (Esc to cancel)',
+        'Optional global shortcuts that work without opening the palette. Set only the actions you need; unset actions are disabled.',
+      placeholder: 'Set shortcut',
+      recordingHint: 'Press shortcut…',
+      recordingCancelHint: 'Esc to cancel',
       clearAriaLabel: 'Clear shortcut',
+      defaultMarker: 'Default',
+      disabledMarker: 'Disabled',
+      notSet: 'Not set',
+      reset: 'Reset',
+      fieldAriaLabel: '{action} shortcut',
+      restoreDefault: 'Restore default for {action}',
+      removeShortcut: 'Remove shortcut for {action}',
+      disableShortcut: 'Disable {action}',
       paletteActions: {
-        pin: 'Pin / unpin selection',
-        delete: 'Delete selection',
-        'paste-as-plain': 'Paste as plain text',
-        'copy-without-paste': 'Copy without pasting',
-        clear: 'Clear search query',
+        pin: 'Toggle pin',
+        delete: 'Delete item',
+        'paste-as-plain': 'Paste without formatting',
+        'copy-without-paste': 'Copy to clipboard',
+        clear: 'Clear search',
         'open-preview': 'Toggle expanded preview',
       },
       secondaryActions: {
-        'repaste-last': 'Repaste most recent entry',
-        'clear-history': 'Clear non-pinned history',
+        'repaste-last': 'Repaste latest item',
+        'clear-history': 'Delete all unpinned history',
       },
     },
     updates: {
