@@ -1196,10 +1196,21 @@ not duplicate runtime logic.
   ordinary search character, whereas a modifier chord types nothing into the
   field and lets the `window` listener stay correct no matter where focus
   sits (Tauri ships with webview zoom hotkeys disabled, so the chord reaches
-  the app instead of resizing the whole UI). Zoom sizes a scroll *stage* in
+  the app instead of resizing the whole UI). Each gesture anchors on its own
+  point: after the zoom the scroll offset is re-pinned so the pixel under the
+  pointer (or the frame centre, for the keyboard chord) stays put, rather than
+  growing the image off the top-left corner. Zoom sizes a scroll *stage* in
   CSS rather than applying a `transform`, so the frame's `overflow: auto`
-  becomes real scroll-to-pan once the image is larger than the pane; a small
-  percentage readout (a `role="status"` live region) surfaces while zoomed.
+  becomes real scroll-to-pan once the image is larger than the pane; the stage
+  scales by the *continuous* (unrounded) zoom so its size matches the
+  re-pin ratio exactly — a sub-percent step that left the stage put would
+  otherwise drift the anchored point. The frame sets `user-select: none` so the
+  double-click toggle never leaves an OS text/range selection behind
+  (`dblclick`'s `preventDefault` can't undo a selection the preceding mousedown
+  already made). A small percentage readout (a `role="status"` live region,
+  rounded to a whole percent) stays visible the whole time the preview is
+  expanded — including at 100 %, where it doubles as a hint that the image is
+  zoomable.
   The footer's *rank* row lists the entry's `RankReason`s as localised
   labels (the same vocabulary as the row chip) so the full "why it
   matched / why it ranked here" set — including the recency / frequency

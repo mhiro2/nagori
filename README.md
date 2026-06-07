@@ -38,9 +38,9 @@
   the palette stays responsive on multi-megabyte screenshots, with a
   `dimensions · format · size` summary chip. **⌘/Ctrl E** opens the
   full-width expanded preview, which switches to the original payload and
-  zooms — pinch the trackpad (or **⌘/Ctrl** + scroll), double-click to
-  toggle fit ↔ 2×, or use the keyboard (**⌘/Ctrl** with **+** / **−** /
-  **0**); a zoomed image pans with the scrollbar / trackpad.
+  zooms toward the pointer — pinch the trackpad (or **⌘/Ctrl** + scroll),
+  double-click to toggle fit ↔ 2×, or use the keyboard (**⌘/Ctrl** with
+  **+** / **−** / **0**); a zoomed image pans with the scrollbar / trackpad.
 - Long-text preview shows head and tail with a middle-elided marker so
   the end of large logs / pastes stays visible; when the active search
   hit lands inside the elided range the preview flags it so you can

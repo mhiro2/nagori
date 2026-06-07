@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
   import {
     isImeComposing,
     isPrimaryModifierHeld,
@@ -59,28 +61,61 @@
   const DOUBLE_CLICK_ZOOM = 2;
   let zoom = $state(ZOOM_MIN);
   const zoomed = $derived(zoom > ZOOM_MIN);
+  // The corner readout rounds to a whole percent for a clean label; the CSS
+  // stage must NOT round — it scales by the continuous `zoom`, so the stage
+  // size tracks `applyZoom`'s `clamped / prev` ratio exactly. Driving the stage
+  // off the rounded value instead would let a sub-percent wheel step move the
+  // scroll offset while the stage stayed put, drifting the anchored point.
   const zoomPercent = $derived(Math.round(zoom * 100));
+  const zoomStagePercent = $derived(zoom * 100);
 
   const clampZoom = (value: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
 
+  // The scroll-container element, used to attach the pointer zoom gestures and
+  // to re-pin the scroll offset after a zoom (see `applyZoom`).
+  let frameEl: HTMLDivElement | undefined = $state();
+
+  // Set the zoom and keep the content point under (`clientX`, `clientY`) fixed
+  // on screen, so the image grows toward the cursor rather than off the top-left
+  // corner. The stage side is a flat `zoom%` of the frame, so content scales
+  // linearly with zoom: a point at scroll offset `s + p` (p = pointer inside the
+  // frame) moves to `(s + p) * next/prev`, and we subtract `p` again to leave it
+  // under the same pixel. Pointer-less callers (the keyboard chord) pass no
+  // coordinates and anchor on the frame centre. The stage resizes reactively, so
+  // we wait a `tick` for that reflow before writing scroll — otherwise the target
+  // exceeds the pre-resize scroll range and clamps to the wrong spot.
+  async function applyZoom(next: number, clientX?: number, clientY?: number): Promise<void> {
+    const prev = zoom;
+    const clamped = clampZoom(next);
+    if (clamped === prev) return;
+    zoom = clamped;
+    const el = frameEl;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const px = clientX === undefined ? rect.width / 2 : clientX - rect.left;
+    const py = clientY === undefined ? rect.height / 2 : clientY - rect.top;
+    const ratio = clamped / prev;
+    const left = (el.scrollLeft + px) * ratio - px;
+    const top = (el.scrollTop + py) * ratio - py;
+    await tick();
+    el.scrollLeft = left;
+    el.scrollTop = top;
+  }
+
   function zoomIn(): void {
-    const next = ZOOM_STEPS.find((step) => step > zoom);
-    zoom = next ?? ZOOM_MAX;
+    void applyZoom(ZOOM_STEPS.find((step) => step > zoom) ?? ZOOM_MAX);
   }
   function zoomOut(): void {
     let next: number = ZOOM_MIN;
     for (const step of ZOOM_STEPS) if (step < zoom) next = step;
-    zoom = next;
+    void applyZoom(next);
   }
   function resetZoom(): void {
-    zoom = ZOOM_MIN;
+    void applyZoom(ZOOM_MIN);
   }
-  function toggleZoom(): void {
-    zoom = zoomed ? ZOOM_MIN : DOUBLE_CLICK_ZOOM;
+  function toggleZoom(clientX?: number, clientY?: number): void {
+    void applyZoom(zoomed ? ZOOM_MIN : DOUBLE_CLICK_ZOOM, clientX, clientY);
   }
-
-  // The scroll-container element, used to attach the pointer zoom gestures.
-  let frameEl: HTMLDivElement | undefined = $state();
 
   // Image bytes are streamed by the `nagori-image://` custom URI scheme
   // registered in src-tauri/src/lib.rs. In the inline preview we request
@@ -178,7 +213,10 @@
   });
 
   // Pointer zoom on the expanded image. Three gestures, all scoped to the
-  // frame so plain two-finger scrolling still pans the zoomed image:
+  // frame so plain two-finger scrolling still pans the zoomed image. Each one
+  // anchors the zoom on the gesture's own point (the wheel cursor, the pinch
+  // centroid, the double-click) via `applyZoom`, so the image grows toward
+  // where the user is acting rather than off the top-left corner:
   //   • trackpad pinch — WebKit (macOS/Linux WKWebView) delivers this as the
   //     non-standard `gesturechange` event with a cumulative `event.scale`,
   //     because wry leaves WKWebView's native magnification off. We multiply
@@ -196,7 +234,7 @@
     const onWheel = (event: WheelEvent): void => {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
-      zoom = clampZoom(zoom * Math.pow(1.0015, -event.deltaY));
+      void applyZoom(zoom * Math.pow(1.0015, -event.deltaY), event.clientX, event.clientY);
     };
     const onGestureStart = (event: Event): void => {
       event.preventDefault();
@@ -204,12 +242,12 @@
     };
     const onGestureChange = (event: Event): void => {
       event.preventDefault();
-      const scale = (event as unknown as { scale?: number }).scale ?? 1;
-      zoom = clampZoom(pinchBase * scale);
+      const gesture = event as unknown as { scale?: number; clientX?: number; clientY?: number };
+      void applyZoom(pinchBase * (gesture.scale ?? 1), gesture.clientX, gesture.clientY);
     };
     const onDoubleClick = (event: MouseEvent): void => {
       event.preventDefault();
-      toggleZoom();
+      toggleZoom(event.clientX, event.clientY);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     el.addEventListener('gesturestart', onGestureStart, { passive: false });
@@ -270,7 +308,7 @@
 {#if imageSrc && !imageFailed}
   <div class="image-viewer" class:expanded>
     <div class="image-frame" class:expanded class:loaded={imageLoaded} bind:this={frameEl}>
-      <div class="image-stage" style:--zoom-pct={zoomPercent}>
+      <div class="image-stage" style:--zoom-pct={zoomStagePercent}>
         <img
           class="image"
           src={imageSrc}
@@ -291,11 +329,13 @@
         <p class="overlay" role="status">{loadingText}</p>
       {/if}
     </div>
-    {#if expanded && zoomed}
-      <!-- Current zoom level. A sibling of the (scrolling) frame, absolutely
-           positioned on the non-scrolling viewer, so it stays pinned to the
-           corner while a zoomed image pans. `role="status"` live region so a
-           screen reader hears the level change as the user pinches / steps. -->
+    {#if expanded}
+      <!-- Current zoom level, always shown while expanded (including 100 %) so
+           the readout doubles as a hint that the image is zoomable. A sibling of
+           the (scrolling) frame, absolutely positioned on the non-scrolling
+           viewer, so it stays pinned to the corner while a zoomed image pans.
+           `role="status"` live region so a screen reader hears the level change
+           as the user pinches / steps. -->
       <span class="zoom-level" role="status" aria-live="polite">{zoomPercent}%</span>
     {/if}
   </div>
@@ -334,6 +374,13 @@
     min-height: 0;
     display: grid;
     overflow: auto;
+    /* The double-click zoom toggle would otherwise leave the OS text/range
+       selection (the blue highlight) behind — `dblclick`'s preventDefault
+       can't undo a selection the preceding mousedown sequence already made.
+       Nothing in the frame is selectable text, so suppress selection here
+       (WebKit/WKWebView needs the prefixed property). */
+    user-select: none;
+    -webkit-user-select: none;
   }
   /* Checkerboard placeholder shown until the lazy <img> finishes decoding.
      Pure CSS so we never reference an external skeleton image (CSP-safe). */
