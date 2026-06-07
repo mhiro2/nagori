@@ -411,4 +411,160 @@ describe('ResultItem', () => {
     });
     expect(getByRole('option').classList.contains('selected')).toBe(true);
   });
+
+  it('renders a single file basename-first with an extension badge and location', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          preview: '/Users/example/Acme/Reports/quarterly-report.pptx',
+          fileSummary: {
+            total: 1,
+            representativeNames: ['quarterly-report.pptx'],
+            commonParentDisplay: 'Acme/Reports',
+          },
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    // The extension badge replaces the generic FILES kind-badge.
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('PPTX');
+    expect(container.querySelector('.preview.file .names')?.textContent).toBe(
+      'quarterly-report.pptx',
+    );
+    expect(container.querySelector('.preview.file .context')?.textContent).toBe('Acme/Reports');
+  });
+
+  it('falls back to a generic FILE badge for an unknown extension', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          preview: '/tmp/archive.weirdext',
+          fileSummary: { total: 1, representativeNames: ['archive.weirdext'] },
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('FILE');
+    expect(container.querySelector('.preview.file .context')).toBeNull();
+  });
+
+  it('summarizes multiple files with a count badge, +N, and a common parent', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          preview: '/Users/example/Acme/Reports/quarterly-report.pptx',
+          fileSummary: {
+            total: 3,
+            representativeNames: ['quarterly-report.pptx', 'budget.xlsx'],
+            commonParentDisplay: 'Acme/Reports',
+          },
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('3');
+    const names = container.querySelector('.preview.file .names')?.textContent ?? '';
+    expect(names).toContain('quarterly-report.pptx');
+    expect(names).toContain('budget.xlsx');
+    expect(container.querySelector('.preview.file .more')?.textContent).toBe('+1');
+    expect(container.querySelector('.preview.file .context')?.textContent).toBe('Acme/Reports');
+  });
+
+  it('shows a location count when the files span multiple folders', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          fileSummary: {
+            total: 4,
+            representativeNames: ['a.txt', 'b.txt'],
+            locationCount: 3,
+          },
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('4');
+    expect(container.querySelector('.preview.file .context.locations')?.textContent).toBe(
+      '3 locations',
+    );
+  });
+
+  it('gives file rows a basename-first accessible name', () => {
+    const { getByRole } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          fileSummary: {
+            total: 3,
+            representativeNames: ['quarterly-report.pptx', 'budget.xlsx'],
+            commonParentDisplay: 'Acme/Reports',
+          },
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(getByRole('option').getAttribute('aria-label')).toBe(
+      '3 files: quarterly-report.pptx, budget.xlsx +1, in Acme/Reports',
+    );
+  });
+
+  it('highlights the query inside the file basename and location', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          fileSummary: {
+            total: 1,
+            representativeNames: ['quarterly-report.pptx'],
+            commonParentDisplay: 'Acme/Reports',
+          },
+        }),
+        index: 0,
+        selected: false,
+        query: 'report acme',
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.preview.file .names mark.match')?.textContent).toBe('report');
+    const contextMarks = [...container.querySelectorAll('.preview.file .context mark.match')].map(
+      (mark) => mark.textContent,
+    );
+    expect(contextMarks).toContain('Acme');
+  });
+
+  it('falls back to the plain preview for a file row without a summary', () => {
+    // Sensitive / un-hydrated file lists carry no summary; the row must render
+    // the (already redacted) preview rather than the basename-first layout.
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({ kind: 'fileList', preview: '/tmp/a.txt\n/tmp/b.txt' }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.preview.file')).toBeNull();
+    expect(container.querySelector('.preview')?.textContent).toContain('/tmp/a.txt');
+  });
 });

@@ -38,6 +38,15 @@ export const es: Messages = {
       allApps: 'Todas las apps',
       clear: 'Borrar filtros',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('es')}`,
+      locations: (count) =>
+        count === 1 ? '1 ubicación' : `${count.toLocaleString('es')} ubicaciones`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('es')} archivos: ${names}`;
+        return location ? `${head}, en ${location}` : head;
+      },
+    },
   },
   rankReason: {
     exact: 'Exacto',

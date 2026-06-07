@@ -376,6 +376,60 @@ impl EntryRepository for SqliteStore {
         })
         .await
     }
+
+    async fn list_file_path_sets(&self, ids: &[EntryId]) -> Result<HashMap<EntryId, Vec<String>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let id_strings: Vec<String> = ids.iter().map(EntryId::to_string).collect();
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            // Gate on the *canonical* `sensitivity` column, never a value the
+            // caller supplied: only `Public` / `Unknown` rows are admitted,
+            // mirroring `is_text_safe_for_default_output`. Sensitive rows are
+            // filtered out in SQL so their `content_json` (and the raw paths
+            // inside it) is never even read here. Restricting to `file_list`
+            // keeps the batch to the rows a file summary applies to.
+            let mut sql = String::from(
+                "SELECT id, content_json FROM entries \
+                 WHERE deleted_at IS NULL AND content_kind = 'file_list' \
+                 AND sensitivity IN ('public', 'unknown') AND id IN (",
+            );
+            for idx in 0..id_strings.len() {
+                if idx > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+            }
+            sql.push(')');
+            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let params: Vec<&dyn ToSql> = id_strings.iter().map(|s| s as &dyn ToSql).collect();
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    let entry_id_str: String = row.get(0)?;
+                    let content_json: String = row.get(1)?;
+                    Ok((entry_id_str, content_json))
+                })
+                .map_err(|err| storage_err(&err))?;
+            let mut out: HashMap<EntryId, Vec<String>> = HashMap::new();
+            for row in rows {
+                let (entry_id_str, content_json) = row.map_err(|err| storage_err(&err))?;
+                let entry_id = EntryId::from_str(&entry_id_str).map_err(|err| {
+                    AppError::Storage(format!("invalid entry_id in file-summary row: {err}"))
+                })?;
+                let content: ClipboardContent =
+                    serde_json::from_str(&content_json).map_err(|err| json_err(&err))?;
+                // The `content_kind = 'file_list'` filter should make every row
+                // a `FileList`, but decode defensively rather than unwrap a
+                // mismatched variant from a hand-edited / corrupt row.
+                if let ClipboardContent::FileList(files) = content {
+                    out.insert(entry_id, files.paths);
+                }
+            }
+            Ok(out)
+        })
+        .await
+    }
 }
 
 /// Map a representation row's `(mime, text_content, payload_blob)` triple

@@ -36,6 +36,14 @@ export const zhHant: Messages = {
       allApps: '所有應用程式',
       clear: '清除篩選',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('zh-Hant')}`,
+      locations: (count) => `${count.toLocaleString('zh-Hant')} 個位置`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('zh-Hant')} 個檔案：${names}`;
+        return location ? `${head}，位於 ${location}` : head;
+      },
+    },
   },
   rankReason: {
     exact: '精確',

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::{
-    AppSettings, ClipboardEntry, EntryId, EntryMetadata, RepresentationSummary, Result,
-    SearchDocument, StoredClipboardRepresentation,
+    AppSettings, ClipboardContent, ClipboardEntry, EntryId, EntryMetadata, RepresentationSummary,
+    Result, SearchDocument, StoredClipboardRepresentation, is_text_safe_for_default_output,
 };
 
 #[async_trait]
@@ -45,6 +45,30 @@ pub trait EntryRepository: Send + Sync {
                 .map(RepresentationSummary::from_stored)
                 .collect();
             out.insert(*id, summaries);
+        }
+        Ok(out)
+    }
+
+    /// Batch-load the captured paths of `FileList` entries that pass the
+    /// default-output sensitivity gate, keyed by entry id. Only entries whose
+    /// *canonical* sensitivity is [`is_text_safe_for_default_output`]
+    /// (`Public` / `Unknown`) are returned; non-`FileList`, sensitive, and
+    /// soft-deleted rows are omitted, so the map only carries paths that are
+    /// already safe to surface in default DTO output.
+    ///
+    /// Used to hydrate a result row's basename-first file summary in one pass,
+    /// the same shape as [`list_representation_summaries`]. The default
+    /// implementation fetches each entry and filters in memory; the `SQLite`
+    /// implementation overrides it with a single gated `IN (...)` query.
+    async fn list_file_path_sets(&self, ids: &[EntryId]) -> Result<HashMap<EntryId, Vec<String>>> {
+        let mut out = HashMap::new();
+        for id in ids {
+            if let Some(entry) = self.get(*id).await?
+                && is_text_safe_for_default_output(entry.sensitivity)
+                && let ClipboardContent::FileList(files) = &entry.content
+            {
+                out.insert(*id, files.paths.clone());
+            }
         }
         Ok(out)
     }

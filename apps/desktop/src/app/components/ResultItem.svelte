@@ -36,6 +36,7 @@
 
 <script lang="ts">
   import { codeLanguageLabel, detectCodeLanguage } from '../lib/codeLanguage';
+  import { fileExtensionBadge } from '../lib/fileSummary';
   import {
     collapseWhitespace,
     formatByteCount,
@@ -122,6 +123,38 @@
   const rankChip = $derived(
     rankReason !== undefined ? rankReasonLabel(rankReason, t.rankReason) : undefined,
   );
+  // File rows lead with filenames when the backend hydrated a summary. Sensitive
+  // and un-hydrated file lists leave this undefined and fall back to the plain
+  // (already redacted) preview branch below.
+  const fileSummary = $derived(item.kind === 'fileList' ? item.fileSummary : undefined);
+  // Files named beyond the representative ones, surfaced as a "+N" suffix.
+  const fileOverflow = $derived(
+    fileSummary ? fileSummary.total - fileSummary.representativeNames.length : 0,
+  );
+  // Leading badge for a file row: the extension for a single file (generic
+  // `FILE` when it's unknown/extensionless), otherwise the file count. Replaces
+  // the generic kind badge so the fixed-width column carries a real recall cue.
+  const fileBadge = $derived.by((): string | undefined => {
+    if (!fileSummary) return undefined;
+    if (fileSummary.total === 1) {
+      return fileExtensionBadge(fileSummary.representativeNames[0] ?? '') ?? 'FILE';
+    }
+    return fileSummary.total > 99 ? '99+' : String(fileSummary.total);
+  });
+  // Basename-first accessible name so a screen reader leads with filenames and
+  // the location/count, rather than the badge + visible fragments in row order.
+  const fileAria = $derived.by((): string | undefined => {
+    if (!fileSummary) return undefined;
+    const names =
+      fileSummary.representativeNames.join(', ') +
+      (fileOverflow > 0 ? ` ${t.palette.fileList.more(fileOverflow)}` : '');
+    const location =
+      fileSummary.commonParentDisplay ??
+      (fileSummary.locationCount != null
+        ? t.palette.fileList.locations(fileSummary.locationCount)
+        : null);
+    return t.palette.fileList.rowAria({ total: fileSummary.total, names, location });
+  });
 </script>
 
 <div class="result-row" class:selected class:locked>
@@ -132,13 +165,14 @@
     class:marked
     role="option"
     aria-selected={selected}
+    aria-label={fileAria}
     data-kind={item.kind}
     data-sensitivity={item.sensitivity}
     onmouseenter={() => onSelect(index)}
     onclick={(event) => onConfirm(index, event)}
   >
     <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
-    <span class="kind-badge" aria-hidden="true">{badge(item.kind)}</span>
+    <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
 
     {#if url}
       <span class="preview url">
@@ -160,6 +194,21 @@
         {#if imageSize}<span class="img-size">{imageSize}</span>{/if}
         {#if !imageDims && !imageSize}<span class="img-fallback"
             ><HighlightedText text={previewText} {query} /></span
+          >{/if}
+      </span>
+    {:else if fileSummary}
+      <span class="preview file">
+        <span class="names"
+          >{#each fileSummary.representativeNames as name, i (i)}{#if i > 0}<span class="sep"
+                >,&nbsp;</span
+              >{/if}<HighlightedText text={name} {query} />{/each}{#if fileOverflow > 0}<span
+              class="more">{t.palette.fileList.more(fileOverflow)}</span
+            >{/if}</span
+        >
+        {#if fileSummary.commonParentDisplay}<span class="context"
+            ><HighlightedText text={fileSummary.commonParentDisplay} {query} /></span
+          >{:else if fileSummary.locationCount != null}<span class="context locations"
+            >{t.palette.fileList.locations(fileSummary.locationCount)}</span
           >{/if}
       </span>
     {:else}
@@ -347,6 +396,43 @@
     overflow: hidden;
     text-overflow: ellipsis;
     color: var(--muted, rgba(255, 255, 255, 0.6));
+  }
+  /* File rows mirror the URL row's "primary + muted context" split: the
+     filenames lead in bold, the shared folder (or location count) follows
+     muted. */
+  .preview.file {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
+  .preview.file .names {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--fg, #f5f5f5);
+  }
+  /* The location context shrinks far ahead of the filenames (same weighting as
+     the preview pane's dim parent), so the recall-bearing basenames survive and
+     only the shared folder ellipsizes when the row is tight. */
+  .preview.file .context {
+    flex: 0 1000 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+  }
+  .preview.file .sep {
+    font-weight: 400;
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+  }
+  .preview.file .more {
+    margin-left: 0.3rem;
+    font-weight: 400;
+    color: var(--muted, rgba(255, 255, 255, 0.55));
   }
   /* Strong-brand pill for known URL hosts (GitHub, YouTube, …). Filled accent
      so it reads as a recognised destination, distinct from the neutral domain

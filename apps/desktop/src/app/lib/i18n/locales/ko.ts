@@ -36,6 +36,14 @@ export const ko: Messages = {
       allApps: '모든 앱',
       clear: '필터 지우기',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('ko')}`,
+      locations: (count) => `위치 ${count.toLocaleString('ko')}곳`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `파일 ${total.toLocaleString('ko')}개: ${names}`;
+        return location ? `${head}, ${location} 하위` : head;
+      },
+    },
   },
   rankReason: {
     exact: '정확',

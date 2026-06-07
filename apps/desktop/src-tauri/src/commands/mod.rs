@@ -3,14 +3,14 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use nagori_core::{
     AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository, MAX_PASTE_DELAY_MS,
-    PasteFailureReason, QuickActionId, RequestId, SearchQuery, Sensitivity,
+    PasteFailureReason, QuickActionId, RequestId, SearchQuery, Sensitivity, build_file_summary,
     is_text_safe_for_default_output,
 };
 use nagori_search::normalize_text;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{
-    AiActionResultDto, AiAvailabilityDto, AppDenyRuleDto, AppSettingsDto, EntryDto,
+    AiActionResultDto, AiAvailabilityDto, AppDenyRuleDto, AppSettingsDto, EntryDto, FileSummaryDto,
     HotkeyFailureDto, PasteFormatDto, PermissionStatusDto, PlatformCapabilitiesDto,
     SearchRequestDto, SearchResponseDto, SearchResultDto, SemanticIndexStatusDto,
 };
@@ -53,20 +53,33 @@ pub async fn search_clipboard(
     let total_candidates = results.len();
     let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
 
+    // Hydrate both projections the result rows need (representation summaries
+    // and basename-first file summaries) under one timer. `list_file_path_sets`
+    // gates on the canonical row sensitivity and only returns `FileList` paths,
+    // so the home-folding builder below never sees a sensitive path.
     let summary_started = Instant::now();
-    let summaries = state
-        .runtime
-        .store()
-        .list_representation_summaries(&ids)
-        .await?;
+    let store = state.runtime.store();
+    let summaries = store.list_representation_summaries(&ids).await?;
+    let file_path_sets = store.list_file_path_sets(&ids).await?;
     let summary_elapsed = summary_started.elapsed();
+
+    // The current user's home directory folds to `~` in location labels. Pure
+    // display shortening (resolved once for the whole batch), never a privacy
+    // boundary — the gate above already kept sensitive paths out entirely.
+    let home = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
 
     let dto_results: Vec<SearchResultDto> = results
         .into_iter()
         .map(|result| {
             let entry_id = result.entry_id;
             let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-            SearchResultDto::from(result).with_representation_summaries(reps)
+            let file_summary = file_path_sets
+                .get(&entry_id)
+                .and_then(|paths| build_file_summary(paths, home.as_deref()))
+                .map(FileSummaryDto::from);
+            SearchResultDto::from(result)
+                .with_representation_summaries(reps)
+                .with_file_summary(file_summary)
         })
         .collect();
 

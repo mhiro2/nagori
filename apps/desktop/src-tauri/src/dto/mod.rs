@@ -1,8 +1,8 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiOverallStatus, ClipboardEntry, ContentKind,
-    EntryId, PerActionStatus, RankReason, RepresentationRole, RepresentationSummary, SearchFilters,
-    SearchMode, SearchResult, SemanticIndexState, SemanticIndexStatus, Sensitivity,
-    safe_preview_for_dto,
+    EntryId, FileSummary, PerActionStatus, RankReason, RepresentationRole, RepresentationSummary,
+    SearchFilters, SearchMode, SearchResult, SemanticIndexState, SemanticIndexStatus, Sensitivity,
+    safe_preview_for_dto, safe_preview_str,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -156,6 +156,33 @@ impl EntryDto {
     }
 }
 
+/// Basename-first projection of a `FileList` row, hydrated for the palette so
+/// it can lead with filenames instead of a shared absolute prefix. Only emitted
+/// for entries whose canonical sensitivity passes the default-output gate
+/// (`Public` / `Unknown`); sensitive rows omit it and fall back to the redacted
+/// `preview`. Mirrors `nagori_core::FileSummary` in camelCase.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSummaryDto {
+    pub total: usize,
+    pub representative_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub common_parent_display: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_count: Option<usize>,
+}
+
+impl From<FileSummary> for FileSummaryDto {
+    fn from(value: FileSummary) -> Self {
+        Self {
+            total: value.total,
+            representative_names: value.representative_names,
+            common_parent_display: value.common_parent_display,
+            location_count: value.location_count,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResultDto {
@@ -182,14 +209,24 @@ pub struct SearchResultDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_height: Option<u32>,
     pub representation_summary: Vec<RepresentationSummaryDto>,
+    /// Basename-first file summary for `FileList` rows; absent for other kinds
+    /// and for sensitive file lists (which fall back to the redacted preview).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_summary: Option<FileSummaryDto>,
 }
 
 impl From<SearchResult> for SearchResultDto {
     fn from(value: SearchResult) -> Self {
+        // Route the preview through the same `Blocked` gate as the entry DTOs.
+        // A search result only carries the projected sensitivity + stored
+        // preview, so a stale / imported `Blocked` `FileList` row would
+        // otherwise hand its joined raw paths straight to the renderer when the
+        // gated `file_summary` is absent.
+        let preview = safe_preview_str(value.sensitivity, &value.preview);
         Self {
             id: value.entry_id,
             kind: value.content_kind.into(),
-            preview: value.preview,
+            preview,
             score: value.score,
             created_at: value.created_at,
             pinned: value.pinned,
@@ -200,6 +237,7 @@ impl From<SearchResult> for SearchResultDto {
             image_width: value.image_width,
             image_height: value.image_height,
             representation_summary: Vec::new(),
+            file_summary: None,
         }
     }
 }
@@ -211,6 +249,12 @@ impl SearchResultDto {
             .iter()
             .map(RepresentationSummaryDto::from_summary)
             .collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_file_summary(mut self, summary: Option<FileSummaryDto>) -> Self {
+        self.file_summary = summary;
         self
     }
 }
@@ -261,7 +305,8 @@ pub struct SearchResponseDto {
     pub total_candidates: usize,
     /// Time spent in the search pipeline itself (`NagoriRuntime::search`).
     pub search_elapsed_ms: u64,
-    /// Time spent hydrating representation summaries for the result set.
+    /// Time spent hydrating the result set's projections — representation
+    /// summaries and basename-first file summaries.
     pub summary_elapsed_ms: u64,
     /// End-to-end time the command spent producing the response — the value
     /// the UI surfaces. `total - (search + summary)` is the DTO-shaping
@@ -455,5 +500,32 @@ mod tests {
         assert!(stripped.text.is_none());
         let with_text = EntryDto::from_entry(entry, true);
         assert_eq!(with_text.text.as_deref(), Some("super secret value"));
+    }
+
+    #[test]
+    fn search_result_dto_replaces_blocked_preview_with_placeholder() {
+        // A stale / imported `Blocked` row's stored preview is still raw text;
+        // the projection must substitute the placeholder so the joined paths
+        // never reach the renderer when the gated `file_summary` is absent.
+        use nagori_core::{ContentKind, SearchResult};
+        use time::OffsetDateTime;
+
+        let result = SearchResult {
+            entry_id: EntryId::new(),
+            score: 1.0,
+            rank_reason: Vec::new(),
+            preview: "/Users/example/secret/dossier.pdf".to_owned(),
+            content_kind: ContentKind::FileList,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            pinned: false,
+            sensitivity: Sensitivity::Blocked,
+            source_app_name: None,
+            language: None,
+            image_width: None,
+            image_height: None,
+        };
+        let dto = SearchResultDto::from(result);
+        assert_eq!(dto.preview, nagori_core::BLOCKED_PREVIEW_PLACEHOLDER);
+        assert!(dto.file_summary.is_none());
     }
 }

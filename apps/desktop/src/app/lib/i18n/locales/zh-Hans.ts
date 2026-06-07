@@ -36,6 +36,14 @@ export const zhHans: Messages = {
       allApps: '所有应用',
       clear: '清除筛选',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('zh-Hans')}`,
+      locations: (count) => `${count.toLocaleString('zh-Hans')} 个位置`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('zh-Hans')} 个文件：${names}`;
+        return location ? `${head}，位于 ${location}` : head;
+      },
+    },
   },
   rankReason: {
     exact: '精确',

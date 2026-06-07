@@ -1634,6 +1634,108 @@ mod tests {
         assert!(!summaries.contains_key(&id));
     }
 
+    /// Build a `FileList` entry carrying `paths` at the given sensitivity,
+    /// using a distinct `display_text` so entries don't dedupe on insert.
+    fn file_list_entry(paths: &[&str], sensitivity: Sensitivity) -> nagori_core::ClipboardEntry {
+        use nagori_core::{ClipboardContent, FileListContent};
+        let paths: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
+        let mut entry = EntryFactory::from_content(
+            ClipboardContent::FileList(FileListContent {
+                display_text: paths.join("\n"),
+                paths,
+            }),
+            None,
+            None,
+        );
+        entry.sensitivity = sensitivity;
+        entry
+    }
+
+    #[tokio::test]
+    async fn list_file_path_sets_returns_paths_for_file_lists_only() {
+        let store = SqliteStore::open_memory().unwrap();
+        let files = vec!["/Users/example/Acme/a.pptx", "/Users/example/Acme/b.xlsx"];
+        let file_id = store
+            .insert(file_list_entry(&files, Sensitivity::Public))
+            .await
+            .unwrap();
+        // A plain-text row is ignored even when its id rides along in the batch.
+        let text_id = insert_text(&store, "not a file list").await;
+
+        let sets = store
+            .list_file_path_sets(&[file_id, text_id])
+            .await
+            .unwrap();
+        assert_eq!(
+            sets.get(&file_id),
+            Some(&vec![
+                "/Users/example/Acme/a.pptx".to_owned(),
+                "/Users/example/Acme/b.xlsx".to_owned(),
+            ])
+        );
+        assert!(!sets.contains_key(&text_id));
+    }
+
+    #[tokio::test]
+    async fn list_file_path_sets_only_admits_public_and_unknown() {
+        // The gate must mirror `is_text_safe_for_default_output`: a sensitive
+        // file list must never leak its raw paths through this batch path.
+        let store = SqliteStore::open_memory().unwrap();
+        let public = store
+            .insert(file_list_entry(&["/pub/a.pdf"], Sensitivity::Public))
+            .await
+            .unwrap();
+        let unknown = store
+            .insert(file_list_entry(&["/unk/b.pdf"], Sensitivity::Unknown))
+            .await
+            .unwrap();
+        let private = store
+            .insert(file_list_entry(&["/priv/c.pdf"], Sensitivity::Private))
+            .await
+            .unwrap();
+        let secret = store
+            .insert(file_list_entry(&["/sec/d.pdf"], Sensitivity::Secret))
+            .await
+            .unwrap();
+        let blocked = store
+            .insert(file_list_entry(&["/blk/e.pdf"], Sensitivity::Blocked))
+            .await
+            .unwrap();
+
+        let sets = store
+            .list_file_path_sets(&[public, unknown, private, secret, blocked])
+            .await
+            .unwrap();
+        assert!(sets.contains_key(&public));
+        assert!(sets.contains_key(&unknown));
+        assert!(!sets.contains_key(&private));
+        assert!(!sets.contains_key(&secret));
+        assert!(!sets.contains_key(&blocked));
+    }
+
+    #[tokio::test]
+    async fn list_file_path_sets_empty_input_returns_empty_map() {
+        let store = SqliteStore::open_memory().unwrap();
+        assert!(store.list_file_path_sets(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_file_path_sets_skips_soft_deleted_entries() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store
+            .insert(file_list_entry(&["/tmp/gone.txt"], Sensitivity::Public))
+            .await
+            .unwrap();
+        store.mark_deleted(id).await.unwrap();
+        assert!(
+            !store
+                .list_file_path_sets(&[id])
+                .await
+                .unwrap()
+                .contains_key(&id)
+        );
+    }
+
     #[tokio::test]
     async fn list_representations_skips_soft_deleted_entries() {
         let store = SqliteStore::open_memory().unwrap();

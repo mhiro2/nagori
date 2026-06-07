@@ -37,6 +37,14 @@ export const de: Messages = {
       allApps: 'Alle Apps',
       clear: 'Filter löschen',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('de')}`,
+      locations: (count) => (count === 1 ? '1 Ort' : `${count.toLocaleString('de')} Orte`),
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('de')} Dateien: ${names}`;
+        return location ? `${head}, in ${location}` : head;
+      },
+    },
   },
   rankReason: {
     exact: 'Exakt',

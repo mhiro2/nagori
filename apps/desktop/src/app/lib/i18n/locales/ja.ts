@@ -36,6 +36,14 @@ export const ja: Messages = {
       allApps: 'すべてのアプリ',
       clear: 'フィルタをクリア',
     },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('ja')}`,
+      locations: (count) => `${count.toLocaleString('ja')} か所`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('ja')} 件のファイル: ${names}`;
+        return location ? `${head}、${location} 配下` : head;
+      },
+    },
   },
   rankReason: {
     exact: '完全一致',

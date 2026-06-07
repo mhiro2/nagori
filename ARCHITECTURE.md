@@ -1322,6 +1322,16 @@ type SearchResultDto = {
   pinned: boolean;
   sensitivity: "Unknown" | "Public" | "Private" | "Secret" | "Blocked";
   rankReasons: string[];
+  // Basename-first projection for fileList rows so the palette leads with
+  // filenames + a home-folded location instead of a shared absolute prefix.
+  // Hydrated from the canonical paths only for Public/Unknown rows; absent for
+  // other kinds and for sensitive file lists (those fall back to `preview`).
+  fileSummary?: {
+    total: number;
+    representativeNames: string[];
+    commonParentDisplay?: string;
+    locationCount?: number;
+  };
 };
 
 type EntryDto = {

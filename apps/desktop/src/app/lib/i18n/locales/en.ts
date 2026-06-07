@@ -49,6 +49,17 @@ export type Messages = {
       // Clears every active filter (shown only when some filter is active).
       clear: string;
     };
+    // Basename-first labels for `fileList` result rows.
+    fileList: {
+      // "+N" overflow appended after the named files when the list holds more.
+      more: (overflow: number) => string;
+      // Distinct-location count shown when files span more than one folder.
+      locations: (count: number) => string;
+      // Accessible name for a file row. `names` is the comma-joined
+      // representative basenames (with any "+N"); `location` is the shared
+      // folder, a location count, or null when neither applies.
+      rowAria: (parts: { total: number; names: string; location: string | null }) => string;
+    };
   };
   // Short labels for `RankReason` variants. Shared by the per-row reason chip
   // (ResultItem) and the full labelled list in the preview footer.
@@ -558,6 +569,15 @@ export const en: Messages = {
       sourceShort: 'App',
       allApps: 'All apps',
       clear: 'Clear filters',
+    },
+    fileList: {
+      more: (overflow) => `+${overflow.toLocaleString('en')}`,
+      locations: (count) =>
+        count === 1 ? '1 location' : `${count.toLocaleString('en')} locations`,
+      rowAria: ({ total, names, location }) => {
+        const head = total === 1 ? names : `${total.toLocaleString('en')} files: ${names}`;
+        return location ? `${head}, in ${location}` : head;
+      },
     },
   },
   rankReason: {

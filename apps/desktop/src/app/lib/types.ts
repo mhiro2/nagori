@@ -150,6 +150,24 @@ export type SearchResultDto = {
   imageWidth?: number;
   imageHeight?: number;
   representationSummary: RepresentationSummary[];
+  // Basename-first projection for `fileList` rows, hydrated by the backend.
+  // Absent for other kinds and for sensitive file lists (those fall back to
+  // the redacted `preview`).
+  fileSummary?: FileSummary;
+};
+
+// Width-independent summary of a captured file list. Strings are already
+// home-folded (`~`) and trimmed to trailing segments; the row fits them to the
+// available width with plain CSS truncation.
+export type FileSummary = {
+  total: number;
+  // Basenames of the first one or two paths, in clipboard order.
+  representativeNames: string[];
+  // Trailing-trimmed shared directory, present only when every path lives in
+  // one folder.
+  commonParentDisplay?: string;
+  // Distinct parent count, present only when the paths span more than one.
+  locationCount?: number;
 };
 
 export type RepresentationRole = 'primary' | 'plainFallback' | 'alternative';

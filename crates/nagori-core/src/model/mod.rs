@@ -6,12 +6,14 @@ use uuid::Uuid;
 mod ai;
 pub mod code_language;
 mod content;
+mod file_summary;
 mod representations;
 mod search;
 mod semantic;
 
 pub use ai::*;
 pub use content::*;
+pub use file_summary::*;
 pub use representations::*;
 pub use search::*;
 pub use semantic::*;
@@ -263,10 +265,23 @@ pub const BLOCKED_PREVIEW_PLACEHOLDER: &str = "[blocked]";
 /// fail-closed contract that pairs with [`is_text_safe_for_default_output`].
 #[must_use]
 pub fn safe_preview_for_dto(entry: &ClipboardEntry) -> String {
-    if matches!(entry.sensitivity, Sensitivity::Blocked) {
+    safe_preview_str(entry.sensitivity, &entry.search.preview)
+}
+
+/// The [`safe_preview_for_dto`] decision for callers that hold only a row's
+/// projected `sensitivity` and stored `preview`, not the full entry.
+///
+/// A search-result projection is the motivating case. Substitutes
+/// [`BLOCKED_PREVIEW_PLACEHOLDER`] for `Blocked` rows (whose stored preview is
+/// still raw text) and passes every other sensitivity through, since the
+/// classifier has already redacted the `Private` / `Secret` previews at capture
+/// time.
+#[must_use]
+pub fn safe_preview_str(sensitivity: Sensitivity, preview: &str) -> String {
+    if matches!(sensitivity, Sensitivity::Blocked) {
         BLOCKED_PREVIEW_PLACEHOLDER.to_owned()
     } else {
-        entry.search.preview.clone()
+        preview.to_owned()
     }
 }
 
