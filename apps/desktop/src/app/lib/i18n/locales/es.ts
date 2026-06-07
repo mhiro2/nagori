@@ -62,6 +62,7 @@ export const es: Messages = {
   preview: {
     empty: 'Selecciona un elemento para previsualizar.',
     loading: 'Cargando vista previa…',
+    details: 'Detalles',
     truncated: 'Vista previa recortada.',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

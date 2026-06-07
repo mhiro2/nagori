@@ -59,6 +59,7 @@ export const zhHans: Messages = {
   preview: {
     empty: '选择一个项目进行预览。',
     loading: '正在加载预览…',
+    details: '详细信息',
     truncated: '预览已截断。',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

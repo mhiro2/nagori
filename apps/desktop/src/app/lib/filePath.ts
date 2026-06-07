@@ -1,9 +1,10 @@
-// Width-independent helpers for rendering captured file paths basename-first.
-// The palette result row and the file-list preview both lean on this single
-// module so the two surfaces classify extensions identically and never drift.
-// The backend already hands the palette a home-folded `commonParentDisplay`, so
-// the path-splitting helpers below serve the preview, which receives raw paths
-// and has to split, group, and trim them on its own.
+// Extension classification for captured file rows. The backend now hands both
+// the palette (`commonParentDisplay` + representative names) and the preview
+// (`FileEntry[]`) their paths already split and home-folded, so the only path
+// work left on the renderer is reading a filename's extension: the palette turns
+// it into an uppercase badge and the preview turns it into a colour-dot
+// category. Both lean on the single `extensionOf` primitive here so the two
+// surfaces never disagree about what counts as an extension.
 
 export type FileCategory = 'image' | 'code' | 'archive' | 'document' | 'unknown';
 
@@ -214,85 +215,10 @@ export const fileExtensionBadge = (name: string): string | undefined => {
   return BADGE_EXTENSIONS.has(ext) ? ext.toUpperCase() : undefined;
 };
 
-// Colour category for a path or basename's extension, or `unknown` when the
-// extension is absent or unrecognised. Deliberately knows nothing about
-// directories: a trailing separator is not a reliable directory signal in
-// captured OS paths, so any folder treatment is left to the caller.
-export const classifyExtension = (pathOrName: string): FileCategory => {
-  const ext = extensionOf(pathOrName);
-  return ext !== undefined ? (EXT_CATEGORY[ext] ?? 'unknown') : 'unknown';
-};
-
-// Split on the last `/` or `\` so Windows-style file lists also light up the
-// basename emphasis. The dir portion keeps its trailing separator so the visual
-// order is "<dim>parent/</dim><strong>basename</strong>". A path ending in one
-// or more separators represents a directory; we strip the whole trailing run
-// before splitting and return a single representative separator in `trailing` so
-// the caller can re-attach it to the basename (`foo/` rather than `foo`).
-// Collapsing the run keeps a non-normalised `…/dir//` from yielding an empty
-// basename.
-export const splitPath = (path: string): { dir: string; base: string; trailing: string } => {
-  const body = path.replace(/[/\\]+$/, '');
-  const isDir = body.length < path.length;
-  // The first stripped char stands in for the (possibly repeated) trailing run.
-  const trailing = isDir ? path.charAt(body.length) : '';
-  const lastSlash = Math.max(body.lastIndexOf('/'), body.lastIndexOf('\\'));
-  if (lastSlash < 0) return { dir: '', base: body, trailing };
-  return {
-    dir: body.slice(0, lastSlash + 1),
-    base: body.slice(lastSlash + 1),
-    trailing,
-  };
-};
-
-// Index just past the last separator that delimits parent-from-basename in `s`,
-// or 0 if none. A trailing separator run (e.g. `/proj/build/` or a non-normalised
-// `/proj/build//`) is treated as part of the directory's own name rather than as
-// the delimiter, so the parent extracted from either is `/proj/` and the entry
-// can render under that header without becoming an empty row. The whole run is
-// stripped — matching `splitPath` — so a doubled trailing separator does not
-// pin the parent one segment too deep.
-const dirEndOf = (s: string): number => {
-  const body = s.replace(/[/\\]+$/, '');
-  const last = Math.max(body.lastIndexOf('/'), body.lastIndexOf('\\'));
-  return last < 0 ? 0 : last + 1;
-};
-
-// A lone filesystem root is too noisy to surface as a common-parent header —
-// every row would still need its own absolute prefix to be readable, so callers
-// collapse it to `''`. Covers a POSIX root (`/`), a bare separator (`\`), a
-// Windows drive root (`C:\`), and the bare UNC introducer (`\\`) that two paths
-// on different servers shrink down to.
-export const isRootOnlyPrefix = (s: string): boolean =>
-  s === '/' || s === '\\' || s === '\\\\' || /^[A-Za-z]:[\\/]$/.test(s);
-
-// Longest common directory prefix shared by every path in the list. We compare
-// each entry's *parent-directory candidate* (`dirEndOf`-trimmed slice) rather
-// than the raw path so the algorithm is order-independent — otherwise a
-// directory entry appearing later than its sibling file would pin the prefix at
-// the directory itself and collapse that row to empty. Operates on character
-// ranges between separators so we never split inside a path segment. A prefix
-// that shrinks to a lone filesystem root collapses to `''`.
-export const findCommonParent = (input: readonly string[]): string => {
-  if (input.length < 2) return '';
-  const parents = input.map((p) => p.slice(0, dirEndOf(p)));
-  let prefix = parents[0]!;
-  for (let i = 1; i < parents.length && prefix.length > 0; i += 1) {
-    const parent = parents[i]!;
-    while (prefix.length > 0 && !parent.startsWith(prefix)) {
-      // Shrink to the next-shorter directory by dropping the trailing
-      // separator and re-finding the previous one.
-      const trimmed = prefix.slice(0, -1);
-      prefix = trimmed.slice(0, dirEndOf(trimmed));
-    }
-  }
-  if (isRootOnlyPrefix(prefix)) return '';
-  return prefix;
-};
-
-// Parent directory formatted as a location: drop the trailing separator
-// (`/tmp/` → `/tmp`) so it reads as a place, but keep a filesystem root intact —
-// `/`, `\`, and `C:\` are meaningful as-is and `C:\` must not collapse to the
-// drive-relative `C:`.
-export const parentForDisplay = (dir: string): string =>
-  isRootOnlyPrefix(dir) ? dir : dir.replace(/[/\\]+$/, '');
+// Colour category for an already-extracted extension (the backend hands the
+// preview the lowercased `extension` directly), or `unknown` when the extension
+// is absent or unrecognised. Deliberately knows nothing about directories: the
+// preview squares the dot off for a folder by reading the row's trailing
+// separator, so any folder treatment is left to the caller.
+export const categoryForExtension = (ext: string | null | undefined): FileCategory =>
+  ext != null ? (EXT_CATEGORY[ext] ?? 'unknown') : 'unknown';

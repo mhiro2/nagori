@@ -1,6 +1,7 @@
 use nagori_core::{
-    ClipboardContent, ClipboardEntry, EntryId, Sensitivity, is_text_safe_for_default_output,
-    normalize_text, safe_preview_for_dto,
+    ClipboardContent, ClipboardEntry, EntryId, Sensitivity, extension_of, find_common_parent,
+    fold_home, is_text_safe_for_default_output, normalize_text, parent_for_display,
+    safe_preview_for_dto, split_path,
 };
 use serde::Serialize;
 
@@ -91,12 +92,22 @@ pub enum PreviewBodyDto {
         height: Option<u32>,
     },
     FileList {
-        paths: Vec<String>,
-        // Pre-truncation `paths.len()`. The wire `paths` is capped at 50
-        // entries so the renderer can show `paths.length / total` without
-        // re-counting and surface a "+N more" hint when the underlying
-        // clipboard list is longer.
+        // Per-file basename-first decomposition, capped at
+        // `FILE_LIST_PREVIEW_CAP`. The renderer leads with the basename and
+        // drops the location to its own row instead of re-splitting a raw path
+        // string, so the preview no longer parses paths client-side.
+        entries: Vec<FileEntryDto>,
+        // Pre-truncation file count. `entries` is capped so the renderer can
+        // show `entries.length / total` without re-counting and surface a
+        // "+N more" hint when the underlying clipboard list is longer.
         total: usize,
+        // Home-folded longest directory prefix shared by every path (the full
+        // list, not just the capped `entries`), with its trailing separator
+        // stripped. The renderer hoists it into a single header and shows each
+        // row relative to it; `None` when the paths span unrelated trees or
+        // share only a lone filesystem root.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        common_parent_display: Option<String>,
     },
     RichText {
         text: String,
@@ -104,6 +115,88 @@ pub enum PreviewBodyDto {
     Unknown {
         text: String,
     },
+}
+
+/// One file in a `FileList` preview body, decomposed basename-first. Only built
+/// for bodies that already passed the default-output gate (sensitive entries
+/// degrade to a `Text` body upstream), so the raw `parent_raw` it may carry is
+/// no broader than the raw `paths` such a body used to ship.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntryDto {
+    /// Final path segment, with a trailing separator re-attached for a
+    /// directory entry (`build/`) so the row reads as a folder.
+    pub name: String,
+    /// Parent directory, home-folded to `~` and stripped of its trailing
+    /// separator (a filesystem root stays intact). Empty when the path has no
+    /// parent segment. This is the display string the Location row and the
+    /// row's accessible name read from.
+    pub parent_display: String,
+    /// The same parent before home folding, surfaced only as a hover `title`
+    /// so the un-folded absolute location is still recoverable. Absent when the
+    /// path has no parent or the raw form already equals `parent_display`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_raw: Option<String>,
+    /// Lowercased filename extension, absent for dotfiles / extensionless names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    /// File-vs-directory kind. Always `Unknown` today: captured paths carry no
+    /// reliable kind signal, so the field is a forward-compat slot the renderer
+    /// can lean on once a platform API supplies one.
+    pub kind: FileEntryKindDto,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+// `File` / `Directory` are reserved wire values: captured paths carry no
+// reliable kind signal today, so the builder only ever emits `Unknown`. They
+// stay in the contract (and the mirrored TS union) so a future platform probe
+// can populate them without a wire change — hence the allow.
+#[allow(dead_code)]
+pub enum FileEntryKindDto {
+    File,
+    Directory,
+    Unknown,
+}
+
+/// Upper bound on the per-file rows shipped in a `FileList` preview body. The
+/// total count is reported separately so the renderer can show a "+N more" hint.
+const FILE_LIST_PREVIEW_CAP: usize = 50;
+
+/// Decompose a captured file list into basename-first rows plus the home-folded
+/// directory prefix they share. `paths` is the full list (sensitivity already
+/// cleared by the caller); `home` folds the current user's home to `~`.
+fn build_file_entries(paths: &[String], home: Option<&str>) -> (Vec<FileEntryDto>, Option<String>) {
+    let entries = paths
+        .iter()
+        .take(FILE_LIST_PREVIEW_CAP)
+        .map(|path| {
+            let split = split_path(path);
+            let name = format!("{}{}", split.base, split.trailing);
+            let extension = extension_of(&split.base);
+            let (parent_display, parent_raw) = if split.dir.is_empty() {
+                (String::new(), None)
+            } else {
+                let raw = parent_for_display(&split.dir);
+                let display = fold_home(&raw, home);
+                // Only carry the raw parent when folding actually changed it,
+                // so the hover title is additive rather than redundant.
+                let parent_raw = (display != raw).then(|| raw.clone());
+                (display, parent_raw)
+            };
+            FileEntryDto {
+                name,
+                parent_display,
+                parent_raw,
+                extension,
+                kind: FileEntryKindDto::Unknown,
+            }
+        })
+        .collect();
+    let common = find_common_parent(paths);
+    let common_parent_display =
+        (!common.is_empty()).then(|| fold_home(&parent_for_display(&common), home));
+    (entries, common_parent_display)
 }
 
 /// Default soft cap on preview byte length. Head+tail truncation kicks in
@@ -123,10 +216,12 @@ pub const MAX_PREVIEW_FULL_BYTES: usize = 1024 * 1024;
 impl EntryPreviewDto {
     // Default constructor used by tests and as the documented entry point;
     // production code paths supply an optional query via
-    // `from_entry_with_query` so the elided-match hint can flow through.
+    // `from_entry_with_query` so the elided-match hint can flow through. `home`
+    // folds the current user's home directory to `~` in `FileList` locations
+    // (`None` leaves absolute paths verbatim).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn from_entry(entry: &ClipboardEntry) -> Self {
-        Self::build(entry, MAX_PREVIEW_BYTES, None)
+    pub fn from_entry(entry: &ClipboardEntry, home: Option<&str>) -> Self {
+        Self::build(entry, MAX_PREVIEW_BYTES, None, home)
     }
 
     /// Same as `from_entry` but tags `elided_contains_match` when the
@@ -134,19 +229,28 @@ impl EntryPreviewDto {
     /// the middle region we just elided. Empty queries are treated as
     /// "no query" so the renderer never emits a misleading warning on a
     /// pristine preview pane.
-    pub fn from_entry_with_query(entry: &ClipboardEntry, query: Option<&str>) -> Self {
+    pub fn from_entry_with_query(
+        entry: &ClipboardEntry,
+        query: Option<&str>,
+        home: Option<&str>,
+    ) -> Self {
         let trimmed = query.map(str::trim).filter(|q| !q.is_empty());
-        Self::build(entry, MAX_PREVIEW_BYTES, trimmed)
+        Self::build(entry, MAX_PREVIEW_BYTES, trimmed, home)
     }
 
     /// Build a preview with a larger byte cap (used by `get_entry_preview_full`).
     /// Sensitive entries are still redacted to the safe-preview placeholder
     /// at the caller; this method does not relax sensitivity gating.
-    pub fn from_entry_full(entry: &ClipboardEntry) -> Self {
-        Self::build(entry, MAX_PREVIEW_FULL_BYTES, None)
+    pub fn from_entry_full(entry: &ClipboardEntry, home: Option<&str>) -> Self {
+        Self::build(entry, MAX_PREVIEW_FULL_BYTES, None, home)
     }
 
-    fn build(entry: &ClipboardEntry, byte_cap: usize, query: Option<&str>) -> Self {
+    fn build(
+        entry: &ClipboardEntry,
+        byte_cap: usize,
+        query: Option<&str>,
+        home: Option<&str>,
+    ) -> Self {
         let sensitive = !is_text_safe_for_default_output(entry.sensitivity);
         let raw_text = if sensitive {
             safe_preview_for_dto(entry)
@@ -217,10 +321,14 @@ impl EntryPreviewDto {
                     width: value.width,
                     height: value.height,
                 },
-                ClipboardContent::FileList(value) => PreviewBodyDto::FileList {
-                    paths: value.paths.iter().take(50).cloned().collect(),
-                    total: value.paths.len(),
-                },
+                ClipboardContent::FileList(value) => {
+                    let (entries, common_parent_display) = build_file_entries(&value.paths, home);
+                    PreviewBodyDto::FileList {
+                        entries,
+                        total: value.paths.len(),
+                        common_parent_display,
+                    }
+                }
                 ClipboardContent::RichText(_) => PreviewBodyDto::RichText {
                     text: preview_text.clone(),
                 },
@@ -532,7 +640,7 @@ mod tests {
         entry.search.preview = "[REDACTED]".to_owned();
         entry.sensitivity = Sensitivity::Secret;
 
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.sensitive);
         assert!(!dto.metadata.full_content_available);
         match dto.body {
@@ -548,7 +656,7 @@ mod tests {
         entry.search.preview = "(redacted OTP)".to_owned();
         entry.sensitivity = Sensitivity::Private;
 
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.sensitive);
         match dto.body {
             PreviewBodyDto::Text { ref text } => assert_eq!(text, "(redacted OTP)"),
@@ -566,7 +674,7 @@ mod tests {
         entry.search.preview = "raw secret value".to_owned();
         entry.sensitivity = Sensitivity::Blocked;
 
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.sensitive);
         assert!(!dto.metadata.full_content_available);
         match dto.body {
@@ -587,7 +695,7 @@ mod tests {
         let bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xCA, 0xFE];
         let entry = image_entry(bytes.clone());
 
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         match dto.body {
             PreviewBodyDto::Image {
                 mime_type,
@@ -614,7 +722,7 @@ mod tests {
         let body = "a".repeat(200 * 1024);
         let entry = text_entry(&body);
 
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.truncated);
         match dto.metadata.truncation {
             TruncationDto::HeadAndTail { elided_bytes } => {
@@ -641,7 +749,7 @@ mod tests {
         // and the head/tail emojis survive.
         let chunk = "あ".repeat(50_000); // 3 bytes × 50_000 = 150 KiB
         let entry = text_entry(&chunk);
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.truncated);
         // Round-trips as valid UTF-8 (no panic on `chars()`).
         assert!(dto.preview_text.chars().count() > 0);
@@ -652,7 +760,7 @@ mod tests {
     #[test]
     fn entry_preview_below_caps_reports_truncation_none() {
         let entry = text_entry("hello world\nsecond line");
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(!dto.metadata.truncated);
         assert!(matches!(dto.metadata.truncation, TruncationDto::None));
     }
@@ -668,14 +776,14 @@ mod tests {
         body.push_str(&"y".repeat(100_000));
         let entry = text_entry(&body);
         let with_match =
-            EntryPreviewDto::from_entry_with_query(&entry, Some("NEEDLE-IN-THE-HAYSTACK"));
+            EntryPreviewDto::from_entry_with_query(&entry, Some("NEEDLE-IN-THE-HAYSTACK"), None);
         assert_eq!(with_match.metadata.elided_contains_match, Some(true));
         let with_other =
-            EntryPreviewDto::from_entry_with_query(&entry, Some("not-in-this-document"));
+            EntryPreviewDto::from_entry_with_query(&entry, Some("not-in-this-document"), None);
         assert_eq!(with_other.metadata.elided_contains_match, Some(false));
         // Empty / whitespace queries are treated as "no query" so the
         // renderer never emits a spurious warning on an empty palette.
-        let with_empty = EntryPreviewDto::from_entry_with_query(&entry, Some("   "));
+        let with_empty = EntryPreviewDto::from_entry_with_query(&entry, Some("   "), None);
         assert!(with_empty.metadata.elided_contains_match.is_none());
     }
 
@@ -690,7 +798,7 @@ mod tests {
         body.push_str(&"y".repeat(100_000));
         let entry = text_entry(&body);
         // Different case from the body — raw contains() would miss this.
-        let lowered = EntryPreviewDto::from_entry_with_query(&entry, Some("hiddenkeyword"));
+        let lowered = EntryPreviewDto::from_entry_with_query(&entry, Some("hiddenkeyword"), None);
         assert_eq!(lowered.metadata.elided_contains_match, Some(true));
         // Multi-term query: both tokens must hit the region (all-of-terms).
         let mut body2 = String::with_capacity(200 * 1024);
@@ -698,9 +806,9 @@ mod tests {
         body2.push_str("foo bar baz");
         body2.push_str(&"y".repeat(100_000));
         let entry2 = text_entry(&body2);
-        let both = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo BAR"));
+        let both = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo BAR"), None);
         assert_eq!(both.metadata.elided_contains_match, Some(true));
-        let one_missing = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo qux"));
+        let one_missing = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo qux"), None);
         assert_eq!(one_missing.metadata.elided_contains_match, Some(false));
     }
 
@@ -713,19 +821,19 @@ mod tests {
         // base fixture is already a non-Public case.
         let unknown = text_entry("hello world");
         assert_eq!(unknown.sensitivity, Sensitivity::Unknown);
-        let unk_dto = EntryPreviewDto::from_entry(&unknown);
+        let unk_dto = EntryPreviewDto::from_entry(&unknown, None);
         // `Unknown` is text-safe for default DTOs but not Public, so the
         // expand affordance must stay off.
         assert!(!unk_dto.metadata.full_content_available);
 
         let mut public = text_entry("hello world");
         public.sensitivity = Sensitivity::Public;
-        let pub_dto = EntryPreviewDto::from_entry(&public);
+        let pub_dto = EntryPreviewDto::from_entry(&public, None);
         assert!(pub_dto.metadata.full_content_available);
 
         let mut secret = text_entry("hello world");
         secret.sensitivity = Sensitivity::Secret;
-        let sec_dto = EntryPreviewDto::from_entry(&secret);
+        let sec_dto = EntryPreviewDto::from_entry(&secret, None);
         assert!(!sec_dto.metadata.full_content_available);
     }
 
@@ -734,7 +842,7 @@ mod tests {
         // Body fits in the cap; nothing was elided so the flag must stay
         // `None` rather than `Some(false)` (no region to inspect).
         let entry = text_entry("alpha beta gamma");
-        let dto = EntryPreviewDto::from_entry_with_query(&entry, Some("delta"));
+        let dto = EntryPreviewDto::from_entry_with_query(&entry, Some("delta"), None);
         assert!(dto.metadata.elided_contains_match.is_none());
     }
 
@@ -745,9 +853,9 @@ mod tests {
         // untruncated while the default path falls back to head+tail.
         let body = "a".repeat(256 * 1024);
         let entry = text_entry(&body);
-        let standard = EntryPreviewDto::from_entry(&entry);
+        let standard = EntryPreviewDto::from_entry(&entry, None);
         assert!(standard.metadata.truncated);
-        let expanded = EntryPreviewDto::from_entry_full(&entry);
+        let expanded = EntryPreviewDto::from_entry_full(&entry, None);
         assert!(!expanded.metadata.truncated);
         assert!(matches!(expanded.metadata.truncation, TruncationDto::None));
         assert_eq!(expanded.preview_text.len(), body.len());
@@ -763,7 +871,7 @@ mod tests {
             .collect::<Vec<_>>()
             .concat();
         let entry = text_entry(&body);
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         assert!(dto.metadata.truncated);
         assert!(matches!(
             dto.metadata.truncation,
@@ -775,15 +883,9 @@ mod tests {
         assert!(dto.preview_text.contains("ln4999"));
     }
 
-    #[test]
-    fn entry_preview_for_file_list_caps_paths_but_reports_total() {
-        // Frontend renders `paths.len() / total` and a "+N more files" hint
-        // when the underlying clip exceeds the 50-path wire cap. Ensure the
-        // DTO carries the pre-truncation count rather than the truncated
-        // `paths.len()`.
-        let paths: Vec<String> = (0..75).map(|i| format!("/tmp/file-{i:03}.txt")).collect();
+    fn file_list_entry(paths: Vec<String>, sequence: &str) -> nagori_core::ClipboardEntry {
         let snapshot = ClipboardSnapshot {
-            sequence: nagori_core::ClipboardSequence::content_hash("fl-many"),
+            sequence: nagori_core::ClipboardSequence::content_hash(sequence),
             captured_at: OffsetDateTime::now_utc(),
             source: None,
             representations: vec![ClipboardRepresentation {
@@ -791,46 +893,110 @@ mod tests {
                 data: ClipboardData::FilePaths(paths),
             }],
         };
-        let entry = EntryFactory::from_snapshot(snapshot).expect("file list snapshot");
-        let dto = EntryPreviewDto::from_entry(&entry);
+        EntryFactory::from_snapshot(snapshot).expect("file list snapshot")
+    }
+
+    #[test]
+    fn entry_preview_for_file_list_caps_entries_but_reports_total() {
+        // Frontend renders `entries.len() / total` and a "+N more files" hint
+        // when the underlying clip exceeds the per-row cap. Ensure the DTO
+        // carries the pre-truncation count rather than the truncated length,
+        // while the shared common parent reflects the whole list.
+        let paths: Vec<String> = (0..75).map(|i| format!("/tmp/file-{i:03}.txt")).collect();
+        let entry = file_list_entry(paths, "fl-many");
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         match dto.body {
             PreviewBodyDto::FileList {
-                paths: wire_paths,
+                entries,
                 total,
+                common_parent_display,
             } => {
-                assert_eq!(wire_paths.len(), 50);
+                assert_eq!(entries.len(), 50);
                 assert_eq!(total, 75);
-                assert_eq!(
-                    wire_paths.first().map(String::as_str),
-                    Some("/tmp/file-000.txt")
-                );
+                assert_eq!(entries[0].name, "file-000.txt");
+                assert_eq!(entries[0].parent_display, "/tmp");
+                assert_eq!(common_parent_display.as_deref(), Some("/tmp"));
             }
             other => panic!("expected FileList body, got {other:?}"),
         }
     }
 
     #[test]
-    fn entry_preview_for_short_file_list_reports_total_equal_to_paths() {
-        let paths = vec!["/tmp/a.txt".to_owned(), "/tmp/b.txt".to_owned()];
-        let expected_len = paths.len();
-        let snapshot = ClipboardSnapshot {
-            sequence: nagori_core::ClipboardSequence::content_hash("fl-short"),
-            captured_at: OffsetDateTime::now_utc(),
-            source: None,
-            representations: vec![ClipboardRepresentation {
-                mime_type: "text/uri-list".to_owned(),
-                data: ClipboardData::FilePaths(paths.clone()),
-            }],
-        };
-        let entry = EntryFactory::from_snapshot(snapshot).expect("file list snapshot");
-        let dto = EntryPreviewDto::from_entry(&entry);
+    fn entry_preview_for_short_file_list_reports_total_equal_to_entries() {
+        let entry = file_list_entry(
+            vec!["/tmp/a.txt".to_owned(), "/tmp/b.txt".to_owned()],
+            "fl-short",
+        );
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         match dto.body {
             PreviewBodyDto::FileList {
-                paths: wire_paths,
+                entries,
                 total,
+                common_parent_display,
             } => {
-                assert_eq!(wire_paths, paths);
-                assert_eq!(total, expected_len);
+                assert_eq!(total, 2);
+                let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+                assert_eq!(names, vec!["a.txt", "b.txt"]);
+                assert_eq!(common_parent_display.as_deref(), Some("/tmp"));
+            }
+            other => panic!("expected FileList body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_preview_for_file_list_folds_home_and_omits_redundant_raw_parent() {
+        // A single file under the user's home folds its location to `~/…` for
+        // display while keeping the un-folded absolute parent as the raw hover
+        // disclosure. A path outside home leaves `parent_raw` absent because
+        // the display string is already the raw one.
+        let entry = file_list_entry(
+            vec![
+                "/Users/ex/Documents/report.pptx".to_owned(),
+                "/opt/data/build.log".to_owned(),
+            ],
+            "fl-home",
+        );
+        let dto = EntryPreviewDto::from_entry(&entry, Some("/Users/ex"));
+        match dto.body {
+            PreviewBodyDto::FileList {
+                entries,
+                common_parent_display,
+                ..
+            } => {
+                assert_eq!(entries[0].parent_display, "~/Documents");
+                assert_eq!(
+                    entries[0].parent_raw.as_deref(),
+                    Some("/Users/ex/Documents")
+                );
+                assert_eq!(entries[1].parent_display, "/opt/data");
+                assert!(entries[1].parent_raw.is_none());
+                // No shared tree beyond the root, so no hoisted header.
+                assert!(common_parent_display.is_none());
+            }
+            other => panic!("expected FileList body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_preview_for_directory_entry_reattaches_trailing_separator() {
+        // A directory entry keeps its trailing separator on `name` so the row
+        // reads as a folder, and the extension stays absent.
+        let entry = file_list_entry(
+            vec!["/proj/build/".to_owned(), "/proj/build/file.txt".to_owned()],
+            "fl-dir",
+        );
+        let dto = EntryPreviewDto::from_entry(&entry, None);
+        match dto.body {
+            PreviewBodyDto::FileList {
+                entries,
+                common_parent_display,
+                ..
+            } => {
+                assert_eq!(entries[0].name, "build/");
+                assert!(entries[0].extension.is_none());
+                assert_eq!(entries[1].name, "file.txt");
+                assert_eq!(entries[1].extension.as_deref(), Some("txt"));
+                assert_eq!(common_parent_display.as_deref(), Some("/proj"));
             }
             other => panic!("expected FileList body, got {other:?}"),
         }
@@ -858,7 +1024,7 @@ mod tests {
             }],
         };
         let entry = EntryFactory::from_snapshot(snapshot).expect("url snapshot");
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         let json = serde_json::to_value(&dto.body).expect("serialise url body");
         assert_eq!(json["type"], serde_json::json!("url"));
         assert_eq!(json["hostDisplay"], serde_json::json!("example.com"));
@@ -886,7 +1052,7 @@ mod tests {
             }],
         };
         let entry = EntryFactory::from_snapshot(snapshot).expect("url snapshot");
-        let dto = EntryPreviewDto::from_entry(&entry);
+        let dto = EntryPreviewDto::from_entry(&entry, None);
         match dto.body {
             PreviewBodyDto::Url {
                 url,

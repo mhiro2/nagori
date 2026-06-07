@@ -6,6 +6,7 @@ use uuid::Uuid;
 mod ai;
 pub mod code_language;
 mod content;
+mod file_path;
 mod file_summary;
 mod representations;
 mod search;
@@ -13,6 +14,7 @@ mod semantic;
 
 pub use ai::*;
 pub use content::*;
+pub use file_path::*;
 pub use file_summary::*;
 pub use representations::*;
 pub use search::*;

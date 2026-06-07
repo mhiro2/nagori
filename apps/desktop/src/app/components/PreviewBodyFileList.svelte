@@ -1,15 +1,13 @@
 <script lang="ts">
-  import {
-    classifyExtension,
-    findCommonParent,
-    parentForDisplay,
-    splitPath,
-    type FileCategory,
-  } from '../lib/filePath';
+  import { categoryForExtension, type FileCategory } from '../lib/filePath';
+  import type { FileEntry } from '../lib/types';
 
   type Props = {
-    paths: readonly string[];
+    // Basename-first file rows, already split and home-folded by the backend.
+    entries: readonly FileEntry[];
     total: number;
+    // Home-folded directory prefix shared by every path; hoisted into a header.
+    commonParentDisplay: string | null | undefined;
     inFolderLabel: (parent: string) => string;
     moreFilesLabel: (overflow: number) => string;
     // Visible label for the single-file "Location" row.
@@ -19,74 +17,102 @@
     fileRowAria: (parts: { name: string; location: string | null }) => string;
   };
 
-  let { paths, total, inFolderLabel, moreFilesLabel, locationLabel, fileRowAria }: Props = $props();
+  let {
+    entries,
+    total,
+    commonParentDisplay,
+    inFolderLabel,
+    moreFilesLabel,
+    locationLabel,
+    fileRowAria,
+  }: Props = $props();
 
-  // Colour category for the row's dot. A trailing separator is the only
-  // directory hint a captured path carries and it is not reliable, so the
+  const startsWithSep = (s: string): boolean => s.startsWith('/') || s.startsWith('\\');
+  const endsWithSep = (s: string): boolean => s.endsWith('/') || s.endsWith('\\');
+  const sepOf = (s: string): string => (s.includes('\\') ? '\\' : '/');
+
+  // Colour category for the row's dot. A trailing separator on the name is the
+  // only directory hint a captured path carries and it is not reliable, so the
   // folder treatment stays a preview-local cosmetic (the dot squares off);
-  // everything else defers to the shared extension classifier.
-  const classifyRow = (path: string): FileCategory | 'directory' => {
-    const last = path.length > 0 ? path[path.length - 1] : '';
-    if (last === '/' || last === '\\') return 'directory';
-    return classifyExtension(path);
-  };
+  // everything else maps the backend-supplied extension to a colour category.
+  const dotCategory = (entry: FileEntry): FileCategory | 'directory' =>
+    entry.kind === 'directory' || endsWithSep(entry.name)
+      ? 'directory'
+      : categoryForExtension(entry.extension);
 
-  const commonParent = $derived(findCommonParent(paths));
-  // Number of paths hidden by the 50-row cap that the backend applies before
-  // the DTO crosses the IPC boundary.
-  const overflow = $derived(Math.max(0, total - paths.length));
+  // The directory text to dim on a multi-file row: the entry's parent below the
+  // hoisted header, with a trailing separator so it reads as "<sub>/<basename>".
+  // Empty when the entry sits directly in the common parent (the row is then a
+  // bare basename). A pure layout strip over the backend's home-folded display
+  // strings — the parsing that produced them already happened server-side.
+  const dimDir = (parentDisplay: string, common: string | null | undefined): string => {
+    if (!parentDisplay) return '';
+    if (common && parentDisplay === common) return '';
+    let rel = parentDisplay;
+    if (common && parentDisplay.startsWith(common)) {
+      // Strip the shared header prefix when the entry sits below it. The
+      // boundary character may be either separator (a path can mix `/` and
+      // `\`), so test for a separator at the prefix edge rather than assuming
+      // a single style for the whole string.
+      const rest = parentDisplay.slice(common.length);
+      if (startsWithSep(rest)) rel = rest.slice(1);
+    }
+    if (!rel) return '';
+    return endsWithSep(rel) ? rel : rel + sepOf(rel);
+  };
 
   // A single file gets a dedicated card: the basename is the heading and the
   // parent directory drops to its own "Location" row, so the filename is no
   // longer wedged onto the same line as a long absolute path. Multi-file
   // lists keep the common-parent header + per-row layout below.
-  const single = $derived(total === 1 && paths.length === 1 ? splitPath(paths[0]!) : null);
-  const singleCategory = $derived(paths.length === 1 ? classifyRow(paths[0]!) : 'unknown');
-  const singleLocation = $derived(single && single.dir ? parentForDisplay(single.dir) : '');
+  const single = $derived(total === 1 && entries.length === 1 ? entries[0]! : null);
+  // Number of paths hidden by the per-row cap the backend applies before the
+  // DTO crosses the IPC boundary.
+  const overflow = $derived(Math.max(0, total - entries.length));
 </script>
 
 {#if single}
   <div class="single-file" data-testid="preview-files-single">
     <p class="single-head">
-      <span class={`ext-dot ${singleCategory}`} aria-hidden="true"></span>
-      <strong class="base single-base">{single.base}{single.trailing}</strong>
+      <span class={`ext-dot ${dotCategory(single)}`} aria-hidden="true"></span>
+      <strong class="base single-base">{single.name}</strong>
     </p>
-    {#if singleLocation}
+    {#if single.parentDisplay}
       <dl class="single-meta">
         <dt class="loc-label">{locationLabel}</dt>
-        <dd class="loc-value" data-testid="preview-files-location" title={single.dir}>
-          {singleLocation}
+        <dd
+          class="loc-value"
+          data-testid="preview-files-location"
+          title={single.parentRaw ?? single.parentDisplay}
+        >
+          {single.parentDisplay}
         </dd>
       </dl>
     {/if}
   </div>
 {:else}
-  {#if commonParent}
-    <p class="common-parent" data-testid="preview-files-common-parent" title={commonParent}>
-      {inFolderLabel(commonParent)}
+  {#if commonParentDisplay}
+    <p class="common-parent" data-testid="preview-files-common-parent" title={commonParentDisplay}>
+      {inFolderLabel(commonParentDisplay)}
     </p>
   {/if}
   <ul class="files">
-    {#each paths as path (path)}
-      {@const relative = commonParent ? path.slice(commonParent.length) : path}
-      {@const parts = splitPath(relative)}
-      {@const full = splitPath(path)}
-      {@const category = classifyRow(path)}
+    {#each entries as entry, i (i)}
+      {@const dim = dimDir(entry.parentDisplay, commonParentDisplay)}
+      {@const category = dotCategory(entry)}
       <!-- `title` is a mouse hover affordance only; screen readers do not
            announce it reliably, so the accessible name comes from the
            basename-first `aria-label`. -->
       <li
-        title={path}
+        title={entry.parentRaw ?? entry.parentDisplay}
         aria-label={fileRowAria({
-          name: `${full.base}${full.trailing}`,
-          location: full.dir ? parentForDisplay(full.dir) : null,
+          name: entry.name,
+          location: entry.parentDisplay || null,
         })}
         class={`kind-${category}`}
       >
         <span class={`ext-dot ${category}`} aria-hidden="true"></span>
-        {#if parts.dir}<span class="dim">{parts.dir}</span>{/if}<strong class="base"
-          >{parts.base}{parts.trailing}</strong
-        >
+        {#if dim}<span class="dim">{dim}</span>{/if}<strong class="base">{entry.name}</strong>
       </li>
     {/each}
     {#if overflow > 0}

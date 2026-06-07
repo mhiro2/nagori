@@ -59,6 +59,7 @@ export const zhHant: Messages = {
   preview: {
     empty: '請選擇一個項目進行預覽。',
     loading: '正在載入預覽…',
+    details: '詳細資訊',
     truncated: '預覽已截斷。',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

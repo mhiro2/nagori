@@ -118,7 +118,7 @@
         });
       }
       case 'fileList': {
-        return t.preview.fileList.summary(body.paths.length, body.total);
+        return t.preview.fileList.summary(body.entries.length, body.total);
       }
       case 'url': {
         // The dedicated URL layout already shows the host on its own row,
@@ -300,8 +300,9 @@
         />
       {:else if preview && preview.body.type === 'fileList'}
         <PreviewBodyFileList
-          paths={preview.body.paths}
+          entries={preview.body.entries}
           total={preview.body.total}
+          commonParentDisplay={preview.body.commonParentDisplay}
           inFolderLabel={t.preview.fileList.inFolder}
           moreFilesLabel={t.preview.fileList.moreFiles}
           locationLabel={t.preview.fileList.location}
@@ -342,27 +343,31 @@
           {t.preview.url.openHint}
         </p>
       {/if}
-      <dl>
-        <dt>{t.preview.fields.id}</dt>
-        <dd>{item.id}</dd>
-        <dt>{t.preview.fields.sensitivity}</dt>
-        <dd>{item.sensitivity}</dd>
-        {#if item.sourceAppName}
+      {#if item.sourceAppName}
+        <!-- The one piece of provenance worth surfacing up front; the rest of
+             the technical metadata folds into Details below. -->
+        <dl class="primary">
           <dt>{t.preview.fields.source}</dt>
           <dd>{item.sourceAppName}</dd>
-        {/if}
-        <!-- Always render the size row so its value lands in place once the
-             preview fetch resolves, rather than appending a grid row and
-             nudging the rows above it. -->
-        <dt>{t.preview.fields.size}</dt>
-        <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
-        <dt>{t.preview.fields.rank}</dt>
-        <dd>{rankLabel || t.preview.none}</dd>
-        {#if preservedFormats}
-          <dt>{t.preview.fields.formats}</dt>
-          <dd>{preservedFormats}</dd>
-        {/if}
-      </dl>
+        </dl>
+      {/if}
+      <details class="details">
+        <summary>{t.preview.details}</summary>
+        <dl>
+          <dt>{t.preview.fields.id}</dt>
+          <dd>{item.id}</dd>
+          <dt>{t.preview.fields.sensitivity}</dt>
+          <dd>{item.sensitivity}</dd>
+          <dt>{t.preview.fields.size}</dt>
+          <dd>{preview ? formatByteCount(preview.metadata.byteCount) : ''}</dd>
+          <dt>{t.preview.fields.rank}</dt>
+          <dd>{rankLabel || t.preview.none}</dd>
+          {#if preservedFormats}
+            <dt>{t.preview.fields.formats}</dt>
+            <dd>{preservedFormats}</dd>
+          {/if}
+        </dl>
+      </details>
     </footer>
   {:else}
     <p class="empty">{t.preview.empty}</p>
@@ -494,6 +499,11 @@
   .truncation .expand:hover:not(:disabled) {
     background: var(--bg-elevated, rgba(255, 255, 255, 0.05));
   }
+  .foot {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
   .foot dl {
     display: grid;
     grid-template-columns: max-content 1fr;
@@ -508,6 +518,22 @@
   .foot dd {
     margin: 0;
     overflow-wrap: anywhere;
+  }
+  /* The technical fields (id / sensitivity / size / rank / formats) live in a
+     collapsed disclosure so the resting pane leads with the body and the source
+     line, not a wall of diagnostics. The grid above styles the inner <dl>. */
+  .details summary {
+    color: var(--muted, rgba(255, 255, 255, 0.45));
+    font-size: 0.75rem;
+    cursor: pointer;
+    user-select: none;
+  }
+  .details summary:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
+  }
+  .details[open] summary {
+    margin-bottom: 0.25rem;
   }
   .empty {
     color: var(--muted, rgba(255, 255, 255, 0.4));

@@ -1,8 +1,16 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
+import type { EntryPreviewDto, FileEntry, SearchResultDto } from '../lib/types';
 import PreviewPane from './PreviewPane.svelte';
+
+// A backend-shaped file row: the preview no longer parses paths, so tests feed
+// it the already-split, home-folded decomposition the Rust builder produces.
+const fileEntry = (overrides: Partial<FileEntry> & { name: string }): FileEntry => ({
+  parentDisplay: '',
+  kind: 'unknown',
+  ...overrides,
+});
 
 const sampleItem = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
   id: 'entry-id',
@@ -133,7 +141,8 @@ describe('PreviewPane', () => {
     const chip = container.querySelector('[data-testid="preview-summary"]');
     expect(chip).toBeTruthy();
     expect(chip?.textContent?.trim()).toBe('');
-    // The size row's dt label is rendered even before the byte count lands.
+    // The size row's dt label is rendered even before the byte count lands
+    // (it now lives inside the Details disclosure, still present in the DOM).
     const foot = container.querySelector('.foot')?.textContent ?? '';
     expect(foot).toMatch(/size/i);
   });
@@ -435,7 +444,7 @@ describe('PreviewPane', () => {
     });
   });
 
-  it('renders the file list paths when body is fileList', () => {
+  it('renders the file list rows with a dimmed sub-directory and emphasised basename', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'fileList' }),
@@ -443,8 +452,12 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: ['/tmp/proj/a.txt', '/tmp/other/b.txt'],
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: '/tmp/proj', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: '/tmp/other', extension: 'txt' }),
+            ],
             total: 2,
+            commonParentDisplay: '/tmp',
           },
         }),
         loading: false,
@@ -453,13 +466,13 @@ describe('PreviewPane', () => {
     });
     const items = Array.from(container.querySelectorAll('ul.files > li'));
     expect(items).toHaveLength(2);
-    // Title retains the full original path for hover disclosure even when
-    // the common parent prefix is stripped from the visible row.
-    expect(items[0]?.getAttribute('title')).toBe('/tmp/proj/a.txt');
-    // The basename is emphasised via <strong>; the directory part lives in
-    // a dimmed span so the eye lands on the filename first.
+    // Title discloses the row's location on hover; the basename-first
+    // accessible name carries the filename for screen readers.
+    expect(items[0]?.getAttribute('title')).toBe('/tmp/proj');
+    // The basename is emphasised via <strong>; the part of the parent below
+    // the hoisted common prefix lives in a dimmed span.
     expect(items[0]?.querySelector('strong.base')?.textContent).toBe('a.txt');
-    // The common parent `/tmp/` is hoisted, leaving `proj/` as the dim dir.
+    // The common parent `/tmp` is hoisted, leaving `proj/` as the dim dir.
     expect(items[0]?.querySelector('span.dim')?.textContent).toBe('proj/');
   });
 
@@ -471,8 +484,12 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: ['/Users/me/proj/a.txt', '/Users/me/proj/b.txt'],
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: '/Users/me/proj', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: '/Users/me/proj', extension: 'txt' }),
+            ],
             total: 2,
+            commonParentDisplay: '/Users/me/proj',
           },
         }),
         loading: false,
@@ -480,10 +497,10 @@ describe('PreviewPane', () => {
       },
     });
     const header = container.querySelector('[data-testid="preview-files-common-parent"]');
-    expect(header?.textContent).toContain('/Users/me/proj/');
-    // Title preserves the full prefix so hover-discloses the path even if
-    // CSS ellipsis truncates the visible header.
-    expect(header?.getAttribute('title')).toBe('/Users/me/proj/');
+    expect(header?.textContent).toContain('/Users/me/proj');
+    // Title preserves the prefix so hover-discloses the path even if CSS
+    // ellipsis truncates the visible header.
+    expect(header?.getAttribute('title')).toBe('/Users/me/proj');
     const items = Array.from(container.querySelectorAll('ul.files > li'));
     // With the common parent hoisted, each row collapses to the basename
     // only — no dir segment remains.
@@ -497,7 +514,18 @@ describe('PreviewPane', () => {
         item: sampleItem({ kind: 'fileList' }),
         preview: samplePreview({
           previewText: '',
-          body: { type: 'fileList', paths: ['/tmp/only.txt'], total: 1 },
+          body: {
+            type: 'fileList',
+            entries: [
+              fileEntry({
+                name: 'only.txt',
+                parentDisplay: '~/tmp',
+                parentRaw: '/Users/me/tmp',
+                extension: 'txt',
+              }),
+            ],
+            total: 1,
+          },
         }),
         loading: false,
         errorMessage: undefined,
@@ -507,13 +535,13 @@ describe('PreviewPane', () => {
     expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
     expect(container.querySelector('ul.files')).toBeNull();
     // Basename is the heading; the parent directory drops to a Location row
-    // with its trailing separator stripped for display.
+    // showing the home-folded display path.
     const card = container.querySelector('[data-testid="preview-files-single"]');
     expect(card?.querySelector('strong.single-base')?.textContent).toBe('only.txt');
     const location = container.querySelector('[data-testid="preview-files-location"]');
-    expect(location?.textContent?.trim()).toBe('/tmp');
-    // The full parent (with separator) stays available on hover via `title`.
-    expect(location?.getAttribute('title')).toBe('/tmp/');
+    expect(location?.textContent?.trim()).toBe('~/tmp');
+    // The un-folded absolute parent stays available on hover via `title`.
+    expect(location?.getAttribute('title')).toBe('/Users/me/tmp');
   });
 
   it('omits the Location row for a single file with no parent directory', () => {
@@ -522,7 +550,11 @@ describe('PreviewPane', () => {
         item: sampleItem({ kind: 'fileList' }),
         preview: samplePreview({
           previewText: '',
-          body: { type: 'fileList', paths: ['bare.txt'], total: 1 },
+          body: {
+            type: 'fileList',
+            entries: [fileEntry({ name: 'bare.txt', parentDisplay: '', extension: 'txt' })],
+            total: 1,
+          },
         }),
         loading: false,
         errorMessage: undefined,
@@ -534,26 +566,28 @@ describe('PreviewPane', () => {
   });
 
   it('keeps the filesystem root intact in the single-file Location', () => {
-    // A file at the POSIX root must show `/` (not collapse to empty) and a
-    // Windows drive root must show `C:\` (not the drive-relative `C:`).
-    for (const [path, expected] of [
-      ['/a.txt', '/'],
-      ['C:\\a.txt', 'C:\\'],
-    ] as const) {
+    // A file at the POSIX root shows `/` (not collapse to empty) and a Windows
+    // drive root shows `C:\` (not the drive-relative `C:`). With no home fold
+    // applied, the raw parent equals the display so `title` falls back to it.
+    for (const root of ['/', 'C:\\'] as const) {
       const { container, unmount } = render(PreviewPane, {
         props: {
           item: sampleItem({ kind: 'fileList' }),
           preview: samplePreview({
             previewText: '',
-            body: { type: 'fileList', paths: [path], total: 1 },
+            body: {
+              type: 'fileList',
+              entries: [fileEntry({ name: 'a.txt', parentDisplay: root, extension: 'txt' })],
+              total: 1,
+            },
           }),
           loading: false,
           errorMessage: undefined,
         },
       });
       const location = container.querySelector('[data-testid="preview-files-location"]');
-      expect(location?.textContent?.trim()).toBe(expected);
-      expect(location?.getAttribute('title')).toBe(expected);
+      expect(location?.textContent?.trim()).toBe(root);
+      expect(location?.getAttribute('title')).toBe(root);
       unmount();
     }
   });
@@ -566,8 +600,12 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: ['/tmp/proj/a.txt', '/tmp/other/b.txt'],
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: '/tmp/proj', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: '/tmp/other', extension: 'txt' }),
+            ],
             total: 2,
+            commonParentDisplay: '/tmp',
           },
         }),
         loading: false,
@@ -586,7 +624,14 @@ describe('PreviewPane', () => {
         item: sampleItem({ kind: 'fileList' }),
         preview: samplePreview({
           previewText: '',
-          body: { type: 'fileList', paths: ['/a.txt', '/b.txt'], total: 2 },
+          body: {
+            type: 'fileList',
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: '/', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: '/', extension: 'txt' }),
+            ],
+            total: 2,
+          },
         }),
         loading: false,
         errorMessage: undefined,
@@ -596,42 +641,9 @@ describe('PreviewPane', () => {
     expect(items[0]?.getAttribute('aria-label')).toBe('a.txt, in /');
   });
 
-  it('omits the common-parent header when the only shared prefix is the root', () => {
-    const { container } = render(PreviewPane, {
-      props: {
-        item: sampleItem({ kind: 'fileList' }),
-        preview: samplePreview({
-          previewText: '',
-          body: { type: 'fileList', paths: ['/a.txt', '/b.txt'], total: 2 },
-        }),
-        loading: false,
-        errorMessage: undefined,
-      },
-    });
-    // `/` alone is too noisy to surface; the rows keep their own dir tokens.
-    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
-  });
-
-  it('omits the common-parent header for a Windows drive root only', () => {
-    const { container } = render(PreviewPane, {
-      props: {
-        item: sampleItem({ kind: 'fileList' }),
-        preview: samplePreview({
-          previewText: '',
-          body: { type: 'fileList', paths: ['C:\\a.txt', 'C:\\b.txt'], total: 2 },
-        }),
-        loading: false,
-        errorMessage: undefined,
-      },
-    });
-    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
-  });
-
-  it('keeps a directory entry visible when it is also the common-parent input', () => {
-    // When one of the paths is itself a directory (e.g. `/proj/build/`) and
-    // a sibling lives inside it (`/proj/build/file.txt`), the common parent
-    // is `/proj/` — the directory entry must still render as `build/` and
-    // not collapse to an empty row.
+  it('omits the common-parent header when there is no shared prefix to hoist', () => {
+    // `/` alone is too noisy to surface, so the backend sends no common parent;
+    // the rows keep their own dir tokens.
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'fileList' }),
@@ -639,7 +651,10 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: ['/proj/build/', '/proj/build/file.txt'],
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: '/', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: '/', extension: 'txt' }),
+            ],
             total: 2,
           },
         }),
@@ -647,8 +662,66 @@ describe('PreviewPane', () => {
         errorMessage: undefined,
       },
     });
+    expect(container.querySelector('[data-testid="preview-files-common-parent"]')).toBeNull();
+    // Each row still shows its own root token as the dim dir.
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('/');
+  });
+
+  it('strips the common prefix on a mixed-separator path at the boundary', () => {
+    // A path can mix `/` and `\` (e.g. a drive root with forward slashes
+    // below). The dim strip must look at the separator right after the shared
+    // prefix, not guess one for the whole string, or the row would repeat the
+    // header it already sits under.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            entries: [
+              fileEntry({ name: 'a.txt', parentDisplay: 'C:\\Users/me/proj', extension: 'txt' }),
+              fileEntry({ name: 'b.txt', parentDisplay: 'C:\\Users/me/docs', extension: 'txt' }),
+            ],
+            total: 2,
+            commonParentDisplay: 'C:\\Users/me',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const items = Array.from(container.querySelectorAll('ul.files > li'));
+    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('proj/');
+    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('a.txt');
+  });
+
+  it('renders a directory row from its trailing-separator name with the folder dot', () => {
+    // A directory entry (`build/`) sitting alongside a file inside it
+    // (`build/file.txt`) shares the `/proj` header; the directory row reads as
+    // `build/` and squares its dot off, while the sibling shows `build/` dimmed.
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'fileList' }),
+        preview: samplePreview({
+          previewText: '',
+          body: {
+            type: 'fileList',
+            entries: [
+              fileEntry({ name: 'build/', parentDisplay: '/proj' }),
+              fileEntry({ name: 'file.txt', parentDisplay: '/proj/build', extension: 'txt' }),
+            ],
+            total: 2,
+            commonParentDisplay: '/proj',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
     const header = container.querySelector('[data-testid="preview-files-common-parent"]');
-    expect(header?.textContent).toContain('/proj/');
+    expect(header?.textContent).toContain('/proj');
     const items = Array.from(container.querySelectorAll('ul.files > li'));
     expect(items[0]?.querySelector('strong.base')?.textContent).toBe('build/');
     expect(items[0]?.classList.contains('kind-directory')).toBe(true);
@@ -656,9 +729,7 @@ describe('PreviewPane', () => {
     expect(items[1]?.querySelector('strong.base')?.textContent).toBe('file.txt');
   });
 
-  it('extracts the same common parent regardless of directory/file order', () => {
-    // Order-independence guard: reversing the inputs must not pin the
-    // prefix at `/proj/build/` and collapse the directory row.
+  it('maps the backend extension to a colour-dot category per row', () => {
     const { container } = render(PreviewPane, {
       props: {
         item: sampleItem({ kind: 'fileList' }),
@@ -666,40 +737,16 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: ['/proj/build/file.txt', '/proj/build/'],
-            total: 2,
-          },
-        }),
-        loading: false,
-        errorMessage: undefined,
-      },
-    });
-    const header = container.querySelector('[data-testid="preview-files-common-parent"]');
-    expect(header?.textContent).toContain('/proj/');
-    const items = Array.from(container.querySelectorAll('ul.files > li'));
-    expect(items[0]?.querySelector('span.dim')?.textContent).toBe('build/');
-    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('file.txt');
-    expect(items[1]?.querySelector('strong.base')?.textContent).toBe('build/');
-    expect(items[1]?.classList.contains('kind-directory')).toBe(true);
-  });
-
-  it('tags each row with an extension category for the colour dot', () => {
-    const { container } = render(PreviewPane, {
-      props: {
-        item: sampleItem({ kind: 'fileList' }),
-        preview: samplePreview({
-          previewText: '',
-          body: {
-            type: 'fileList',
-            paths: [
-              '/proj/photo.PNG',
-              '/proj/main.rs',
-              '/proj/release.zip',
-              '/proj/spec.pdf',
-              '/proj/Makefile',
-              '/proj/build/',
+            entries: [
+              fileEntry({ name: 'photo.PNG', parentDisplay: '/proj', extension: 'png' }),
+              fileEntry({ name: 'main.rs', parentDisplay: '/proj', extension: 'rs' }),
+              fileEntry({ name: 'release.zip', parentDisplay: '/proj', extension: 'zip' }),
+              fileEntry({ name: 'spec.pdf', parentDisplay: '/proj', extension: 'pdf' }),
+              fileEntry({ name: 'Makefile', parentDisplay: '/proj' }),
+              fileEntry({ name: 'build/', parentDisplay: '/proj' }),
             ],
             total: 6,
+            commonParentDisplay: '/proj',
           },
         }),
         loading: false,
@@ -722,28 +769,6 @@ describe('PreviewPane', () => {
     expect(items[0]?.querySelector('.ext-dot')?.getAttribute('aria-hidden')).toBe('true');
   });
 
-  it('re-attaches the trailing slash to directory rows so foo/ stays foo/', () => {
-    const { container } = render(PreviewPane, {
-      props: {
-        item: sampleItem({ kind: 'fileList' }),
-        preview: samplePreview({
-          previewText: '',
-          body: {
-            type: 'fileList',
-            paths: ['/proj/build/', '/proj/dist/'],
-            total: 2,
-          },
-        }),
-        loading: false,
-        errorMessage: undefined,
-      },
-    });
-    const items = Array.from(container.querySelectorAll('ul.files > li'));
-    expect(items[0]?.querySelector('strong.base')?.textContent).toBe('build/');
-    expect(items[1]?.querySelector('strong.base')?.textContent).toBe('dist/');
-    expect(items[0]?.classList.contains('kind-directory')).toBe(true);
-  });
-
   it('renders a "more files" hint when the file list exceeds the wire cap', () => {
     const { container } = render(PreviewPane, {
       props: {
@@ -752,8 +777,11 @@ describe('PreviewPane', () => {
           previewText: '',
           body: {
             type: 'fileList',
-            paths: Array.from({ length: 50 }, (_, i) => `/tmp/file-${i}.txt`),
+            entries: Array.from({ length: 50 }, (_, i) =>
+              fileEntry({ name: `file-${i}.txt`, parentDisplay: '/tmp', extension: 'txt' }),
+            ),
             total: 218,
+            commonParentDisplay: '/tmp',
           },
         }),
         loading: false,
@@ -763,7 +791,7 @@ describe('PreviewPane', () => {
     const lis = Array.from(container.querySelectorAll('ul.files > li'));
     expect(lis).toHaveLength(51);
     expect(lis[lis.length - 1]?.classList.contains('more')).toBe(true);
-    // The summary chip surfaces the truncated/total ratio for the kind.
+    // The summary chip surfaces the shown/total ratio for the kind.
     const summary = container.querySelector('[data-testid="preview-summary"]')?.textContent ?? '';
     expect(summary).toContain('50');
     expect(summary).toContain('218');
@@ -1197,6 +1225,29 @@ describe('PreviewPane', () => {
     const foot = container.querySelector('.foot')?.textContent ?? '';
     expect(foot).toMatch(/Exact, Recent/);
     expect(foot).not.toMatch(/ExactMatch/);
+  });
+
+  it('folds the technical fields into a Details disclosure, keeping source outside it', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ id: 'abc-123', sourceAppName: 'Safari' }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    const details = container.querySelector('.foot details');
+    expect(details).toBeTruthy();
+    // id / sensitivity / size / rank are diagnostics — they live inside the
+    // collapsed disclosure, not in the resting footer.
+    const detailsText = details?.textContent ?? '';
+    expect(detailsText).toContain('abc-123');
+    expect(detailsText).toMatch(/sensitivity/i);
+    expect(detailsText).toMatch(/rank/i);
+    // The source line stays in the footer but outside the disclosure.
+    const source = container.querySelector('.foot dl.primary');
+    expect(source?.textContent).toContain('Safari');
+    expect(details?.querySelector('dl')?.textContent).not.toContain('Safari');
   });
 
   it('shows a preserved-formats row when the entry kept multiple representations', () => {

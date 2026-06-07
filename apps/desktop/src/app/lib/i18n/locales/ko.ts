@@ -59,6 +59,7 @@ export const ko: Messages = {
   preview: {
     empty: '미리 볼 항목을 선택하세요.',
     loading: '미리보기 불러오는 중…',
+    details: '세부 정보',
     truncated: '미리보기가 잘렸습니다.',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

@@ -77,6 +77,9 @@ export type Messages = {
   preview: {
     empty: string;
     loading: string;
+    // Summary label for the collapsible holding the technical fields
+    // (id / sensitivity / size / rank / preserved formats).
+    details: string;
     truncated: string;
     truncation: {
       // Head-only fallback (legacy / tiny caps): "First 64 KB of 2.3 MB shown."
@@ -594,6 +597,7 @@ export const en: Messages = {
   preview: {
     empty: 'Select an item to preview.',
     loading: 'Loading preview…',
+    details: 'Details',
     truncated: 'Preview truncated.',
     truncation: {
       headOnly: ({ shown, total }) => `First ${shown} of ${total} shown.`,

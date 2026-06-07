@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::file_path::{fold_home, is_root_only, keep_trailing_segments, trim_trailing_separators};
+
 /// Number of representative basenames a summary carries for multi-file lists.
 const REPRESENTATIVE_LIMIT: usize = 2;
 
@@ -127,68 +129,6 @@ fn parent_of(path: &str) -> &str {
         Some(idx) => &path[..=idx],
         None => "",
     }
-}
-
-/// Strip a trailing run of `/` or `\` (separators are ASCII, so byte slicing
-/// stays on char boundaries).
-fn trim_trailing_separators(path: &str) -> &str {
-    path.trim_end_matches(['/', '\\'])
-}
-
-/// A lone filesystem root with nothing below it: POSIX `/`, a bare `\`, or a
-/// Windows drive root such as `C:\` / `C:/`.
-fn is_root_only(path: &str) -> bool {
-    if path == "/" || path == "\\" {
-        return true;
-    }
-    let bytes = path.as_bytes();
-    bytes.len() == 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-}
-
-/// Replace a leading `home` prefix with `~`, preserving the original separator
-/// style. A no-op when `home` is absent/empty or `path` lives outside it.
-fn fold_home(path: &str, home: Option<&str>) -> String {
-    let Some(home) = home else {
-        return path.to_owned();
-    };
-    let home = trim_trailing_separators(home);
-    if home.is_empty() {
-        return path.to_owned();
-    }
-    if path == home {
-        return "~".to_owned();
-    }
-    if let Some(rest) = path.strip_prefix(home)
-        && rest.starts_with(['/', '\\'])
-    {
-        return format!("~{rest}");
-    }
-    path.to_owned()
-}
-
-/// Return the suffix of `s` covering its last `n` path segments, preserving the
-/// original separators. Falls back to the whole string when it has fewer than
-/// `n` separators, so a short location keeps any leading `~` or root marker.
-fn keep_trailing_segments(s: &str, n: usize) -> &str {
-    if n == 0 {
-        return "";
-    }
-    let bytes = s.as_bytes();
-    let mut seen = 0;
-    let mut idx = bytes.len();
-    while idx > 0 {
-        idx -= 1;
-        if bytes[idx] == b'/' || bytes[idx] == b'\\' {
-            seen += 1;
-            if seen == n {
-                return &s[idx + 1..];
-            }
-        }
-    }
-    s
 }
 
 #[cfg(test)]

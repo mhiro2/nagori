@@ -59,6 +59,7 @@ export const ja: Messages = {
   preview: {
     empty: 'プレビューする項目を選択してください。',
     loading: 'プレビューを読み込み中…',
+    details: '詳細',
     truncated: 'プレビューは途中まで表示しています。',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

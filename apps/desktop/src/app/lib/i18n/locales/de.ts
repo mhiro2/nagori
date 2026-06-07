@@ -60,6 +60,7 @@ export const de: Messages = {
   preview: {
     empty: 'Eintrag auswählen, um eine Vorschau anzuzeigen.',
     loading: 'Vorschau wird geladen …',
+    details: 'Details',
     truncated: 'Vorschau gekürzt.',
     truncation: {
       headOnly: ({ shown, total }: { shown: string; total: string }): string =>

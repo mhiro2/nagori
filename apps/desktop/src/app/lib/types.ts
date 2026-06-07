@@ -193,6 +193,30 @@ export type EntryDto = {
   representationSummary: RepresentationSummary[];
 };
 
+// File-vs-directory kind for a preview file row. Always `'unknown'` today —
+// captured paths carry no reliable kind signal — but the union mirrors the
+// backend's forward-compat wire contract so a future platform probe needs no
+// renderer change. The colour dot still squares off for a folder by reading the
+// trailing separator on `name`.
+export type FileEntryKind = 'file' | 'directory' | 'unknown';
+
+// One file in a `fileList` preview body, decomposed basename-first by the
+// backend so the renderer never parses a raw path. Strings are already
+// home-folded (`~`); the row fits them to the available width with plain CSS.
+export type FileEntry = {
+  // Final segment, with a trailing separator re-attached for a directory.
+  name: string;
+  // Home-folded parent directory, trailing separator stripped (a filesystem
+  // root stays intact). Empty when the path has no parent segment.
+  parentDisplay: string;
+  // The un-folded absolute parent, surfaced only as a hover `title`. Absent
+  // when there is no parent or it already equals `parentDisplay`.
+  parentRaw?: string | null;
+  // Lowercased extension, absent for dotfiles / extensionless names.
+  extension?: string | null;
+  kind: FileEntryKind;
+};
+
 export type EntryPreviewBody =
   | { type: 'text'; text: string }
   | { type: 'code'; text: string; language?: string | null }
@@ -219,7 +243,14 @@ export type EntryPreviewBody =
       width?: number | null;
       height?: number | null;
     }
-  | { type: 'fileList'; paths: string[]; total: number }
+  | {
+      type: 'fileList';
+      entries: FileEntry[];
+      total: number;
+      // Home-folded directory prefix shared by every path, hoisted into a
+      // header. Absent when the paths share only a lone filesystem root.
+      commonParentDisplay?: string | null;
+    }
   | { type: 'richText'; text: string }
   | { type: 'unknown'; text: string };
 

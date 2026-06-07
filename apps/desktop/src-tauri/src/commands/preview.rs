@@ -31,9 +31,14 @@ pub async fn get_entry_preview(
         .get_entry(entry_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    // Fold the current user's home to `~` in file-list locations. Display-only
+    // shortening, never a privacy boundary — the body is already gated to
+    // non-sensitive entries before any raw path is surfaced.
+    let home = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
     Ok(EntryPreviewDto::from_entry_with_query(
         &entry,
         query.as_deref(),
+        home.as_deref(),
     ))
 }
 
@@ -62,7 +67,8 @@ pub async fn get_entry_preview_full(
             "expanded preview is only available for Public entries",
         ));
     }
-    Ok(EntryPreviewDto::from_entry_full(&entry))
+    let home = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
+    Ok(EntryPreviewDto::from_entry_full(&entry, home.as_deref()))
 }
 /// Open an OS-native preview overlay for the entry (Quick Look on
 /// macOS).
