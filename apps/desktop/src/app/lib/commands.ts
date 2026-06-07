@@ -14,6 +14,7 @@ import type {
   EntryPreviewDto,
   HotkeyFailure,
   PasteFormat,
+  PasteOption,
   PermissionStatus,
   PlatformCapabilities,
   QuickActionId,
@@ -44,6 +45,19 @@ export const closePalette = (): Promise<void> => invoke('close_palette');
 
 export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Promise<void> =>
   invoke('paste_entry_from_palette', { entryId, format });
+
+// Paste exactly one chosen representation of an entry (the "paste as PNG /
+// plain text / files" picker). `mime` must be one returned by
+// `listPasteOptions`; the backend re-validates and refuses anything it can't
+// publish rather than falling back to the primary.
+export const pasteEntryRepresentationFromPalette = (entryId: string, mime: string): Promise<void> =>
+  invoke('paste_entry_representation_from_palette', { entryId, mime });
+
+// The distinct representations the entry can be pasted as, in canonical order.
+// Empty when the entry has nothing extra to offer (or is blocked); the caller
+// then falls back to the plain alternate-format paste.
+export const listPasteOptions = (entryId: string): Promise<PasteOption[]> =>
+  invoke('list_paste_options', { entryId });
 
 export const copyEntryFromPalette = (entryId: string): Promise<void> =>
   invoke('copy_entry_from_palette', { entryId });

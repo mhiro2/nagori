@@ -234,6 +234,22 @@ export type Messages = {
     saveResult: string;
     saved: string;
   };
+  // The "paste as <format>" picker, surfaced from the alternate-format chord
+  // when the selected entry offers more than one pasteable representation.
+  pastePicker: {
+    title: string;
+    // The leading row: re-paste the entry as captured (every publishable
+    // format at once), identical to a plain Enter.
+    keepOriginal: string;
+    // Row labels keyed by the representation's category token.
+    categories: {
+      files: string;
+      image: string;
+      plainText: string;
+      html: string;
+      richText: string;
+    };
+  };
   setup: {
     title: string;
     intro: string;
@@ -730,6 +746,17 @@ export const en: Messages = {
     saveResult: 'Save as new entry',
     saved: 'Saved',
   },
+  pastePicker: {
+    title: 'Paste as',
+    keepOriginal: 'Keep original format',
+    categories: {
+      files: 'Files',
+      image: 'Image',
+      plainText: 'Plain text',
+      html: 'HTML',
+      richText: 'Rich text',
+    },
+  },
   setup: {
     title: 'Set up Nagori',
     intro:
@@ -976,7 +1003,7 @@ export const en: Messages = {
       paletteActions: {
         pin: 'Toggle pin',
         delete: 'Delete item',
-        'paste-as-plain': 'Paste without formatting',
+        'paste-as-plain': 'Paste as…',
         'copy-without-paste': 'Copy to clipboard',
         clear: 'Clear search',
         'open-preview': 'Toggle expanded preview',

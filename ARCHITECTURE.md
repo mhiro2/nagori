@@ -690,7 +690,7 @@ the bare `redact_text` or the AI crate's `Redactor`.
 | Trait | Purpose |
 |-------|---------|
 | `ClipboardReader` | `current_snapshot()`, `current_sequence()`, bounded sequence/snapshot variants for the capture loop |
-| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + `writeObjects` over an `NSPasteboardItem` batch under the arboard mutex, with inline reps sharing one item and each file URL fanning out to its own item so a multi-file list keeps every path; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`; Windows — `OpenClipboard` + `EmptyClipboard` + N × `SetClipboardData` against `CF_UNICODETEXT` / `CF_HTML` / `Rich Text Format` / `CF_DIBV5` (plus a registered `"PNG"` companion) / `CF_HDROP` under the arboard mutex), with a default impl that falls back to `write_entry` on any adapter that does not advertise the capability. |
+| `ClipboardWriter` | Restore an entry to the OS clipboard. `write_entry` / `write_plain` / `write_text` cover the primary-only contract; `write_representations` lets Preserve copy-back re-offer the publishable subset of captured MIMEs (text/plain, text/html, application/rtf, image/png, image/tiff, image/jpeg, image/gif, image/webp, text/uri-list) on adapters whose `clipboard_multi_representation_write` capability is `Available` (macOS — `clearContents` + `writeObjects` over an `NSPasteboardItem` batch under the arboard mutex, with inline reps sharing one item and each file URL fanning out to its own item so a multi-file list keeps every path; Linux Wayland — single-offer `copy::copy_multi` over `wlr_data_control` / `ext_data_control`; Windows — `OpenClipboard` + `EmptyClipboard` + N × `SetClipboardData` against `CF_UNICODETEXT` / `CF_HTML` / `Rich Text Format` / `CF_DIBV5` (plus a registered `"PNG"` companion) / `CF_HDROP` under the arboard mutex), with a default impl that falls back to `write_entry` on any adapter that does not advertise the capability. A companion `write_representation_exact` publishes exactly one chosen representation for the desktop "paste as <format>" picker: it validates the rep against the same per-adapter publishable table and, unlike `write_representations`, errors (`Unsupported`) instead of falling back to the primary, so the user never silently gets a different format than they picked. |
 | `HotkeyManager` | Register / unregister palette and AI hotkeys |
 | `PasteController` | Trigger Cmd+V / Ctrl+V into the frontmost app |
 | `PermissionChecker` | Query / request Accessibility, Input Monitoring, Clipboard, Notifications, AutoLaunch |
@@ -942,6 +942,22 @@ the Preserve branch reads the persisted rows via
 `add_text`-style synthesised rows). PlainText copy-back keeps its
 existing `write_plain` path so plain-text-only targets always get the
 plain fallback the capture pipeline normalised on insert.
+
+**Paste as <format>.** A copied item that carries several representations
+(a file that also offers a rendered image and a text label, say) can be
+re-pasted as just one of them. `NagoriRuntime::list_paste_options` reads
+the stored set and returns the distinct pasteable MIMEs (deduped, in
+canonical role/ordinal order) via the shared `model::paste_option` helper,
+and the desktop surfaces them from the alternate-format chord
+(`Cmd/Ctrl+Shift+Enter`) as a small picker — shown only when there is a
+real choice (≥2 distinct formats), otherwise the chord keeps its plain
+alternate-format paste. Choosing one runs `copy_entry_representation`,
+which re-reads the representation set (so a concurrent eviction can't make
+the picker's snapshot stale), resolves the MIME to its single canonical row,
+and publishes it through `write_representation_exact`. Sensitivity is
+unchanged from Preserve — `Blocked` is refused and the chosen rep is a
+subset of what Preserve already offers — and the wire contract stays
+desktop-local (the IPC/CLI search result keeps its flat `preview`).
 
 ---
 

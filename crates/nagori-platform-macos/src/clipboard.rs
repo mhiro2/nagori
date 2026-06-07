@@ -406,6 +406,25 @@ impl ClipboardWriter for MacosClipboard {
         }
         self.publish_representations(representations.to_vec()).await
     }
+
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        // Strict single-representation paste: refuse a MIME this adapter
+        // cannot publish instead of falling back to the primary the way
+        // `write_representations` does. `publish_representations` builds the
+        // pasteboard item off-pasteboard and only clears + writes when at
+        // least one item maps, so an unmapped rep leaves the clipboard
+        // untouched rather than blanking it.
+        if !has_publishable_representation(std::slice::from_ref(representation)) {
+            return Err(AppError::Unsupported(
+                "representation cannot be published to the macOS clipboard".to_owned(),
+            ));
+        }
+        self.publish_representations(vec![representation.clone()])
+            .await
+    }
 }
 
 impl MacosClipboard {

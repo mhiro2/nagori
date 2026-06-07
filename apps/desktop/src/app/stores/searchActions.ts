@@ -3,14 +3,22 @@ import {
   copyEntryFromPalette as copyEntryCmd,
   deleteEntries as deleteEntriesCmd,
   deleteEntry as deleteEntryCmd,
+  listPasteOptions,
   pasteEntryFromPalette as pasteEntryCmd,
+  pasteEntryRepresentationFromPalette as pasteEntryRepresentationCmd,
   pinEntry as pinEntryCmd,
   previewEntry as previewEntryCmd,
 } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
-import type { PasteFormat } from '../lib/types';
+import type { PasteFormat, PasteOption } from '../lib/types';
 import { clearPasteDiagnostics } from './pasteDiagnostics.svelte';
+import {
+  closePasteFormatPicker,
+  openPasteFormatPicker,
+  pasteFormatPickerGeneration,
+  pasteFormatPickerState,
+} from './pasteFormatPicker.svelte';
 import { clearMultiSelect, multiSelectState } from './searchMultiSelect.svelte';
 import { cancelPendingQuery, runQuery, searchState } from './searchQuery.svelte';
 import { currentSelection } from './searchSelection';
@@ -22,15 +30,16 @@ const oppositeFormat = (): PasteFormat | undefined => {
   return current === 'preserve' ? 'plain_text' : 'preserve';
 };
 
-export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
-  const target = currentSelection();
-  if (!target || !isTauri()) return;
+// Paste a specific entry id, sharing the hide-on-return + diagnostics contract.
+// Callers capture the id up front so an async step (or the picker) can never let
+// the live selection drift onto a different entry before the paste lands.
+const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => {
   // The Tauri command hides the palette on its way out; drop any pending
   // debounced search so a keystroke typed within the 80 ms window before
-  // Enter doesn't land a runQuery against the now-hidden webview.
+  // the paste doesn't land a runQuery against the now-hidden webview.
   cancelPendingQuery();
   try {
-    await pasteEntryCmd(target.id, format);
+    await pasteEntryCmd(id, format);
     // A clean paste makes any prior failure diagnostic stale — drop the
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
@@ -39,8 +48,67 @@ export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   }
 };
 
+export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
+  const target = currentSelection();
+  if (!target || !isTauri()) return;
+  await pasteEntryId(target.id, format);
+};
+
 export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
-  await confirmSelection(oppositeFormat());
+  const target = currentSelection();
+  if (!target || !isTauri()) return;
+  // Open a representation picker only when the entry genuinely offers a choice
+  // (≥2 distinct pasteable formats, e.g. a copied file that also carries an
+  // image and a text label). Otherwise keep the lightweight alternate-format
+  // paste so the common "paste as plain text" stays a single keystroke.
+  // `listPasteOptions` is the authority on what is pasteable; a failure (the
+  // entry vanished mid-keystroke) just falls back to the plain alternate paste.
+  // Capture the dismiss generation before the query so a palette hide
+  // (blur / Escape) landing while it is in flight bails this opener instead of
+  // popping the picker open on a hidden window against a now-stale entry.
+  const generation = pasteFormatPickerGeneration();
+  let options: PasteOption[] = [];
+  try {
+    options = await listPasteOptions(target.id);
+  } catch {
+    options = [];
+  }
+  if (pasteFormatPickerGeneration() !== generation) return;
+  if (options.length >= 2) {
+    openPasteFormatPicker(target.id, options);
+  } else {
+    // No real choice — paste the *captured* entry in the alternate format.
+    // Using `target.id` (not a fresh `currentSelection()`) keeps a selection
+    // change during the options query from redirecting the paste.
+    await pasteEntryId(target.id, oppositeFormat());
+  }
+};
+
+// Apply a choice from the representation picker. `undefined` is the "keep
+// original" row — re-offer every captured representation (explicit Preserve,
+// regardless of the user's paste_format_default) — while an option pastes
+// exactly its representation. Shares the hide-on-return + diagnostics contract;
+// the target is the id captured when the picker opened, not the live selection.
+export const confirmPasteFormat = async (option: PasteOption | undefined): Promise<void> => {
+  const targetId = pasteFormatPickerState.targetId;
+  closePasteFormatPicker();
+  if (targetId === undefined || !isTauri()) return;
+  if (option === undefined) {
+    await pasteEntryId(targetId, 'preserve');
+    return;
+  }
+  cancelPendingQuery();
+  try {
+    await pasteEntryRepresentationCmd(targetId, option.mime);
+    clearPasteDiagnostics();
+  } catch (err) {
+    searchState.errorMessage = describeError(err);
+  }
+};
+
+// Dismiss the picker without pasting (Escape / click-outside).
+export const cancelPasteFormat = (): void => {
+  closePasteFormatPicker();
 };
 
 export const copySelection = async (): Promise<void> => {

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nagori_core::{
     AppError, ClipboardData, ClipboardEntry, ClipboardRepresentation, ClipboardSequence,
-    ClipboardSnapshot, ContentHash, Result, StoredClipboardRepresentation,
+    ClipboardSnapshot, ContentHash, RepresentationDataRef, Result, StoredClipboardRepresentation,
 };
 use time::OffsetDateTime;
 
@@ -95,6 +95,28 @@ pub trait ClipboardWriter: Send + Sync {
         let _ = representations;
         self.write_entry(entry).await
     }
+
+    /// Publish exactly one stored representation, with no fallback to the
+    /// entry's primary content.
+    ///
+    /// Backs the "paste as <format>" picker: the runtime resolves the
+    /// chosen MIME to a single representation and asks the adapter to put
+    /// only that on the clipboard. Unlike [`Self::write_representations`]
+    /// (Preserve copy-back, which falls back to `write_entry` when nothing
+    /// is publishable), this must never silently substitute a different
+    /// representation — the user picked a specific format, so a request the
+    /// adapter cannot honour is an error rather than a surprise paste of
+    /// the primary. The default impl refuses; adapters that advertise
+    /// `clipboard_multi_representation_write` override it.
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        let _ = representation;
+        Err(AppError::Unsupported(
+            "this clipboard adapter cannot publish a single representation".to_owned(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -136,6 +158,13 @@ impl<T: ClipboardWriter + ?Sized> ClipboardWriter for Arc<T> {
         representations: &[StoredClipboardRepresentation],
     ) -> Result<()> {
         (**self).write_representations(entry, representations).await
+    }
+
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        (**self).write_representation_exact(representation).await
     }
 }
 
@@ -205,6 +234,21 @@ impl ClipboardWriter for MemoryClipboard {
         *self.state.lock().map_err(|err| lock_err(&err))? = Some(text.to_owned());
         Ok(())
     }
+
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        // The in-memory adapter is text-only, so it can honour an exact
+        // paste of an inline-text representation but nothing binary; a
+        // non-text request is refused rather than silently dropped.
+        match &representation.data {
+            RepresentationDataRef::InlineText(text) => self.write_text(text).await,
+            _ => Err(AppError::Unsupported(
+                "memory clipboard only stores text representations".to_owned(),
+            )),
+        }
+    }
 }
 
 fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
@@ -249,5 +293,34 @@ mod tests {
             .await
             .expect("default fallback must succeed for text entries");
         assert_eq!(clipboard.current_text().as_deref(), Some("primary body"));
+    }
+
+    #[tokio::test]
+    async fn write_representation_exact_publishes_text_and_refuses_binary() {
+        // The memory adapter honours an inline-text exact paste verbatim
+        // (the selected rep's body, not the entry's primary)...
+        let clipboard = MemoryClipboard::new();
+        let html = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/html".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("<p>just me</p>".to_owned()),
+        };
+        clipboard
+            .write_representation_exact(&html)
+            .await
+            .expect("inline-text exact paste must succeed");
+        assert_eq!(clipboard.current_text().as_deref(), Some("<p>just me</p>"));
+
+        // ...and refuses a binary rep rather than falling back to anything.
+        let image = StoredClipboardRepresentation {
+            role: RepresentationRole::Alternative,
+            mime_type: "image/png".to_owned(),
+            ordinal: 1,
+            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50]),
+        };
+        assert!(clipboard.write_representation_exact(&image).await.is_err());
+        // The refused write left the prior contents untouched.
+        assert_eq!(clipboard.current_text().as_deref(), Some("<p>just me</p>"));
     }
 }

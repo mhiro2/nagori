@@ -2,7 +2,8 @@
 
 use nagori_core::{
     AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
-    PasteFormat, Result, SecretAction, Sensitivity, SensitivityClassifier, SettingsRepository,
+    PasteFormat, PasteOption, Result, SecretAction, Sensitivity, SensitivityClassifier,
+    SettingsRepository, build_paste_options, select_representation,
 };
 
 use super::NagoriRuntime;
@@ -114,6 +115,58 @@ impl NagoriRuntime {
         self.store.increment_use_count(id).await?;
         self.invalidate_search_cache();
         Ok(())
+    }
+
+    /// Copy a single chosen representation of an entry back to the clipboard
+    /// ("paste as PNG / plain text / files").
+    ///
+    /// Unlike [`Self::copy_entry_with_format`]'s `Preserve` path, which
+    /// re-offers every stored representation, this publishes exactly the one
+    /// the user picked and never falls back to the primary: a `mime` the
+    /// entry doesn't hold (or the platform can't publish) is an error, so the
+    /// user never silently gets a different format. The representation set is
+    /// re-read here so a concurrent capture/eviction cannot make the picker's
+    /// snapshot stale; `select_representation` resolves the request to the
+    /// canonical (lowest role/ordinal) copy of that MIME.
+    pub async fn copy_entry_representation(&self, id: EntryId, mime: &str) -> Result<()> {
+        let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
+        if matches!(entry.sensitivity, Sensitivity::Blocked) {
+            return Err(AppError::Policy(
+                "blocked entries cannot be copied".to_owned(),
+            ));
+        }
+        let representations = self.store.list_representations(id).await?;
+        let representation = select_representation(&representations, mime).ok_or_else(|| {
+            // Deliberately MIME- and payload-free: the error reaches the UI
+            // toast, and the requested format is the only safe detail.
+            AppError::InvalidInput(
+                "the requested clipboard format is not available for this entry".to_owned(),
+            )
+        })?;
+        self.clipboard
+            .write_representation_exact(representation)
+            .await?;
+        // Same use-count bump + cache invalidation contract as the other
+        // copy-back paths so the ranker reflects the re-paste.
+        self.invalidate_search_cache();
+        self.store.increment_use_count(id).await?;
+        self.invalidate_search_cache();
+        Ok(())
+    }
+
+    /// Enumerate the distinct representations the user can paste individually,
+    /// in canonical order. Drives the desktop "paste as <format>" picker.
+    ///
+    /// A `Blocked` entry can never be copied, so it offers nothing. The set is
+    /// re-read from storage (not the search snapshot) so the options reflect
+    /// what is actually publishable right now.
+    pub async fn list_paste_options(&self, id: EntryId) -> Result<Vec<PasteOption>> {
+        let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
+        if matches!(entry.sensitivity, Sensitivity::Blocked) {
+            return Ok(Vec::new());
+        }
+        let representations = self.store.list_representations(id).await?;
+        Ok(build_paste_options(&representations))
     }
 
     pub async fn paste_entry(&self, id: EntryId, format: Option<PasteFormat>) -> Result<()> {

@@ -16,6 +16,7 @@
     quickLookAvailable,
     refreshCapabilities,
   } from '../stores/capabilities.svelte';
+  import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
     confirmSelectionWithAlternateFormat,
@@ -54,6 +55,7 @@
   import { showSettings } from '../stores/view.svelte';
   import ActionInspector from './ActionInspector.svelte';
   import FilterChips from './FilterChips.svelte';
+  import PasteFormatPicker from './PasteFormatPicker.svelte';
   import PreviewPane from './PreviewPane.svelte';
   import ResultList from './ResultList.svelte';
   import SearchBox from './SearchBox.svelte';
@@ -259,6 +261,10 @@
     // the arrows move between candidates. Bail before `resolveAction` so we
     // never `preventDefault` a composition keystroke.
     if (isImeComposing(event)) return;
+    // While the paste-format picker is open it owns the keyboard (it swallows
+    // its own keydowns), so stand down here too — a key that slips through
+    // before the picker takes focus must not move the selection or paste.
+    if (pasteFormatPickerState.open) return;
     const action = resolveAction(event, paletteBindings);
     if (!action) return;
     event.preventDefault();
@@ -408,6 +414,9 @@
       onClose={() => (actionsOpen = false)}
     />
   </div>
+  {#if pasteFormatPickerState.open}
+    <PasteFormatPicker />
+  {/if}
   <StatusBar
     entryCount={searchState.results.length}
     elapsedMs={searchState.lastElapsedMs}

@@ -407,6 +407,136 @@ async fn copy_entry_preserve_hydrates_stored_representations() {
 }
 
 #[tokio::test]
+async fn copy_entry_representation_publishes_only_the_selected_format() {
+    // The "paste as <format>" picker resolves a chosen MIME to one stored
+    // representation and publishes exactly that — never the primary, never
+    // the whole set. A recording writer confirms the single rep handed to
+    // `write_representation_exact`, and an absent MIME is rejected rather
+    // than silently substituted.
+    use nagori_core::{
+        ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, ContentHash,
+        EntryFactory, PasteCategory, StoredClipboardRepresentation,
+    };
+    use time::OffsetDateTime;
+
+    #[derive(Default)]
+    struct ExactRecordingWriter {
+        exact_calls: tokio::sync::Mutex<Vec<StoredClipboardRepresentation>>,
+    }
+
+    #[async_trait]
+    impl ClipboardWriter for ExactRecordingWriter {
+        async fn write_entry(&self, _entry: &ClipboardEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn write_plain(&self, _entry: &ClipboardEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn write_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn write_representation_exact(
+            &self,
+            representation: &StoredClipboardRepresentation,
+        ) -> Result<()> {
+            self.exact_calls.lock().await.push(representation.clone());
+            Ok(())
+        }
+    }
+
+    let snapshot = ClipboardSnapshot {
+        sequence: ClipboardSequence::content_hash(ContentHash::sha256(b"paste-as-format").value),
+        captured_at: OffsetDateTime::now_utc(),
+        source: None,
+        representations: vec![
+            ClipboardRepresentation {
+                mime_type: "text/html".to_owned(),
+                data: ClipboardData::Text("<p>pick <strong>me</strong></p>".to_owned()),
+            },
+            ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text("pick me".to_owned()),
+            },
+        ],
+    };
+    let entry = EntryFactory::from_snapshot(snapshot).expect("multi-rep entry from snapshot");
+
+    let writer = Arc::new(ExactRecordingWriter::default());
+    let store = SqliteStore::open_memory().expect("memory store should open");
+    let runtime = NagoriRuntime::builder(store)
+        .clipboard(writer.clone() as Arc<dyn ClipboardWriter>)
+        .build_for_test();
+    let id = runtime.store().insert(entry).await.expect("insert entry");
+
+    // The picker enumerates the HTML primary and its plain fallback in
+    // canonical order.
+    let options = runtime.list_paste_options(id).await.expect("list options");
+    assert_eq!(
+        options
+            .iter()
+            .map(|opt| (opt.mime.as_str(), opt.category))
+            .collect::<Vec<_>>(),
+        vec![
+            ("text/html", PasteCategory::Html),
+            ("text/plain", PasteCategory::PlainText),
+        ],
+    );
+
+    // Selecting plain text publishes only the plain rep.
+    runtime
+        .copy_entry_representation(id, "text/plain")
+        .await
+        .expect("copy plain representation");
+    let calls = writer.exact_calls.lock().await.clone();
+    assert_eq!(calls.len(), 1, "expected exactly one exact write");
+    assert_eq!(calls[0].mime_type, "text/plain");
+
+    // A MIME the entry doesn't hold is an error, not a fallback.
+    let err = runtime
+        .copy_entry_representation(id, "image/png")
+        .await
+        .expect_err("missing format must error");
+    assert!(matches!(err, AppError::InvalidInput(_)));
+    assert_eq!(
+        writer.exact_calls.lock().await.len(),
+        1,
+        "the rejected request must not publish anything",
+    );
+}
+
+#[tokio::test]
+async fn blocked_entry_offers_and_pastes_no_representation() {
+    // `Blocked` entries can never be copied, so the picker offers nothing
+    // and a direct representation paste is refused at the policy gate.
+    use nagori_core::{EntryFactory, Sensitivity};
+
+    let mut entry = EntryFactory::from_text("blocked body".to_owned());
+    entry.sensitivity = Sensitivity::Blocked;
+
+    let store = SqliteStore::open_memory().expect("memory store should open");
+    let runtime = NagoriRuntime::builder(store).build_for_test();
+    let id = runtime
+        .store()
+        .insert(entry)
+        .await
+        .expect("insert blocked entry");
+
+    assert!(
+        runtime
+            .list_paste_options(id)
+            .await
+            .expect("list options")
+            .is_empty(),
+        "a blocked entry must offer no paste options",
+    );
+    let err = runtime
+        .copy_entry_representation(id, "text/plain")
+        .await
+        .expect_err("blocked entry must refuse a representation paste");
+    assert!(matches!(err, AppError::Policy(_)));
+}
+
+#[tokio::test]
 async fn sensitive_entries_hide_text_until_sensitive_output_is_requested() {
     // OTP-shaped clips classify as Secret and get persisted as
     // `[REDACTED]` under the default `StoreRedacted`. The IPC gate

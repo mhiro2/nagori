@@ -9,7 +9,9 @@ vi.mock('../lib/commands', () => ({
   copyEntryFromPalette: vi.fn(),
   deleteEntries: vi.fn(),
   deleteEntry: vi.fn(),
+  listPasteOptions: vi.fn(async () => []),
   pasteEntryFromPalette: vi.fn(),
+  pasteEntryRepresentationFromPalette: vi.fn(),
   pinEntry: vi.fn(),
   previewEntry: vi.fn(),
   listRecent: vi.fn(async () => []),
@@ -21,15 +23,20 @@ import {
   copyEntryFromPalette,
   deleteEntries,
   deleteEntry,
+  listPasteOptions,
   pasteEntryFromPalette,
+  pasteEntryRepresentationFromPalette,
   pinEntry,
   previewEntry,
   searchClipboard,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
-import type { SearchResultDto } from '../lib/types';
+import type { PasteOption, SearchResultDto } from '../lib/types';
+import { closePasteFormatPicker, pasteFormatPickerState } from './pasteFormatPicker.svelte';
 import {
+  confirmPasteFormat,
   confirmSelection,
+  confirmSelectionWithAlternateFormat,
   copyMultiSelection,
   copySelection,
   deleteMultiSelection,
@@ -73,6 +80,9 @@ beforeEach(() => {
   searchState.errorMessage = undefined;
   searchState.lastElapsedMs = undefined;
   clearMultiSelect();
+  pasteFormatPickerState.open = false;
+  pasteFormatPickerState.targetId = undefined;
+  pasteFormatPickerState.options = [];
 });
 
 describe('confirmSelection', () => {
@@ -92,6 +102,86 @@ describe('confirmSelection', () => {
     searchState.results = [];
     await confirmSelection();
     expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+  });
+});
+
+const pasteOption = (mime: string, category: PasteOption['category']): PasteOption => ({
+  mime,
+  category,
+});
+
+describe('confirmSelectionWithAlternateFormat', () => {
+  it('opens the representation picker when the entry offers more than one format', async () => {
+    vi.mocked(listPasteOptions).mockResolvedValue([
+      pasteOption('text/html', 'html'),
+      pasteOption('text/plain', 'plainText'),
+    ]);
+    await confirmSelectionWithAlternateFormat();
+    expect(pasteFormatPickerState.open).toBe(true);
+    expect(pasteFormatPickerState.targetId).toBe('r1');
+    expect(pasteFormatPickerState.options).toHaveLength(2);
+    // The picker defers the actual paste, so nothing is pasted yet.
+    expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the plain alternate paste when there is no real choice', async () => {
+    vi.mocked(listPasteOptions).mockResolvedValue([pasteOption('text/plain', 'plainText')]);
+    vi.mocked(pasteEntryFromPalette).mockResolvedValue();
+    await confirmSelectionWithAlternateFormat();
+    expect(pasteFormatPickerState.open).toBe(false);
+    expect(pasteEntryFromPalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the plain alternate paste when listing options fails', async () => {
+    vi.mocked(listPasteOptions).mockRejectedValue(new Error('entry vanished'));
+    vi.mocked(pasteEntryFromPalette).mockResolvedValue();
+    await confirmSelectionWithAlternateFormat();
+    expect(pasteFormatPickerState.open).toBe(false);
+    expect(pasteEntryFromPalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not open the picker (nor paste) if the palette hides while options load', async () => {
+    // A blur / Escape landing during the query dismisses the picker, bumping
+    // the generation; the resolved opener must bail rather than pop a picker
+    // onto the now-hidden palette against a stale target.
+    vi.mocked(listPasteOptions).mockImplementation(async () => {
+      closePasteFormatPicker();
+      return [pasteOption('text/html', 'html'), pasteOption('text/plain', 'plainText')];
+    });
+    await confirmSelectionWithAlternateFormat();
+    expect(pasteFormatPickerState.open).toBe(false);
+    expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+  });
+});
+
+describe('confirmPasteFormat', () => {
+  beforeEach(() => {
+    pasteFormatPickerState.open = true;
+    pasteFormatPickerState.targetId = 'r1';
+    pasteFormatPickerState.options = [{ mime: 'image/png', category: 'image' }];
+  });
+
+  it('pastes the explicit Preserve format and closes the picker for "keep original"', async () => {
+    vi.mocked(pasteEntryFromPalette).mockResolvedValue();
+    await confirmPasteFormat(undefined);
+    // "Keep original" must re-offer every representation regardless of the
+    // user's default paste format, so it forces 'preserve' rather than omitting.
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', 'preserve');
+    expect(pasteEntryRepresentationFromPalette).not.toHaveBeenCalled();
+    expect(pasteFormatPickerState.open).toBe(false);
+  });
+
+  it('pastes exactly the chosen representation and closes the picker', async () => {
+    vi.mocked(pasteEntryRepresentationFromPalette).mockResolvedValue();
+    await confirmPasteFormat({ mime: 'image/png', category: 'image' });
+    expect(pasteEntryRepresentationFromPalette).toHaveBeenCalledWith('r1', 'image/png');
+    expect(pasteFormatPickerState.open).toBe(false);
+  });
+
+  it('surfaces a paste failure as an errorMessage', async () => {
+    vi.mocked(pasteEntryRepresentationFromPalette).mockRejectedValue(new Error('cannot publish'));
+    await confirmPasteFormat({ mime: 'image/png', category: 'image' });
+    expect(searchState.errorMessage).toBe('cannot publish');
   });
 });
 

@@ -201,6 +201,17 @@ export const de: Messages = {
     saveResult: 'Als neuen Eintrag speichern',
     saved: 'Gespeichert',
   },
+  pastePicker: {
+    title: 'Einfügen als',
+    keepOriginal: 'Originalformat behalten',
+    categories: {
+      files: 'Dateien',
+      image: 'Bild',
+      plainText: 'Nur Text',
+      html: 'HTML',
+      richText: 'Formatierter Text',
+    },
+  },
   setup: {
     title: 'Nagori einrichten',
     intro:
@@ -452,7 +463,7 @@ export const de: Messages = {
       paletteActions: {
         pin: 'Anheften umschalten',
         delete: 'Eintrag löschen',
-        'paste-as-plain': 'Ohne Formatierung einfügen',
+        'paste-as-plain': 'Einfügen als …',
         'copy-without-paste': 'In Zwischenablage kopieren',
         clear: 'Suche löschen',
         'open-preview': 'Erweiterte Vorschau umschalten',

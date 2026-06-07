@@ -191,6 +191,17 @@ export const ko: Messages = {
     saveResult: '새 항목으로 저장',
     saved: '저장됨',
   },
+  pastePicker: {
+    title: '붙여넣기 형식',
+    keepOriginal: '원래 형식 유지',
+    categories: {
+      files: '파일',
+      image: '이미지',
+      plainText: '일반 텍스트',
+      html: 'HTML',
+      richText: '서식 있는 텍스트',
+    },
+  },
   setup: {
     title: 'Nagori 설정',
     intro:
@@ -436,7 +447,7 @@ export const ko: Messages = {
       paletteActions: {
         pin: '고정 전환',
         delete: '항목 삭제',
-        'paste-as-plain': '서식 없이 붙여넣기',
+        'paste-as-plain': '형식 선택 붙여넣기',
         'copy-without-paste': '클립보드에 복사',
         clear: '검색 지우기',
         'open-preview': '확대 미리보기 전환',

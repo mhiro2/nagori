@@ -313,6 +313,50 @@ impl ClipboardWriter for WindowsClipboard {
             ))
         }
     }
+
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        // Strict single-representation paste: refuse a MIME this adapter
+        // cannot publish rather than falling back to the primary the way
+        // `write_representations` does. `win::write_multi_rep` empties the
+        // clipboard and publishes exactly the reps it is handed, so a
+        // one-rep batch puts only the chosen format on the clipboard.
+        if !has_publishable_representation(std::slice::from_ref(representation)) {
+            return Err(AppError::Unsupported(
+                "representation cannot be published to the Windows clipboard".to_owned(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            // Decode any image rep to its CF_DIBV5 payload off the clipboard
+            // mutex / timeout path, exactly as `write_representations` does.
+            let reps = vec![representation.clone()];
+            let (reps, dibv5) = tokio::task::spawn_blocking(
+                move || -> Result<(Vec<StoredClipboardRepresentation>, Vec<Option<Vec<u8>>>)> {
+                    let dibv5 = win::render_dibv5_payloads(&reps)?;
+                    Ok((reps, dibv5))
+                },
+            )
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
+
+            let clipboard = self.clipboard.clone();
+            clipboard_blocking("write_representation_exact", move || -> Result<()> {
+                let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                win::write_multi_rep(&reps, &dibv5)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
+        }
+        #[cfg(not(windows))]
+        {
+            Err(AppError::Unsupported(
+                "Windows multi-representation writes are Windows-only".to_owned(),
+            ))
+        }
+    }
 }
 
 /// True when at least one stored rep has a known Windows mapping.

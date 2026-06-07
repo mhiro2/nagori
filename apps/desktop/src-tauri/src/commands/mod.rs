@@ -3,15 +3,15 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use nagori_core::{
     AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository, MAX_PASTE_DELAY_MS,
-    PasteFailureReason, QuickActionId, RequestId, SearchQuery, Sensitivity, build_file_summary,
-    is_text_safe_for_default_output,
+    PasteFailureReason, PasteFormat, QuickActionId, RequestId, SearchQuery, Sensitivity,
+    build_file_summary, is_text_safe_for_default_output,
 };
 use nagori_search::normalize_text;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{
     AiActionResultDto, AiAvailabilityDto, AppDenyRuleDto, AppSettingsDto, EntryDto, FileSummaryDto,
-    HotkeyFailureDto, PasteFormatDto, PermissionStatusDto, PlatformCapabilitiesDto,
+    HotkeyFailureDto, PasteFormatDto, PasteOptionDto, PermissionStatusDto, PlatformCapabilitiesDto,
     SearchRequestDto, SearchResponseDto, SearchResultDto, SemanticIndexStatusDto,
 };
 use crate::error::{CommandError, CommandResult};
@@ -354,6 +354,20 @@ pub fn close_palette(app: AppHandle, state: State<'_, AppState>) -> CommandResul
     hide_main_palette(&app)
 }
 
+/// Which representation a palette paste should write back to the clipboard.
+///
+/// Both palette paste commands share the same hide → restore-focus →
+/// auto-paste → diagnostics orchestration ([`run_palette_paste`]); they differ
+/// only in this copy step. `Format` is the default Enter / alternate-format
+/// paste (Preserve copy-back of the publishable set, or plain text); the
+/// `Option` resolves to the user's `paste_format_default` when absent.
+/// `Representation` is the "paste as <format>" picker, publishing exactly the
+/// chosen MIME.
+enum PaletteCopyTarget {
+    Format(Option<PasteFormat>),
+    Representation(String),
+}
+
 #[tauri::command]
 pub async fn paste_entry_from_palette(
     app: AppHandle,
@@ -362,6 +376,61 @@ pub async fn paste_entry_from_palette(
     format: Option<PasteFormatDto>,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&entry_id)?;
+    run_palette_paste(
+        &app,
+        &state,
+        entry_id,
+        PaletteCopyTarget::Format(format.map(Into::into)),
+    )
+    .await
+}
+
+/// Paste a single chosen representation of an entry from the palette (the
+/// "paste as PNG / plain text / files" picker). Shares the focus-restore /
+/// auto-paste / diagnostics path with [`paste_entry_from_palette`]; only the
+/// clipboard write differs (exactly the picked MIME, never the primary).
+#[tauri::command]
+pub async fn paste_entry_representation_from_palette(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    entry_id: String,
+    mime: String,
+) -> CommandResult<()> {
+    let entry_id = parse_entry_id(&entry_id)?;
+    run_palette_paste(
+        &app,
+        &state,
+        entry_id,
+        PaletteCopyTarget::Representation(mime),
+    )
+    .await
+}
+
+/// List the distinct representations the selected entry can be pasted as,
+/// driving the desktop "paste as <format>" picker. Returns an empty list for
+/// entries with nothing extra to offer (or `Blocked` rows), so the caller can
+/// fall back to the plain alternate-format paste.
+#[tauri::command]
+pub async fn list_paste_options(
+    state: State<'_, AppState>,
+    entry_id: String,
+) -> CommandResult<Vec<PasteOptionDto>> {
+    let entry_id = parse_entry_id(&entry_id)?;
+    let options = state.runtime.list_paste_options(entry_id).await?;
+    Ok(options.iter().map(PasteOptionDto::from_option).collect())
+}
+
+/// The shared palette-paste flow: copy the chosen representation, hide the
+/// palette, restore the source app's focus, then (when auto-paste is on)
+/// synthesise the keystroke — emitting `nagori://paste_failed` for the
+/// failures that strand behind the now-hidden window. The copy runs *before*
+/// the palette hides so a copy error still surfaces in the visible palette.
+async fn run_palette_paste(
+    app: &AppHandle,
+    state: &AppState,
+    entry_id: EntryId,
+    copy: PaletteCopyTarget,
+) -> CommandResult<()> {
     let settings = match state.runtime.get_settings().await {
         Ok(s) => s,
         Err(err) => {
@@ -369,14 +438,21 @@ pub async fn paste_entry_from_palette(
             return Err(err.into());
         }
     };
-    state
-        .runtime
-        .copy_entry_with_format(
-            entry_id,
-            format.map_or(settings.paste_format_default, Into::into),
-        )
-        .await?;
-    hide_main_palette(&app)?;
+    match copy {
+        PaletteCopyTarget::Format(format) => {
+            state
+                .runtime
+                .copy_entry_with_format(entry_id, format.unwrap_or(settings.paste_format_default))
+                .await?;
+        }
+        PaletteCopyTarget::Representation(mime) => {
+            state
+                .runtime
+                .copy_entry_representation(entry_id, &mime)
+                .await?;
+        }
+    }
+    hide_main_palette(app)?;
 
     // Re-focus the app the user came from *regardless* of the auto-paste
     // setting. The snapshot was taken at `open_palette` time, so it is the
@@ -432,7 +508,7 @@ pub async fn paste_entry_from_palette(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed_with_reason(&app, &message, &PasteFailureReason::PreviousAppLost);
+        emit_paste_failed_with_reason(app, &message, &PasteFailureReason::PreviousAppLost);
         return Err(CommandError { message, ..cmd_err });
     }
 
@@ -468,7 +544,7 @@ pub async fn paste_entry_from_palette(
             "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed_with_reason(&app, &message, &reason);
+        emit_paste_failed_with_reason(app, &message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
     state.record_last_pasted(entry_id);

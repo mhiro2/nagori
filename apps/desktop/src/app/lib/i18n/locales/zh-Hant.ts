@@ -185,6 +185,17 @@ export const zhHant: Messages = {
     saveResult: '另存為新項目',
     saved: '已儲存',
   },
+  pastePicker: {
+    title: '貼上格式',
+    keepOriginal: '保留原始格式',
+    categories: {
+      files: '檔案',
+      image: '圖片',
+      plainText: '純文字',
+      html: 'HTML',
+      richText: '格式化文字',
+    },
+  },
   setup: {
     title: '設定 Nagori',
     intro: '授予 Nagori 向其他應用程式貼上所需的權限。您稍後可在系統設定中變更。',
@@ -416,7 +427,7 @@ export const zhHant: Messages = {
       paletteActions: {
         pin: '切換釘選',
         delete: '刪除項目',
-        'paste-as-plain': '無格式貼上',
+        'paste-as-plain': '選擇格式貼上',
         'copy-without-paste': '複製到剪貼簿',
         clear: '清除搜尋',
         'open-preview': '切換放大預覽',

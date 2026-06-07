@@ -203,6 +203,8 @@ pub fn run() {
             commands::open_palette,
             commands::close_palette,
             commands::paste_entry_from_palette,
+            commands::paste_entry_representation_from_palette,
+            commands::list_paste_options,
             commands::copy_entry_from_palette,
             commands::preview::get_entry_preview,
             commands::preview::get_entry_preview_full,

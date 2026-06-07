@@ -178,6 +178,18 @@ export type RepresentationSummary = {
   byteCount: number;
 };
 
+// User-facing grouping for a representation the entry can be pasted as,
+// surfaced by the "paste as <format>" picker. Mirrors the backend
+// `PasteCategoryDto` tokens and keys the localized label.
+export type PasteCategory = 'files' | 'image' | 'plainText' | 'html' | 'richText';
+
+// One representation the user can re-paste on its own. `mime` is the canonical
+// MIME echoed straight back to the paste command; `category` selects the label.
+export type PasteOption = {
+  mime: string;
+  category: PasteCategory;
+};
+
 export type EntryDto = {
   id: string;
   kind: ContentKind;

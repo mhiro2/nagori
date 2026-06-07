@@ -121,6 +121,18 @@ describe('command wrappers', () => {
       args: { entryId: 'e', format: undefined },
     },
     {
+      name: 'pasteEntryRepresentationFromPalette',
+      run: () => commands.pasteEntryRepresentationFromPalette('e', 'image/png'),
+      cmd: 'paste_entry_representation_from_palette',
+      args: { entryId: 'e', mime: 'image/png' },
+    },
+    {
+      name: 'listPasteOptions',
+      run: () => commands.listPasteOptions('e'),
+      cmd: 'list_paste_options',
+      args: { entryId: 'e' },
+    },
+    {
       name: 'copyEntryFromPalette',
       run: () => commands.copyEntryFromPalette('e'),
       cmd: 'copy_entry_from_palette',

@@ -192,6 +192,17 @@ export const ja: Messages = {
     saveResult: '新しいエントリとして保存',
     saved: '保存しました',
   },
+  pastePicker: {
+    title: 'ペースト形式',
+    keepOriginal: '元の形式のまま',
+    categories: {
+      files: 'ファイル',
+      image: '画像',
+      plainText: 'プレーンテキスト',
+      html: 'HTML',
+      richText: 'リッチテキスト',
+    },
+  },
   setup: {
     title: 'Nagori をセットアップ',
     intro:
@@ -438,7 +449,7 @@ export const ja: Messages = {
       paletteActions: {
         pin: 'ピン留めを切り替える',
         delete: '選択中の項目を削除',
-        'paste-as-plain': '書式なしでペースト',
+        'paste-as-plain': '形式を選んでペースト',
         'copy-without-paste': 'クリップボードにコピー',
         clear: '検索をクリア',
         'open-preview': 'プレビューを拡大表示',

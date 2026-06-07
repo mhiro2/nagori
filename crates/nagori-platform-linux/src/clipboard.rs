@@ -377,6 +377,33 @@ impl ClipboardWriter for LinuxClipboard {
             Err(unsupported_off_target())
         }
     }
+
+    async fn write_representation_exact(
+        &self,
+        representation: &StoredClipboardRepresentation,
+    ) -> Result<()> {
+        // Strict single-representation paste: refuse a MIME this adapter
+        // cannot publish rather than falling back to the primary the way
+        // `write_representations` does, so the user always gets the format
+        // they picked or a clear error. `publish_representations` maps the
+        // rep to a `MimeSource` before touching the selection, so an
+        // unrepresentable rep errors without clearing the clipboard.
+        if !has_publishable_representation(std::slice::from_ref(representation)) {
+            return Err(AppError::Unsupported(
+                "representation cannot be published to the Wayland clipboard".to_owned(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return self
+                .publish_representations(vec![representation.clone()])
+                .await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported_off_target())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

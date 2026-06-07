@@ -185,6 +185,17 @@ export const zhHans: Messages = {
     saveResult: '保存为新条目',
     saved: '已保存',
   },
+  pastePicker: {
+    title: '粘贴格式',
+    keepOriginal: '保持原始格式',
+    categories: {
+      files: '文件',
+      image: '图像',
+      plainText: '纯文本',
+      html: 'HTML',
+      richText: '富文本',
+    },
+  },
   setup: {
     title: '设置 Nagori',
     intro: '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。',
@@ -416,7 +427,7 @@ export const zhHans: Messages = {
       paletteActions: {
         pin: '切换固定',
         delete: '删除项目',
-        'paste-as-plain': '无格式粘贴',
+        'paste-as-plain': '选择格式粘贴',
         'copy-without-paste': '复制到剪贴板',
         clear: '清除搜索',
         'open-preview': '切换扩展预览',

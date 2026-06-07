@@ -202,6 +202,17 @@ export const es: Messages = {
     saveResult: 'Guardar como nueva entrada',
     saved: 'Guardado',
   },
+  pastePicker: {
+    title: 'Pegar como',
+    keepOriginal: 'Mantener formato original',
+    categories: {
+      files: 'Archivos',
+      image: 'Imagen',
+      plainText: 'Texto sin formato',
+      html: 'HTML',
+      richText: 'Texto enriquecido',
+    },
+  },
   setup: {
     title: 'Configurar Nagori',
     intro:
@@ -453,7 +464,7 @@ export const es: Messages = {
       paletteActions: {
         pin: 'Alternar fijado',
         delete: 'Eliminar elemento',
-        'paste-as-plain': 'Pegar sin formato',
+        'paste-as-plain': 'Pegar como…',
         'copy-without-paste': 'Copiar al portapapeles',
         clear: 'Borrar búsqueda',
         'open-preview': 'Alternar vista previa ampliada',

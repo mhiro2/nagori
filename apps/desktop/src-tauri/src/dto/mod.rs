@@ -1,8 +1,8 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiOverallStatus, ClipboardEntry, ContentKind,
-    EntryId, FileSummary, PerActionStatus, RankReason, RepresentationRole, RepresentationSummary,
-    SearchFilters, SearchMode, SearchResult, SemanticIndexState, SemanticIndexStatus, Sensitivity,
-    safe_preview_for_dto, safe_preview_str,
+    EntryId, FileSummary, PasteCategory, PasteOption, PerActionStatus, RankReason,
+    RepresentationRole, RepresentationSummary, SearchFilters, SearchMode, SearchResult,
+    SemanticIndexState, SemanticIndexStatus, Sensitivity, safe_preview_for_dto, safe_preview_str,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -98,6 +98,49 @@ impl RepresentationSummaryDto {
             mime_type: summary.mime_type.clone(),
             role: summary.role.into(),
             byte_count: summary.byte_count,
+        }
+    }
+}
+
+/// User-facing grouping for a pasteable representation, surfaced as a stable
+/// camelCase token the renderer maps to a localized "paste as <X>" label.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PasteCategoryDto {
+    Files,
+    Image,
+    PlainText,
+    Html,
+    RichText,
+}
+
+impl From<PasteCategory> for PasteCategoryDto {
+    fn from(category: PasteCategory) -> Self {
+        match category {
+            PasteCategory::Files => Self::Files,
+            PasteCategory::Image => Self::Image,
+            PasteCategory::PlainText => Self::PlainText,
+            PasteCategory::Html => Self::Html,
+            PasteCategory::RichText => Self::RichText,
+        }
+    }
+}
+
+/// One representation the user can re-paste on its own, for the desktop
+/// "paste as <format>" picker. Carries the canonical MIME (echoed back to the
+/// paste command) plus the category that drives the localized label.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteOptionDto {
+    pub mime: String,
+    pub category: PasteCategoryDto,
+}
+
+impl PasteOptionDto {
+    pub fn from_option(option: &PasteOption) -> Self {
+        Self {
+            mime: option.mime.clone(),
+            category: option.category.into(),
         }
     }
 }

@@ -19,6 +19,10 @@
   PEM blocks, credit-card numbers, and OTPs before they hit disk.
 - User regex denylist for project-specific patterns.
 - Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
+- Paste a copied item as a specific representation: for a file that also
+  carries a rendered image and a text label, **Cmd/Ctrl+Shift+Enter** offers a
+  picker to paste it as *Files*, *Image*, or *Plain text* instead of the
+  default re-offer-everything paste.
 - Quick actions on a selected entry: summarise, format JSON, extract tasks,
   redact secrets — all computed locally without any network calls.
 - macOS on-device AI actions (opt-in, off by default): summarise, rewrite,
@@ -109,7 +113,8 @@ compatibility matrix and troubleshooting.
    fails and you toggle the palette from the tray icon instead.
 2. Press the hotkey to open the palette, type to search, arrow keys to
    navigate, **Enter** to paste the highlighted entry back into the previous
-   window.
+   window. **Cmd/Ctrl+Shift+Enter** pastes in an alternate format — and opens a
+   picker when the entry can be pasted as more than one (files / image / text).
 3. Use **Settings** for privacy and hotkey configuration. Run
    `nagori doctor` if something feels off; the desktop app surfaces the
    same capability matrix under **Settings → Advanced → Capabilities**.

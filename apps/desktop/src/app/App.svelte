@@ -21,6 +21,7 @@
     normalizePasteReason,
     recordPasteFailure,
   } from './stores/pasteDiagnostics.svelte';
+  import { closePasteFormatPicker } from './stores/pasteFormatPicker.svelte';
   import { cancelPendingQuery, refreshCurrent } from './stores/searchQuery.svelte';
   import {
     accessibilityState,
@@ -56,6 +57,9 @@
     // otherwise fire ~80 ms later against a closed palette and clobber
     // `searchState.results` while the next invocation is being primed.
     cancelPendingQuery();
+    // A paste-format picker open at hide time must not survive into the next
+    // invocation — it would re-render against a stale, now-unselected entry.
+    closePasteFormatPicker();
     void hidePalette();
   };
 
@@ -65,6 +69,9 @@
     // visible because the user explicitly navigated there.
     if (viewState.current !== 'palette') return;
     cancelPendingQuery();
+    // Don't leave a paste-format picker open behind a hidden palette — it would
+    // reappear (against a stale target) on the next show.
+    closePasteFormatPicker();
     void hidePalette();
   };
 
