@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-
   import { messages } from '../lib/i18n/index.svelte';
   import type { PasteOption } from '../lib/types';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
@@ -44,10 +42,15 @@
     els[wrapped]?.focus();
   };
 
-  // Land focus on the first row when the picker opens so the keyboard owns it
-  // immediately (and Escape routes into `onKeydown`, not the palette below).
+  // Land focus on the first row the instant the picker mounts so the keyboard
+  // owns it immediately (arrows move the selection, Escape routes into
+  // `onKeydown` rather than the palette below). Focus synchronously in the
+  // mount effect — a deferred (microtask) focus loses the race to the search
+  // input's own focus in the webview, which would leave the picker click-only.
+  // The effect tracks `panelEl` (read via `rowButtons`), so it runs once the
+  // bound element and its rows are in the DOM.
   $effect(() => {
-    if (panelEl) void tick().then(() => focusRow(0));
+    focusRow(0);
   });
 
   // All navigation is handled and swallowed here: the palette routes

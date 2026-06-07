@@ -954,10 +954,15 @@ real choice (≥2 distinct formats), otherwise the chord keeps its plain
 alternate-format paste. Choosing one runs `copy_entry_representation`,
 which re-reads the representation set (so a concurrent eviction can't make
 the picker's snapshot stale), resolves the MIME to its single canonical row,
-and publishes it through `write_representation_exact`. Sensitivity is
-unchanged from Preserve — `Blocked` is refused and the chosen rep is a
-subset of what Preserve already offers — and the wire contract stays
-desktop-local (the IPC/CLI search result keeps its flat `preview`).
+and publishes it through `write_representation_exact`. The whole chord
+(picker rows and the direct fallback alike) is a deliberate paste, so it
+runs with `PasteSynthesis::Force`: the ⌘/Ctrl+V keystroke fires even when
+`auto_paste_enabled` is off (plain Enter still honours the setting), and a
+synthesis failure surfaces the usual "copy succeeded — paste manually"
+diagnostic rather than degrading silently to a copy. Sensitivity is unchanged
+from Preserve — `Blocked` is refused and the chosen rep is a subset of what
+Preserve already offers — and the wire contract stays desktop-local (the
+IPC/CLI search result keeps its flat `preview`).
 
 ---
 
@@ -1069,10 +1074,12 @@ focus, not domain logic:
   before the palette stole focus, so Cmd+V lands in the right window.
   The palette-confirm path runs this **regardless of the `auto_paste`
   setting**: with auto-paste on, focus must return before the synthesised
-  Cmd+V; with auto-paste off, the user pastes manually, and restoring
-  focus means their next Cmd+V hits the source window without first
-  clicking to re-activate it. (Linux Wayland captures no frontmost
-  handle, so this is a no-op there and the compositor's own post-hide
+  Cmd+V; with auto-paste off, plain Enter leaves the user to paste manually,
+  and restoring focus means their next Cmd+V hits the source window without
+  first clicking to re-activate it. (The explicit "paste as" chord forces the
+  synthesised Cmd+V even when auto-paste is off — see the paste-as section in
+  §10 — so focus restoration is required there too.) (Linux Wayland captures no
+  frontmost handle, so this is a no-op there and the compositor's own post-hide
   focus handoff returns focus to the source surface.)
 - `request_accessibility(prompt: bool) -> PermissionStatus` — on macOS
   calls `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt:

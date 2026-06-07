@@ -33,13 +33,15 @@ const oppositeFormat = (): PasteFormat | undefined => {
 // Paste a specific entry id, sharing the hide-on-return + diagnostics contract.
 // Callers capture the id up front so an async step (or the picker) can never let
 // the live selection drift onto a different entry before the paste lands.
-const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => {
+// `force` makes the backend synthesise the keystroke even with auto-paste off —
+// set by the deliberate alternate-format chord, cleared for plain Enter.
+const pasteEntryId = async (id: string, format?: PasteFormat, force = false): Promise<void> => {
   // The Tauri command hides the palette on its way out; drop any pending
   // debounced search so a keystroke typed within the 80 ms window before
   // the paste doesn't land a runQuery against the now-hidden webview.
   cancelPendingQuery();
   try {
-    await pasteEntryCmd(id, format);
+    await pasteEntryCmd(id, format, force);
     // A clean paste makes any prior failure diagnostic stale — drop the
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
@@ -51,6 +53,7 @@ const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => 
 export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   const target = currentSelection();
   if (!target || !isTauri()) return;
+  // Plain Enter honours the user's auto-paste setting (no forced synthesis).
   await pasteEntryId(target.id, format);
 };
 
@@ -79,8 +82,10 @@ export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
   } else {
     // No real choice — paste the *captured* entry in the alternate format.
     // Using `target.id` (not a fresh `currentSelection()`) keeps a selection
-    // change during the options query from redirecting the paste.
-    await pasteEntryId(target.id, oppositeFormat());
+    // change during the options query from redirecting the paste. This chord is
+    // a deliberate paste, so force synthesis regardless of the auto-paste
+    // setting (consistent with selecting a format in the picker).
+    await pasteEntryId(target.id, oppositeFormat(), true);
   }
 };
 
@@ -94,7 +99,8 @@ export const confirmPasteFormat = async (option: PasteOption | undefined): Promi
   closePasteFormatPicker();
   if (targetId === undefined || !isTauri()) return;
   if (option === undefined) {
-    await pasteEntryId(targetId, 'preserve');
+    // Picking from the picker is a deliberate paste, so force synthesis.
+    await pasteEntryId(targetId, 'preserve', true);
     return;
   }
   cancelPendingQuery();

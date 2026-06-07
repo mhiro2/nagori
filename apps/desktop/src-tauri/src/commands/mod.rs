@@ -368,19 +368,44 @@ enum PaletteCopyTarget {
     Representation(String),
 }
 
+/// Whether a palette paste synthesises the ⌘/Ctrl+V keystroke after copying.
+///
+/// Plain Enter uses [`PasteSynthesis::RespectSetting`]: browsing history into
+/// the clipboard shouldn't type into the focused app unless the user opted into
+/// `auto_paste_enabled`. The explicit "paste as <format>" chord
+/// (`Cmd/Ctrl+Shift+Enter`, whether it opens the picker or directly pastes the
+/// alternate format) is a deliberate paste, so it uses [`PasteSynthesis::Force`]
+/// — the keystroke fires regardless of the setting, and a synthesis failure is
+/// surfaced (clipboard + focus are still restored) rather than silently
+/// degrading to a copy.
+enum PasteSynthesis {
+    RespectSetting,
+    Force,
+}
+
 #[tauri::command]
 pub async fn paste_entry_from_palette(
     app: AppHandle,
     state: State<'_, AppState>,
     entry_id: String,
     format: Option<PasteFormatDto>,
+    // `true` for the alternate-format chord's direct-paste fallback, which is a
+    // deliberate paste and should fire ⌘V even when `auto_paste_enabled` is off;
+    // absent/`false` for plain Enter, which honours the setting.
+    force_paste: Option<bool>,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&entry_id)?;
+    let synthesis = if force_paste == Some(true) {
+        PasteSynthesis::Force
+    } else {
+        PasteSynthesis::RespectSetting
+    };
     run_palette_paste(
         &app,
         &state,
         entry_id,
         PaletteCopyTarget::Format(format.map(Into::into)),
+        synthesis,
     )
     .await
 }
@@ -397,11 +422,15 @@ pub async fn paste_entry_representation_from_palette(
     mime: String,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&entry_id)?;
+    // The picker is an explicit paste action, so it forces synthesis regardless
+    // of `auto_paste_enabled` — selecting "paste as PNG" and getting only a
+    // copy would contradict the action.
     run_palette_paste(
         &app,
         &state,
         entry_id,
         PaletteCopyTarget::Representation(mime),
+        PasteSynthesis::Force,
     )
     .await
 }
@@ -421,15 +450,17 @@ pub async fn list_paste_options(
 }
 
 /// The shared palette-paste flow: copy the chosen representation, hide the
-/// palette, restore the source app's focus, then (when auto-paste is on)
-/// synthesise the keystroke — emitting `nagori://paste_failed` for the
-/// failures that strand behind the now-hidden window. The copy runs *before*
-/// the palette hides so a copy error still surfaces in the visible palette.
+/// palette, restore the source app's focus, then — when auto-paste is on *or*
+/// `synthesis` is [`PasteSynthesis::Force`] (the explicit "paste as" chord) —
+/// synthesise the keystroke, emitting `nagori://paste_failed` for the failures
+/// that strand behind the now-hidden window. The copy runs *before* the palette
+/// hides so a copy error still surfaces in the visible palette.
 async fn run_palette_paste(
     app: &AppHandle,
     state: &AppState,
     entry_id: EntryId,
     copy: PaletteCopyTarget,
+    synthesis: PasteSynthesis,
 ) -> CommandResult<()> {
     let settings = match state.runtime.get_settings().await {
         Ok(s) => s,
@@ -474,9 +505,11 @@ async fn run_palette_paste(
         None => Ok(()),
     };
 
-    // Auto-paste is the user's switch for the synthesised keystroke only —
-    // focus is already handed back above, so a manual ⌘V works either way.
-    if !settings.auto_paste_enabled {
+    // Plain Enter honours `auto_paste_enabled` (the user's switch for the
+    // synthesised keystroke); the explicit "paste as" chord forces it. Focus is
+    // already handed back above, so a manual ⌘V works either way when we skip.
+    let synthesise = matches!(synthesis, PasteSynthesis::Force) || settings.auto_paste_enabled;
+    if !synthesise {
         // Copy succeeded and we tried to restore focus. A restore failure
         // here only costs the user one manual click, so log it but do not
         // raise a hard error — there is no auto-paste step to "skip".
@@ -486,7 +519,7 @@ async fn run_palette_paste(
         return Ok(());
     }
 
-    // auto-paste ON: a restore failure means the synthesised paste would
+    // Synthesising: a restore failure means the synthesised paste would
     // land in nagori itself, so surface it. The palette window is already
     // hidden above, so a returned `Err` only reaches the now-invisible
     // `searchState.errorMessage` — emit `nagori://paste_failed` so the

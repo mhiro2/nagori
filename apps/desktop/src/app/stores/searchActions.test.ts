@@ -86,10 +86,11 @@ beforeEach(() => {
 });
 
 describe('confirmSelection', () => {
-  it('pastes the current selection through the palette command', async () => {
+  it('pastes the current selection through the palette command (honouring auto-paste)', async () => {
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmSelection();
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined);
+    // Plain Enter does not force synthesis — `forcePaste` is false.
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, false);
   });
 
   it('records an errorMessage when the paste command rejects', async () => {
@@ -124,12 +125,13 @@ describe('confirmSelectionWithAlternateFormat', () => {
     expect(pasteEntryFromPalette).not.toHaveBeenCalled();
   });
 
-  it('falls back to the plain alternate paste when there is no real choice', async () => {
+  it('falls back to the plain alternate paste (forced) when there is no real choice', async () => {
     vi.mocked(listPasteOptions).mockResolvedValue([pasteOption('text/plain', 'plainText')]);
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmSelectionWithAlternateFormat();
     expect(pasteFormatPickerState.open).toBe(false);
-    expect(pasteEntryFromPalette).toHaveBeenCalledTimes(1);
+    // The chord is a deliberate paste, so the direct fallback forces synthesis.
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, true);
   });
 
   it('falls back to the plain alternate paste when listing options fails', async () => {
@@ -164,9 +166,9 @@ describe('confirmPasteFormat', () => {
   it('pastes the explicit Preserve format and closes the picker for "keep original"', async () => {
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmPasteFormat(undefined);
-    // "Keep original" must re-offer every representation regardless of the
-    // user's default paste format, so it forces 'preserve' rather than omitting.
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', 'preserve');
+    // "Keep original" re-offers every representation (explicit 'preserve') and,
+    // as a deliberate paste, forces synthesis even when auto-paste is off.
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', 'preserve', true);
     expect(pasteEntryRepresentationFromPalette).not.toHaveBeenCalled();
     expect(pasteFormatPickerState.open).toBe(false);
   });

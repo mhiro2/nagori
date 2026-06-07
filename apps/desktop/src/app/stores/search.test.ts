@@ -225,7 +225,8 @@ describe('action helpers', () => {
 
   it('confirmSelection forwards the selected id to pasteEntry', async () => {
     await confirmSelection();
-    expect(pasteEntryCmd).toHaveBeenCalledWith('a', undefined);
+    // Plain Enter: no explicit format, and does not force synthesis.
+    expect(pasteEntryCmd).toHaveBeenCalledWith('a', undefined, false);
   });
 
   it('copySelection forwards the selected id to copyEntry', async () => {

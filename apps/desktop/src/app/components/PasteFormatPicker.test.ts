@@ -35,6 +35,23 @@ describe('PasteFormatPicker', () => {
     expect(getByRole('menuitem', { name: 'Image (PNG)' })).toBeTruthy();
   });
 
+  it('focuses the first row on open so the keyboard owns the picker', () => {
+    const { getByRole } = render(PasteFormatPicker);
+    // Synchronous focus on mount — no await — so arrows work without a click.
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Keep original format' }));
+  });
+
+  it('moves focus between rows with the arrow keys', async () => {
+    const user = userEvent.setup();
+    const { getByRole } = render(PasteFormatPicker);
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Files' }));
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Image (PNG)' }));
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Files' }));
+  });
+
   it('keep-original applies the default paste (undefined option)', async () => {
     const user = userEvent.setup();
     const { getByRole } = render(PasteFormatPicker);

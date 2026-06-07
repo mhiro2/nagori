@@ -118,7 +118,13 @@ describe('command wrappers', () => {
       name: 'pasteEntryFromPalette',
       run: () => commands.pasteEntryFromPalette('e'),
       cmd: 'paste_entry_from_palette',
-      args: { entryId: 'e', format: undefined },
+      args: { entryId: 'e', format: undefined, forcePaste: undefined },
+    },
+    {
+      name: 'pasteEntryFromPalette (forced)',
+      run: () => commands.pasteEntryFromPalette('e', 'plain_text', true),
+      cmd: 'paste_entry_from_palette',
+      args: { entryId: 'e', format: 'plain_text', forcePaste: true },
     },
     {
       name: 'pasteEntryRepresentationFromPalette',

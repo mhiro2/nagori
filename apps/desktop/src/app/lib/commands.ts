@@ -43,8 +43,14 @@ export const openPalette = (): Promise<void> => invoke('open_palette');
 
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
-export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Promise<void> =>
-  invoke('paste_entry_from_palette', { entryId, format });
+// `forcePaste` makes the backend synthesise ⌘/Ctrl+V even when auto-paste is
+// off — used by the deliberate alternate-format chord; plain Enter omits it so
+// it keeps honouring the user's auto-paste setting.
+export const pasteEntryFromPalette = (
+  entryId: string,
+  format?: PasteFormat,
+  forcePaste?: boolean,
+): Promise<void> => invoke('paste_entry_from_palette', { entryId, format, forcePaste });
 
 // Paste exactly one chosen representation of an entry (the "paste as PNG /
 // plain text / files" picker). `mime` must be one returned by
