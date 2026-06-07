@@ -183,6 +183,47 @@ describe('ResultItem', () => {
     expect(getByText('Screenshot')).toBeTruthy();
   });
 
+  it('shows the representation badge for non-file rows that kept multiple formats', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'text',
+          representationSummary: [
+            { mimeType: 'text/html', role: 'primary', byteCount: 40 },
+            { mimeType: 'text/plain', role: 'plainFallback', byteCount: 20 },
+          ],
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(container.querySelector('.rep-badge')?.textContent).toBe('HTML + Plain');
+  });
+
+  it('suppresses the representation badge on file rows (FILES kind-badge already covers it)', () => {
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample({
+          kind: 'fileList',
+          preview: '/tmp/a.pptx',
+          representationSummary: [
+            { mimeType: 'text/uri-list', role: 'primary', byteCount: 40 },
+            { mimeType: 'image/png', role: 'alternative', byteCount: 2000 },
+          ],
+        }),
+        index: 0,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    // The same multi-rep summary would render "Files + PNG" on a non-file row,
+    // but file rows drop the chip so it doesn't double the FILES kind-badge.
+    expect(container.querySelector('.rep-badge')).toBeNull();
+  });
+
   it('degrades gracefully for image rows without dimensions', () => {
     const { container } = render(ResultItem, {
       props: {

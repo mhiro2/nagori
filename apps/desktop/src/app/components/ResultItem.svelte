@@ -110,7 +110,12 @@
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
-  const repBadge = $derived(formatRepresentationBadge(item.representationSummary));
+  // File rows drop the representation chip: the row already carries the FILES
+  // kind-badge, so a trailing "Files + PNG + Plain" rep-badge doubles "Files"
+  // and steals horizontal room from the path. Other kinds keep the chip.
+  const repBadge = $derived(
+    item.kind === 'fileList' ? undefined : formatRepresentationBadge(item.representationSummary),
+  );
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
   const rankReason = $derived(primaryRankReason(item.rankReasons));
