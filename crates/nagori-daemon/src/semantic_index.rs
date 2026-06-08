@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use nagori_ai::{Embedder, EmbeddingInput};
 use nagori_core::{
-    AppError, EntryId, Result, SearchQuery, SearchResult, SemanticIndexMeta, SemanticIndexState,
-    SemanticIndexStatus, SettingsRepository, normalize_text,
+    AppError, AppSettings, EntryId, Result, SearchQuery, SearchResult, SemanticIndexMeta,
+    SemanticIndexState, SemanticIndexStatus, Sensitivity, SensitivityClassifier,
+    SettingsRepository, normalize_text,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -30,7 +31,11 @@ pub type PowerProbe = std::sync::Arc<dyn Fn() -> Option<bool> + Send + Sync>;
 
 /// Bumped when the indexing pipeline's content shaping changes in a way that
 /// invalidates previously-stored vectors for the same model.
-const INDEX_VERSION: u32 = 1;
+///
+/// `2`: `Secret` entries are no longer embedded and `Private` bodies are
+/// redacted before embedding. Vectors produced under `1` may carry raw
+/// secret / private content, so the bump forces a clear + rebuild.
+const INDEX_VERSION: u32 = 2;
 
 /// Entries embedded per `embed_batch` call. Small so each batch stays
 /// cancellable and a settings/power change is observed promptly between batches.
@@ -206,8 +211,21 @@ impl NagoriRuntime {
     /// indexing pass (subject to the guards), then sleeps again.
     pub async fn run_semantic_indexer(self, mut shutdown: ShutdownHandle) {
         let Some(embedder) = self.embedder() else {
+            // No indexing on this host, but a macOS-origin DB opened on
+            // Windows/Linux may still carry v1 vectors that the privacy
+            // migration must erase. Retry until the index is clean (or
+            // shutdown) rather than giving up after one attempt — the purge is
+            // the only thing protecting that at-rest content here.
             self.semantic.set_state(SemanticIndexState::Unsupported);
-            return;
+            loop {
+                if self.purge_incompatible_index_version().await {
+                    return;
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(IDLE_TICK) => {}
+                }
+            }
         };
         // A token that mirrors `shutdown` so an in-flight pass — the embedding
         // batch, the semaphore wait, and the backoff sleep — is interrupted
@@ -223,9 +241,16 @@ impl NagoriRuntime {
         }
         let mut settings_rx = self.settings_subscribe();
         loop {
-            let ai = settings_rx.borrow().ai.clone();
-            if ai.semantic_index_enabled {
-                self.semantic_index_pass(embedder.as_ref(), &ai, &cancel)
+            // Privacy migration *before* the per-pass guards, retried on every
+            // wake until it succeeds — so a transient failure is not stranded
+            // until the next restart even while the index stays disabled or the
+            // model is unavailable. Idempotent and cheap: once the incompatible
+            // vectors are gone (or the stored version already matches) it is a
+            // single singleton-row read.
+            let _ = self.purge_incompatible_index_version().await;
+            let settings = settings_rx.borrow().clone();
+            if settings.ai.semantic_index_enabled {
+                self.semantic_index_pass(embedder.as_ref(), &settings, &cancel)
                     .await;
             } else {
                 self.semantic.set_state(SemanticIndexState::Disabled);
@@ -249,17 +274,31 @@ impl NagoriRuntime {
     async fn semantic_index_pass(
         &self,
         embedder: &dyn Embedder,
-        ai: &nagori_core::AiSettings,
+        settings: &AppSettings,
         cancel: &CancellationToken,
     ) {
+        let ac_power_only = settings.ai.semantic_index_ac_power_only;
         if let nagori_ai::BackendAvailability::Unavailable(_) = embedder.availability().await {
             self.semantic.set_state(SemanticIndexState::Unavailable);
             return;
         }
-        if !self.semantic.power_allows(ai.semantic_index_ac_power_only) {
+        if !self.semantic.power_allows(ac_power_only) {
             self.semantic.set_state(SemanticIndexState::Paused);
             return;
         }
+        // Built once per pass so every `Private` body is scrubbed through the
+        // settings-aware redactor (built-in detectors + the user's
+        // `regex_denylist`) before it reaches the embedding model. A broken
+        // `regex_denylist` fails closed — same as the capture loop — so a
+        // private body is never embedded verbatim because a rule won't compile.
+        let classifier = match SensitivityClassifier::try_new(settings.clone()) {
+            Ok(classifier) => classifier,
+            Err(err) => {
+                tracing::warn!(error = %err, "semantic_classifier_build_failed");
+                self.semantic.set_state(SemanticIndexState::Unavailable);
+                return;
+            }
+        };
         if let Err(err) = self.reconcile_semantic_metadata(embedder).await {
             tracing::warn!(error = %err, "semantic_metadata_reconcile_failed");
             self.semantic.set_state(SemanticIndexState::Unavailable);
@@ -269,8 +308,7 @@ impl NagoriRuntime {
         self.semantic.set_state(SemanticIndexState::Indexing);
         let mut backoff = 0_usize;
         loop {
-            if cancel.is_cancelled() || !self.semantic.power_allows(ai.semantic_index_ac_power_only)
-            {
+            if cancel.is_cancelled() || !self.semantic.power_allows(ac_power_only) {
                 self.semantic.set_state(SemanticIndexState::Paused);
                 return;
             }
@@ -285,7 +323,10 @@ impl NagoriRuntime {
             if pending.is_empty() {
                 break;
             }
-            match self.embed_and_store(embedder, &pending, cancel).await {
+            match self
+                .embed_and_store(embedder, &classifier, &pending, cancel)
+                .await
+            {
                 Ok(()) => backoff = 0,
                 Err(err) if err.is_transient => {
                     let wait = BACKOFF_STEPS_MS[backoff.min(BACKOFF_STEPS_MS.len() - 1)];
@@ -314,6 +355,47 @@ impl NagoriRuntime {
             }
         }
         self.semantic.set_state(SemanticIndexState::Ready);
+    }
+
+    /// Unconditionally drop stored vectors whose `index_version` no longer
+    /// matches [`INDEX_VERSION`]. Runs *before* the enabled / availability /
+    /// battery guards, because an `INDEX_VERSION` bump is a privacy migration
+    /// (e.g. the Secret/Private shaping change): vectors built under the old
+    /// shaping may carry content that the new policy forbids embedding, so they
+    /// must be erased even if the index is currently disabled or the model is
+    /// unreachable. A model-identity change is handled separately by
+    /// `reconcile_semantic_metadata`, which needs the live embedder metadata
+    /// this path deliberately avoids fetching.
+    ///
+    /// Returns whether the index is now free of incompatible-version vectors:
+    /// `true` when there was nothing to purge or the purge succeeded, `false`
+    /// when the probe or clear failed (so incompatible vectors may remain and
+    /// the caller should retry). Idempotent — once cleared, the stored meta is
+    /// gone and a later call is a single singleton-row read.
+    async fn purge_incompatible_index_version(&self) -> bool {
+        match self.store.semantic_meta().await {
+            Ok(Some(meta)) if meta.index_version != INDEX_VERSION => {
+                match self.store.semantic_clear().await {
+                    Ok(()) => {
+                        tracing::info!(
+                            stored = meta.index_version,
+                            current = INDEX_VERSION,
+                            "semantic_index_version_purged",
+                        );
+                        true
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "semantic_index_version_purge_failed");
+                        false
+                    }
+                }
+            }
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(error = %err, "semantic_index_version_probe_failed");
+                false
+            }
+        }
     }
 
     /// The current embedder's metadata as a [`SemanticIndexMeta`].
@@ -362,6 +444,7 @@ impl NagoriRuntime {
     async fn embed_and_store(
         &self,
         embedder: &dyn Embedder,
+        classifier: &SensitivityClassifier,
         pending: &[nagori_storage::PendingEmbedding],
         cancel: &CancellationToken,
     ) -> std::result::Result<(), EmbedBatchError> {
@@ -369,7 +452,15 @@ impl NagoriRuntime {
             .iter()
             .map(|entry| EmbeddingInput {
                 id: entry.entry_id.to_string(),
-                text: entry.text.clone(),
+                // `Private` bodies are scrubbed before they reach the model so
+                // private content is never embedded verbatim; `Public` /
+                // `Unknown` bodies embed as-is, and `Secret` never reaches here
+                // (excluded by `semantic_pending`).
+                text: if entry.sensitivity == Sensitivity::Private {
+                    classifier.redact(&entry.text)
+                } else {
+                    entry.text.clone()
+                },
             })
             .collect();
         // Race the permit wait against cancellation so shutdown is not blocked
@@ -561,5 +652,57 @@ mod tests {
         let results = runtime.semantic_search_results(query).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry_id, id);
+    }
+
+    /// Bumping `INDEX_VERSION` is a privacy migration (the Secret/Private
+    /// shaping change), so vectors built under an older version must be purged
+    /// from disk *unconditionally* — not gated behind the enabled / model /
+    /// battery guards that protect the per-pass rebuild. Otherwise disabling
+    /// the index (a privacy action) would strand vectors that may embed raw
+    /// secret / private content.
+    #[tokio::test]
+    async fn purge_clears_vectors_built_under_an_incompatible_index_version() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store
+            .insert(EntryFactory::from_text("indexed under the old shaping"))
+            .await
+            .unwrap();
+        // Stored under a previous INDEX_VERSION, otherwise model-compatible.
+        let mut stale = compatible_meta();
+        stale.index_version = INDEX_VERSION - 1;
+        store.semantic_set_meta(stale).await.unwrap();
+        store
+            .semantic_upsert(id, "h".to_owned(), vec![1.0; 8])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        assert!(
+            runtime.purge_incompatible_index_version().await,
+            "purge must report the index is now clean"
+        );
+
+        assert!(
+            store.semantic_meta().await.unwrap().is_none(),
+            "incompatible-version meta must be cleared"
+        );
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "incompatible-version vectors must be purged from disk"
+        );
     }
 }

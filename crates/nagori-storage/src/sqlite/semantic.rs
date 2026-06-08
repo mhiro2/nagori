@@ -16,13 +16,14 @@ use std::sync::Once;
 
 use nagori_core::{
     AppError, EntryId, RankReason, Result, SearchFilters, SearchResult, SemanticIndexMeta,
+    Sensitivity,
 };
 use rusqlite::{ToSql, params};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::SqliteStore;
-use super::convert::{row_to_entry, storage_err};
+use super::convert::{parse_sensitivity_strict, row_to_entry, storage_err};
 use super::search::build_filter_fragment;
 
 /// Live, embeddable-entry counts for the semantic index.
@@ -41,6 +42,11 @@ pub struct PendingEmbedding {
     pub entry_id: EntryId,
     pub text: String,
     pub content_hash: String,
+    /// Classification of the source entry. The indexer redacts `Private`
+    /// bodies before embedding so private content never reaches the model
+    /// verbatim; `Secret` rows are excluded from `semantic_pending` entirely,
+    /// so this never reports `Secret` / `Blocked`.
+    pub sensitivity: Sensitivity,
 }
 
 /// The entry-point signature `rusqlite`'s `sqlite3_auto_extension` expects.
@@ -239,11 +245,13 @@ impl SqliteStore {
             let conn = store.conn()?;
             let total: i64 = conn
                 .query_row(
+                    // Mirror `semantic_pending`'s embeddable predicate (Secret is
+                    // never indexed) so progress never shows perpetual pending.
                     "SELECT COUNT(*)
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      WHERE e.deleted_at IS NULL
-                       AND e.sensitivity != 'blocked'
+                       AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0",
                     [],
                     |row| row.get(0),
@@ -256,7 +264,7 @@ impl SqliteStore {
                      JOIN entries e ON e.id = em.entry_id
                      JOIN search_documents d ON d.entry_id = e.id
                      WHERE e.deleted_at IS NULL
-                       AND e.sensitivity != 'blocked'
+                       AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0",
                     [],
                     |row| row.get(0),
@@ -279,12 +287,17 @@ impl SqliteStore {
             let conn = store.conn()?;
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT e.id, e.content_hash, d.normalized_text
+                    // `Secret` is excluded outright: even a `StoreFull` secret's
+                    // raw body must never be handed to the embedding model, and a
+                    // `StoreRedacted` secret's body is already scrubbed on disk
+                    // but is cheaper and clearer to never index. `Private` rows
+                    // are returned and redacted in the indexer before embedding.
+                    "SELECT e.id, e.content_hash, d.normalized_text, e.sensitivity
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      LEFT JOIN entry_embeddings em ON em.entry_id = e.id
                      WHERE e.deleted_at IS NULL
-                       AND e.sensitivity != 'blocked'
+                       AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0
                        AND em.entry_id IS NULL
                      ORDER BY e.created_at DESC
@@ -293,16 +306,18 @@ impl SqliteStore {
                 .map_err(|err| storage_err(&err))?;
             let rows = stmt
                 .query_map(params![limit], |row| {
+                    let sensitivity = parse_sensitivity_strict(&row.get::<_, String>(3)?)?;
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        sensitivity,
                     ))
                 })
                 .map_err(|err| storage_err(&err))?;
             let mut pending = Vec::new();
             for row in rows {
-                let (id, content_hash, text) = row.map_err(|err| storage_err(&err))?;
+                let (id, content_hash, text, sensitivity) = row.map_err(|err| storage_err(&err))?;
                 let Ok(entry_id) = id.parse::<EntryId>() else {
                     continue;
                 };
@@ -310,6 +325,7 @@ impl SqliteStore {
                     entry_id,
                     text,
                     content_hash,
+                    sensitivity,
                 });
             }
             Ok(pending)
@@ -345,7 +361,7 @@ impl SqliteStore {
                  JOIN entries e ON e.id = em.entry_id
                  JOIN search_documents d ON d.entry_id = e.id
                  WHERE e.deleted_at IS NULL
-                   AND e.sensitivity != 'blocked'
+                   AND e.sensitivity NOT IN ('blocked', 'secret')
                    AND em.dimension = ?
                    {extra}
                  ORDER BY dist ASC
@@ -422,6 +438,16 @@ mod tests {
         store.insert(EntryFactory::from_text(text)).await.unwrap()
     }
 
+    async fn insert_with_sensitivity(
+        store: &SqliteStore,
+        text: &str,
+        sensitivity: Sensitivity,
+    ) -> EntryId {
+        let mut entry = EntryFactory::from_text(text);
+        entry.sensitivity = sensitivity;
+        store.insert(entry).await.unwrap()
+    }
+
     #[tokio::test]
     async fn meta_round_trips_and_clears() {
         let store = SqliteStore::open_memory().unwrap();
@@ -457,6 +483,29 @@ mod tests {
         let pending = store.semantic_pending(10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_ne!(pending[0].entry_id, a);
+    }
+
+    #[tokio::test]
+    async fn pending_excludes_secret_and_flags_private() {
+        let store = SqliteStore::open_memory().unwrap();
+        let public = insert_with_sensitivity(&store, "public doc", Sensitivity::Public).await;
+        let private = insert_with_sensitivity(&store, "private doc", Sensitivity::Private).await;
+        let _secret = insert_with_sensitivity(&store, "secret doc", Sensitivity::Secret).await;
+
+        // Secret is never embeddable, so neither the pending list nor the
+        // total count includes it.
+        let counts = store.semantic_counts().await.unwrap();
+        assert_eq!(counts.total, 2);
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        let ids: Vec<_> = pending.iter().map(|p| p.entry_id).collect();
+        assert!(ids.contains(&public));
+        assert!(ids.contains(&private));
+        assert_eq!(pending.len(), 2);
+
+        // The indexer needs the sensitivity to decide whether to redact.
+        let private_pending = pending.iter().find(|p| p.entry_id == private).unwrap();
+        assert_eq!(private_pending.sensitivity, Sensitivity::Private);
     }
 
     #[tokio::test]

@@ -103,7 +103,7 @@ pub(crate) const fn sensitivity_to_str(sensitivity: Sensitivity) -> &'static str
 /// to open instead of misclassifying secret rows as `Unknown`) or the column
 /// has been tampered with. Either way, returning an error surfaces the issue
 /// instead of silently downgrading the sensitivity guard.
-fn parse_sensitivity_strict(value: &str) -> rusqlite::Result<Sensitivity> {
+pub(crate) fn parse_sensitivity_strict(value: &str) -> rusqlite::Result<Sensitivity> {
     match value {
         "public" => Ok(Sensitivity::Public),
         "private" => Ok(Sensitivity::Private),
