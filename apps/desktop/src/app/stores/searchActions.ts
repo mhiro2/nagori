@@ -20,7 +20,7 @@ import {
   pasteFormatPickerState,
 } from './pasteFormatPicker.svelte';
 import { clearMultiSelect, multiSelectState } from './searchMultiSelect.svelte';
-import { cancelPendingQuery, runQuery, searchState } from './searchQuery.svelte';
+import { cancelPendingQuery, flushPendingQuery, runQuery, searchState } from './searchQuery.svelte';
 import { currentSelection } from './searchSelection';
 import { settingsState } from './settings.svelte';
 
@@ -51,15 +51,26 @@ const pasteEntryId = async (id: string, format?: PasteFormat, force = false): Pr
 };
 
 export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
+  if (!isTauri()) return;
+  // Settle any pending/in-flight debounced search first so we paste the entry
+  // for the query the user actually typed, not a stale row from the previous
+  // query that the 80 ms debounce hasn't replaced yet. Bail if the results
+  // could not be settled (search errored / superseded) so we never paste a
+  // stale row.
+  if (!(await flushPendingQuery())) return;
   const target = currentSelection();
-  if (!target || !isTauri()) return;
+  if (!target) return;
   // Plain Enter honours the user's auto-paste setting (no forced synthesis).
   await pasteEntryId(target.id, format);
 };
 
 export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
+  if (!isTauri()) return;
+  // As in `confirmSelection`: act on the freshest query results, not a row the
+  // debounce is about to replace; bail if they could not be settled.
+  if (!(await flushPendingQuery())) return;
   const target = currentSelection();
-  if (!target || !isTauri()) return;
+  if (!target) return;
   // Open a representation picker only when the entry genuinely offers a choice
   // (≥2 distinct pasteable formats, e.g. a copied file that also carries an
   // image and a text label). Otherwise keep the lightweight alternate-format
@@ -118,8 +129,12 @@ export const cancelPasteFormat = (): void => {
 };
 
 export const copySelection = async (): Promise<void> => {
+  if (!isTauri()) return;
+  // Settle the pending/in-flight search so we copy the typed query's entry,
+  // not a row the debounce is about to replace; bail if it could not settle.
+  if (!(await flushPendingQuery())) return;
   const target = currentSelection();
-  if (!target || !isTauri()) return;
+  if (!target) return;
   // Same hide-on-return contract as `confirmSelection` — cancel before
   // the IPC so the debounce can't fire post-hide.
   cancelPendingQuery();
@@ -157,8 +172,14 @@ const applyPinToggle = async (target: { id: string; pinned: boolean }): Promise<
 };
 
 export const togglePinSelection = async (): Promise<void> => {
+  if (!isTauri()) return;
+  // Pinning is selection-based and exempts the row from clear-on-quit, so it
+  // needs the same freshness gate as paste/copy/delete: a ⌘P fired during the
+  // debounce window must not pin a stale row the user can no longer see. Bail
+  // if the typed query's results could not be settled.
+  if (!(await flushPendingQuery())) return;
   const target = currentSelection();
-  if (!target || !isTauri()) return;
+  if (!target) return;
   await applyPinToggle(target);
 };
 
@@ -169,8 +190,13 @@ export const togglePinAt = async (index: number): Promise<void> => {
 };
 
 export const deleteSelection = async (): Promise<void> => {
+  if (!isTauri()) return;
+  // Delete is destructive, so it especially must target the typed query's
+  // entry — settle the pending/in-flight search before reading the selection,
+  // and bail entirely if the results could not be settled.
+  if (!(await flushPendingQuery())) return;
   const target = currentSelection();
-  if (!target || !isTauri()) return;
+  if (!target) return;
   try {
     await deleteEntryCmd(target.id);
   } catch (err) {
@@ -226,8 +252,14 @@ const refreshPreservingError = async (
 };
 
 const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Promise<void> => {
+  if (!isTauri()) return;
+  // Settle any pending/in-flight search first: the multi-selection is
+  // reconciled against the result list, so flushing keeps the bulk copy/delete
+  // scoped to the entries visible for the query the user actually typed. Bail
+  // if the results could not be settled rather than acting on a stale set.
+  if (!(await flushPendingQuery())) return;
   const ids = orderedMultiSelection();
-  if (ids.length === 0 || !isTauri()) return;
+  if (ids.length === 0) return;
   const queryBeforeAction = searchState.query;
   let actionError: string | undefined;
   try {

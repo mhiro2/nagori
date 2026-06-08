@@ -63,6 +63,15 @@ export const searchState = $state<SearchState>({
 let inflight = 0;
 let searchRunning = false;
 let queuedSearch: { request: SearchRequest; resolve: () => void } | undefined;
+// Ticket of the most recently *applied* result set. Advanced only when a
+// search actually publishes its results (the freshest branch below), never on
+// failure or supersede. `appliedTicket === inflight` therefore means "the
+// latest search initiated — for whatever query *and* filters — succeeded and is
+// what's on screen", which is the precise gate `flushPendingQuery` needs: a
+// failed re-search (even one that keeps the same query string after a filter
+// change) leaves `appliedTicket` behind `inflight`, so an action can tell the
+// displayed list is stale rather than trusting a query-string match.
+let appliedTicket = 0;
 
 // Debounce keystrokes before hitting `searchClipboard`. The backend
 // serializes SQLite work behind a single `Mutex<Connection>`, so a burst of
@@ -121,6 +130,7 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     if (isFreshest(ticket)) {
       searchState.results = response.results;
       searchState.appliedQuery = request.query;
+      appliedTicket = ticket;
       searchState.selectedIndex = 0;
       searchState.lastElapsedMs = response.totalElapsedMs;
       reconcileMultiSelect(response.results.map((r) => r.id));
@@ -179,6 +189,47 @@ export const scheduleQuery = (raw: string): void => {
   }, SEARCH_DEBOUNCE_MS);
 };
 
+/// Force the displayed results to reflect the *typed* query before an action
+/// reads the selection. For the ~80 ms debounce window — and while the search
+/// for the latest keystroke is still in flight — `searchState.results` (and the
+/// selection) still belong to the previous query, so a paste/copy/delete fired
+/// in that window would act on a stale entry the user can no longer see in the
+/// box. Flushing runs the pending query immediately and awaits the freshest
+/// results so the action targets the list the user actually typed.
+///
+/// Returns whether it is now safe to act: `true` only when the latest search —
+/// for the current query *and* filters — has actually applied its results. It
+/// returns `false` when the flush could not settle: the search errored and left
+/// the previous results in place, or it was superseded mid-flight (a newer
+/// keystroke / filter change arrived, e.g. a fast double Enter or a concurrent
+/// clipboard refresh), so its promise resolved before fresh results landed.
+/// Callers must abort in that case rather than act on a stale row. A no-op
+/// (`true`) when results are already settled, so the common "type, wait, act"
+/// path adds no latency.
+export const flushPendingQuery = async (): Promise<boolean> => {
+  // Re-run the current query when the displayed list does not already reflect
+  // it: a debounce is armed (`pendingQueryTimer`), a search is mid-flight
+  // (`searchRunning`), or the most recent search never applied
+  // (`appliedTicket !== inflight` — it failed or was superseded). The last case
+  // is what stops a one-off search failure from permanently wedging actions:
+  // each attempt re-issues the search rather than giving up forever.
+  if (pendingQueryTimer !== undefined || searchRunning || appliedTicket !== inflight) {
+    await runQuery(searchState.query);
+  }
+  // Ready iff nothing is still pending/queued *and* the most recent search
+  // actually published its results (`appliedTicket === inflight`). A plain
+  // `appliedQuery === query` would wrongly pass when a filter-change re-search
+  // (same query string) failed and left the old-filter list in place; gating on
+  // the applied ticket catches every "results don't reflect current intent"
+  // case — failure, supersede, and filter change alike.
+  return (
+    pendingQueryTimer === undefined &&
+    !searchRunning &&
+    queuedSearch === undefined &&
+    appliedTicket === inflight
+  );
+};
+
 /// Cancel any debounced query without running it. Use when the palette
 /// closes so a stale keystroke doesn't fire after the user moves on.
 export const cancelPendingQuery = (): void => {
@@ -214,4 +265,19 @@ export const runQuery = async (raw: string): Promise<void> => {
 
 export const refreshCurrent = async (): Promise<void> => {
   await runQuery(searchState.query);
+};
+
+/// Test-only reset of the module-private search runtime (the latest-only queue
+/// tickets and debounce timer) so each test starts from a clean slate. Without
+/// it the `appliedTicket`/`inflight` generation counters leak across tests and
+/// make `flushPendingQuery`'s readiness gate depend on prior tests' searches.
+/// Not for production use — `searchState` itself is reset separately.
+export const resetSearchRuntimeForTest = (): void => {
+  if (pendingQueryTimer !== undefined) clearTimeout(pendingQueryTimer);
+  pendingQueryTimer = undefined;
+  pendingQueryRaw = undefined;
+  inflight = 0;
+  appliedTicket = 0;
+  searchRunning = false;
+  queuedSearch = undefined;
 };

@@ -30,7 +30,14 @@ import {
   togglePinSelection,
 } from './searchActions';
 import { hydratePreview, previewState } from './searchPreview.svelte';
-import { refreshRecent, runQuery, searchState } from './searchQuery.svelte';
+import {
+  resetSearchRuntimeForTest,
+  flushPendingQuery,
+  refreshRecent,
+  runQuery,
+  scheduleQuery,
+  searchState,
+} from './searchQuery.svelte';
 import {
   currentSelection,
   selectByIndex,
@@ -55,6 +62,7 @@ const sampleEntry = (id: string, preview = `value-${id}`) => ({
 
 const resetState = () => {
   searchState.query = '';
+  searchState.appliedQuery = '';
   searchState.results = [];
   searchState.selectedIndex = 0;
   searchState.loading = false;
@@ -64,6 +72,9 @@ const resetState = () => {
   previewState.preview = undefined;
   previewState.loading = false;
   previewState.errorMessage = undefined;
+  // Reset the latest-only queue tickets so `flushPendingQuery`'s generation
+  // gate doesn't inherit a prior test's failed/superseded search.
+  resetSearchRuntimeForTest();
 };
 
 beforeEach(() => {
@@ -164,6 +175,113 @@ describe('runQuery', () => {
     });
     expect(searchState.results).toHaveLength(1);
     expect(searchState.lastElapsedMs).toBe(12);
+  });
+});
+
+describe('flushPendingQuery', () => {
+  it('runs a pending debounced query, applies results, and reports ready', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue({
+      results: [sampleEntry('fresh')].map(toResult),
+      totalCandidates: 1,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    // The list still belongs to the previous query while the debounce is armed.
+    searchState.results = [sampleEntry('stale')].map(toResult);
+    searchState.appliedQuery = 'old';
+    scheduleQuery('needle');
+    expect(searchState.query).toBe('needle');
+    expect(searchState.appliedQuery).toBe('old');
+
+    const ready = await flushPendingQuery();
+
+    // The pending query ran immediately and its results are now applied, so an
+    // action reading the selection after the flush sees the typed query's list.
+    expect(ready).toBe(true);
+    expect(searchClipboard).toHaveBeenCalledWith({ query: 'needle', mode: 'Auto', limit: 50 });
+    expect(searchState.appliedQuery).toBe('needle');
+    expect(searchState.results.at(0)?.id).toBe('fresh');
+  });
+
+  it('reports not-ready when the pending search fails and leaves stale results', async () => {
+    vi.mocked(searchClipboard).mockRejectedValue({
+      code: 'storage_error',
+      message: 'boom',
+      recoverable: true,
+    });
+    searchState.results = [sampleEntry('stale')].map(toResult);
+    searchState.appliedQuery = 'old';
+    scheduleQuery('needle');
+
+    const ready = await flushPendingQuery();
+
+    // A failed search never advances `appliedQuery`, so the flush must report
+    // not-ready and the caller must abort rather than act on the stale row.
+    expect(ready).toBe(false);
+    expect(searchState.appliedQuery).toBe('old');
+  });
+
+  it('is a noop and reports ready once a search has settled', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue({
+      results: [sampleEntry('settled')].map(toResult),
+      totalCandidates: 1,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    // A successful search advances the applied ticket to the latest request.
+    await runQuery('needle');
+    vi.mocked(searchClipboard).mockClear();
+
+    const ready = await flushPendingQuery();
+
+    expect(ready).toBe(true);
+    // Nothing pending or stale, so the flush does not re-issue the search.
+    expect(searchClipboard).not.toHaveBeenCalled();
+  });
+
+  it('retries the search on a later flush after an earlier failure', async () => {
+    // First flush: the search fails, leaving the displayed list stale.
+    vi.mocked(searchClipboard).mockRejectedValueOnce({
+      code: 'storage_error',
+      message: 'boom',
+      recoverable: true,
+    });
+    scheduleQuery('needle');
+    expect(await flushPendingQuery()).toBe(false);
+
+    // A failure must not permanently wedge actions: the next flush re-issues
+    // the query (now nothing pending/running), and a success makes it ready.
+    vi.mocked(searchClipboard).mockResolvedValue({
+      results: [sampleEntry('recovered')].map(toResult),
+      totalCandidates: 1,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+
+    expect(await flushPendingQuery()).toBe(true);
+    expect(searchState.appliedQuery).toBe('needle');
+    expect(searchState.results.at(0)?.id).toBe('recovered');
+  });
+
+  it('makes confirmSelection abort when the pending search cannot settle', async () => {
+    vi.mocked(searchClipboard).mockRejectedValue({
+      code: 'storage_error',
+      message: 'boom',
+      recoverable: true,
+    });
+    searchState.results = [sampleEntry('stale')].map(toResult);
+    searchState.selectedIndex = 0;
+    searchState.appliedQuery = 'old';
+    scheduleQuery('needle');
+
+    await confirmSelection();
+
+    // The stale row must never be pasted when the typed query's results are
+    // unavailable.
+    expect(pasteEntryCmd).not.toHaveBeenCalled();
   });
 });
 
