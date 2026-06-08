@@ -20,4 +20,4 @@ pub use search_cache::{
     CACHEABLE_QUERY_LEN, CacheKey, CacheLookup, DEFAULT_CACHE_CAPACITY, RecentSearchCache,
     SharedSearchCache, new_shared_cache,
 };
-pub use serve::{DaemonConfig, default_socket_path, run_daemon};
+pub use serve::{DaemonConfig, acquire_data_dir_lock, default_socket_path, run_daemon};

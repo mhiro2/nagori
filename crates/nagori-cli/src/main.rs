@@ -527,10 +527,21 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         unreachable!()
     };
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
-    if let Some(parent) = db_path.parent() {
-        nagori_storage::ensure_private_directory(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
+    let data_dir = db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+    nagori_storage::ensure_private_directory(&data_dir)
+        .with_context(|| format!("failed to create {}", data_dir.display()))?;
+    // Single-instance gate: take the data-directory lock before opening the
+    // store, so a second daemon (or the desktop app, which locks the same
+    // directory) never runs migrations or a capture loop against a DB this
+    // process is about to own. Held until `run_daemon` returns.
+    let instance_lock = nagori_daemon::acquire_data_dir_lock(&data_dir)
+        .context("refusing to start a second daemon")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
 
@@ -584,13 +595,14 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             parts.clipboard_reader,
             config,
             Some(parts.window),
+            instance_lock,
         )
         .await?;
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        let _ = (store, config);
+        let _ = (store, config, instance_lock);
         anyhow::bail!("daemon run is only available on macOS, Windows, and Linux in this build")
     }
 }

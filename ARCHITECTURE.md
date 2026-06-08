@@ -153,7 +153,14 @@ Two execution modes:
   via `NagoriRuntimeBuilder` and Tauri commands call its methods
   directly. `AppState::spawn_background_tasks` and
   `spawn_settings_subscribers` (`apps/desktop/src-tauri/src/lib.rs`)
-  start the capture loop and settings fan-out.
+  start the capture loop and settings fan-out. `AppState::try_new_at`
+  first takes the single-instance lock (`nagori_storage::ProcessLock`
+  over the DB directory) before opening the store, so a second launch —
+  or a standalone daemon sharing the same data directory — is refused
+  rather than running migrations and a second capture loop against the
+  same store. A duplicate launch surfaces the refusal in the startup
+  fallback window; see [§11](#11-ipc-boundary) for the lock semantics
+  shared with the daemon.
 - **Out-of-process (daemon + CLI)** — `nagori daemon run` calls
   `nagori-daemon::serve::run_daemon`, which spawns the same kind of
   background tasks plus an IPC accept loop (Unix-domain socket on
@@ -1001,6 +1008,32 @@ IpcRequest }` line and reads one `IpcResponse` line. Defaults:
   security descriptor inherited from the daemon process — there is no
   custom DACL yet, so authentication relies on the sibling token file
   rather than on ACL filtering at the pipe level.
+
+**Single-instance & stale-socket handling.** A daemon takes a
+process-lifetime advisory lock (`nagori_storage::ProcessLock`, an
+`flock(LOCK_EX)` / `LockFileEx` over a `nagori.lock` file) on the
+**directory that holds its SQLite store**, acquired *before* it opens
+the store (`acquire_data_dir_lock`, called from the CLI's `daemon run`)
+and held for its whole run. The desktop shell locks the same directory
+in `AppState::try_new_at`, so on **every** platform a second daemon — or
+a daemon vs. the desktop app — against the same store refuses to start
+rather than co-owning it and double-capturing. (Windows additionally
+gets daemon-vs-daemon exclusion from the named pipe's
+`first_pipe_instance(true)`, but the store-directory lock is the gate
+that also covers the app.) The store lock is the authoritative
+single-instance gate. `bind_unix` (the conservative primitive used by
+`serve_unix` and tests) refuses any pre-existing socket; only a
+lock-holding daemon's `bind_unix_replacing_stale` reclaims one, and it
+does so only when the socket is **dead** (a `connect()` is refused) — a
+crashed predecessor's, or its own after a supervisor restart. A socket
+with a *live* listener (e.g. a daemon sharing this `--ipc` endpoint under
+a *different* `--db`, whose distinct store lock did not exclude it, or a
+non-nagori squatter) is refused rather than unlinked, so a live peer is
+never left unreachable. Removal never hinges on a connect failure
+*alone* — that failure mode is exactly what the lifetime lock was added
+to close — it requires both the held store lock and a dead socket. The
+kernel drops the lock on process exit — including a crash — so there is
+no stale-lock file to clean up.
 
 An auth-token file sits in the same directory as the IPC endpoint:
 `nagori.token` next to the socket on Unix (`0600` mode set explicitly

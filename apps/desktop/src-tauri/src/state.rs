@@ -76,6 +76,17 @@ pub struct AppState {
     /// `nagori://hotkey_register_failed` / `_resolved` events for
     /// updates.
     pub last_hotkey_failure: Mutex<HotkeyFailureCache>,
+    /// Single-instance lock over the data directory, held for the whole
+    /// process lifetime. Two desktop instances (or a desktop instance plus a
+    /// standalone daemon) owning the same store would double-capture the
+    /// clipboard, race schema migrations, and let one process' clear-on-quit
+    /// purge data the other still considers live. `try_new_at` acquires this
+    /// before opening the store and refuses to start a second owner; `build`
+    /// (used by tests with in-memory stores) leaves it `None`. The field is
+    /// never read — its only job is to keep the OS lock alive until the
+    /// process exits, at which point the kernel releases it.
+    #[allow(dead_code)]
+    instance_lock: Option<nagori_storage::ProcessLock>,
 }
 
 /// Snapshot of a global-hotkey registration failure shared across the
@@ -302,9 +313,18 @@ impl AppState {
             nagori_storage::ensure_private_directory(parent)
                 .map_err(|err| annotate_startup_error(&err, db_path, StartupStage::Directory))?;
         }
+        // Take the single-instance lock *before* opening the store, so a
+        // second launch never runs migrations or starts a capture loop
+        // against a DB the first instance already owns. The lock lives in the
+        // DB's parent directory, which the daemon also locks on the default
+        // layout, so launching the app while a standalone daemon owns the same
+        // store is refused too.
+        let instance_lock = acquire_instance_lock(lock_dir_for(db_path))?;
         let store = SqliteStore::open(db_path)
             .map_err(|err| annotate_startup_error(&err, db_path, StartupStage::OpenDb))?;
-        Self::build(store)
+        let mut state = Self::build(store)?;
+        state.instance_lock = Some(instance_lock);
+        Ok(state)
     }
 
     /// Spawns the in-process capture loop and a low-frequency maintenance
@@ -443,6 +463,9 @@ impl AppState {
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
             last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
+            // Set by `try_new_at` for real launches; `build`-only callers
+            // (tests, in-memory stores) own no on-disk directory to lock.
+            instance_lock: None,
         })
     }
 
@@ -1006,6 +1029,36 @@ fn resolve_default_db_path(
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nagori")
         .join("nagori.sqlite")
+}
+
+/// Directory whose `nagori.lock` the single-instance lock lives in: the DB's
+/// parent, falling back to the current directory for a bare relative DB
+/// filename. Kept in lockstep with the daemon's choice
+/// (`nagori_daemon::serve::acquire_daemon_lock`, keyed on the socket parent)
+/// so that on the default layout — DB and socket share one directory — the
+/// app and a standalone daemon contend for the same lock file.
+fn lock_dir_for(db_path: &Path) -> &Path {
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Acquire the single-instance lock over `lock_dir`, mapping contention to a
+/// self-explanatory startup error. The `setup` closure surfaces this message
+/// in the fallback window (the only UI a duplicate launch reaches), so it must
+/// tell the user where the running instance is rather than failing silently.
+fn acquire_instance_lock(lock_dir: &Path) -> Result<nagori_storage::ProcessLock> {
+    match nagori_storage::ProcessLock::try_acquire(lock_dir)? {
+        Some(lock) => Ok(lock),
+        None => Err(AppError::Platform(format!(
+            "another nagori process is already using the clipboard history in {}. \
+             Only one instance can own it at a time — look for the running nagori in \
+             your menu bar / system tray, or use the global shortcut to open the \
+             palette.",
+            lock_dir.display()
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

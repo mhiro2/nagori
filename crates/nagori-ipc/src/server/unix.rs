@@ -46,13 +46,47 @@ impl Drop for UmaskGuard {
     }
 }
 
-/// Bind a `UnixListener` at `path` with `0o600` perms.
+/// Bind a `UnixListener` at `path` with `0o600` perms, refusing to touch an
+/// entry that already exists.
 ///
-/// Synchronous-friendly callers (daemon startup) can `await` this and
-/// propagate the failure before signalling that they are ready, which is what
-/// the daemon needs to fail fast on bind errors instead of staying
-/// half-alive.
-pub async fn bind_unix(path: impl AsRef<Path>) -> Result<UnixListener> {
+/// This never removes a pre-existing socket. Deciding that a leftover socket
+/// is *stale* (its owner is dead) and safe to replace is the caller's job, and
+/// is only sound once the caller holds the daemon lifetime lock
+/// (`nagori_storage::ProcessLock`) — see [`bind_unix_replacing_stale`]. A
+/// single failed `connect()` is deliberately NOT treated as proof of
+/// staleness: a transient refusal (listener backlog saturated, peer
+/// mid-restart) would otherwise unlink a socket a live daemon still owns and
+/// let a second daemon bind the same path, producing two daemons.
+pub fn bind_unix(path: impl AsRef<Path>) -> Result<UnixListener> {
+    let path = path.as_ref();
+    if path.exists() {
+        return Err(AppError::Platform(format!(
+            "IPC socket is already in use: {}",
+            path.display()
+        )));
+    }
+    bind_unix_fresh(path)
+}
+
+/// Like [`bind_unix`], but reclaims a *stale* socket inode at `path`.
+///
+/// **The caller MUST already hold the daemon's data-directory lifetime lock**
+/// (`nagori_storage::ProcessLock`) before calling this. That lock proves no
+/// other daemon owns the *same store*, so it is the authoritative
+/// single-instance gate. Removal is gated on the lock **and** the socket being
+/// dead — never on a connect failure *alone* (the failure mode the lifetime
+/// lock was introduced to fix): an existing socket is unlinked only when a
+/// `connect()` fails with `ECONNREFUSED` (nothing is listening). If a
+/// `connect()` *succeeds*, something is actively serving the endpoint — a
+/// daemon launched with the same `--ipc` but a *different* `--db` (whose
+/// distinct data-dir lock did not exclude it), or a non-nagori squatter — so
+/// we refuse rather than unlink a live peer's socket and leave it unreachable.
+/// Any *other* connect error leaves liveness undetermined, so we fail closed
+/// and refuse to remove. A dead socket inode (a crashed predecessor's, or this
+/// daemon's own after a supervisor restart) refuses `connect()` and is
+/// reclaimed. The probe is a blocking `std` connect to a local socket, run
+/// once on the daemon-startup path.
+pub fn bind_unix_replacing_stale(path: impl AsRef<Path>) -> Result<UnixListener> {
     let path = path.as_ref();
     if path.exists() {
         let metadata =
@@ -63,14 +97,38 @@ pub async fn bind_unix(path: impl AsRef<Path>) -> Result<UnixListener> {
                 path.display()
             )));
         }
-        if tokio::net::UnixStream::connect(path).await.is_ok() {
-            return Err(AppError::Platform(format!(
-                "IPC socket is already in use: {}",
-                path.display()
-            )));
+        // Only `ECONNREFUSED` reliably means "nobody is listening" (the
+        // socket is dead). A *successful* connect means a live peer owns the
+        // endpoint — refuse. Any *other* error (`EACCES`, `EMFILE`, `EINTR`,
+        // …) leaves liveness undetermined, so we fail closed and refuse to
+        // remove rather than risk unlinking a live socket on an inconclusive
+        // probe.
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(AppError::Platform(format!(
+                    "IPC socket is already in use: {}",
+                    path.display()
+                )));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                // Dead socket — fall through to reclaim it.
+            }
+            Err(err) => {
+                return Err(AppError::Platform(format!(
+                    "refusing to replace IPC socket {}: liveness probe was inconclusive ({err})",
+                    path.display()
+                )));
+            }
         }
         std::fs::remove_file(path).map_err(|err| AppError::Platform(err.to_string()))?;
     }
+    bind_unix_fresh(path)
+}
+
+/// Bind a fresh listener at `path` (which must not already exist) with a
+/// `0o600` socket inode. Shared by [`bind_unix`] and
+/// [`bind_unix_replacing_stale`].
+fn bind_unix_fresh(path: &Path) -> Result<UnixListener> {
     // `bind` creates the socket inode using the process umask. Tighten the
     // mask to 0o077 around the call so the file is born `0o600` and there
     // is no window where a co-tenant on the same machine could `connect()`
@@ -244,7 +302,7 @@ where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
-    let listener = bind_unix(path).await?;
+    let listener = bind_unix(path)?;
     accept_loop(listener, token, handler).await
 }
 
@@ -262,7 +320,7 @@ where
     F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
-    let listener = bind_unix(path).await?;
+    let listener = bind_unix(path)?;
     accept_loop_with_shutdown(
         listener,
         token,
@@ -304,6 +362,79 @@ mod tests {
             .expect_err("active socket should be refused");
 
         assert!(matches!(err, AppError::Platform(message) if message.contains("already in use")));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn bind_unix_refuses_a_pre_existing_socket_even_when_dead() {
+        // `bind_unix` is the conservative primitive: it must never unlink an
+        // entry it finds, not even a *dead* socket (no listener). Removing a
+        // stale socket is the lifetime-lock holder's job via
+        // `bind_unix_replacing_stale`; inferring staleness here from the
+        // absence of a peer is exactly the fragile heuristic we removed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nagori.sock");
+        // Bind then drop to leave a socket inode with nobody listening.
+        drop(std::os::unix::net::UnixListener::bind(&path).expect("seed dead socket"));
+        assert!(path.exists());
+
+        let err = bind_unix(&path).expect_err("a pre-existing socket must be refused");
+        assert!(matches!(err, AppError::Platform(message) if message.contains("already in use")));
+        // The inode is left untouched — we did not unlink it.
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn bind_unix_replacing_stale_reclaims_a_dead_socket() {
+        // The lock-gated path: a socket inode left by a crashed predecessor is
+        // known-stale (the caller holds the lifetime lock), so it is removed
+        // and rebinding succeeds. This backs both the daemon's first bind and
+        // its supervisor restart over its own dead listener. Runs under a
+        // Tokio runtime because `UnixListener::bind` registers with the
+        // reactor.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nagori.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).expect("seed dead socket"));
+        assert!(path.exists());
+
+        let listener =
+            bind_unix_replacing_stale(&path).expect("a dead socket should be reclaimable");
+        // The fresh listener owns a new socket inode at the same path.
+        assert!(path.exists());
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_unix_replacing_stale_refuses_a_live_socket() {
+        // Guards the cross-config case the data-dir lock cannot: a daemon
+        // launched with the same `--ipc` but a *different* `--db` holds a
+        // distinct data-dir lock, so it is not excluded — but it IS actively
+        // listening. We must refuse to unlink a socket someone is serving
+        // (which would leave them unreachable), not reclaim it. A bound
+        // listener answers `connect()` from its backlog even without an
+        // explicit `accept()`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nagori.sock");
+        let _live =
+            tokio::net::UnixListener::bind(&path).expect("seed a live listener on the path");
+
+        let err = bind_unix_replacing_stale(&path)
+            .expect_err("a socket with a live listener must be refused, not reclaimed");
+        assert!(matches!(err, AppError::Platform(message) if message.contains("already in use")));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn bind_unix_replacing_stale_refuses_a_non_socket_path() {
+        // Even holding the lifetime lock, we never clobber a non-socket entry
+        // squatting the IPC path — it is not ours to delete.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nagori.sock");
+        std::fs::write(&path, b"not a socket").expect("seed regular file");
+
+        let err =
+            bind_unix_replacing_stale(&path).expect_err("a non-socket entry must not be removed");
+        assert!(matches!(err, AppError::Platform(message) if message.contains("non-socket")));
         assert!(path.exists());
     }
 
@@ -531,7 +662,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("drain.sock");
         let token = test_token();
-        let listener = bind_unix(&path).await.expect("bind");
+        let listener = bind_unix(&path).expect("bind");
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let shutdown_for_server = shutdown.clone();
         let server_token = token.clone();
@@ -594,7 +725,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("saturated.sock");
         let token = test_token();
-        let listener = bind_unix(&path).await.expect("bind");
+        let listener = bind_unix(&path).expect("bind");
 
         let release = Arc::new(tokio::sync::Notify::new());
         let started = Arc::new(AtomicUsize::new(0));
@@ -722,7 +853,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("panic.sock");
         let token = test_token();
-        let listener = bind_unix(&path).await.expect("bind");
+        let listener = bind_unix(&path).expect("bind");
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let shutdown_for_server = shutdown.clone();
         let server_token = token.clone();

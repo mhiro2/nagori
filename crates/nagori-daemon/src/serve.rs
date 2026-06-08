@@ -16,7 +16,8 @@ use nagori_ipc::IpcServerConfig;
 use nagori_ipc::{AuthToken, accept_loop_pipe_with_shutdown, bind_pipe, write_token_file};
 #[cfg(unix)]
 use nagori_ipc::{
-    AuthToken, accept_loop_with_shutdown, bind_unix, default_token_path, write_token_file,
+    AuthToken, accept_loop_with_shutdown, bind_unix_replacing_stale, default_token_path,
+    write_token_file,
 };
 use nagori_platform::{ClipboardReader, WindowBehavior};
 use tokio::{signal, sync::watch};
@@ -155,7 +156,11 @@ fn default_token_path_local() -> PathBuf {
 /// Unix socket, plain content for the token file) so [`stage_runtime_files`]
 /// can refuse to unlink an entry that's been replaced by a fresh daemon
 /// running concurrently.
-async fn spawn_ipc_server(
+// Not `async`: the bind / token write are synchronous now that the socket
+// bind no longer probes peer liveness, and the accept loop is driven by an
+// inner `tokio::spawn`. Callers invoke it from within the daemon runtime, so
+// the spawn still finds an ambient executor.
+fn spawn_ipc_server(
     runtime: NagoriRuntime,
     config: &DaemonConfig,
     shutdown: ShutdownHandle,
@@ -163,7 +168,16 @@ async fn spawn_ipc_server(
     let (stop_tx, stop_rx) = watch::channel(false);
     #[cfg(unix)]
     {
-        let listener = bind_unix(&config.socket_path).await?;
+        // `run_daemon` holds the data-directory lifetime lock
+        // (`nagori_storage::ProcessLock`) for as long as this daemon runs, so
+        // no peer daemon owns the same store. A socket inode left behind by a
+        // crashed predecessor — or by this daemon's own dead accept loop on a
+        // supervisor restart — refuses `connect()` and is reclaimed.
+        // `bind_unix_replacing_stale` still refuses a socket with a *live*
+        // listener (a daemon sharing this `--ipc` under a different `--db`, or
+        // a squatter), so we never unlink a socket someone is serving; removal
+        // never hinges on a connect failure alone (the lock is the gate).
+        let listener = bind_unix_replacing_stale(&config.socket_path)?;
         let socket_fingerprint = SocketFingerprint::capture(&config.socket_path);
         let token = AuthToken::generate()?;
         write_token_file(&config.token_path, &token)?;
@@ -429,7 +443,7 @@ async fn supervise_ipc_server(
                     // and no restart was pending. Start one immediately;
                     // the restart-timer arm will handle the post-failure
                     // backoff path on its own.
-                    match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
+                    match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()) {
                         Ok(next) => {
                             info!(socket = %config.socket_path.display(), "ipc_server_started");
                             server = Some(next);
@@ -455,13 +469,15 @@ async fn supervise_ipc_server(
             // We deliberately do NOT call `cleanup_runtime_files` here even
             // though the accept-loop task (and therefore the listener) is
             // already gone. The next `spawn_ipc_server` below safely
-            // replaces both files atomically: `bind_unix` removes a stale
-            // socket entry it can't connect to and rebinds; `write_token_file`
-            // writes to a sibling temp and renames over the target. Adding
-            // a fingerprint-check + rename here would re-introduce a
-            // listener-less TOCTOU window — a concurrent fresh daemon
-            // (which is no longer blocked at bind because our listener is
-            // dead) could write its token between our check and our rename
+            // replaces both files atomically: `bind_unix_replacing_stale`
+            // removes the socket inode our dead listener left behind and
+            // rebinds — safe because this process still holds the daemon
+            // lifetime lock, so the leftover socket is known-stale, not a
+            // peer's; `write_token_file` writes to a sibling temp and renames
+            // over the target. Adding a fingerprint-check + rename here would
+            // re-introduce a listener-less TOCTOU window — a concurrent fresh
+            // daemon (which is no longer blocked at bind because our listener
+            // is dead) could write its token between our check and our rename
             // and we'd rename *its* file out from under it. Leaving the
             // stale entries in place until the next spawn is the safer
             // choice.
@@ -506,7 +522,7 @@ async fn supervise_ipc_server(
             // would bail to the other arms after a single failed retry and
             // never recover.
             () = restart_timer => {
-                match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await {
+                match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()) {
                     Ok(next) => {
                         info!(
                             socket = %config.socket_path.display(),
@@ -652,6 +668,34 @@ fn spawn_ipc_supervisor(
     })
 }
 
+/// Take the daemon's data-directory lifetime lock.
+///
+/// Keyed on the directory that holds the daemon's `SQLite` store, so two daemons
+/// against the same DB — and a daemon vs. the desktop shell against the same
+/// DB — are mutually exclusive on **every** platform: the desktop locks the
+/// same directory in `AppState::try_new_at`, and the named pipe's
+/// `first_pipe_instance` only ever guarded daemon-vs-daemon on Windows, not
+/// the app. The caller acquires this *before* it opens the store (so a second
+/// owner never runs migrations or a capture loop against a DB the first owner
+/// holds) and hands it to [`run_daemon`], which holds it for the whole daemon
+/// lifetime. The lock is also what makes the Unix `bind_unix_replacing_stale`
+/// safe — see [`run_daemon`]. Returns the held lock, or an
+/// `AppError::Platform` describing the conflict when another owner already
+/// holds it. `dir` must already exist.
+pub fn acquire_data_dir_lock(dir: &std::path::Path) -> Result<nagori_storage::ProcessLock> {
+    match nagori_storage::ProcessLock::try_acquire(dir)? {
+        Some(lock) => {
+            info!(lock = %lock.path().display(), "daemon_lock_acquired");
+            Ok(lock)
+        }
+        None => Err(nagori_core::AppError::Platform(format!(
+            "another nagori daemon or the desktop app is already running and owns {}; \
+             refusing to start a second instance",
+            dir.display()
+        ))),
+    }
+}
+
 fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
     // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
     // not a filesystem path. Only ensure the parent directory exists when
@@ -669,16 +713,31 @@ fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
     Ok(())
 }
 
+/// Run the daemon until shutdown.
+///
+/// `instance_lock` is the data-directory lifetime lock the caller acquired
+/// (via [`acquire_data_dir_lock`]) **before** opening the store. `run_daemon`
+/// owns it for its whole body, so it is held for the daemon's lifetime and
+/// released by the kernel on exit — including a crash. Holding it is what
+/// makes the Unix `bind_unix_replacing_stale` below safe: the lock, not a
+/// fragile `connect()` probe, proves no peer daemon is alive, so a leftover
+/// socket inode is known-stale and can be replaced. It is also the
+/// single-instance gate shared with the desktop shell (which locks the same
+/// directory), so a standalone daemon and the app refuse to co-own one store.
 #[allow(clippy::too_many_lines)]
 pub async fn run_daemon<R>(
     runtime: NagoriRuntime,
     reader: R,
     config: DaemonConfig,
     window: Option<Arc<dyn WindowBehavior>>,
+    instance_lock: nagori_storage::ProcessLock,
 ) -> Result<()>
 where
     R: ClipboardReader + 'static,
 {
+    // Bind the lock to a lifetime-spanning local so it is held until this
+    // function returns (and then dropped, releasing it). Never read otherwise.
+    let _instance_lock = instance_lock;
     let store = runtime.store().clone();
     let shutdown = runtime.shutdown_handle();
     // Fail closed: refuse to start if the persisted settings can't be loaded
@@ -788,7 +847,11 @@ where
     };
 
     let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
-        Some(spawn_ipc_server(runtime.clone(), &config, shutdown.clone()).await?)
+        Some(spawn_ipc_server(
+            runtime.clone(),
+            &config,
+            shutdown.clone(),
+        )?)
     } else {
         info!("ipc_disabled_by_settings");
         None
@@ -1045,6 +1108,26 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn acquire_data_dir_lock_refuses_a_second_owner() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = temp.path();
+        // The first owner takes the lock and holds it for the rest of the test.
+        let first = acquire_data_dir_lock(dir).expect("first owner should acquire the lock");
+        // A second owner against the same data directory is refused rather
+        // than silently allowed to co-own (and double-capture into) the store.
+        let err = acquire_data_dir_lock(dir)
+            .expect_err("a second owner must be refused while the first holds the lock");
+        assert!(
+            matches!(err, nagori_core::AppError::Platform(message) if message.contains("already running")),
+            "the conflict error should name the single-instance refusal"
+        );
+        drop(first);
+        // Releasing the first lock frees the directory for a fresh owner.
+        let _second =
+            acquire_data_dir_lock(dir).expect("lock should be reacquirable after release");
+    }
+
     #[tokio::test]
     async fn settings_change_stops_existing_ipc_server() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -1059,7 +1142,6 @@ mod tests {
         let settings_rx = runtime.settings_subscribe();
         let shutdown = runtime.shutdown_handle();
         let initial_server = spawn_ipc_server(runtime.clone(), &config, shutdown.clone())
-            .await
             .expect("IPC server should start");
         let supervisor = tokio::spawn(supervise_ipc_server(
             runtime.clone(),
