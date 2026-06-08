@@ -4,52 +4,51 @@ use time::OffsetDateTime;
 
 use super::SqliteStore;
 use super::convert::{format_time, storage_err};
-use super::search::prune_deleted_search_rows;
 
 impl SqliteStore {
     pub async fn clear_older_than(&self, cutoff: OffsetDateTime) -> Result<usize> {
         self.run_blocking(move |store| {
             let cutoff = format_time(cutoff)?;
-            let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            // Physically delete aged-out, non-pinned rows. `ON DELETE CASCADE`
+            // (plus `recursive_triggers` firing `search_documents_ad_fts`)
+            // drops each row's representations, image/blob payloads,
+            // embeddings, thumbnails, and search/ngram index along with it, so
+            // the content is gone from the live table rather than tombstoned
+            // and left on disk indefinitely. No `deleted_at` predicate: a hard
+            // delete of an already-tombstoned row (from a per-entry delete) is
+            // just cleanup we want anyway.
             let changed = tx
                 .execute(
-                    "UPDATE entries
-                 SET deleted_at = ?1, updated_at = ?1
-                 WHERE pinned = 0 AND deleted_at IS NULL AND created_at < ?2",
-                    params![now, cutoff],
+                    "DELETE FROM entries
+                     WHERE pinned = 0 AND created_at < ?1",
+                    params![cutoff],
                 )
                 .map_err(|err| storage_err(&err))?;
-            if changed > 0 {
-                prune_deleted_search_rows(&tx)?;
-            }
             tx.commit().map_err(|err| storage_err(&err))?;
             Ok(changed)
         })
         .await
     }
 
-    /// Soft-delete every non-pinned entry. Used by the desktop's
-    /// `clear_on_quit` setting and the secondary "Clear history" hotkey.
+    /// Physically delete every non-pinned entry. Used by the desktop's
+    /// `clear_on_quit` setting and the "Clear history" hotkey/tray action.
     /// Pinned rows survive so users can keep curated snippets across the
     /// purge.
+    ///
+    /// This is a *hard* delete: the cascade drops each row's representations,
+    /// blobs, embeddings, thumbnails, and search/ngram index, so "Clear
+    /// history" leaves nothing recoverable from the live table — including
+    /// rows a per-entry delete previously tombstoned, which are unpinned and
+    /// therefore swept here too.
     pub async fn clear_non_pinned(&self) -> Result<usize> {
         self.run_blocking(move |store| {
-            let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
             let changed = tx
-                .execute(
-                    "UPDATE entries
-                 SET deleted_at = ?1, updated_at = ?1
-                 WHERE pinned = 0 AND deleted_at IS NULL",
-                    params![now],
-                )
+                .execute("DELETE FROM entries WHERE pinned = 0", [])
                 .map_err(|err| storage_err(&err))?;
-            if changed > 0 {
-                prune_deleted_search_rows(&tx)?;
-            }
             tx.commit().map_err(|err| storage_err(&err))?;
             Ok(changed)
         })
@@ -70,34 +69,26 @@ impl SqliteStore {
             ))
         })?;
         self.run_blocking(move |store| {
-            let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            // Physically delete the oldest live, unpinned rows beyond the cap.
+            // The cap bounds *live* history, so the subquery selects from
+            // `deleted_at IS NULL` rows; the cascade drops each evicted row's
+            // representations, blobs, embeddings, thumbnails, and search index
+            // with it, so a retention cap actually reclaims disk instead of
+            // leaving tombstones that grow the file forever.
             let changed = tx
                 .execute(
-                    // Mirror `clear_older_than` and the per-entry delete by
-                    // bumping `updated_at` alongside `deleted_at`. Without
-                    // this, retention-evicted rows look like they were last
-                    // touched at insert time even though the soft-delete
-                    // itself is a mutation, and downstream consumers that
-                    // watch `updated_at` for change detection (sync,
-                    // analytics, audit replays) miss the eviction.
-                    "UPDATE entries
-                 SET deleted_at = ?1, updated_at = ?1
-                 WHERE deleted_at IS NULL
-                   AND pinned = 0
-                   AND id IN (
-                       SELECT id FROM entries
-                       WHERE deleted_at IS NULL AND pinned = 0
-                       ORDER BY created_at DESC
-                       LIMIT -1 OFFSET ?2
-                   )",
-                    params![now, max_entries_i64],
+                    "DELETE FROM entries
+                     WHERE id IN (
+                         SELECT id FROM entries
+                         WHERE deleted_at IS NULL AND pinned = 0
+                         ORDER BY created_at DESC
+                         LIMIT -1 OFFSET ?1
+                     )",
+                    params![max_entries_i64],
                 )
                 .map_err(|err| storage_err(&err))?;
-            if changed > 0 {
-                prune_deleted_search_rows(&tx)?;
-            }
             tx.commit().map_err(|err| storage_err(&err))?;
             Ok(changed)
         })
@@ -164,26 +155,25 @@ impl SqliteStore {
                     .collect::<Result<Vec<_>>>()?
             };
 
-            let now = format_time(OffsetDateTime::now_utc())?;
             let mut deleted = 0;
             for (id, bytes) in candidates {
                 if total <= max_total_bytes {
                     break;
                 }
+                // Hard-delete (cascade drops representations / blobs /
+                // embeddings / search index) so trimming to the byte budget
+                // reclaims real disk. `pinned = 0` is a defensive guard; the
+                // candidate set is already unpinned and live.
                 let changed = tx
                     .execute(
-                        "UPDATE entries SET deleted_at = ?1, updated_at = ?1
-                         WHERE id = ?2 AND deleted_at IS NULL AND pinned = 0",
-                        params![now, id],
+                        "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
+                        params![id],
                     )
                     .map_err(|err| storage_err(&err))?;
                 if changed > 0 {
                     deleted += changed;
                     total = total.saturating_sub(bytes);
                 }
-            }
-            if deleted > 0 {
-                prune_deleted_search_rows(&tx)?;
             }
             tx.commit().map_err(|err| storage_err(&err))?;
             Ok(deleted)

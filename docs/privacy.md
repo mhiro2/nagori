@@ -260,13 +260,19 @@ everything else in the DB — restrictive filesystem permissions,
 guidance applies to them too.
 
 The vector follows the entry's lifecycle the same way the rest of the
-row does. A normal delete or a retention sweep is a **soft delete**:
-the entry (and its vector) stays in the file, filtered out of search
-results, until it is hard-deleted/purged, at which point `ON DELETE
-CASCADE` drops the vector with the entry. So embeddings persist at
-rest after an ordinary delete exactly like the source text does —
-follow the same checkpoint / `VACUUM` steps from [Secret
-redaction](#secret-redaction) if you need them physically gone.
+row does. A per-entry delete is a **soft delete**: the entry (and its
+vector) stays in the file, filtered out of search results. A retention
+sweep (count / age / size cap) and *Clear history* / clear-on-quit are
+**hard deletes**: `ON DELETE CASCADE` drops the vector — along with the
+body, blobs, and search index — in the same transaction, so the content
+is physically removed from the live database rather than tombstoned. So
+a vector persists at rest only after an *ordinary per-entry delete*; if
+you need a soft-deleted entry's bytes gone immediately, run *Clear
+history* or follow the checkpoint / `VACUUM` steps from [Secret
+redaction](#secret-redaction). Freed pages can still be recovered from
+the raw file or a backup until reused or `VACUUM`ed — see [Data at
+rest](#data-at-rest) — which is why full-disk encryption remains the
+recommended at-rest protection.
 Turning the toggle off stops indexing, and a model change (different
 identifier, revision, or dimension) clears and rebuilds the index
 rather than mixing incompatible embedding spaces.

@@ -409,6 +409,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn concurrent_migrations_do_not_double_apply() {
+        // Two processes upgrading the same DB right after an install (daemon +
+        // desktop + CLI launching at once) must not both re-run the same
+        // migration. `run_migrations` takes the write lock with BEGIN
+        // IMMEDIATE and re-reads `user_version` under it, so the loser skips
+        // the already-applied migration instead of failing on a re-run
+        // `ALTER TABLE` (duplicate column) / `CREATE` against the migrated
+        // shape.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("nagori.db");
+        // Materialise the (empty, user_version = 0) DB file so both threads
+        // connect to the *same* database instead of racing to create it.
+        drop(Connection::open(&db_path).unwrap());
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = db_path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut conn = Connection::open(&path).unwrap();
+                    // The IMMEDIATE lock is the serialisation point; without a
+                    // busy_timeout the loser would get SQLITE_BUSY instead of
+                    // waiting, exactly as `configure_connection` sets in prod.
+                    conn.execute_batch("PRAGMA busy_timeout = 5000;").unwrap();
+                    barrier.wait();
+                    run_migrations(&mut conn)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .unwrap()
+                .expect("concurrent migration must not error");
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "DB must land at the latest schema version after a concurrent upgrade",
+        );
+    }
+
     #[tokio::test]
     async fn stores_and_searches_japanese_text() {
         let store = SqliteStore::open_memory().unwrap();
@@ -938,51 +987,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enforce_retention_count_bumps_updated_at_on_evicted_rows() {
-        // Regression: `enforce_retention_count` previously updated only
-        // `deleted_at`, leaving `updated_at` frozen at insert time. That
-        // diverged from `clear_older_than` / `delete_entry` (both bump
-        // both columns) and broke downstream consumers (sync, audit
-        // replays) that watch `updated_at` for change detection.
+    async fn enforce_retention_count_hard_deletes_evicted_rows() {
+        // Retention eviction must *physically* remove the row — and its
+        // representations / search index via `ON DELETE CASCADE` — rather than
+        // tombstone it. A soft delete left the body, blobs, and embeddings on
+        // disk, so a retention cap never reclaimed space and the content stayed
+        // recoverable from the file.
         let store = SqliteStore::open_memory().unwrap();
         let now = OffsetDateTime::now_utc();
         let oldest = insert_text(&store, "oldest entry").await;
         let _middle = insert_text(&store, "middle entry").await;
         let _newest = insert_text(&store, "newest entry").await;
-        // Backdate created_at *and* updated_at so we can detect the
-        // retention-driven bump. `backdate_entry` only touches
-        // `created_at`, which would leave `updated_at` at insert-now —
-        // an order of magnitude smaller gap that masks the regression.
-        let backdated = now - time::Duration::days(3);
-        let formatted = backdated.format(&Rfc3339).expect("rfc3339 format");
-        let conn = store.conn().expect("lock conn");
-        conn.execute(
-            "UPDATE entries SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
-            params![formatted, oldest.to_string()],
-        )
-        .expect("backdate updated_at");
-        drop(conn);
+        backdate_entry(&store, oldest, now - time::Duration::days(3));
 
+        assert_eq!(count_total(&store), 3);
         let removed = store.enforce_retention_count(2).await.unwrap();
         assert_eq!(removed, 1);
 
+        // The evicted row is gone from the table entirely, not just filtered
+        // out by `deleted_at`.
+        assert_eq!(count_total(&store), 2);
+        assert_eq!(count_active(&store), 2);
         let conn = store.conn().expect("lock conn");
-        let (deleted_at, updated_at): (Option<String>, String) = conn
+        let surviving: i64 = conn
             .query_row(
-                "SELECT deleted_at, updated_at FROM entries WHERE id = ?1",
+                "SELECT COUNT(*) FROM entries WHERE id = ?1",
                 params![oldest.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("fetch evicted row");
-        assert!(deleted_at.is_some(), "evicted row must carry deleted_at");
+            .expect("count evicted row");
+        assert_eq!(surviving, 0, "evicted row must be physically deleted");
+        // Its representation rows cascade away with it.
+        let reps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_representations WHERE entry_id = ?1",
+                params![oldest.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count evicted representations");
         assert_eq!(
-            deleted_at.as_deref(),
-            Some(updated_at.as_str()),
-            "updated_at should be bumped in lockstep with deleted_at on retention eviction (was: deleted_at={deleted_at:?}, updated_at={updated_at:?})",
-        );
-        assert_ne!(
-            updated_at, formatted,
-            "updated_at must move forward past the backdated insert time"
+            reps, 0,
+            "evicted row's representations must cascade-delete with it",
         );
     }
 
@@ -1070,6 +1115,46 @@ mod tests {
         assert_eq!(surviving, vec![pinned], "only pinned row must survive");
         assert!(!surviving.contains(&unpinned_a));
         assert!(!surviving.contains(&unpinned_b));
+    }
+
+    #[tokio::test]
+    async fn clear_non_pinned_hard_deletes_unpinned_content() {
+        // "Clear history" / clear-on-quit must physically purge non-pinned
+        // rows (body, representations, search index) so nothing is
+        // recoverable from the live table — while the pinned row keeps its
+        // content intact.
+        let store = SqliteStore::open_memory().unwrap();
+        let pinned = insert_text(&store, "pinned anchor").await;
+        let unpinned = insert_text(&store, "ephemeral secret").await;
+        store.set_pinned(pinned, true).await.unwrap();
+
+        let removed = store.clear_non_pinned().await.unwrap();
+        assert_eq!(removed, 1);
+
+        // Only the pinned row remains anywhere in the table.
+        assert_eq!(count_total(&store), 1);
+        let conn = store.conn().unwrap();
+        for (table, column) in [
+            ("entries", "id"),
+            ("entry_representations", "entry_id"),
+            ("search_documents", "entry_id"),
+            ("ngrams", "entry_id"),
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+            let count: i64 = conn
+                .query_row(&sql, params![unpinned.to_string()], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} rows for the cleared entry must be gone");
+        }
+        // The pinned row's content survives.
+        let pinned_reps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_representations WHERE entry_id = ?1",
+                params![pinned.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(pinned_reps > 0, "pinned row must keep its representations");
     }
 
     #[tokio::test]

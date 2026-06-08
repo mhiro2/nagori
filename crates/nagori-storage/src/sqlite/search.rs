@@ -509,25 +509,6 @@ pub(super) fn delete_search_rows(tx: &rusqlite::Transaction<'_>, entry_id: &str)
     Ok(())
 }
 
-pub(super) fn prune_deleted_search_rows(tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    // `search_fts` is an external-content FTS5 over `search_documents`;
-    // the ad trigger fires on each search_documents row that this DELETE
-    // removes, so we don't prune `search_fts` directly.
-    tx.execute(
-        "DELETE FROM search_documents
-         WHERE entry_id IN (SELECT id FROM entries WHERE deleted_at IS NOT NULL)",
-        [],
-    )
-    .map_err(|err| storage_err(&err))?;
-    tx.execute(
-        "DELETE FROM ngrams
-         WHERE entry_id NOT IN (SELECT id FROM entries WHERE deleted_at IS NULL)",
-        [],
-    )
-    .map_err(|err| storage_err(&err))?;
-    Ok(())
-}
-
 pub(super) fn fetch_recent_entries(
     conn: &Connection,
     filter: &FilterFragment,

@@ -1,5 +1,5 @@
 use nagori_core::{AppError, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::convert::storage_err;
 
@@ -77,7 +77,40 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
                 "schema migrations are non-contiguous: jumped from {last_applied} to {version}",
             )));
         }
-        let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+        // Acquire the write lock up front with `BEGIN IMMEDIATE` rather than
+        // a DEFERRED transaction that only upgrades to a writer at the first
+        // statement. Without it, two processes upgrading the same DB right
+        // after an install (daemon + desktop + CLI all launching at once)
+        // could both read the old `user_version` outside any lock, both
+        // decide to apply this migration, and the second one would re-run an
+        // `ALTER TABLE` / `CREATE` against the already-migrated shape and
+        // fail at startup. `busy_timeout` (set in `configure_connection`)
+        // makes the loser wait here instead of erroring out.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| storage_err(&err))?;
+        // Re-read `user_version` now that we hold the write lock. A peer may
+        // have applied this migration (or more) while we waited for the
+        // lock, so the pre-lock `current` read is stale — trust the locked
+        // value for the apply/skip decision.
+        let locked_version: i64 = tx
+            .query_row("SELECT user_version FROM pragma_user_version", [], |row| {
+                row.get(0)
+            })
+            .map_err(|err| storage_err(&err))?;
+        if locked_version > SCHEMA_VERSION {
+            return Err(AppError::Storage(format!(
+                "database schema version {locked_version} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
+            )));
+        }
+        if *version <= locked_version {
+            // A concurrent process applied this migration between our initial
+            // read and acquiring the lock. Skip it (the `tx` rolls back on
+            // drop without writing) and advance our cursor so the contiguity
+            // check on the next iteration stays aligned with the static list.
+            last_applied = *version;
+            continue;
+        }
         // Concatenate the version bump onto the migration SQL so a
         // single `execute_batch` runs both as one unit. This guarantees
         // the version pragma can never execute without the preceding
@@ -332,8 +365,10 @@ CREATE TABLE IF NOT EXISTS ngrams (
 );
 
 -- `idx_ngrams_gram_entry` is for the ngram fan-out: `WHERE n.gram IN (…)`
--- then `GROUP BY entry_id`. `idx_ngrams_entry_id` is for per-entry
--- deletes (the soft-delete prune path).
+-- then `GROUP BY entry_id`. `idx_ngrams_entry_id` keeps per-entry-id
+-- deletes cheap — both the soft-delete prune path (`delete_search_rows`)
+-- and the FK `ON DELETE CASCADE` fired when a retention/clear hard-delete
+-- removes the parent row.
 CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry ON ngrams(gram, entry_id);
 CREATE INDEX IF NOT EXISTS idx_ngrams_entry_id ON ngrams(entry_id);
 

@@ -102,10 +102,13 @@ the platform paste shortcut into the frontmost app — Cmd+V on macOS
 
 ### `nagori clear (--all | --older-than-days N)`
 
-Soft-delete unpinned entries. One scope flag is required: `--all` deletes
-every unpinned entry, while `--older-than-days N` deletes only unpinned
-entries created before that cutoff. A bare `nagori clear` with no flag is
-rejected at parse time so the command can't wipe history by accident.
+Hard-delete unpinned entries (the row and its representations, blobs,
+embeddings, and search index are physically removed via cascade — unlike
+`nagori delete`, which is soft). One scope flag is required: `--all`
+deletes every unpinned entry, while `--older-than-days N` deletes only
+unpinned entries created before that cutoff. A bare `nagori clear` with no
+flag is rejected at parse time so the command can't wipe history by
+accident.
 
 ### `nagori quick <action> <id>`
 

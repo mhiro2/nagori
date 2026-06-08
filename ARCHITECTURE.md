@@ -455,7 +455,7 @@ are forward-only; downgrades are not supported.
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
-| `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`; soft-deleted entries keep their vector but are filtered out at query time. |
+| `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and *Clear history* / clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. |
 | `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) the stored vectors were produced with, so a model change clears the index and triggers a rebuild instead of mixing incompatible spaces. |
 | `settings` | Key/value persistence for `AppSettings`. |
 | `audit_events` | Capture / policy events (block, redact, etc.). Never stores raw clipboard content. |
@@ -507,9 +507,15 @@ first.
 denormalised `total_byte_count` (maintained by triggers on
 `entry_representations`, so the budget total is a single-table
 aggregate over the live partition rather than a JOIN+SUM) and evicts
-oldest-first when the budget is exceeded. Eviction soft-deletes the
-parent `entries` row; the cascade on `entry_representations` only runs
-on hard-delete via `purge_expired`.
+oldest-first when the budget is exceeded. Eviction — like the count /
+age sweeps and *Clear history* / clear-on-quit — **hard-deletes** the
+parent `entries` row, so `ON DELETE CASCADE` (plus `recursive_triggers`
+firing the `search_documents_ad_fts` sync trigger) drops the row's
+representations, blobs, embeddings, thumbnails, and search / ngram
+index in the same transaction. Retention therefore reclaims disk (a
+later `VACUUM` from the maintenance sweep then shrinks the file) rather
+than tombstoning rows that grow it forever. Per-entry deletes
+(`delete_entry`) stay soft.
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**
@@ -1726,7 +1732,7 @@ change.
   bar, Windows notification area, Linux StatusNotifierItem /
   `libayatana-appindicator`) with *Show Palette*, *Pause Capture* /
   *Resume Capture* (label tracks `capture_enabled`), *Settings…*,
-  *Clear History* (soft-deletes every non-pinned entry — pinned rows are
+  *Clear History* (hard-deletes every non-pinned entry — pinned rows are
   kept — then emits `CLIPBOARD_CHANGED_EVENT` so an open palette refreshes
   and confirms via a notification, mirroring the `ClearHistory` secondary
   hotkey), *Quit Nagori*. The settings entry emits the Tauri event
