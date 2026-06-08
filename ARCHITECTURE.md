@@ -1610,7 +1610,15 @@ the native extension stays optional). A background worker
 (`nagori-daemon::semantic_index`) embeds freshly-captured clips and backfills
 history in bounded batches, guarded by a battery check (AC-only by default), the
 embedding concurrency permit, and rate-limit backoff; the settings UI exposes a
-*Rebuild index* control plus live progress. At query time `SearchMode::Semantic`
+*Rebuild index* control plus live progress. The index is sensitivity-aware: the
+`semantic_pending` query excludes `Secret` entries outright (so even a
+`StoreFull` secret's raw body never reaches the embedding model), and the worker
+runs every `Private` body through the settings-aware redactor
+(`SensitivityClassifier::redact`) before embedding so private content is never
+sent verbatim; `Public` / `Unknown` bodies embed as-is. This shaping is recorded
+in `INDEX_VERSION` — bumping it (it was raised when this gate landed) is treated
+like a model change, so the worker clears any vectors built under the old shaping
+and rebuilds. At query time `SearchMode::Semantic`
 embeds the query and ranks the stored vectors; the embedder is macOS-only, so on
 other platforms (or when the model is unavailable) semantic search reports
 `Unsupported` and the text plans keep working.
@@ -1806,7 +1814,18 @@ change.
   `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
   Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries and
   purges the `nagori-preview/` plaintext temp cache before the tokio
-  runtime tears down. Pinned entries are always preserved.
+  runtime tears down. Pinned entries are always preserved. The delete is
+  bounded by a 1 s ceiling so a wedged DB cannot freeze the quit path, but
+  the timeout no longer silently loses data: `perform_exit_cleanup` writes
+  a `clear-on-quit.pending` marker (a sentinel file in the DB directory)
+  *before* the delete and removes it only once the purge completes within
+  the budget. On the next launch `complete_pending_clear_on_quit` runs
+  synchronously during `setup` — before any window can show a row — and
+  finishes the purge fail-closed if the marker is still present, so a
+  timed-out / crashed / killed shutdown purge is always completed rather
+  than leaving behind history the user asked to clear. The marker lives on
+  the filesystem (not in the DB) so it survives even when the DB is the
+  contended resource that timed the purge out.
   `WindowEvent::CloseRequested` is *not* a delete trigger: the same
   handler intercepts it on every OS, calls `prevent_close` and hides the
   main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the

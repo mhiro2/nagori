@@ -259,6 +259,17 @@ everything else in the DB — restrictive filesystem permissions,
 **not** encrypted at rest — so the [Data at rest](#data-at-rest)
 guidance applies to them too.
 
+The index is sensitivity-aware about *what* it embeds. **Secret**
+entries are never embedded — even under `StoreFull`, a secret's raw
+body is never handed to the embedding model — so no Secret-derived
+vector is ever produced or stored. **Private** entries are embedded
+only after the same redaction that gates AI input shaping
+(built-in detectors plus your `regex_denylist`), so private content is
+not sent to the model verbatim. **Public** / unclassified bodies are
+embedded as-is. If you change which captures are Secret/Private, use
+*Rebuild index* to re-embed under the new policy; the index also
+rebuilds automatically when this embedding policy is revised.
+
 The vector follows the entry's lifecycle the same way the rest of the
 row does. A per-entry delete is a **soft delete**: the entry (and its
 vector) stays in the file, filtered out of search results. A retention
