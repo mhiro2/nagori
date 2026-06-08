@@ -556,6 +556,24 @@ branch its own pooled SQLite connection so they run truly in parallel
 under WAL — readers do not block each other and an in-flight capture
 write does not stall search.
 
+**Bounded admission + cancellation.** Each candidate fetch runs through
+`SqliteStore::run_search_blocking`, which adds two guards over the plain
+blocking path. *Bounded admission*: a search-admission semaphore
+(`POOL_CAPACITY - 1` permits) is held inside the blocking closure until the
+pooled connection is returned, so concurrent — possibly superseded —
+fan-outs can't claim every pooled connection and starve capture /
+maintenance writes (the reservation holds even for an abandoned query whose
+future was dropped). *Real cancellation*: `SearchService::search` owns a
+`CancellationToken` whose drop guard fires when the search future is dropped
+(a superseded keystroke, or a sibling branch failing the `try_join`); a
+`sqlite3_progress_handler` installed on the connection polls that token
+throughout statement execution and aborts the LIKE / FTS / ngram query so it
+stops and releases its connection promptly instead of running to completion.
+The handler is checked for the statement's whole life (closing the race an
+after-the-fact `sqlite3_interrupt` would lose) and an RAII guard removes it
+before the connection returns to the pool — even on a panic — so a later
+borrower of the recycled connection is never aborted by a stale token.
+
 **Hybrid ngram is CJK-scoped.** In the implicit `Hybrid` (Auto) plan the
 ngram branch only fires for queries that carry a CJK character, and the
 orchestrator passes `NgramQueryMode::CjkOnly` so the provider keeps just

@@ -11,6 +11,7 @@ use nagori_search::{
     ngram_input_was_truncated,
 };
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
+use tokio_util::sync::CancellationToken;
 
 use super::SqliteStore;
 use super::convert::{format_time, fts_query, kind_to_str, row_to_entry, storage_err};
@@ -219,12 +220,12 @@ impl SearchCandidateProvider for SqliteStore {
         filters: &SearchFilters,
         order: RecentOrder,
         limit: usize,
+        cancel: &CancellationToken,
     ) -> Result<Vec<ClipboardEntry>> {
         let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
-        self.run_blocking(move |store| {
-            let conn = store.conn()?;
-            fetch_recent_entries(&conn, &filter, order, limit_i64)
+        self.run_search_blocking(cancel, move |conn| {
+            fetch_recent_entries(conn, &filter, order, limit_i64)
         })
         .await
     }
@@ -235,13 +236,13 @@ impl SearchCandidateProvider for SqliteStore {
         filters: &SearchFilters,
         limit: usize,
         bounded: bool,
+        cancel: &CancellationToken,
     ) -> Result<Vec<ClipboardEntry>> {
         let filter = build_filter_fragment(filters)?;
         let like = format!("%{}%", escape_like(normalized));
         let limit_i64 = clamp_limit(limit);
         let scan_window = SUBSTRING_SCAN_WINDOW;
-        self.run_blocking(move |store| {
-            let conn = store.conn()?;
+        self.run_search_blocking(cancel, move |conn| {
             // LIKE can't hit a secondary index for `%term%`, so for the hybrid
             // path we cap the candidate set to the most recent
             // `SUBSTRING_SCAN_WINDOW` live entries via a CTE. The composite
@@ -313,6 +314,7 @@ impl SearchCandidateProvider for SqliteStore {
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
+        cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>> {
         let fts = fts_query(normalized);
         if fts.is_empty() {
@@ -320,8 +322,7 @@ impl SearchCandidateProvider for SqliteStore {
         }
         let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
-        self.run_blocking(move |store| {
-            let conn = store.conn()?;
+        self.run_search_blocking(cancel, move |conn| {
             // `search_fts` is an external-content FTS5 over
             // `search_documents`, so it has no `entry_id` column — join via
             // `search_fts.rowid = search_documents.doc_id` (the explicit
@@ -370,6 +371,7 @@ impl SearchCandidateProvider for SqliteStore {
         filters: &SearchFilters,
         limit: usize,
         mode: NgramQueryMode,
+        cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>> {
         let mut query_grams = generate_query_ngrams(normalized);
         if query_grams.is_empty() {
@@ -400,8 +402,7 @@ impl SearchCandidateProvider for SqliteStore {
         }
         let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
-        self.run_blocking(move |store| {
-            let conn = store.conn()?;
+        self.run_search_blocking(cancel, move |conn| {
             let placeholders = std::iter::repeat_n("?", query_grams.len())
                 .collect::<Vec<_>>()
                 .join(",");

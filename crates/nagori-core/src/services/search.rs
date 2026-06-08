@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     ClipboardEntry, EntryId, RecentOrder, Result, SearchFilters, SearchMode, SearchQuery,
@@ -69,11 +70,17 @@ pub enum NgramQueryMode {
 pub trait SearchCandidateProvider: Send + Sync {
     /// Most recent active entries, optionally with pinned rows hoisted to the
     /// top. Used for the `Recent` plan and as the empty-query fallback.
+    ///
+    /// `cancel` is fired when the search future is dropped (a superseded
+    /// keystroke, a sibling branch failing the `try_join`); an implementation
+    /// that offloads blocking work should interrupt it so the abandoned query
+    /// releases its resources promptly instead of running to completion.
     async fn recent_entries(
         &self,
         filters: &SearchFilters,
         order: RecentOrder,
         limit: usize,
+        cancel: &CancellationToken,
     ) -> Result<Vec<ClipboardEntry>>;
 
     /// Substring (LIKE) matches against `normalized_text`.
@@ -84,34 +91,38 @@ pub trait SearchCandidateProvider: Send + Sync {
     /// predictable per-keystroke latency. For an explicit `Exact` query the
     /// orchestrator passes `false` so the implementation walks the full
     /// (non-blocked, non-deleted) corpus and never silently drops a real
-    /// match outside the window.
+    /// match outside the window. See [`Self::recent_entries`] for `cancel`.
     async fn substring_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
         bounded: bool,
+        cancel: &CancellationToken,
     ) -> Result<Vec<ClipboardEntry>>;
 
-    /// Full-text matches with raw `bm25` scores attached.
+    /// Full-text matches with raw `bm25` scores attached. See
+    /// [`Self::recent_entries`] for `cancel`.
     async fn fulltext_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
+        cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>>;
 
     /// Ngram-overlap matches. `mode` carries the plan-level gram policy (see
     /// [`NgramQueryMode`]). May return empty when no usable grams survive the
     /// mode filter or when the implementation deems the fan-out unprofitable
     /// (long ASCII queries under [`NgramQueryMode::Full`] are the canonical
-    /// case).
+    /// case). See [`Self::recent_entries`] for `cancel`.
     async fn ngram_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
         limit: usize,
         mode: NgramQueryMode,
+        cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>>;
 }
 
@@ -200,6 +211,17 @@ where
         let candidate_limit = limit.saturating_mul(CANDIDATE_OVERSAMPLE).max(limit);
         let filters = &query.filters;
 
+        // One cancellation token for every candidate fetch this search drives.
+        // The drop guard fires it when *this future* is dropped — a superseded
+        // keystroke, or a sibling branch failing the `try_join` below — so a
+        // provider that offloads blocking work (the SQLite store) can interrupt
+        // the abandoned query and free its pooled connection instead of letting
+        // it run to completion and starve the next search. On a clean return the
+        // guard drops after every branch already finished, so the cancel is a
+        // harmless no-op.
+        let cancel = CancellationToken::new();
+        let _cancel_guard = cancel.clone().drop_guard();
+
         let mut entries: Vec<ClipboardEntry> = Vec::new();
         let mut seen: HashSet<EntryId> = HashSet::new();
         let mut fts_scores: HashMap<EntryId, f32> = HashMap::new();
@@ -208,86 +230,16 @@ where
         if matches!(plan, SearchPlan::Recent) {
             for entry in self
                 .provider
-                .recent_entries(filters, query.recent_order, candidate_limit)
+                .recent_entries(filters, query.recent_order, candidate_limit, &cancel)
                 .await?
             {
                 push_unique(&mut entries, &mut seen, entry);
             }
         }
 
-        // Fan the substring/FTS/ngram fetches out concurrently for the
-        // hybrid plan. Previously each ran sequentially through a shared
-        // SQLite mutex, so a single slow branch (typically the LIKE scan
-        // on long histories) gated the rest. With the storage-side
-        // connection pool, joining lets reads overlap on physically
-        // separate connections — capture writes no longer queue behind
-        // a slow keystroke and per-keystroke search latency tracks the
-        // slowest single branch instead of the sum.
-        let want_substring = matches!(
-            plan,
-            SearchPlan::Exact | SearchPlan::Fuzzy | SearchPlan::Hybrid
-        );
-        let want_fts = matches!(plan, SearchPlan::FullText | SearchPlan::Hybrid);
-        // Ngram fan-out runs for `Fuzzy` (full grams — its typo tolerance comes
-        // from gram overlap) and for `Hybrid` *only when the query carries CJK*.
-        // A pure-ASCII `Hybrid` query is fully served by FTS + bounded
-        // substring, so we skip even dispatching the blocking ngram fetch and
-        // dodge the common-bigram posting-list explosion on large histories.
-        // Mixed CJK+ASCII queries still reach the provider, where
-        // `NgramQueryMode::CjkOnly` strips the costly ASCII grams.
-        let want_ngram = match plan {
-            SearchPlan::Fuzzy => true,
-            SearchPlan::Hybrid => has_cjk(&normalized),
-            _ => false,
-        };
-        let ngram_mode = if matches!(plan, SearchPlan::Hybrid) {
-            NgramQueryMode::CjkOnly
-        } else {
-            NgramQueryMode::Full
-        };
-
-        // Only the implicit `Hybrid` plan opts into the recent-window
-        // bound. There FTS gives word-level recall and ngram gives CJK
-        // recall over the full corpus, so trading substring coverage for
-        // predictable per-keystroke latency on large histories is a fair
-        // deal. Explicit modes (`Exact`, `Fuzzy`) preserve full coverage:
-        //
-        // * `Exact` — substring is the only branch, so bounding it would
-        //   silently hide older matches.
-        // * `Fuzzy` — ngram returns empty for long ASCII queries (CJK or
-        //   ≤ 8 chars only), so substring is the de-facto matcher there
-        //   and bounding it would regress non-CJK fuzzy searches.
-        let bounded_substring = matches!(plan, SearchPlan::Hybrid);
-        let substring_fut = async {
-            if want_substring {
-                self.provider
-                    .substring_candidates(&normalized, filters, candidate_limit, bounded_substring)
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        };
-        let fts_fut = async {
-            if want_fts {
-                self.provider
-                    .fulltext_candidates(&normalized, filters, candidate_limit)
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        };
-        let ngram_fut = async {
-            if want_ngram {
-                self.provider
-                    .ngram_candidates(&normalized, filters, candidate_limit, ngram_mode)
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        };
-
-        let (substring_hits, fts_hits, ngram_hits) =
-            tokio::try_join!(substring_fut, fts_fut, ngram_fut)?;
+        let (substring_hits, fts_hits, ngram_hits) = self
+            .fetch_candidates(plan, &normalized, filters, candidate_limit, &cancel)
+            .await?;
 
         for entry in substring_hits {
             push_unique(&mut entries, &mut seen, entry);
@@ -318,6 +270,96 @@ where
         });
         results.truncate(limit);
         Ok(results)
+    }
+
+    /// Fan the substring/FTS/ngram fetches out concurrently for the active
+    /// plan and return their raw hits.
+    ///
+    /// Previously each ran sequentially through a shared `SQLite` mutex, so a
+    /// single slow branch (typically the LIKE scan on long histories) gated the
+    /// rest. With the storage-side connection pool, joining lets reads overlap
+    /// on physically separate connections — capture writes no longer queue
+    /// behind a slow keystroke and per-keystroke search latency tracks the
+    /// slowest single branch instead of the sum. `cancel` is shared with every
+    /// branch so a superseded search interrupts all of them.
+    async fn fetch_candidates(
+        &self,
+        plan: SearchPlan,
+        normalized: &str,
+        filters: &SearchFilters,
+        candidate_limit: usize,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<ClipboardEntry>, Vec<FtsCandidate>, Vec<NgramCandidate>)> {
+        let want_substring = matches!(
+            plan,
+            SearchPlan::Exact | SearchPlan::Fuzzy | SearchPlan::Hybrid
+        );
+        let want_fts = matches!(plan, SearchPlan::FullText | SearchPlan::Hybrid);
+        // Ngram fan-out runs for `Fuzzy` (full grams — its typo tolerance comes
+        // from gram overlap) and for `Hybrid` *only when the query carries CJK*.
+        // A pure-ASCII `Hybrid` query is fully served by FTS + bounded
+        // substring, so we skip even dispatching the blocking ngram fetch and
+        // dodge the common-bigram posting-list explosion on large histories.
+        // Mixed CJK+ASCII queries still reach the provider, where
+        // `NgramQueryMode::CjkOnly` strips the costly ASCII grams.
+        let want_ngram = match plan {
+            SearchPlan::Fuzzy => true,
+            SearchPlan::Hybrid => has_cjk(normalized),
+            _ => false,
+        };
+        let ngram_mode = if matches!(plan, SearchPlan::Hybrid) {
+            NgramQueryMode::CjkOnly
+        } else {
+            NgramQueryMode::Full
+        };
+
+        // Only the implicit `Hybrid` plan opts into the recent-window
+        // bound. There FTS gives word-level recall and ngram gives CJK
+        // recall over the full corpus, so trading substring coverage for
+        // predictable per-keystroke latency on large histories is a fair
+        // deal. Explicit modes (`Exact`, `Fuzzy`) preserve full coverage:
+        //
+        // * `Exact` — substring is the only branch, so bounding it would
+        //   silently hide older matches.
+        // * `Fuzzy` — ngram returns empty for long ASCII queries (CJK or
+        //   ≤ 8 chars only), so substring is the de-facto matcher there
+        //   and bounding it would regress non-CJK fuzzy searches.
+        let bounded_substring = matches!(plan, SearchPlan::Hybrid);
+        let substring_fut = async {
+            if want_substring {
+                self.provider
+                    .substring_candidates(
+                        normalized,
+                        filters,
+                        candidate_limit,
+                        bounded_substring,
+                        cancel,
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let fts_fut = async {
+            if want_fts {
+                self.provider
+                    .fulltext_candidates(normalized, filters, candidate_limit, cancel)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let ngram_fut = async {
+            if want_ngram {
+                self.provider
+                    .ngram_candidates(normalized, filters, candidate_limit, ngram_mode, cancel)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+
+        Ok(tokio::try_join!(substring_fut, fts_fut, ngram_fut)?)
     }
 
     fn rank_all(
@@ -382,6 +424,7 @@ mod tests {
             _filters: &SearchFilters,
             _order: RecentOrder,
             _limit: usize,
+            _cancel: &CancellationToken,
         ) -> Result<Vec<ClipboardEntry>> {
             self.seen.lock().unwrap().push("recent");
             Ok(self.recent.clone())
@@ -393,6 +436,7 @@ mod tests {
             _filters: &SearchFilters,
             _limit: usize,
             _bounded: bool,
+            _cancel: &CancellationToken,
         ) -> Result<Vec<ClipboardEntry>> {
             self.seen.lock().unwrap().push("substring");
             Ok(self.substring.clone())
@@ -403,6 +447,7 @@ mod tests {
             _normalized: &str,
             _filters: &SearchFilters,
             _limit: usize,
+            _cancel: &CancellationToken,
         ) -> Result<Vec<FtsCandidate>> {
             self.seen.lock().unwrap().push("fts");
             Ok(self.fts.clone())
@@ -414,6 +459,7 @@ mod tests {
             _filters: &SearchFilters,
             _limit: usize,
             mode: NgramQueryMode,
+            _cancel: &CancellationToken,
         ) -> Result<Vec<NgramCandidate>> {
             self.seen.lock().unwrap().push("ngram");
             *self.ngram_mode.lock().unwrap() = Some(mode);

@@ -24,6 +24,10 @@ serde_json.workspace = true
 sqlite-vec = { version = "=0.1.9", optional = true }
 time.workspace = true
 tokio.workspace = true
+# `CancellationToken` lets `run_search_blocking` interrupt a superseded search's
+# in-flight SQLite query so the abandoned `spawn_blocking` releases its pooled
+# connection promptly instead of running to completion.
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

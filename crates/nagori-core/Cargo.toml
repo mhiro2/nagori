@@ -33,6 +33,11 @@ tracing.workspace = true
 # `SearchService::search`; the `macros` feature is the smallest surface
 # that gives us that without pulling in a runtime.
 tokio = { workspace = true, features = ["macros"] }
+# `CancellationToken` threads search cancellation through the
+# `SearchCandidateProvider` seam so the SQLite store can interrupt a superseded
+# query's blocking work. The `sync` utilities are not feature-gated in
+# tokio-util, so this adds no runtime to `nagori-core`.
+tokio-util.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
 uuid.workspace = true
