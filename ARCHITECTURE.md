@@ -1639,7 +1639,13 @@ the input (redaction, byte cap, and a ~3,500-token budget that refuses oversized
 input rather than letting the model silently truncate); acquires the backend's
 concurrency permit (text generation is serialised to one, matching Apple's
 single-request model); and registers the request in the `AiRequestRegistry`,
-which owns the `CancellationToken`. The returned stream of `AiEvent`s
+which owns the `CancellationToken`. An **absolute deadline** is anchored at
+registration (`now + request_timeout_ms`) and bounds *every* phase — the
+permit wait, `engine.start`, and the streamed generation all draw down the same
+budget — so a wedged predecessor holding the single text-generation permit, or
+a stalled `engine.start`, can no longer keep a request (and its permit) alive
+past the configured timeout; previously the timeout armed only after start. The
+returned stream of `AiEvent`s
 (`Delta` / `Replace` / `Done` / `Cancelled`, with errors as `Err(AiError)`
 items) releases the permit and removes the registry entry — and cancels the run
 — when dropped. The desktop drives the engine in-process and re-emits events on

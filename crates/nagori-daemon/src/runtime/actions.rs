@@ -9,12 +9,13 @@ use futures::StreamExt;
 use nagori_ai::{AiActionRun, resolve_backend};
 use nagori_core::{
     AiActionId, AiActionRequest, AiAvailabilityReport, AiError, AiErrorCode, AiEvent,
-    AiInputPolicy, AiOutput, AiOverallStatus, AiRequestOptions, AppError, ClipboardEntry, EntryId,
-    EntryRepository, PerActionAvailability, PerActionStatus, QuickActionId, RequestId, Result,
-    SemanticIndexAvailability, Sensitivity, SensitivityClassifier, SettingsRepository,
-    estimate_tokens,
+    AiInputPolicy, AiOutput, AiOverallStatus, AiProviderKind, AiRequestOptions, AppError,
+    ClipboardEntry, EntryId, EntryRepository, PerActionAvailability, PerActionStatus,
+    QuickActionId, RequestId, Result, SemanticIndexAvailability, Sensitivity,
+    SensitivityClassifier, SettingsRepository, estimate_tokens,
 };
 use time::OffsetDateTime;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai_registry::AiRequestRegistry;
@@ -137,6 +138,16 @@ impl NagoriRuntime {
             options,
         };
 
+        // One absolute budget for the *whole* request, anchored at registration
+        // time. The semaphore wait, `engine.start`, and the streamed generation
+        // all draw down the same deadline, so a wedged predecessor holding the
+        // single text-generation permit — or a stalled `engine.start` — can't
+        // keep this request (and its permit) alive past the configured timeout.
+        // Previously the timeout only armed *after* start, leaving the
+        // pre-stream phases unbounded.
+        let timeout = Duration::from_millis(settings.ai.request_timeout_ms);
+        let deadline = Instant::now() + timeout;
+
         // Register *before* acquiring the permit so the request is cancellable
         // while it waits behind the semaphore (Apple serialises text generation
         // to one in-flight request). The registry mutex is never held across the
@@ -145,13 +156,85 @@ impl NagoriRuntime {
         self.ai_registry
             .register(request_id, action, cancel.clone());
 
-        // Acquire the backend's concurrency permit, racing it against a cancel
-        // so a queued request can be aborted before it ever reaches the model.
-        let permit = match resolve_backend(action, engine.provider()) {
-            Some(kind) => {
-                let semaphore = self.ai_registry.semaphores().for_backend(kind);
-                tokio::select! {
-                    acquired = semaphore.acquire_owned() => {
+        // Acquire the backend's concurrency permit, bounded by the cancel token
+        // *and* the remaining budget so a queued request is aborted before it
+        // ever reaches the model — whether by an explicit cancel or by the
+        // deadline expiring while a wedged predecessor holds the permit.
+        let permit = self
+            .acquire_ai_permit(action, engine.provider(), request_id, &cancel, deadline)
+            .await?;
+        // Bind the permit to the registry handle so a normal removal *and* the
+        // TTL reaper both release it, even if the stream is never polled out.
+        self.ai_registry.attach_permit(request_id, permit);
+
+        // Bound `engine.start` by what's left of the budget so a model that
+        // stalls during init / asset load can't pin the permit indefinitely.
+        let run = match tokio::time::timeout(
+            remaining_until(deadline),
+            engine.start(req, cancel.clone()),
+        )
+        .await
+        {
+            Ok(Ok(run)) => run,
+            Ok(Err(err)) => {
+                self.ai_registry.remove(request_id);
+                return Err(ai_error_to_app(&err));
+            }
+            Err(_elapsed) => {
+                // Cancel the backend so any work `engine.start` kicked off
+                // unwinds, then release the permit via the registry handle.
+                cancel.cancel();
+                self.ai_registry.remove(request_id);
+                return Err(AppError::Ai(
+                    "ai action timed out before streaming".to_owned(),
+                ));
+            }
+        };
+
+        let guard = RequestGuard {
+            registry: Arc::clone(&self.ai_registry),
+            request_id,
+            cancel,
+        };
+        // Record that a model-backed action started, with its provider, so the
+        // AI path is observable end-to-end. `action.slug()` and the provider
+        // enum are fixed identifiers — no prompt, input, or output text.
+        tracing::debug!(
+            action = action.slug(),
+            provider = ?engine.provider(),
+            elapsed_ms = elapsed_ms(started),
+            "ai_action_started"
+        );
+        // The stream shares the same absolute deadline, so the remaining budget
+        // already drawn down by the acquire + start bounds the generation too.
+        let events = guard_event_stream(run.events, guard, deadline);
+        Ok(AiActionRun { request_id, events })
+    }
+
+    /// Acquires the backend concurrency permit for a registered request,
+    /// bounded by both `cancel` and the request `deadline`.
+    ///
+    /// Returns `Ok(None)` when no backend is wired for the action (the engine
+    /// surfaces the capability mismatch later). On a cancel or timeout it
+    /// removes the registry handle and returns the matching [`AppError::Ai`], so
+    /// the caller never holds a slot for a run that never started.
+    async fn acquire_ai_permit(
+        &self,
+        action: AiActionId,
+        provider: AiProviderKind,
+        request_id: RequestId,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Option<OwnedSemaphorePermit>> {
+        let Some(kind) = resolve_backend(action, provider) else {
+            // No backend wired — let the engine surface the capability mismatch.
+            return Ok(None);
+        };
+        let semaphore = self.ai_registry.semaphores().for_backend(kind);
+        tokio::select! {
+            acquired = tokio::time::timeout(remaining_until(deadline), semaphore.acquire_owned()) => {
+                match acquired {
+                    Ok(acquired) => {
                         let permit = acquired.map_err(|_| {
                             self.ai_registry.remove(request_id);
                             AppError::Ai("ai concurrency semaphore closed".to_owned())
@@ -167,48 +250,24 @@ impl NagoriRuntime {
                                 "ai action was cancelled while queued".to_owned(),
                             ));
                         }
-                        Some(permit)
+                        Ok(Some(permit))
                     }
-                    () = cancel.cancelled() => {
+                    Err(_elapsed) => {
+                        // The budget expired while we waited for the permit — a
+                        // previous request is wedged. Drop the registry slot so we
+                        // don't hold it for a run that never started.
                         self.ai_registry.remove(request_id);
-                        return Err(AppError::Ai(
-                            "ai action was cancelled while queued".to_owned(),
-                        ));
+                        Err(AppError::Ai(
+                            "ai action timed out waiting for a concurrency permit".to_owned(),
+                        ))
                     }
                 }
             }
-            // No backend wired — let the engine surface the capability mismatch.
-            None => None,
-        };
-        // Bind the permit to the registry handle so a normal removal *and* the
-        // TTL reaper both release it, even if the stream is never polled out.
-        self.ai_registry.attach_permit(request_id, permit);
-
-        let run = match engine.start(req, cancel.clone()).await {
-            Ok(run) => run,
-            Err(err) => {
+            () = cancel.cancelled() => {
                 self.ai_registry.remove(request_id);
-                return Err(ai_error_to_app(&err));
+                Err(AppError::Ai("ai action was cancelled while queued".to_owned()))
             }
-        };
-
-        let timeout = Duration::from_millis(settings.ai.request_timeout_ms);
-        let guard = RequestGuard {
-            registry: Arc::clone(&self.ai_registry),
-            request_id,
-            cancel,
-        };
-        // Record that a model-backed action started, with its provider, so the
-        // AI path is observable end-to-end. `action.slug()` and the provider
-        // enum are fixed identifiers — no prompt, input, or output text.
-        tracing::debug!(
-            action = action.slug(),
-            provider = ?engine.provider(),
-            elapsed_ms = elapsed_ms(started),
-            "ai_action_started"
-        );
-        let events = guard_event_stream(run.events, guard, timeout);
-        Ok(AiActionRun { request_id, events })
+        }
     }
 
     /// Runs an AI action to completion and returns the collected result.
@@ -389,18 +448,21 @@ struct GuardedStreamState {
 
 /// Wraps an engine event stream so the registry guard lives exactly as long as
 /// the stream (dropping it cancels the run and releases the permit), and
-/// enforces the request timeout *consumer-side*: each poll races the backend
-/// against the remaining deadline, so even a backend wedged in an `await`
-/// terminates with a distinct [`AiErrorCode::Timeout`] rather than hanging.
+/// enforces the request `deadline` *consumer-side*: each poll races the backend
+/// against the time remaining until the absolute deadline, so even a backend
+/// wedged in an `await` terminates with a distinct [`AiErrorCode::Timeout`]
+/// rather than hanging. The deadline is the request-wide budget anchored at
+/// registration, so time already spent waiting for the permit and starting the
+/// engine has shortened what the stream gets.
 fn guard_event_stream(
     inner: nagori_ai::AiEventStream,
     guard: RequestGuard,
-    timeout: Duration,
+    deadline: Instant,
 ) -> nagori_ai::AiEventStream {
     let state = GuardedStreamState {
         inner,
         guard,
-        deadline: Instant::now() + timeout,
+        deadline,
         ended: false,
     };
     futures::stream::unfold(state, |mut state| async move {
@@ -429,4 +491,11 @@ fn guard_event_stream(
 
 fn timeout_error() -> AiError {
     AiError::new(AiErrorCode::Timeout, "ai action timed out")
+}
+
+/// Time left until `deadline`, saturating at zero once it has passed. A zero
+/// duration handed to `tokio::time::timeout` elapses on the first poll, so a
+/// blown budget surfaces as a timeout rather than an unbounded wait.
+fn remaining_until(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }

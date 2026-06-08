@@ -875,6 +875,61 @@ async fn ai_action_runs_when_enabled() {
 }
 
 #[tokio::test]
+async fn ai_action_times_out_waiting_for_a_wedged_permit() {
+    use nagori_core::{AiProviderKind, AiSettings};
+    // The request budget is anchored at registration, so a predecessor wedged
+    // while holding the single text-generation permit must time *this* request
+    // out before it ever reaches the model — not leave it queued forever.
+    let (runtime, _) = runtime_with_mock_ai();
+    runtime
+        .save_settings(AppSettings {
+            ai: AiSettings {
+                enabled: true,
+                provider: AiProviderKind::AppleNative,
+                // Small real budget so the test bounds the permit wait without
+                // sleeping long (paused time would not advance behind the
+                // semaphore acquire).
+                request_timeout_ms: 50,
+                ..AiSettings::default()
+            },
+            ..AppSettings::default()
+        })
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("hello world".to_owned())
+        .await
+        .expect("entry should be added");
+
+    // Stand in for a wedged predecessor by holding the only text-generation
+    // permit for the whole test.
+    let held = runtime
+        .ai_registry
+        .semaphores()
+        .text_generation
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold the only text-generation permit");
+
+    // `AiActionRun` isn't `Debug`, so bind the error explicitly rather than
+    // `expect_err`.
+    let Err(err) = runtime
+        .start_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
+        .await
+    else {
+        panic!("a wedged permit must time the request out before it starts");
+    };
+    assert!(
+        matches!(&err, AppError::Ai(msg) if msg.contains("timed out waiting for a concurrency permit")),
+        "got {err:?}"
+    );
+    // The timed-out request must not leak a registry slot.
+    assert_eq!(runtime.ai_registry.active_count(), 0);
+    drop(held);
+}
+
+#[tokio::test]
 async fn ai_action_unsupported_without_engine() {
     // No engine wired (the default test builder): AI actions surface as
     // Unsupported even when enabled.
