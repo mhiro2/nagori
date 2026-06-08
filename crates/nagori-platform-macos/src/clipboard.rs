@@ -156,6 +156,30 @@ where
     }
 }
 
+/// Run a *side-effecting* clipboard write on the blocking pool, awaited to
+/// completion — deliberately **without** [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// A timeout would be unsafe here. `spawn_blocking` tasks cannot be aborted,
+/// so a timed-out write would not stop: the detached thread keeps running and
+/// still lands on the pasteboard once the OS call unwedges, overwriting
+/// whatever the user copied in the meantime — silently clobbering newer (and
+/// possibly sensitive) clipboard content. We therefore await the write to
+/// completion, so the caller either learns the pasteboard truly holds the
+/// intended content or blocks until a wedged pasteboard recovers. This mirrors
+/// the synthetic-paste contract in `nagori_platform::run_blocking_with_timeout`,
+/// which awaits `⌘V` synthesis without a timeout for the same reason. Reads
+/// (`current_snapshot` / `current_sequence`) keep [`clipboard_blocking`]
+/// because a late read result is simply discarded.
+async fn clipboard_write_blocking<F, T>(f: F) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(BlockingError::Join)
+}
+
 #[async_trait]
 impl ClipboardReader for MacosClipboard {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
@@ -378,7 +402,7 @@ impl ClipboardWriter for MacosClipboard {
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
-        clipboard_blocking("write_text", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?
@@ -432,7 +456,7 @@ impl MacosClipboard {
     async fn write_image_bytes(&self, bytes: Vec<u8>, mime: &str) -> Result<()> {
         let mime_owned = mime.to_owned();
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("write_image_bytes", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             // Take the same arboard mutex `current_snapshot` and the text
             // path use so a concurrent reader/writer cannot race the
             // clearContents+setData pair below on the shared NSPasteboard.
@@ -519,7 +543,7 @@ impl MacosClipboard {
             ));
         }
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("write_files", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             // Hold the arboard mutex across `clearContents` + `writeObjects`
             // so a concurrent reader cannot observe the cleared-but-not-yet-
             // written window, matching `write_image_bytes` /
@@ -569,7 +593,7 @@ impl MacosClipboard {
         representations: Vec<StoredClipboardRepresentation>,
     ) -> Result<()> {
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("publish_representations", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             // Hold the arboard mutex across the whole clearContents +
             // writeObjects batch so a concurrent reader cannot observe a
             // partial state with the primary published but the plain

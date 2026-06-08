@@ -249,37 +249,33 @@ impl ClipboardReader for LinuxClipboard {
     }
 }
 
-/// Upper bound on a `wl-clipboard` write (`copy::copy` / `copy::copy_multi`).
+/// Run a *side-effecting* `wl-clipboard` write (`copy::copy` /
+/// `copy::copy_multi`) on the blocking pool, awaited to completion —
+/// deliberately **without** a timeout.
 ///
 /// `copy::copy` returns once the offer is registered with the compositor;
-/// under a healthy Wayland session that is near-instant, but a *wedged*
-/// compositor (a frozen Wayland server mid-handshake) would otherwise leave
-/// the `spawn_blocking` hop pending forever — freezing copy-back, the AI
-/// result write-back, and the paste serialisation that depends on them. The
-/// read side already bounds its pipe via `PIPE_READ_TIMEOUT` + `poll(2)`; this
-/// is the write-side equivalent. The detached worker is leaked until the
-/// compositor unwedges (`spawn_blocking` tasks cannot be aborted), but the
-/// async caller is freed within the window.
-#[cfg(target_os = "linux")]
-const CLIPBOARD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Run a `wl-clipboard` write closure on the blocking pool, bounded by
-/// [`CLIPBOARD_WRITE_TIMEOUT`]. Maps a timeout / panic onto `AppError::Platform`
-/// so the daemon's copy-back path surfaces a degraded result instead of
-/// hanging.
+/// under a healthy Wayland session that is near-instant. A timeout here would
+/// be unsafe, though: `spawn_blocking` tasks cannot be aborted, so a timed-out
+/// write would not stop — the detached worker keeps running and still
+/// registers the offer once the compositor unwedges, overwriting whatever the
+/// user copied in the meantime and silently clobbering newer (and possibly
+/// sensitive) clipboard content. We therefore await the write to completion,
+/// so the caller either learns the selection truly holds the intended content
+/// or blocks until a wedged compositor recovers. This mirrors the
+/// synthetic-paste contract in `nagori_platform::run_blocking_with_timeout`,
+/// which awaits `Ctrl+V` synthesis without a timeout for the same reason.
+///
+/// Reads keep their bound: the read side uses `PIPE_READ_TIMEOUT` + `poll(2)`
+/// and closes the pipe on timeout, which is a *real* cancellation (the pipe
+/// read genuinely stops), so a late result is impossible there.
 #[cfg(target_os = "linux")]
 async fn run_clipboard_write<F>(op: &'static str, f: F) -> Result<()>
 where
     F: FnOnce() -> Result<()> + Send + 'static,
 {
-    match nagori_platform::run_blocking_with_timeout(op, CLIPBOARD_WRITE_TIMEOUT, f).await {
+    match tokio::task::spawn_blocking(f).await {
         Ok(inner) => inner,
-        Err(err @ nagori_platform::BlockingError::Timeout { .. }) => Err(AppError::Platform(
-            format!("{err}; the Wayland compositor may be wedged, the copy did not complete"),
-        )),
-        Err(err @ nagori_platform::BlockingError::Panicked { .. }) => Err(AppError::Platform(
-            format!("wl-clipboard write failed: {err}"),
-        )),
+        Err(join_err) => Err(AppError::Platform(format!("{op} task failed: {join_err}"))),
     }
 }
 

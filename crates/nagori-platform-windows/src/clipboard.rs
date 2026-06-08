@@ -122,6 +122,31 @@ where
     }
 }
 
+/// Run a *side-effecting* clipboard write on the blocking pool, awaited to
+/// completion — deliberately **without** [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// A timeout would be unsafe here. `spawn_blocking` tasks cannot be aborted,
+/// so a timed-out `SetClipboardData` would not stop: the detached thread keeps
+/// running and still lands on the clipboard once the OS call unwedges,
+/// overwriting whatever the user copied in the meantime — silently clobbering
+/// newer (and possibly sensitive) clipboard content. We therefore await the
+/// write to completion, so the caller either learns the clipboard truly holds
+/// the intended content or blocks until a wedged clipboard recovers. This
+/// mirrors the synthetic-paste contract in
+/// `nagori_platform::run_blocking_with_timeout`, which awaits `Ctrl+V`
+/// synthesis without a timeout for the same reason. Reads (`current_snapshot`
+/// / `current_sequence`) keep [`clipboard_blocking`] because a late read
+/// result is simply discarded.
+async fn clipboard_write_blocking<F, T>(f: F) -> std::result::Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(BlockingError::Join)
+}
+
 #[cfg(test)]
 mod blocking_timeout_tests {
     use super::*;
@@ -246,7 +271,7 @@ impl ClipboardWriter for WindowsClipboard {
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
-        clipboard_blocking("write_text", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?
@@ -292,7 +317,7 @@ impl ClipboardWriter for WindowsClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))??;
 
             let clipboard = self.clipboard.clone();
-            clipboard_blocking("write_representations", move || -> Result<()> {
+            clipboard_write_blocking(move || -> Result<()> {
                 // Hold the arboard mutex across the entire OpenClipboard +
                 // EmptyClipboard + N × SetClipboardData batch so a concurrent
                 // text-write through arboard cannot land between our
@@ -343,7 +368,7 @@ impl ClipboardWriter for WindowsClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))??;
 
             let clipboard = self.clipboard.clone();
-            clipboard_blocking("write_representation_exact", move || -> Result<()> {
+            clipboard_write_blocking(move || -> Result<()> {
                 let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
                 win::write_multi_rep(&reps, &dibv5)
             })
@@ -392,7 +417,7 @@ impl WindowsClipboard {
             ));
         }
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("write_files", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             // Hold the arboard mutex across the whole `OpenClipboard +
             // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
             // concurrent text-write through arboard cannot land between
@@ -452,9 +477,12 @@ impl WindowsClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))??;
 
-        // Only the actual Win32 clipboard write is timeout-bounded.
+        // The image decode above ran on a plain blocking task (CPU/memory
+        // bound, no clipboard lock). The actual Win32 clipboard write awaits
+        // to completion without a timeout: a timed-out `set_image` cannot be
+        // cancelled and would clobber newer clipboard content on late return.
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("write_image_bytes", move || -> Result<()> {
+        clipboard_write_blocking(move || -> Result<()> {
             clipboard
                 .lock()
                 .map_err(|err| lock_err(&err))?

@@ -17,15 +17,22 @@
 //! **Caveat — the timeout does not cancel the closure.** `spawn_blocking`
 //! tasks cannot be aborted, so on timeout the detached thread keeps running
 //! and the OS call still completes once it un-wedges. That is fine when a late
-//! completion is harmless: a clipboard write lands the *intended* content, a
-//! focus restore re-foregrounds the source app the user came from, and a
-//! frontmost-app probe's result is simply discarded. It is **not** safe for an
-//! op whose late side effect would be harmful — most notably synthetic paste,
-//! where a stray `⌘V` / `Ctrl+V` after the user has moved on would inject
-//! clipboard content into an unrelated window. Synthetic-input synthesis is
-//! therefore awaited *without* a timeout in the paste adapters (the Linux path
-//! is the exception: it shells out to `wtype` and kills the subprocess on
-//! timeout, which is a real cancellation).
+//! completion is harmless: a focus restore re-foregrounds the source app the
+//! user came from, and a frontmost-app probe's result is simply discarded. It
+//! is **not** safe for an op whose late side effect would be harmful:
+//!
+//! - **Synthetic paste** — a stray `⌘V` / `Ctrl+V` after the user has moved
+//!   on would inject clipboard content into an unrelated window. Synthetic-
+//!   input synthesis is therefore awaited *without* a timeout in the paste
+//!   adapters (the Linux path is the exception: it shells out to `wtype` and
+//!   kills the subprocess on timeout, which is a real cancellation).
+//! - **Clipboard write (copy-back)** — a timed-out write would still land on
+//!   the OS clipboard once it un-wedges, overwriting whatever the user copied
+//!   in the meantime and clobbering newer (possibly sensitive) content. The
+//!   platform clipboard adapters therefore await their *write* paths to
+//!   completion without this timeout (`clipboard_write_blocking` on macOS /
+//!   Windows, the timeout-free `run_clipboard_write` on Linux), and reserve
+//!   the timeout for *reads*, whose late result is simply discarded.
 
 use std::time::Duration;
 
