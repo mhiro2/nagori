@@ -1818,8 +1818,8 @@ mod tests {
     fn reject_oversized_image_blocks_canvas_above_cap() {
         // Forged PNG that advertises a pixel count above
         // MAX_DECODED_IMAGE_PIXELS but encodes to a few-dozen bytes —
-        // exactly the asymmetric payload the REVIEW.md P1 entry called
-        // out. Must return Unsupported so `write_image_bytes` /
+        // exactly the asymmetric payload a decompression-bomb guard must
+        // reject. Must return Unsupported so `write_image_bytes` /
         // `build_dibv5_payload` bail before `decode()` allocates the
         // multi-GB RGBA buffer.
         let dim = dim_above_cap();

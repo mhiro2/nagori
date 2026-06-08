@@ -517,7 +517,7 @@ mod tests {
     async fn hybrid_ascii_query_skips_ngram() {
         // Pure-ASCII Auto queries are served by FTS + bounded substring; ngram
         // is not dispatched at all, so the common-bigram posting-list scan
-        // never runs. This is the P0 fix for the 100k fan-out blowup.
+        // never runs. This is the fix for the 100k fan-out blowup.
         let provider = StubProvider {
             substring: vec![entry("alpha")],
             fts: vec![FtsCandidate {

@@ -751,7 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_skips_ascii_ngram_only_match() {
-        // Regression for the P0 ngram fan-out fix: the Auto/Hybrid plan must
+        // Regression for the ngram fan-out fix: the Auto/Hybrid plan must
         // not run ASCII ngram. `qui ck` reaches `the quick brown fox` only via
         // whitespace-stripped ngram overlap (`quick`) — FTS sees the tokens
         // `qui`/`ck` with no whole-token match, and the substring scan looks
@@ -800,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn ngram_cjk_only_mode_drops_ascii_grams() {
-        // Directly pins the P0 gram filter. `CjkOnly` (the Auto/Hybrid policy)
+        // Directly pins the gram filter. `CjkOnly` (the Auto/Hybrid policy)
         // keeps only CJK-bearing grams, so a pure-ASCII query yields nothing
         // while a mixed query still matches on its CJK / boundary grams. The
         // `Full` mode (explicit Fuzzy) keeps ASCII grams so the same ASCII

@@ -11,8 +11,8 @@
 //! `QLPreviewPanel` (`AppKit`'s in-process Quick Look surface) requires
 //! the calling app to expose a delegate / data-source pair that conforms
 //! to `QLPreviewPanelDataSource` and to drive `orderFront:` on the main
-//! thread. That is a meaningful amount of `objc2` plumbing for a P2
-//! affordance, and the user-visible result of `qlmanage -p` is
+//! thread. That is a meaningful amount of `objc2` plumbing for a
+//! secondary affordance, and the user-visible result of `qlmanage -p` is
 //! indistinguishable from the in-process panel — same animation, same
 //! escape-to-dismiss, same Quick Look chrome. We keep the door open for
 //! a future swap to `QLPreviewPanel` (e.g. once we want tighter focus
