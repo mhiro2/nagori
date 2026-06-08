@@ -363,11 +363,47 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
             .shutdown_background_tasks(BACKGROUND_TASK_SHUTDOWN_GRACE)
             .await;
         if runtime.current_settings().clear_on_quit {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                runtime.clear_non_pinned(),
-            )
-            .await;
+            // Persist a purge-pending marker *before* the delete so a timeout
+            // (below), crash, or kill mid-purge is completed on the next launch
+            // (fail-closed) instead of silently leaving the history the user
+            // asked to clear.
+            match state.mark_clear_on_quit_pending() {
+                Ok(()) => {
+                    // The marker covers a timeout, so the 1 s ceiling can keep a
+                    // wedged DB from freezing quit: if it elapses (or errors) the
+                    // marker stays and `try_new_at` finishes the job at next
+                    // launch.
+                    let purged = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        runtime.clear_non_pinned(),
+                    )
+                    .await;
+                    if matches!(purged, Ok(Ok(_))) {
+                        // Only a completed purge removes the marker. A removal
+                        // failure would make the next launch re-purge, so
+                        // surface it; that fail-closed re-purge is harmless
+                        // (idempotent at the start of a session).
+                        if let Err(err) = state.clear_clear_on_quit_pending() {
+                            tracing::warn!(error = %err, "clear_on_quit_marker_remove_failed");
+                        }
+                    } else {
+                        tracing::warn!("clear_on_quit_incomplete_purge_deferred_to_next_launch");
+                    }
+                }
+                Err(err) => {
+                    // No resume marker could be written, so the timeout path
+                    // would be fail-open (a timed-out purge would leave data
+                    // with nothing to finish it on next launch). Await the purge
+                    // to completion instead — honouring clear-on-quit now is the
+                    // only remaining guarantee. A DELETE on the local SQLite file
+                    // does not hang indefinitely; a genuine failure here means a
+                    // broken filesystem we cannot recover from at quit.
+                    tracing::warn!(error = %err, "clear_on_quit_marker_write_failed");
+                    if let Err(err) = runtime.clear_non_pinned().await {
+                        tracing::error!(error = %err, "clear_on_quit_purge_failed_without_marker");
+                    }
+                }
+            }
             // `clear_on_quit` promises a clean slate on exit; extend that to
             // the plaintext Quick Look cache so a previewed Public body is not
             // left behind in `/tmp` for the next user of the machine.

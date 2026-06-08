@@ -87,6 +87,15 @@ pub struct AppState {
     /// process exits, at which point the kernel releases it.
     #[allow(dead_code)]
     instance_lock: Option<nagori_storage::ProcessLock>,
+    /// Path to the clear-on-quit purge-pending marker. Set for real launches
+    /// by `try_new_at`; `build`-only callers (tests / in-memory stores) own no
+    /// on-disk directory and leave it `None`. When `clear_on_quit` is enabled,
+    /// `perform_exit_cleanup` writes this sentinel *before* attempting the
+    /// purge and removes it only once the purge completes within the shutdown
+    /// budget. A launch that finds it present finishes the purge fail-closed
+    /// before any window can serve history, so a timed-out / crashed shutdown
+    /// purge can no longer leave behind data the user asked to clear.
+    clear_on_quit_marker: Option<PathBuf>,
 }
 
 /// Snapshot of a global-hotkey registration failure shared across the
@@ -324,6 +333,12 @@ impl AppState {
             .map_err(|err| annotate_startup_error(&err, db_path, StartupStage::OpenDb))?;
         let mut state = Self::build(store)?;
         state.instance_lock = Some(instance_lock);
+        state.clear_on_quit_marker = Some(clear_on_quit_marker_path(db_path));
+        // Fail-closed: complete any clear-on-quit purge the previous session
+        // could not finish before the state is handed to Tauri. A failure here
+        // surfaces the startup fallback window (and leaves the marker) rather
+        // than booting into a session that still shows the cleared history.
+        state.finish_pending_clear_on_quit()?;
         Ok(state)
     }
 
@@ -466,7 +481,89 @@ impl AppState {
             // Set by `try_new_at` for real launches; `build`-only callers
             // (tests, in-memory stores) own no on-disk directory to lock.
             instance_lock: None,
+            clear_on_quit_marker: None,
         })
+    }
+
+    /// Write the clear-on-quit purge-pending marker. Called by the shutdown
+    /// path *before* it attempts the purge so a timeout, crash, or kill
+    /// mid-purge is finished on the next launch instead of leaving the history
+    /// the user asked to clear. No-op (`Ok`) for `build`-only callers (no
+    /// marker path). The `io::Result` is surfaced rather than swallowed: a
+    /// write failure means a subsequent purge timeout could not be resumed, so
+    /// the caller logs it instead of silently losing the guarantee.
+    pub fn mark_clear_on_quit_pending(&self) -> std::io::Result<()> {
+        let Some(path) = self.clear_on_quit_marker.as_ref() else {
+            return Ok(());
+        };
+        std::fs::write(path, b"")
+    }
+
+    /// Remove the purge-pending marker after a purge has actually completed.
+    /// A missing file is success (the marker was never written or already
+    /// gone). A real removal failure is returned, not swallowed: a marker left
+    /// behind after a *successful* purge would make the next launch purge again
+    /// — including any history captured in between — so the caller must treat
+    /// it as a hard error rather than logging and moving on.
+    pub fn clear_clear_on_quit_pending(&self) -> std::io::Result<()> {
+        let Some(path) = self.clear_on_quit_marker.as_ref() else {
+            return Ok(());
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Whether a clear-on-quit purge from a previous session is still pending,
+    /// i.e. the marker survived because the shutdown purge did not complete.
+    /// An I/O error probing the marker is treated as **present** so an
+    /// unreadable marker fails closed into a purge attempt rather than silently
+    /// skipping the user's clear-on-quit intent.
+    #[must_use]
+    pub fn clear_on_quit_marker_present(&self) -> bool {
+        let Some(path) = self.clear_on_quit_marker.as_ref() else {
+            return false;
+        };
+        match path.try_exists() {
+            Ok(present) => present,
+            Err(err) => {
+                tracing::warn!(error = %err, "clear_on_quit_marker_probe_failed");
+                true
+            }
+        }
+    }
+
+    /// Finish a clear-on-quit purge a previous session could not complete
+    /// within its shutdown budget. Runs during `try_new_at` — before the state
+    /// is handed to Tauri and before any window can serve a row — so the purge
+    /// is fail-closed: if the marker is present the purge must succeed (and its
+    /// marker must be removed) before the app starts normally. A failure is
+    /// returned as a startup error, which surfaces the fallback window and
+    /// leaves the marker so the next launch retries, rather than booting into a
+    /// session that still shows — or later re-purges — the history the user
+    /// asked to clear.
+    fn finish_pending_clear_on_quit(&self) -> Result<()> {
+        if !self.clear_on_quit_marker_present() {
+            return Ok(());
+        }
+        tracing::warn!("clear_on_quit_resuming_pending_purge");
+        tauri::async_runtime::block_on(self.runtime.clear_non_pinned()).map_err(|err| {
+            AppError::Storage(format!(
+                "could not finish the clear-on-quit purge left pending by the previous session: \
+                 {err}. The clipboard history you asked to clear on quit is still present; relaunch \
+                 to retry, or move the database aside to start fresh."
+            ))
+        })?;
+        self.clear_clear_on_quit_pending().map_err(|err| {
+            AppError::Storage(format!(
+                "finished the clear-on-quit purge but could not remove its marker: {err}. Remove \
+                 the clear-on-quit.pending file in the database directory so the next launch does \
+                 not purge again."
+            ))
+        })?;
+        Ok(())
     }
 
     /// Record a hotkey registration failure so a later-mounted listener
@@ -1042,6 +1139,23 @@ fn lock_dir_for(db_path: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+/// Path to the clear-on-quit purge-pending marker: a sentinel file beside the
+/// DB. Kept on the filesystem rather than in the DB so it can be written /
+/// checked even when the DB itself is the contended resource that made the
+/// shutdown purge time out, and so a hard kill that never ran any DB write
+/// still leaves a trace the next launch can act on.
+///
+/// Keyed to the DB *file*, not just its directory: a marker named after the
+/// directory alone would let a different `NAGORI_DB_PATH` pointed at another DB
+/// in the same directory inherit a stale marker and purge the wrong database's
+/// history at startup. Appending the suffix to the full path yields e.g.
+/// `…/nagori.sqlite.clear-on-quit.pending`.
+fn clear_on_quit_marker_path(db_path: &Path) -> PathBuf {
+    let mut marker = db_path.as_os_str().to_owned();
+    marker.push(".clear-on-quit.pending");
+    PathBuf::from(marker)
 }
 
 /// Acquire the single-instance lock over `lock_dir`, mapping contention to a
