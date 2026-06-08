@@ -29,8 +29,10 @@ pub struct MacosWindowBehavior;
 
 /// Upper bound on a blocking `NSWorkspace` / `activateWithOptions` call.
 /// Frontmost-app probing happens at palette-open and focus restore happens
-/// just before the synthesised ⌘V; a healthy call answers in a few ms, so 3 s
-/// is generous headroom while still bounding a wedged `AppKit` lock.
+/// just before the synthesised ⌘V. A healthy frontmost probe answers in a few
+/// ms; focus restore additionally polls up to [`ACTIVATION_VERIFY_DEADLINE`]
+/// (500 ms) for the target to become frontmost, so 3 s leaves headroom for that
+/// verification while still bounding a wedged `AppKit` lock.
 const WINDOW_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl MacosWindowBehavior {
@@ -108,11 +110,21 @@ impl WindowBehavior for MacosWindowBehavior {
         // can't hang the paste flow — on timeout we surface a platform error
         // and the desktop aborts the paste rather than letting ⌘V land in
         // whatever window kept focus.
-        nagori_platform::run_blocking_with_timeout("activate_app", WINDOW_OP_TIMEOUT, move || {
-            activate_app_sync(&bundle_id);
-        })
+        //
+        // `activate_app_sync` also verifies the activation actually took: it
+        // checks `activateWithOptions`' return value and then polls until the
+        // workspace reports the target as frontmost. A terminated / unfocusable
+        // target therefore surfaces as an `Err` instead of a silent success, so
+        // the desktop's synthesise path aborts the ⌘V rather than typing the
+        // clipboard into whatever window happened to keep focus.
+        let outcome = nagori_platform::run_blocking_with_timeout(
+            "activate_app",
+            WINDOW_OP_TIMEOUT,
+            move || activate_app_sync(&bundle_id),
+        )
         .await
-        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
+        outcome.map_err(nagori_core::AppError::Platform)
     }
 
     async fn frontmost_focused_is_secure(&self) -> Result<bool> {
@@ -152,17 +164,63 @@ fn frontmost_app_sync() -> Option<FrontmostApp> {
     })
 }
 
-fn activate_app_sync(bundle_id: &str) {
+/// How long to wait for `activateWithOptions` to actually move the frontmost
+/// app to the target. The call returns immediately and posts the activation to
+/// the main thread, so the frontmost app may not have changed yet on return. A
+/// healthy hand-off lands in tens of ms; the desktop then sleeps a further
+/// 60 ms before synthesising ⌘V. If the target never becomes frontmost within
+/// this window we abort so the keystroke is not sent into the wrong window.
+const ACTIVATION_VERIFY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Poll cadence while waiting for the frontmost app to flip to the target.
+const ACTIVATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Activate the app identified by `bundle_id` and verify the activation took.
+///
+/// Returns `Err(reason)` when the target is no longer running, when
+/// `activateWithOptions` reports failure, or when the target does not become
+/// the frontmost app within [`ACTIVATION_VERIFY_DEADLINE`]. The caller maps the
+/// reason onto `AppError::Platform` so the paste flow can abort the synthesised
+/// ⌘V rather than send it into whatever window kept focus.
+fn activate_app_sync(bundle_id: &str) -> std::result::Result<(), String> {
     let ns_id = NSString::from_str(bundle_id);
     let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_id);
     let Some(app) = apps.iter().next() else {
-        // Caller treats "app no longer running" as best-effort, so this
-        // is not promoted to an error — the paste will land wherever the
-        // OS now considers frontmost.
-        return;
+        return Err(format!(
+            "focus restore target {bundle_id} is no longer running"
+        ));
     };
     #[allow(deprecated)]
-    let _ = app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+    let activated = app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+    if !activated {
+        return Err(format!(
+            "activateWithOptions reported failure for {bundle_id} (target terminated or cannot be activated)"
+        ));
+    }
+    // The activation is posted to the main thread, so poll the workspace until
+    // it reports the target as frontmost before declaring success. `Instant`
+    // is safe here: this is a sub-second active spin, not a wall-clock gap that
+    // could span a system sleep.
+    let deadline = std::time::Instant::now() + ACTIVATION_VERIFY_DEADLINE;
+    loop {
+        if frontmost_bundle_id().as_deref() == Some(bundle_id) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{bundle_id} did not become frontmost within {} ms after activation",
+                ACTIVATION_VERIFY_DEADLINE.as_millis()
+            ));
+        }
+        std::thread::sleep(ACTIVATION_POLL_INTERVAL);
+    }
+}
+
+/// Bundle id of the workspace's current frontmost app, if any. A lean read used
+/// to verify a focus restore actually moved the frontmost to the target.
+fn frontmost_bundle_id() -> Option<String> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let app = workspace.frontmostApplication()?;
+    app.bundleIdentifier().map(|s| s.to_string())
 }
 
 /// Walk the system-wide Accessibility tree to learn whether the frontmost
