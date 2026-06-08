@@ -696,6 +696,267 @@ pub fn acquire_data_dir_lock(dir: &std::path::Path) -> Result<nagori_storage::Pr
     }
 }
 
+/// Initial delay before restarting a background worker that exited
+/// unexpectedly. Doubles on each consecutive failure up to
+/// [`WORKER_RESTART_BACKOFF_MAX`], so a worker that panics on every start
+/// (a deterministic bug) backs off instead of spinning.
+const WORKER_RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+/// Cap on the worker restart backoff.
+const WORKER_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Restart policy for a supervised background worker.
+#[derive(Clone, Copy)]
+enum WorkerRestart {
+    /// Long-running loop (capture / maintenance / semantic index): any exit
+    /// while shutdown has *not* been requested is unexpected — a panic, or a
+    /// settings/`watch` channel that closed early — and triggers a
+    /// backoff-restart. Only the shutdown signal stops it for good.
+    OnExit,
+    /// One-shot pass (the ngram backfill): a clean completion is terminal and
+    /// must not respawn; only a panic restarts it so the backlog still drains.
+    OnPanic,
+}
+
+/// Keep a background worker alive under the daemon's lifetime.
+///
+/// (Re)spawns the worker through `spawn`, and on an unexpected exit — a panic,
+/// or (for [`WorkerRestart::OnExit`]) any return while shutdown was not
+/// requested — logs it and restarts after an exponential backoff. On shutdown
+/// it drains the live worker within `grace`, then returns. A worker past
+/// `grace` is aborted: that drops the supervisor's await of it so shutdown is
+/// bounded, but — like the pre-existing `drain_workers` abort — it cannot stop
+/// an already-running `spawn_blocking` call, which keeps running detached until
+/// the syscall returns (see [`POST_ABORT_JOIN_TIMEOUT`]).
+///
+/// This mirrors [`supervise_ipc_server`]: before this, a panicking or
+/// early-returning capture / maintenance / semantic / ngram worker was
+/// invisible — `run_daemon` kept waiting on shutdown while the worker stayed
+/// dead and its health snapshot went stale or falsely healthy.
+async fn supervise_worker<F>(
+    name: &'static str,
+    restart: WorkerRestart,
+    mut shutdown: ShutdownHandle,
+    grace: Duration,
+    mut spawn: F,
+) where
+    F: FnMut(ShutdownHandle) -> tokio::task::JoinHandle<()>,
+{
+    let mut backoff = WORKER_RESTART_BACKOFF_INITIAL;
+    loop {
+        let mut handle = spawn(shutdown.clone());
+        tokio::select! {
+            // `biased` so a real shutdown beats a coincident worker exit and we
+            // don't restart a worker we're about to tear down.
+            biased;
+            () = shutdown.cancelled() => {
+                // The worker observes the same shutdown signal, so it should
+                // return between ticks; `drain_one` bounds the wait and aborts a
+                // worker still running past `grace` (a detached `spawn_blocking`
+                // it left behind may outlive the abort — bounded shutdown, not a
+                // hard stop of in-flight blocking work).
+                drain_one(name, handle, grace).await;
+                return;
+            }
+            join = &mut handle => {
+                match join {
+                    Ok(()) => {
+                        if shutdown.is_cancelled() {
+                            return;
+                        }
+                        match restart {
+                            // One-shot pass finished its work — nothing to respawn.
+                            WorkerRestart::OnPanic => return,
+                            WorkerRestart::OnExit => {
+                                warn!(worker = name, "worker_exited_unexpectedly");
+                            }
+                        }
+                    }
+                    // Only the drain path above aborts a worker, and it returns
+                    // there — so a cancellation here means an external abort;
+                    // treat it as shutdown rather than respawning.
+                    Err(err) if err.is_cancelled() => return,
+                    Err(err) if err.is_panic() => {
+                        warn!(worker = name, error = %err, "worker_panicked");
+                    }
+                    Err(err) => {
+                        warn!(worker = name, error = %err, "worker_join_failed");
+                    }
+                }
+            }
+        }
+        // Back off before the restart, racing shutdown so we don't sleep through
+        // it (and resurrect a worker the daemon is tearing down).
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(backoff) => {}
+        }
+        backoff = backoff.saturating_mul(2).min(WORKER_RESTART_BACKOFF_MAX);
+    }
+}
+
+/// Supervise the clipboard capture loop. `reader` is shared (`Arc`) so each
+/// (re)spawn after a panic rebuilds a fresh [`CaptureLoop`] over the same
+/// adapter.
+fn spawn_capture_supervisor(
+    runtime: NagoriRuntime,
+    reader: Arc<dyn ClipboardReader>,
+    window: Option<Arc<dyn WindowBehavior>>,
+    config: &DaemonConfig,
+    settings_rx: watch::Receiver<nagori_core::AppSettings>,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    let interval = config.capture_interval;
+    let secure_focus_fail_closed = config.secure_focus_fail_closed;
+    let grace = config.shutdown_grace;
+    let store = runtime.store().clone();
+    tokio::spawn(async move {
+        supervise_worker(
+            "capture",
+            WorkerRestart::OnExit,
+            shutdown,
+            grace,
+            move |mut worker_shutdown| {
+                let reader = reader.clone();
+                let store = store.clone();
+                let window = window.clone();
+                let settings_rx = settings_rx.clone();
+                let search_cache = runtime.search_cache_handle();
+                let capture_health = runtime.capture_health();
+                let notify_runtime = runtime.clone();
+                tokio::spawn(async move {
+                    let settings = settings_rx.borrow().clone();
+                    let semantic_notifier: Arc<dyn Fn(nagori_core::EntryId) + Send + Sync> =
+                        Arc::new(move |_entry_id| notify_runtime.notify_semantic_capture());
+                    let mut capture =
+                        CaptureLoop::new(reader, store.clone(), store.clone(), settings)
+                            .with_search_cache(search_cache)
+                            .with_capture_health(capture_health)
+                            .with_capture_notifier(semantic_notifier);
+                    if !secure_focus_fail_closed {
+                        capture = capture.without_secure_focus_fail_closed();
+                    }
+                    if let Some(w) = window {
+                        capture = capture.with_window(w);
+                    }
+                    let shutdown_signal = async move { worker_shutdown.cancelled().await };
+                    if let Err(err) = capture
+                        .run_polling_with_settings(interval, settings_rx, shutdown_signal)
+                        .await
+                    {
+                        warn!(error = %err, "capture_loop_terminated");
+                    }
+                })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the periodic maintenance loop (retention sweep + AI stale-request
+/// reaper).
+fn spawn_maintenance_supervisor(
+    runtime: NagoriRuntime,
+    interval: Duration,
+    grace: Duration,
+    settings_rx: watch::Receiver<nagori_core::AppSettings>,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    let store = runtime.store().clone();
+    tokio::spawn(async move {
+        supervise_worker(
+            "maintenance",
+            WorkerRestart::OnExit,
+            shutdown,
+            grace,
+            move |mut worker_shutdown| {
+                let store = store.clone();
+                let mut settings_rx = settings_rx.clone();
+                let search_cache = runtime.search_cache_handle();
+                let health = runtime.maintenance_health();
+                let reaper_runtime = runtime.clone();
+                tokio::spawn(async move {
+                    let maintenance =
+                        MaintenanceService::new(store).with_search_cache(search_cache);
+                    loop {
+                        let settings = settings_rx.borrow().clone();
+                        match maintenance.run(&settings).await {
+                            Ok(_) => health.record_success(),
+                            Err(err) => {
+                                // Record before logging so a concurrent
+                                // health-probe sees the latest counter even if
+                                // tracing back-pressure delays the warn line.
+                                health.record_failure(err.to_string());
+                                warn!(error = %err, "maintenance_failed");
+                            }
+                        }
+                        // Backstop for AI requests whose stream was leaked or
+                        // wedged: the guard-drop path releases the permit on
+                        // normal completion, but a never-polled stream needs
+                        // the TTL reaper to free it.
+                        let reaped = reaper_runtime.reap_stale_ai_requests();
+                        if reaped > 0 {
+                            warn!(count = reaped, "ai_requests_reaped");
+                        }
+                        tokio::select! {
+                            () = worker_shutdown.cancelled() => return,
+                            changed = settings_rx.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                            },
+                            () = tokio::time::sleep(interval) => {},
+                        }
+                    }
+                })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the background semantic-index worker.
+fn spawn_semantic_supervisor(
+    runtime: NagoriRuntime,
+    grace: Duration,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        supervise_worker(
+            "semantic",
+            WorkerRestart::OnExit,
+            shutdown,
+            grace,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move { runtime.run_semantic_indexer(worker_shutdown).await })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the one-shot ngram-rebuild backfill. A clean completion is
+/// terminal (the backlog drained); only a panic respawns it.
+fn spawn_ngram_rebuild_supervisor(
+    runtime: NagoriRuntime,
+    grace: Duration,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        supervise_worker(
+            "ngram_rebuild",
+            WorkerRestart::OnPanic,
+            shutdown,
+            grace,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move { runtime.run_ngram_rebuild(worker_shutdown).await })
+            },
+        )
+        .await;
+    })
+}
+
 fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
     // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
     // not a filesystem path. Only ensure the parent directory exists when
@@ -738,7 +999,6 @@ where
     // Bind the lock to a lifetime-spanning local so it is held until this
     // function returns (and then dropped, releasing it). Never read otherwise.
     let _instance_lock = instance_lock;
-    let store = runtime.store().clone();
     let shutdown = runtime.shutdown_handle();
     // Fail closed: refuse to start if the persisted settings can't be loaded
     // — running on `Default` means we'd ignore the user's denylist /
@@ -748,103 +1008,45 @@ where
     let settings_rx = runtime.settings_subscribe();
     ensure_ipc_runtime_dirs(&config)?;
 
-    let capture_handle = {
-        let store = store.clone();
-        let mut shutdown = shutdown.clone();
-        let interval = config.capture_interval;
-        let settings_rx = settings_rx.clone();
-        let window = window.clone();
-        let search_cache = runtime.search_cache_handle();
-        let capture_health = runtime.capture_health();
-        let secure_focus_fail_closed = config.secure_focus_fail_closed;
-        // `refresh_settings_from_store` already succeeded above, so the
-        // daemon's pre-poll init is healthy by definition — record it
-        // here so `nagori doctor` doesn't transiently report "not ready"
-        // while the capture task is being spawned.
-        runtime.startup_health().record_capture_ready();
-        let notify_runtime = runtime.clone();
-        tokio::spawn(async move {
-            let settings = settings_rx.borrow().clone();
-            let semantic_notifier: std::sync::Arc<dyn Fn(nagori_core::EntryId) + Send + Sync> =
-                std::sync::Arc::new(move |_entry_id| notify_runtime.notify_semantic_capture());
-            let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
-                .with_search_cache(search_cache)
-                .with_capture_health(capture_health)
-                .with_capture_notifier(semantic_notifier);
-            if !secure_focus_fail_closed {
-                capture = capture.without_secure_focus_fail_closed();
-            }
-            if let Some(w) = window {
-                capture = capture.with_window(w);
-            }
-            let shutdown_signal = async move { shutdown.cancelled().await };
-            if let Err(err) = capture
-                .run_polling_with_settings(interval, settings_rx, shutdown_signal)
-                .await
-            {
-                warn!(error = %err, "capture_loop_terminated");
-            }
-        })
-    };
+    // Every long-running worker runs under a supervisor that restarts it after
+    // a panic or unexpected early return (capture / maintenance / semantic) and
+    // drains it on shutdown. The ngram backfill is one-shot, so its supervisor
+    // only respawns on a panic, never after the backlog drains. Without this a
+    // worker that crashed left the daemon serving with a dead loop and a stale
+    // health snapshot.
+    //
+    // `reader` becomes shared so a respawn can rebuild a fresh capture loop over
+    // the same adapter.
+    let reader: Arc<dyn ClipboardReader> = Arc::new(reader);
+    let grace = config.shutdown_grace;
 
-    let maintenance_handle = {
-        let store = store.clone();
-        let mut shutdown = shutdown.clone();
-        let interval = config.maintenance_interval;
-        let mut settings_rx = settings_rx.clone();
-        let search_cache = runtime.search_cache_handle();
-        let health = runtime.maintenance_health();
-        let reaper_runtime = runtime.clone();
-        tokio::spawn(async move {
-            let maintenance =
-                MaintenanceService::new(store.clone()).with_search_cache(search_cache);
-            loop {
-                let settings = settings_rx.borrow().clone();
-                match maintenance.run(&settings).await {
-                    Ok(_) => health.record_success(),
-                    Err(err) => {
-                        // Record before logging so a concurrent
-                        // health-probe sees the latest counter even if
-                        // tracing back-pressure delays the warn line.
-                        health.record_failure(err.to_string());
-                        warn!(error = %err, "maintenance_failed");
-                    }
-                }
-                // Backstop for AI requests whose stream was leaked or wedged:
-                // the guard-drop path releases the permit on normal completion,
-                // but a never-polled stream needs the TTL reaper to free it.
-                let reaped = reaper_runtime.reap_stale_ai_requests();
-                if reaped > 0 {
-                    warn!(count = reaped, "ai_requests_reaped");
-                }
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    changed = settings_rx.changed() => {
-                        if changed.is_err() {
-                            return;
-                        }
-                    },
-                    () = tokio::time::sleep(interval) => {},
-                }
-            }
-        })
-    };
-
-    let semantic_handle = {
-        let runtime = runtime.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move { runtime.run_semantic_indexer(shutdown).await })
-    };
-
+    // `refresh_settings_from_store` already succeeded above, so the daemon's
+    // pre-poll init is healthy by definition — record it here (once, before the
+    // capture supervisor spawns) so `nagori doctor` doesn't transiently report
+    // "not ready" while the capture task is being spawned.
+    runtime.startup_health().record_capture_ready();
+    let capture_handle = spawn_capture_supervisor(
+        runtime.clone(),
+        reader,
+        window,
+        &config,
+        settings_rx.clone(),
+        shutdown.clone(),
+    );
+    let maintenance_handle = spawn_maintenance_supervisor(
+        runtime.clone(),
+        config.maintenance_interval,
+        grace,
+        settings_rx.clone(),
+        shutdown.clone(),
+    );
+    let semantic_handle = spawn_semantic_supervisor(runtime.clone(), grace, shutdown.clone());
     // One-shot backfill that regenerates ngrams left stale by a generator
     // upgrade (kana folding / Han 1-grams). Spawned after serving has started
     // so it never blocks daemon startup; it drains the backlog in small batches
     // and then exits.
-    let ngram_rebuild_handle = {
-        let runtime = runtime.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move { runtime.run_ngram_rebuild(shutdown).await })
-    };
+    let ngram_rebuild_handle =
+        spawn_ngram_rebuild_supervisor(runtime.clone(), grace, shutdown.clone());
 
     let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
         Some(spawn_ipc_server(
@@ -901,16 +1103,21 @@ where
 ///    loop to stop, and waits for its in-flight drain + abort cleanup.
 ///    The outer +2 s slack keeps the supervisor alive long enough to
 ///    finish the inner +1 s IPC-server drain and remove runtime files.
-/// 2. Capture + maintenance loops read the same notify and exit between
-///    ticks; we give them up to `grace` to finish the current iteration
-///    so a partway-through DB write commits instead of being abandoned.
-/// 3. Anything still running after `grace` is **explicitly** aborted via
-///    `handle.abort()` and we await the resulting `JoinError(cancelled)`
-///    so the task is fully cleaned up before we proceed to socket / token
-///    deletion. Dropping a `tokio::task::JoinHandle` only detaches it, so
-///    skipping the explicit abort would let capture / maintenance / IPC
-///    workers race the file removals below — the very class of bug the
-///    grace timeout is supposed to bound.
+/// 2. Each worker supervisor reads the same notify and, in its shutdown
+///    branch, drains its live worker within `grace` — the worker exits
+///    between ticks so a partway-through DB write commits instead of
+///    being abandoned — then returns. The outer drain therefore gives a
+///    supervisor `grace + POST_ABORT_JOIN_TIMEOUT` plus 1 s of slack so
+///    it can finish that inner drain (including the worst case where the
+///    worker is wedged and force-aborted) before we move on.
+/// 3. Anything still running after its window is **explicitly** aborted
+///    via `handle.abort()` and we await the resulting
+///    `JoinError(cancelled)` so the task is fully cleaned up before we
+///    proceed to socket / token deletion. Dropping a
+///    `tokio::task::JoinHandle` only detaches it, so skipping the
+///    explicit abort would let a supervisor (and its worker) race the
+///    file removals below — the very class of bug the grace timeout is
+///    supposed to bound.
 async fn drain_workers(
     serve_handle: tokio::task::JoinHandle<()>,
     capture_handle: tokio::task::JoinHandle<()>,
@@ -925,11 +1132,23 @@ async fn drain_workers(
         grace + Duration::from_secs(2),
     )
     .await;
+    // A worker supervisor's own shutdown branch runs `drain_one(worker, grace)`
+    // (worst case `grace + POST_ABORT_JOIN_TIMEOUT`), so the supervisor task
+    // needs more than `grace` to wind down.
+    let supervisor_grace = grace + POST_ABORT_JOIN_TIMEOUT + Duration::from_secs(1);
     tokio::join!(
-        drain_one("capture", capture_handle, grace),
-        drain_one("maintenance", maintenance_handle, grace),
-        drain_one("semantic", semantic_handle, grace),
-        drain_one("ngram_rebuild", ngram_rebuild_handle, grace),
+        drain_one("capture_supervisor", capture_handle, supervisor_grace),
+        drain_one(
+            "maintenance_supervisor",
+            maintenance_handle,
+            supervisor_grace
+        ),
+        drain_one("semantic_supervisor", semantic_handle, supervisor_grace),
+        drain_one(
+            "ngram_rebuild_supervisor",
+            ngram_rebuild_handle,
+            supervisor_grace
+        ),
     );
 }
 
@@ -1187,6 +1406,90 @@ mod tests {
             .await
             .expect("supervisor should stop")
             .expect("supervisor should not panic");
+    }
+
+    #[tokio::test]
+    async fn supervise_worker_restarts_after_panic() {
+        use std::sync::atomic::AtomicUsize;
+
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let supervisor = tokio::spawn({
+            let spawns = spawns.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                supervise_worker(
+                    "test",
+                    WorkerRestart::OnExit,
+                    shutdown,
+                    Duration::from_millis(50),
+                    move |mut worker_shutdown| {
+                        // First run panics; every subsequent run blocks until
+                        // shutdown so the supervisor settles after one restart.
+                        let n = spawns.fetch_add(1, Ordering::SeqCst);
+                        tokio::spawn(async move {
+                            assert!(n > 0, "first supervised run panics on purpose");
+                            worker_shutdown.cancelled().await;
+                        })
+                    },
+                )
+                .await;
+            }
+        });
+
+        // A panicking worker must be respawned rather than left dead.
+        wait_until(Duration::from_secs(2), || {
+            spawns.load(Ordering::SeqCst) >= 2
+        })
+        .await
+        .expect("a panicking worker should be respawned");
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), supervisor)
+            .await
+            .expect("supervisor should stop after shutdown")
+            .expect("supervisor should not panic");
+    }
+
+    #[tokio::test]
+    async fn supervise_worker_one_shot_completion_is_terminal() {
+        use std::sync::atomic::AtomicUsize;
+
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let supervisor = tokio::spawn({
+            let spawns = spawns.clone();
+            async move {
+                supervise_worker(
+                    "test",
+                    WorkerRestart::OnPanic,
+                    shutdown,
+                    Duration::from_millis(50),
+                    move |_worker_shutdown| {
+                        spawns.fetch_add(1, Ordering::SeqCst);
+                        // Completes immediately and cleanly.
+                        tokio::spawn(async {})
+                    },
+                )
+                .await;
+            }
+        });
+
+        // A one-shot worker that finishes cleanly must end the supervisor
+        // without a shutdown signal and without respawning.
+        tokio::time::timeout(Duration::from_secs(2), supervisor)
+            .await
+            .expect("one-shot supervisor returns after a clean completion")
+            .expect("supervisor should not panic");
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            1,
+            "a clean one-shot completion must not be restarted",
+        );
     }
 
     async fn wait_until(

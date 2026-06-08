@@ -165,7 +165,17 @@ Two execution modes:
   `nagori-daemon::serve::run_daemon`, which spawns the same kind of
   background tasks plus an IPC accept loop (Unix-domain socket on
   macOS / Linux, named pipe on Windows), then dispatches every request
-  through `NagoriRuntime::handle_ipc`. CLI calls with
+  through `NagoriRuntime::handle_ipc`. Each long-running worker (capture,
+  maintenance, semantic index) runs under `supervise_worker`: a panic or
+  unexpected early return — while shutdown was *not* requested — is logged
+  and the worker is respawned after an exponential backoff, so a crashed
+  loop can no longer leave the daemon serving with a dead worker and a
+  stale health snapshot. The one-shot ngram backfill is supervised too,
+  but only respawns on a panic (a clean completion is terminal). On
+  shutdown each supervisor drains its worker within the grace window,
+  force-aborting one wedged in an un-cancellable `spawn_blocking`. The IPC
+  accept loop keeps its own supervisor (backoff restart + liveness probe).
+  CLI calls with
   `--ipc <endpoint>` / `--auto-ipc` route through that transport;
   `--db <path>` is a read/write fallback that bypasses the daemon and
   is documented as **repair / offline mode** in
