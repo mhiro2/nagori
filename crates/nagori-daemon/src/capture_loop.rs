@@ -95,7 +95,11 @@ impl CaptureErrorKind {
             AppError::NotFound => Self::NotFound,
             AppError::InvalidInput(_) => Self::InvalidInput,
             AppError::Unsupported(_) => Self::Unsupported,
-            AppError::Configuration(_) => Self::Configuration,
+            // A `Conflict` is the settings compare-and-swap rejecting a stale
+            // write; it cannot originate inside the capture loop, so — like
+            // `Paste` above — bucket it with the other wiring-mistake errors
+            // rather than adding a dead variant.
+            AppError::Configuration(_) | AppError::Conflict(_) => Self::Configuration,
         }
     }
 

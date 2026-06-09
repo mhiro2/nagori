@@ -340,6 +340,23 @@
   let lastBlurredPaletteHotkeys: Partial<Record<PaletteHotkeyAction, string>> = {};
   let lastBlurredSecondaryHotkeys: Partial<Record<SecondaryHotkeyAction, string>> = {};
 
+  // Compare-and-swap base for `update_settings`: the revision this window last
+  // saw via `getSettings` or a `settings_changed` broadcast. It is tracked
+  // *outside* the autosave snapshot so it never enters the dedup JSON (a
+  // changing revision would otherwise churn the idempotent-IPC guard or loop
+  // the autosave). `applyRemoteSettings` advances it as broadcasts arrive —
+  // including the echo of our own save — so a tray toggle from the palette
+  // refreshes the base before the next save and a conflict only survives the
+  // vanishingly small window between dispatch and that broadcast, which the
+  // controller's retry then clears.
+  let settingsRevision = 0;
+  const saveSettings = async (snapshot: AppSettings): Promise<void> => {
+    // Inject the live CAS base onto the wire payload. The dedup snapshot pins
+    // `revision` to 0 (see `buildSnapshotPayload`); the backend reads this
+    // value, not the body's other fields, to detect a stale overwrite.
+    await updateSettings({ ...snapshot, revision: settingsRevision });
+  };
+
   // Autosave state machine lives in its own module so the textarea
   // debounce, retry timer, in-flight + queued draining, and remote-
   // merge baselines stay testable in isolation. The controller calls
@@ -348,7 +365,7 @@
   // `lastBlurred…` set.
   const save = new SettingsSaveController({
     buildSnapshot: () => buildSnapshotPayload(),
-    updateSettings,
+    updateSettings: saveSettings,
     describeError,
     onSaveSuccess: () => {
       error = undefined;
@@ -483,6 +500,8 @@
       try {
         const s = await getSettings();
         settings = s;
+        // Seed the compare-and-swap base from the freshly loaded snapshot.
+        settingsRevision = s.revision ?? 0;
         // First-launch heuristic: surface the Setup tab when the user has
         // never reached a successful Accessibility grant. Today the daemon
         // only stamps `accessibilityPromptedAt` / `accessibilityFirstGrantedAt`
@@ -702,6 +721,13 @@
     appDenylist: assembleDenylist(),
     regexDenylist:
       regexDenylistErrors.length === 0 ? linesToList(regexDenylistText) : lastValidRegexList,
+    // Revision is the compare-and-swap base, tracked separately and passed to
+    // `update_settings` by `saveSettings`. Pin it to a constant here so it
+    // never enters the autosave dedup JSON — a live revision spread from
+    // `settings` (or echoed by a broadcast) would churn the idempotent-IPC
+    // guard and could loop the autosave. The backend ignores the body's
+    // revision and reads the explicit argument instead.
+    revision: 0,
   });
 
   // Promote each clean version of the regex textarea to the "last valid"
@@ -790,7 +816,14 @@
   // snapshot.
   const applyRemoteSettings = (remote: AppSettings): void => {
     if (!hydrated || !settings) return;
-    const remoteJson = JSON.stringify(remote);
+    // Advance the compare-and-swap base to whatever the backend just
+    // published — this is what keeps a tray toggle (or another client's save)
+    // from leaving our baseline stale, so the next autosave compare-and-swaps
+    // against reality instead of conflicting. The revision is dropped from the
+    // dedup JSON below (pinned to 0, matching `buildSnapshotPayload`) so the
+    // echo/merge comparison stays revision-agnostic.
+    settingsRevision = remote.revision ?? settingsRevision;
+    const remoteJson = JSON.stringify({ ...remote, revision: 0 });
     // Echo of our own most-recent dispatch — the backend has confirmed
     // the write landed. Advance the persisted baseline so subsequent
     // remote events evaluate against reality, but leave local state

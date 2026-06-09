@@ -1845,6 +1845,24 @@ guards the adoption: a slow in-flight `refreshSettings` (kicked off at
 palette mount or on window focus) discards its own stale settings
 write-back rather than clobbering a fresher broadcast.
 
+**Optimistic concurrency on settings writes.** The `settings` row carries
+a monotonic `revision` token (migration `102`), bumped on every persisted
+write. Single-field mutations (`set_capture_enabled`, onboarding markers)
+go through `mutate_settings`, a read-modify-write under the runtime's
+`settings_write_lock` that is inherently safe. The full-blob path the
+settings window uses (`update_settings`) is the lost-update risk: it
+edits a snapshot loaded earlier, so a concurrent tray pause/resume could
+be silently reverted when the stale blob lands. `update_settings`
+therefore carries the `revision` the window last observed as a
+compare-and-swap base; `save_settings_checked` rejects the write with
+`AppError::Conflict` (`settings_conflict`) when the stored revision has
+moved. The settings window keeps that base fresh from the
+`settings_changed` broadcast (which stamps the live revision), so a
+conflict only occurs in the narrow window between dispatch and the
+broadcast and is cleared transparently by the autosave retry. The
+revision is tracked outside the autosave snapshot and pinned to `0` in
+the dedup JSON so it never churns the idempotent-IPC guard.
+
 **Adding a locale.**
 
 1. Add `apps/desktop/src/app/lib/i18n/locales/<tag>.ts` typed

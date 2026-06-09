@@ -521,10 +521,16 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             // the next autosave. Serialized via `Into<AppSettingsDto>` so
             // the wire shape matches `get_settings`. Failures here are
             // best-effort — the receiving window may have just closed.
-            let _ = app.emit(
-                SETTINGS_CHANGED_EVENT,
-                dto::AppSettingsDto::from(snapshot.clone()),
-            );
+            //
+            // Stamp the live revision so the receiving window advances its
+            // compare-and-swap baseline as it adopts the snapshot; otherwise a
+            // tray toggle from the palette would leave the settings window's
+            // baseline stale and its next save would needlessly conflict. A
+            // benign skew (the token nudged again between the snapshot and this
+            // read) only costs one extra conflict-and-retry, never a lost write.
+            let mut dto = dto::AppSettingsDto::from(snapshot.clone());
+            dto.revision = runtime.settings_revision().await.unwrap_or(0);
+            let _ = app.emit(SETTINGS_CHANGED_EVENT, dto);
 
             if snapshot.global_hotkey != current_hotkey {
                 let next = snapshot.global_hotkey.clone();

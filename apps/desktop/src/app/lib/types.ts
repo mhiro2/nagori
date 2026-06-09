@@ -437,6 +437,13 @@ export type AppSettings = {
   updateChannel: UpdateChannel;
   maxThumbnailTotalBytes: number | null;
   onboarding: OnboardingSettings;
+  // Optimistic-concurrency token, not a user setting. `getSettings` and the
+  // `settings_changed` broadcast carry the current value; `updateSettings`
+  // sends it back as the compare-and-swap base so a stale full-blob save is
+  // rejected instead of reverting a concurrent change. Optional because it is
+  // backend-managed metadata that the form never edits and never sends inside
+  // the snapshot body.
+  revision?: number;
 };
 
 export type UpdateInfo = {

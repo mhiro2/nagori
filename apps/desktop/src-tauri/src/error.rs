@@ -84,6 +84,7 @@ const fn error_code(err: &AppError) -> &'static str {
         AppError::InvalidInput(_) => "invalid_input",
         AppError::Unsupported(_) => "unsupported",
         AppError::Configuration(_) => "configuration_error",
+        AppError::Conflict(_) => "settings_conflict",
         AppError::Paste { .. } => "paste_error",
     }
 }
@@ -108,6 +109,11 @@ fn user_message(err: &AppError) -> String {
         // they hit a build defect — so collapse to a generic message and
         // let the warn! log carry the structured cause for triage.
         AppError::Configuration(_) => "Configuration error.".to_owned(),
+        // The settings window resolves a conflict by refreshing its baseline
+        // (the broadcast that bumped the revision is already in flight) and
+        // retrying, so the detail (revision numbers) never needs to reach the
+        // user. Collapse to a generic, retryable message.
+        AppError::Conflict(_) => "Settings changed elsewhere; reloading.".to_owned(),
         // Permission/InvalidInput/Unsupported messages are already
         // user-curated (permission hints, hotkey-format errors, etc.) so
         // forwarding them gives the user actionable feedback without

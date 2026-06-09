@@ -146,6 +146,41 @@ impl NagoriRuntime {
         Ok(())
     }
 
+    /// Current optimistic-concurrency token for the persisted settings. A
+    /// full-blob client (the settings window) reads this alongside the
+    /// settings and echoes it back through [`Self::save_settings_checked`] so a
+    /// stale snapshot cannot silently revert a concurrent single-field change.
+    pub async fn settings_revision(&self) -> Result<u64> {
+        self.store.settings_revision().await
+    }
+
+    /// Compare-and-swap variant of [`Self::save_settings`]: persist only when
+    /// the stored revision still equals `expected_revision`, returning the
+    /// post-write revision. A mismatch surfaces as [`AppError::Conflict`].
+    ///
+    /// Routes through the same write lock and onboarding-marker merge as
+    /// `save_settings`, so a stale full-blob save can neither wipe an
+    /// `accessibility_*` marker nor — now — clobber a `capture_enabled` toggle
+    /// the tray made after the snapshot was loaded. The runtime lock serialises
+    /// writers; the revision check catches a caller whose *snapshot* predates a
+    /// committed change even though no write is racing in the moment.
+    pub async fn save_settings_checked(
+        &self,
+        settings: AppSettings,
+        expected_revision: u64,
+    ) -> Result<u64> {
+        let _guard = self.settings_write_lock.lock().await;
+        let persisted = self.store.get_settings().await?;
+        let mut merged = settings;
+        merged.onboarding = persisted.onboarding;
+        let new_revision = self
+            .store
+            .save_settings_checked(merged.clone(), expected_revision)
+            .await?;
+        self.publish_settings(merged);
+        Ok(new_revision)
+    }
+
     /// Read-modify-write the persisted settings under the settings write
     /// lock, returning the post-update snapshot.
     ///

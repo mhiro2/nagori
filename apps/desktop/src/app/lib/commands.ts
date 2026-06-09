@@ -135,6 +135,13 @@ export const passwordManagerPreset = (): Promise<AppDenyRule[]> =>
 // off a resolved tail and dispatch normally.
 let updateSettingsTail: Promise<unknown> = Promise.resolve();
 
+// `settings.revision` is the compare-and-swap base — the revision the caller
+// last observed via `getSettings` or a `settings_changed` broadcast. The daemon
+// rejects the write with a `settings_conflict` error if the stored revision has
+// moved since then, so a stale full-blob snapshot cannot revert a concurrent
+// single-field change (e.g. the tray pausing capture). The post-write revision
+// reaches the caller via the `settings_changed` broadcast, so the resolved
+// value is discarded here.
 export const updateSettings = (settings: AppSettings): Promise<void> => {
   const next = updateSettingsTail.then(() => invoke<void>('update_settings', { settings }));
   updateSettingsTail = next.catch(() => undefined);

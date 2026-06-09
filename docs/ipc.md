@@ -79,6 +79,13 @@ It carries per-request overrides — `translate`'s `target_language` /
 before dispatch. Without it `translate` over IPC would run with no target
 language and fail.
 
+`UpdateSettings` over IPC is a last-writer-wins write: it carries no revision
+token and is not compare-and-swap checked. The CLI has no settings-write
+command, so the only full-blob writer that needs lost-update protection is the
+desktop settings window, which goes through the in-process runtime
+(`save_settings_checked`) rather than this socket — see ARCHITECTURE.md
+"Optimistic concurrency on settings writes".
+
 ## Response kinds
 
 ```jsonc

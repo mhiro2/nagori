@@ -24,6 +24,12 @@ pub enum AppError {
     Unsupported(String),
     #[error("configuration error: {0}")]
     Configuration(String),
+    /// An optimistic-concurrency check failed: the caller's snapshot was based
+    /// on a stale revision and writing it would clobber a concurrent change.
+    /// The caller is expected to refresh and retry rather than treat this as a
+    /// hard failure. Used by the settings compare-and-swap save path.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// Auto-paste (synthetic Cmd/Ctrl+V) failed. Carries a classified
     /// [`PasteFailureReason`] alongside the diagnostic message so surfaces can
     /// render a targeted hint instead of a raw string. The clipboard write

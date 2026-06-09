@@ -312,6 +312,7 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
             | AppError::Platform(_)
             | AppError::Ai(_)
             | AppError::Paste { .. }
+            | AppError::Conflict(_)
             | AppError::Configuration(_) => 8,
         };
     }

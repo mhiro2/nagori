@@ -476,6 +476,14 @@ pub struct AppSettingsDto {
     /// omit it, which deserialises to all-`None`.
     #[serde(default)]
     pub onboarding: OnboardingSettingsDto,
+    /// Optimistic-concurrency token, not a persisted setting. `get_settings`
+    /// stamps the current value and `settings_changed` broadcasts carry it so
+    /// the window can keep its baseline fresh; `update_settings` reads the
+    /// caller's value as the compare-and-swap base. It is *not* part of the
+    /// `AppSettings` <-> DTO body conversion (the core type carries no
+    /// revision), so it defaults to 0 and is set by the command layer.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// Default `ai` block for snapshots that predate the namespace.
@@ -559,6 +567,11 @@ impl From<AppSettings> for AppSettingsDto {
             update_channel: value.update_channel.into(),
             max_thumbnail_total_bytes: value.max_thumbnail_total_bytes,
             onboarding: value.onboarding.into(),
+            // Revision is storage metadata, not part of the core settings body.
+            // The command / broadcast layer overwrites this with the live token
+            // after the conversion; 0 is the correct default for an unstamped
+            // DTO, and `From<AppSettingsDto>` drops it (the core type has none).
+            revision: 0,
         }
     }
 }

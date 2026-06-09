@@ -968,7 +968,12 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettingsDto> {
     let settings = state.runtime.get_settings().await?;
-    Ok(settings.into())
+    let revision = state.runtime.settings_revision().await?;
+    let mut dto: AppSettingsDto = settings.into();
+    // Stamp the live optimistic-concurrency token so the window can echo it
+    // back on the next `update_settings` as the compare-and-swap base.
+    dto.revision = revision;
+    Ok(dto)
 }
 
 /// Canonical password-manager preset bundled with the daemon. The
@@ -989,13 +994,26 @@ pub fn password_manager_preset() -> Vec<AppDenyRuleDto> {
 pub async fn update_settings(
     state: State<'_, AppState>,
     settings: AppSettingsDto,
-) -> CommandResult<()> {
+) -> CommandResult<u64> {
+    // The DTO's `revision` is the compare-and-swap base: the revision the
+    // window last read via `get_settings` (or learned from a `settings_changed`
+    // broadcast). The runtime rejects the write with `settings_conflict` if the
+    // stored revision moved since then, so a stale full-blob snapshot cannot
+    // revert a concurrent change (e.g. the tray's pause/resume) made in the
+    // meantime. It is carried on the DTO rather than as a separate argument so
+    // the wire shape stays a single settings object.
+    let expected_revision = settings.revision;
     let value: nagori_core::AppSettings = settings.into();
     // Runtime persists the settings *and* re-publishes them on the watch
     // channel so the capture loop, maintenance task, and other subscribers
-    // pick up the change without a second round-trip here.
-    state.runtime.save_settings(value).await?;
-    Ok(())
+    // pick up the change without a second round-trip here. The returned
+    // revision is the post-write token (callers may ignore it and rely on the
+    // broadcast echo to refresh their baseline).
+    let revision = state
+        .runtime
+        .save_settings_checked(value, expected_revision)
+        .await?;
+    Ok(revision)
 }
 
 fn parse_entry_id(value: &str) -> Result<EntryId, CommandError> {

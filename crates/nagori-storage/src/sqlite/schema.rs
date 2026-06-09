@@ -20,7 +20,11 @@ use super::convert::storage_err;
 /// and fails loud at startup rather than silently running the new
 /// code against an old shape. Operators are expected to delete the
 /// local DB and let it be recreated on next launch.
-pub(crate) const MIGRATIONS: &[(i64, &str)] = &[(100, SCHEMA_V1), (101, ADD_NGRAM_INDEX_VERSION)];
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
+    (100, SCHEMA_V1),
+    (101, ADD_NGRAM_INDEX_VERSION),
+    (102, ADD_SETTINGS_REVISION),
+];
 
 /// Highest schema version supported by this binary. A DB whose
 /// `user_version` already exceeds this is from a newer build and we refuse
@@ -447,4 +451,13 @@ const ADD_NGRAM_INDEX_VERSION: &str = r"
 ALTER TABLE search_documents ADD COLUMN ngram_index_version INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_search_documents_ngram_version_doc_id
     ON search_documents(ngram_index_version, doc_id);
+";
+
+// Optimistic-concurrency token for the single `settings` row. Every persisted
+// write bumps it; a full-blob save from one client (settings window) carries
+// the revision it last read so the daemon can reject a stale overwrite instead
+// of silently reverting a concurrent single-field change (e.g. the tray's
+// pause/resume) made after the snapshot was loaded.
+const ADD_SETTINGS_REVISION: &str = r"
+ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
 ";
