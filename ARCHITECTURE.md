@@ -153,7 +153,11 @@ Two execution modes:
   via `NagoriRuntimeBuilder` and Tauri commands call its methods
   directly. `AppState::spawn_background_tasks` and
   `spawn_settings_subscribers` (`apps/desktop/src-tauri/src/lib.rs`)
-  start the capture loop and settings fan-out. `AppState::try_new_at`
+  start the capture loop and settings fan-out; the same five background
+  workers (capture, maintenance, semantic index, ngram backfill, AI
+  stale-request watchdog) run under the same `supervise_worker` policy as
+  the daemon (see below), so a panic no longer leaves the app running with
+  a dead loop. `AppState::try_new_at`
   first takes the single-instance lock (`nagori_storage::ProcessLock`
   over the DB directory) before opening the store, so a second launch —
   or a standalone daemon sharing the same data directory — is refused
@@ -166,7 +170,8 @@ Two execution modes:
   background tasks plus an IPC accept loop (Unix-domain socket on
   macOS / Linux, named pipe on Windows), then dispatches every request
   through `NagoriRuntime::handle_ipc`. Each long-running worker (capture,
-  maintenance, semantic index) runs under `supervise_worker`: a panic or
+  maintenance, semantic index, AI stale-request watchdog) runs under
+  `supervise_worker`: a panic or
   unexpected early return — while shutdown was *not* requested — is logged
   and the worker is respawned after an exponential backoff, so a crashed
   loop can no longer leave the daemon serving with a dead worker and a
@@ -509,8 +514,14 @@ preview and the expanded view of the original payload shows the same
 picture. A header-only dimension probe rejects encoded payloads whose
 advertised canvas would breach `MAX_DECODED_IMAGE_PIXELS` so a forged
 PNG IHDR cannot force the decoder to materialise a multi-GB buffer.
-Generation is gated by an in-memory `HashSet<EntryId>` so a burst of
-preview opens collapses to one decoder, and the same
+Generation is gated two ways before any task is spawned: an in-memory
+`HashSet<EntryId>` collapses a burst of opens on the *same* entry to one
+decoder, and a global decode-pool semaphore admits the request only if a slot
+is free — both are acquired *before* `tokio::spawn`, so a burst of misses
+against *distinct* entries (an image-heavy scroll, a prefetch sweep) is bounded
+to the pool size instead of piling up detached tasks each parked on the
+semaphore and each ready to allocate a large decode buffer. A rejected request
+is retried on the next fetch (the `503` path below) once a slot frees. The same
 `is_text_safe_for_default_output` sensitivity check that gates the
 original-payload scheme handler is re-asserted inside the generator
 before the thumbnail is written so a Private / Secret / Blocked
@@ -1125,6 +1136,16 @@ paths, daemon status, and `PermissionChecker::check()` output.
 **Backpressure & limits.** `MAX_IPC_BYTES` caps per-message size. The
 server uses an `accept_loop` over a `bind_unix` listener; each
 connection runs on a tokio task and shares the same `NagoriRuntime`.
+Beyond the read/write timeouts, the handler itself runs under a
+`HANDLER_DEADLINE` backstop and a concurrent peer-disconnect watch: while a
+handler runs the read half is watched for EOF, so when a client gives up and
+closes (its own request timeout is far shorter than the deadline) the handler
+future is dropped — cancelling its in-flight work and freeing the connection
+permit, the AI permit, and any pending DB query — instead of finishing a
+response no one will read. The deadline only fires for the degenerate case where
+the peer neither reads nor closes while a handler is wedged; it is sized above
+the longest legitimate handler (a `RunAiAction` bounded by its own absolute
+deadline).
 
 **Error model.** `IpcError` carries a stable `code` (English) plus a
 human-readable `message`. The desktop frontend maps `code` to
@@ -1697,7 +1718,14 @@ terminal result, so the toggle holds for every surface regardless of whether the
 backend itself streams. The returned stream of `AiEvent`s
 (`Delta` / `Replace` / `Done` / `Cancelled`, with errors as `Err(AiError)`
 items) releases the permit and removes the registry entry — and cancels the run
-— when dropped. The desktop drives the engine in-process and re-emits events on
+— when dropped. That cleanup is poll-driven, so a dedicated **AI watchdog**
+(`run_ai_request_watchdog`, supervised in both the daemon and the desktop)
+sweeps the registry every minute and reaps any handle still alive past its
+absolute deadline — the polling-independent backstop for a stream that is
+returned but never polled or dropped. Reaping on each request's own deadline
+(rather than a flat TTL riding on the 30-minute maintenance cadence) reclaims a
+short request's permit promptly while leaving a long-but-legitimate one alone
+for its full budget. The desktop drives the engine in-process and re-emits events on
 the request-scoped `nagori://ai/*` Tauri channel (coalesced); it also waits for
 those listeners to attach before starting a run, so a fast terminal event can't
 fire before the renderer is listening and strand the inspector in the running
