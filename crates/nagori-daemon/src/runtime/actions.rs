@@ -22,6 +22,7 @@ use crate::ai_registry::AiRequestRegistry;
 use crate::ipc_handler::result_code;
 
 use super::{MAX_AI_INPUT_TOKENS, NagoriRuntime, elapsed_ms};
+use crate::ShutdownHandle;
 
 impl NagoriRuntime {
     /// Runs a deterministic [`QuickActionId`] on-device.
@@ -164,7 +165,7 @@ impl NagoriRuntime {
         // acquire, so permit waiters can't deadlock against the map mutation.
         let cancel = CancellationToken::new();
         self.ai_registry
-            .register(request_id, action, cancel.clone());
+            .register(request_id, action, cancel.clone(), deadline);
 
         // Acquire the backend's concurrency permit, bounded by the cancel token
         // *and* the remaining budget so a queued request is aborted before it
@@ -338,10 +339,34 @@ impl NagoriRuntime {
         self.ai_registry.cancel(request_id)
     }
 
-    /// Cancels and reaps AI request handles older than the registry TTL,
-    /// returning how many were reaped. Called by the maintenance loop.
-    pub fn reap_stale_ai_requests(&self) -> usize {
-        self.ai_registry.reap_stale()
+    /// Cancels and reaps AI request handles whose absolute deadline has passed,
+    /// returning how many were reaped. Driven by [`Self::run_ai_request_watchdog`].
+    pub fn reap_expired_ai_requests(&self) -> usize {
+        self.ai_registry.reap_expired()
+    }
+
+    /// Dedicated watchdog that sweeps expired AI request handles on a tight
+    /// cadence, freeing the concurrency permit a leaked or wedged stream would
+    /// otherwise pin. Runs until `shutdown` fires.
+    ///
+    /// The per-request deadline is also enforced by the streamed generation
+    /// itself, but that path is poll-driven: a returned run that is never
+    /// polled (nor dropped) would keep its permit until this watchdog reaps it.
+    /// Sweeping every [`AI_WATCHDOG_INTERVAL`] — far tighter than the
+    /// maintenance loop that previously hosted the reap — keeps that reclamation
+    /// prompt.
+    pub async fn run_ai_request_watchdog(&self, mut shutdown: ShutdownHandle) {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(crate::ai_registry::AI_WATCHDOG_INTERVAL) => {
+                    let reaped = self.reap_expired_ai_requests();
+                    if reaped > 0 {
+                        tracing::warn!(count = reaped, "ai_requests_reaped");
+                    }
+                }
+            }
+        }
     }
 
     /// Builds a point-in-time AI availability report for the current settings.

@@ -17,10 +17,23 @@ use nagori_core::{AiActionId, RequestId};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-/// How long a handle may live before the reaper treats it as stale. A normal
-/// request removes its own handle when its stream terminates or is dropped;
-/// this only catches handles orphaned by a panic or a leaked stream future.
-const HANDLE_TTL: Duration = Duration::from_mins(5);
+/// Slack added to a request's absolute deadline before the watchdog reaps it.
+///
+/// Every registered request carries the same absolute deadline its streamed
+/// generation enforces, so a *polled* run cleans up its own handle the instant
+/// the budget expires. This grace lets that normal path win the common race;
+/// the watchdog only acts on a handle still alive past `deadline + REAP_GRACE`,
+/// which means its stream was leaked (returned but never polled or dropped) —
+/// the exact case the consumer-side deadline can't catch.
+const REAP_GRACE: Duration = Duration::from_secs(5);
+
+/// How often the dedicated AI watchdog sweeps for expired request handles.
+///
+/// Kept well under any per-request budget so a leaked or wedged request's
+/// concurrency permit is reclaimed promptly. Previously the reap rode on the
+/// maintenance loop's (default 30-minute) cadence, so an orphaned permit could
+/// pin the single-permit text-generation slot for half an hour.
+pub const AI_WATCHDOG_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Per-capability concurrency limits.
 pub struct AiSemaphores {
@@ -57,7 +70,11 @@ impl AiSemaphores {
 struct RequestHandle {
     #[allow(dead_code)]
     action: AiActionId,
-    started_at: Instant,
+    /// Absolute budget for the whole request, mirroring the deadline its
+    /// pre-stream phases and streamed generation already enforce. The watchdog
+    /// cancels + drops a handle still present past `deadline + REAP_GRACE`,
+    /// reclaiming its permit independently of whether the stream is ever polled.
+    deadline: Instant,
     cancel: CancellationToken,
     /// The backend concurrency permit, held for the request's lifetime. Owning
     /// it here (rather than in the event stream) means dropping the handle —
@@ -96,15 +113,25 @@ impl AiRequestRegistry {
     /// Records a started request *before* its permit is acquired, so a cancel
     /// can land while the request is still queued behind the semaphore.
     ///
+    /// `deadline` is the request's absolute budget (registration time plus the
+    /// effective, tightened timeout), so the watchdog can reap a leaked handle
+    /// without depending on the stream ever being polled.
+    ///
     /// The mutex is only ever held for the map mutation — never across a
     /// semaphore acquire — so this can't deadlock against permit waiters.
-    pub fn register(&self, request_id: RequestId, action: AiActionId, cancel: CancellationToken) {
+    pub fn register(
+        &self,
+        request_id: RequestId,
+        action: AiActionId,
+        cancel: CancellationToken,
+        deadline: Instant,
+    ) {
         let mut handles = self.lock();
         handles.insert(
             request_id,
             RequestHandle {
                 action,
-                started_at: Instant::now(),
+                deadline,
                 cancel,
                 permit: None,
             },
@@ -142,24 +169,27 @@ impl AiRequestRegistry {
         self.lock().len()
     }
 
-    /// Cancels and drops handles older than [`HANDLE_TTL`], returning how many
-    /// were reaped. Dropping a handle releases its concurrency permit, so this
-    /// is the backstop that frees a permit a leaked or wedged stream would
-    /// otherwise pin forever.
-    pub fn reap_stale(&self) -> usize {
+    /// Cancels and drops handles whose absolute deadline has passed (plus
+    /// [`REAP_GRACE`]), returning how many were reaped. Dropping a handle
+    /// releases its concurrency permit, so this is the backstop that frees a
+    /// permit a leaked or wedged stream would otherwise pin until the next
+    /// process restart. Reaping on the per-request deadline (rather than a flat
+    /// TTL) keeps a long-but-legitimate request alive for its full budget while
+    /// still reclaiming a short one promptly.
+    pub fn reap_expired(&self) -> usize {
         let mut handles = self.lock();
         let now = Instant::now();
-        let stale: Vec<RequestId> = handles
+        let expired: Vec<RequestId> = handles
             .iter()
-            .filter(|(_, handle)| now.duration_since(handle.started_at) > HANDLE_TTL)
+            .filter(|(_, handle)| now >= handle.deadline + REAP_GRACE)
             .map(|(id, _)| *id)
             .collect();
-        for id in &stale {
+        for id in &expired {
             if let Some(handle) = handles.remove(id) {
                 handle.cancel.cancel();
             }
         }
-        stale.len()
+        expired.len()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RequestId, RequestHandle>> {
@@ -176,12 +206,16 @@ impl AiRequestRegistry {
 mod tests {
     use super::*;
 
+    fn far_deadline() -> Instant {
+        Instant::now() + Duration::from_hours(1)
+    }
+
     #[test]
     fn cancel_marks_token_and_reports_tracked() {
         let registry = AiRequestRegistry::new();
         let id = RequestId::new();
         let token = CancellationToken::new();
-        registry.register(id, AiActionId::Summarize, token.clone());
+        registry.register(id, AiActionId::Summarize, token.clone(), far_deadline());
         assert_eq!(registry.active_count(), 1);
         assert!(registry.cancel(id));
         assert!(token.is_cancelled());
@@ -193,9 +227,54 @@ mod tests {
     fn remove_drops_handle() {
         let registry = AiRequestRegistry::new();
         let id = RequestId::new();
-        registry.register(id, AiActionId::Summarize, CancellationToken::new());
+        registry.register(
+            id,
+            AiActionId::Summarize,
+            CancellationToken::new(),
+            far_deadline(),
+        );
         registry.remove(id);
         assert_eq!(registry.active_count(), 0);
+    }
+
+    #[test]
+    fn reap_expired_cancels_only_past_deadline_handles() {
+        let registry = AiRequestRegistry::new();
+
+        // Already past its deadline by more than the grace: must be reaped.
+        let expired_id = RequestId::new();
+        let expired_token = CancellationToken::new();
+        registry.register(
+            expired_id,
+            AiActionId::Summarize,
+            expired_token.clone(),
+            Instant::now()
+                .checked_sub(REAP_GRACE + Duration::from_secs(1))
+                .expect("test clock is well past the epoch"),
+        );
+
+        // Still within its budget: must survive the sweep.
+        let live_id = RequestId::new();
+        let live_token = CancellationToken::new();
+        registry.register(
+            live_id,
+            AiActionId::Summarize,
+            live_token.clone(),
+            far_deadline(),
+        );
+
+        assert_eq!(registry.active_count(), 2);
+        assert_eq!(registry.reap_expired(), 1);
+        assert_eq!(registry.active_count(), 1);
+        assert!(
+            expired_token.is_cancelled(),
+            "reaping an expired handle cancels its token",
+        );
+        assert!(
+            !live_token.is_cancelled(),
+            "a handle still within its deadline must not be reaped",
+        );
+        assert!(registry.cancel(live_id), "the live handle is still tracked");
     }
 
     #[test]

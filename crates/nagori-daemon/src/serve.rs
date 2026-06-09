@@ -706,7 +706,7 @@ const WORKER_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Restart policy for a supervised background worker.
 #[derive(Clone, Copy)]
-enum WorkerRestart {
+pub enum WorkerRestart {
     /// Long-running loop (capture / maintenance / semantic index): any exit
     /// while shutdown has *not* been requested is unexpected — a panic, or a
     /// settings/`watch` channel that closed early — and triggers a
@@ -732,7 +732,12 @@ enum WorkerRestart {
 /// early-returning capture / maintenance / semantic / ngram worker was
 /// invisible — `run_daemon` kept waiting on shutdown while the worker stayed
 /// dead and its health snapshot went stale or falsely healthy.
-async fn supervise_worker<F>(
+///
+/// Exposed so the desktop shell, which drives the same [`NagoriRuntime`]
+/// workers without the CLI daemon's serve loop, can place its in-process
+/// capture / maintenance / semantic / ngram / AI-watchdog tasks under the
+/// identical respawn-and-drain policy.
+pub async fn supervise_worker<F>(
     name: &'static str,
     restart: WorkerRestart,
     mut shutdown: ShutdownHandle,
@@ -852,8 +857,7 @@ fn spawn_capture_supervisor(
     })
 }
 
-/// Supervise the periodic maintenance loop (retention sweep + AI stale-request
-/// reaper).
+/// Supervise the periodic maintenance loop (retention sweep).
 fn spawn_maintenance_supervisor(
     runtime: NagoriRuntime,
     interval: Duration,
@@ -873,7 +877,6 @@ fn spawn_maintenance_supervisor(
                 let mut settings_rx = settings_rx.clone();
                 let search_cache = runtime.search_cache_handle();
                 let health = runtime.maintenance_health();
-                let reaper_runtime = runtime.clone();
                 tokio::spawn(async move {
                     let maintenance =
                         MaintenanceService::new(store).with_search_cache(search_cache);
@@ -889,14 +892,6 @@ fn spawn_maintenance_supervisor(
                                 warn!(error = %err, "maintenance_failed");
                             }
                         }
-                        // Backstop for AI requests whose stream was leaked or
-                        // wedged: the guard-drop path releases the permit on
-                        // normal completion, but a never-polled stream needs
-                        // the TTL reaper to free it.
-                        let reaped = reaper_runtime.reap_stale_ai_requests();
-                        if reaped > 0 {
-                            warn!(count = reaped, "ai_requests_reaped");
-                        }
                         tokio::select! {
                             () = worker_shutdown.cancelled() => return,
                             changed = settings_rx.changed() => {
@@ -908,6 +903,30 @@ fn spawn_maintenance_supervisor(
                         }
                     }
                 })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the AI stale-request watchdog. Sweeps expired request handles on a
+/// tight cadence (independent of the maintenance loop) so a leaked or wedged
+/// stream's concurrency permit is reclaimed promptly rather than on the
+/// 30-minute maintenance tick.
+fn spawn_ai_watchdog_supervisor(
+    runtime: NagoriRuntime,
+    grace: Duration,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        supervise_worker(
+            "ai_watchdog",
+            WorkerRestart::OnExit,
+            shutdown,
+            grace,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move { runtime.run_ai_request_watchdog(worker_shutdown).await })
             },
         )
         .await;
@@ -1041,6 +1060,7 @@ where
         shutdown.clone(),
     );
     let semantic_handle = spawn_semantic_supervisor(runtime.clone(), grace, shutdown.clone());
+    let ai_watchdog_handle = spawn_ai_watchdog_supervisor(runtime.clone(), grace, shutdown.clone());
     // One-shot backfill that regenerates ngrams left stale by a generator
     // upgrade (kana folding / Han 1-grams). Spawned after serving has started
     // so it never blocks daemon startup; it drains the backlog in small batches
@@ -1085,6 +1105,7 @@ where
         capture_handle,
         maintenance_handle,
         semantic_handle,
+        ai_watchdog_handle,
         ngram_rebuild_handle,
         config.shutdown_grace,
     )
@@ -1123,6 +1144,7 @@ async fn drain_workers(
     capture_handle: tokio::task::JoinHandle<()>,
     maintenance_handle: tokio::task::JoinHandle<()>,
     semantic_handle: tokio::task::JoinHandle<()>,
+    ai_watchdog_handle: tokio::task::JoinHandle<()>,
     ngram_rebuild_handle: tokio::task::JoinHandle<()>,
     grace: Duration,
 ) {
@@ -1144,6 +1166,11 @@ async fn drain_workers(
             supervisor_grace
         ),
         drain_one("semantic_supervisor", semantic_handle, supervisor_grace),
+        drain_one(
+            "ai_watchdog_supervisor",
+            ai_watchdog_handle,
+            supervisor_grace
+        ),
         drain_one(
             "ngram_rebuild_supervisor",
             ngram_rebuild_handle,
