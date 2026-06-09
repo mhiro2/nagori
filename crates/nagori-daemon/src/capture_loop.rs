@@ -3,8 +3,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
-    EntryRepository, Result, SecretAction, Sensitivity, SensitivityClassifier,
-    StoredClipboardRepresentation, factory::compute_representation_set_hash,
+    EntryRepository, MAX_ENTRY_SIZE_BYTES, Result, SecretAction, Sensitivity,
+    SensitivityClassifier, StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
 use nagori_ipc::CaptureEventCategory;
 use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
@@ -574,10 +574,38 @@ where
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
         if self.pristine && !settings.capture_initial_clipboard_on_launch {
-            let snapshot = self.reader.current_snapshot().await?;
-            self.last_sequence = Some(snapshot.sequence.clone());
-            if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                self.last_content_hash = Some(effective_dedupe_hash(&entry));
+            // Read the pre-launch clipboard through the bounded path rather than
+            // the unbounded `current_snapshot`, so a huge pre-launch text/image
+            // isn't fully materialised just to seed the dedup state and blow up
+            // startup latency / memory. Bound it by the internal hard limit
+            // (`MAX_ENTRY_SIZE_BYTES`), *not* the live `max_entry_size_bytes`:
+            // since the setting is validated to never exceed the hard limit, any
+            // clip that could ever become capturable (even after the user later
+            // raises the setting) is within this read and gets its dedup hash
+            // anchored here. Without that, a baseline left unhashed because it
+            // was over the *current* setting would be re-captured on a post-raise
+            // wake-resync instead of being recognised as the pre-launch clip.
+            // `current_snapshot_with_max` also enforces the internal
+            // decoded-pixel cap, so a forged-dimension image can't OOM the probe.
+            match self
+                .reader
+                .current_snapshot_with_max(MAX_ENTRY_SIZE_BYTES)
+                .await?
+            {
+                CapturedSnapshot::Captured(snapshot) => {
+                    self.last_sequence = Some(snapshot.sequence.clone());
+                    if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
+                        self.last_content_hash = Some(effective_dedupe_hash(&entry));
+                    }
+                }
+                CapturedSnapshot::Oversized { sequence, .. } => {
+                    // Larger than the hard limit, so it can never be captured
+                    // under any setting — there's no body worth hashing. Anchor
+                    // the sequence so the next poll skips it without re-probing;
+                    // a later wake-resync re-reads through the bounded steady-state
+                    // path, hits the same oversize guard, and skips it again.
+                    self.last_sequence = Some(sequence);
+                }
             }
             self.pristine = false;
             return Ok(None);
@@ -2370,6 +2398,100 @@ mod tests {
             .expect("post-launch clip should be inserted");
         let stored = store.get(id).await.unwrap().expect("stored row");
         assert_eq!(stored.plain_text(), Some("post launch clip"));
+    }
+
+    #[tokio::test]
+    async fn pristine_baseline_skips_pre_launch_clip_over_hard_limit() {
+        // capture_initial_clipboard_on_launch=false with a pre-launch clip that
+        // exceeds the internal hard limit: the baseline read goes through the
+        // bounded path (not the unbounded `current_snapshot`), recognises the
+        // clip as oversized, anchors the sequence so it isn't re-probed, and
+        // never inserts it. Such a clip can never be captured under any setting,
+        // so leaving `last_content_hash` unset is correct. A later in-budget clip
+        // must still flow through.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let oversized = "x".repeat(MAX_ENTRY_SIZE_BYTES + 1);
+        clipboard
+            .write_text(&oversized)
+            .await
+            .expect("seed clipboard");
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            ..AppSettings::default()
+        };
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+
+        // First tick: the over-hard-limit pre-launch clip is the baseline. It is
+        // discarded without an insert, and `last_content_hash` is left unset
+        // because no body within the hard limit was read.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+        assert!(loop_.last_sequence.is_some());
+        assert!(loop_.last_content_hash.is_none());
+
+        // A small post-launch clip is within budget and must be captured.
+        clipboard
+            .write_text("small")
+            .await
+            .expect("clipboard write");
+        let id = loop_
+            .capture_once()
+            .await
+            .unwrap()
+            .expect("post-launch clip should be inserted");
+        let stored = store.get(id).await.unwrap().expect("stored row");
+        assert_eq!(stored.plain_text(), Some("small"));
+    }
+
+    #[tokio::test]
+    async fn pristine_baseline_hashes_clip_over_setting_but_under_hard_limit() {
+        // A pre-launch clip larger than the *current* `max_entry_size_bytes` but
+        // within the hard limit must still have its dedup hash anchored at the
+        // baseline. Otherwise, raising the setting above the clip's size and then
+        // hitting a wake-gap resync would re-capture the pre-launch clip instead
+        // of recognising it. This locks the baseline read to the hard limit, not
+        // the live setting.
+        let clipboard = Arc::new(MemoryClipboard::new());
+        // 64 bytes: over the initial 16-byte budget, far under the hard limit.
+        clipboard
+            .write_text(&"y".repeat(64))
+            .await
+            .expect("seed clipboard");
+        let store = SqliteStore::open_memory().expect("memory store");
+        let settings = AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            max_entry_size_bytes: 16,
+            ..AppSettings::default()
+        };
+        let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+
+        // Baseline tick: the clip is over the 16-byte setting but the bounded
+        // read uses the hard limit, so the body is read and its hash anchored.
+        let t0 = SystemTime::now();
+        assert!(loop_.capture_once_at(t0).await.unwrap().is_none());
+        assert!(loop_.last_content_hash.is_some());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+
+        // The user raises the budget so the 64-byte clip would now be capturable.
+        loop_.update_settings(AppSettings {
+            capture_initial_clipboard_on_launch: false,
+            max_entry_size_bytes: 128,
+            ..AppSettings::default()
+        });
+
+        // A wake-gap resync (>30s) forces a content-aware re-read of the same,
+        // unchanged pre-launch clip. The anchored hash recognises it, so it is
+        // skipped rather than promoted into history.
+        assert!(
+            loop_
+                .capture_once_at(t0 + Duration::from_secs(31))
+                .await
+                .unwrap()
+                .is_none(),
+            "the unchanged pre-launch clip must not be captured after a setting raise + wake",
+        );
+        assert!(store.list_recent(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

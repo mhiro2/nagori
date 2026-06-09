@@ -286,7 +286,18 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   system sleeps. The pristine launch path under
   `capture_initial_clipboard_on_launch=false` also anchors the dedupe
   hash so a post-wake resync without any user copy correctly recognises
-  the unchanged pre-launch clipboard and does **not** promote it.
+  the unchanged pre-launch clipboard and does **not** promote it. That
+  baseline read goes through `current_snapshot_with_max` instead of the
+  unbounded `current_snapshot`, so a huge pre-launch text/image is bounded
+  (and the internal decoded-pixel cap applies) rather than fully
+  materialised just to seed the dedup state. It is bounded by the internal
+  hard limit (`MAX_ENTRY_SIZE_BYTES`), not the live `max_entry_size_bytes`:
+  since the setting can never exceed that hard limit, any clip that could
+  ever become capturable — even after the user later raises the setting —
+  is within this read and gets its dedup hash anchored, so a post-raise
+  wake-resync still recognises it. A clip over the hard limit can never be
+  captured under any setting, so it anchors only the sequence and is
+  skipped.
 - After frontmost is captured, the loop asks the platform whether the
   frontmost app's currently-focused element is a secure text field
   (`kAXSecureTextField` role/subrole). When true, the clip is dropped
