@@ -6,7 +6,7 @@ use nagori_core::{
 };
 use nagori_search::normalize_text;
 use rusqlite::Row;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 pub(crate) fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
     let id = EntryId::from_str(&row.get::<_, String>("id")?)
@@ -147,8 +147,22 @@ pub(crate) fn fts_query(query: &str) -> String {
         .join(" ")
 }
 
+/// Renders a timestamp as a UTC RFC 3339 string for storage.
+///
+/// The value is pinned to UTC *before* formatting so the column never holds an
+/// offset-bearing form (e.g. `+09:00`). Every timestamp comparison in storage
+/// — retention sweeps (`created_at < cutoff`), period filters (`created_at >=
+/// after`), recency ordering (`ORDER BY created_at DESC`) — is a lexicographic
+/// string comparison, and that is only sound when all values share one offset.
+/// A mix of `Z` and `+09:00` renderings would sort by wall-clock text rather
+/// than instant, so an offset bound from the UI could drop or reorder rows.
+/// Normalising to UTC here keeps the column monotonic as text whatever offset
+/// the caller's `OffsetDateTime` carries, and matches the form every existing
+/// row already uses (all writes have always gone through `now_utc()`), so no
+/// data migration is needed.
 pub(crate) fn format_time(value: OffsetDateTime) -> Result<String> {
     value
+        .to_offset(UtcOffset::UTC)
         .format(&Rfc3339)
         .map_err(|err| AppError::Storage(err.to_string()))
 }
@@ -178,4 +192,46 @@ pub(crate) fn json_err(err: &serde_json::Error) -> AppError {
 
 pub(crate) fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
     AppError::Storage(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(unix: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(unix).unwrap()
+    }
+
+    fn tokyo(unix: i64) -> OffsetDateTime {
+        utc(unix).to_offset(UtcOffset::from_hms(9, 0, 0).unwrap())
+    }
+
+    #[test]
+    fn format_time_normalises_offset_to_utc() {
+        // The same instant carried as a `+09:00` value must serialise to the
+        // identical UTC string as the UTC value, with no offset suffix left in.
+        let instant = 1_780_000_000;
+        assert_eq!(
+            format_time(tokyo(instant)).unwrap(),
+            format_time(utc(instant)).unwrap()
+        );
+        assert!(!format_time(tokyo(instant)).unwrap().contains('+'));
+    }
+
+    #[test]
+    fn format_time_keeps_instants_lexicographically_ordered() {
+        // An earlier instant expressed with a positive offset must still sort
+        // before a later UTC instant once both are normalised. Compared as the
+        // raw offset strings (`...+09:00` vs `...Z`) the order would invert.
+        let earlier = tokyo(1_780_000_000);
+        let later = utc(1_780_003_600); // one hour later
+        assert!(format_time(earlier).unwrap() < format_time(later).unwrap());
+    }
+
+    #[test]
+    fn format_time_round_trips_through_parse_time() {
+        let value = OffsetDateTime::from_unix_timestamp_nanos(1_780_000_000_123_456_789).unwrap();
+        let stored = format_time(value).unwrap();
+        assert_eq!(parse_time(&stored).unwrap(), value);
+    }
 }
