@@ -145,9 +145,17 @@ Full CLI reference: [`docs/cli.md`](./docs/cli.md).
 (Windows), or `$XDG_DATA_HOME/nagori` (Linux).
 
 **Is the database encrypted?**
-No. The DB file has restrictive filesystem permissions but is not encrypted at
-rest. Use FileVault / BitLocker / LUKS for full-disk protection. SQLCipher
-integration is on the roadmap.
+No, and shipping without it is a deliberate v0.1.0 decision — encryption at
+rest is a post-1.0 feature, not a launch blocker. The DB file has restrictive
+filesystem permissions (`0600` / `0700`) but the bytes on disk are plaintext,
+so anything running as your user (malware, backup agents, cloud-sync clients)
+can read your history. Use FileVault / BitLocker / LUKS for full-disk
+protection — that is the real defence — and keep the data directory off
+cleartext sync targets. Deleted rows are zeroed in place (`secure_delete`) and
+*Clear history* truncates the write-ahead log so purged content does not linger
+in the live file, but that is residue reduction, not encryption. The accepted
+threat model and the SQLCipher / OS-keystore roadmap are in
+[`docs/security-encryption-at-rest.md`](./docs/security-encryption-at-rest.md).
 
 **How does secret redaction work?**
 The default mode stores matched secrets as `[REDACTED]` and re-derives hashes

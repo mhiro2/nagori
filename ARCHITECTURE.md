@@ -556,6 +556,14 @@ later `VACUUM` from the maintenance sweep then shrinks the file) rather
 than tombstoning rows that grow it forever. Per-entry deletes
 (`delete_entry`) stay soft.
 
+Hard-delete reclaims the rows; `secure_delete = ON` (set on every pooled
+connection) zeroes their freed pages so the content is not recoverable
+from the freelist, and the explicit purge paths (`clear_non_pinned`,
+`clear_older_than`) follow up with `wal_checkpoint(TRUNCATE)` so the
+pre-deletion bytes do not survive in historical WAL frames. This is
+residue reduction inside the file, **not** encryption — see
+[section 19](#19-security-notes).
+
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**
 encrypted — see [section 19](#19-security-notes).
@@ -2090,13 +2098,21 @@ under 80 ms for 100k text entries on a developer machine.
 - **Capture** — no remote network calls; the capture loop never
   leaves the process.
 - **Storage at rest** — SQLite file forced to `0600`, parent
-  directory to `0700`. The DB itself is **not** encrypted;
+  directory to `0700`. The DB itself is **not** encrypted, and
+  shipping 1.0 without encryption is a documented, accepted decision
+  (see `docs/security-encryption-at-rest.md` → Release decision):
   permission bits keep other local users out but do not defend
   against backups, sync clients, or code running as the same user.
   README documents the gap and recommended mitigations (avoid sync
-  targets, rely on FileVault, prefer `Store redacted`); the
-  SQLCipher / OS-keystore trade-offs are captured in
-  `docs/security-encryption-at-rest.md`.
+  targets, rely on FileVault, prefer `Store redacted`). To keep
+  *deleted* secrets from lingering in the live file, every connection
+  runs `secure_delete = ON` (freed pages zeroed) and the explicit
+  purge paths (`clear_non_pinned`, `clear_older_than`) issue
+  `wal_checkpoint(TRUNCATE)` so the pre-deletion content does not
+  survive in WAL frames — residue reduction, not a substitute for
+  full-disk encryption (freed disk blocks stay recoverable at the
+  filesystem layer until reused). The SQLCipher / OS-keystore
+  trade-offs are captured in `docs/security-encryption-at-rest.md`.
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret
   imagery never reaches the WebView. The `/thumb/<id>` branch

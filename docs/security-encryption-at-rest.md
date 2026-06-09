@@ -9,6 +9,57 @@ directory, but the bytes on disk are plaintext. Permission bits keep
 other local users out; they do not defend against anything running as
 the same user (backups, sync clients, malware).
 
+## Release decision
+
+**For the canary and the v0.1.0 release, the at-rest threat model is an
+accepted, documented limitation — encryption at rest is explicitly out
+of scope for 1.0.** SQLCipher + OS keystore (the candidates below) is a
+post-1.0 feature, not a launch blocker.
+
+What this means concretely — the residual risks accepted at 1.0:
+
+- The DB bytes are plaintext on disk. Anything running **as the same
+  user** (malware, a backup agent, a cloud-sync client copying the data
+  directory) can read the full clipboard history. `0600` / `0700` only
+  keep *other* local users out.
+- A plaintext backup or disk-image snapshot exposes the history; so does
+  copying the data directory into a cleartext cloud share.
+- Freed disk blocks remain recoverable at the **filesystem** layer until
+  the OS reuses them, even after the in-DB mitigations below.
+
+The supported mitigations a user has at 1.0:
+
+- **Full-disk encryption** (FileVault / BitLocker / LUKS) is the real
+  defence and the recommended baseline. README and ARCHITECTURE §19 say
+  so.
+- **`Store redacted`** (the default `secret_handling`) keeps detected
+  secrets out of the durable copy in the first place.
+- Keep the data directory off cleartext sync targets.
+
+### What we *do* enforce in the file
+
+Because the clipboard inevitably captures secrets, a hard-delete must not
+leave the content sitting in the freelist or the WAL for a raw file read
+or an upgrade-time `VACUUM` to resurrect. As of this decision the storage
+layer:
+
+- opens every pooled connection with `PRAGMA secure_delete = ON`, so a
+  deleted row's freed pages are overwritten with zeros rather than merely
+  unlinked from the b-tree, and
+- follows the explicit purge paths (`clear_non_pinned` for *Clear
+  history* / clear-on-quit, and the age sweep `clear_older_than`) with
+  `PRAGMA wal_checkpoint(TRUNCATE)`, so the pre-deletion content that
+  lived in historical WAL frames is folded into the now-zeroed main file
+  and the `-wal` sidecar is shrunk to zero.
+
+This is **residue reduction within the database file, not encryption**:
+it shrinks the window where deleted secrets are recoverable from the
+live file, but it does not protect *live* (non-deleted) rows and does not
+defend against any of the same-user / backup / sync vectors above.
+Encryption at rest remains the only mitigation that holds once a third
+party has file-level read access; this section records that we are
+shipping 1.0 without it by choice.
+
 ## Why encryption at rest is open
 
 The clipboard inevitably captures secrets: passwords copied from a

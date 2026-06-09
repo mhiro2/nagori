@@ -5,6 +5,31 @@ use time::OffsetDateTime;
 use super::SqliteStore;
 use super::convert::{format_time, storage_err};
 
+/// Fold the WAL back into the main file and truncate it to zero length after
+/// a purge that deleted at least one row.
+///
+/// `secure_delete = ON` zeroes the *freed pages in the main database*, but
+/// the pre-deletion content also lives in the historical WAL frames written
+/// before the delete; a passive `wal_autocheckpoint` neither truncates the
+/// WAL nor guarantees those frames are gone. `TRUNCATE` checkpoints every
+/// frame into the (now-zeroed) main file and shrinks the `-wal` sidecar to
+/// zero, so the cleartext a user copied just before *Clear history* /
+/// retention does not survive in `nagori.sqlite-wal`.
+///
+/// Best-effort: the rows are already gone once the transaction committed, so a
+/// busy checkpoint (a concurrent reader holding the WAL open) must not turn a
+/// successful purge into an error — clear-on-quit relies on the purge result
+/// to clear its fail-closed marker. The next checkpoint or maintenance VACUUM
+/// reclaims the residue instead.
+fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, deleted: usize) {
+    if deleted == 0 {
+        return;
+    }
+    if let Err(err) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+        tracing::warn!(error = %err, "wal_checkpoint_truncate_after_purge_failed");
+    }
+}
+
 impl SqliteStore {
     pub async fn clear_older_than(&self, cutoff: OffsetDateTime) -> Result<usize> {
         self.run_blocking(move |store| {
@@ -27,6 +52,7 @@ impl SqliteStore {
                 )
                 .map_err(|err| storage_err(&err))?;
             tx.commit().map_err(|err| storage_err(&err))?;
+            checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
         .await
@@ -50,6 +76,7 @@ impl SqliteStore {
                 .execute("DELETE FROM entries WHERE pinned = 0", [])
                 .map_err(|err| storage_err(&err))?;
             tx.commit().map_err(|err| storage_err(&err))?;
+            checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
         .await

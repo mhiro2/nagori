@@ -251,12 +251,26 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // `DELETE FROM entries` (or any path that purges an entry row)
     // walks the FK cascade into `search_documents` and then drops the
     // matching `search_fts` row instead of leaking the FTS index entry.
+    //
+    // `secure_delete = ON` overwrites the freed content of every deleted
+    // row with zeros instead of merely unlinking the b-tree cell. The
+    // clipboard inevitably captures secrets, so a hard-delete (retention
+    // sweep, *Clear history*, clear-on-quit) must leave nothing
+    // recoverable from the freelist pages a later VACUUM or raw file read
+    // would otherwise expose. This is a per-connection setting, so it has
+    // to be set on every pooled connection. It is *not* a substitute for
+    // full-disk encryption — freed disk blocks remain recoverable at the
+    // filesystem layer until reused — and the explicit purge paths follow
+    // up with `wal_checkpoint(TRUNCATE)` to drop the historical WAL frames
+    // that still hold the pre-deletion content; see
+    // `docs/security-encryption-at-rest.md`.
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA recursive_triggers = ON;
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
+         PRAGMA secure_delete = ON;
          PRAGMA temp_store = MEMORY;
          PRAGMA wal_autocheckpoint = 1000;
          PRAGMA mmap_size = 67108864;",
@@ -564,6 +578,24 @@ mod tests {
         assert_eq!(
             version, SCHEMA_VERSION,
             "DB must land at the latest schema version after a concurrent upgrade",
+        );
+    }
+
+    #[tokio::test]
+    async fn pooled_connections_enable_secure_delete() {
+        // Deleted clipboard rows must have their freed pages zeroed, not just
+        // unlinked, so a hard-delete leaves nothing recoverable from the
+        // freelist. `secure_delete` is a per-connection setting, so assert it
+        // is live on a connection handed out by the pool rather than only on
+        // the one `configure_connection` was called with at open time.
+        let store = SqliteStore::open_memory().unwrap();
+        let conn = store.conn().unwrap();
+        let secure_delete: i64 = conn
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            secure_delete, 1,
+            "secure_delete must be ON for every pooled connection"
         );
     }
 
