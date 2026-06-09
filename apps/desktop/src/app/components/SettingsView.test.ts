@@ -676,6 +676,43 @@ describe('SettingsView', () => {
     expect(retried?.captureEnabled).toBe(false);
   });
 
+  it('settles to a non-error state on a conflict that reconciles to no delta', async () => {
+    // When the reload after a conflict leaves no local delta (another client
+    // already made the same edit, or the user reverted mid-flight), the
+    // controller's follow-up dedups. The save path must treat that as handled
+    // rather than re-throwing, or the UI would stay stuck on "Save failed"
+    // even though settings are synchronized — and no extra IPC should fire.
+    let reloaded = false;
+    vi.mocked(getSettings).mockImplementation(async () =>
+      reloaded
+        ? { ...baseSettings(), captureEnabled: false, revision: 6 }
+        : { ...baseSettings(), captureEnabled: true, revision: 5 },
+    );
+    vi.mocked(updateSettings).mockRejectedValueOnce({
+      code: 'settings_conflict',
+      message: 'stale',
+      recoverable: true,
+    });
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+    // From here, a reload reflects another client having already applied the
+    // same capture toggle the user is about to make.
+    reloaded = true;
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+
+    // The dispatch conflicts; the reload reconciles to the same value with no
+    // delta, so the status settles to a non-error terminal state.
+    await waitFor(() => {
+      const status = container.querySelector('.save-status')?.getAttribute('data-status') ?? 'idle';
+      expect(['saved', 'idle']).toContain(status);
+    });
+    // No re-send: the deduped follow-up must not fan out a second IPC.
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+  });
+
   it('retries a failed save automatically after a cool-down', async () => {
     // The two retry paths above ride on either a follow-up edit or
     // unmount. If the user does neither — common after a transient IPC

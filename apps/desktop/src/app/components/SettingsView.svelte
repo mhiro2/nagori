@@ -362,16 +362,30 @@
       // landing in the startup attach/hydrate gap can be dropped — leaving the
       // baseline stuck and the autosave retry conflicting forever. Re-fetch the
       // authoritative (settings, revision) pair and reconcile it the same way a
-      // broadcast would (preserving in-progress edits and advancing
-      // `settingsRevision`), so the controller's follow-up retry compare-and-
-      // swaps against reality. Re-throw so the controller still records the
-      // failure and schedules that retry.
+      // broadcast would: `applyRemoteSettings` preserves in-progress edits,
+      // advances `settingsRevision`, and (because it runs mid-inflight) marks
+      // an external merge so the controller fires a follow-up commit.
       if (isSettingsConflict(err)) {
         try {
-          applyRemoteSettings(await getSettings());
+          const reloaded = await getSettings();
+          applyRemoteSettings(reloaded);
+          // Decide exactly as the controller's follow-up dedup will. If the
+          // reconciled form still differs from the freshly-loaded state, there
+          // is a real edit to flush: re-throw so the controller's catch rewinds
+          // its baseline to the reloaded snapshot and the follow-up re-sends
+          // against the fresh revision. If reconciliation left no delta
+          // (another writer already applied the same change, or the user
+          // reverted), resolve instead — re-throwing would strand the UI on
+          // "Save failed" because the deduped follow-up never clears it.
+          const reconciledJson = JSON.stringify(buildSnapshotPayload());
+          const reloadedJson = JSON.stringify({ ...reloaded, revision: 0 });
+          if (reconciledJson === reloadedJson) {
+            return;
+          }
         } catch {
-          // A failed reload leaves the baseline as-is; the next broadcast or a
-          // reopen recovers. Fall through to surface the original conflict.
+          // A failed reload leaves the baseline as-is; fall through to surface
+          // the original conflict so the cool-down retry tries again (and the
+          // next broadcast or a reopen recovers).
         }
       }
       throw err;
