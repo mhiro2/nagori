@@ -6,9 +6,22 @@ import type { AiActionId, AiAvailability } from '../lib/types';
 
 // `vi.mock` is hoisted above module-level consts, so the shared mock state has
 // to be defined via `vi.hoisted` to be reachable from the factory.
-const { handlers, AI_EVENTS } = vi.hoisted(() => ({
+const { handlers, readyState, AI_EVENTS } = vi.hoisted(() => ({
   // Captured `nagori://ai/*` handlers so tests can drive the streaming flow.
   handlers: {} as Record<string, (payload: unknown) => void>,
+  // Listener-attach control. `auto` (default) fires each `onReady` synchronously
+  // like the real wrapper; a test can set `auto = false` to defer attach and
+  // drive the start gate manually via `flushReady()`, or set `fail = true` to
+  // simulate every `listen()` rejecting (fires `onError` instead).
+  readyState: {
+    auto: true,
+    fail: false,
+    pending: [] as (() => void)[],
+    flushReady(): void {
+      const callbacks = readyState.pending.splice(0);
+      for (const cb of callbacks) cb();
+    },
+  },
   AI_EVENTS: {
     aiStarted: 'nagori://ai/started',
     aiDelta: 'nagori://ai/delta',
@@ -22,12 +35,29 @@ const { handlers, AI_EVENTS } = vi.hoisted(() => ({
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => true),
   TAURI_EVENTS: AI_EVENTS,
-  subscribe: vi.fn((event: string, handler: (payload: unknown) => void) => {
-    handlers[event] = handler;
-    return () => {
-      delete handlers[event];
-    };
-  }),
+  subscribe: vi.fn(
+    (
+      event: string,
+      handler: (payload: unknown) => void,
+      onReady?: () => void,
+      onError?: () => void,
+    ) => {
+      handlers[event] = handler;
+      // Mirror the real wrapper: the listener attaches and signals readiness so
+      // the inspector's start gate opens. `fail` simulates a rejected attach
+      // (fires `onError`); otherwise `onReady` fires now, or is deferred when
+      // `auto` is off so a test can drive the gate manually.
+      if (readyState.fail) {
+        onError?.();
+      } else if (onReady) {
+        if (readyState.auto) onReady();
+        else readyState.pending.push(onReady);
+      }
+      return () => {
+        delete handlers[event];
+      };
+    },
+  ),
 }));
 
 vi.mock('../lib/commands', () => ({
@@ -97,6 +127,9 @@ const availability = (actionsAvailable: boolean): AiAvailability => ({
 beforeEach(() => {
   vi.clearAllMocks();
   for (const key of Object.keys(handlers)) delete handlers[key];
+  readyState.auto = true;
+  readyState.fail = false;
+  readyState.pending.length = 0;
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(getAiAvailability).mockResolvedValue(availability(true));
   vi.mocked(aiActionsSupported).mockReturnValue(true);
@@ -240,6 +273,59 @@ describe('ActionInspector', () => {
       warnings: [],
     });
     expect(await findByText('Hello world')).toBeTruthy();
+  });
+
+  it('waits for the request-scoped listeners to attach before starting a run', async () => {
+    // Defer listener attach so a click lands inside the window where the
+    // backend could emit a terminal event before we are listening. The run must
+    // not start until the listeners attach, then drive cleanly to done.
+    readyState.auto = false;
+    const user = userEvent.setup();
+    vi.mocked(startAiAction).mockResolvedValue('req-gate');
+
+    const { getByTestId, findByText } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'gated' }), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+
+    await user.click(getByTestId('ai-Summarize'));
+    await flush();
+    // Listeners have not attached yet, so the backend run is held back.
+    expect(startAiAction).not.toHaveBeenCalled();
+
+    // Attach the listeners: the gate opens and the run starts.
+    readyState.flushReady();
+    await flush();
+    expect(startAiAction).toHaveBeenCalledWith('Summarize', 'gated');
+    await flush(); // let startAiAction resolve so aiRequestId is set
+
+    handlers[AI_EVENTS.aiDone]?.({
+      requestId: 'req-gate',
+      finalText: 'gated result',
+      warnings: [],
+    });
+    expect(await findByText('gated result')).toBeTruthy();
+  });
+
+  it('fails closed without starting a run when listeners cannot attach', async () => {
+    // If `listen()` rejects the ready gate rejects, so the run must not start
+    // (a backend run whose terminal event can never reach us would strand the
+    // UI). Instead it surfaces an error and clears the running state.
+    readyState.fail = true;
+    const user = userEvent.setup();
+    vi.mocked(startAiAction).mockResolvedValue('req-never');
+
+    const { getByTestId, container } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'no-listeners' }), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+
+    await user.click(getByTestId('ai-Summarize'));
+    await flush();
+
+    // The backend run never starts, and the inline error alert is shown.
+    expect(startAiAction).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')).toBeTruthy();
   });
 
   it('starts a non-summarize AI action with its own id', async () => {

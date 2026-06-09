@@ -100,6 +100,18 @@
   // returned a request id — so we can cancel the moment that id arrives.
   let runToken = 0;
   let cancelRequested = false;
+  // Resolves once the request-scoped `nagori://ai/*` listeners have actually
+  // attached on the backend (Tauri's `listen()` is async, so `subscribe()`
+  // returning does not mean we are listening yet). `runAiAction` awaits this
+  // before starting a run so a fast `done`/`error` can't be emitted in the gap
+  // between subscribe and attach — which would drop the terminal event and
+  // strand the UI in the running state. Reset to a fresh pending promise each
+  // time the inspector (re)subscribes; resolved by default while unsubscribed.
+  // `aiListenersAttached` is the synchronous fast-path: once true, a run skips
+  // the await entirely, so the common open-then-click case adds no latency and
+  // the gate only ever delays a click that lands inside the attach window.
+  let aiListenersReady: Promise<void> = Promise.resolve();
+  let aiListenersAttached = true;
 
   type FlashTimer = ReturnType<typeof setTimeout> | undefined;
   let copyFlashTimer: FlashTimer = undefined;
@@ -300,6 +312,18 @@
     doneFlash = false;
     cancelRequested = false;
     try {
+      // Don't start the backend run until the request-scoped listeners have
+      // attached; otherwise a fast `done`/`error` could fire before we are
+      // listening and the UI would hang in the running state. The fast-path
+      // boolean keeps the common open-then-click case synchronous; only a click
+      // that lands inside the attach window pays the await. Bail if a close /
+      // re-target / newer run superseded us while we waited; if the gate rejects
+      // (a listener failed to attach), the `catch` below surfaces the error
+      // instead of starting a run whose terminal event could never arrive.
+      if (!aiListenersAttached) {
+        await aiListenersReady;
+        if (token !== runToken) return;
+      }
       const id = await startAiAction(action, target.id);
       // Superseded while the backend was spinning up (the inspector was closed
       // or re-targeted before the id arrived): cancel the orphaned backend run
@@ -493,40 +517,100 @@
     if (!open || !isTauri()) return;
     // `aiRequestId` is the id returned by `startAiAction` — authoritative and
     // scoped to *this* run, so we never adopt a stray `started` from another
-    // run/window. The command returns the id before the backend produces its
-    // first real snapshot, so deltas are not dropped in practice.
+    // run/window. `runAiAction` waits on `aiListenersReady` before starting, so
+    // even the fastest terminal event lands after every listener has attached.
     const matches = (id: string): boolean => aiRequestId !== undefined && id === aiRequestId;
+    // Arm the ready gate: resolve once every subscription's underlying
+    // `listen()` has attached so a run started afterward can't miss an event,
+    // or reject if any attach fails so a run fails closed instead of starting
+    // with a missing listener (which would never deliver its terminal event and
+    // strand the UI).
+    let attached = 0;
+    // Assigned synchronously by the Promise executor below before any use.
+    let resolveReady!: () => void;
+    let rejectReady!: (reason: unknown) => void;
+    aiListenersAttached = false;
+    aiListenersReady = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    // Keep a rejected gate from surfacing as an unhandled rejection when no run
+    // is awaiting it; a run that *does* await sees the rejection on its own.
+    aiListenersReady.catch(() => {});
+    const SUBSCRIPTION_COUNT = 5;
+    const markAttached = (): void => {
+      attached += 1;
+      if (attached === SUBSCRIPTION_COUNT) {
+        aiListenersAttached = true;
+        resolveReady();
+      }
+    };
+    const markFailed = (): void => {
+      rejectReady(new Error('ai event listener failed to attach'));
+    };
     const unsubscribers = [
-      subscribe<AiDeltaEvent>(TAURI_EVENTS.aiDelta, (payload) => {
-        if (matches(payload.requestId)) aiText += payload.text;
-      }),
-      subscribe<AiReplaceEvent>(TAURI_EVENTS.aiReplace, (payload) => {
-        if (matches(payload.requestId)) aiText = payload.text;
-      }),
-      subscribe<AiDoneEvent>(TAURI_EVENTS.aiDone, (payload) => {
-        if (!matches(payload.requestId)) return;
-        aiText = payload.finalText;
-        lastResult = payload.finalText;
-        aiStreaming = false;
-        aiRequestId = undefined;
-        aiPendingAction = undefined;
-        flashDone();
-      }),
-      subscribe<AiErrorEvent>(TAURI_EVENTS.aiError, (payload) => {
-        if (!matches(payload.requestId)) return;
-        runError = payload.message;
-        aiStreaming = false;
-        aiRequestId = undefined;
-        aiPendingAction = undefined;
-      }),
-      subscribe<{ requestId: string }>(TAURI_EVENTS.aiCancelled, (payload) => {
-        if (!matches(payload.requestId)) return;
-        aiStreaming = false;
-        aiRequestId = undefined;
-        aiPendingAction = undefined;
-      }),
+      subscribe<AiDeltaEvent>(
+        TAURI_EVENTS.aiDelta,
+        (payload) => {
+          if (matches(payload.requestId)) aiText += payload.text;
+        },
+        markAttached,
+        markFailed,
+      ),
+      subscribe<AiReplaceEvent>(
+        TAURI_EVENTS.aiReplace,
+        (payload) => {
+          if (matches(payload.requestId)) aiText = payload.text;
+        },
+        markAttached,
+        markFailed,
+      ),
+      subscribe<AiDoneEvent>(
+        TAURI_EVENTS.aiDone,
+        (payload) => {
+          if (!matches(payload.requestId)) return;
+          aiText = payload.finalText;
+          lastResult = payload.finalText;
+          aiStreaming = false;
+          aiRequestId = undefined;
+          aiPendingAction = undefined;
+          flashDone();
+        },
+        markAttached,
+        markFailed,
+      ),
+      subscribe<AiErrorEvent>(
+        TAURI_EVENTS.aiError,
+        (payload) => {
+          if (!matches(payload.requestId)) return;
+          runError = payload.message;
+          aiStreaming = false;
+          aiRequestId = undefined;
+          aiPendingAction = undefined;
+        },
+        markAttached,
+        markFailed,
+      ),
+      subscribe<{ requestId: string }>(
+        TAURI_EVENTS.aiCancelled,
+        (payload) => {
+          if (!matches(payload.requestId)) return;
+          aiStreaming = false;
+          aiRequestId = undefined;
+          aiPendingAction = undefined;
+        },
+        markAttached,
+        markFailed,
+      ),
     ];
     return () => {
+      // Unblock any run still awaiting this gate — it bails on its `runToken`
+      // check, since closing/re-targeting bumps the token via `resetRun` — then
+      // drop back to the resolved default so the next open re-arms a fresh
+      // pending gate.
+      resolveReady();
+      aiListenersAttached = true;
+      aiListenersReady = Promise.resolve();
       for (const unsub of unsubscribers) unsub();
     };
   });

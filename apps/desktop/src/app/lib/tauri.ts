@@ -122,16 +122,20 @@ export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];
 // Subscribe to a Tauri event without leaking listeners across the dynamic
 // import await. If the consumer cleans up before `listen()` resolves we
 // immediately unsubscribe instead of pushing the late unlisten into a list
-// the caller has already drained. `onReady` (when provided) fires *after*
-// the underlying `listen()` has attached, so callers that need to defer
-// follow-up work — e.g. querying a backend cache for any emit that fired
-// in the gap between `subscribe()` returning and `listen()` resolving —
-// can wait on a real attach signal instead of guessing.
+// the caller has already drained. `onReady` (when provided) fires *after* the
+// underlying `listen()` has attached, so callers that gate follow-up work on a
+// real attach signal (querying a backend cache for an emit that fired in the
+// gap, opening a start gate) get a definite signal instead of guessing.
+// `onError` fires if the dynamic import or `listen()` rejected — exactly one of
+// the two runs (unless the consumer cleaned up first), so a gate that must not
+// hang on attach failure can fail closed rather than wait forever. On error the
+// listener is not attached, so the event will not be delivered.
 // oxlint-disable-next-line no-unnecessary-type-parameters
 export const subscribe = <T>(
   event: TauriEventName,
   handler: (payload: T) => void,
   onReady?: () => void,
+  onError?: () => void,
 ): (() => void) => {
   if (!isTauri()) {
     onReady?.();
@@ -140,14 +144,21 @@ export const subscribe = <T>(
   let cancelled = false;
   let unlisten: (() => void) | undefined;
   void (async () => {
-    const { listen } = await import('@tauri-apps/api/event');
-    const off = await listen<T>(event, (e) => handler(e.payload));
-    if (cancelled) {
-      off();
-      return;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      const off = await listen<T>(event, (e) => handler(e.payload));
+      if (cancelled) {
+        off();
+        return;
+      }
+      unlisten = off;
+      onReady?.();
+    } catch {
+      // The dynamic import or `listen()` failed. Signal the failure (unless the
+      // consumer already cleaned up) so a gate awaiting this subscription can
+      // fail closed instead of hanging or starting work with no listener.
+      if (!cancelled) onError?.();
     }
-    unlisten = off;
-    onReady?.();
   })();
   return () => {
     cancelled = true;
