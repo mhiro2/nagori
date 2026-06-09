@@ -35,29 +35,43 @@ use wl_clipboard_rs::{
 #[cfg(target_os = "linux")]
 const INTERNAL_BODY_CEILING_BYTES: usize = 256 * 1024 * 1024;
 
-/// Per-call ceiling applied to sequence-only paths
-/// (`current_sequence`, `current_sequence_with_max`).
+/// Per-call ceiling on how much of the clipboard payload the change-detection
+/// fingerprint reads and hashes.
 ///
-/// Wayland's data-control protocols do not expose an offer-level serial
-/// that `wl-clipboard-rs` could surface as a cheap signal, so detecting
-/// "did the clipboard change since last poll?" otherwise requires
-/// streaming every mime payload through SHA-256 every tick — a
-/// multi-megabyte image clip pays its read cost over and over for the
-/// entire time it sits on the clipboard. Capping the sequence-only
-/// hash at 256 KiB makes a single poll cost bounded regardless of
-/// payload size: anything bigger collapses to the `oversized-over:`
-/// sentinel keyed on the first 256 KiB, which still differs across
-/// distinct clips that share a mime set (image headers, text prefixes,
-/// uri-list rows all differ inside the first 256 KiB in practice).
+/// Wayland's data-control protocols do not expose an offer-level serial that
+/// `wl-clipboard-rs` could surface as a cheap signal, so detecting "did the
+/// clipboard change since last poll?" means streaming the mime payloads
+/// through SHA-256 every tick. We cannot hash the *whole* body unconditionally
+/// — a clip sits on the selection until the user copies something else, so a
+/// huge payload would pay its full read cost on every poll for minutes. This
+/// ceiling caps the per-poll read so the cost stays bounded regardless of
+/// payload size: a clip bigger than the ceiling collapses to the
+/// `oversized-over:` sentinel keyed on the hash of its first
+/// `SEQUENCE_FINGERPRINT_CEILING` bytes.
 ///
-/// The trade-off is a theoretical false negative when two distinct
-/// clips share an identical first 256 KiB and differ only past it —
-/// vanishingly rare for natural clipboard data. The full-body read
-/// still runs through `current_snapshot_with_max` once a change *is*
-/// detected, and storage-layer content-hash dedupe catches accidental
-/// re-publishes regardless of what this fingerprint reports.
+/// Hashing the read prefix (rather than only counting its length, or only
+/// reading 256 KiB) is the strongest signal per byte read: two clips that
+/// differ *anywhere* in the hashed prefix — including a length change — get
+/// distinct fingerprints, whereas a length-only fingerprint would still
+/// collide for an in-place edit and a 256 KiB fingerprint collides for any two
+/// large documents that share a 256 KiB header. The residual false negative is
+/// now narrow: two *distinct* clips whose first 1 MiB is byte-for-byte
+/// identical and which differ only past it. That is vanishingly rare for
+/// natural clipboard data, and it cannot happen at all under the default
+/// `max_entry_size_bytes` (512 KiB): the read ceiling is `min(this, max)`, so a
+/// capturable clip is hashed in full and the fingerprint is exact. The
+/// per-mime `PIPE_READ_TIMEOUT` still bounds a slow/malicious publisher
+/// independently of this size cap.
 #[cfg(target_os = "linux")]
-const SEQUENCE_FINGERPRINT_CEILING: usize = 256 * 1024;
+const SEQUENCE_FINGERPRINT_CEILING: usize = 1024 * 1024;
+
+// The fingerprint read ceiling is `min(SEQUENCE_FINGERPRINT_CEILING, max)`, so
+// keeping the ceiling >= the default `max_entry_size_bytes` (512 KiB, see
+// `AppSettings::default`) guarantees a capturable clip under the default
+// setting is hashed in full — the change-detection fingerprint is exact and
+// the same-prefix false negative cannot occur without the user raising the cap.
+#[cfg(target_os = "linux")]
+const _: () = assert!(SEQUENCE_FINGERPRINT_CEILING >= 512 * 1024);
 
 /// Image MIME types we will capture, in priority order. Mirrors the
 /// `nagori-core` factory's `is_allowlisted_image_mime` allowlist
@@ -201,9 +215,10 @@ impl ClipboardReader for LinuxClipboard {
     async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
         // Use the smaller of the caller's `max_bytes` and the
         // sequence-fingerprint ceiling — the caller's cap still wins
-        // when they want a tighter budget than 256 KiB, but a 256 MiB
-        // `max_entry_size_bytes` does not turn every poll into a
-        // multi-megabyte SHA-256 stream.
+        // when they want a tighter budget than the ceiling, but a
+        // 256 MiB `max_entry_size_bytes` does not turn every poll into a
+        // multi-megabyte SHA-256 stream. When `max_bytes <= ceiling` the
+        // capturable clip is hashed in full, so the fingerprint is exact.
         #[cfg(target_os = "linux")]
         {
             let pass =
@@ -613,8 +628,8 @@ async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass
     let read_ceiling = buffer_cap.unwrap_or(INTERNAL_BODY_CEILING_BYTES);
     // Cap the sequence hash at the smaller of `SEQUENCE_FINGERPRINT_CEILING`
     // and the actual read budget so the fingerprint matches the
-    // sequence-only path even when the snapshot keeps buffering past
-    // 256 KiB toward `max_entry_size_bytes`. The `.min` guard covers the
+    // sequence-only path even when the snapshot keeps buffering past the
+    // ceiling toward `max_entry_size_bytes`. The `.min` guard covers the
     // rare test/embedded case where `buffer_cap < SEQUENCE_FINGERPRINT_CEILING`.
     let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
     pipe_read_multi_pass_internal(buffer_cap, sequence_ceiling, read_ceiling).await
@@ -623,9 +638,9 @@ async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipePass> {
     // No-buffer paths always run from `current_sequence*`, which already
-    // chose 256 KiB (or a smaller `max_bytes`) as the read ceiling. Re-cap
-    // here so a future caller passing a larger `read_ceiling` still gets
-    // the canonical 256 KiB fingerprint.
+    // chose `SEQUENCE_FINGERPRINT_CEILING` (or a smaller `max_bytes`) as the
+    // read ceiling. Re-cap here so a future caller passing a larger
+    // `read_ceiling` still gets the canonical fingerprint extent.
     let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
     pipe_read_multi_pass_internal(None, sequence_ceiling, read_ceiling).await
 }
@@ -958,7 +973,7 @@ struct MultiReadState {
     /// separately from `read_ceiling` so the snapshot and sequence-only
     /// paths can buffer different amounts but still produce identical
     /// sequence strings for the same clip — without that, every
-    /// over-256-KiB clip would mismatch on the very next tick and the
+    /// over-ceiling clip would mismatch on the very next tick and the
     /// capture loop would re-read it forever.
     sequence_ceiling: usize,
     read_ceiling: usize,
@@ -1078,8 +1093,8 @@ impl MultiReadState {
             // and mark the sticky overflow. We do NOT stop reading here
             // — the snapshot path still needs the remaining bytes to
             // buffer the full body. The sequence-only path crosses this
-            // and `read_ceiling` simultaneously (both 256 KiB), so the
-            // hard read-abort below fires on the same tick.
+            // and `read_ceiling` simultaneously (both the fingerprint
+            // ceiling), so the hard read-abort below fires on the same tick.
             if !self.sequence_overflow {
                 if self.observed_total > self.sequence_ceiling {
                     let prefix_remaining = self.sequence_ceiling.saturating_sub(previous).min(n);
@@ -1149,8 +1164,8 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, TimeoutPipeReader, oversized_sequence,
-        parse_uri_list, pick_image_mime, serialize_uri_list,
+        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, SEQUENCE_FINGERPRINT_CEILING,
+        TimeoutPipeReader, oversized_sequence, parse_uri_list, pick_image_mime, serialize_uri_list,
     };
 
     /// `Read` impl that always returns `TimedOut` — lets us exercise
@@ -1261,7 +1276,7 @@ mod tests {
     fn snapshot_and_sequence_only_paths_agree_on_oversized_clip() {
         // Regression: the snapshot path used to hash the full body while
         // current_sequence_with_max capped at SEQUENCE_FINGERPRINT_CEILING,
-        // so over-256-KiB clips produced different sequences every tick and
+        // so over-ceiling clips produced different sequences every tick and
         // the capture loop re-read them forever. The two configs must
         // collapse to the same oversized-over: sentinel for the same
         // bytes.
@@ -1270,7 +1285,7 @@ mod tests {
             .collect();
 
         // Snapshot: full-body buffer (way past sequence_ceiling) with the
-        // 256-KiB-equivalent fingerprint cap.
+        // fingerprint cap.
         let mut snapshot = MultiReadState::new(Some(body.len()), PIPE_CHUNK, body.len());
         let _ = snapshot
             .read_pipe(&mut io::Cursor::new(body.clone()))
@@ -1282,6 +1297,44 @@ mod tests {
         let _ = seq_only.read_pipe(&mut io::Cursor::new(body)).unwrap();
 
         assert_eq!(snapshot.finalize_sequence(), seq_only.finalize_sequence());
+    }
+
+    #[test]
+    fn distinguishes_clips_that_diverge_past_256_kib() {
+        // Two documents that share an identical first 256 KiB and differ only
+        // afterward used to collapse to the same `oversized-over:` sentinel
+        // (the hash stopped at 256 KiB), so the capture loop missed the second
+        // one. With the larger fingerprint ceiling the divergence at 300 KiB
+        // is inside the hashed prefix, so the two now get distinct sequences.
+        let prefix = vec![b'a'; 256 * 1024];
+        let mut first = prefix.clone();
+        first.extend(std::iter::repeat_n(b'b', 64 * 1024));
+        let mut second = prefix;
+        second.extend(std::iter::repeat_n(b'c', 64 * 1024));
+        assert!(first.len() < SEQUENCE_FINGERPRINT_CEILING);
+
+        let mut s1 = MultiReadState::new(
+            None,
+            SEQUENCE_FINGERPRINT_CEILING,
+            SEQUENCE_FINGERPRINT_CEILING,
+        );
+        let _ = s1.read_pipe(&mut io::Cursor::new(first)).unwrap();
+        let mut s2 = MultiReadState::new(
+            None,
+            SEQUENCE_FINGERPRINT_CEILING,
+            SEQUENCE_FINGERPRINT_CEILING,
+        );
+        let _ = s2.read_pipe(&mut io::Cursor::new(second)).unwrap();
+
+        let seq1 = s1.finalize_sequence();
+        let seq2 = s2.finalize_sequence();
+        assert_ne!(
+            seq1, seq2,
+            "clips diverging past 256 KiB must fingerprint differently"
+        );
+        // Both are under the ceiling, so neither lands in the sentinel form.
+        assert!(!seq1.starts_with("oversized-over:"));
+        assert!(!seq2.starts_with("oversized-over:"));
     }
 
     #[test]
