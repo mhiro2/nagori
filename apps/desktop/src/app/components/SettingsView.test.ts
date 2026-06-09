@@ -641,6 +641,41 @@ describe('SettingsView', () => {
     expect(second?.autoPasteEnabled).toBe(false);
   });
 
+  it('reloads the baseline and retries when a save hits a settings_conflict', async () => {
+    // A compare-and-swap conflict means the window's revision baseline is
+    // stale (e.g. a broadcast was missed during the startup attach/hydrate
+    // gap). The save path must re-fetch the authoritative settings — refreshing
+    // the revision and reconciling values — so the follow-up retry succeeds
+    // instead of looping on the stale revision forever.
+    vi.mocked(getSettings).mockResolvedValue({ ...baseSettings(), revision: 7 });
+    vi.mocked(updateSettings)
+      .mockRejectedValueOnce({ code: 'settings_conflict', message: 'stale', recoverable: true })
+      .mockResolvedValueOnce(undefined);
+
+    const { findByRole, container } = render(SettingsView);
+    await findByRole('button', { name: 'Back to palette' });
+    // Let the mount-time getSettings / refreshSettings round-trips settle so
+    // the post-save reload is attributable to the conflict, not startup.
+    await waitFor(() => {
+      expect(getSettings).toHaveBeenCalled();
+    });
+    const getCallsBeforeSave = vi.mocked(getSettings).mock.calls.length;
+
+    const captureCheckbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    await fireEvent.click(captureCheckbox);
+
+    // The first dispatch conflicts; the closure re-fetches settings and the
+    // controller's follow-up retry then lands the edit.
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledTimes(2);
+    });
+    // The conflict triggered an extra getSettings (the baseline reload).
+    expect(vi.mocked(getSettings).mock.calls.length).toBeGreaterThan(getCallsBeforeSave);
+    // The user's edit survived the reload+retry.
+    const retried = vi.mocked(updateSettings).mock.calls[1]?.[0];
+    expect(retried?.captureEnabled).toBe(false);
+  });
+
   it('retries a failed save automatically after a cool-down', async () => {
     // The two retry paths above ride on either a follow-up edit or
     // unmount. If the user does neither — common after a transient IPC

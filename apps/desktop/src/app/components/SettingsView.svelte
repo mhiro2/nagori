@@ -10,7 +10,7 @@
     passwordManagerPreset,
     updateSettings,
   } from '../lib/commands';
-  import { describeError } from '../lib/errors';
+  import { describeError, isSettingsConflict } from '../lib/errors';
   import { i18nState, messages, setLocale } from '../lib/i18n/index.svelte';
   import type { Messages } from '../lib/i18n/locales/en';
   import {
@@ -354,7 +354,28 @@
     // Inject the live CAS base onto the wire payload. The dedup snapshot pins
     // `revision` to 0 (see `buildSnapshotPayload`); the backend reads this
     // value, not the body's other fields, to detect a stale overwrite.
-    await updateSettings({ ...snapshot, revision: settingsRevision });
+    try {
+      await updateSettings({ ...snapshot, revision: settingsRevision });
+    } catch (err: unknown) {
+      // A conflict means our baseline is stale. Normally the broadcast that
+      // bumped the revision already refreshed `settingsRevision`, but a write
+      // landing in the startup attach/hydrate gap can be dropped — leaving the
+      // baseline stuck and the autosave retry conflicting forever. Re-fetch the
+      // authoritative (settings, revision) pair and reconcile it the same way a
+      // broadcast would (preserving in-progress edits and advancing
+      // `settingsRevision`), so the controller's follow-up retry compare-and-
+      // swaps against reality. Re-throw so the controller still records the
+      // failure and schedules that retry.
+      if (isSettingsConflict(err)) {
+        try {
+          applyRemoteSettings(await getSettings());
+        } catch {
+          // A failed reload leaves the baseline as-is; the next broadcast or a
+          // reopen recovers. Fall through to surface the original conflict.
+        }
+      }
+      throw err;
+    }
   };
 
   // Autosave state machine lives in its own module so the textarea

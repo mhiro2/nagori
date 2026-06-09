@@ -3,6 +3,16 @@ import { messages } from '../lib/i18n/index.svelte';
 const hasStringField = <K extends string>(value: object, key: K): value is Record<K, string> =>
   key in value && typeof Reflect.get(value, key) === 'string';
 
+// True for the backend `settings_conflict` CommandError — the optimistic-
+// concurrency check rejecting a stale `update_settings`. Callers recover by
+// reloading the authoritative settings baseline and retrying rather than
+// treating it as a hard failure.
+export const isSettingsConflict = (err: unknown): boolean =>
+  err !== null &&
+  typeof err === 'object' &&
+  'code' in err &&
+  (err as { code: unknown }).code === 'settings_conflict';
+
 export const describeError = (err: unknown): string => {
   const t = messages().errors;
   if (err && typeof err === 'object' && 'code' in err) {
