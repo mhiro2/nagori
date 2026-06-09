@@ -116,17 +116,19 @@ impl ThumbnailGate {
         }
     }
 
-    /// Wait for a slot in the global decode pool. The permit is released
-    /// when dropped, so callers hold it for the duration of decode +
-    /// `put_thumbnail` and not a moment longer.
+    /// Non-blocking admission check used *before* spawning a decode task. The
+    /// permit is released when dropped, so callers hold it for the duration of
+    /// decode + `put_thumbnail` and not a moment longer.
     ///
-    /// The semaphore is never closed, so `acquire_owned` cannot fail in
-    /// practice; the error variant is mapped onto `AppError::Storage` so
-    /// the rare cancellation case still surfaces in the spawn-site log.
-    pub(crate) async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit> {
-        self.permits.clone().acquire_owned().await.map_err(|err| {
-            AppError::Storage(format!("thumbnail concurrency semaphore closed: {err}"))
-        })
+    /// Returns `None` when the global decode pool is already saturated, so the
+    /// caller can skip the spawn entirely instead of detaching a task that
+    /// would only park on the semaphore. A burst of misses against *distinct*
+    /// entries (image-heavy scroll, prefetch sweep) is bounded to the pool size
+    /// rather than piling up unbounded `tokio::spawn` tasks; a rejected request
+    /// is picked up on the next fetch (the `nagori-image://thumb/` 503
+    /// `Retry-After` path) once a slot frees.
+    pub(crate) fn try_acquire_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.permits.clone().try_acquire_owned().ok()
     }
 }
 
@@ -373,37 +375,37 @@ fn fit_within(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// The global decode cap and the per-entry dedupe gate are
-    /// independent: a single semaphore permit must still be honoured
-    /// even if the caller already holds a dedupe guard for a distinct
-    /// entry id. This guards against a future refactor that confuses
-    /// the two acquire paths.
-    #[tokio::test]
-    async fn thumbnail_gate_serialises_decodes_past_capacity() {
+    /// The global decode cap bounds admission: once the pool is full, the
+    /// next `try_acquire_permit` is *refused* (returns `None`) rather than
+    /// queued — that refusal is what lets `kick_thumbnail_generation` skip the
+    /// spawn instead of detaching a task that would park on the semaphore. A
+    /// slot frees as soon as a held permit drops.
+    #[test]
+    fn thumbnail_gate_admits_only_up_to_capacity() {
         let gate = ThumbnailGate::with_capacity(2);
-        let p1 = gate.acquire_permit().await.unwrap();
-        let p2 = gate.acquire_permit().await.unwrap();
-        // Third acquire must block until one of the held permits drops.
-        let pending = gate.acquire_permit();
-        tokio::pin!(pending);
+        let p1 = gate.try_acquire_permit().expect("first slot is free");
+        let p2 = gate.try_acquire_permit().expect("second slot is free");
+        // Pool saturated: a third admission must be refused, not queued.
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
-                .await
-                .is_err(),
-            "third permit must wait while two are outstanding",
+            gate.try_acquire_permit().is_none(),
+            "third admission must be refused while two are outstanding",
         );
         drop(p1);
-        let p3 = pending.await.expect("permit becomes available");
+        let p3 = gate
+            .try_acquire_permit()
+            .expect("a slot frees once a permit drops");
         drop(p2);
         drop(p3);
     }
 
-    /// Passing `0` for `max_concurrent` would otherwise deadlock every
+    /// Passing `0` for `max_concurrent` would otherwise refuse every
     /// generator forever; the clamp keeps at least one decoder slot.
-    #[tokio::test]
-    async fn thumbnail_gate_clamps_zero_capacity_to_one() {
+    #[test]
+    fn thumbnail_gate_clamps_zero_capacity_to_one() {
         let gate = ThumbnailGate::with_capacity(0);
-        let permit = gate.acquire_permit().await.unwrap();
+        let permit = gate
+            .try_acquire_permit()
+            .expect("zero capacity is clamped to one slot");
         drop(permit);
     }
 

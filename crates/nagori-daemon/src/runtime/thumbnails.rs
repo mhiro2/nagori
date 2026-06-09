@@ -40,27 +40,36 @@ impl NagoriRuntime {
             // fetch.
             return;
         };
+        // Admission control *before* spawning. Per-entry dedupe (the gate guard
+        // above) does nothing for misses that span distinct entries — a
+        // prefetch sweep or image-heavy scroll would otherwise detach a
+        // `tokio::spawn` task per entry, each parked on the decode semaphore
+        // and each ready to allocate hundreds of MiB. Reserving the global
+        // decode slot here bounds the number of in-flight tasks to the pool
+        // size; if it is saturated we drop `guard` (freeing the per-entry slot)
+        // and skip the spawn.
+        //
+        // Trade-off: a rejected request is *not* queued, so the entry is only
+        // (re)generated when something fetches it again — the preview pane's
+        // 503-miss path retries once (~1s), and a re-navigation re-kicks. An
+        // entry scrolled past during a burst may therefore stay un-cached until
+        // revisited, falling back to streaming the original payload. That
+        // fallback streams bytes without a daemon-side decode, so under the
+        // very saturation that triggered the rejection it is the memory-safe
+        // outcome (no 5th concurrent decode buffer) rather than a regression.
+        let Some(permit) = self.thumbnail_gate.try_acquire_permit() else {
+            return;
+        };
         let store = self.store.clone();
         let settings_rx = self.settings_rx.clone();
-        let gate = self.thumbnail_gate.clone();
         tokio::spawn(async move {
             // Hold the gate guard across the whole generation so a
             // second request that beats us to the cache lookup still
-            // observes the in-flight slot.
+            // observes the in-flight slot, and hold the decode permit so the
+            // global concurrency cap stays enforced until decode +
+            // `put_thumbnail` finish.
             let _guard = guard;
-            // Bound the global decode concurrency before pulling bytes
-            // off disk or touching the blocking pool. Per-entry dedupe
-            // (the gate guard above) does nothing for misses that span
-            // distinct entries — a prefetch sweep or image-heavy scroll
-            // would otherwise pile up `tokio::spawn` tasks each ready to
-            // allocate hundreds of MiB for the decode buffer.
-            let _permit = match gate.acquire_permit().await {
-                Ok(permit) => permit,
-                Err(err) => {
-                    tracing::warn!(error = %err, entry_id = %id, "thumbnail_permit_unavailable");
-                    return;
-                }
-            };
+            let _permit = permit;
             match generate_thumbnail(&store, id).await {
                 Ok(Some(_)) => {
                     let budget = settings_rx.borrow().max_thumbnail_total_bytes;
