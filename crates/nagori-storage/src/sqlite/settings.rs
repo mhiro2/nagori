@@ -64,22 +64,36 @@ impl SettingsRepository for SqliteStore {
 }
 
 impl SqliteStore {
-    /// Current optimistic-concurrency token for the persisted settings row,
-    /// or `0` when no row exists yet (a fresh install before the first save).
-    /// Paired with [`SqliteStore::save_settings_checked`] so a full-blob save
-    /// can detect that the snapshot it edited is stale.
-    pub async fn settings_revision(&self) -> Result<u64> {
+    /// Read the persisted settings *and* their optimistic-concurrency token as
+    /// a single consistent pair, returning `(AppSettings::default(), 0)` when
+    /// no row exists yet.
+    ///
+    /// Both values come from one `SELECT value, revision`, so the body and the
+    /// revision always describe the same committed state. A caller that read
+    /// the body and the revision in two separate statements could observe body
+    /// N with revision N+1 if a write landed in between — the stale body would
+    /// then pass the compare-and-swap and revert the concurrent change. This is
+    /// the read side of [`SqliteStore::save_settings_checked`].
+    pub async fn get_settings_with_revision(&self) -> Result<(AppSettings, u64)> {
         self.run_blocking(|store| {
             let conn = store.conn()?;
-            let revision: Option<i64> = conn
+            let row: Option<(String, i64)> = conn
                 .query_row(
-                    "SELECT revision FROM settings WHERE key = 'app'",
+                    "SELECT value, revision FROM settings WHERE key = 'app'",
                     [],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(|err| storage_err(&err))?;
-            Ok(u64::try_from(revision.unwrap_or(0)).unwrap_or(0))
+            let Some((value, revision)) = row else {
+                return Ok((AppSettings::default(), 0));
+            };
+            let settings: AppSettings =
+                serde_json::from_str(&value).map_err(|err| json_err(&err))?;
+            // Mirror `get_settings`: a hand-edited or downgraded row surfaces
+            // loudly here too instead of wedging the consumer.
+            settings.validate()?;
+            Ok((settings, u64::try_from(revision).unwrap_or(0)))
         })
         .await
     }

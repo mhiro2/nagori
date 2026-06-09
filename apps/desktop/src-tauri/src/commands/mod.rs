@@ -967,8 +967,11 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> CommandResult<AppSettingsDto> {
-    let settings = state.runtime.get_settings().await?;
-    let revision = state.runtime.settings_revision().await?;
+    // Read the body and its revision as one consistent pair. Two separate reads
+    // could return body N with revision N+1 if a write landed in between, and
+    // that stale body would then pass the compare-and-swap in `update_settings`
+    // and revert the concurrent change.
+    let (settings, revision) = state.runtime.get_settings_with_revision().await?;
     let mut dto: AppSettingsDto = settings.into();
     // Stamp the live optimistic-concurrency token so the window can echo it
     // back on the next `update_settings` as the compare-and-swap base.

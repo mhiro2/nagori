@@ -530,11 +530,25 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             // Stamp the live revision so the receiving window advances its
             // compare-and-swap baseline as it adopts the snapshot; otherwise a
             // tray toggle from the palette would leave the settings window's
-            // baseline stale and its next save would needlessly conflict. A
-            // benign skew (the token nudged again between the snapshot and this
-            // read) only costs one extra conflict-and-retry, never a lost write.
-            let mut dto = dto::AppSettingsDto::from(snapshot.clone());
-            dto.revision = runtime.settings_revision().await.unwrap_or(0);
+            // baseline stale and its next save would needlessly conflict.
+            //
+            // Read the body and revision as one consistent pair rather than
+            // pairing the watch snapshot with a separate revision read: a write
+            // landing between the two could broadcast body N with revision N+1,
+            // and the window would then adopt N's values under N+1's token —
+            // letting its next save pass the compare-and-swap and revert the
+            // concurrent change. Re-reading the current pair may surface a value
+            // a hair newer than the snapshot that woke this loop, which is fine
+            // (it is still internally consistent and is the latest state). Fall
+            // back to the watch snapshot only if the read fails.
+            let dto = match runtime.get_settings_with_revision().await {
+                Ok((settings, revision)) => {
+                    let mut dto = dto::AppSettingsDto::from(settings);
+                    dto.revision = revision;
+                    dto
+                }
+                Err(_) => dto::AppSettingsDto::from(snapshot.clone()),
+            };
             let _ = app.emit(SETTINGS_CHANGED_EVENT, dto);
 
             if snapshot.global_hotkey != current_hotkey {

@@ -146,12 +146,15 @@ impl NagoriRuntime {
         Ok(())
     }
 
-    /// Current optimistic-concurrency token for the persisted settings. A
-    /// full-blob client (the settings window) reads this alongside the
-    /// settings and echoes it back through [`Self::save_settings_checked`] so a
-    /// stale snapshot cannot silently revert a concurrent single-field change.
-    pub async fn settings_revision(&self) -> Result<u64> {
-        self.store.settings_revision().await
+    /// Read the persisted settings and their optimistic-concurrency token as a
+    /// single consistent pair. A full-blob client (the settings window) echoes
+    /// the revision back through [`Self::save_settings_checked`] so a stale
+    /// snapshot cannot silently revert a concurrent single-field change.
+    /// Reading both in one statement is what makes the compare-and-swap sound:
+    /// a body/revision pair fetched in two steps could pair body N with
+    /// revision N+1 and let the stale body pass the check.
+    pub async fn get_settings_with_revision(&self) -> Result<(AppSettings, u64)> {
+        self.store.get_settings_with_revision().await
     }
 
     /// Compare-and-swap variant of [`Self::save_settings`]: persist only when
