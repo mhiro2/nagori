@@ -13,7 +13,7 @@ const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 use nagori_core::{AppError, AppSettings, EntryId, Result};
 use nagori_daemon::{
     CaptureLoop, MaintenanceHealth, MaintenanceReport, MaintenanceService, NagoriRuntime,
-    StartupHealth,
+    ShutdownHandle, StartupHealth, WorkerRestart, supervise_worker,
 };
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
@@ -187,7 +187,13 @@ struct BackgroundTasks {
     maintenance: tauri::async_runtime::JoinHandle<()>,
     semantic: tauri::async_runtime::JoinHandle<()>,
     ngram_rebuild: tauri::async_runtime::JoinHandle<()>,
+    ai_watchdog: tauri::async_runtime::JoinHandle<()>,
 }
+
+/// Grace each supervised worker gets to drain in-flight work when shutdown is
+/// requested. The worker exits between ticks (so a partway-through DB write
+/// commits instead of being abandoned); past this it is force-aborted.
+const WORKER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 impl AppState {
     pub fn record_last_pasted(&self, id: EntryId) {
@@ -342,8 +348,17 @@ impl AppState {
         Ok(state)
     }
 
-    /// Spawns the in-process capture loop and a low-frequency maintenance
-    /// loop. Call once after `manage(state)` so a Tokio runtime is available.
+    /// Spawns the in-process capture, maintenance, semantic-index, ngram-rebuild
+    /// and AI-watchdog workers. Call once after `manage(state)` so a Tokio
+    /// runtime is available.
+    ///
+    /// Each worker runs under [`supervise_worker`] — the same respawn-and-drain
+    /// policy the CLI daemon uses — so a panic or unexpected early return
+    /// restarts the worker (with backoff) instead of silently leaving the app
+    /// running with a dead loop and a stale/falsely-healthy snapshot. The
+    /// ngram backfill is one-shot, so its supervisor only respawns on a panic.
+    /// The supervisor task handle is what we store; on shutdown each supervisor
+    /// drains its live worker within [`WORKER_DRAIN_GRACE`] before returning.
     pub fn spawn_background_tasks(&self, app: tauri::AppHandle) {
         let mut tasks_slot = self.background_tasks_slot();
         if tasks_slot.is_some() {
@@ -351,103 +366,42 @@ impl AppState {
             return;
         }
 
-        let runtime = self.runtime.clone();
-        let window = self.window.clone();
-        let reader = self.capture_reader.clone();
-        let search_cache = self.runtime.search_cache_handle();
-        let startup_health = self.runtime.startup_health();
-        let capture_health = self.runtime.capture_health();
-        let capture = tauri::async_runtime::spawn(async move {
-            // Fail closed: refuse to start the capture loop if the persisted
-            // settings cannot be loaded — running with `Default` would drop
-            // the user's denylist / regex_denylist / secret_handling and
-            // capture more aggressively than configured.
-            let refresh = runtime.refresh_settings_from_store().await;
-            if !note_capture_settings_load_outcome(&startup_health, &refresh) {
-                return;
-            }
-            let store = runtime.store().clone();
-            let settings = runtime.current_settings();
-            let app_for_capture_event = app.clone();
-            let runtime_for_notify = runtime.clone();
-            let capture_notifier = Arc::new(move |entry_id: EntryId| {
-                use tauri::Emitter;
-
-                let _ = app_for_capture_event.emit(
-                    crate::CLIPBOARD_CHANGED_EVENT,
-                    serde_json::json!({ "entryId": entry_id.to_string() }),
-                );
-                // Nudge the semantic indexer so the fresh clip is embedded
-                // promptly (no-op when the index is disabled / unsupported).
-                runtime_for_notify.notify_semantic_capture();
-            });
-            let mut capture = CaptureLoop::new(reader, store.clone(), store.clone(), settings)
-                .with_window(window)
-                .with_search_cache(search_cache)
-                .with_capture_health(capture_health)
-                .with_capture_notifier(capture_notifier);
-            let mut shutdown = runtime.shutdown_handle();
-            let shutdown_signal = async move { shutdown.cancelled().await };
-            if let Err(err) = capture
-                .run_polling_with_settings(
-                    Duration::from_millis(500),
-                    runtime.settings_subscribe(),
-                    shutdown_signal,
-                )
-                .await
-            {
-                tracing::warn!(error = %err, "capture_loop_terminated");
-            }
-        });
-
-        let runtime = self.runtime.clone();
-        let maintenance = tauri::async_runtime::spawn(async move {
-            let store = runtime.store().clone();
-            let mut settings_rx = runtime.settings_subscribe();
-            let mut shutdown = runtime.shutdown_handle();
-            let health = runtime.maintenance_health();
-            let maintenance =
-                MaintenanceService::new(store).with_search_cache(runtime.search_cache_handle());
-            loop {
-                let settings = settings_rx.borrow().clone();
-                let outcome = maintenance.run(&settings).await;
-                note_maintenance_outcome(&health, &outcome);
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    _ = settings_rx.changed() => {},
-                    () = tokio::time::sleep(Duration::from_mins(30)) => {},
-                }
-            }
-        });
-
-        let runtime = self.runtime.clone();
-        let semantic = tauri::async_runtime::spawn(async move {
-            let shutdown = runtime.shutdown_handle();
-            runtime.run_semantic_indexer(shutdown).await;
-        });
-
-        // One-shot backfill of ngrams left stale by a generator upgrade (kana
-        // folding / Han 1-grams). The desktop app drives `NagoriRuntime`
-        // directly without the CLI daemon's serve loop, so it must spawn this
-        // worker itself — otherwise a desktop-only history never gets its old
-        // rows rebuilt and CJK search improvements don't apply to them.
-        let runtime = self.runtime.clone();
-        let ngram_rebuild = tauri::async_runtime::spawn(async move {
-            let shutdown = runtime.shutdown_handle();
-            runtime.run_ngram_rebuild(shutdown).await;
-        });
-
         *tasks_slot = Some(BackgroundTasks {
-            capture,
-            maintenance,
-            semantic,
-            ngram_rebuild,
+            capture: spawn_capture_supervisor(
+                self.runtime.clone(),
+                self.window.clone(),
+                self.capture_reader.clone(),
+                self.runtime.startup_health(),
+                self.runtime.shutdown_handle(),
+                app,
+            ),
+            maintenance: spawn_maintenance_supervisor(
+                self.runtime.clone(),
+                self.runtime.shutdown_handle(),
+            ),
+            semantic: spawn_semantic_supervisor(
+                self.runtime.clone(),
+                self.runtime.shutdown_handle(),
+            ),
+            ngram_rebuild: spawn_ngram_rebuild_supervisor(
+                self.runtime.clone(),
+                self.runtime.shutdown_handle(),
+            ),
+            ai_watchdog: spawn_ai_watchdog_supervisor(
+                self.runtime.clone(),
+                self.runtime.shutdown_handle(),
+            ),
         });
     }
 
-    /// Cancel, drain, and abort the in-process capture and maintenance
-    /// workers. Safe to call more than once; only the first call owns the
-    /// task handles.
+    /// Cancel, drain, and abort the in-process supervised workers. Safe to call
+    /// more than once; only the first call owns the task handles.
+    ///
+    /// The stored handles are now the *supervisor* tasks: cancelling the shared
+    /// shutdown signal makes each supervisor drain its live worker within
+    /// [`WORKER_DRAIN_GRACE`] (force-aborting a wedged one) before returning, so
+    /// `grace` here must exceed `WORKER_DRAIN_GRACE` plus the supervisor's own
+    /// post-abort join window. The caller passes a budget sized for that.
     pub async fn shutdown_background_tasks(&self, grace: Duration) {
         self.runtime.shutdown_handle().cancel();
         let Some(tasks) = self.background_tasks_slot().take() else {
@@ -458,6 +412,7 @@ impl AppState {
             drain_background_task("maintenance", tasks.maintenance, grace),
             drain_background_task("semantic", tasks.semantic, grace),
             drain_background_task("ngram_rebuild", tasks.ngram_rebuild, grace),
+            drain_background_task("ai_watchdog", tasks.ai_watchdog, grace),
         );
     }
 
@@ -614,6 +569,185 @@ impl AppState {
             .map(|guard| guard.clone())
             .unwrap_or_default()
     }
+}
+
+/// Supervise the in-process clipboard capture loop. `reader` / `window` are
+/// shared (`Arc`) so each respawn after a panic rebuilds a fresh
+/// [`CaptureLoop`] over the same adapter. A one-time fail-closed settings load
+/// runs *before* the supervised loop is entered: if it fails the worker never
+/// enters the loop (so a persistent settings failure leaves capture down rather
+/// than respawn-spinning), mirroring the daemon's `run_daemon`.
+fn spawn_capture_supervisor(
+    runtime: NagoriRuntime,
+    window: Arc<dyn WindowBehavior>,
+    reader: Arc<dyn ClipboardReader>,
+    startup_health: StartupHealth,
+    shutdown: ShutdownHandle,
+    app: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let refresh = runtime.refresh_settings_from_store().await;
+        if !note_capture_settings_load_outcome(&startup_health, &refresh) {
+            return;
+        }
+        supervise_worker(
+            "capture",
+            WorkerRestart::OnExit,
+            shutdown,
+            WORKER_DRAIN_GRACE,
+            move |mut worker_shutdown| {
+                let runtime = runtime.clone();
+                let reader = reader.clone();
+                let window = window.clone();
+                let app = app.clone();
+                let store = runtime.store().clone();
+                let settings = runtime.current_settings();
+                let search_cache = runtime.search_cache_handle();
+                let capture_health = runtime.capture_health();
+                let settings_rx = runtime.settings_subscribe();
+                tokio::spawn(async move {
+                    let app_for_capture_event = app.clone();
+                    let runtime_for_notify = runtime.clone();
+                    let capture_notifier = Arc::new(move |entry_id: EntryId| {
+                        use tauri::Emitter;
+
+                        let _ = app_for_capture_event.emit(
+                            crate::CLIPBOARD_CHANGED_EVENT,
+                            serde_json::json!({ "entryId": entry_id.to_string() }),
+                        );
+                        // Nudge the semantic indexer so the fresh clip is
+                        // embedded promptly (no-op when the index is disabled
+                        // / unsupported).
+                        runtime_for_notify.notify_semantic_capture();
+                    });
+                    let mut capture =
+                        CaptureLoop::new(reader, store.clone(), store.clone(), settings)
+                            .with_window(window)
+                            .with_search_cache(search_cache)
+                            .with_capture_health(capture_health)
+                            .with_capture_notifier(capture_notifier);
+                    let shutdown_signal = async move { worker_shutdown.cancelled().await };
+                    if let Err(err) = capture
+                        .run_polling_with_settings(
+                            Duration::from_millis(500),
+                            settings_rx,
+                            shutdown_signal,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %err, "capture_loop_terminated");
+                    }
+                })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the periodic maintenance loop (retention sweep).
+fn spawn_maintenance_supervisor(
+    runtime: NagoriRuntime,
+    shutdown: ShutdownHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        supervise_worker(
+            "maintenance",
+            WorkerRestart::OnExit,
+            shutdown,
+            WORKER_DRAIN_GRACE,
+            move |mut worker_shutdown| {
+                let runtime = runtime.clone();
+                let store = runtime.store().clone();
+                let health = runtime.maintenance_health();
+                let search_cache = runtime.search_cache_handle();
+                let mut settings_rx = runtime.settings_subscribe();
+                tokio::spawn(async move {
+                    let maintenance =
+                        MaintenanceService::new(store).with_search_cache(search_cache);
+                    loop {
+                        let settings = settings_rx.borrow().clone();
+                        let outcome = maintenance.run(&settings).await;
+                        note_maintenance_outcome(&health, &outcome);
+                        tokio::select! {
+                            () = worker_shutdown.cancelled() => return,
+                            _ = settings_rx.changed() => {},
+                            () = tokio::time::sleep(Duration::from_mins(30)) => {},
+                        }
+                    }
+                })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the background semantic-index worker.
+fn spawn_semantic_supervisor(
+    runtime: NagoriRuntime,
+    shutdown: ShutdownHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        supervise_worker(
+            "semantic",
+            WorkerRestart::OnExit,
+            shutdown,
+            WORKER_DRAIN_GRACE,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move { runtime.run_semantic_indexer(worker_shutdown).await })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the one-shot ngram-rebuild backfill of ngrams left stale by a
+/// generator upgrade (kana folding / Han 1-grams). The desktop app drives
+/// `NagoriRuntime` directly without the CLI daemon's serve loop, so it must
+/// spawn this worker itself — otherwise a desktop-only history never gets its
+/// old rows rebuilt and CJK search improvements don't apply to them. A clean
+/// completion is terminal (the backlog drained); only a panic respawns it.
+fn spawn_ngram_rebuild_supervisor(
+    runtime: NagoriRuntime,
+    shutdown: ShutdownHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        supervise_worker(
+            "ngram_rebuild",
+            WorkerRestart::OnPanic,
+            shutdown,
+            WORKER_DRAIN_GRACE,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move { runtime.run_ngram_rebuild(worker_shutdown).await })
+            },
+        )
+        .await;
+    })
+}
+
+/// Supervise the dedicated AI stale-request watchdog. The desktop drives AI
+/// actions directly (no daemon maintenance loop), so without this a leaked or
+/// wedged AI stream's concurrency permit would never be reclaimed.
+fn spawn_ai_watchdog_supervisor(
+    runtime: NagoriRuntime,
+    shutdown: ShutdownHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        supervise_worker(
+            "ai_watchdog",
+            WorkerRestart::OnExit,
+            shutdown,
+            WORKER_DRAIN_GRACE,
+            move |worker_shutdown| {
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    runtime.run_ai_request_watchdog(worker_shutdown).await;
+                })
+            },
+        )
+        .await;
+    })
 }
 
 async fn drain_background_task(
