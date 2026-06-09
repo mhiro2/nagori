@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hide-palette"
+description = "Enables the hide_palette command without any pre-configured scope."
+commands.allow = ["hide_palette"]
+
+[[permission]]
+identifier = "deny-hide-palette"
+description = "Denies the hide_palette command without any pre-configured scope."
+commands.deny = ["hide_palette"]

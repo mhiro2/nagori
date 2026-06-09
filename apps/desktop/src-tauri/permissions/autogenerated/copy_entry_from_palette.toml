@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-copy-entry-from-palette"
+description = "Enables the copy_entry_from_palette command without any pre-configured scope."
+commands.allow = ["copy_entry_from_palette"]
+
+[[permission]]
+identifier = "deny-copy-entry-from-palette"
+description = "Denies the copy_entry_from_palette command without any pre-configured scope."
+commands.deny = ["copy_entry_from_palette"]

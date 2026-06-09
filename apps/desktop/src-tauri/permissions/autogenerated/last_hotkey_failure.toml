@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-last-hotkey-failure"
+description = "Enables the last_hotkey_failure command without any pre-configured scope."
+commands.allow = ["last_hotkey_failure"]
+
+[[permission]]
+identifier = "deny-last-hotkey-failure"
+description = "Denies the last_hotkey_failure command without any pre-configured scope."
+commands.deny = ["last_hotkey_failure"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-entry-preview-full"
+description = "Enables the get_entry_preview_full command without any pre-configured scope."
+commands.allow = ["get_entry_preview_full"]
+
+[[permission]]
+identifier = "deny-get-entry-preview-full"
+description = "Denies the get_entry_preview_full command without any pre-configured scope."
+commands.deny = ["get_entry_preview_full"]

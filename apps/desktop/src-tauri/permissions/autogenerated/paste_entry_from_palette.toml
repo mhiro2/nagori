@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-paste-entry-from-palette"
+description = "Enables the paste_entry_from_palette command without any pre-configured scope."
+commands.allow = ["paste_entry_from_palette"]
+
+[[permission]]
+identifier = "deny-paste-entry-from-palette"
+description = "Denies the paste_entry_from_palette command without any pre-configured scope."
+commands.deny = ["paste_entry_from_palette"]

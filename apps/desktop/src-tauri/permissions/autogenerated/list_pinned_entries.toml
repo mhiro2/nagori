@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-pinned-entries"
+description = "Enables the list_pinned_entries command without any pre-configured scope."
+commands.allow = ["list_pinned_entries"]
+
+[[permission]]
+identifier = "deny-list-pinned-entries"
+description = "Denies the list_pinned_entries command without any pre-configured scope."
+commands.deny = ["list_pinned_entries"]

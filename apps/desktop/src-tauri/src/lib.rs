@@ -50,6 +50,11 @@ pub(crate) const NAVIGATE_EVENT: &str = "nagori://navigate";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::too_many_lines)]
+// `generate_context!` embeds the (now per-command) ACL manifest and inlines a
+// large initializer closure; with the app-command permission table declared in
+// `build.rs` it trips `large_stack_frames`. The closure runs once at startup on
+// the main thread, so the one-time frame size is not a concern.
+#[allow(clippy::large_stack_frames)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())

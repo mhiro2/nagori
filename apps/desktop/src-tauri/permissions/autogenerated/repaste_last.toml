@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repaste-last"
+description = "Enables the repaste_last command without any pre-configured scope."
+commands.allow = ["repaste_last"]
+
+[[permission]]
+identifier = "deny-repaste-last"
+description = "Denies the repaste_last command without any pre-configured scope."
+commands.deny = ["repaste_last"]

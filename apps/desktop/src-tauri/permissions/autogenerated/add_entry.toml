@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-entry"
+description = "Enables the add_entry command without any pre-configured scope."
+commands.allow = ["add_entry"]
+
+[[permission]]
+identifier = "deny-add-entry"
+description = "Denies the add_entry command without any pre-configured scope."
+commands.deny = ["add_entry"]

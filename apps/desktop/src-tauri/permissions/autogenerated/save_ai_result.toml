@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-ai-result"
+description = "Enables the save_ai_result command without any pre-configured scope."
+commands.allow = ["save_ai_result"]
+
+[[permission]]
+identifier = "deny-save-ai-result"
+description = "Denies the save_ai_result command without any pre-configured scope."
+commands.deny = ["save_ai_result"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-palette"
+description = "Enables the close_palette command without any pre-configured scope."
+commands.allow = ["close_palette"]
+
+[[permission]]
+identifier = "deny-close-palette"
+description = "Denies the close_palette command without any pre-configured scope."
+commands.deny = ["close_palette"]

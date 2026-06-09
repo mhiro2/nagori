@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rebuild-semantic-index"
+description = "Enables the rebuild_semantic_index command without any pre-configured scope."
+commands.allow = ["rebuild_semantic_index"]
+
+[[permission]]
+identifier = "deny-rebuild-semantic-index"
+description = "Denies the rebuild_semantic_index command without any pre-configured scope."
+commands.deny = ["rebuild_semantic_index"]

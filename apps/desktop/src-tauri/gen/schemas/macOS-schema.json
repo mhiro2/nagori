@@ -177,6 +177,546 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the add_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-add-entry",
+          "markdownDescription": "Enables the add_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cancel_ai_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-ai-action",
+          "markdownDescription": "Enables the cancel_ai_action command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_for_updates command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-for-updates",
+          "markdownDescription": "Enables the check_for_updates command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the clear_history command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-history",
+          "markdownDescription": "Enables the clear_history command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cli_install_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cli-install-status",
+          "markdownDescription": "Enables the cli_install_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the close_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-palette",
+          "markdownDescription": "Enables the close_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the close_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-settings",
+          "markdownDescription": "Enables the close_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_entries_combined command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-entries-combined",
+          "markdownDescription": "Enables the copy_entries_combined command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-entry",
+          "markdownDescription": "Enables the copy_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the copy_entry_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-entry-from-palette",
+          "markdownDescription": "Enables the copy_entry_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-entries",
+          "markdownDescription": "Enables the delete_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-entry",
+          "markdownDescription": "Enables the delete_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_ai_availability command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-ai-availability",
+          "markdownDescription": "Enables the get_ai_availability command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_capabilities command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-capabilities",
+          "markdownDescription": "Enables the get_capabilities command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-entry",
+          "markdownDescription": "Enables the get_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_entry_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-entry-preview",
+          "markdownDescription": "Enables the get_entry_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_entry_preview_full command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-entry-preview-full",
+          "markdownDescription": "Enables the get_entry_preview_full command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_permissions command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-permissions",
+          "markdownDescription": "Enables the get_permissions command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_semantic_index_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-semantic-index-status",
+          "markdownDescription": "Enables the get_semantic_index_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-settings",
+          "markdownDescription": "Enables the get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the hide_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-hide-palette",
+          "markdownDescription": "Enables the hide_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install_cli command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-install-cli",
+          "markdownDescription": "Enables the install_cli command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the last_hotkey_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-last-hotkey-failure",
+          "markdownDescription": "Enables the last_hotkey_failure command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_paste_options command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-paste-options",
+          "markdownDescription": "Enables the list_paste_options command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_pinned_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-pinned-entries",
+          "markdownDescription": "Enables the list_pinned_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_recent_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-recent-entries",
+          "markdownDescription": "Enables the list_recent_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-palette",
+          "markdownDescription": "Enables the open_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-settings",
+          "markdownDescription": "Enables the open_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_url_external command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-url-external",
+          "markdownDescription": "Enables the open_url_external command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the password_manager_preset command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-password-manager-preset",
+          "markdownDescription": "Enables the password_manager_preset command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the paste_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-paste-entry",
+          "markdownDescription": "Enables the paste_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the paste_entry_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-paste-entry-from-palette",
+          "markdownDescription": "Enables the paste_entry_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the paste_entry_representation_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-paste-entry-representation-from-palette",
+          "markdownDescription": "Enables the paste_entry_representation_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pin_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pin-entry",
+          "markdownDescription": "Enables the pin_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the preview_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-preview-entry",
+          "markdownDescription": "Enables the preview_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the rebuild_semantic_index command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-rebuild-semantic-index",
+          "markdownDescription": "Enables the rebuild_semantic_index command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the repaste_last command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-repaste-last",
+          "markdownDescription": "Enables the repaste_last command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_accessibility command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-accessibility",
+          "markdownDescription": "Enables the request_accessibility command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the run_quick_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-run-quick-action",
+          "markdownDescription": "Enables the run_quick_action command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_ai_result command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-ai-result",
+          "markdownDescription": "Enables the save_ai_result command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the search_clipboard command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-search-clipboard",
+          "markdownDescription": "Enables the search_clipboard command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_capture_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-capture-enabled",
+          "markdownDescription": "Enables the set_capture_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_ai_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-ai-action",
+          "markdownDescription": "Enables the start_ai_action command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the toggle_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-toggle-palette",
+          "markdownDescription": "Enables the toggle_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-settings",
+          "markdownDescription": "Enables the update_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the add_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-add-entry",
+          "markdownDescription": "Denies the add_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_ai_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-ai-action",
+          "markdownDescription": "Denies the cancel_ai_action command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_for_updates command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-for-updates",
+          "markdownDescription": "Denies the check_for_updates command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_history command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-history",
+          "markdownDescription": "Denies the clear_history command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cli_install_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cli-install-status",
+          "markdownDescription": "Denies the cli_install_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-palette",
+          "markdownDescription": "Denies the close_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-settings",
+          "markdownDescription": "Denies the close_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_entries_combined command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-entries-combined",
+          "markdownDescription": "Denies the copy_entries_combined command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-entry",
+          "markdownDescription": "Denies the copy_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the copy_entry_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-entry-from-palette",
+          "markdownDescription": "Denies the copy_entry_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-entries",
+          "markdownDescription": "Denies the delete_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-entry",
+          "markdownDescription": "Denies the delete_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_ai_availability command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-ai-availability",
+          "markdownDescription": "Denies the get_ai_availability command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_capabilities command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-capabilities",
+          "markdownDescription": "Denies the get_capabilities command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-entry",
+          "markdownDescription": "Denies the get_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_entry_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-entry-preview",
+          "markdownDescription": "Denies the get_entry_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_entry_preview_full command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-entry-preview-full",
+          "markdownDescription": "Denies the get_entry_preview_full command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_permissions command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-permissions",
+          "markdownDescription": "Denies the get_permissions command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_semantic_index_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-semantic-index-status",
+          "markdownDescription": "Denies the get_semantic_index_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-settings",
+          "markdownDescription": "Denies the get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the hide_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-hide-palette",
+          "markdownDescription": "Denies the hide_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install_cli command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-install-cli",
+          "markdownDescription": "Denies the install_cli command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the last_hotkey_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-last-hotkey-failure",
+          "markdownDescription": "Denies the last_hotkey_failure command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_paste_options command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-paste-options",
+          "markdownDescription": "Denies the list_paste_options command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_pinned_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-pinned-entries",
+          "markdownDescription": "Denies the list_pinned_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_recent_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-recent-entries",
+          "markdownDescription": "Denies the list_recent_entries command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-palette",
+          "markdownDescription": "Denies the open_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-settings",
+          "markdownDescription": "Denies the open_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_url_external command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-url-external",
+          "markdownDescription": "Denies the open_url_external command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the password_manager_preset command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-password-manager-preset",
+          "markdownDescription": "Denies the password_manager_preset command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the paste_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-paste-entry",
+          "markdownDescription": "Denies the paste_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the paste_entry_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-paste-entry-from-palette",
+          "markdownDescription": "Denies the paste_entry_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the paste_entry_representation_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-paste-entry-representation-from-palette",
+          "markdownDescription": "Denies the paste_entry_representation_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pin_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pin-entry",
+          "markdownDescription": "Denies the pin_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the preview_entry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-preview-entry",
+          "markdownDescription": "Denies the preview_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the rebuild_semantic_index command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-rebuild-semantic-index",
+          "markdownDescription": "Denies the rebuild_semantic_index command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the repaste_last command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-repaste-last",
+          "markdownDescription": "Denies the repaste_last command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_accessibility command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-accessibility",
+          "markdownDescription": "Denies the request_accessibility command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the run_quick_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-run-quick-action",
+          "markdownDescription": "Denies the run_quick_action command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_ai_result command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-ai-result",
+          "markdownDescription": "Denies the save_ai_result command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the search_clipboard command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-search-clipboard",
+          "markdownDescription": "Denies the search_clipboard command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_capture_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-capture-enabled",
+          "markdownDescription": "Denies the set_capture_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_ai_action command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-ai-action",
+          "markdownDescription": "Denies the start_ai_action command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the toggle_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-toggle-palette",
+          "markdownDescription": "Denies the toggle_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-settings",
+          "markdownDescription": "Denies the update_settings command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

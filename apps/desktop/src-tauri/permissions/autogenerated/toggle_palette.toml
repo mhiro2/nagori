@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-toggle-palette"
+description = "Enables the toggle_palette command without any pre-configured scope."
+commands.allow = ["toggle_palette"]
+
+[[permission]]
+identifier = "deny-toggle-palette"
+description = "Denies the toggle_palette command without any pre-configured scope."
+commands.deny = ["toggle_palette"]

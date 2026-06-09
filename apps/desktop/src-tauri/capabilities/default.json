@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Webview-side permissions shared by the palette and the settings window. The frontend only calls `invoke` (custom commands registered via `generate_handler!`) and `listen` for backend events; everything else (tray, global shortcut, autostart, notifications, window show/hide, update probes) is driven from Rust and does not need a JS capability. Keeping the surface this small limits what a WebView compromise can reach.",
+  "description": "Core-plugin permissions shared by both webviews: `listen` for backend events plus the rest of `core:default`. Everything else (tray, global shortcut, autostart, notifications, window show/hide, update probes) is driven from Rust and needs no JS capability. The app's own `invoke` commands are NOT granted here — they are scoped per window in `palette.json` (main) and `settings.json` (settings) so a compromise of one webview cannot reach the other's command surface.",
   "windows": ["main", "settings"],
   "permissions": [
     "core:default"
