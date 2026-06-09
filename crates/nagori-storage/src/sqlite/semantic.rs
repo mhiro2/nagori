@@ -20,10 +20,9 @@ use nagori_core::{
 };
 use rusqlite::{ToSql, params};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use super::SqliteStore;
-use super::convert::{parse_sensitivity_strict, row_to_entry, storage_err};
+use super::convert::{format_time, parse_sensitivity_strict, row_to_entry, storage_err};
 use super::search::build_filter_fragment;
 
 /// Live, embeddable-entry counts for the semantic index.
@@ -140,9 +139,7 @@ impl SqliteStore {
     /// Replaces the persisted embedding-model metadata (singleton row).
     pub async fn semantic_set_meta(&self, meta: SemanticIndexMeta) -> Result<()> {
         let languages = serde_json::to_string(&meta.languages).unwrap_or_else(|_| "[]".to_owned());
-        let now = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_default();
+        let now = format_time(OffsetDateTime::now_utc())?;
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             conn.execute(
@@ -197,29 +194,60 @@ impl SqliteStore {
         content_hash: String,
         vector: Vec<f32>,
     ) -> Result<()> {
-        if vector.is_empty() {
+        self.semantic_upsert_batch(vec![(entry_id, content_hash, vector)])
+            .await
+    }
+
+    /// Stores (or replaces) the embeddings for a batch of entries in one
+    /// transaction.
+    ///
+    /// The indexer validates the batch (id set, dimensions, no duplicates)
+    /// before calling, then relies on the single transaction here so a batch is
+    /// applied all-or-nothing: a crash mid-write never leaves the index with
+    /// some vectors persisted and their siblings dropped.
+    pub async fn semantic_upsert_batch(
+        &self,
+        items: Vec<(EntryId, String, Vec<f32>)>,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        if items.iter().any(|(_, _, vector)| vector.is_empty()) {
             return Err(AppError::Storage(
                 "refusing to store an empty embedding vector".to_owned(),
             ));
         }
-        let dimension = i64::try_from(vector.len()).unwrap_or(i64::MAX);
-        let blob = vector_to_blob(&vector);
-        let now = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_default();
+        let now = format_time(OffsetDateTime::now_utc())?;
         self.run_blocking(move |store| {
-            let conn = store.conn()?;
-            conn.execute(
-                "INSERT INTO entry_embeddings (entry_id, vector, dimension, content_hash, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(entry_id) DO UPDATE SET
-                    vector = excluded.vector,
-                    dimension = excluded.dimension,
-                    content_hash = excluded.content_hash,
-                    created_at = excluded.created_at",
-                params![entry_id.to_string(), blob, dimension, content_hash, now],
-            )
-            .map_err(|err| storage_err(&err))?;
+            let mut conn = store.conn()?;
+            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            {
+                let mut stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO entry_embeddings
+                            (entry_id, vector, dimension, content_hash, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(entry_id) DO UPDATE SET
+                            vector = excluded.vector,
+                            dimension = excluded.dimension,
+                            content_hash = excluded.content_hash,
+                            created_at = excluded.created_at",
+                    )
+                    .map_err(|err| storage_err(&err))?;
+                for (entry_id, content_hash, vector) in &items {
+                    let dimension = i64::try_from(vector.len()).unwrap_or(i64::MAX);
+                    let blob = vector_to_blob(vector);
+                    stmt.execute(params![
+                        entry_id.to_string(),
+                        blob,
+                        dimension,
+                        content_hash,
+                        now
+                    ])
+                    .map_err(|err| storage_err(&err))?;
+                }
+            }
+            tx.commit().map_err(|err| storage_err(&err))?;
             Ok(())
         })
         .await
@@ -259,13 +287,19 @@ impl SqliteStore {
                 .map_err(|err| storage_err(&err))?;
             let indexed: i64 = conn
                 .query_row(
+                    // Only count vectors whose `content_hash` still matches the
+                    // entry: a stale vector (entry re-captured under a new hash)
+                    // is pending re-embedding, not indexed, so progress reports
+                    // it as outstanding rather than done. Mirrors the
+                    // `semantic_pending` predicate.
                     "SELECT COUNT(*)
                      FROM entry_embeddings em
                      JOIN entries e ON e.id = em.entry_id
                      JOIN search_documents d ON d.entry_id = e.id
                      WHERE e.deleted_at IS NULL
                        AND e.sensitivity NOT IN ('blocked', 'secret')
-                       AND length(d.normalized_text) > 0",
+                       AND length(d.normalized_text) > 0
+                       AND em.content_hash = e.content_hash",
                     [],
                     |row| row.get(0),
                 )
@@ -292,6 +326,14 @@ impl SqliteStore {
                     // `StoreRedacted` secret's body is already scrubbed on disk
                     // but is cheaper and clearer to never index. `Private` rows
                     // are returned and redacted in the indexer before embedding.
+                    //
+                    // An entry is pending when it has no vector *or* its stored
+                    // vector's `content_hash` no longer matches the entry's
+                    // current hash (the document was rewritten under the same
+                    // id). The hash check keeps a stale vector from lingering;
+                    // capture alone never mutates an existing entry's hash, but
+                    // the predicate guarantees the invariant regardless of how a
+                    // row's content changed.
                     "SELECT e.id, e.content_hash, d.normalized_text, e.sensitivity
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
@@ -299,7 +341,7 @@ impl SqliteStore {
                      WHERE e.deleted_at IS NULL
                        AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0
-                       AND em.entry_id IS NULL
+                       AND (em.entry_id IS NULL OR em.content_hash != e.content_hash)
                      ORDER BY e.created_at DESC
                      LIMIT ?1",
                 )
@@ -354,6 +396,11 @@ impl SqliteStore {
             // seeing a stored vector of a different width mid-rebuild (it errors
             // on a dimension mismatch); incompatible models are cleared up
             // front, so in steady state every row already matches.
+            //
+            // `em.content_hash = e.content_hash` drops stale vectors: a row
+            // whose document changed under the same id is awaiting re-embedding
+            // (see `semantic_pending`), so ranking against its old vector would
+            // surface a result scored on content the entry no longer holds.
             let sql = format!(
                 "SELECT e.*, d.title, d.preview, d.normalized_text, d.language,
                         vec_distance_cosine(em.vector, ?) AS dist
@@ -363,6 +410,7 @@ impl SqliteStore {
                  WHERE e.deleted_at IS NULL
                    AND e.sensitivity NOT IN ('blocked', 'secret')
                    AND em.dimension = ?
+                   AND em.content_hash = e.content_hash
                    {extra}
                  ORDER BY dist ASC
                  LIMIT ?",
@@ -472,9 +520,17 @@ mod tests {
 
         let pending = store.semantic_pending(10).await.unwrap();
         assert_eq!(pending.len(), 2);
+        // Store the vector under the entry's real content hash so the counts
+        // see it as indexed (a mismatching hash keeps the entry pending).
+        let hash_a = pending
+            .iter()
+            .find(|p| p.entry_id == a)
+            .unwrap()
+            .content_hash
+            .clone();
 
         store
-            .semantic_upsert(a, "hash-a".to_owned(), vec![1.0, 0.0, 0.0, 0.0])
+            .semantic_upsert(a, hash_a, vec![1.0, 0.0, 0.0, 0.0])
             .await
             .unwrap();
 
@@ -483,6 +539,68 @@ mod tests {
         let pending = store.semantic_pending(10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_ne!(pending[0].entry_id, a);
+    }
+
+    #[tokio::test]
+    async fn stale_hash_vector_stays_pending_and_uncounted() {
+        // A vector whose `content_hash` no longer matches the entry (the
+        // document was rewritten under the same id) must be treated as pending
+        // re-embedding, not as indexed — otherwise an outdated vector would
+        // linger and the entry would never be re-embedded.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "rewritten document").await;
+
+        // Store under a hash that deliberately differs from the entry's.
+        store
+            .semantic_upsert(id, "stale-hash".to_owned(), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        // Stale vector ⇒ still pending, not counted as indexed.
+        let counts = store.semantic_counts().await.unwrap();
+        assert_eq!(counts.indexed, 0);
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entry_id, id);
+
+        // Re-embed under the current hash ⇒ no longer pending, now indexed.
+        store
+            .semantic_upsert(id, pending[0].content_hash.clone(), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+        assert!(store.semantic_pending(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn upsert_batch_persists_all_or_rejects_empty() {
+        let store = SqliteStore::open_memory().unwrap();
+        let a = insert_text(&store, "first").await;
+        let b = insert_text(&store, "second").await;
+        let pending = store.semantic_pending(10).await.unwrap();
+        let hash = |id: EntryId| {
+            pending
+                .iter()
+                .find(|p| p.entry_id == id)
+                .unwrap()
+                .content_hash
+                .clone()
+        };
+
+        store
+            .semantic_upsert_batch(vec![
+                (a, hash(a), vec![1.0, 0.0]),
+                (b, hash(b), vec![0.0, 1.0]),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 2);
+
+        // An empty vector anywhere in the batch is refused outright.
+        let err = store
+            .semantic_upsert_batch(vec![(a, hash(a), Vec::new())])
+            .await;
+        assert!(err.is_err());
     }
 
     #[tokio::test]
@@ -514,13 +632,25 @@ mod tests {
         let near = insert_text(&store, "near").await;
         let far = insert_text(&store, "far").await;
 
+        // Store under the entries' real content hashes so the vectors are
+        // considered current and searchable.
+        let pending = store.semantic_pending(10).await.unwrap();
+        let hash = |id: EntryId| {
+            pending
+                .iter()
+                .find(|p| p.entry_id == id)
+                .unwrap()
+                .content_hash
+                .clone()
+        };
+
         // Query is closest to `near`'s vector.
         store
-            .semantic_upsert(near, "h1".to_owned(), vec![1.0, 0.0, 0.0])
+            .semantic_upsert(near, hash(near), vec![1.0, 0.0, 0.0])
             .await
             .unwrap();
         store
-            .semantic_upsert(far, "h2".to_owned(), vec![0.0, 1.0, 0.0])
+            .semantic_upsert(far, hash(far), vec![0.0, 1.0, 0.0])
             .await
             .unwrap();
 
@@ -532,6 +662,38 @@ mod tests {
         assert_eq!(results[0].entry_id, near);
         assert!(results[0].score > results[1].score);
         assert_eq!(results[0].rank_reason, vec![RankReason::SemanticMatch]);
+    }
+
+    #[tokio::test]
+    async fn search_excludes_stale_hash_vectors() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "rankable document").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+
+        // A fresh vector (hash matches the entry) ranks normally.
+        store
+            .semantic_upsert(id, hash, vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        let hits = store
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+
+        // Overwriting with a stale hash (entry awaiting re-embedding) drops the
+        // vector from search results rather than ranking on outdated content.
+        store
+            .semantic_upsert(id, "stale".to_owned(), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        let hits = store
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]
@@ -555,8 +717,11 @@ mod tests {
     async fn delete_removes_vector() {
         let store = SqliteStore::open_memory().unwrap();
         let id = insert_text(&store, "to delete").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
         store
-            .semantic_upsert(id, "h".to_owned(), vec![1.0, 0.0])
+            .semantic_upsert(id, hash, vec![1.0, 0.0])
             .await
             .unwrap();
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);

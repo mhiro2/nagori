@@ -10,6 +10,7 @@
 //! Semantic *queries* (the read path) are handled inline by
 //! [`NagoriRuntime::search`]; this module owns the *write* path.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -478,20 +479,74 @@ impl NagoriRuntime {
             .embed_batch(inputs, cancel.clone())
             .await
             .map_err(EmbedBatchError::from_ai)?;
-        for (entry, vector) in pending.iter().zip(vectors) {
-            // Guard against the embedder returning out-of-order ids.
-            let entry_id = vector.id.parse::<EntryId>().unwrap_or(entry.entry_id);
-            if let Err(err) = self
-                .store
-                .semantic_upsert(entry_id, entry.content_hash.clone(), vector.vector)
-                .await
-            {
-                return Err(EmbedBatchError {
-                    detail: err.to_string(),
-                    is_transient: false,
-                });
-            }
+
+        // Reconcile the returned vectors against the requested entries by id
+        // rather than trusting positional order. A backend that reorders, drops,
+        // or duplicates results would otherwise pair a vector with the wrong
+        // entry's `content_hash` (zip aligns by position, not id), silently
+        // corrupting staleness detection. Validate the count, the id set
+        // (every result requested, none duplicated), and the dimension against
+        // the model's declared width *before* persisting anything, then write
+        // the whole batch in one transaction so a bad batch is rejected wholesale.
+        if vectors.len() != pending.len() {
+            return Err(EmbedBatchError::invalid(format!(
+                "embedder returned {} vectors for {} inputs",
+                vectors.len(),
+                pending.len()
+            )));
         }
+        // Check against the dimension the model declares, not just batch-internal
+        // uniformity: a backend that returns the whole batch at the wrong width
+        // would otherwise be stored and mismatch the model-tagged index metadata.
+        let expected_dim = embedder
+            .dimension()
+            .await
+            .map_err(EmbedBatchError::from_ai)?;
+        if expected_dim == 0 {
+            return Err(EmbedBatchError::invalid(
+                "embedder reported a zero embedding dimension".to_owned(),
+            ));
+        }
+        let by_id: HashMap<EntryId, &nagori_storage::PendingEmbedding> = pending
+            .iter()
+            .map(|entry| (entry.entry_id, entry))
+            .collect();
+        let mut seen = HashSet::with_capacity(pending.len());
+        let mut batch = Vec::with_capacity(pending.len());
+        for vector in vectors {
+            let entry_id = vector.id.parse::<EntryId>().map_err(|_| {
+                EmbedBatchError::invalid(format!(
+                    "embedder returned an unparseable id {:?}",
+                    vector.id
+                ))
+            })?;
+            let Some(entry) = by_id.get(&entry_id) else {
+                return Err(EmbedBatchError::invalid(format!(
+                    "embedder returned an id ({entry_id}) that was not requested"
+                )));
+            };
+            if !seen.insert(entry_id) {
+                return Err(EmbedBatchError::invalid(format!(
+                    "embedder returned a duplicate id ({entry_id})"
+                )));
+            }
+            if vector.vector.len() != expected_dim {
+                return Err(EmbedBatchError::invalid(format!(
+                    "embedder returned a {}-dim vector for {entry_id}, expected {expected_dim}",
+                    vector.vector.len()
+                )));
+            }
+            batch.push((entry_id, entry.content_hash.clone(), vector.vector));
+        }
+        // Count matched, every id was requested, and none repeated ⇒ the
+        // returned set equals the requested set, so no pending entry is skipped.
+        self.store
+            .semantic_upsert_batch(batch)
+            .await
+            .map_err(|err| EmbedBatchError {
+                detail: err.to_string(),
+                is_transient: false,
+            })?;
         Ok(())
     }
 }
@@ -503,6 +558,17 @@ struct EmbedBatchError {
 }
 
 impl EmbedBatchError {
+    /// A batch that failed validation (id mismatch, wrong count, bad
+    /// dimensions). Not transient: re-requesting the same batch from a
+    /// misbehaving backend would just fail the same way, so surface it rather
+    /// than spin.
+    const fn invalid(detail: String) -> Self {
+        Self {
+            detail,
+            is_transient: false,
+        }
+    }
+
     fn from_ai(err: nagori_core::AiError) -> Self {
         use nagori_core::AiErrorCode;
         let is_transient = matches!(
@@ -644,8 +710,13 @@ mod tests {
             )
             .await
             .unwrap();
+        // Store under the entry's real content hash so the vector counts as
+        // current; a stale hash would now be excluded from ranking.
+        let content_hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
         store
-            .semantic_upsert(id, "h".to_owned(), vector[0].vector.clone())
+            .semantic_upsert(id, content_hash, vector[0].vector.clone())
             .await
             .unwrap();
 
@@ -676,10 +747,12 @@ mod tests {
         let mut stale = compatible_meta();
         stale.index_version = INDEX_VERSION - 1;
         store.semantic_set_meta(stale).await.unwrap();
-        store
-            .semantic_upsert(id, "h".to_owned(), vec![1.0; 8])
-            .await
-            .unwrap();
+        // Use the entry's real content hash so the vector counts as indexed
+        // (a mismatching hash would read as pending re-embedding instead).
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store.semantic_upsert(id, hash, vec![1.0; 8]).await.unwrap();
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
 
         let engine = AiEngine::builder(AiProviderKind::AppleNative)
@@ -704,5 +777,198 @@ mod tests {
             0,
             "incompatible-version vectors must be purged from disk"
         );
+    }
+
+    /// An embedder that returns the batch results in reverse input order,
+    /// keeping each vector tagged with its own id. The indexer must pair each
+    /// vector with the entry named by its id — not by position — or it would
+    /// store the wrong entry's `content_hash` and silently corrupt staleness
+    /// detection.
+    struct ReversingEmbedder {
+        dimension: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for ReversingEmbedder {
+        async fn availability(&self) -> nagori_ai::BackendAvailability {
+            nagori_ai::BackendAvailability::Available
+        }
+
+        async fn metadata(
+            &self,
+        ) -> std::result::Result<nagori_ai::EmbeddingModelMetadata, nagori_core::AiError> {
+            Ok(nagori_ai::EmbeddingModelMetadata {
+                model_identifier: "reversing".to_owned(),
+                revision: 1,
+                dimension: self.dimension,
+                max_sequence_length: 256,
+                languages: vec!["en".to_owned()],
+            })
+        }
+
+        async fn embed_batch(
+            &self,
+            inputs: Vec<EmbeddingInput>,
+            _cancel: CancellationToken,
+        ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
+            // A distinct vector per id (first byte = a hash of the id) so a
+            // mis-paired result would be observable, then reverse the order.
+            let mut out: Vec<nagori_ai::EmbeddingVector> = inputs
+                .into_iter()
+                .map(|input| {
+                    let tag = f32::from(u8::try_from(input.id.len() % 251).unwrap_or(0));
+                    let mut vector = vec![0.0_f32; self.dimension];
+                    vector[0] = tag;
+                    nagori_ai::EmbeddingVector {
+                        id: input.id,
+                        vector,
+                    }
+                })
+                .collect();
+            out.reverse();
+            Ok(out)
+        }
+    }
+
+    /// An embedder whose declared dimension disagrees with what `embed_batch`
+    /// actually returns. The indexer must reject the whole batch rather than
+    /// storing vectors that mismatch the model-tagged index metadata.
+    struct WrongDimEmbedder {
+        declared: usize,
+        produced: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for WrongDimEmbedder {
+        async fn availability(&self) -> nagori_ai::BackendAvailability {
+            nagori_ai::BackendAvailability::Available
+        }
+
+        async fn metadata(
+            &self,
+        ) -> std::result::Result<nagori_ai::EmbeddingModelMetadata, nagori_core::AiError> {
+            Ok(nagori_ai::EmbeddingModelMetadata {
+                model_identifier: "wrong-dim".to_owned(),
+                revision: 1,
+                dimension: self.declared,
+                max_sequence_length: 256,
+                languages: vec!["en".to_owned()],
+            })
+        }
+
+        async fn embed_batch(
+            &self,
+            inputs: Vec<EmbeddingInput>,
+            _cancel: CancellationToken,
+        ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
+            Ok(inputs
+                .into_iter()
+                .map(|input| nagori_ai::EmbeddingVector {
+                    id: input.id,
+                    vector: vec![0.0; self.produced],
+                })
+                .collect())
+        }
+    }
+
+    /// A batch whose vectors do not match the model's declared dimension must be
+    /// rejected wholesale, leaving nothing stored.
+    #[tokio::test]
+    async fn embed_and_store_rejects_wrong_dimension_batch() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("a document"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        let pending = store.semantic_pending(10).await.unwrap();
+
+        let result = runtime
+            .embed_and_store(
+                &WrongDimEmbedder {
+                    declared: 8,
+                    produced: 4,
+                },
+                &classifier,
+                &pending,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_err(), "a dimension mismatch must be rejected");
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "a rejected batch must store nothing"
+        );
+    }
+
+    /// Reordered embedder results must be matched back to their entries by id,
+    /// so every entry ends up stored under *its own* content hash and none is
+    /// left pending.
+    #[tokio::test]
+    async fn embed_and_store_matches_reordered_results_by_id() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("first distinct document"))
+            .await
+            .unwrap();
+        store
+            .insert(EntryFactory::from_text("second longer distinct document"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let settings = AppSettings::default();
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+
+        let result = runtime
+            .embed_and_store(
+                &ReversingEmbedder { dimension: 8 },
+                &classifier,
+                &pending,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "reordered batch should store cleanly: {:?}",
+            result.err().map(|err| err.detail)
+        );
+
+        // Each entry was stored under its own content hash, so none remains
+        // pending and both count as indexed.
+        assert!(
+            store.semantic_pending(10).await.unwrap().is_empty(),
+            "every entry must be stored under its own hash after a reorder"
+        );
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 2);
     }
 }
