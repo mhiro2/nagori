@@ -475,14 +475,7 @@ async fn run_local_command(cli: Cli) -> Result<()> {
             print_ai_output(&output.into(), format)?;
         }
         Command::Ai(args) => {
-            if matches!(args.action, AiActionId::Translate) && args.to.is_none() {
-                anyhow::bail!("`nagori ai translate` requires --to <language> (e.g. --to ja)");
-            }
-            let options = AiRequestOptions {
-                source_language: args.from.clone(),
-                target_language: args.to.clone(),
-                ..AiRequestOptions::default()
-            };
+            let options = ai_options_from_args(&args)?;
             let runtime = build_headless_runtime(store.clone())?;
             run_ai_streaming(
                 &runtime,
@@ -734,10 +727,15 @@ async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
             // The daemon drives AI actions to completion over a one-shot
             // envelope — streaming runs in-process via the local path, so an
             // explicit `--ipc` connection always returns the final result.
+            // Carry the per-request options over the wire so `--from`/`--to`
+            // survive: without them the daemon would translate with default
+            // options (no target language) and fail.
+            let options = ai_options_from_args(&args)?;
             let resp = client
                 .send(IpcRequest::RunAiAction(RunAiActionRequest {
                     id: parse_id(&args.id)?,
                     action: args.action,
+                    options,
                 }))
                 .await?;
             print_ai_output(&expect_ai_output(resp)?, format)?;
@@ -807,6 +805,21 @@ fn build_headless_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
         builder = builder.ai_engine(engine);
     }
     Ok(builder.build()?)
+}
+
+/// Builds the per-request [`AiRequestOptions`] from the `ai` subcommand args,
+/// rejecting a `translate` with no `--to`. Shared by the local in-process path
+/// and the `--ipc` path so both validate identically and the daemon receives
+/// the same options the local driver would use.
+fn ai_options_from_args(args: &AiArgs) -> Result<AiRequestOptions> {
+    if matches!(args.action, AiActionId::Translate) && args.to.is_none() {
+        anyhow::bail!("`nagori ai translate` requires --to <language> (e.g. --to ja)");
+    }
+    Ok(AiRequestOptions {
+        source_language: args.from.clone(),
+        target_language: args.to.clone(),
+        ..AiRequestOptions::default()
+    })
 }
 
 /// Drives a model-backed AI action in-process and renders its event stream.

@@ -61,6 +61,8 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 { "DeleteEntry":    { "id": "<uuid>" } }
 { "PinEntry":       { "id": "<uuid>", "pinned": true } }
 { "RunAiAction":    { "id": "<uuid>", "action": "Summarize" } }
+{ "RunAiAction":    { "id": "<uuid>", "action": "Translate",
+                      "options": { "target_language": "ja", "source_language": "en" } } }
 "GetSettings"
 { "UpdateSettings": { "value": { /* AppSettings */ } } }
 { "Clear":          { "older_than_days": 30 } }
@@ -69,6 +71,13 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 "Capabilities"
 "Shutdown"
 ```
+
+`RunAiAction.options` is optional (`AiRequestOptions`, defaulted when absent).
+It carries per-request overrides — `translate`'s `target_language` /
+`source_language`, plus tightening-only caps (`timeout_ms`, `max_input_tokens`,
+`max_output_tokens`, `streaming`) the daemon clamps against the AI settings
+before dispatch. Without it `translate` over IPC would run with no target
+language and fail.
 
 ## Response kinds
 

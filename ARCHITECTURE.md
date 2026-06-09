@@ -1662,26 +1662,50 @@ embeds the query and ranks the stored vectors; the embedder is macOS-only, so on
 other platforms (or when the model is unavailable) semantic search reports
 `Unsupported` and the text plans keep working.
 
+**Effective policy.** `NagoriRuntime::start_ai_action` builds one
+`EffectiveAiPolicy` up front by tightening the per-request `AiRequestOptions`
+against the `AiSettings` (and the model's hard input cap): the timeout is
+`min(settings, request)`, the input-token cap is the model cap lowered by any
+override, the output-token cap is the request's value (no settings counterpart),
+and streaming is `allow_streaming && request`. That single value then drives the
+input-shaping guard, the deadline, the options stamped onto the request handed
+to the backend, and the stream wrapper — so a "tightening only" override is
+actually applied rather than documented and ignored, and no limit is re-derived
+(and drifts) between those sites. Timeout, the input-token cap, and streaming
+are enforced daemon-side before the backend runs; the output-token cap is
+*forwarded* (output length is only knowable mid-generation), so a backend caps
+on it where it supports a max-output control — the on-device Apple generator
+does not yet, so that value is carried but not honoured there.
+
 **Streaming + cancellation.** `NagoriRuntime::start_ai_action` gates on the
 `ai.enabled` master toggle, the allow-list, and the selected provider; shapes
-the input (redaction, byte cap, and a ~3,500-token budget that refuses oversized
-input rather than letting the model silently truncate); acquires the backend's
-concurrency permit (text generation is serialised to one, matching Apple's
-single-request model); and registers the request in the `AiRequestRegistry`,
-which owns the `CancellationToken`. An **absolute deadline** is anchored at
-registration (`now + request_timeout_ms`) and bounds *every* phase — the
-permit wait, `engine.start`, and the streamed generation all draw down the same
-budget — so a wedged predecessor holding the single text-generation permit, or
-a stalled `engine.start`, can no longer keep a request (and its permit) alive
-past the configured timeout; previously the timeout armed only after start. The
-returned stream of `AiEvent`s
+the input (redaction, byte cap, and the effective token budget — a ~3,500-token
+model cap, tightened by any per-request `max_input_tokens` — that refuses
+oversized input rather than letting the model silently truncate); acquires the
+backend's concurrency permit (text generation is serialised to one, matching
+Apple's single-request model); and registers the request in the
+`AiRequestRegistry`, which owns the `CancellationToken`. An **absolute
+deadline** is anchored at registration (`now + effective timeout`) and bounds
+*every* phase — the permit wait, `engine.start`, and the streamed generation all
+draw down the same budget — so a wedged predecessor holding the single
+text-generation permit, or a stalled `engine.start`, can no longer keep a
+request (and its permit) alive past the configured timeout; previously the
+timeout armed only after start. When streaming is not allowed (the
+`allow_streaming` UI toggle off, or the request opting out) the daemon suppresses
+intermediate `Delta` / `Replace` snapshots server-side and surfaces only the
+terminal result, so the toggle holds for every surface regardless of whether the
+backend itself streams. The returned stream of `AiEvent`s
 (`Delta` / `Replace` / `Done` / `Cancelled`, with errors as `Err(AiError)`
 items) releases the permit and removes the registry entry — and cancels the run
 — when dropped. The desktop drives the engine in-process and re-emits events on
-the request-scoped `nagori://ai/*` Tauri channel (coalesced); the CLI's
-`nagori ai` streams in-process to stdout (`Ctrl-C` cancels). The IPC
-`RunAiAction` envelope drives the engine to completion and returns a single
-`AiOutput`; `RunQuickAction` runs the one-shot quick path.
+the request-scoped `nagori://ai/*` Tauri channel (coalesced); it also waits for
+those listeners to attach before starting a run, so a fast terminal event can't
+fire before the renderer is listening and strand the inspector in the running
+state. The CLI's `nagori ai` streams in-process to stdout (`Ctrl-C` cancels).
+The IPC `RunAiAction` envelope carries the same `AiRequestOptions` (so a CLI
+`ai translate --from/--to` keeps its languages over the wire), drives the engine
+to completion, and returns a single `AiOutput`; `RunQuickAction` runs the
+one-shot quick path.
 
 **Privacy contract.** Apple's on-device models run fully local
 (`AiInputPolicy::allow_remote` is always `false`). The input-policy pipeline

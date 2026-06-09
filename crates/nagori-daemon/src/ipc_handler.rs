@@ -143,8 +143,12 @@ impl NagoriRuntime {
                 let output = self.run_quick_action(id, action).await?;
                 Ok(IpcResponse::AiOutput(AiOutputDto::from(output)))
             }
-            IpcRequest::RunAiAction(RunAiActionRequest { id, action }) => {
-                let output = self.run_ai_action(id, action).await?;
+            IpcRequest::RunAiAction(RunAiActionRequest {
+                id,
+                action,
+                options,
+            }) => {
+                let output = self.run_ai_action(id, action, options).await?;
                 Ok(IpcResponse::AiOutput(AiOutputDto::from(output)))
             }
             IpcRequest::GetSettings => {

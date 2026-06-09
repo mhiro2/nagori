@@ -1,7 +1,7 @@
 use nagori_core::{
-    AiActionId, AiAvailabilityReport, AiOutput, AppSettings, ClipboardEntry, ContentKind, EntryId,
-    PasteFormat, QuickActionId, RankReason, RepresentationRole, RepresentationSummary,
-    SearchResult, Sensitivity, safe_preview_for_dto,
+    AiActionId, AiAvailabilityReport, AiOutput, AiRequestOptions, AppSettings, ClipboardEntry,
+    ContentKind, EntryId, PasteFormat, QuickActionId, RankReason, RepresentationRole,
+    RepresentationSummary, SearchResult, Sensitivity, safe_preview_for_dto,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,13 @@ pub struct RunQuickActionRequest {
 pub struct RunAiActionRequest {
     pub id: EntryId,
     pub action: AiActionId,
+    /// Per-request overrides (translate's source/target language, tightening
+    /// caps, …). Without this the daemon ran every wire request with
+    /// `AiRequestOptions::default()`, so `nagori ai translate --from/--to` lost
+    /// its languages on the wire and the daemon failed for want of a target.
+    /// `#[serde(default)]` keeps the field optional for older clients.
+    #[serde(default)]
+    pub options: AiRequestOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

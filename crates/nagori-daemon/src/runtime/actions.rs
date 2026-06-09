@@ -119,15 +119,26 @@ impl NagoriRuntime {
         let policy = action.input_policy();
         let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
         let classifier = SensitivityClassifier::try_new(settings.clone())?;
-        let input = shape_ai_input(&entry, &classifier, &policy)?;
+
+        // Build the effective policy once by tightening the per-request options
+        // against the AI settings (timeout, input/output token caps) and the
+        // `allow_streaming` toggle, then enforce it everywhere downstream — the
+        // input-shaping guard, the deadline, the request handed to the backend,
+        // and the stream wrapper — so no limit is re-derived (and silently
+        // drifts) between those sites.
+        let mut options = options;
+        let effective = EffectiveAiPolicy::resolve(&options, &settings.ai);
+        let input = shape_ai_input(&entry, &classifier, &policy, effective.max_input_tokens)?;
 
         // Steer the generated text toward the UI-language setting instead of
         // letting the on-device model default to English; a caller that set
         // this explicitly wins.
-        let mut options = options;
         if options.output_language.is_none() {
             options.output_language = Some(settings.locale.as_tag().to_owned());
         }
+        // Stamp the tightened limits onto the request so the backend sees the
+        // enforced policy, not the looser values the caller supplied.
+        effective.apply_to(&mut options);
 
         let request_id = RequestId::new();
         let req = AiActionRequest {
@@ -139,14 +150,13 @@ impl NagoriRuntime {
         };
 
         // One absolute budget for the *whole* request, anchored at registration
-        // time. The semaphore wait, `engine.start`, and the streamed generation
-        // all draw down the same deadline, so a wedged predecessor holding the
-        // single text-generation permit — or a stalled `engine.start` — can't
-        // keep this request (and its permit) alive past the configured timeout.
-        // Previously the timeout only armed *after* start, leaving the
-        // pre-stream phases unbounded.
-        let timeout = Duration::from_millis(settings.ai.request_timeout_ms);
-        let deadline = Instant::now() + timeout;
+        // time and bounded by the effective (tightened) timeout. The semaphore
+        // wait, `engine.start`, and the streamed generation all draw down the
+        // same deadline, so a wedged predecessor holding the single
+        // text-generation permit — or a stalled `engine.start` — can't keep this
+        // request (and its permit) alive past the budget. Previously the timeout
+        // only armed *after* start, leaving the pre-stream phases unbounded.
+        let deadline = Instant::now() + Duration::from_millis(effective.timeout_ms);
 
         // Register *before* acquiring the permit so the request is cancellable
         // while it waits behind the semaphore (Apple serialises text generation
@@ -205,9 +215,17 @@ impl NagoriRuntime {
             elapsed_ms = elapsed_ms(started),
             "ai_action_started"
         );
+        // Enforce the streaming decision server-side: when streaming is not
+        // allowed, drop intermediate snapshots so only the terminal result is
+        // surfaced (the consumer still gets the full text from `Done`).
+        let raw_events = if effective.streaming {
+            run.events
+        } else {
+            coalesce_non_streaming(run.events)
+        };
         // The stream shares the same absolute deadline, so the remaining budget
         // already drawn down by the acquire + start bounds the generation too.
-        let events = guard_event_stream(run.events, guard, deadline);
+        let events = guard_event_stream(raw_events, guard, deadline);
         Ok(AiActionRun { request_id, events })
     }
 
@@ -274,11 +292,17 @@ impl NagoriRuntime {
     ///
     /// The one-shot path used by the IPC `RunAiAction` handler: it drives
     /// [`Self::start_ai_action`] and folds the stream into a single
-    /// [`AiOutput`].
-    pub async fn run_ai_action(&self, id: EntryId, action: AiActionId) -> Result<AiOutput> {
-        let run = self
-            .start_ai_action(id, action, AiRequestOptions::default())
-            .await?;
+    /// [`AiOutput`]. The caller-supplied `options` carry the wire request's
+    /// per-request overrides (translate languages, tightening caps), so a CLI
+    /// `ai translate --from/--to` over IPC reaches the backend instead of being
+    /// replaced with defaults here.
+    pub async fn run_ai_action(
+        &self,
+        id: EntryId,
+        action: AiActionId,
+        options: AiRequestOptions,
+    ) -> Result<AiOutput> {
+        let run = self.start_ai_action(id, action, options).await?;
         let mut events = run.events;
         let mut text = String::new();
         let mut warnings = Vec::new();
@@ -342,11 +366,14 @@ fn actionable_text(entry: &ClipboardEntry) -> Result<&str> {
 }
 
 /// Shapes an entry's text for a model-backed AI action: redacts per
-/// sensitivity, enforces the byte cap, and refuses input over the token budget.
+/// sensitivity, enforces the byte cap, and refuses input over `max_input_tokens`
+/// (the effective token budget — the model's hard cap tightened by any
+/// per-request override).
 fn shape_ai_input(
     entry: &ClipboardEntry,
     classifier: &SensitivityClassifier,
     policy: &AiInputPolicy,
+    max_input_tokens: usize,
 ) -> Result<String> {
     let raw = actionable_text(entry)?;
     let input = match entry.sensitivity {
@@ -366,12 +393,85 @@ fn shape_ai_input(
         )));
     }
     let tokens = estimate_tokens(&input);
-    if tokens > MAX_AI_INPUT_TOKENS {
+    if tokens > max_input_tokens {
         return Err(AppError::Policy(format!(
-            "input is ~{tokens} tokens; the on-device model caps at {MAX_AI_INPUT_TOKENS}"
+            "input is ~{tokens} tokens; the budget for this request is {max_input_tokens}"
         )));
     }
     Ok(input)
+}
+
+/// A request's limits after tightening the per-request [`AiRequestOptions`]
+/// against the daemon-wide [`AiSettings`] and the model's hard input cap.
+///
+/// Built once at registration so the deadline math, the input-shaping guard,
+/// the stream wrapper, and the options handed to the backend all read the same
+/// enforced numbers rather than each re-deriving them (and silently drifting).
+/// Every field is "tightening only": a per-request override can make a request
+/// *more* restrictive than the settings / model defaults but never looser.
+#[derive(Debug, Clone, Copy)]
+struct EffectiveAiPolicy {
+    /// Absolute per-request budget in ms: `min(settings, request override)`,
+    /// floored at 1 so a zero override can't make the deadline already-expired.
+    timeout_ms: u64,
+    /// Input token ceiling: the model's hard cap tightened by any override.
+    max_input_tokens: usize,
+    /// Output token ceiling forwarded to the backend, if the request set one.
+    /// No settings counterpart today, so it passes through unchanged. Output
+    /// length is only knowable mid-generation, so this can't be enforced
+    /// pre-call: the daemon hands it to the backend, which caps on it where it
+    /// supports a max-output control. The on-device Apple text generator does
+    /// not yet wire one, so the value is carried but not honoured there.
+    max_output_tokens: Option<u32>,
+    /// Whether intermediate snapshots may be surfaced: the UI-level
+    /// `allow_streaming` toggle combined (logical AND) with the request's
+    /// preference, which defaults to on.
+    streaming: bool,
+}
+
+impl EffectiveAiPolicy {
+    fn resolve(options: &AiRequestOptions, settings: &nagori_core::AiSettings) -> Self {
+        let timeout_ms = options
+            .timeout_ms
+            .map_or(settings.request_timeout_ms, |req| {
+                req.min(settings.request_timeout_ms)
+            })
+            .max(1);
+        let max_input_tokens = options.max_input_tokens.map_or(MAX_AI_INPUT_TOKENS, |req| {
+            (req as usize).min(MAX_AI_INPUT_TOKENS)
+        });
+        let streaming = settings.allow_streaming && options.streaming.unwrap_or(true);
+        Self {
+            timeout_ms,
+            max_input_tokens,
+            max_output_tokens: options.max_output_tokens,
+            streaming,
+        }
+    }
+
+    /// Writes the tightened values back onto `options` so the request handed to
+    /// the backend carries the enforced policy — a backend that honours
+    /// `streaming` / `max_output_tokens` / the caps sees the tightened figures,
+    /// not the looser ones the caller supplied.
+    fn apply_to(&self, options: &mut AiRequestOptions) {
+        options.timeout_ms = Some(self.timeout_ms);
+        options.max_input_tokens = Some(u32::try_from(self.max_input_tokens).unwrap_or(u32::MAX));
+        options.max_output_tokens = self.max_output_tokens;
+        options.streaming = Some(self.streaming);
+    }
+}
+
+/// Suppresses intermediate `Delta` / `Replace` snapshots when streaming is not
+/// allowed, leaving only terminal events (`Done` carries the authoritative
+/// `final_text`, so no output is lost). Enforced server-side so the toggle
+/// holds regardless of whether the backend itself streams.
+fn coalesce_non_streaming(events: nagori_ai::AiEventStream) -> nagori_ai::AiEventStream {
+    events
+        .filter(|item| {
+            let keep = !matches!(item, Ok(AiEvent::Delta { .. } | AiEvent::Replace { .. }));
+            async move { keep }
+        })
+        .boxed()
 }
 
 /// Maps a structured [`AiError`] onto the daemon's [`AppError`].
@@ -498,4 +598,122 @@ fn timeout_error() -> AiError {
 /// blown budget surfaces as a timeout rather than an unbounded wait.
 fn remaining_until(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nagori_core::AiSettings;
+
+    fn settings_with(request_timeout_ms: u64, allow_streaming: bool) -> AiSettings {
+        AiSettings {
+            request_timeout_ms,
+            allow_streaming,
+            ..AiSettings::default()
+        }
+    }
+
+    #[test]
+    fn timeout_tightens_to_the_smaller_of_settings_and_request() {
+        let settings = settings_with(30_000, true);
+        // A shorter per-request override wins.
+        let shorter = AiRequestOptions {
+            timeout_ms: Some(5_000),
+            ..AiRequestOptions::default()
+        };
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&shorter, &settings).timeout_ms,
+            5_000
+        );
+        // A longer override cannot loosen the settings ceiling.
+        let longer = AiRequestOptions {
+            timeout_ms: Some(120_000),
+            ..AiRequestOptions::default()
+        };
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&longer, &settings).timeout_ms,
+            30_000
+        );
+        // No override falls back to settings.
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&AiRequestOptions::default(), &settings).timeout_ms,
+            30_000
+        );
+    }
+
+    #[test]
+    fn timeout_is_floored_at_one_ms() {
+        // A zero override must not produce an already-expired deadline.
+        let settings = settings_with(30_000, true);
+        let zero = AiRequestOptions {
+            timeout_ms: Some(0),
+            ..AiRequestOptions::default()
+        };
+        assert_eq!(EffectiveAiPolicy::resolve(&zero, &settings).timeout_ms, 1);
+    }
+
+    #[test]
+    fn input_tokens_tighten_against_the_model_hard_cap() {
+        let settings = settings_with(30_000, true);
+        // A request can only lower the cap.
+        let lower = AiRequestOptions {
+            max_input_tokens: Some(100),
+            ..AiRequestOptions::default()
+        };
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&lower, &settings).max_input_tokens,
+            100
+        );
+        // A request above the hard cap is clamped down to it.
+        let above = AiRequestOptions {
+            max_input_tokens: Some(u32::MAX),
+            ..AiRequestOptions::default()
+        };
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&above, &settings).max_input_tokens,
+            MAX_AI_INPUT_TOKENS
+        );
+        assert_eq!(
+            EffectiveAiPolicy::resolve(&AiRequestOptions::default(), &settings).max_input_tokens,
+            MAX_AI_INPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn streaming_requires_both_the_settings_toggle_and_the_request() {
+        // Settings off → never streams, whatever the request asks.
+        let off = settings_with(30_000, false);
+        let asks = AiRequestOptions {
+            streaming: Some(true),
+            ..AiRequestOptions::default()
+        };
+        assert!(!EffectiveAiPolicy::resolve(&asks, &off).streaming);
+        // Settings on, request silent → defaults to streaming.
+        let on = settings_with(30_000, true);
+        assert!(EffectiveAiPolicy::resolve(&AiRequestOptions::default(), &on).streaming);
+        // Settings on, request opts out → no streaming.
+        let opts_out = AiRequestOptions {
+            streaming: Some(false),
+            ..AiRequestOptions::default()
+        };
+        assert!(!EffectiveAiPolicy::resolve(&opts_out, &on).streaming);
+    }
+
+    #[test]
+    fn apply_to_stamps_the_tightened_values_onto_the_request_options() {
+        let settings = settings_with(10_000, false);
+        let mut options = AiRequestOptions {
+            timeout_ms: Some(60_000),
+            max_input_tokens: Some(50),
+            max_output_tokens: Some(256),
+            streaming: Some(true),
+            ..AiRequestOptions::default()
+        };
+        let effective = EffectiveAiPolicy::resolve(&options, &settings);
+        effective.apply_to(&mut options);
+        assert_eq!(options.timeout_ms, Some(10_000));
+        assert_eq!(options.max_input_tokens, Some(50));
+        assert_eq!(options.max_output_tokens, Some(256));
+        assert_eq!(options.streaming, Some(false));
+    }
 }

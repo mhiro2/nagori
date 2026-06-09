@@ -832,7 +832,7 @@ async fn ai_action_on_image_is_invalid_input() {
         .expect("save settings");
     let id = add_image_entry(&runtime).await;
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("ai action on an image must be refused");
     assert!(matches!(err, AppError::InvalidInput(_)), "got {err:?}");
@@ -848,7 +848,7 @@ async fn ai_action_blocked_when_disabled() {
         .await
         .expect("entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("ai actions must be refused when disabled");
     assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
@@ -866,7 +866,7 @@ async fn ai_action_runs_when_enabled() {
         .await
         .expect("entry should be added");
     let output = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect("summarize should succeed when enabled");
     assert!(output.text.starts_with("Summary:"), "got {}", output.text);
@@ -943,7 +943,7 @@ async fn ai_action_unsupported_without_engine() {
         .await
         .expect("entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("no engine must surface as Unsupported");
     assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
@@ -971,7 +971,7 @@ async fn ai_action_provider_mismatch_is_unsupported() {
         .await
         .expect("entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("provider mismatch must surface as Unsupported");
     assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
@@ -999,7 +999,7 @@ async fn ai_action_not_in_allow_list_is_blocked() {
         .await
         .expect("entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("action outside the allow-list must be blocked");
     assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
@@ -1024,7 +1024,7 @@ async fn ai_action_applies_user_regex_to_redaction() {
         .expect("save settings");
 
     let output = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect("summarize should succeed");
     assert!(
@@ -1091,7 +1091,7 @@ async fn ai_action_blocked_when_input_exceeds_max_bytes() {
         .await
         .expect("large entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Summarize)
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
         .await
         .expect_err("must refuse inputs over max_bytes");
     assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
@@ -1129,6 +1129,90 @@ async fn ai_action_cancel_via_registry_yields_cancelled() {
     }
     assert!(saw_cancelled, "stream must terminate with Cancelled");
     drop(events);
+    assert_eq!(runtime.ai_registry.active_count(), 0);
+}
+
+#[tokio::test]
+async fn allow_streaming_false_suppresses_intermediate_snapshots() {
+    // With the UI streaming toggle off the daemon must surface only the
+    // terminal result — no `Delta` / `Replace` — while `Done.final_text` still
+    // carries the full output.
+    use nagori_ai::{AiEngine, MockBackend};
+    use nagori_core::{AiProviderKind, AiSettings};
+
+    let store = SqliteStore::open_memory().expect("memory store");
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let engine = AiEngine::builder(AiProviderKind::AppleNative)
+        .text_generator(Arc::new(MockBackend::with_output("hello world")))
+        .build();
+    let runtime = NagoriRuntime::builder(store)
+        .clipboard(clipboard)
+        .ai_engine(Arc::new(engine))
+        .build_for_test();
+    runtime
+        .save_settings(AppSettings {
+            ai: AiSettings {
+                enabled: true,
+                provider: AiProviderKind::AppleNative,
+                allow_streaming: false,
+                ..AiSettings::default()
+            },
+            ..AppSettings::default()
+        })
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("some text".to_owned())
+        .await
+        .expect("entry should be added");
+    let run = runtime
+        .start_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
+        .await
+        .expect("summarize should start");
+
+    let mut events = run.events;
+    let mut final_text = None;
+    while let Some(item) = events.next().await {
+        match item.expect("no stream error") {
+            AiEvent::Delta { .. } | AiEvent::Replace { .. } => {
+                panic!("streaming is disabled; no intermediate snapshot may surface")
+            }
+            AiEvent::Done {
+                final_text: text, ..
+            } => final_text = Some(text),
+            AiEvent::Cancelled => panic!("unexpected cancel"),
+        }
+    }
+    assert_eq!(final_text.as_deref(), Some("hello world"));
+    drop(events);
+    assert_eq!(runtime.ai_registry.active_count(), 0);
+}
+
+#[tokio::test]
+async fn request_max_input_tokens_tightens_the_input_budget() {
+    // A per-request `max_input_tokens` below the input's estimate refuses the
+    // run before the backend is touched, even though the model's hard cap would
+    // otherwise have admitted it. No registry slot is leaked.
+    let (runtime, _) = runtime_with_mock_ai();
+    runtime
+        .save_settings(ai_enabled_settings(AppSettings::default()))
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("the quick brown fox jumps over the lazy dog".to_owned())
+        .await
+        .expect("entry should be added");
+    let options = AiRequestOptions {
+        max_input_tokens: Some(1),
+        ..AiRequestOptions::default()
+    };
+    let Err(err) = runtime
+        .start_ai_action(id, AiActionId::Summarize, options)
+        .await
+    else {
+        panic!("a 1-token budget must reject this input");
+    };
+    assert!(matches!(err, AppError::Policy(_)), "got {err:?}");
     assert_eq!(runtime.ai_registry.active_count(), 0);
 }
 
@@ -1172,8 +1256,8 @@ async fn translate_action_threads_target_language_to_backend() {
 
 #[tokio::test]
 async fn translate_action_without_target_language_is_unsupported() {
-    // The one-shot path uses default options (no target language); the engine
-    // refuses with a capability mismatch, which surfaces as Unsupported.
+    // With no target language the engine refuses with a capability mismatch,
+    // which surfaces as Unsupported.
     let (runtime, _) = runtime_with_mock_translator();
     runtime
         .save_settings(ai_enabled_settings(AppSettings::default()))
@@ -1184,10 +1268,36 @@ async fn translate_action_without_target_language_is_unsupported() {
         .await
         .expect("entry should be added");
     let err = runtime
-        .run_ai_action(id, AiActionId::Translate)
+        .run_ai_action(id, AiActionId::Translate, AiRequestOptions::default())
         .await
         .expect_err("translate without a target language must error");
     assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
+    assert_eq!(runtime.ai_registry.active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_ai_action_translate_honours_request_options_target_language() {
+    // The one-shot IPC path must forward the request options to the backend, so
+    // a translate with a target language succeeds rather than being run with
+    // the defaults a wire request used to be reduced to.
+    let (runtime, _) = runtime_with_mock_translator();
+    runtime
+        .save_settings(ai_enabled_settings(AppSettings::default()))
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("hello".to_owned())
+        .await
+        .expect("entry should be added");
+    let options = AiRequestOptions {
+        target_language: Some("ja".to_owned()),
+        ..AiRequestOptions::default()
+    };
+    let output = runtime
+        .run_ai_action(id, AiActionId::Translate, options)
+        .await
+        .expect("translate with a target language should succeed");
+    assert_eq!(output.text, "[ja] hello");
     assert_eq!(runtime.ai_registry.active_count(), 0);
 }
 
