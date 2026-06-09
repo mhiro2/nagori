@@ -57,6 +57,25 @@ const FIRST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// promptly.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Absolute ceiling on how long a single request handler may run before the
+/// connection is force-released and a structured `deadline_exceeded` rejection
+/// is written back. This is a *backstop*: peer-disconnect detection
+/// (`wait_for_peer_close`) already frees the connection slot — and cancels the
+/// handler's in-flight work — the instant a client gives up and closes, which
+/// is the common case (the CLI client's own request timeout is far shorter).
+/// The deadline only matters for the degenerate case where the peer neither
+/// reads the response nor closes while the handler is wedged.
+///
+/// Sized strictly above the longest *legitimate* handler so it never trips a
+/// healthy request: a `RunAiAction` drives the model to completion under its
+/// own absolute deadline, which the settings cap at
+/// [`nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS`]. The extra slack keeps
+/// this from racing a legitimately slow AI action that is finishing right at
+/// its own deadline.
+const HANDLER_DEADLINE: std::time::Duration = std::time::Duration::from_millis(
+    nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS.saturating_add(30_000),
+);
+
 /// Bounded-read + auth-check + write-back driver shared by every
 /// transport. Generic over `AsyncRead + AsyncWrite` so the Unix-socket and
 /// Windows named-pipe servers reuse the exact same envelope handling.
@@ -82,7 +101,16 @@ pub(super) async fn handle_connection<S, F, Fut>(
         Ok(line) => match serde_json::from_slice::<IpcEnvelope>(&line) {
             Ok(envelope) => {
                 if token.verify(&envelope.token) {
-                    handler(envelope.request).await
+                    // Run the handler under a server-side deadline and watch
+                    // the read half for a peer disconnect. `None` means the
+                    // handler was cancelled — the peer went away (skip the
+                    // write entirely) — so we drop the stream and the permit
+                    // by returning, releasing the connection slot and (via the
+                    // dropped handler future) any AI permit / DB work it held.
+                    match run_handler_bounded(&mut stream, handler(envelope.request)).await {
+                        Some(response) => response,
+                        None => return,
+                    }
                 } else {
                     IpcResponse::Error(crate::IpcError {
                         code: "unauthorized".to_owned(),
@@ -145,6 +173,76 @@ pub(super) async fn handle_connection<S, F, Fut>(
                 timeout_ms = u64::try_from(WRITE_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
                 "ipc_write_timeout_dropping_slow_reader",
             );
+        }
+    }
+}
+
+/// Drive `handler` to completion while bounding it two ways:
+///
+/// * **Peer disconnect.** The handler never touches the stream, so we
+///   concurrently watch the read half for EOF. The CLI client keeps its write
+///   half open until it has read the response (it never half-closes — see
+///   `exchange_envelope`), so an `Ok(0)` here means the peer truly went away
+///   (gave up after its own timeout, exited, or dropped the client). Returning
+///   `None` lets the caller skip the write and drop the handler future,
+///   cancelling whatever in-flight work it held — the connection permit, the
+///   AI concurrency permit, and any pending DB query — instead of finishing a
+///   response no one will read.
+/// * **Server-side deadline.** A backstop for the degenerate case where the
+///   peer neither reads nor closes while the handler is wedged. On expiry we
+///   return a structured `deadline_exceeded` error so a peer that *is* still
+///   waiting gets a deterministic rejection (best-effort, bounded by
+///   `WRITE_TIMEOUT` like every other write-back) rather than a hang.
+///
+/// `biased` so a handler that completes in the same poll as a coincident
+/// deadline / EOF still wins — we always prefer delivering a real response.
+async fn run_handler_bounded<S, Fut>(stream: &mut S, handler: Fut) -> Option<IpcResponse>
+where
+    S: AsyncRead + Unpin,
+    Fut: Future<Output = IpcResponse>,
+{
+    tokio::pin!(handler);
+    tokio::select! {
+        biased;
+        response = &mut handler => Some(response),
+        () = wait_for_peer_close(stream) => {
+            warn!("ipc_peer_disconnected_cancelling_handler");
+            None
+        }
+        () = tokio::time::sleep(HANDLER_DEADLINE) => {
+            warn!(
+                timeout_ms = u64::try_from(HANDLER_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+                "ipc_handler_deadline_exceeded",
+            );
+            Some(IpcResponse::Error(crate::IpcError {
+                code: "deadline_exceeded".to_owned(),
+                message: format!(
+                    "handler exceeded the {}ms server deadline",
+                    HANDLER_DEADLINE.as_millis()
+                ),
+                recoverable: false,
+            }))
+        }
+    }
+}
+
+/// Resolve once the peer closes its end of `stream` (or the read errors).
+///
+/// Never resolves while the peer is alive and waiting: the one-line
+/// request/response protocol means a well-behaved peer sends nothing after its
+/// request, so the read stays pending until EOF. Any stray bytes a peer
+/// pipelines after the request line are ignored (we keep watching) rather than
+/// mistaken for a disconnect. The read is only ever dropped while pending (when
+/// another `select!` arm wins), so it cannot swallow buffered response bytes.
+async fn wait_for_peer_close<S>(stream: &mut S)
+where
+    S: AsyncRead + Unpin,
+{
+    let mut scratch = [0_u8; 256];
+    loop {
+        match stream.read(&mut scratch).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
         }
     }
 }
@@ -286,6 +384,146 @@ mod tests_transport {
             semaphore.available_permits(),
             1,
             "the connection permit must be released once the slow reader times out",
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_disconnect_cancels_handler_and_releases_permit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Regression: before peer-disconnect detection, a handler kept running
+        // (holding its connection permit, AI permit, and any DB work) after the
+        // client gave up and closed. This handler never completes on its own but
+        // flips a flag when its future is dropped, so we can prove the peer-close
+        // path cancelled it rather than waiting out the deadline.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handler = {
+            let cancelled = cancelled.clone();
+            Arc::new(move |_request: IpcRequest| {
+                let cancelled = cancelled.clone();
+                async move {
+                    struct DropFlag(Arc<AtomicBool>);
+                    impl Drop for DropFlag {
+                        fn drop(&mut self) {
+                            self.0.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    let _flag = DropFlag(cancelled);
+                    std::future::pending::<IpcResponse>().await
+                }
+            })
+        };
+
+        let token = Arc::new(test_token());
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let request = serde_json::to_vec(&IpcEnvelope {
+            token: token.as_str().to_owned(),
+            request: IpcRequest::Health,
+        })
+        .expect("serialise envelope");
+
+        let (server_io, mut client_io) = tokio::io::duplex(256);
+        let start = tokio::time::Instant::now();
+        let server = handle_connection(server_io, permit, handler, token);
+        let client = async move {
+            client_io
+                .write_all(&request)
+                .await
+                .expect("client should write the request envelope");
+            client_io
+                .write_all(b"\n")
+                .await
+                .expect("client should terminate the request line");
+            // Give up like a real client whose own request timeout fired:
+            // dropping the stream closes both halves, so the server's read
+            // half sees EOF.
+            drop(client_io);
+        };
+
+        // Both futures live in this task; `join!` drives them to completion.
+        tokio::join!(server, client);
+
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the handler future must be dropped (cancelled) when the peer disconnects",
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the connection permit must be released as soon as the peer disconnects",
+        );
+        assert!(
+            start.elapsed() < HANDLER_DEADLINE,
+            "peer disconnect must cancel immediately, not wait out the handler deadline",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_handler_is_force_released_at_the_deadline() {
+        // A handler that never completes, paired with a peer that neither reads
+        // the response nor closes the connection (the degenerate case
+        // peer-disconnect detection cannot catch). The server-side deadline is
+        // the backstop: it must fire, free the permit, and emit a structured
+        // rejection rather than pinning the slot forever.
+        let handler = Arc::new(|_request: IpcRequest| std::future::pending::<IpcResponse>());
+
+        let token = Arc::new(test_token());
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let request = serde_json::to_vec(&IpcEnvelope {
+            token: token.as_str().to_owned(),
+            request: IpcRequest::Health,
+        })
+        .expect("serialise envelope");
+
+        // Buffer large enough to absorb the small `deadline_exceeded` response
+        // without blocking, so the test isolates the handler deadline from the
+        // write-back timeout.
+        let (server_io, mut client_io) = tokio::io::duplex(4096);
+        let start = tokio::time::Instant::now();
+        let server = handle_connection(server_io, permit, handler, token);
+        let client = async {
+            client_io
+                .write_all(&request)
+                .await
+                .expect("client should write the request envelope");
+            client_io
+                .write_all(b"\n")
+                .await
+                .expect("client should terminate the request line");
+            // Never read, never close: only the server's `HANDLER_DEADLINE`
+            // timer can break the stalemate, which paused-time auto-advance
+            // fires once every task is parked.
+            std::future::pending::<()>().await;
+        };
+
+        tokio::select! {
+            () = server => {}
+            () = client => unreachable!("the wedged peer never finishes on its own"),
+        }
+
+        assert!(
+            start.elapsed() >= HANDLER_DEADLINE,
+            "the handler must run until HANDLER_DEADLINE fires: {:?}",
+            start.elapsed(),
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the connection permit must be released once the handler deadline fires",
         );
     }
 }

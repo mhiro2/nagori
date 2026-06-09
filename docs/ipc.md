@@ -112,10 +112,11 @@ language and fail.
 | `unauthorized`       | Envelope's `token` field did not match the daemon's `nagori.token`                               |
 | `invalid_request`    | Transport-level rejection: timed-out read, request exceeded `MAX_IPC_BYTES`, or unparseable JSON |
 | `response_too_large` | Handler produced a response exceeding `MAX_IPC_BYTES` after serialisation                        |
+| `deadline_exceeded`  | Handler ran past the server-side handler deadline (a wedged handler backstop) and was force-released |
 
 `recoverable=false` is set for `not_found`, `policy_error`,
-`configuration_error`, `unauthorized`, and `response_too_large`;
-everything else is treated as transient by the CLI.
+`configuration_error`, `unauthorized`, `response_too_large`, and
+`deadline_exceeded`; everything else is treated as transient by the CLI.
 
 When `cli_ipc_enabled` is switched off, the daemon drains the active IPC
 server and removes the socket/token files. While disabled, only `Health`,
@@ -130,6 +131,15 @@ server reads a single newline-terminated envelope, writes the response
 line, and closes the connection. To issue multiple commands, open a new
 connection per command. (`nc -U` reflects this: every `Health` /
 `ListRecent` below would in practice be a separate `nc` invocation.)
+
+A client **must keep the connection fully open until it has read the
+response** — it must not `shutdown(Write)` (half-close) its write half after
+sending the request. While a handler runs, the server watches the connection's
+read half for EOF as a *peer gave up* signal and cancels the handler (freeing
+its connection slot, any AI permit, and in-flight DB work) the moment it sees
+one. A half-close looks identical to a disconnect, so half-closing while still
+waiting for the response would have the server cancel a request the client is
+in fact still waiting on. The bundled `nagori` CLI follows this contract.
 
 macOS / Linux:
 
