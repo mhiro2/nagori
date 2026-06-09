@@ -8,7 +8,7 @@ use nagori_core::{
     StoredClipboardRepresentation,
 };
 use nagori_search::{MAX_NGRAM_INPUT_CHARS, ngram_input_was_truncated};
-use rusqlite::{OptionalExtension, ToSql, params};
+use rusqlite::{OptionalExtension, ToSql, TransactionBehavior, params};
 use time::OffsetDateTime;
 
 use super::SqliteStore;
@@ -556,7 +556,18 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         ),
     };
     let mut conn = store.conn()?;
-    let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+    // `BEGIN IMMEDIATE` so the dedupe SELECT and the follow-up INSERT/UPDATE run
+    // under the write lock from the start. With a `DEFERRED` transaction two
+    // captures of the same `representation_set_hash` on different pool
+    // connections could both read "no existing row" before either writes; the
+    // second would then either insert a duplicate or, against the WAL snapshot,
+    // fail with `SQLITE_BUSY_SNAPSHOT` and lose the capture. Acquiring the write
+    // lock up front serialises the two: the loser waits (bounded by
+    // `busy_timeout`), then its SELECT observes the winner's committed row and
+    // takes the UPDATE (dedupe) branch instead of racing the INSERT.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|err| storage_err(&err))?;
     // Resolve dedupe explicitly via SELECT-then-INSERT/UPDATE rather than
     // `INSERT ... ON CONFLICT(representation_set_hash) WHERE deleted_at IS NULL`,
     // because conflict resolution against a partial unique index is
