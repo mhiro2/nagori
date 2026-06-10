@@ -1136,8 +1136,11 @@ per system, so a custom-store desktop and a default-store daemon can run
 concurrently and contend for the endpoint. The live-listener refusal
 above means the second binder retries with backoff rather than stealing
 the socket, but which store the CLI reaches then depends on which
-process owns the endpoint; pass `--ipc <endpoint>` explicitly to
-disambiguate.
+process owns the endpoint. The desktop always serves the default
+endpoint (it is not configurable), so the only way to address two
+instances deterministically is to start the *daemon* with a custom
+`--ipc <endpoint>` and point the CLI at it; the desktop then owns the
+default endpoint uncontended.
 
 **Request / response types** (`nagori-ipc::protocol`):
 

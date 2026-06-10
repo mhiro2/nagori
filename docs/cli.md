@@ -62,10 +62,11 @@ Defaults:
 Set `NAGORI_DB_PATH=/path/to/nagori.sqlite` to redirect the store away
 from the platform default. The desktop shell honours the same variable,
 so both processes target the same DB when launched with it. Note the
-IPC endpoint does **not** move with the variable: whichever process owns
-the default endpoint serves the CLI, so when running a custom-store
-desktop alongside a default-store daemon, pass `--ipc <endpoint>` to
-pick the instance explicitly.
+IPC endpoint does **not** move with the variable: the desktop always
+serves the default endpoint, so whichever process owns it serves the
+CLI. To address two instances deterministically, start the daemon with
+a custom `--ipc <endpoint>` and pass the same flag to the CLI; the
+desktop then owns the default endpoint uncontended.
 
 ## Output formats
 
