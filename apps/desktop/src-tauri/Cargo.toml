@@ -66,6 +66,7 @@ nagori-platform-linux = { path = "../../../crates/nagori-platform-linux" }
 
 [dev-dependencies]
 image = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

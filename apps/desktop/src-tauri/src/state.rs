@@ -12,8 +12,9 @@ const LAST_PASTED_TTL: Duration = Duration::from_mins(30);
 
 use nagori_core::{AppError, AppSettings, EntryId, Result};
 use nagori_daemon::{
-    CaptureLoop, MaintenanceHealth, MaintenanceReport, MaintenanceService, NagoriRuntime,
-    ShutdownHandle, StartupHealth, WorkerRestart, supervise_worker,
+    CaptureLoop, CliIpcConfig, MaintenanceHealth, MaintenanceReport, MaintenanceService,
+    NagoriRuntime, ShutdownHandle, StartupHealth, WorkerRestart, spawn_cli_ipc_supervisor,
+    supervise_worker,
 };
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
@@ -188,12 +189,22 @@ struct BackgroundTasks {
     semantic: tauri::async_runtime::JoinHandle<()>,
     ngram_rebuild: tauri::async_runtime::JoinHandle<()>,
     ai_watchdog: tauri::async_runtime::JoinHandle<()>,
+    cli_ipc: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// Grace each supervised worker gets to drain in-flight work when shutdown is
 /// requested. The worker exits between ticks (so a partway-through DB write
 /// commits instead of being abandoned); past this it is force-aborted.
 const WORKER_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Extra drain budget for the CLI IPC host on top of the caller's worker
+/// grace. The IPC supervisor's shutdown branch waits `shutdown_grace + 1s`
+/// for in-flight handlers before it removes the socket / token files
+/// (`stop_ipc_server`), so giving it only the shared worker budget could
+/// abort the task between the drain and the file cleanup, leaving a stale
+/// socket behind. Mirrors the `grace + 2s` the daemon's `drain_workers`
+/// grants its IPC supervisor.
+const CLI_IPC_DRAIN_SLACK: Duration = Duration::from_secs(2);
 
 impl AppState {
     pub fn record_last_pasted(&self, id: EntryId) {
@@ -391,7 +402,44 @@ impl AppState {
                 self.runtime.clone(),
                 self.runtime.shutdown_handle(),
             ),
+            cli_ipc: self.spawn_cli_ipc_host(CliIpcConfig::default()),
         });
+    }
+
+    /// Host the CLI IPC endpoint inside the desktop process so `nagori`
+    /// write commands reach this runtime (and its search-cache
+    /// invalidation) while the GUI is running, exactly as they would a
+    /// headless `nagori daemon run`.
+    ///
+    /// Two gates precede the supervisor:
+    ///
+    /// * The single-instance lock must be held. The bind path reclaims a
+    ///   leftover socket on the grounds that the lock holder is the only
+    ///   live owner of the store — a `build()`-only state (tests,
+    ///   in-memory) holds no lock, so it must not bind a real endpoint.
+    /// * The persisted settings must load (fail-closed). `cli_ipc_enabled`
+    ///   is read from the runtime's settings snapshot; serving before the
+    ///   store snapshot lands would honor the compiled-in default — and
+    ///   briefly expose the socket — even when the user disabled CLI IPC.
+    ///   The refresh also runs in the capture supervisor; doubling up is
+    ///   an accepted interim until startup settings loading is centralized.
+    fn spawn_cli_ipc_host(&self, config: CliIpcConfig) -> tauri::async_runtime::JoinHandle<()> {
+        if self.instance_lock.is_none() {
+            tracing::info!("cli_ipc_skipped_without_instance_lock");
+            return tauri::async_runtime::spawn(async {});
+        }
+        let runtime = self.runtime.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = runtime.refresh_settings_from_store().await {
+                tracing::warn!(error = %err, "cli_ipc_settings_load_failed_not_serving");
+                return;
+            }
+            let shutdown = runtime.shutdown_handle();
+            let supervisor = spawn_cli_ipc_supervisor(runtime, config, shutdown);
+            if let Err(err) = supervisor.await {
+                tracing::warn!(error = %err, "cli_ipc_supervisor_join_failed");
+            }
+        })
     }
 
     /// Cancel, drain, and abort the in-process supervised workers. Safe to call
@@ -413,6 +461,11 @@ impl AppState {
             drain_background_task("semantic", tasks.semantic, grace),
             drain_background_task("ngram_rebuild", tasks.ngram_rebuild, grace),
             drain_background_task("ai_watchdog", tasks.ai_watchdog, grace),
+            // The IPC supervisor drains in-flight handlers for its own
+            // `shutdown_grace + 1s` before it can remove the socket / token
+            // files, so it gets extra slack on top of the shared budget —
+            // see CLI_IPC_DRAIN_SLACK.
+            drain_background_task("cli_ipc", tasks.cli_ipc, grace + CLI_IPC_DRAIN_SLACK),
         );
     }
 
@@ -1009,6 +1062,109 @@ mod tests {
     impl Drop for DropFlag {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    mod cli_ipc {
+        use super::*;
+
+        fn test_state() -> AppState {
+            AppState::build(SqliteStore::open_memory().expect("memory store"))
+                .expect("app state should build on the host target")
+        }
+
+        fn test_ipc_config(dir: &std::path::Path) -> CliIpcConfig {
+            CliIpcConfig {
+                socket_path: dir.join("nagori.sock"),
+                token_path: dir.join("nagori.token"),
+                shutdown_grace: Duration::from_millis(50),
+                ..CliIpcConfig::default()
+            }
+        }
+
+        async fn wait_until(
+            timeout: Duration,
+            mut predicate: impl FnMut() -> bool,
+        ) -> std::result::Result<(), ()> {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if predicate() {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(())
+        }
+
+        /// A `build()`-only state holds no single-instance lock, so the
+        /// IPC host must refuse to bind: the stale-socket reclaim inside
+        /// the bind path is only sound while this process owns the
+        /// data-directory lock.
+        #[tokio::test]
+        async fn host_skips_without_instance_lock() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let state = test_state();
+            let config = test_ipc_config(temp.path());
+            let handle = state.spawn_cli_ipc_host(config.clone());
+            tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect("skip task should finish promptly")
+                .expect("skip task should not panic");
+            assert!(
+                !config.socket_path.exists(),
+                "lockless state must not bind the socket",
+            );
+            assert!(
+                !config.token_path.exists(),
+                "lockless state must not write a token file",
+            );
+        }
+
+        /// End-to-end over the desktop host: the endpoint answers Health
+        /// while the app runs, and shutdown removes the socket and token
+        /// within the drain budget.
+        #[tokio::test]
+        async fn host_serves_health_and_cleans_up_on_shutdown() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let mut state = test_state();
+            state.instance_lock = Some(
+                nagori_storage::ProcessLock::try_acquire(temp.path())
+                    .expect("lock io")
+                    .expect("lock should be free"),
+            );
+            let config = test_ipc_config(temp.path());
+            let handle = state.spawn_cli_ipc_host(config.clone());
+
+            wait_until(Duration::from_secs(3), || config.socket_path.exists())
+                .await
+                .expect("socket should appear once the host is up");
+            let token = nagori_ipc::read_token_file(&config.token_path).expect("token file");
+            let client = nagori_ipc::IpcClient::new(
+                config.socket_path.to_string_lossy().into_owned(),
+                token,
+            )
+            .with_connect_timeout(Duration::from_millis(100))
+            .with_request_timeout(Duration::from_secs(1));
+            let health = client
+                .send(nagori_ipc::IpcRequest::Health)
+                .await
+                .expect("health over the desktop-hosted endpoint");
+            assert!(matches!(health, nagori_ipc::IpcResponse::Health(_)));
+
+            state.runtime.shutdown_handle().cancel();
+            tokio::time::timeout(Duration::from_secs(3), handle)
+                .await
+                .expect("host should stop after shutdown")
+                .expect("host should not panic");
+            assert!(
+                !config.socket_path.exists(),
+                "socket should be removed on shutdown",
+            );
+            assert!(
+                !config.token_path.exists(),
+                "token file should be removed on shutdown",
+            );
         }
     }
 
