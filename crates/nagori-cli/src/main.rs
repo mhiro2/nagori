@@ -900,23 +900,25 @@ async fn run_ai_streaming(
         }
     }
 
-    if !stream || format.is_json() {
-        // Non-streaming (or JSON Lines already emitted): print the authoritative
-        // result once. The streaming text path already wrote to stdout.
-        if !format.is_json() {
-            let output = AiOutputDto {
-                text: if final_text.is_empty() {
-                    buffer.clone()
-                } else {
-                    final_text.clone()
-                },
-                created_entry: None,
-                warnings: warnings.clone(),
-            };
-            print_ai_output(&output, format)?;
-        }
-    } else if !final_text.is_empty() || !buffer.is_empty() {
-        // Terminate the streamed text line.
+    if !stream {
+        // Non-streaming: the loop wrote nothing to stdout, so emit the
+        // authoritative result once — text *and* JSON/JSONL alike. (A prior
+        // version gated this on `!format.is_json()`, which left
+        // `--no-stream --json/--jsonl` printing nothing and exiting 0.)
+        let output = AiOutputDto {
+            text: if final_text.is_empty() {
+                buffer.clone()
+            } else {
+                final_text.clone()
+            },
+            created_entry: None,
+            warnings: warnings.clone(),
+        };
+        print_ai_output(&output, format)?;
+    } else if !format.is_json() && (!final_text.is_empty() || !buffer.is_empty()) {
+        // Streaming text: terminate the streamed line. Streaming JSON Lines
+        // needs nothing more here — each event was already emitted as it
+        // arrived in the loop above.
         let mut handle = stdout.lock();
         writeln!(handle)?;
     }

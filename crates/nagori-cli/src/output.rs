@@ -438,9 +438,11 @@ pub(crate) fn print_ack(format: OutputFormat) {
 
 pub(crate) fn print_ai_output(output: &AiOutputDto, format: OutputFormat) -> Result<()> {
     match format {
-        OutputFormat::Json | OutputFormat::Jsonl => {
-            println!("{}", serde_json::to_string_pretty(output)?);
-        }
+        // `--json` is pretty; `--jsonl` must stay one record per line so the
+        // non-streaming AI path emits valid JSON Lines (a pretty multi-line
+        // blob would break line-oriented consumers).
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(output)?),
+        OutputFormat::Jsonl => println!("{}", serde_json::to_string(output)?),
         OutputFormat::Text => {
             println!("{}", output.text);
             for warning in &output.warnings {
