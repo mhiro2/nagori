@@ -193,7 +193,7 @@ const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
 const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Cheap, non-cryptographic entropy source for the backoff jitter in
-/// [`CaptureCaptureFailurePolicy::jittered_backoff`]. The wall clock is already imported
+/// [`CaptureFailurePolicy::jittered_backoff`]. The wall clock is already imported
 /// for the gap-detection path; jitter only needs enough variation that
 /// two co-tenant daemons crashing at the same shared event (sleep wake,
 /// network re-attach) don't retry on identical ticks. We deliberately
