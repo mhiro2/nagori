@@ -247,7 +247,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             if writes {
                 anyhow::bail!(
-                    "write commands require a running daemon. Run `nagori daemon run` \
+                    "write commands need a reachable IPC endpoint. Launch the desktop \
+                     app (with Settings → CLI → IPC enabled) or `nagori daemon run`, \
                      or pass an explicit `--db <path>` to operate on a local DB."
                 );
             }

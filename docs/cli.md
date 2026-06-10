@@ -1,8 +1,10 @@
 # `nagori` CLI
 
 The CLI is a single binary, `nagori`, that can either talk directly to the
-SQLite database or to a running daemon over its IPC endpoint (Unix-domain
-socket on macOS / Linux, Win32 named pipe on Windows).
+SQLite database or to a running nagori over its IPC endpoint (Unix-domain
+socket on macOS / Linux, Win32 named pipe on Windows). Both the desktop
+app and the headless `nagori daemon run` serve that endpoint, so the CLI
+works the same whichever one is running.
 
 ## Installation
 
@@ -38,9 +40,17 @@ separate download — there is one artifact to install and update.
 
 | Mode        | When to use                                                  | Flag                |
 |-------------|--------------------------------------------------------------|---------------------|
-| Direct DB   | Default. Opens the local SQLite history file                 |  *(none)*           |
-| Auto IPC    | Try the daemon endpoint; fall back to direct DB if unreachable | `--auto-ipc`      |
-| Forced IPC  | Always go through the daemon; error if the endpoint is missing | `--ipc <endpoint>` |
+| Direct DB   | Default for reads. Opens the local SQLite history file       |  *(none)*           |
+| Auto IPC    | Try the IPC endpoint; fall back to direct DB if unreachable  | `--auto-ipc`        |
+| Forced IPC  | Always go through IPC; error if the endpoint is missing      | `--ipc <endpoint>`  |
+
+Write commands (`add`, `copy`, `paste`, `pin`, `unpin`, `delete`,
+`clear`) default to IPC so the process that owns the store stays the
+single source of truth and its search cache is invalidated on every
+mutation. They succeed whenever the desktop app **or** a headless daemon
+is running and the **Settings → CLI** IPC toggle (`cli_ipc_enabled`) is
+on; with neither reachable they error rather than desync a running
+instance — pass `--db <path>` explicitly to operate on an offline DB.
 
 Defaults:
 
@@ -51,7 +61,11 @@ Defaults:
 
 Set `NAGORI_DB_PATH=/path/to/nagori.sqlite` to redirect the store away
 from the platform default. The desktop shell honours the same variable,
-so both processes target the same DB when launched with it.
+so both processes target the same DB when launched with it. Note the
+IPC endpoint does **not** move with the variable: whichever process owns
+the default endpoint serves the CLI, so when running a custom-store
+desktop alongside a default-store daemon, pass `--ipc <endpoint>` to
+pick the instance explicitly.
 
 ## Output formats
 

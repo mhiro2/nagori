@@ -1,10 +1,20 @@
 # IPC Protocol
 
-`nagori-daemon` exposes a per-platform stream transport: a Unix domain socket
+Nagori exposes a per-platform stream transport: a Unix domain socket
 on macOS / Linux and a Win32 named pipe on Windows. Each connection speaks a
 newline-delimited JSON protocol — the client writes one JSON object per line
 and reads exactly one response line back. The wire format is identical
 across platforms; only the endpoint differs.
+
+The server is hosted by whichever process owns the store: the headless
+`nagori daemon run` *or* the desktop app, which runs the same IPC
+supervisor (`nagori_daemon::spawn_cli_ipc_supervisor`) against its
+in-process runtime. The two are mutually exclusive per store directory
+(single-instance lock), serve byte-identical IPC, and honour the same
+`cli_ipc_enabled` settings toggle, so everything below applies to both;
+"daemon" in this document means the serving process. The desktop host is
+fail-closed — it serves only after the persisted settings loaded — and
+retries a failed bind with backoff instead of aborting the app.
 
 ## Endpoint location
 

@@ -126,6 +126,10 @@ The `nagori` CLI ships inside the desktop app bundle. Homebrew cask installs
 link it onto your PATH automatically; for direct `.dmg` installs, open
 **Settings → CLI → Command-line tool → Install nagori CLI** to symlink it into
 `~/.local/bin`. See [`docs/cli.md`](./docs/cli.md#installation) for details.
+The CLI talks to the running desktop app directly — write commands such as
+`nagori add` or `nagori paste` go over the same IPC endpoint a headless
+daemon would serve, and the palette reflects them immediately (toggle under
+**Settings → CLI**).
 
 CLI quick reference:
 

@@ -157,7 +157,15 @@ Two execution modes:
   workers (capture, maintenance, semantic index, ngram backfill, AI
   stale-request watchdog) run under the same `supervise_worker` policy as
   the daemon (see below), so a panic no longer leaves the app running with
-  a dead loop. `AppState::try_new_at`
+  a dead loop. The desktop also hosts the **CLI IPC endpoint**
+  (`nagori_daemon::spawn_cli_ipc_supervisor`): while the app runs and
+  `cli_ipc_enabled` is on, `nagori` write commands reach the GUI's
+  runtime over the same socket / pipe a headless daemon would serve, so
+  the search cache is invalidated and the palette reflects them
+  immediately. The host is fail-closed — it serves only after the
+  persisted settings loaded and only when the single-instance lock is
+  held — and an initial bind failure arms a backoff retry instead of
+  aborting the app. `AppState::try_new_at`
   first takes the single-instance lock (`nagori_storage::ProcessLock`
   over the DB directory) before opening the store, so a second launch —
   or a standalone daemon sharing the same data directory — is refused
@@ -1116,6 +1124,20 @@ drains the accept loop and removes the socket/token files. The runtime
 also rejects non-control IPC requests while the toggle is off; `Health`,
 `Doctor`, `Capabilities`, and `Shutdown` remain available to support
 diagnostics and orderly exit.
+
+**Hosts.** The IPC server is not daemon-only: the desktop shell runs the
+same supervisor (`spawn_cli_ipc_supervisor`) against its in-process
+runtime, so the CLI reaches whichever surface currently owns the store —
+both serve byte-identical IPC on the same default endpoint, and the
+store-directory lock guarantees at most one of them runs per store. One
+caveat when `NAGORI_DB_PATH` / `--db` point a process at a non-default
+store: the lock is per store directory while the default endpoint is one
+per system, so a custom-store desktop and a default-store daemon can run
+concurrently and contend for the endpoint. The live-listener refusal
+above means the second binder retries with backoff rather than stealing
+the socket, but which store the CLI reaches then depends on which
+process owns the endpoint; pass `--ipc <endpoint>` explicitly to
+disambiguate.
 
 **Request / response types** (`nagori-ipc::protocol`):
 
