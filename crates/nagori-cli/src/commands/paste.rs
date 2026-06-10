@@ -6,17 +6,20 @@ use crate::output::print_ack;
 use crate::{IdArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Result<()> {
-    let id = parse_id(&args.id)?;
     match executor {
+        // Store first, then id, then the clipboard-backed runtime — the
+        // pre-split dispatcher's precedence (see `copy`).
         Executor::Local(ctx) => {
-            let runtime = build_runtime(ctx.open_store()?)?;
+            let store = ctx.open_store()?;
+            let id = parse_id(&args.id)?;
+            let runtime = build_runtime(store)?;
             runtime.paste_entry(id, None).await?;
         }
         Executor::Ipc(ctx) => {
             expect_ack(
                 ctx.client
                     .send(IpcRequest::PasteEntry(PasteEntryRequest {
-                        id,
+                        id: parse_id(&args.id)?,
                         format: None,
                     }))
                     .await?,

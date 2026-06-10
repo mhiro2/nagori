@@ -9,14 +9,26 @@ use crate::output::print_ai_output;
 use crate::{AiArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: &AiArgs, format: OutputFormat) -> Result<()> {
-    let id = parse_id(&args.id)?;
-    let options = ai_options_from_args(args)?;
     match executor {
+        // Store first, then `--to` validation, then the id — the pre-split
+        // dispatcher's precedence: a missing translate target must surface
+        // before id validation on both paths.
         Executor::Local(ctx) => {
-            let runtime = build_headless_runtime(ctx.open_store()?)?;
-            run_ai_streaming(&runtime, id, args.action, options, !args.no_stream, format).await
+            let store = ctx.open_store()?;
+            let options = ai_options_from_args(args)?;
+            let runtime = build_headless_runtime(store)?;
+            run_ai_streaming(
+                &runtime,
+                parse_id(&args.id)?,
+                args.action,
+                options,
+                !args.no_stream,
+                format,
+            )
+            .await
         }
         Executor::Ipc(ctx) => {
+            let options = ai_options_from_args(args)?;
             // The daemon drives AI actions to completion over a one-shot
             // envelope — streaming runs in-process via the local path, so an
             // explicit `--ipc` connection always returns the final result.
@@ -26,7 +38,7 @@ pub async fn run(executor: &Executor, args: &AiArgs, format: OutputFormat) -> Re
             let resp = ctx
                 .client
                 .send(IpcRequest::RunAiAction(RunAiActionRequest {
-                    id,
+                    id: parse_id(&args.id)?,
                     action: args.action,
                     options,
                 }))

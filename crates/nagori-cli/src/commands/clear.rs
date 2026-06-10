@@ -8,19 +8,21 @@ use crate::output::print_clear_result;
 use crate::{ClearArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: &ClearArgs, format: OutputFormat) -> Result<()> {
-    let request = clear_request_from_args(args)?;
     match executor {
+        // Store first, args second — the pre-split dispatcher's precedence.
         Executor::Local(ctx) => {
-            let cutoff = match request {
+            let store = ctx.open_store()?;
+            let cutoff = match clear_request_from_args(args)? {
                 ClearRequest::All => OffsetDateTime::now_utc(),
                 ClearRequest::OlderThanDays { days } => {
                     OffsetDateTime::now_utc() - time::Duration::days(i64::from(days))
                 }
             };
-            let deleted = ctx.open_store()?.clear_older_than(cutoff).await?;
+            let deleted = store.clear_older_than(cutoff).await?;
             print_clear_result(deleted, format);
         }
         Executor::Ipc(ctx) => {
+            let request = clear_request_from_args(args)?;
             let resp = ctx.client.send(IpcRequest::Clear(request)).await?;
             print_clear_result(expect_cleared(resp)?.deleted, format);
         }

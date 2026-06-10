@@ -7,15 +7,20 @@ use crate::output::print_ack;
 use crate::{IdArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Result<()> {
-    let id = parse_id(&args.id)?;
     match executor {
+        // Store first, id second — the pre-split dispatcher's precedence, so
+        // a broken DB surfaces as a storage error rather than being shadowed
+        // by input validation.
         Executor::Local(ctx) => {
-            ctx.open_store()?.mark_deleted(id).await?;
+            let store = ctx.open_store()?;
+            store.mark_deleted(parse_id(&args.id)?).await?;
         }
         Executor::Ipc(ctx) => {
             expect_ack(
                 ctx.client
-                    .send(IpcRequest::DeleteEntry(DeleteEntryRequest { id }))
+                    .send(IpcRequest::DeleteEntry(DeleteEntryRequest {
+                        id: parse_id(&args.id)?,
+                    }))
                     .await?,
             )?;
         }

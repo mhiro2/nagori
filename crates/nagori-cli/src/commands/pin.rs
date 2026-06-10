@@ -12,15 +12,19 @@ pub async fn run(
     pinned: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    let id = parse_id(&args.id)?;
     match executor {
+        // Store first, id second — the pre-split dispatcher's precedence.
         Executor::Local(ctx) => {
-            ctx.open_store()?.set_pinned(id, pinned).await?;
+            let store = ctx.open_store()?;
+            store.set_pinned(parse_id(&args.id)?, pinned).await?;
         }
         Executor::Ipc(ctx) => {
             expect_ack(
                 ctx.client
-                    .send(IpcRequest::PinEntry(PinEntryRequest { id, pinned }))
+                    .send(IpcRequest::PinEntry(PinEntryRequest {
+                        id: parse_id(&args.id)?,
+                        pinned,
+                    }))
                     .await?,
             )?;
         }

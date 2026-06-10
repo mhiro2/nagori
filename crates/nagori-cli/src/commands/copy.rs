@@ -6,16 +6,22 @@ use crate::output::print_ack;
 use crate::{IdArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Result<()> {
-    let id = parse_id(&args.id)?;
     match executor {
+        // Store first, then id, then the clipboard-backed runtime — the
+        // pre-split dispatcher's precedence: an invalid id must fail before
+        // the runtime build so the command never needs clipboard access.
         Executor::Local(ctx) => {
-            let runtime = build_runtime(ctx.open_store()?)?;
+            let store = ctx.open_store()?;
+            let id = parse_id(&args.id)?;
+            let runtime = build_runtime(store)?;
             runtime.copy_entry(id).await?;
         }
         Executor::Ipc(ctx) => {
             expect_ack(
                 ctx.client
-                    .send(IpcRequest::CopyEntry(CopyEntryRequest { id }))
+                    .send(IpcRequest::CopyEntry(CopyEntryRequest {
+                        id: parse_id(&args.id)?,
+                    }))
                     .await?,
             )?;
         }

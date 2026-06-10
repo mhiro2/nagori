@@ -9,10 +9,13 @@ use crate::output::{print_dto_entry, print_entry};
 use crate::{AddArgs, OutputFormat};
 
 pub async fn run(executor: &Executor, args: AddArgs, format: OutputFormat) -> Result<()> {
-    let text = read_text(args)?;
     match executor {
+        // The local arm opens the store *before* reading the input — the
+        // order the pre-split dispatcher used — so a broken DB fails fast
+        // instead of consuming stdin first.
         Executor::Local(ctx) => {
             let store = ctx.open_store()?;
+            let text = read_text(args)?;
             let runtime = build_headless_runtime(store.clone())?;
             let id = runtime.add_text(text).await?;
             let entry = store
@@ -26,6 +29,7 @@ pub async fn run(executor: &Executor, args: AddArgs, format: OutputFormat) -> Re
             )
         }
         Executor::Ipc(ctx) => {
+            let text = read_text(args)?;
             let resp = ctx
                 .client
                 .send(IpcRequest::AddEntry(AddEntryRequest { text }))

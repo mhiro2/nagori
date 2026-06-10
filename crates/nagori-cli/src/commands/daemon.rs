@@ -40,7 +40,12 @@ pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
 
 pub async fn stop(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
-        Executor::Local(_) => anyhow::bail!("daemon stop requires --ipc <socket>"),
+        // Open the store before bailing — the pre-split dispatcher's
+        // precedence, so a broken `--db` keeps surfacing as the open error.
+        Executor::Local(ctx) => {
+            let _store = ctx.open_store()?;
+            anyhow::bail!("daemon stop requires --ipc <socket>")
+        }
         Executor::Ipc(ctx) => {
             expect_ack(ctx.client.send(IpcRequest::Shutdown).await?)?;
             print_ack(format);
