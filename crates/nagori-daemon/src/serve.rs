@@ -203,8 +203,7 @@ fn spawn_ipc_server(
         // never hinges on a connect failure alone (the lock is the gate).
         let listener = bind_unix_replacing_stale(&config.socket_path)?;
         let socket_fingerprint = SocketFingerprint::capture(&config.socket_path);
-        let token = AuthToken::generate()?;
-        write_token_file(&config.token_path, &token)?;
+        let (token, listener) = mint_token_unlinking_socket_on_failure(config, listener)?;
         let token_fingerprint = TokenFingerprint::from(&token);
         let grace = config.shutdown_grace;
         let ipc_health = runtime.ipc_health();
@@ -301,6 +300,40 @@ fn spawn_ipc_server(
         Err(AppError::Unsupported(
             "IPC requires a Unix-like or Windows platform".to_owned(),
         ))
+    }
+}
+
+/// Mint a fresh auth token and write its file, unlinking the just-bound
+/// socket when either step fails.
+///
+/// The bind has already succeeded at this point, so propagating the error
+/// as-is would leave a socket inode with no listener behind. A host that
+/// maps the error to a backoff retry (or whose user then disables the
+/// toggle) must not strand a dead socket for clients to trip over. The
+/// unlink is safe because we just created the inode and still hold the
+/// data-directory lock — no peer can own this path. The listener is
+/// passed through (and dropped on the failure path before the unlink) so
+/// the socket is never removed out from under a live accept loop.
+#[cfg(unix)]
+fn mint_token_unlinking_socket_on_failure(
+    config: &CliIpcConfig,
+    listener: tokio::net::UnixListener,
+) -> Result<(AuthToken, tokio::net::UnixListener)> {
+    let minted = AuthToken::generate()
+        .and_then(|token| write_token_file(&config.token_path, &token).map(|()| token));
+    match minted {
+        Ok(token) => Ok((token, listener)),
+        Err(err) => {
+            drop(listener);
+            if let Err(unlink_err) = std::fs::remove_file(&config.socket_path) {
+                warn!(
+                    error = %unlink_err,
+                    path = %config.socket_path.display(),
+                    "socket_cleanup_after_token_failure_failed",
+                );
+            }
+            Err(err)
+        }
     }
 }
 
@@ -504,6 +537,14 @@ async fn supervise_ipc_server(
                             stop_ipc_server(current, &config).await;
                         }
                     } else if restart_pending {
+                        // Cancelling a pending restart leaves any runtime
+                        // files of the previously-dead server in place: we
+                        // no longer hold its fingerprints, and a blind
+                        // unlink here would reopen the TOCTOU described at
+                        // the join arm below. The files are known-stale
+                        // (we hold the data-dir lock) and the next bind —
+                        // settings re-enable or a fresh launch — replaces
+                        // them atomically.
                         info!("ipc_restart_cancelled_by_settings");
                     }
                     restart_pending = false;
@@ -1638,6 +1679,46 @@ mod tests {
             .send(IpcRequest::Health)
             .await
             .expect("health after enabling");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
+    }
+
+    #[tokio::test]
+    async fn cli_ipc_supervisor_cleans_socket_when_token_write_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = test_ipc_config(temp.path());
+        // Occupy the token path with a directory: the bind succeeds, but
+        // `write_token_file`'s rename over a directory fails, exercising
+        // the partial-init path. Without the cleanup a dead socket inode
+        // would linger for clients to trip over.
+        std::fs::create_dir(&config.token_path).expect("plant blocking dir");
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let supervisor =
+            spawn_cli_ipc_supervisor(runtime.clone(), config.clone(), shutdown.clone());
+
+        // The failed attempt must not leave the just-bound socket behind.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !config.socket_path.exists(),
+            "a token-write failure must unlink the socket it bound",
+        );
+
+        // Clearing the cause lets the backoff retry bring IPC up whole.
+        std::fs::remove_dir(&config.token_path).expect("remove blocking dir");
+        wait_until(Duration::from_secs(3), || config.socket_path.exists())
+            .await
+            .expect("socket should appear once the retry succeeds");
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("health after recovery");
         assert!(matches!(health, IpcResponse::Health(_)));
 
         shutdown.cancel();
