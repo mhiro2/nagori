@@ -383,7 +383,7 @@ impl AppState {
 
         *tasks_slot = Some(BackgroundTasks {
             ipc_mutations: spawn_ipc_mutation_forwarder(
-                self.runtime.clone(),
+                &self.runtime,
                 self.runtime.shutdown_handle(),
                 app.clone(),
             ),
@@ -708,7 +708,8 @@ fn spawn_capture_supervisor(
 }
 
 /// Forward corpus mutations made by external IPC clients (`nagori add` /
-/// `delete` / `pin` / `clear`) to the palette's refresh event.
+/// `delete` / `pin` / `clear`, plus the ranking-relevant use-count bumps
+/// of `copy` / `paste`) to the palette's refresh event.
 ///
 /// The capture loop's notifier covers clipboard captures and the palette
 /// refreshes itself after its own commands, but an IPC write has no other
@@ -721,16 +722,19 @@ fn spawn_capture_supervisor(
 /// and cannot fail other than by the channel closing, which only happens
 /// at runtime teardown.
 fn spawn_ipc_mutation_forwarder(
-    runtime: NagoriRuntime,
+    runtime: &NagoriRuntime,
     mut shutdown: ShutdownHandle,
     app: tauri::AppHandle,
 ) -> tauri::async_runtime::JoinHandle<()> {
+    // Subscribe synchronously, before the task is scheduled: the CLI IPC
+    // host is spawned right after this call, and a mutation that lands
+    // between the two must wake the first `changed()` below rather than
+    // race the task's startup. The baseline is deliberately NOT marked
+    // seen — if a mutation somehow predates the subscription, one
+    // catch-up refresh fires, which is harmless; swallowing it is not.
+    let mut mutations = runtime.external_mutations_subscribe();
     tauri::async_runtime::spawn(async move {
         use tauri::Emitter;
-        let mut mutations = runtime.external_mutations_subscribe();
-        // Mark the snapshot seen so a mutation that landed before this task
-        // started doesn't fire a spurious refresh at startup.
-        let _ = mutations.borrow_and_update();
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => return,

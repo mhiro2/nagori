@@ -11,8 +11,9 @@ use nagori_core::{
     SettingsRepository,
 };
 use nagori_ipc::{
-    AddEntryRequest, EntryDto, GetEntryRequest, IpcRequest, IpcResponse, ListPinnedRequest,
-    ListRecentRequest, PinEntryRequest, SearchRequest, SearchResponse, UpdateSettingsRequest,
+    AddEntryRequest, CopyEntryRequest, DeleteEntryRequest, EntryDto, GetEntryRequest, IpcRequest,
+    IpcResponse, ListPinnedRequest, ListRecentRequest, PinEntryRequest, SearchRequest,
+    SearchResponse, UpdateSettingsRequest,
 };
 use nagori_platform::{
     MemoryClipboard, PasteResult, PermissionCheckContext, PermissionKind, PermissionState,
@@ -268,6 +269,29 @@ async fn ipc_writes_notify_external_mutations_and_reads_do_not() {
     assert!(
         mutations.has_changed().expect("channel should be open"),
         "an IPC pin must bump the mutation counter",
+    );
+    let _ = mutations.borrow_and_update();
+
+    // Copy bumps use_count / last_used_at, which reorders ranking — the
+    // palette must hear about it even when the host's capture loop is
+    // disabled and never sees the clipboard write.
+    let response = runtime
+        .handle_ipc(IpcRequest::CopyEntry(CopyEntryRequest { id }))
+        .await;
+    assert!(matches!(response, IpcResponse::Ack));
+    assert!(
+        mutations.has_changed().expect("channel should be open"),
+        "an IPC copy must bump the mutation counter",
+    );
+    let _ = mutations.borrow_and_update();
+
+    let response = runtime
+        .handle_ipc(IpcRequest::DeleteEntry(DeleteEntryRequest { id }))
+        .await;
+    assert!(matches!(response, IpcResponse::Ack));
+    assert!(
+        mutations.has_changed().expect("channel should be open"),
+        "an IPC delete must bump the mutation counter",
     );
 }
 

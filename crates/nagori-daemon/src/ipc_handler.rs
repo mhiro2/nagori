@@ -124,12 +124,19 @@ impl NagoriRuntime {
                     EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
                 ))
             }
+            // Copy / paste also count as corpus mutations: they bump the
+            // entry's use_count / last_used_at, which reorders ranking. The
+            // clipboard write usually re-triggers the host's capture loop
+            // (whose notifier refreshes the palette), but not when capture
+            // is disabled or policy drops the event — so notify explicitly.
             IpcRequest::CopyEntry(CopyEntryRequest { id }) => {
                 self.copy_entry(id).await?;
+                self.notify_external_mutation();
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::PasteEntry(PasteEntryRequest { id, format }) => {
                 self.paste_entry(id, format).await?;
+                self.notify_external_mutation();
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::DeleteEntry(DeleteEntryRequest { id }) => {

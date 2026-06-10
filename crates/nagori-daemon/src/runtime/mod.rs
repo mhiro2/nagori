@@ -125,7 +125,8 @@ pub struct NagoriRuntime {
     /// AC-power probe its battery guard reads. See `semantic_index.rs`.
     pub(crate) semantic: Arc<crate::semantic_index::SemanticState>,
     /// Monotonic counter bumped whenever an external IPC client mutates the
-    /// corpus (add / delete / pin / clear). A UI host subscribes via
+    /// corpus (add / delete / pin / clear, plus the use-count bumps of
+    /// copy / paste). A UI host subscribes via
     /// [`Self::external_mutations_subscribe`] to refresh its views: unlike
     /// clipboard captures (which the capture loop's notifier reports) and
     /// the host's own commands (whose initiating UI refreshes itself),
