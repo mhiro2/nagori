@@ -284,17 +284,51 @@ impl SensitivityClassifier {
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
                 let redacted = self.redact(&raw);
                 let redacted_normalized = normalize_text(&redacted);
-                entry.metadata.content_hash = ContentHash::sha256(redacted.as_bytes());
-                // Match the preview cap used by `classify`'s `redacted_preview`
-                // so the standalone API yields the same scrubbed preview the
-                // daemon path produces.
+                // Scrub every text-shaped search surface so the index can never
+                // carry the raw secret. For an image these derive from an empty
+                // plain projection; recomputing them from the redacted body
+                // keeps the standalone API self-contained either way. Match the
+                // preview cap used by `classify`'s `redacted_preview` so this
+                // yields the same scrubbed preview the daemon path produces.
                 entry.search.preview = make_preview(&redacted, 180);
-                entry.content = ClipboardContent::from_plain_text(redacted);
                 entry.search.tokens = redacted_normalized
                     .split_whitespace()
                     .map(ToOwned::to_owned)
                     .collect();
                 entry.search.normalized_text = redacted_normalized;
+                // Rewrite the stored body per content kind so a redaction can
+                // never destroy a non-text payload (the old code overwrote
+                // every Secret with `from_plain_text(redact(plain_text))`,
+                // turning an image — whose `plain_text()` is `None` → `""` —
+                // into an empty Text entry).
+                match &mut entry.content {
+                    // Binary primary: the image bytes can't carry a text
+                    // secret, so the only secret lives in a markup alternative
+                    // (dropped by the fall-through). Keep the bytes; their hash
+                    // already keys off the binary payload (see `EntryFactory`).
+                    ClipboardContent::Image(_) => {}
+                    // A file path can itself be the secret (e.g. one embedding
+                    // an API-key-shaped token), so redact every text field in
+                    // place — but keep it a FileList rather than collapsing to
+                    // an empty Text entry, and re-key the hash off the redacted
+                    // display text (matching how `EntryFactory` hashes a file
+                    // list). Alternatives are still dropped by the fall-through.
+                    ClipboardContent::FileList(list) => {
+                        for path in &mut list.paths {
+                            *path = self.redact(path);
+                        }
+                        list.display_text = self.redact(&list.display_text);
+                        entry.metadata.content_hash =
+                            ContentHash::sha256(list.display_text.as_bytes());
+                    }
+                    // Text-shaped primary: the secret is in the body itself, so
+                    // rewrite it to the redacted text and re-key the hash so
+                    // dedup matches what's actually persisted.
+                    _ => {
+                        entry.metadata.content_hash = ContentHash::sha256(redacted.as_bytes());
+                        entry.content = ClipboardContent::from_plain_text(redacted);
+                    }
+                }
             }
         }
         // Both StoreFull and StoreRedacted fall through here (Block returned
@@ -1234,6 +1268,146 @@ mod tests {
             entry.metadata.representation_set_hash.as_ref(),
             Some(&entry.metadata.content_hash),
             "representation_set_hash must realign to the redacted primary content hash",
+        );
+    }
+
+    #[test]
+    fn apply_secret_handling_store_redacted_preserves_image_body() {
+        // An image classified Secret because of a markup alternative (the
+        // factory's image+html shape) must keep its bytes: the secret lives in
+        // the HTML rep — dropped by the fall-through — not in the image itself.
+        // A prior version redacted `plain_text()` (None → "") and overwrote the
+        // body with an empty Text entry, silently destroying the image.
+        use crate::{ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot};
+        use time::OffsetDateTime;
+
+        let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13];
+        let secret = "token = ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("img-secret-html"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![
+                ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(png_bytes.clone()),
+                },
+                ClipboardRepresentation {
+                    mime_type: "text/html".to_owned(),
+                    data: ClipboardData::Text(format!("<p>{secret}</p>")),
+                },
+            ],
+        };
+        let mut entry = EntryFactory::from_snapshot(snapshot).expect("entry should build");
+        assert!(matches!(entry.content, ClipboardContent::Image(_)));
+        let image_hash = entry.metadata.content_hash.clone();
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        entry.sensitivity = classifier.classify(&entry).sensitivity;
+        assert_eq!(
+            entry.sensitivity,
+            Sensitivity::Secret,
+            "the HTML alternative's secret must drive the verdict",
+        );
+
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+        assert_eq!(action, SecretAction::Persist);
+
+        // The image body survives untouched...
+        match &entry.content {
+            ClipboardContent::Image(img) => {
+                assert_eq!(
+                    img.pending_bytes.as_deref(),
+                    Some(png_bytes.as_slice()),
+                    "image bytes must be preserved, not replaced with redacted text",
+                );
+            }
+            other => panic!("image body must be preserved, got {other:?}"),
+        }
+        // ...keyed off the binary payload, not the empty-string hash a redacted
+        // text body would have produced.
+        assert_eq!(entry.metadata.content_hash, image_hash);
+        // The secret-bearing HTML alternative is still dropped and the set hash
+        // realigns to the image primary so storage takes the primary-only path.
+        assert!(
+            entry.pending_representations.is_empty(),
+            "raw-secret alternatives must be dropped, got: {:?}",
+            entry.pending_representations,
+        );
+        assert_eq!(
+            entry.metadata.representation_set_hash.as_ref(),
+            Some(&entry.metadata.content_hash),
+        );
+    }
+
+    #[test]
+    fn apply_secret_handling_store_redacted_redacts_file_list_paths() {
+        // A file path can itself be the secret (e.g. one embedding an
+        // API-key-shaped token). StoreRedacted must scrub it from the stored
+        // paths / display text — neither preserving the raw path (which would
+        // leak it into `content_json`) nor collapsing the entry to empty Text.
+        use crate::{ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot};
+        use time::OffsetDateTime;
+
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash("fl-secret"),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "text/uri-list".to_owned(),
+                data: ClipboardData::FilePaths(vec![
+                    format!("/tmp/{token}.txt"),
+                    "/tmp/safe.txt".to_owned(),
+                ]),
+            }],
+        };
+        let mut entry = EntryFactory::from_snapshot(snapshot).expect("entry should build");
+        assert!(matches!(entry.content, ClipboardContent::FileList(_)));
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        entry.sensitivity = classifier.classify(&entry).sensitivity;
+        assert_eq!(
+            entry.sensitivity,
+            Sensitivity::Secret,
+            "a token embedded in a path must drive the verdict",
+        );
+
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+        assert_eq!(action, SecretAction::Persist);
+
+        // Still a FileList (structure preserved), with the secret scrubbed from
+        // both the paths and the display text.
+        match &entry.content {
+            ClipboardContent::FileList(list) => {
+                assert!(
+                    !list.paths.iter().any(|p| p.contains(token)),
+                    "raw token must not survive in stored paths: {:?}",
+                    list.paths,
+                );
+                assert!(
+                    list.paths.iter().any(|p| p.contains("[REDACTED]")),
+                    "the secret path must be redacted: {:?}",
+                    list.paths,
+                );
+                assert!(
+                    !list.display_text.contains(token),
+                    "raw token leaked into display_text: {:?}",
+                    list.display_text,
+                );
+                // The hash re-keys off the redacted display text.
+                assert_eq!(
+                    entry.metadata.content_hash,
+                    ContentHash::sha256(list.display_text.as_bytes()),
+                );
+            }
+            other => panic!("file list structure must be preserved, got {other:?}"),
+        }
+        // The alternatives are dropped and the set hash realigns to the primary.
+        assert!(entry.pending_representations.is_empty());
+        assert_eq!(
+            entry.metadata.representation_set_hash.as_ref(),
+            Some(&entry.metadata.content_hash),
         );
     }
 
