@@ -41,7 +41,14 @@ tauri-plugin-updater = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
+# `log` feature bridges `tracing` events to the `log` facade. The desktop binary
+# installs no `tracing` subscriber, so without it every `tracing::warn!/error!`
+# the desktop and the embedded daemon emit (capture_skipped, command_error, …)
+# is silently dropped — `tauri_plugin_log` only captures `log`-crate records.
+# With the feature and no subscriber set, those events flow to `log` (and thus
+# the plugin's file/stdout sinks); a subscriber, if one is ever added, suppresses
+# the bridge so records are never duplicated.
+tracing = { workspace = true, features = ["log"] }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 nagori-platform-macos = { path = "../../../crates/nagori-platform-macos" }

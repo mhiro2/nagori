@@ -57,6 +57,11 @@ pub(crate) const NAVIGATE_EVENT: &str = "nagori://navigate";
 #[allow(clippy::large_stack_frames)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        // The sole log sink for this binary: it captures `log`-crate records,
+        // and `tracing` events reach it via the `tracing/log` bridge (enabled
+        // in Cargo.toml) since no `tracing` subscriber is installed here. That
+        // is what keeps the desktop and embedded-daemon `tracing` diagnostics
+        // (capture_skipped, command_error, …) out of the void.
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         // Per-shortcut handlers attach in `spawn_settings_subscribers`
