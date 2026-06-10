@@ -1,11 +1,9 @@
-#[cfg(target_os = "macos")]
-use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use arboard::Clipboard;
 use async_trait::async_trait;
 #[cfg(target_os = "macos")]
-use image::{ImageEncoder, ImageReader, codecs::png::PngEncoder};
+use image::{ImageEncoder, codecs::png::PngEncoder};
 #[cfg(target_os = "macos")]
 use nagori_core::MAX_DECODED_IMAGE_PIXELS;
 use nagori_core::{
@@ -17,6 +15,8 @@ use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
     clipboard_write_blocking, has_publishable_representation,
 };
+#[cfg(target_os = "macos")]
+use nagori_platform::{DecodeRgbaError, decode_rgba_with_pixel_cap};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -881,63 +881,62 @@ fn collect_macos_extras(
     })
 }
 
-/// Probe the TIFF dimensions before letting `normalize_tiff_capture`
-/// invoke `to_rgba8` — without this a 65535×65535 TIFF would force a
-/// multi-GB allocation well before the snapshot's byte-budget check
-/// runs. Drop the image rep entirely (rest of the snapshot still flows
-/// through) when:
+/// Normalise a captured TIFF to PNG, guarded by the shared decoded-pixel
+/// cap.
+///
+/// `decode_rgba_with_pixel_cap` probes the dimensions before `to_rgba8` —
+/// without that a 65535×65535 TIFF would force a multi-GB allocation well
+/// before the snapshot's byte-budget check runs. Drop the image rep
+/// entirely (rest of the snapshot still flows through) when:
 ///   * dimensions exceed `MAX_DECODED_IMAGE_PIXELS`, or
 ///   * dimensions are unreadable — `image` could not sniff the TIFF
 ///     header, so a subsequent `decode()` would not succeed either and
 ///     saving an opaque blob serves no UI purpose.
+///
+/// A decode or PNG-encode failure *after* a readable header keeps the
+/// original TIFF bytes instead: the payload is well-formed enough to show
+/// dimensions, so storing it still serves copy-back even if this host could
+/// not transcode it.
 #[cfg(target_os = "macos")]
 fn prepare_tiff_capture(bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
-    let dimensions = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.into_dimensions().ok());
-    let Some((width, height)) = dimensions else {
-        tracing::warn!(
-            byte_count = bytes.len(),
-            "tiff_capture_dropped reason=dimensions_unreadable"
-        );
-        return None;
+    let rgba = match decode_rgba_with_pixel_cap(&bytes, MAX_DECODED_IMAGE_PIXELS) {
+        Ok(rgba) => rgba,
+        Err(DecodeRgbaError::DimensionsUnreadable { .. }) => {
+            tracing::warn!(
+                byte_count = bytes.len(),
+                "tiff_capture_dropped reason=dimensions_unreadable"
+            );
+            return None;
+        }
+        Err(DecodeRgbaError::PixelCapExceeded { pixels, max_pixels }) => {
+            tracing::warn!(
+                pixels,
+                max_pixels,
+                "tiff_capture_dropped reason=decoded_pixels_exceed_cap"
+            );
+            return None;
+        }
+        Err(DecodeRgbaError::DecodeFailed { .. }) => {
+            tracing::warn!(
+                byte_count = bytes.len(),
+                "tiff_to_png_failed_using_original"
+            );
+            return Some(("image/tiff".to_owned(), bytes));
+        }
     };
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
-    if pixels > MAX_DECODED_IMAGE_PIXELS {
-        tracing::warn!(
-            pixels,
-            max_pixels = MAX_DECODED_IMAGE_PIXELS,
-            "tiff_capture_dropped reason=decoded_pixels_exceed_cap"
-        );
-        return None;
-    }
-    Some(normalize_tiff_capture(bytes))
-}
-
-#[cfg(target_os = "macos")]
-fn normalize_tiff_capture(bytes: Vec<u8>) -> (String, Vec<u8>) {
-    let png = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.decode().ok())
-        .and_then(|decoded| {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            let mut png = Vec::new();
-            PngEncoder::new(&mut png)
-                .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
-                .ok()?;
-            Some(png)
-        });
-    if let Some(png) = png {
-        ("image/png".to_owned(), png)
+    let (width, height) = rgba.dimensions();
+    let mut png = Vec::new();
+    if PngEncoder::new(&mut png)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .is_ok()
+    {
+        Some(("image/png".to_owned(), png))
     } else {
         tracing::warn!(
             byte_count = bytes.len(),
             "tiff_to_png_failed_using_original"
         );
-        ("image/tiff".to_owned(), bytes)
+        Some(("image/tiff".to_owned(), bytes))
     }
 }
 
@@ -1225,7 +1224,8 @@ mod tests {
 
     #[test]
     fn tiff_capture_is_normalized_to_png() {
-        let (mime, bytes) = normalize_tiff_capture(TINY_TIFF.to_vec());
+        let (mime, bytes) =
+            prepare_tiff_capture(TINY_TIFF.to_vec()).expect("tiny tiff passes the pixel cap");
 
         assert_eq!(mime, "image/png");
         assert!(bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));

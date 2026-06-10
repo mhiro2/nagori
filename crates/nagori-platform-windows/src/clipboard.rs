@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use arboard::{Clipboard, ImageData};
 use async_trait::async_trait;
-use image::{ImageFormat, ImageReader};
+use image::ImageFormat;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
     ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, Result,
@@ -12,7 +12,7 @@ use nagori_core::{
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
-    clipboard_write_blocking, has_publishable_representation,
+    clipboard_write_blocking, decode_rgba_with_pixel_cap, has_publishable_representation,
 };
 use time::OffsetDateTime;
 
@@ -282,17 +282,13 @@ impl WindowsClipboard {
         // decode task from landing a stale `SetClipboardData` after the caller
         // already saw a timeout error.
         let image_data = tokio::task::spawn_blocking(move || -> Result<ImageData<'static>> {
-            // Probe dimensions first so an encoded payload whose advertised
-            // canvas blows past `MAX_DECODED_IMAGE_PIXELS` (e.g. a 1 KB PNG
-            // claiming 65535×65535) is rejected before `decode` allocates a
-            // multi-GB RGBA buffer.
-            reject_oversized_image(&bytes)?;
-            let rgba = ImageReader::new(Cursor::new(&bytes))
-                .with_guessed_format()
-                .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
-                .decode()
-                .map_err(|err| AppError::Platform(format!("image decode failed: {err}")))?
-                .to_rgba8();
+            // The shared helper probes dimensions first so an encoded
+            // payload whose advertised canvas blows past
+            // `MAX_DECODED_IMAGE_PIXELS` (e.g. a 1 KB PNG claiming
+            // 65535×65535) is rejected before `decode` allocates a multi-GB
+            // RGBA buffer.
+            let rgba = decode_rgba_with_pixel_cap(&bytes, MAX_DECODED_IMAGE_PIXELS)
+                .map_err(|err| decode_err_to_app_error(&err))?;
             let (width, height) = rgba.dimensions();
             Ok(ImageData {
                 width: width as usize,
@@ -320,43 +316,16 @@ impl WindowsClipboard {
     }
 }
 
-/// Reject an encoded image payload whose decoded canvas would exceed
-/// [`MAX_DECODED_IMAGE_PIXELS`].
-///
-/// `image::ImageReader::into_dimensions` reads only the format header (e.g.
-/// PNG's IHDR, JPEG's SOF) so the probe stays bounded even when the encoded
-/// payload itself is multiple MB. The error path matches the rest of the
-/// adapter: callers receive an `AppError::Unsupported` and report the
-/// rejection upward instead of crashing on the subsequent `decode`.
-///
-/// A probe failure (corrupt header, unknown format) returns `Ok(())` so the
-/// downstream `decode` call still gets to produce the more descriptive
-/// platform error; it is the dimensions-exceed-cap case that needs the
-/// early bail-out.
-fn reject_oversized_image(bytes: &[u8]) -> Result<()> {
-    let Some(pixels) = image_pixel_count_from_encoded(bytes) else {
-        return Ok(());
-    };
-    if pixels > MAX_DECODED_IMAGE_PIXELS {
-        return Err(AppError::Unsupported(format!(
-            "image dimensions {pixels} pixels exceed MAX_DECODED_IMAGE_PIXELS ({MAX_DECODED_IMAGE_PIXELS})"
-        )));
+/// Map a shared decode rejection onto this adapter's error split: the
+/// decompression-bomb cap is `Unsupported` (the rejection is reported
+/// upward as a policy refusal), everything else is a `Platform` failure.
+fn decode_err_to_app_error(err: &nagori_platform::DecodeRgbaError) -> AppError {
+    match err {
+        nagori_platform::DecodeRgbaError::PixelCapExceeded { .. } => {
+            AppError::Unsupported(err.to_string())
+        }
+        _ => AppError::Platform(err.to_string()),
     }
-    Ok(())
-}
-
-/// Compute the decoded pixel count of an encoded image header.
-///
-/// Returns `None` when the prefix is too short to identify a format or when
-/// `into_dimensions` fails for any reason; the only contract is that a
-/// successful return reflects the dimensions the corresponding `decode`
-/// call would observe.
-fn image_pixel_count_from_encoded(bytes: &[u8]) -> Option<u64> {
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let (width, height) = reader.into_dimensions().ok()?;
-    Some(u64::from(width).saturating_mul(u64::from(height)))
 }
 
 /// Pixel count parsed from the leading bytes of a `BITMAPINFOHEADER` /
@@ -596,11 +565,9 @@ const fn native_sequence_number() -> u32 {
 #[cfg(windows)]
 mod win {
     use std::ffi::OsString;
-    use std::io::Cursor;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::{char, mem, slice};
 
-    use image::ImageReader;
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, TRUE};
     use windows_sys::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER, LCS_GM_IMAGES};
     use windows_sys::Win32::System::DataExchange::{
@@ -613,7 +580,10 @@ mod win {
     use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
     use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW};
 
-    use nagori_core::{AppError, RepresentationDataRef, Result, StoredClipboardRepresentation};
+    use nagori_core::{
+        AppError, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
+        StoredClipboardRepresentation,
+    };
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
     /// the function returns the file count instead of writing a path.
@@ -1368,15 +1338,10 @@ mod win {
     pub(super) fn build_dibv5_payload(encoded: &[u8]) -> Result<Vec<u8>> {
         // Multi-rep copy-back walks every stored representation through
         // `build_dibv5_payload`, so the same encoded-vs-decoded asymmetry
-        // applies here as in the single-image path. Probe dimensions before
-        // the `decode` call materialises the RGBA buffer.
-        super::reject_oversized_image(encoded)?;
-        let rgba = ImageReader::new(Cursor::new(encoded))
-            .with_guessed_format()
-            .map_err(|err| AppError::Platform(format!("image probe failed: {err}")))?
-            .decode()
-            .map_err(|err| AppError::Platform(format!("image decode failed: {err}")))?
-            .to_rgba8();
+        // applies here as in the single-image path. The shared helper probes
+        // dimensions before the `decode` call materialises the RGBA buffer.
+        let rgba = nagori_platform::decode_rgba_with_pixel_cap(encoded, MAX_DECODED_IMAGE_PIXELS)
+            .map_err(|err| super::decode_err_to_app_error(&err))?;
         let (width, height) = rgba.dimensions();
         if width == 0 || height == 0 {
             return Err(AppError::Platform(
@@ -1463,6 +1428,8 @@ fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    use image::ImageReader;
+
     use super::*;
 
     /// CRC-32 (PNG/IEEE 802.3 polynomial 0xEDB88320).
@@ -1537,24 +1504,6 @@ mod tests {
         img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .expect("encode small PNG");
         png
-    }
-
-    #[test]
-    fn image_pixel_count_from_encoded_reads_forged_png_header() {
-        // Bare IHDR — no IDAT / IEND, decode would fail, but the
-        // dimensions probe must still report the advertised canvas so
-        // copy-back can reject pre-decode.
-        let forged = forge_png_header(40_000, 40_000);
-        let pixels = image_pixel_count_from_encoded(&forged).expect("dimensions parse");
-        assert_eq!(pixels, 40_000_u64 * 40_000_u64);
-    }
-
-    #[test]
-    fn image_pixel_count_from_encoded_returns_none_for_non_image_bytes() {
-        // No format guess possible → caller falls through to whatever
-        // platform-level error the downstream `decode` produces.
-        assert!(image_pixel_count_from_encoded(b"definitely not an image").is_none());
-        assert!(image_pixel_count_from_encoded(&[]).is_none());
     }
 
     #[test]
@@ -1636,32 +1585,19 @@ mod tests {
     }
 
     #[test]
-    fn reject_oversized_image_blocks_canvas_above_cap() {
+    fn decode_err_to_app_error_maps_forged_canvas_above_cap_to_unsupported() {
         // Forged PNG that advertises a pixel count above
         // MAX_DECODED_IMAGE_PIXELS but encodes to a few-dozen bytes —
         // exactly the asymmetric payload a decompression-bomb guard must
-        // reject. Must return Unsupported so `write_image_bytes` /
-        // `build_dibv5_payload` bail before `decode()` allocates the
-        // multi-GB RGBA buffer.
+        // reject. The shared decode must refuse it pre-decode and this
+        // adapter must surface the refusal as Unsupported so
+        // `write_image_bytes` / `build_dibv5_payload` report it upward.
         let dim = dim_above_cap();
         let forged = forge_png_header(dim, dim);
-        let err = reject_oversized_image(&forged).expect_err("must reject above cap");
+        let err = nagori_platform::decode_rgba_with_pixel_cap(&forged, MAX_DECODED_IMAGE_PIXELS)
+            .map_err(|err| decode_err_to_app_error(&err))
+            .expect_err("must reject above cap");
         assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn reject_oversized_image_allows_canvas_at_or_below_cap() {
-        // A real small PNG must pass without complaint so legitimate
-        // captures keep round-tripping through the copy-back path.
-        let small = encode_real_png(8, 8);
-        reject_oversized_image(&small).expect("small PNG must be accepted");
-    }
-
-    #[test]
-    fn reject_oversized_image_tolerates_unrecognised_bytes() {
-        // Probe failure (unknown format) is not the cap's job to report;
-        // the downstream `decode` produces a clearer platform error.
-        reject_oversized_image(b"not an image at all").expect("unknown bytes pass the cap");
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod blocking;
 pub mod capability;
 pub mod clipboard;
 pub mod hotkey;
+pub mod image_decode;
 pub mod paste;
 pub mod permissions;
 pub mod preview;
@@ -20,6 +21,7 @@ pub use clipboard::{
     has_publishable_representation,
 };
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
+pub use image_decode::{DecodeRgbaError, decode_rgba_with_pixel_cap};
 pub use paste::{NoopPasteController, PasteController, PasteResult};
 pub use permissions::{
     PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
