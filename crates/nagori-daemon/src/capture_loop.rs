@@ -205,12 +205,114 @@ fn jitter_entropy() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
+/// Dedup / baseline state the capture loop uses to decide whether a tick's
+/// snapshot is new content.
+///
+/// The fields move together: once a snapshot read succeeds the loop refreshes
+/// them *optimistically*, and a transient failure between that refresh and
+/// the durable insert must restore **all** of them to their pre-clip values —
+/// see [`DedupState::begin_clip`] / [`DedupState::rollback`]. Restoring only
+/// `last_sequence` is not enough: after an empty-snapshot one-shot the real
+/// content lands at the *same* changeCount, so the retry relies on
+/// `force_content_check` being re-armed and `last_content_hash` still holding
+/// the previous capture's hash to clear both dedup gates.
+struct DedupState {
+    /// Sequence of the last snapshot we acted on. `None` until the first
+    /// observation (or after [`CaptureLoop::reset_sequence_baseline`]).
+    last_sequence: Option<ClipboardSequence>,
+    /// Representation-set hash of the most recent snapshot we observed
+    /// (captured or otherwise). Used to confirm a post-resync sequence
+    /// collision is a genuine duplicate before re-inserting the same
+    /// content. Mirrors the storage dedupe key (`representation_set_hash`
+    /// in `entries`), with a fallback to the primary content hash for
+    /// snapshot-less entries — so a wake-gap that lands two snapshots
+    /// with the same primary text but different HTML/RTF alternatives
+    /// is not silently squelched here before storage gets to record
+    /// them as distinct rows.
+    last_content_hash: Option<String>,
+    /// One-shot flag that survives across one tick boundary. When set, the
+    /// next `capture_once` invocation bypasses the cheap sequence-based
+    /// dedup short-circuit and instead reads the body so the content hash
+    /// can be compared against `last_content_hash`. We set this on a
+    /// detected wake gap to defend against a potentially lapped pasteboard
+    /// `changeCount`.
+    force_content_check: bool,
+    /// `true` until the loop has observed and acted on its first sequence.
+    /// When `capture_initial_clipboard_on_launch` is `false`, the first
+    /// observed sequence is recorded as `last_sequence` and the body read is
+    /// skipped, so whatever was already on the pasteboard at startup never
+    /// reaches storage.
+    pristine: bool,
+}
+
+/// Pre-clip snapshot of [`DedupState`], returned by
+/// [`DedupState::begin_clip`] so a failure after the optimistic refresh can
+/// undo it.
+struct DedupRollback {
+    sequence: Option<ClipboardSequence>,
+    content_hash: Option<String>,
+    force_content_check: bool,
+}
+
+impl DedupState {
+    const fn new() -> Self {
+        Self {
+            last_sequence: None,
+            last_content_hash: None,
+            force_content_check: false,
+            pristine: true,
+        }
+    }
+
+    /// Optimistically anchor the accepted snapshot's sequence, consume the
+    /// one-shot content-check flag, and leave the pristine phase.
+    ///
+    /// Returns the pre-clip state. The clip is only truly finalised once it
+    /// is persisted or intentionally dropped by policy; a transient failure
+    /// after this point (denylist regex that won't compile, or a durable
+    /// insert that hits DB busy / disk full) must hand the snapshot back to
+    /// [`Self::rollback`] so the next tick re-reads and retries the same
+    /// clip instead of dedup-skipping it and losing it forever.
+    ///
+    /// `force_flag_at_tick_start` is the `force_content_check` value read at
+    /// the top of the tick (it already folds in any wake-gap arming) — that,
+    /// not the just-cleared field, is what a rollback must restore.
+    fn begin_clip(
+        &mut self,
+        sequence: ClipboardSequence,
+        force_flag_at_tick_start: bool,
+    ) -> DedupRollback {
+        self.force_content_check = false;
+        self.pristine = false;
+        DedupRollback {
+            sequence: self.last_sequence.replace(sequence),
+            content_hash: self.last_content_hash.clone(),
+            force_content_check: force_flag_at_tick_start,
+        }
+    }
+
+    /// Restore the pre-clip dedup state captured by [`Self::begin_clip`].
+    ///
+    /// `pristine` is deliberately *not* restored: the loop has acted on an
+    /// observation by the time a clip can fail, and re-entering the pristine
+    /// phase would re-run the skip-pre-launch-clipboard logic against a clip
+    /// the user copied after launch.
+    fn rollback(&mut self, saved: DedupRollback) {
+        self.last_sequence = saved.sequence;
+        self.last_content_hash = saved.content_hash;
+        self.force_content_check = saved.force_content_check;
+    }
+}
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
     audit: A,
     settings: AppSettings,
-    last_sequence: Option<ClipboardSequence>,
+    /// Dedup / baseline state. Grouped so the optimistic refresh and its
+    /// failure rollback stay a single operation instead of three hand-kept
+    /// fields — see [`DedupState`].
+    dedup: DedupState,
     window: Option<Arc<dyn WindowBehavior>>,
     /// Per-kind warn suppression. Earlier we kept a single
     /// `last_platform_warn_at` and any non-platform error logged
@@ -236,35 +338,12 @@ pub struct CaptureLoop<R, E, A> {
     /// the next successful AX query.
     consecutive_secure_ax_failures: u32,
     search_cache: Option<SharedSearchCache>,
-    /// `true` until the loop has observed and acted on its first sequence.
-    /// When `capture_initial_clipboard_on_launch` is `false`, the first
-    /// observed sequence is recorded as `last_sequence` and the body read is
-    /// skipped, so whatever was already on the pasteboard at startup never
-    /// reaches storage.
-    pristine: bool,
     /// Wall-clock anchor for the previous `capture_once` invocation. Used to
     /// spot host-paused gaps (sleep / suspend) and resync the dedup baseline.
     /// `SystemTime` rather than `Instant` because Darwin's `Instant` is
     /// `CLOCK_UPTIME_RAW` and freezes during sleep — see the
     /// `RESYNC_GAP_THRESHOLD` doc comment for details.
     last_tick_at: Option<SystemTime>,
-    /// Representation-set hash of the most recent snapshot we observed
-    /// (captured or otherwise). Used to confirm a post-resync sequence
-    /// collision is a genuine duplicate before re-inserting the same
-    /// content. Mirrors the storage dedupe key (`representation_set_hash`
-    /// in `entries`), with a fallback to the primary content hash for
-    /// snapshot-less entries — so a wake-gap that lands two snapshots
-    /// with the same primary text but different HTML/RTF alternatives
-    /// is not silently squelched here before storage gets to record
-    /// them as distinct rows.
-    last_content_hash: Option<String>,
-    /// One-shot flag that survives across one tick boundary. When set, the
-    /// next `capture_once` invocation bypasses the cheap sequence-based
-    /// dedup short-circuit and instead reads the body so the content hash
-    /// can be compared against `last_content_hash`. We set this on a
-    /// detected wake gap to defend against a potentially lapped pasteboard
-    /// `changeCount`.
-    force_content_check: bool,
     /// When `false`, sustained AX errors no longer flip the loop to
     /// fail-closed: the loop keeps treating an AX-errored tick as
     /// "unknown → not secure" indefinitely. Production runs leave this
@@ -302,17 +381,14 @@ where
             entries,
             audit,
             settings,
-            last_sequence: None,
+            dedup: DedupState::new(),
             window: None,
             last_warn_at: [None; CaptureErrorKind::COUNT],
             suppressed_warns: [0; CaptureErrorKind::COUNT],
             consecutive_failures: 0,
             consecutive_secure_ax_failures: 0,
             search_cache: None,
-            pristine: true,
             last_tick_at: None,
-            last_content_hash: None,
-            force_content_check: false,
             secure_focus_fail_closed_enabled: true,
             capture_health: None,
             capture_notifier: None,
@@ -333,7 +409,7 @@ where
     /// counter can lap silently and we'd otherwise skip a real change as a
     /// duplicate.
     pub fn reset_sequence_baseline(&mut self) {
-        self.last_sequence = None;
+        self.dedup.last_sequence = None;
     }
 
     fn note_capture_error(&mut self, err: &AppError) {
@@ -536,7 +612,7 @@ where
                         Some(&format!("gap_secs={gap_secs}")),
                     )
                     .await;
-                self.force_content_check = true;
+                self.dedup.force_content_check = true;
             }
         }
         self.last_tick_at = Some(now);
@@ -564,8 +640,8 @@ where
         // would drop the flag, and the next tick would dedup-skip the
         // colliding sequence again. Re-trying with the flag still set is
         // safe because the body-read path is idempotent.
-        let force_content_check = self.force_content_check;
-        if !force_content_check && self.last_sequence.as_ref() == Some(&sequence) {
+        let force_content_check = self.dedup.force_content_check;
+        if !force_content_check && self.dedup.last_sequence.as_ref() == Some(&sequence) {
             return Ok(None);
         }
         // Honour the "skip whatever was on the clipboard before launch" flag
@@ -577,7 +653,7 @@ where
         // last — only after the snapshot read succeeds — so a transient
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
-        if self.pristine && !settings.capture_initial_clipboard_on_launch {
+        if self.dedup.pristine && !settings.capture_initial_clipboard_on_launch {
             // Read the pre-launch clipboard through the bounded path rather than
             // the unbounded `current_snapshot`, so a huge pre-launch text/image
             // isn't fully materialised just to seed the dedup state and blow up
@@ -597,9 +673,9 @@ where
                 .await?
             {
                 CapturedSnapshot::Captured(snapshot) => {
-                    self.last_sequence = Some(snapshot.sequence.clone());
+                    self.dedup.last_sequence = Some(snapshot.sequence.clone());
                     if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                        self.last_content_hash = Some(effective_dedupe_hash(&entry));
+                        self.dedup.last_content_hash = Some(effective_dedupe_hash(&entry));
                     }
                 }
                 CapturedSnapshot::Oversized { sequence, .. } => {
@@ -608,10 +684,10 @@ where
                     // the sequence so the next poll skips it without re-probing;
                     // a later wake-resync re-reads through the bounded steady-state
                     // path, hits the same oversize guard, and skips it again.
-                    self.last_sequence = Some(sequence);
+                    self.dedup.last_sequence = Some(sequence);
                 }
             }
-            self.pristine = false;
+            self.dedup.pristine = false;
             return Ok(None);
         }
         // Run both AX queries concurrently — each spawns its own
@@ -684,8 +760,8 @@ where
                 .audit
                 .record("capture_skipped", None, Some("secure_field"))
                 .await;
-            self.last_sequence = Some(sequence);
-            self.pristine = false;
+            self.dedup.last_sequence = Some(sequence);
+            self.dedup.pristine = false;
             return Ok(None);
         }
 
@@ -715,33 +791,24 @@ where
                 self.note_capture_drop(CaptureEventCategory::OversizedDrop);
                 // Anchor the sequence so the next poll skips this same
                 // oversized clip without re-probing pasteboard sizes.
-                self.force_content_check = false;
-                self.pristine = false;
-                self.last_sequence = Some(sequence);
+                // (Equivalent to `begin_clip` minus the rollback handle —
+                // an oversized pre-read is a decided outcome, never undone.)
+                self.dedup.force_content_check = false;
+                self.dedup.pristine = false;
+                self.dedup.last_sequence = Some(sequence);
                 return Ok(None);
             }
         };
         // Snapshot succeeded — only now is it safe to consume the wake-gap
-        // flag and flip pristine. We mutate the dedup state
-        // (`last_sequence`, `force_content_check`, `last_content_hash`)
-        // *optimistically* so the paths below all observe it, but the clip is
-        // only truly finalised once it is persisted or intentionally dropped
-        // by policy. A transient failure after this point (denylist regex that
-        // won't compile, or a durable insert that hits DB busy / disk full)
-        // must roll *all three* fields back to their pre-clip values so the
-        // next tick re-reads and retries the same clip instead of
-        // dedup-skipping it and losing it forever. Restoring only
-        // `last_sequence` is not enough: after an empty-snapshot one-shot the
-        // real content lands at the *same* changeCount, so the retry relies on
-        // `force_content_check` being re-armed and `last_content_hash` still
-        // holding the previous capture's hash to clear both dedup gates.
-        //
-        // `prev_force_content_check` is the entry-state flag captured at the
-        // top of the tick (it already folds in any wake-gap arming).
-        let prev_force_content_check = force_content_check;
-        self.force_content_check = false;
-        self.pristine = false;
-        let prev_sequence = self.last_sequence.replace(snapshot.sequence.clone());
+        // flag and flip pristine. `begin_clip` refreshes the dedup state
+        // *optimistically* so the paths below all observe it and hands back
+        // the pre-clip snapshot; the failure paths below (uncompilable
+        // denylist regex, durable insert hitting DB busy / disk full) feed it
+        // to `DedupState::rollback` so the next tick re-reads and retries the
+        // same clip instead of dedup-skipping it and losing it forever.
+        let rollback = self
+            .dedup
+            .begin_clip(snapshot.sequence.clone(), force_content_check);
         if snapshot.source.is_none() {
             snapshot.source = frontmost_source;
         }
@@ -759,7 +826,7 @@ where
             // instead of trusting the dedup; it clears as soon as a snapshot
             // yields content (or stays armed harmlessly while the clipboard is
             // genuinely empty).
-            self.force_content_check = true;
+            self.dedup.force_content_check = true;
             return Ok(None);
         };
         // Wake-gap content cross-check: if a sleep gap forced the body read
@@ -772,13 +839,12 @@ where
         // it as a distinct row. Refresh `last_content_hash` either way
         // so subsequent gaps still have something to compare against.
         let dedupe_hash = effective_dedupe_hash(&entry);
-        if force_content_check && self.last_content_hash.as_deref() == Some(dedupe_hash.as_str()) {
+        if force_content_check
+            && self.dedup.last_content_hash.as_deref() == Some(dedupe_hash.as_str())
+        {
             return Ok(None);
         }
-        // Stash the pre-clip hash alongside the optimistic refresh so a
-        // transient failure below can restore it (see the rollback comment
-        // where `prev_sequence` is captured).
-        let prev_content_hash = self.last_content_hash.replace(dedupe_hash);
+        self.dedup.last_content_hash = Some(dedupe_hash);
         if !settings.capture_kinds.contains(&entry.content_kind()) {
             info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
             let _ = self
@@ -825,9 +891,7 @@ where
                 // not a decided outcome for this clip. Roll the dedup state
                 // back so the next tick re-reads and retries rather than
                 // treating the clip as already-seen and dropping it.
-                self.last_sequence = prev_sequence;
-                self.last_content_hash = prev_content_hash;
-                self.force_content_check = prev_force_content_check;
+                self.dedup.rollback(rollback);
                 return Err(err);
             }
         };
@@ -912,9 +976,7 @@ where
                 // it permanently — including the empty-snapshot one-shot case
                 // where the content lands at the same changeCount and the
                 // retry needs `force_content_check` re-armed.
-                self.last_sequence = prev_sequence;
-                self.last_content_hash = prev_content_hash;
-                self.force_content_check = prev_force_content_check;
+                self.dedup.rollback(rollback);
                 return Err(err);
             }
         };
@@ -2431,8 +2493,8 @@ mod tests {
         // because no body within the hard limit was read.
         assert!(loop_.capture_once().await.unwrap().is_none());
         assert!(store.list_recent(10).await.unwrap().is_empty());
-        assert!(loop_.last_sequence.is_some());
-        assert!(loop_.last_content_hash.is_none());
+        assert!(loop_.dedup.last_sequence.is_some());
+        assert!(loop_.dedup.last_content_hash.is_none());
 
         // A small post-launch clip is within budget and must be captured.
         clipboard
@@ -2474,7 +2536,7 @@ mod tests {
         // read uses the hard limit, so the body is read and its hash anchored.
         let t0 = SystemTime::now();
         assert!(loop_.capture_once_at(t0).await.unwrap().is_none());
-        assert!(loop_.last_content_hash.is_some());
+        assert!(loop_.dedup.last_content_hash.is_some());
         assert!(store.list_recent(10).await.unwrap().is_empty());
 
         // The user raises the budget so the 64-byte clip would now be capturable.
