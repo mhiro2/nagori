@@ -15,11 +15,42 @@ const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
 /// writing a request the daemon will only drop.
 const MAX_IPC_REQUEST_BYTES: usize = crate::MAX_IPC_BYTES;
 
-/// Total budget for connect+write+read on a single IPC round trip. Without a
+/// Default budget for connect+write+read on a single IPC round trip. Without a
 /// cap, a half-alive daemon (or a malicious peer that accepts but never
-/// answers) would pin the CLI forever.
+/// answers) would pin the CLI forever. Long-running requests opt into
+/// [`LONG_REQUEST_TIMEOUT`] instead — see [`request_timeout`].
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Budget for requests the daemon legitimately drives for minutes:
+/// `RunAiAction` (model inference, bounded server-side by
+/// `ai.request_timeout_ms` up to `MAX_AI_REQUEST_TIMEOUT_MS`) and `Clear`
+/// (a bulk delete over a large history). The 15 s default would sever a valid
+/// inference *and* — because the client closing the socket is the daemon's
+/// cancel signal — abort the server-side handler mid-flight, so `nagori ai
+/// --ipc` failed on every non-trivial prompt.
+///
+/// The 60 s grace over the server's max deadline is deliberately comfortable:
+/// the client clock starts before connect+write, while the daemon's deadline
+/// starts only once it receives the request (and it reaps leaked handles a
+/// further `REAP_GRACE` later). The margin guarantees the client outlasts the
+/// server, so a request that hits the cap returns the daemon's structured
+/// `deadline_exceeded` rather than racing it to a generic client timeout.
+const LONG_REQUEST_TIMEOUT: Duration =
+    Duration::from_millis(nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + 60_000);
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Resolve the round-trip budget for `request`. An explicit
+/// [`IpcClient::with_request_timeout`] override (`Some`) wins for every request
+/// kind so tests can still force a fast give-up; otherwise model-backed actions
+/// and bulk deletes get [`LONG_REQUEST_TIMEOUT`] and everything else the
+/// default.
+fn request_timeout(override_timeout: Option<Duration>, request: &IpcRequest) -> Duration {
+    override_timeout.unwrap_or(match request {
+        IpcRequest::RunAiAction(_) | IpcRequest::Clear(_) => LONG_REQUEST_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    })
+}
 
 /// Windows named-pipe servers signal "all instances busy" with
 /// `ERROR_PIPE_BUSY` (231). Treat it as transient and back off briefly
@@ -33,7 +64,9 @@ const PIPE_BUSY_RETRY: Duration = Duration::from_millis(50);
 pub struct IpcClient {
     path: String,
     token: AuthToken,
-    request_timeout: Duration,
+    /// `None` selects a per-request default (see [`request_timeout`]); `Some`
+    /// is an explicit override that applies to every request kind.
+    request_timeout: Option<Duration>,
     connect_timeout: Duration,
 }
 
@@ -42,16 +75,17 @@ impl IpcClient {
         Self {
             path: path.into(),
             token,
-            request_timeout: REQUEST_TIMEOUT,
+            request_timeout: None,
             connect_timeout: CONNECT_TIMEOUT,
         }
     }
 
-    /// Override the request timeout. Mostly for tests that need to assert the
-    /// CLI gives up rather than waiting on a half-alive peer.
+    /// Override the per-request timeout for *every* request kind. Mostly for
+    /// tests that need to assert the CLI gives up rather than waiting on a
+    /// half-alive peer, and for the daemon's own fast liveness probe.
     #[must_use]
     pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -66,11 +100,11 @@ impl IpcClient {
 
     #[cfg(any(unix, windows))]
     pub async fn send(&self, request: IpcRequest) -> Result<IpcResponse> {
-        match timeout(self.request_timeout, self.send_inner(request)).await {
+        let budget = request_timeout(self.request_timeout, &request);
+        match timeout(budget, self.send_inner(request)).await {
             Ok(result) => result,
             Err(_) => Err(AppError::Platform(format!(
-                "IPC request timed out after {:?}",
-                self.request_timeout
+                "IPC request timed out after {budget:?}"
             ))),
         }
     }
@@ -218,6 +252,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_running_requests_get_extended_timeout() {
+        use nagori_core::{AiActionId, AiRequestOptions, EntryId};
+
+        let ai = IpcRequest::RunAiAction(crate::RunAiActionRequest {
+            id: EntryId::new(),
+            action: AiActionId::Summarize,
+            options: AiRequestOptions::default(),
+        });
+        let clear = IpcRequest::Clear(crate::ClearRequest::All);
+
+        // Model inference and bulk deletes get the long ceiling...
+        assert_eq!(request_timeout(None, &ai), LONG_REQUEST_TIMEOUT);
+        assert_eq!(request_timeout(None, &clear), LONG_REQUEST_TIMEOUT);
+        // ...while ordinary requests keep the snappy default.
+        assert_eq!(request_timeout(None, &IpcRequest::Health), REQUEST_TIMEOUT);
+
+        // An explicit override wins for every request kind so tests and the
+        // daemon's liveness probe can still force a fast give-up.
+        let override_timeout = Duration::from_millis(5);
+        assert_eq!(
+            request_timeout(Some(override_timeout), &ai),
+            override_timeout
+        );
+        assert_eq!(
+            request_timeout(Some(override_timeout), &IpcRequest::Health),
+            override_timeout,
+        );
+    }
 
     #[tokio::test]
     async fn bounded_response_reader_rejects_oversized_lines() {
