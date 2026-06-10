@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-ai"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "futures",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-ai-apple"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "futures",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-cli"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2838,7 +2838,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "clap",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-daemon"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-desktop"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-ipc"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "dirs 6.0.0",
  "getrandom 0.4.2",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-platform"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "nagori-core",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-platform-linux"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "hex",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-platform-macos"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "arboard",
  "async-trait",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-platform-native"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nagori-ai",
  "nagori-ai-apple",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-platform-windows"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-search"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nagori-core",
  "time",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "nagori-storage"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "libc",
