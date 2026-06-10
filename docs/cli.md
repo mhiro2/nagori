@@ -47,10 +47,19 @@ separate download — there is one artifact to install and update.
 Write commands (`add`, `copy`, `paste`, `pin`, `unpin`, `delete`,
 `clear`) default to IPC so the process that owns the store stays the
 single source of truth and its search cache is invalidated on every
-mutation. They succeed whenever the desktop app **or** a headless daemon
-is running and the **Settings → CLI** IPC toggle (`cli_ipc_enabled`) is
-on; with neither reachable they error rather than desync a running
-instance — pass `--db <path>` explicitly to operate on an offline DB.
+mutation. When the endpoint is unreachable they fall back to writing
+the local DB directly — but only after taking the same single-instance
+lock the desktop app and the daemon hold, so the fallback can never
+desync a running instance:
+
+| What's running                      | Where the write goes                       |
+|-------------------------------------|--------------------------------------------|
+| Desktop app or daemon, IPC on       | IPC (palette updates immediately)          |
+| Nothing                             | Direct DB write (instance lock acquired)   |
+| Instance running, IPC toggle off    | Refused — enable **Settings → CLI** or quit |
+
+`--db <path>` follows the same rule: reads are always allowed, but a
+write with `--db` is refused while a running instance owns that DB.
 
 Defaults:
 

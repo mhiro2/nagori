@@ -50,14 +50,20 @@ use output::{
 #[command(name = "nagori")]
 #[command(about = "Local-first clipboard history CLI")]
 struct Cli {
+    /// Operate directly on this DB file (repair / offline mode). Reads are
+    /// always allowed; write commands take the single-instance lock first
+    /// and are refused while a desktop app or daemon owns the DB.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
-    /// Path to the daemon socket. When omitted, the CLI uses the local DB
-    /// directly unless `--auto-ipc` is set, which auto-connects to the
-    /// default socket if the daemon is reachable.
+    /// Path to the IPC endpoint of a running desktop app or daemon
+    /// (Unix socket / Windows named pipe). Forces IPC: the command fails
+    /// when the endpoint is unreachable.
     #[arg(long, global = true)]
     ipc: Option<PathBuf>,
-    /// Try the default socket; fall back to direct DB access if unreachable.
+    /// For read commands: try the default IPC endpoint first and fall back
+    /// to reading the local DB when unreachable. Write commands behave
+    /// this way by default (their fallback takes the single-instance
+    /// lock), so the flag only changes reads.
     #[arg(long, global = true)]
     auto_ipc: bool,
     /// Pretty JSON output (single payload).
@@ -226,49 +232,87 @@ async fn dispatch(cli: Cli) -> Result<()> {
     if let Some(socket) = cli.ipc.clone() {
         return run_ipc_command(cli, socket).await;
     }
-    // `--db <path>` is an explicit direct-DB request; honor it as-is so the
-    // user can still poke at an offline DB even with a daemon running.
-    if cli.db.is_none() {
-        let writes = is_write_command(&cli.command);
-        // Writes default to IPC so the daemon stays the single source of
-        // truth for capture / settings / clipboard state. Reads only try
-        // IPC under explicit `--auto-ipc`, preserving the existing
-        // "read straight from disk" UX for casual queries.
-        if writes || cli.auto_ipc {
-            let candidate = default_socket_path();
-            if let Ok(token) =
-                nagori_ipc::read_token_file(&nagori_ipc::token_path_for_endpoint(&candidate))
-                && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
-                    .send(IpcRequest::Health)
-                    .await
-                    .is_ok()
-            {
-                return run_ipc_command(cli, candidate).await;
-            }
-            if writes {
-                anyhow::bail!(
-                    "write commands need a reachable IPC endpoint. Launch the desktop \
-                     app (with Settings → CLI → IPC enabled) or `nagori daemon run`, \
-                     or pass an explicit `--db <path>` to operate on a local DB."
-                );
-            }
-            // `--auto-ipc` was set but the daemon either had no readable
-            // token or failed the health probe. Reads silently fall back
-            // to opening the SQLite file directly, which is documented in
-            // `docs/cli.md` but easy to miss — and in this mode any writes
-            // the daemon makes after our snapshot won't reach us, and any
-            // local cache invalidation we'd normally trigger via IPC isn't
-            // delivered to the running daemon. Surface the fallback at
-            // warn! (stderr) so a user debugging stale results sees the
-            // mismatch instead of having to bisect why their query lags.
-            init_tracing();
-            tracing::warn!(
-                socket = %candidate.display(),
-                "ipc_fallback_to_local_db reason=daemon_unreachable mode=local-fallback"
-            );
+    let writes = is_write_command(&cli.command);
+    // `--db <path>` is an explicit direct-DB request; honor it without
+    // probing IPC so the user can still poke at an offline DB. For writes
+    // the instance lock below still gates it.
+    if cli.db.is_none() && (writes || cli.auto_ipc) {
+        // Writes default to IPC so the running instance stays the single
+        // source of truth for capture / settings / clipboard state. Reads
+        // only try IPC under explicit `--auto-ipc`, preserving the
+        // existing "read straight from disk" UX for casual queries.
+        let candidate = default_socket_path();
+        if let Ok(token) =
+            nagori_ipc::read_token_file(&nagori_ipc::token_path_for_endpoint(&candidate))
+            && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
+                .send(IpcRequest::Health)
+                .await
+                .is_ok()
+        {
+            return run_ipc_command(cli, candidate).await;
         }
+        // The endpoint either had no readable token or failed the health
+        // probe. Both reads and writes fall back to the local DB below —
+        // reads unconditionally (SQLite tolerates a concurrent owner),
+        // writes only once the instance lock proves nothing is running.
+        // Surface the fallback at warn! (stderr) so a user debugging
+        // stale results or an unexpected direct write sees the mismatch
+        // instead of having to bisect why their query lags.
+        init_tracing();
+        tracing::warn!(
+            socket = %candidate.display(),
+            mode = if writes { "write-fallback" } else { "local-fallback" },
+            "ipc_fallback_to_local_db reason=endpoint_unreachable"
+        );
     }
+    // Gate every direct write on the same single-instance lock the desktop
+    // app and the daemon hold for their lifetime. Acquisition succeeding
+    // proves nothing owns the store, so a direct write cannot desync a
+    // running instance's in-memory caches; the lock is held until the
+    // command finishes. Reads stay lock-free.
+    let _write_lock = if writes {
+        Some(acquire_direct_write_lock(cli.db.as_deref())?)
+    } else {
+        None
+    };
     run_local_command(cli).await
+}
+
+/// Take the single-instance lock over the DB's directory before a direct
+/// write, mirroring `lock_dir_for` in the desktop shell (DB parent, falling
+/// back to `.` for a bare filename) so all three surfaces contend for the
+/// same `nagori.lock`.
+///
+/// A held lock means a desktop app or daemon owns the store: writing
+/// underneath it would land in `SQLite` but never invalidate the owner's
+/// search cache or refresh its palette, so the CLI refuses and points at
+/// the IPC path instead. The two refusal messages differ because the
+/// reachable fix differs: with an explicit `--db` the user opted out of
+/// IPC, while the auto-fallback only gets here when the owner's endpoint
+/// is unreachable (typically `cli_ipc_enabled` off).
+fn acquire_direct_write_lock(db_override: Option<&Path>) -> Result<nagori_storage::ProcessLock> {
+    let explicit_db = db_override.is_some();
+    let db_path = db_override.map_or_else(default_db_path, Path::to_path_buf);
+    let lock_dir = match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    nagori_storage::ensure_private_directory(lock_dir)
+        .with_context(|| format!("failed to create {}", lock_dir.display()))?;
+    match nagori_storage::ProcessLock::try_acquire(lock_dir)? {
+        Some(lock) => Ok(lock),
+        None if explicit_db => anyhow::bail!(
+            "a running nagori (desktop app or daemon) owns {}. Write through it \
+             instead (drop --db), or quit it before writing to the DB directly.",
+            lock_dir.display()
+        ),
+        None => anyhow::bail!(
+            "a running nagori owns {} but its IPC endpoint is unreachable. Enable \
+             Settings → CLI (cli_ipc_enabled) in the desktop app or start \
+             `nagori daemon run`, or quit the running instance to write directly.",
+            lock_dir.display()
+        ),
+    }
 }
 
 /// Treat an env var as a boolean opt-in. Only an explicit truthy token

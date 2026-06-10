@@ -249,3 +249,86 @@ fn daemon_stop_without_ipc_errors_with_invalid_usage() {
         .failure()
         .stderr(predicate::str::contains("daemon stop requires"));
 }
+
+#[test]
+fn write_with_db_is_refused_while_an_instance_owns_the_store() {
+    // Holding the single-instance lock stands in for a running desktop app
+    // or daemon. A direct write underneath the owner would land in SQLite
+    // without ever invalidating its in-memory caches, so the CLI must
+    // refuse rather than desync it.
+    let (dir, db) = temp_db();
+    let _owner = nagori_storage::ProcessLock::try_acquire(dir.path())
+        .expect("lock io")
+        .expect("lock should be free");
+
+    let output = nagori(&db)
+        .args(["add", "--text", "should not land"])
+        .output()
+        .expect("invoke add");
+    assert!(
+        !output.status.success(),
+        "a direct write must be refused while the lock is held",
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        stderr.contains("owns"),
+        "the refusal should name the owning instance: {stderr}"
+    );
+}
+
+#[test]
+fn read_with_db_is_allowed_while_an_instance_owns_the_store() {
+    // Reads tolerate a concurrent owner (SQLite WAL); only writes are
+    // gated on the lock.
+    let (dir, db) = temp_db();
+    let _ = nagori(&db)
+        .args(["add", "--text", "seeded before lock"])
+        .output()
+        .expect("invoke add");
+    let _owner = nagori_storage::ProcessLock::try_acquire(dir.path())
+        .expect("lock io")
+        .expect("lock should be free");
+
+    let output = nagori(&db).arg("list").output().expect("invoke list");
+    assert!(
+        output.status.success(),
+        "reads must stay lock-free: {:?}",
+        output.status,
+    );
+    assert!(stdout_string(&output).contains("seeded before lock"));
+}
+
+/// Write commands without `--db` must fall back to a direct write when no
+/// instance is running (nothing to desync) instead of erroring. The fake
+/// `HOME` / `XDG_DATA_HOME` isolate both the default DB and the default
+/// IPC endpoint inside the tempdir, so the probe can never reach a real
+/// nagori on the development machine.
+#[cfg(unix)]
+#[test]
+fn write_without_db_falls_back_to_direct_write_when_nothing_runs() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let isolated = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("nagori").expect("nagori binary");
+        cmd.env("HOME", home.path());
+        cmd.env("XDG_DATA_HOME", home.path().join(".local/share"));
+        cmd.env_remove("NAGORI_DB_PATH");
+        cmd.args(args);
+        cmd
+    };
+
+    let output = isolated(&["add", "--text", "fallback write"])
+        .output()
+        .expect("invoke add");
+    assert!(
+        output.status.success(),
+        "with nothing running, a write should fall back to the local DB: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let list = isolated(&["list"]).output().expect("invoke list");
+    assert!(list.status.success(), "exit: {:?}", list.status);
+    assert!(
+        stdout_string(&list).contains("fallback write"),
+        "the fallback write must land in the default DB",
+    );
+}
