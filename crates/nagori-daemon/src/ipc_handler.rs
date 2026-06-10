@@ -111,6 +111,7 @@ impl NagoriRuntime {
             }
             IpcRequest::AddEntry(AddEntryRequest { text }) => {
                 let id = self.add_text(text).await?;
+                self.notify_external_mutation();
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text = is_text_safe_for_default_output(entry.sensitivity);
                 let entry_id = entry.id;
@@ -133,10 +134,12 @@ impl NagoriRuntime {
             }
             IpcRequest::DeleteEntry(DeleteEntryRequest { id }) => {
                 self.delete_entry(id).await?;
+                self.notify_external_mutation();
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::PinEntry(PinEntryRequest { id, pinned }) => {
                 self.pin_entry(id, pinned).await?;
+                self.notify_external_mutation();
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::RunQuickAction(RunQuickActionRequest { id, action }) => {
@@ -171,6 +174,7 @@ impl NagoriRuntime {
                 self.invalidate_search_cache();
                 let deleted = self.store.clear_older_than(cutoff).await?;
                 self.invalidate_search_cache();
+                self.notify_external_mutation();
                 Ok(IpcResponse::Cleared(ClearResponse { deleted }))
             }
             IpcRequest::Doctor => Ok(IpcResponse::Doctor(self.build_doctor_report().await?)),

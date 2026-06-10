@@ -162,7 +162,11 @@ Two execution modes:
   `cli_ipc_enabled` is on, `nagori` write commands reach the GUI's
   runtime over the same socket / pipe a headless daemon would serve, so
   the search cache is invalidated and the palette reflects them
-  immediately. The host is fail-closed — it serves only after the
+  immediately: IPC write requests bump the runtime's external-mutation
+  watch channel, which a forwarder task relays to the palette's
+  `clipboard_changed` refresh event (clipboard captures and the
+  palette's own commands already have their own refresh paths). The
+  host is fail-closed — it serves only after the
   persisted settings loaded and only when the single-instance lock is
   held — and an initial bind failure arms a backoff retry instead of
   aborting the app. `AppState::try_new_at`

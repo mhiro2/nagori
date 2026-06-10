@@ -190,6 +190,7 @@ struct BackgroundTasks {
     ngram_rebuild: tauri::async_runtime::JoinHandle<()>,
     ai_watchdog: tauri::async_runtime::JoinHandle<()>,
     cli_ipc: tauri::async_runtime::JoinHandle<()>,
+    ipc_mutations: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// Grace each supervised worker gets to drain in-flight work when shutdown is
@@ -381,6 +382,11 @@ impl AppState {
         }
 
         *tasks_slot = Some(BackgroundTasks {
+            ipc_mutations: spawn_ipc_mutation_forwarder(
+                self.runtime.clone(),
+                self.runtime.shutdown_handle(),
+                app.clone(),
+            ),
             capture: spawn_capture_supervisor(
                 self.runtime.clone(),
                 self.window.clone(),
@@ -469,6 +475,7 @@ impl AppState {
             // files, so it gets extra slack on top of the shared budget —
             // see CLI_IPC_DRAIN_SLACK.
             drain_background_task("cli_ipc", tasks.cli_ipc, grace + CLI_IPC_DRAIN_SLACK),
+            drain_background_task("ipc_mutations", tasks.ipc_mutations, grace),
         );
     }
 
@@ -697,6 +704,44 @@ fn spawn_capture_supervisor(
             },
         )
         .await;
+    })
+}
+
+/// Forward corpus mutations made by external IPC clients (`nagori add` /
+/// `delete` / `pin` / `clear`) to the palette's refresh event.
+///
+/// The capture loop's notifier covers clipboard captures and the palette
+/// refreshes itself after its own commands, but an IPC write has no other
+/// path to the frontend — without this, a CLI `nagori add` only shows up
+/// whenever the next capture happens to fire. Reuses
+/// `CLIPBOARD_CHANGED_EVENT` (whose payload the palette ignores) so the
+/// frontend contract stays a single "re-run your query" signal.
+///
+/// A plain forwarding loop, not a `supervise_worker`: it holds no state
+/// and cannot fail other than by the channel closing, which only happens
+/// at runtime teardown.
+fn spawn_ipc_mutation_forwarder(
+    runtime: NagoriRuntime,
+    mut shutdown: ShutdownHandle,
+    app: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+        let mut mutations = runtime.external_mutations_subscribe();
+        // Mark the snapshot seen so a mutation that landed before this task
+        // started doesn't fire a spurious refresh at startup.
+        let _ = mutations.borrow_and_update();
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                changed = mutations.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+                }
+            }
+        }
     })
 }
 

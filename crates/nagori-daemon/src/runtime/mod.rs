@@ -124,6 +124,14 @@ pub struct NagoriRuntime {
     /// coarse state, a wake signal new captures fire, a rebuild flag, and the
     /// AC-power probe its battery guard reads. See `semantic_index.rs`.
     pub(crate) semantic: Arc<crate::semantic_index::SemanticState>,
+    /// Monotonic counter bumped whenever an external IPC client mutates the
+    /// corpus (add / delete / pin / clear). A UI host subscribes via
+    /// [`Self::external_mutations_subscribe`] to refresh its views: unlike
+    /// clipboard captures (which the capture loop's notifier reports) and
+    /// the host's own commands (whose initiating UI refreshes itself),
+    /// nothing else tells an open palette that `nagori add` just landed.
+    external_mutations_tx: watch::Sender<u64>,
+    external_mutations_rx: watch::Receiver<u64>,
 }
 
 impl NagoriRuntime {
@@ -199,6 +207,22 @@ impl NagoriRuntime {
 
     pub fn settings_subscribe(&self) -> watch::Receiver<AppSettings> {
         self.settings_rx.clone()
+    }
+
+    /// Subscribe to corpus mutations performed by external IPC clients.
+    /// The value is a monotonic counter; only "it changed" matters. The
+    /// desktop forwards each change to its palette-refresh event so a CLI
+    /// `nagori add` shows up as immediately as a clipboard capture.
+    pub fn external_mutations_subscribe(&self) -> watch::Receiver<u64> {
+        self.external_mutations_rx.clone()
+    }
+
+    /// Record that an IPC client mutated the corpus. Called from the IPC
+    /// dispatcher's write arms after the mutation committed; `send_modify`
+    /// never fails, and with no subscriber (headless daemon) it is a no-op.
+    pub(crate) fn notify_external_mutation(&self) {
+        self.external_mutations_tx
+            .send_modify(|count| *count = count.wrapping_add(1));
     }
 
     pub fn current_settings(&self) -> AppSettings {
@@ -355,6 +379,7 @@ impl NagoriRuntimeBuilder {
     ) -> NagoriRuntime {
         let (settings_tx, settings_rx) = watch::channel(AppSettings::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (external_mutations_tx, external_mutations_rx) = watch::channel(0_u64);
         // Headless callers (the CLI's `add` / `ai` paths, in-process
         // tests) never expose IPC, so the capability report is never
         // queried — default to `unsupported_capabilities()` rather than
@@ -401,6 +426,8 @@ impl NagoriRuntimeBuilder {
             update_probe: Arc::new(UpdateProbeState::default()),
             settings_write_lock: Arc::new(AsyncMutex::new(())),
             semantic: Arc::new(crate::semantic_index::SemanticState::new(self.power_probe)),
+            external_mutations_tx,
+            external_mutations_rx,
         }
     }
 }

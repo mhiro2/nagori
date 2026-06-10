@@ -12,7 +12,7 @@ use nagori_core::{
 };
 use nagori_ipc::{
     AddEntryRequest, EntryDto, GetEntryRequest, IpcRequest, IpcResponse, ListPinnedRequest,
-    SearchRequest, SearchResponse, UpdateSettingsRequest,
+    ListRecentRequest, PinEntryRequest, SearchRequest, SearchResponse, UpdateSettingsRequest,
 };
 use nagori_platform::{
     MemoryClipboard, PasteResult, PermissionCheckContext, PermissionKind, PermissionState,
@@ -225,6 +225,50 @@ async fn add_entry_ipc_persists_and_searches_text() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, id);
+}
+
+#[tokio::test]
+async fn ipc_writes_notify_external_mutations_and_reads_do_not() {
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let mut mutations = runtime.external_mutations_subscribe();
+    let baseline = *mutations.borrow_and_update();
+
+    // A read must not signal a corpus mutation — the desktop forwards
+    // every change to a palette refresh, so false positives would re-run
+    // the open query on every CLI `list` / `search`.
+    let response = runtime
+        .handle_ipc(IpcRequest::ListRecent(ListRecentRequest {
+            limit: 10,
+            include_sensitive: false,
+        }))
+        .await;
+    assert!(matches!(response, IpcResponse::Entries(_)));
+    assert!(
+        !mutations.has_changed().expect("channel should be open"),
+        "a read-only request must not bump the mutation counter",
+    );
+
+    let response = runtime
+        .handle_ipc(IpcRequest::AddEntry(AddEntryRequest {
+            text: "added over ipc".to_owned(),
+        }))
+        .await;
+    let IpcResponse::Entry(EntryDto { id, .. }) = response else {
+        panic!("expected entry response");
+    };
+    assert!(
+        *mutations.borrow_and_update() > baseline,
+        "an IPC add must bump the mutation counter",
+    );
+
+    let response = runtime
+        .handle_ipc(IpcRequest::PinEntry(PinEntryRequest { id, pinned: true }))
+        .await;
+    assert!(matches!(response, IpcResponse::Ack));
+    assert!(
+        mutations.has_changed().expect("channel should be open"),
+        "an IPC pin must bump the mutation counter",
+    );
 }
 
 #[tokio::test]
