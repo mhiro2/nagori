@@ -2947,6 +2947,7 @@ name = "nagori-platform"
 version = "0.0.7"
 dependencies = [
  "async-trait",
+ "image",
  "nagori-core",
  "serde",
  "serde_json",
