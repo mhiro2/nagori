@@ -2,49 +2,18 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::ExitCode,
-    str::FromStr,
-    sync::Arc,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use futures::StreamExt;
-use nagori_core::{
-    AiActionId, AiEvent, AiRequestOptions, AppError, EntryId, EntryRepository,
-    MAX_ENTRY_SIZE_BYTES, QuickActionId, SearchQuery, SettingsRepository,
-    is_text_safe_for_default_output,
-};
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use nagori_daemon::run_daemon;
-use nagori_daemon::{CliIpcConfig, DaemonConfig, NagoriRuntime, default_socket_path};
-use nagori_ipc::{
-    AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
-    DeleteEntryRequest, DoctorReport, EntryDto, GetEntryRequest, IpcClient, IpcRequest,
-    IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest, PinEntryRequest,
-    RunAiActionRequest, RunQuickActionRequest, SearchRequest, SearchResponse,
-};
-use nagori_platform::{MemoryClipboard, NoopPasteController, PlatformCapabilities};
-use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
-use nagori_search::normalize_text;
-use nagori_storage::SqliteStore;
-use time::OffsetDateTime;
+use nagori_core::{AiActionId, AppError, QuickActionId};
+use nagori_daemon::default_socket_path;
+use nagori_ipc::{IpcClient, IpcRequest};
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-use nagori_platform::{PermissionCheckContext, PermissionChecker};
-#[cfg(target_os = "linux")]
-use nagori_platform_linux::LinuxPermissionChecker;
-#[cfg(target_os = "macos")]
-use nagori_platform_macos::MacosPermissionChecker;
-#[cfg(target_os = "windows")]
-use nagori_platform_windows::WindowsPermissionChecker;
-
+mod commands;
 mod output;
 
-use output::{
-    print_ack, print_ai_output, print_capabilities, print_clear_result, print_doctor_report,
-    print_dto_entries, print_dto_entry, print_dto_search, print_entries, print_entry,
-    print_search_results, print_status, shorten_home,
-};
+use commands::{Executor, IpcContext, LocalContext};
 
 #[derive(Debug, Parser)]
 #[command(name = "nagori")]
@@ -219,18 +188,20 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Decide *where* the command runs — the daemon bootstrap, a forced IPC
+/// endpoint, the instance-lock-gated write routing, or the local store —
+/// then hand off to [`commands::run_cli`]. This function owns routing and
+/// lock acquisition only; the per-command behaviour lives in `commands/`.
 async fn dispatch(cli: Cli) -> Result<()> {
-    if matches!(
-        cli.command,
-        Command::Daemon(DaemonArgs {
-            command: DaemonCommand::Run(_)
-        })
-    ) {
+    if let Command::Daemon(DaemonArgs {
+        command: DaemonCommand::Run(args),
+    }) = cli.command
+    {
         init_tracing();
-        return run_daemon_command(cli).await;
+        return commands::daemon::run_server(cli.db, cli.ipc, args).await;
     }
     if let Some(socket) = cli.ipc.clone() {
-        return run_ipc_command(cli, socket).await;
+        return run_over_ipc(cli, &socket).await;
     }
     let writes = is_write_command(&cli.command);
     if writes && cli.db.is_none() {
@@ -246,10 +217,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "ipc_fallback_to_local_db reason=no_running_instance mode=write-fallback"
             );
             let _write_lock = lock;
-            return run_local_command(cli).await;
+            return run_locally(cli).await;
         }
         let candidate = default_socket_path();
-        return run_ipc_command(cli, candidate).await.with_context(|| {
+        return run_over_ipc(cli, &candidate).await.with_context(|| {
             "a running nagori owns the store but its IPC endpoint was unreachable. \
              Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
              `nagori daemon run`, or quit the running instance to write to the DB \
@@ -268,7 +239,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .await
                 .is_ok()
         {
-            return run_ipc_command(cli, candidate).await;
+            return run_over_ipc(cli, &candidate).await;
         }
         // The endpoint either had no readable token or failed the health
         // probe. Reads fall back to opening the SQLite file directly —
@@ -298,7 +269,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    run_local_command(cli).await
+    run_locally(cli).await
+}
+
+async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
+    let executor = Executor::Ipc(IpcContext::connect(socket_path)?);
+    commands::run_cli(cli, &executor).await
+}
+
+async fn run_locally(cli: Cli) -> Result<()> {
+    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
+    let executor = Executor::Local(LocalContext { db_path });
+    commands::run_cli(cli, &executor).await
 }
 
 /// Try to take the single-instance lock over the DB's directory before a
@@ -333,19 +315,6 @@ fn try_acquire_direct_write_lock(db_path: &Path) -> Result<Option<nagori_storage
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
-}
-
-/// Treat an env var as a boolean opt-in. Only an explicit truthy token
-/// (`1` / `true` / `yes` / `on`, case-insensitive) flips the flag on; anything
-/// else — unset, empty, `0`, `false`, `no`, garbage — keeps it off. Used for
-/// security-relaxation flags where silently honouring `=0` would be a footgun.
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 const fn is_write_command(cmd: &Command) -> bool {
@@ -395,31 +364,6 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
     8
 }
 
-/// Translate an IPC-level error response into an `anyhow::Error` whose
-/// root cause is the structured `AppError`. Without this, the CLI's
-/// `exit_code_for` would only see the rendered `"<code>: <message>"`
-/// string and fall through to the internal-error bucket.
-fn ipc_error_to_anyhow(err: &nagori_ipc::IpcError) -> anyhow::Error {
-    let app = match err.code.as_str() {
-        "not_found" => AppError::NotFound,
-        "invalid_input" => AppError::InvalidInput(err.message.clone()),
-        "policy_error" => AppError::Policy(err.message.clone()),
-        "permission_error" => AppError::Permission(err.message.clone()),
-        "unsupported" => AppError::Unsupported(err.message.clone()),
-        "storage_error" => AppError::Storage(err.message.clone()),
-        "search_error" => AppError::Search(err.message.clone()),
-        "platform_error" => AppError::Platform(err.message.clone()),
-        "ai_error" => AppError::Ai(err.message.clone()),
-        "configuration_error" => AppError::Configuration(err.message.clone()),
-        // An unrecognised code is by definition something this CLI
-        // build doesn't know how to classify. Surface it as a generic
-        // internal error rather than guessing a bucket — an unknown
-        // code shouldn't quietly map to "not found".
-        _ => return anyhow!("{}: {}", err.code, err.message),
-    };
-    anyhow::Error::from(app)
-}
-
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter =
@@ -431,574 +375,6 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
-}
-
-// The CLI dispatcher intentionally mirrors the subcommand enum one-to-one.
-#[allow(clippy::too_many_lines)]
-async fn run_local_command(cli: Cli) -> Result<()> {
-    let format = OutputFormat::from(cli.json, cli.jsonl);
-
-    // `Capabilities` is a static OS probe — short-circuit before we
-    // touch the DB so users can inspect the host matrix on machines
-    // where the SQLite path is misconfigured or unreadable.
-    if matches!(cli.command, Command::Capabilities) {
-        print_capabilities(&nagori_platform_native::capabilities(), format)?;
-        return Ok(());
-    }
-
-    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
-    if let Some(parent) = db_path.parent() {
-        nagori_storage::ensure_private_directory(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let store = SqliteStore::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
-
-    match cli.command {
-        Command::List(args) => {
-            let entries = if args.pinned {
-                store.list_pinned().await?
-            } else {
-                store.list_recent(args.limit).await?
-            };
-            print_entries(entries, format, args.include_sensitive)?;
-        }
-        Command::Search(args) => {
-            // The direct/local search path must not serve stale CJK grams: drain
-            // any ngram rebuild left pending by a generator upgrade (kana folding
-            // / Han 1-grams) before querying. When a daemon has already rebuilt —
-            // the common case — this is a single zero-row check; only an offline
-            // `--db` DB that no daemon has touched pays the one-time rebuild here.
-            // Other direct commands (list/get) don't need current grams.
-            while store.rebuild_stale_ngrams().await? > 0 {}
-            let query = SearchQuery::new(&args.query, normalize_text(&args.query), args.limit);
-            let results = store.search(query).await?;
-            print_search_results(results, format)?;
-        }
-        Command::Get(args) => {
-            let id = parse_id(&args.id)?;
-            let entry = store
-                .get(id)
-                .await?
-                .ok_or_else(|| anyhow::Error::new(AppError::NotFound))?;
-            let include_text =
-                args.include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-            print_entry(&entry, format, include_text)?;
-        }
-        Command::Add(args) => {
-            let text = read_text(args)?;
-            let runtime = build_headless_runtime(store.clone())?;
-            let id = runtime.add_text(text).await?;
-            let entry = store
-                .get(id)
-                .await?
-                .context("entry not found after insert")?;
-            print_entry(
-                &entry,
-                format,
-                is_text_safe_for_default_output(entry.sensitivity),
-            )?;
-        }
-        Command::Delete(args) => {
-            store.mark_deleted(parse_id(&args.id)?).await?;
-            print_ack(format);
-        }
-        Command::Pin(args) => {
-            store.set_pinned(parse_id(&args.id)?, true).await?;
-            print_ack(format);
-        }
-        Command::Unpin(args) => {
-            store.set_pinned(parse_id(&args.id)?, false).await?;
-            print_ack(format);
-        }
-        Command::Copy(args) => {
-            let id = parse_id(&args.id)?;
-            let runtime = build_runtime(store.clone())?;
-            runtime.copy_entry(id).await?;
-            print_ack(format);
-        }
-        Command::Paste(args) => {
-            let id = parse_id(&args.id)?;
-            let runtime = build_runtime(store.clone())?;
-            runtime.paste_entry(id, None).await?;
-            print_ack(format);
-        }
-        Command::Clear(args) => {
-            let cutoff = match clear_request_from_args(&args)? {
-                ClearRequest::All => OffsetDateTime::now_utc(),
-                ClearRequest::OlderThanDays { days } => {
-                    OffsetDateTime::now_utc() - time::Duration::days(i64::from(days))
-                }
-            };
-            let deleted = store.clear_older_than(cutoff).await?;
-            print_clear_result(deleted, format);
-        }
-        Command::Quick(args) => {
-            let runtime = build_headless_runtime(store.clone())?;
-            let output = runtime
-                .run_quick_action(parse_id(&args.id)?, args.action)
-                .await?;
-            print_ai_output(&output.into(), format)?;
-        }
-        Command::Ai(args) => {
-            let options = ai_options_from_args(&args)?;
-            let runtime = build_headless_runtime(store.clone())?;
-            run_ai_streaming(
-                &runtime,
-                parse_id(&args.id)?,
-                args.action,
-                options,
-                !args.no_stream,
-                format,
-            )
-            .await?;
-        }
-        Command::Doctor => {
-            print_local_doctor(&db_path, &store).await?;
-        }
-        Command::Capabilities => unreachable!("handled before DB open"),
-        Command::Daemon(args) => match args.command {
-            DaemonCommand::Status => {
-                let settings = store.get_settings().await?;
-                print_status(&db_path, &settings, format)?;
-            }
-            DaemonCommand::Run(_) => unreachable!("handled before run_local_command"),
-            DaemonCommand::Stop => {
-                anyhow::bail!("daemon stop requires --ipc <socket>");
-            }
-        },
-    }
-
-    Ok(())
-}
-
-// On platforms without a native adapter the body short-circuits via
-// `bail!`, so no `.await` runs.
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "windows")),
-    allow(clippy::unused_async)
-)]
-async fn run_daemon_command(cli: Cli) -> Result<()> {
-    let Command::Daemon(DaemonArgs {
-        command: DaemonCommand::Run(args),
-    }) = cli.command
-    else {
-        unreachable!()
-    };
-    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
-    let data_dir = db_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(
-            || std::path::PathBuf::from("."),
-            std::path::Path::to_path_buf,
-        );
-    nagori_storage::ensure_private_directory(&data_dir)
-        .with_context(|| format!("failed to create {}", data_dir.display()))?;
-    // Single-instance gate: take the data-directory lock before opening the
-    // store, so a second daemon (or the desktop app, which locks the same
-    // directory) never runs migrations or a capture loop against a DB this
-    // process is about to own. Held until `run_daemon` returns.
-    let instance_lock = nagori_daemon::acquire_data_dir_lock(&data_dir)
-        .context("refusing to start a second daemon")?;
-    let store = SqliteStore::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
-
-    let socket_path = cli.ipc.clone().unwrap_or_else(default_socket_path);
-    // Test harnesses (notably scripts/e2e-macos.sh) cannot grant the daemon
-    // Accessibility permission programmatically, so AX queries fail every
-    // tick and the capture loop's "after N AX errors, treat focus as
-    // secure" escalation drops user-issued pbcopy events. Letting the
-    // harness opt out via env var keeps production safety intact (default
-    // remains fail-closed) while making the e2e pipeline exercisable.
-    //
-    // Only accept explicit truthy values: anything else — including the
-    // common footgun `=0`, `=false`, or `=no` — leaves fail-closed on. A
-    // security-relaxation flag should not be enabled by accident.
-    let secure_focus_fail_closed = !env_truthy("NAGORI_DISABLE_SECURE_FOCUS_FAIL_CLOSED");
-    // Pair the token file with the IPC endpoint so a daemon launched with
-    // `--ipc <custom>` doesn't trample the default daemon's token file
-    // (and vice versa). The CLI's `run_ipc_command` mirrors this derivation
-    // so client and daemon agree on the path.
-    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
-    let ipc_defaults = CliIpcConfig::default();
-    let max_concurrent_connections = args
-        .ipc_max_connections
-        .unwrap_or(ipc_defaults.max_concurrent_connections);
-    let config = DaemonConfig {
-        ipc: CliIpcConfig {
-            socket_path,
-            token_path,
-            max_concurrent_connections,
-            ..ipc_defaults
-        },
-        capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
-        // The clap range above already keeps this well clear of overflow;
-        // `saturating_mul` is belt-and-suspenders in case the bound is ever
-        // relaxed without revisiting this arithmetic.
-        maintenance_interval: std::time::Duration::from_secs(
-            args.maintenance_interval_min.saturating_mul(60),
-        ),
-        secure_focus_fail_closed,
-    };
-
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    {
-        let parts = build_native_runtime(
-            store,
-            NativeRuntimeOptions {
-                socket_path: Some(config.ipc.socket_path.clone()),
-                ai_engine: None,
-            },
-        )?;
-        run_daemon(
-            parts.runtime,
-            parts.clipboard_reader,
-            config,
-            Some(parts.window),
-            instance_lock,
-        )
-        .await?;
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        let _ = (store, config, instance_lock);
-        anyhow::bail!("daemon run is only available on macOS, Windows, and Linux in this build")
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn run_ipc_command(cli: Cli, socket_path: PathBuf) -> Result<()> {
-    // Derive the token path from the IPC endpoint so a CLI run with
-    // `--ipc <custom>` reads the same file the matching daemon wrote.
-    // Without this, a custom-endpoint daemon would still write the
-    // default `nagori.token` and trample the token of any default-endpoint
-    // daemon also running on this machine.
-    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
-    let token = nagori_ipc::read_token_file(&token_path).map_err(|err| {
-        anyhow!(
-            "failed to read IPC auth token from {}: {err}. Is the daemon running?",
-            token_path.display()
-        )
-    })?;
-    let client = IpcClient::new(
-        socket_path
-            .to_str()
-            .ok_or_else(|| anyhow!("ipc socket path must be valid UTF-8"))?,
-        token,
-    );
-    let format = OutputFormat::from(cli.json, cli.jsonl);
-    match cli.command {
-        Command::List(args) => {
-            let request = if args.pinned {
-                IpcRequest::ListPinned(ListPinnedRequest {
-                    include_sensitive: args.include_sensitive,
-                })
-            } else {
-                IpcRequest::ListRecent(ListRecentRequest {
-                    limit: args.limit,
-                    include_sensitive: args.include_sensitive,
-                })
-            };
-            let resp = client.send(request).await?;
-            print_dto_entries(expect_entries(resp)?, format)?;
-        }
-        Command::Search(args) => {
-            let resp = client
-                .send(IpcRequest::Search(SearchRequest {
-                    query: args.query,
-                    limit: args.limit,
-                }))
-                .await?;
-            print_dto_search(expect_search(resp)?, format)?;
-        }
-        Command::Get(args) => {
-            let resp = client
-                .send(IpcRequest::GetEntry(GetEntryRequest {
-                    id: parse_id(&args.id)?,
-                    include_sensitive: args.include_sensitive,
-                }))
-                .await?;
-            print_dto_entry(&expect_entry(resp)?, format)?;
-        }
-        Command::Add(args) => {
-            let text = read_text(args)?;
-            let resp = client
-                .send(IpcRequest::AddEntry(AddEntryRequest { text }))
-                .await?;
-            print_dto_entry(&expect_entry(resp)?, format)?;
-        }
-        Command::Delete(args) => {
-            expect_ack(
-                client
-                    .send(IpcRequest::DeleteEntry(DeleteEntryRequest {
-                        id: parse_id(&args.id)?,
-                    }))
-                    .await?,
-            )?;
-            print_ack(format);
-        }
-        Command::Pin(args) => {
-            expect_ack(
-                client
-                    .send(IpcRequest::PinEntry(PinEntryRequest {
-                        id: parse_id(&args.id)?,
-                        pinned: true,
-                    }))
-                    .await?,
-            )?;
-            print_ack(format);
-        }
-        Command::Unpin(args) => {
-            expect_ack(
-                client
-                    .send(IpcRequest::PinEntry(PinEntryRequest {
-                        id: parse_id(&args.id)?,
-                        pinned: false,
-                    }))
-                    .await?,
-            )?;
-            print_ack(format);
-        }
-        Command::Copy(args) => {
-            expect_ack(
-                client
-                    .send(IpcRequest::CopyEntry(CopyEntryRequest {
-                        id: parse_id(&args.id)?,
-                    }))
-                    .await?,
-            )?;
-            print_ack(format);
-        }
-        Command::Paste(args) => {
-            expect_ack(
-                client
-                    .send(IpcRequest::PasteEntry(PasteEntryRequest {
-                        id: parse_id(&args.id)?,
-                        format: None,
-                    }))
-                    .await?,
-            )?;
-            print_ack(format);
-        }
-        Command::Quick(args) => {
-            let resp = client
-                .send(IpcRequest::RunQuickAction(RunQuickActionRequest {
-                    id: parse_id(&args.id)?,
-                    action: args.action,
-                }))
-                .await?;
-            print_ai_output(&expect_ai_output(resp)?, format)?;
-        }
-        Command::Ai(args) => {
-            // The daemon drives AI actions to completion over a one-shot
-            // envelope — streaming runs in-process via the local path, so an
-            // explicit `--ipc` connection always returns the final result.
-            // Carry the per-request options over the wire so `--from`/`--to`
-            // survive: without them the daemon would translate with default
-            // options (no target language) and fail.
-            let options = ai_options_from_args(&args)?;
-            let resp = client
-                .send(IpcRequest::RunAiAction(RunAiActionRequest {
-                    id: parse_id(&args.id)?,
-                    action: args.action,
-                    options,
-                }))
-                .await?;
-            print_ai_output(&expect_ai_output(resp)?, format)?;
-        }
-        Command::Clear(args) => {
-            let request = clear_request_from_args(&args)?;
-            let resp = client.send(IpcRequest::Clear(request)).await?;
-            print_clear_result(expect_cleared(resp)?.deleted, format);
-        }
-        Command::Doctor => {
-            let resp = client.send(IpcRequest::Doctor).await?;
-            print_doctor_report(&expect_doctor(resp)?, format)?;
-        }
-        Command::Capabilities => {
-            let resp = client.send(IpcRequest::Capabilities).await?;
-            print_capabilities(&expect_capabilities(resp)?, format)?;
-        }
-        Command::Daemon(args) => match args.command {
-            DaemonCommand::Status => {
-                let resp = client.send(IpcRequest::Health).await?;
-                let IpcResponse::Health(health) = resp else {
-                    anyhow::bail!("unexpected ipc response");
-                };
-                if format.is_json() {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "ok": health.ok,
-                            "version": health.version,
-                        }))?
-                    );
-                } else {
-                    println!("ok\t{}", health.version);
-                }
-            }
-            DaemonCommand::Stop => {
-                expect_ack(client.send(IpcRequest::Shutdown).await?)?;
-                print_ack(format);
-            }
-            DaemonCommand::Run(_) => unreachable!("handled before run_ipc_command"),
-        },
-    }
-    Ok(())
-}
-
-fn build_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
-    Ok(build_native_runtime(store, NativeRuntimeOptions::default())?.runtime)
-}
-
-/// Build a runtime for CLI commands that don't touch the OS clipboard.
-///
-/// `add` and `ai` operate on the store and AI provider only; they never
-/// invoke `ClipboardWriter::set_*` or `PasteController::paste_frontmost`.
-/// Wire explicit `MemoryClipboard` / `NoopPasteController` so the builder
-/// never sees missing adapters — the safety check in
-/// `NagoriRuntimeBuilder::build` stays meaningful for paths that *do*
-/// need real clipboard integration. The function still propagates a
-/// `Result` so a future required adapter surfaces here as a user-facing
-/// CLI error instead of a panic.
-fn build_headless_runtime(store: SqliteStore) -> Result<NagoriRuntime> {
-    let mut builder = NagoriRuntime::builder(store)
-        .clipboard(Arc::new(MemoryClipboard::new()))
-        .paste(Arc::new(NoopPasteController));
-    // Wire the host's default AI engine (Apple Foundation Models on macOS) so
-    // `nagori ai` can stream in-process without opening the OS clipboard.
-    if let Some(engine) = nagori_platform_native::default_ai_engine() {
-        builder = builder.ai_engine(engine);
-    }
-    Ok(builder.build()?)
-}
-
-/// Builds the per-request [`AiRequestOptions`] from the `ai` subcommand args,
-/// rejecting a `translate` with no `--to`. Shared by the local in-process path
-/// and the `--ipc` path so both validate identically and the daemon receives
-/// the same options the local driver would use.
-fn ai_options_from_args(args: &AiArgs) -> Result<AiRequestOptions> {
-    if matches!(args.action, AiActionId::Translate) && args.to.is_none() {
-        anyhow::bail!("`nagori ai translate` requires --to <language> (e.g. --to ja)");
-    }
-    Ok(AiRequestOptions {
-        source_language: args.from.clone(),
-        target_language: args.to.clone(),
-        ..AiRequestOptions::default()
-    })
-}
-
-/// Drives a model-backed AI action in-process and renders its event stream.
-///
-/// Cancellation is wired two ways: `Ctrl-C` cancels the in-flight request (and
-/// the process exits 130 once the stream drains), and dropping the stream — for
-/// example on a broken stdout pipe — cancels it through the runtime's request
-/// registry guard.
-async fn run_ai_streaming(
-    runtime: &NagoriRuntime,
-    id: EntryId,
-    action: AiActionId,
-    options: AiRequestOptions,
-    stream: bool,
-    format: OutputFormat,
-) -> Result<()> {
-    use std::io::Write;
-
-    let run = runtime.start_ai_action(id, action, options).await?;
-    let request_id = run.request_id;
-    let mut events = run.events;
-
-    let mut interrupted = false;
-    let mut warnings: Vec<String> = Vec::new();
-    let mut final_text = String::new();
-    let mut buffer = String::new();
-    let stdout = std::io::stdout();
-
-    loop {
-        let item = tokio::select! {
-            biased;
-            // Ctrl-C cancels the request through the registry; keep draining so
-            // the stream reaches its terminal `Cancelled`.
-            res = tokio::signal::ctrl_c(), if !interrupted => {
-                res.ok();
-                interrupted = true;
-                let _ = runtime.cancel_ai_action(request_id);
-                continue;
-            }
-            item = events.next() => item,
-        };
-        let Some(item) = item else { break };
-        let event = item.map_err(|err| anyhow!("{:?}: {}", err.code, err.message))?;
-
-        if stream && format.is_json() {
-            let mut handle = stdout.lock();
-            writeln!(handle, "{}", serde_json::to_string(&event)?)?;
-        }
-        match event {
-            AiEvent::Delta { text, .. } => {
-                buffer.push_str(&text);
-                if stream && !format.is_json() {
-                    let mut handle = stdout.lock();
-                    write!(handle, "{text}")?;
-                    handle.flush()?;
-                }
-            }
-            AiEvent::Replace { text, .. } => {
-                if stream && !format.is_json() {
-                    let mut handle = stdout.lock();
-                    writeln!(handle)?;
-                    write!(handle, "{text}")?;
-                    handle.flush()?;
-                }
-                buffer = text;
-            }
-            AiEvent::Done {
-                final_text: text,
-                warnings: done_warnings,
-                ..
-            } => {
-                final_text = text;
-                warnings = done_warnings;
-                break;
-            }
-            AiEvent::Cancelled => break,
-        }
-    }
-
-    if !stream {
-        // Non-streaming: the loop wrote nothing to stdout, so emit the
-        // authoritative result once — text *and* JSON/JSONL alike. (A prior
-        // version gated this on `!format.is_json()`, which left
-        // `--no-stream --json/--jsonl` printing nothing and exiting 0.)
-        let output = AiOutputDto {
-            text: if final_text.is_empty() {
-                buffer.clone()
-            } else {
-                final_text.clone()
-            },
-            created_entry: None,
-            warnings: warnings.clone(),
-        };
-        print_ai_output(&output, format)?;
-    } else if !format.is_json() && (!final_text.is_empty() || !buffer.is_empty()) {
-        // Streaming text: terminate the streamed line. Streaming JSON Lines
-        // needs nothing more here — each event was already emitted as it
-        // arrived in the loop above.
-        let mut handle = stdout.lock();
-        writeln!(handle)?;
-    }
-
-    for warning in &warnings {
-        eprintln!("warning: {warning}");
-    }
-
-    if interrupted {
-        // SIGINT: mirror shells' 128 + signal-number convention.
-        std::process::exit(130);
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1019,37 +395,6 @@ impl OutputFormat {
 
     const fn is_json(self) -> bool {
         matches!(self, Self::Json | Self::Jsonl)
-    }
-}
-
-fn read_text(args: AddArgs) -> Result<String> {
-    if args.stdin {
-        use std::io::Read;
-        // Bound the read so an unbounded or hostile stdin (e.g. `cat /dev/zero |
-        // nagori add --stdin`) cannot OOM the CLI process. The daemon's bounded
-        // reader only protects the server side; this guards the client itself.
-        // Read one byte past the ceiling so a payload sitting exactly at the cap
-        // is still accepted while anything larger is rejected.
-        //
-        // Read raw bytes rather than straight into a `String`: `read_to_string`
-        // validates UTF-8 while it fills the buffer, so an oversized input whose
-        // `cap + 1` boundary splits a multi-byte char would surface as a UTF-8
-        // error (exit 8) before the size check runs, escaping the "oversize =>
-        // exit 2" contract. Check the length first, then validate UTF-8.
-        let mut buffer = Vec::new();
-        std::io::stdin()
-            .take(MAX_ENTRY_SIZE_BYTES as u64 + 1)
-            .read_to_end(&mut buffer)?;
-        if buffer.len() > MAX_ENTRY_SIZE_BYTES {
-            return Err(AppError::InvalidInput(format!(
-                "stdin input exceeds the maximum entry size of {MAX_ENTRY_SIZE_BYTES} bytes"
-            ))
-            .into());
-        }
-        String::from_utf8(buffer).map_err(|err| anyhow!("stdin input is not valid UTF-8: {err}"))
-    } else {
-        args.text
-            .ok_or_else(|| anyhow!("either --text or --stdin must be provided"))
     }
 }
 
@@ -1083,178 +428,11 @@ fn resolve_default_db_path(
         .join("nagori.sqlite")
 }
 
-fn parse_id(value: &str) -> Result<EntryId> {
-    EntryId::from_str(value)
-        .map_err(|err| AppError::InvalidInput(format!("invalid entry id: {value}: {err}")).into())
-}
-
-/// Stable label for the configured AI provider family.
-const fn ai_provider_label(provider: nagori_core::AiProviderKind) -> &'static str {
-    match provider {
-        nagori_core::AiProviderKind::Disabled => "disabled",
-        nagori_core::AiProviderKind::AppleNative => "apple-native",
-        nagori_core::AiProviderKind::OpenAiCompatible => "openai-compatible",
-    }
-}
-
-async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
-    let settings = store.get_settings().await?;
-    println!("version\t{}", env!("CARGO_PKG_VERSION"));
-    println!("version_latest\t(unknown)");
-    println!("update_channel\t{}", settings.update_channel.as_str());
-    println!("db\t{}", shorten_home(db_path));
-    println!("capture_enabled\t{}", settings.capture_enabled);
-    println!("auto_paste_enabled\t{}", settings.auto_paste_enabled);
-    println!("ai_enabled\t{}", settings.ai.enabled);
-    println!("auto_update_check\t{}", settings.auto_update_check);
-    println!("ai_provider\t{}", ai_provider_label(settings.ai.provider));
-    // The macOS checker keys NotDetermined vs Denied off this timestamp;
-    // build the context once and share it across the per-OS branches.
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    let permission_ctx = PermissionCheckContext {
-        accessibility_prompted_at: settings.onboarding.accessibility_prompted_at,
-    };
-    #[cfg(target_os = "macos")]
-    {
-        let checker = MacosPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let checker = WindowsPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let checker = LinuxPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
-    }
-    let thumb_used = store
-        .total_thumbnail_bytes()
-        .await
-        .map_or_else(|_| "(unknown)".to_owned(), |b| b.to_string());
-    let thumb_cap = settings
-        .max_thumbnail_total_bytes
-        .map_or_else(|| "disabled".to_owned(), |b| b.to_string());
-    println!("thumbnails\tused={thumb_used}\tcap={thumb_cap}");
-    Ok(())
-}
-
-fn expect_entry(response: IpcResponse) -> Result<EntryDto> {
-    match response {
-        IpcResponse::Entry(entry) => Ok(entry),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_entries(response: IpcResponse) -> Result<Vec<EntryDto>> {
-    match response {
-        IpcResponse::Entries(entries) => Ok(entries),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_search(response: IpcResponse) -> Result<SearchResponse> {
-    match response {
-        IpcResponse::Search(value) => Ok(value),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_ai_output(response: IpcResponse) -> Result<AiOutputDto> {
-    match response {
-        IpcResponse::AiOutput(value) => Ok(value),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_ack(response: IpcResponse) -> Result<()> {
-    match response {
-        IpcResponse::Ack => Ok(()),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_cleared(response: IpcResponse) -> Result<ClearResponse> {
-    match response {
-        IpcResponse::Cleared(value) => Ok(value),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn clear_request_from_args(args: &ClearArgs) -> Result<ClearRequest> {
-    // The clap arg group enforces "exactly one of --all / --older-than-days",
-    // so reaching this point with neither set means a clap bug or a manual
-    // struct construction. Defend in depth.
-    match (args.older_than_days, args.all) {
-        (Some(days), false) => {
-            let days = u32::try_from(days)
-                .map_err(|_| AppError::InvalidInput("--older-than-days must be >= 0".into()))?;
-            Ok(ClearRequest::OlderThanDays { days })
-        }
-        (None, true) => Ok(ClearRequest::All),
-        _ => Err(AppError::InvalidInput("specify --all or --older-than-days".into()).into()),
-    }
-}
-
-fn expect_doctor(response: IpcResponse) -> Result<DoctorReport> {
-    match response {
-        IpcResponse::Doctor(value) => Ok(value),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
-fn expect_capabilities(response: IpcResponse) -> Result<PlatformCapabilities> {
-    match response {
-        IpcResponse::Capabilities(value) => Ok(*value),
-        IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
-        _ => Err(anyhow!("unexpected ipc response")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+    use commands::ipc_error_to_anyhow;
 
     fn err_with_code(code: &str) -> nagori_ipc::IpcError {
         nagori_ipc::IpcError {
