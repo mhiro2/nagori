@@ -193,7 +193,7 @@ const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
 const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Cheap, non-cryptographic entropy source for the backoff jitter in
-/// [`CaptureLoop::jittered_backoff`]. The wall clock is already imported
+/// [`CaptureCaptureFailurePolicy::jittered_backoff`]. The wall clock is already imported
 /// for the gap-detection path; jitter only needs enough variation that
 /// two co-tenant daemons crashing at the same shared event (sleep wake,
 /// network re-attach) don't retry on identical ticks. We deliberately
@@ -304,22 +304,18 @@ impl DedupState {
     }
 }
 
-pub struct CaptureLoop<R, E, A> {
-    reader: R,
-    entries: E,
-    audit: A,
-    settings: AppSettings,
-    /// Dedup / baseline state. Grouped so the optimistic refresh and its
-    /// failure rollback stay a single operation instead of three hand-kept
-    /// fields — see [`DedupState`].
-    dedup: DedupState,
-    window: Option<Arc<dyn WindowBehavior>>,
-    /// Per-kind warn suppression. Earlier we kept a single
-    /// `last_platform_warn_at` and any non-platform error logged
-    /// unconditionally; the consequence was that two distinct platform
-    /// failures within the suppression window collapsed to one log line
-    /// and AX-permission losses on top of pasteboard outages were
-    /// effectively invisible.
+/// Failure reporting and pacing for the polling loop: per-kind rate-limited
+/// warns, the consecutive-failure counter, and the exponential backoff (with
+/// jitter) that counter drives.
+///
+/// Earlier the loop kept a single `last_platform_warn_at` and any
+/// non-platform error logged unconditionally; the consequence was that two
+/// distinct platform failures within the suppression window collapsed to one
+/// log line and AX-permission losses on top of pasteboard outages were
+/// effectively invisible. Suppression is therefore per
+/// [`CaptureErrorKind`] bucket.
+struct CaptureFailurePolicy {
+    /// Per-kind timestamp of the last emitted warn, for rate limiting.
     last_warn_at: [Option<Instant>; CaptureErrorKind::COUNT],
     /// Counter of suppressed warnings since the last emitted log line,
     /// reset on every emit. Surfaced as a tracing field so suppressed
@@ -331,92 +327,24 @@ pub struct CaptureLoop<R, E, A> {
     /// `run_polling[_with_settings]` and resets to zero on the next
     /// successful tick.
     consecutive_failures: u32,
-    /// Number of consecutive `frontmost_focused_is_secure` errors. Once
-    /// this crosses `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` the loop flips
-    /// to fail-closed (assume the focus is secure) so a sustained AX
-    /// outage can't silently let password keystrokes through. Reset on
-    /// the next successful AX query.
-    consecutive_secure_ax_failures: u32,
-    search_cache: Option<SharedSearchCache>,
-    /// Wall-clock anchor for the previous `capture_once` invocation. Used to
-    /// spot host-paused gaps (sleep / suspend) and resync the dedup baseline.
-    /// `SystemTime` rather than `Instant` because Darwin's `Instant` is
-    /// `CLOCK_UPTIME_RAW` and freezes during sleep — see the
-    /// `RESYNC_GAP_THRESHOLD` doc comment for details.
-    last_tick_at: Option<SystemTime>,
-    /// When `false`, sustained AX errors no longer flip the loop to
-    /// fail-closed: the loop keeps treating an AX-errored tick as
-    /// "unknown → not secure" indefinitely. Production runs leave this
-    /// `true` (the default) so that a revoked Accessibility grant or a
-    /// wedged AX subsystem can't silently let password keystrokes through
-    /// history. Test harnesses where Accessibility can't be granted
-    /// programmatically (notably `scripts/e2e-macos.sh` running against a
-    /// freshly built binary) flip it off so the rest of the capture
-    /// pipeline can be exercised end-to-end. The bundle-id override list
-    /// still fires regardless: those system password UIs are positively
-    /// identified, not assumed.
-    secure_focus_fail_closed_enabled: bool,
-    /// Optional shared snapshot for steady-state capture health. When
-    /// wired (production via `with_capture_health`), every `capture_once`
-    /// outcome — success, intentional drop, error — is reflected here so
-    /// `nagori doctor` and the desktop tray can flag a silently filtering
-    /// loop. `None` in unit tests keeps the loop independent of the
-    /// daemon's shared-state plumbing.
-    capture_health: Option<CaptureHealth>,
-    /// Optional hook invoked after a new entry has been durably inserted.
-    /// Desktop uses this to wake the palette without coupling the daemon
-    /// crate to Tauri; CLI/server callers leave it unset.
-    capture_notifier: Option<Arc<dyn Fn(EntryId) + Send + Sync>>,
 }
 
-impl<R, E, A> CaptureLoop<R, E, A>
-where
-    R: ClipboardReader,
-    E: EntryRepository,
-    A: AuditLog,
-{
-    pub const fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
+impl CaptureFailurePolicy {
+    const fn new() -> Self {
         Self {
-            reader,
-            entries,
-            audit,
-            settings,
-            dedup: DedupState::new(),
-            window: None,
             last_warn_at: [None; CaptureErrorKind::COUNT],
             suppressed_warns: [0; CaptureErrorKind::COUNT],
             consecutive_failures: 0,
-            consecutive_secure_ax_failures: 0,
-            search_cache: None,
-            last_tick_at: None,
-            secure_focus_fail_closed_enabled: true,
-            capture_health: None,
-            capture_notifier: None,
         }
     }
 
-    /// Disable the AX-error fail-closed escalation. See the field doc on
-    /// `secure_focus_fail_closed_enabled` for the production vs. test
-    /// trade-off; the bundle-id override list still applies.
-    #[must_use]
-    pub const fn without_secure_focus_fail_closed(mut self) -> Self {
-        self.secure_focus_fail_closed_enabled = false;
-        self
-    }
-
-    /// Reset the dedup baseline so the next observed sequence is treated as
-    /// fresh content. Useful after macOS sleep/wake when the pasteboard
-    /// counter can lap silently and we'd otherwise skip a real change as a
-    /// duplicate.
-    pub fn reset_sequence_baseline(&mut self) {
-        self.dedup.last_sequence = None;
-    }
-
-    fn note_capture_error(&mut self, err: &AppError) {
+    /// Record a failed tick: bump the failure counter, emit (or suppress)
+    /// the rate-limited warn for the error's kind, and reflect the error in
+    /// the shared health snapshot when one is wired.
+    fn note_error(&mut self, err: &AppError, health: Option<&CaptureHealth>) {
         // Track persistent failure for the polling-loop backoff. Any
-        // tick that reaches `note_capture_error` has, by definition,
-        // failed; the counter is reset only on a successful
-        // `capture_once`.
+        // tick that reaches `note_error` has, by definition, failed; the
+        // counter is reset only on a successful `capture_once`.
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
 
         let kind = CaptureErrorKind::from_error(err);
@@ -437,7 +365,7 @@ where
         } else {
             self.suppressed_warns[slot] = self.suppressed_warns[slot].saturating_add(1);
         }
-        if let Some(health) = &self.capture_health {
+        if let Some(health) = health {
             health.record_error(
                 kind.capture_event_category(),
                 err.to_string(),
@@ -446,22 +374,19 @@ where
         }
     }
 
-    fn note_capture_success(&mut self) {
+    /// Record a successful tick: reset the backoff counter and reflect the
+    /// success in the shared health snapshot when one is wired.
+    fn note_success(&mut self, health: Option<&CaptureHealth>) {
         self.consecutive_failures = 0;
-        if let Some(health) = &self.capture_health {
+        if let Some(health) = health {
             health.record_success(OffsetDateTime::now_utc());
         }
     }
 
-    /// Record an intentional in-loop drop (oversized payload, policy /
-    /// secret refusal). Does not bump the failure counter — the loop did
-    /// its job — but updates the shared `CaptureHealth` snapshot so the
-    /// UI can distinguish "we lost visibility" from "we're rejecting on
-    /// purpose".
-    fn note_capture_drop(&self, category: CaptureEventCategory) {
-        if let Some(health) = &self.capture_health {
-            health.record_drop(category, OffsetDateTime::now_utc());
-        }
+    /// The inter-tick sleep for the polling loop given the current failure
+    /// streak: the jittered backoff below.
+    fn next_sleep(&self, base: Duration) -> Duration {
+        Self::jittered_backoff(base, self.consecutive_failures)
     }
 
     /// Compute the inter-tick sleep applied after a failed
@@ -518,6 +443,118 @@ where
         let offset_abs = entropy % span;
         let jittered = nanos.saturating_add(offset_abs).saturating_sub(range);
         Duration::from_nanos(jittered)
+    }
+}
+
+pub struct CaptureLoop<R, E, A> {
+    reader: R,
+    entries: E,
+    audit: A,
+    settings: AppSettings,
+    /// Dedup / baseline state. Grouped so the optimistic refresh and its
+    /// failure rollback stay a single operation instead of three hand-kept
+    /// fields — see [`DedupState`].
+    dedup: DedupState,
+    window: Option<Arc<dyn WindowBehavior>>,
+    /// Failure reporting + backoff pacing for the polling loop — see
+    /// [`CaptureFailurePolicy`].
+    failures: CaptureFailurePolicy,
+    /// Number of consecutive `frontmost_focused_is_secure` errors. Once
+    /// this crosses `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` the loop flips
+    /// to fail-closed (assume the focus is secure) so a sustained AX
+    /// outage can't silently let password keystrokes through. Reset on
+    /// the next successful AX query.
+    consecutive_secure_ax_failures: u32,
+    search_cache: Option<SharedSearchCache>,
+    /// Wall-clock anchor for the previous `capture_once` invocation. Used to
+    /// spot host-paused gaps (sleep / suspend) and resync the dedup baseline.
+    /// `SystemTime` rather than `Instant` because Darwin's `Instant` is
+    /// `CLOCK_UPTIME_RAW` and freezes during sleep — see the
+    /// `RESYNC_GAP_THRESHOLD` doc comment for details.
+    last_tick_at: Option<SystemTime>,
+    /// When `false`, sustained AX errors no longer flip the loop to
+    /// fail-closed: the loop keeps treating an AX-errored tick as
+    /// "unknown → not secure" indefinitely. Production runs leave this
+    /// `true` (the default) so that a revoked Accessibility grant or a
+    /// wedged AX subsystem can't silently let password keystrokes through
+    /// history. Test harnesses where Accessibility can't be granted
+    /// programmatically (notably `scripts/e2e-macos.sh` running against a
+    /// freshly built binary) flip it off so the rest of the capture
+    /// pipeline can be exercised end-to-end. The bundle-id override list
+    /// still fires regardless: those system password UIs are positively
+    /// identified, not assumed.
+    secure_focus_fail_closed_enabled: bool,
+    /// Optional shared snapshot for steady-state capture health. When
+    /// wired (production via `with_capture_health`), every `capture_once`
+    /// outcome — success, intentional drop, error — is reflected here so
+    /// `nagori doctor` and the desktop tray can flag a silently filtering
+    /// loop. `None` in unit tests keeps the loop independent of the
+    /// daemon's shared-state plumbing.
+    capture_health: Option<CaptureHealth>,
+    /// Optional hook invoked after a new entry has been durably inserted.
+    /// Desktop uses this to wake the palette without coupling the daemon
+    /// crate to Tauri; CLI/server callers leave it unset.
+    capture_notifier: Option<Arc<dyn Fn(EntryId) + Send + Sync>>,
+}
+
+impl<R, E, A> CaptureLoop<R, E, A>
+where
+    R: ClipboardReader,
+    E: EntryRepository,
+    A: AuditLog,
+{
+    pub const fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
+        Self {
+            reader,
+            entries,
+            audit,
+            settings,
+            dedup: DedupState::new(),
+            window: None,
+            failures: CaptureFailurePolicy::new(),
+            consecutive_secure_ax_failures: 0,
+            search_cache: None,
+            last_tick_at: None,
+            secure_focus_fail_closed_enabled: true,
+            capture_health: None,
+            capture_notifier: None,
+        }
+    }
+
+    /// Disable the AX-error fail-closed escalation. See the field doc on
+    /// `secure_focus_fail_closed_enabled` for the production vs. test
+    /// trade-off; the bundle-id override list still applies.
+    #[must_use]
+    pub const fn without_secure_focus_fail_closed(mut self) -> Self {
+        self.secure_focus_fail_closed_enabled = false;
+        self
+    }
+
+    /// Reset the dedup baseline so the next observed sequence is treated as
+    /// fresh content. Useful after macOS sleep/wake when the pasteboard
+    /// counter can lap silently and we'd otherwise skip a real change as a
+    /// duplicate.
+    pub fn reset_sequence_baseline(&mut self) {
+        self.dedup.last_sequence = None;
+    }
+
+    fn note_capture_error(&mut self, err: &AppError) {
+        self.failures.note_error(err, self.capture_health.as_ref());
+    }
+
+    fn note_capture_success(&mut self) {
+        self.failures.note_success(self.capture_health.as_ref());
+    }
+
+    /// Record an intentional in-loop drop (oversized payload, policy /
+    /// secret refusal). Does not bump the failure counter — the loop did
+    /// its job — but updates the shared `CaptureHealth` snapshot so the
+    /// UI can distinguish "we lost visibility" from "we're rejecting on
+    /// purpose".
+    fn note_capture_drop(&self, category: CaptureEventCategory) {
+        if let Some(health) = &self.capture_health {
+            health.record_drop(category, OffsetDateTime::now_utc());
+        }
     }
 
     #[must_use]
@@ -1004,7 +1041,7 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
-            let sleep_for = Self::jittered_backoff(interval, self.consecutive_failures);
+            let sleep_for = self.failures.next_sleep(interval);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
                 () = tokio::time::sleep(sleep_for) => {
@@ -1025,7 +1062,7 @@ where
     ) -> Result<()> {
         tokio::pin!(shutdown);
         loop {
-            let sleep_for = Self::jittered_backoff(interval, self.consecutive_failures);
+            let sleep_for = self.failures.next_sleep(interval);
             tokio::select! {
                 () = &mut shutdown => return Ok(()),
                 changed = settings_rx.changed() => {
@@ -2997,8 +3034,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
     }
 
-    type Loop = CaptureLoop<Arc<MemoryClipboard>, SqliteStore, SqliteStore>;
-
     #[test]
     fn backoff_keeps_base_interval_below_threshold() {
         // Below the threshold the loop must keep its configured cadence —
@@ -3006,7 +3041,10 @@ mod tests {
         // hide the next clip behind a several-second wait.
         let base = Duration::from_millis(500);
         for failures in 0..BACKOFF_AFTER_CONSECUTIVE_FAILURES {
-            assert_eq!(Loop::backoff_for_failures(base, failures), base);
+            assert_eq!(
+                CaptureFailurePolicy::backoff_for_failures(base, failures),
+                base
+            );
         }
     }
 
@@ -3017,11 +3055,15 @@ mod tests {
         // matters: without it a sustained outage would push the next
         // tick out by minutes.
         let base = Duration::from_millis(500);
-        let first = Loop::backoff_for_failures(base, BACKOFF_AFTER_CONSECUTIVE_FAILURES);
+        let first =
+            CaptureFailurePolicy::backoff_for_failures(base, BACKOFF_AFTER_CONSECUTIVE_FAILURES);
         assert_eq!(first, base * 2);
-        let second = Loop::backoff_for_failures(base, BACKOFF_AFTER_CONSECUTIVE_FAILURES + 1);
+        let second = CaptureFailurePolicy::backoff_for_failures(
+            base,
+            BACKOFF_AFTER_CONSECUTIVE_FAILURES + 1,
+        );
         assert_eq!(second, base * 4);
-        let huge = Loop::backoff_for_failures(base, 1_000);
+        let huge = CaptureFailurePolicy::backoff_for_failures(base, 1_000);
         assert_eq!(huge, MAX_BACKOFF);
     }
 
@@ -3035,7 +3077,7 @@ mod tests {
         let low = nanos - nanos / 10;
         let high = nanos + nanos / 10;
         for entropy in [0_u64, 1, 7, nanos, u64::MAX] {
-            let jittered = Loop::apply_jitter(base, entropy);
+            let jittered = CaptureFailurePolicy::apply_jitter(base, entropy);
             let got = u64::try_from(jittered.as_nanos()).expect("1.1s fits u64");
             assert!(
                 got >= low && got <= high,
@@ -3052,13 +3094,13 @@ mod tests {
         let base = Duration::from_secs(1);
         let nanos = u64::try_from(base.as_nanos()).expect("1s fits u64");
         let range = nanos / 10;
-        let floor = Loop::apply_jitter(base, 0);
+        let floor = CaptureFailurePolicy::apply_jitter(base, 0);
         assert_eq!(
             floor,
             Duration::from_nanos(nanos - range),
             "entropy=0 should produce the lower bound",
         );
-        let ceil = Loop::apply_jitter(base, range * 2);
+        let ceil = CaptureFailurePolicy::apply_jitter(base, range * 2);
         assert_eq!(
             ceil,
             Duration::from_nanos(nanos + range),
@@ -3074,7 +3116,7 @@ mod tests {
         // is actually active.
         let base = Duration::from_millis(500);
         for failures in 0..BACKOFF_AFTER_CONSECUTIVE_FAILURES {
-            assert_eq!(Loop::jittered_backoff(base, failures), base);
+            assert_eq!(CaptureFailurePolicy::jittered_backoff(base, failures), base);
         }
     }
 
@@ -3089,7 +3131,8 @@ mod tests {
         let saturated = MAX_BACKOFF;
         let entropy_max =
             u64::try_from(saturated.as_nanos() / 10).expect("MAX_BACKOFF/10 fits u64") * 2;
-        let with_max_jitter = Loop::apply_jitter(saturated, entropy_max).min(MAX_BACKOFF);
+        let with_max_jitter =
+            CaptureFailurePolicy::apply_jitter(saturated, entropy_max).min(MAX_BACKOFF);
         assert!(
             with_max_jitter <= MAX_BACKOFF,
             "post-jitter clamp must respect MAX_BACKOFF: {with_max_jitter:?}",
@@ -3107,9 +3150,9 @@ mod tests {
 
         loop_.note_capture_error(&AppError::Platform("simulated".to_owned()));
         loop_.note_capture_error(&AppError::Platform("simulated".to_owned()));
-        assert_eq!(loop_.consecutive_failures, 2);
+        assert_eq!(loop_.failures.consecutive_failures, 2);
         loop_.note_capture_success();
-        assert_eq!(loop_.consecutive_failures, 0);
+        assert_eq!(loop_.failures.consecutive_failures, 0);
     }
 
     #[tokio::test]
@@ -3127,15 +3170,15 @@ mod tests {
         // Same kind: suppressed, but counter increments.
         loop_.note_capture_error(&AppError::Platform("second".to_owned()));
         let platform_slot = CaptureErrorKind::Platform as usize;
-        assert_eq!(loop_.suppressed_warns[platform_slot], 1);
+        assert_eq!(loop_.failures.suppressed_warns[platform_slot], 1);
 
         // Different kind: emits its own warn line, independent of the
         // platform suppression timer.
         loop_.note_capture_error(&AppError::Policy("policy hit".to_owned()));
         let policy_slot = CaptureErrorKind::Policy as usize;
         // After emitting, suppressed counter is consumed back to 0.
-        assert_eq!(loop_.suppressed_warns[policy_slot], 0);
-        assert!(loop_.last_warn_at[policy_slot].is_some());
+        assert_eq!(loop_.failures.suppressed_warns[policy_slot], 0);
+        assert!(loop_.failures.last_warn_at[policy_slot].is_some());
     }
 
     #[tokio::test]
@@ -3151,7 +3194,7 @@ mod tests {
         loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
         loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
         let storage_slot = CaptureErrorKind::Storage as usize;
-        assert_eq!(loop_.suppressed_warns[storage_slot], 1);
+        assert_eq!(loop_.failures.suppressed_warns[storage_slot], 1);
 
         loop_.note_capture_error(&AppError::InvalidInput("bad clip".to_owned()));
         let invalid_slot = CaptureErrorKind::InvalidInput as usize;
@@ -3159,11 +3202,11 @@ mod tests {
         // shadowed by the in-flight Storage suppression — so its
         // last_warn_at is set and the suppressed counter starts from
         // zero on the next collision.
-        assert!(loop_.last_warn_at[invalid_slot].is_some());
-        assert_eq!(loop_.suppressed_warns[invalid_slot], 0);
+        assert!(loop_.failures.last_warn_at[invalid_slot].is_some());
+        assert_eq!(loop_.failures.suppressed_warns[invalid_slot], 0);
         // The Storage suppression is independent and its in-flight
         // suppressed counter is unaffected by the invalid-input emit.
-        assert_eq!(loop_.suppressed_warns[storage_slot], 1);
+        assert_eq!(loop_.failures.suppressed_warns[storage_slot], 1);
     }
 
     #[tokio::test]
