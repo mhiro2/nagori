@@ -435,7 +435,6 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
 ///     they realise remote calls may now happen.
 #[allow(clippy::too_many_lines)]
 fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
-    use nagori_core::SettingsRepository;
     use std::collections::BTreeMap;
     use tauri::Emitter;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -444,19 +443,21 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
     let app = handle.clone();
     let runtime = app.state::<AppState>().runtime.clone();
     let mut settings_rx = runtime.settings_subscribe();
+    let mut settings_gate = app.state::<AppState>().settings_load_gate();
 
     tauri::async_runtime::spawn(async move {
-        // Fail closed: if the persisted settings can't be loaded we abort
-        // the subscriber. Falling back to `Default` would clobber the
-        // user-customised hotkey, capture flag and auto-launch state.
-        let store = runtime.store().clone();
-        let initial = match store.get_settings().await {
-            Ok(s) => s,
-            Err(err) => {
-                state::record_subscriber_settings_load_failure(&runtime.startup_health(), &err);
-                return;
-            }
-        };
+        // Fail closed: wait for the one-shot startup settings load and abort
+        // if it failed (or if shutdown beats it). The coordinator already
+        // recorded the startup health; here we just bail, because registering
+        // hotkeys / auto-launch from the compiled-in `Default` would clobber
+        // the user-customised hotkey, capture flag and auto-launch state. On
+        // success the loaded snapshot is already published to the runtime's
+        // watch channel.
+        let mut shutdown = runtime.shutdown_handle();
+        if !state::settings_loaded_or_shutdown(&mut settings_gate, &mut shutdown).await {
+            return;
+        }
+        let initial = runtime.current_settings();
 
         let mut current_hotkey = initial.global_hotkey.clone();
         let mut current_capture = initial.capture_enabled;

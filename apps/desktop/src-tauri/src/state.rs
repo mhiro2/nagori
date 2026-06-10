@@ -97,6 +97,14 @@ pub struct AppState {
     /// before any window can serve history, so a timed-out / crashed shutdown
     /// purge can no longer leave behind data the user asked to clear.
     clear_on_quit_marker: Option<PathBuf>,
+    /// Receiver side of the startup settings-load gate. Cloned by each gated
+    /// worker (capture, CLI IPC host, settings subscriber) so they await the
+    /// single coordinator load instead of each re-reading the store.
+    settings_load_rx: tokio::sync::watch::Receiver<SettingsLoadGate>,
+    /// Sender side, taken once by the coordinator in `spawn_background_tasks`.
+    /// Held in a slot rather than moved into `build`'s return so the coordinator
+    /// can publish the load outcome after the state is managed by Tauri.
+    settings_load_tx: Mutex<Option<tokio::sync::watch::Sender<SettingsLoadGate>>>,
 }
 
 /// Snapshot of a global-hotkey registration failure shared across the
@@ -183,7 +191,56 @@ impl HotkeyFailureCache {
     }
 }
 
+/// Outcome of the one-shot startup settings load, broadcast to the workers
+/// that must not run until it lands. Mirrors the daemon's `run_daemon`, which
+/// loads settings once up front and only then spawns its workers — here a
+/// single coordinator does the load and publishes the result through this
+/// gate so the capture loop, the CLI IPC host, and the settings subscriber
+/// each start from the same snapshot instead of re-reading the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsLoadGate {
+    /// The coordinator has not finished the initial load yet.
+    Pending,
+    /// Settings loaded and were published to the runtime's watch channel.
+    Loaded,
+    /// The initial load failed; gated workers must not start (fail-closed).
+    Failed,
+}
+
+/// Block until the startup settings load resolves. Returns `true` once it
+/// loaded, `false` if it failed — or if the coordinator died before resolving
+/// (the watch sender dropped while still `Pending`), which is treated as a
+/// failure so a crashed coordinator fails closed rather than wedging the
+/// gated workers forever. Resolves immediately when the gate is already set.
+pub(crate) async fn settings_loaded_ok(
+    gate: &mut tokio::sync::watch::Receiver<SettingsLoadGate>,
+) -> bool {
+    match gate
+        .wait_for(|state| *state != SettingsLoadGate::Pending)
+        .await
+    {
+        Ok(state) => *state == SettingsLoadGate::Loaded,
+        Err(_) => false,
+    }
+}
+
+/// [`settings_loaded_ok`], but also gives up (returns `false` without
+/// proceeding) the moment shutdown is signalled. Production always starts the
+/// coordinator before any gated worker, so the gate resolves on its own; this
+/// is a backstop so a gated worker can never outlive teardown — and can never
+/// hang at all should the gate, by misconfiguration, never be published.
+pub(crate) async fn settings_loaded_or_shutdown(
+    gate: &mut tokio::sync::watch::Receiver<SettingsLoadGate>,
+    shutdown: &mut ShutdownHandle,
+) -> bool {
+    tokio::select! {
+        ok = settings_loaded_ok(gate) => ok,
+        () = shutdown.cancelled() => false,
+    }
+}
+
 struct BackgroundTasks {
+    settings_load: tauri::async_runtime::JoinHandle<()>,
     capture: tauri::async_runtime::JoinHandle<()>,
     maintenance: tauri::async_runtime::JoinHandle<()>,
     semantic: tauri::async_runtime::JoinHandle<()>,
@@ -382,6 +439,9 @@ impl AppState {
         }
 
         *tasks_slot = Some(BackgroundTasks {
+            // Spawned first so the single store read starts immediately; the
+            // gated workers below await its outcome via `settings_load_gate`.
+            settings_load: self.spawn_settings_load_coordinator(),
             ipc_mutations: spawn_ipc_mutation_forwarder(
                 &self.runtime,
                 self.runtime.shutdown_handle(),
@@ -391,7 +451,7 @@ impl AppState {
                 self.runtime.clone(),
                 self.window.clone(),
                 self.capture_reader.clone(),
-                self.runtime.startup_health(),
+                self.settings_load_gate(),
                 self.runtime.shutdown_handle(),
                 app,
             ),
@@ -415,6 +475,43 @@ impl AppState {
         });
     }
 
+    /// Run the one-shot startup settings load and publish its outcome to the
+    /// gate. A single load here — mirroring the daemon's `run_daemon`, which
+    /// loads settings once before spawning its workers — replaces the
+    /// per-worker `refresh_settings_from_store` calls the capture loop, the
+    /// CLI IPC host, and the settings subscriber each used to make, so they
+    /// all observe one consistent snapshot rather than racing concurrent
+    /// reads. It records the startup health (the gated "nagori is running"
+    /// notification reads it) and then sends `Loaded` / `Failed` through the
+    /// watch. If this task dies before sending, the dropped sender resolves
+    /// every waiter to failed (fail-closed).
+    fn spawn_settings_load_coordinator(&self) -> tauri::async_runtime::JoinHandle<()> {
+        let tx = self
+            .settings_load_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let runtime = self.runtime.clone();
+        tauri::async_runtime::spawn(async move {
+            // `spawn_background_tasks` guards against a second start, so the
+            // slot is present on the first (and only) call; bail quietly if a
+            // future caller ever spawns the coordinator twice.
+            let Some(tx) = tx else {
+                tracing::warn!("settings_load_coordinator_already_started");
+                return;
+            };
+            let outcome = runtime.refresh_settings_from_store().await;
+            let gate = if note_settings_load_outcome(&runtime.startup_health(), &outcome) {
+                SettingsLoadGate::Loaded
+            } else {
+                SettingsLoadGate::Failed
+            };
+            // Receivers retain the last value, so dropping `tx` after this
+            // send still lets a late waiter observe the terminal state.
+            let _ = tx.send(gate);
+        })
+    }
+
     /// Host the CLI IPC endpoint inside the desktop process so `nagori`
     /// write commands reach this runtime (and its search-cache
     /// invalidation) while the GUI is running, exactly as they would a
@@ -426,24 +523,25 @@ impl AppState {
     ///   leftover socket on the grounds that the lock holder is the only
     ///   live owner of the store — a `build()`-only state (tests,
     ///   in-memory) holds no lock, so it must not bind a real endpoint.
-    /// * The persisted settings must load (fail-closed). `cli_ipc_enabled`
-    ///   is read from the runtime's settings snapshot; serving before the
-    ///   store snapshot lands would honor the compiled-in default — and
-    ///   briefly expose the socket — even when the user disabled CLI IPC.
-    ///   The refresh also runs in the capture supervisor; doubling up is
-    ///   an accepted interim until startup settings loading is centralized.
+    /// * The startup settings load must have succeeded (fail-closed).
+    ///   `cli_ipc_enabled` is read from the runtime's settings snapshot, so
+    ///   serving before the store snapshot lands would honor the compiled-in
+    ///   default — and briefly expose the socket — even when the user
+    ///   disabled CLI IPC. The host awaits the shared coordinator gate rather
+    ///   than reading the store itself.
     fn spawn_cli_ipc_host(&self, config: CliIpcConfig) -> tauri::async_runtime::JoinHandle<()> {
         if self.instance_lock.is_none() {
             tracing::info!("cli_ipc_skipped_without_instance_lock");
             return tauri::async_runtime::spawn(async {});
         }
         let runtime = self.runtime.clone();
+        let mut gate = self.settings_load_gate();
         tauri::async_runtime::spawn(async move {
-            if let Err(err) = runtime.refresh_settings_from_store().await {
-                tracing::warn!(error = %err, "cli_ipc_settings_load_failed_not_serving");
+            let mut shutdown = runtime.shutdown_handle();
+            if !settings_loaded_or_shutdown(&mut gate, &mut shutdown).await {
+                tracing::warn!("cli_ipc_settings_load_failed_not_serving");
                 return;
             }
-            let shutdown = runtime.shutdown_handle();
             let supervisor = spawn_cli_ipc_supervisor(runtime, config, shutdown);
             if let Err(err) = supervisor.await {
                 tracing::warn!(error = %err, "cli_ipc_supervisor_join_failed");
@@ -465,6 +563,7 @@ impl AppState {
             return;
         };
         tokio::join!(
+            drain_background_task("settings_load", tasks.settings_load, grace),
             drain_background_task("capture", tasks.capture, grace),
             drain_background_task("maintenance", tasks.maintenance, grace),
             drain_background_task("semantic", tasks.semantic, grace),
@@ -487,6 +586,8 @@ impl AppState {
 
     fn build(store: SqliteStore) -> Result<Self> {
         let parts = build_native_runtime(store, NativeRuntimeOptions::default())?;
+        let (settings_load_tx, settings_load_rx) =
+            tokio::sync::watch::channel(SettingsLoadGate::Pending);
         Ok(Self {
             runtime: parts.runtime,
             window: parts.window,
@@ -500,7 +601,16 @@ impl AppState {
             // (tests, in-memory stores) own no on-disk directory to lock.
             instance_lock: None,
             clear_on_quit_marker: None,
+            settings_load_rx,
+            settings_load_tx: Mutex::new(Some(settings_load_tx)),
         })
+    }
+
+    /// Clone the startup settings-load gate receiver so a worker spawned
+    /// outside `spawn_background_tasks` (the settings subscriber, in `lib.rs`)
+    /// can await the single coordinator load via [`settings_loaded_ok`].
+    pub(crate) fn settings_load_gate(&self) -> tokio::sync::watch::Receiver<SettingsLoadGate> {
+        self.settings_load_rx.clone()
     }
 
     /// Write the clear-on-quit purge-pending marker. Called by the shutdown
@@ -636,21 +746,22 @@ impl AppState {
 
 /// Supervise the in-process clipboard capture loop. `reader` / `window` are
 /// shared (`Arc`) so each respawn after a panic rebuilds a fresh
-/// [`CaptureLoop`] over the same adapter. A one-time fail-closed settings load
-/// runs *before* the supervised loop is entered: if it fails the worker never
-/// enters the loop (so a persistent settings failure leaves capture down rather
-/// than respawn-spinning), mirroring the daemon's `run_daemon`.
+/// [`CaptureLoop`] over the same adapter. The loop waits for the one-shot
+/// startup settings load (the coordinator's `settings_load_gate`) *before* it
+/// is entered: if that load failed the worker never enters the loop (so a
+/// persistent settings failure leaves capture down rather than respawn-spinning),
+/// mirroring the daemon's `run_daemon`.
 fn spawn_capture_supervisor(
     runtime: NagoriRuntime,
     window: Arc<dyn WindowBehavior>,
     reader: Arc<dyn ClipboardReader>,
-    startup_health: StartupHealth,
+    mut settings_gate: tokio::sync::watch::Receiver<SettingsLoadGate>,
     shutdown: ShutdownHandle,
     app: tauri::AppHandle,
 ) -> tauri::async_runtime::JoinHandle<()> {
+    let mut gate_shutdown = shutdown.clone();
     tauri::async_runtime::spawn(async move {
-        let refresh = runtime.refresh_settings_from_store().await;
-        if !note_capture_settings_load_outcome(&startup_health, &refresh) {
+        if !settings_loaded_or_shutdown(&mut settings_gate, &mut gate_shutdown).await {
             return;
         }
         supervise_worker(
@@ -881,14 +992,16 @@ async fn drain_background_task(
     }
 }
 
-/// Funnels the capture task's `refresh_settings_from_store` outcome into the
-/// shared `StartupHealth` signal and decides whether the capture loop should
-/// proceed to enter polling. Extracted so the wiring between "settings load
-/// failed" and "`StartupHealth` records failed" can be pinned by a unit test
-/// rather than living only inside `tauri::async_runtime::spawn`, where the
-/// previous inline version silently dropped failures and left users with a
-/// "Clipboard history is ready" notification while capture never started.
-pub(crate) fn note_capture_settings_load_outcome(
+/// Funnels the startup settings-load outcome into the shared `StartupHealth`
+/// signal and decides whether the gated workers should proceed. Called once
+/// by the settings-load coordinator (the gated capture loop, CLI IPC host,
+/// and settings subscriber then key off its broadcast gate). Extracted so the
+/// wiring between "settings load failed" and "`StartupHealth` records failed"
+/// can be pinned by a unit test rather than living only inside
+/// `tauri::async_runtime::spawn`, where an inline version silently dropping
+/// failures left users with a "Clipboard history is ready" notification while
+/// capture never started.
+pub(crate) fn note_settings_load_outcome(
     health: &StartupHealth,
     result: &Result<AppSettings>,
 ) -> bool {
@@ -899,22 +1012,10 @@ pub(crate) fn note_capture_settings_load_outcome(
         }
         Err(err) => {
             health.record_capture_failed(err.to_string());
-            tracing::error!(error = %err, "settings_load_failed_aborting_capture");
+            tracing::error!(error = %err, "settings_load_failed_aborting_workers");
             false
         }
     }
-}
-
-/// Subscriber-side counterpart to `note_capture_settings_load_outcome`. The
-/// settings subscriber and the capture task both abort on a failed initial
-/// settings load; recording the same failure here means a subscriber-only
-/// abort (which the capture task may not even reach) still flips the
-/// desktop's gated "ready" notification to "failed". `StartupHealth` is
-/// first-outcome-wins, so calling this after a capture-side success cannot
-/// mask the running state.
-pub(crate) fn record_subscriber_settings_load_failure(health: &StartupHealth, err: &AppError) {
-    health.record_capture_failed(err.to_string());
-    tracing::error!(error = %err, "settings_load_failed_aborting_subscribers");
 }
 
 /// Funnels one maintenance iteration's outcome into `MaintenanceHealth` so
@@ -1186,11 +1287,20 @@ mod tests {
                     .expect("lock should be free"),
             );
             let config = test_ipc_config(temp.path());
+            // The host gates on the startup settings load, so drive the
+            // coordinator the same way `spawn_background_tasks` would —
+            // otherwise the gate stays Pending and the host never binds.
+            let _coordinator = state.spawn_settings_load_coordinator();
             let handle = state.spawn_cli_ipc_host(config.clone());
 
-            wait_until(Duration::from_secs(3), || config.socket_path.exists())
-                .await
-                .expect("socket should appear once the host is up");
+            // Wait for the token too, not just the socket: the bind creates the
+            // socket inode a beat before the token file is written, so polling
+            // on the socket alone can race the token read below under load.
+            wait_until(Duration::from_secs(3), || {
+                config.socket_path.exists() && config.token_path.exists()
+            })
+            .await
+            .expect("socket and token should appear once the host is up");
             let token = nagori_ipc::read_token_file(&config.token_path).expect("token file");
             let client = nagori_ipc::IpcClient::new(
                 config.socket_path.to_string_lossy().into_owned(),
@@ -1218,6 +1328,45 @@ mod tests {
                 "token file should be removed on shutdown",
             );
         }
+
+        /// Fail-closed: when the startup settings load failed (the gate
+        /// resolved to `Failed`), the host must never bind — serving on the
+        /// compiled-in default could expose the socket even though the user
+        /// disabled CLI IPC.
+        #[tokio::test]
+        async fn host_does_not_serve_when_settings_load_failed() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let mut state = test_state();
+            state.instance_lock = Some(
+                nagori_storage::ProcessLock::try_acquire(temp.path())
+                    .expect("lock io")
+                    .expect("lock should be free"),
+            );
+            let config = test_ipc_config(temp.path());
+            // Stand in for the coordinator reporting a failed load.
+            state
+                .settings_load_tx
+                .lock()
+                .expect("tx slot")
+                .take()
+                .expect("tx present")
+                .send(SettingsLoadGate::Failed)
+                .expect("publish failed gate");
+
+            let handle = state.spawn_cli_ipc_host(config.clone());
+            tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect("host should bail promptly on a failed gate")
+                .expect("host should not panic");
+            assert!(
+                !config.socket_path.exists(),
+                "a failed settings load must not bind the socket",
+            );
+            assert!(
+                !config.token_path.exists(),
+                "a failed settings load must not write a token file",
+            );
+        }
     }
 
     #[tokio::test]
@@ -1237,75 +1386,98 @@ mod tests {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
-    /// Capture-task abort path: when `refresh_settings_from_store` returns
-    /// an error, `StartupHealth` must flip to `failed` with the error
-    /// string preserved verbatim. This pins the wiring extracted out of
-    /// `spawn_background_tasks` so a future inline refactor that drops
-    /// the recording is caught even without running the full spawn.
+    /// Settings-load abort path: when the coordinator's load returns an
+    /// error, `StartupHealth` must flip to `failed` with the error string
+    /// preserved verbatim. This pins the wiring extracted out of
+    /// `spawn_settings_load_coordinator` so a future inline refactor that
+    /// drops the recording is caught even without running the full spawn.
     #[test]
-    fn note_capture_settings_load_outcome_records_failure() {
+    fn note_settings_load_outcome_records_failure() {
         let health = StartupHealth::new();
         let err = AppError::Storage("disk full".to_owned());
         let expected = err.to_string();
         let result: Result<AppSettings> = Err(err);
-        let proceed = note_capture_settings_load_outcome(&health, &result);
-        assert!(!proceed, "capture loop must abort when settings load fails");
-        let report = health.report();
-        assert!(!report.ready);
-        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
-    }
-
-    /// Capture-task success path: a settled refresh must flip ready, with
-    /// no error recorded. Combined with the failure test, this fixes the
-    /// helper as the single source of truth for "did the capture loop
-    /// reach polling?" — the bug that motivated 1.2 was precisely that
-    /// the desktop notification fired before this signal existed.
-    #[test]
-    fn note_capture_settings_load_outcome_records_ready_on_success() {
-        let health = StartupHealth::new();
-        let result: Result<AppSettings> = Ok(AppSettings::default());
-        let proceed = note_capture_settings_load_outcome(&health, &result);
-        assert!(proceed, "capture loop must continue when settings load");
-        let report = health.report();
-        assert!(report.ready);
-        assert!(report.last_error.is_none());
-    }
-
-    /// Subscriber-task abort path: like the capture-side helper but
-    /// driven by the settings subscriber's own initial `get_settings`
-    /// call. The subscriber and capture task race on the same store; the
-    /// first abort to land wins. This test pins that the subscriber
-    /// helper records the failure string as-is.
-    #[test]
-    fn record_subscriber_settings_load_failure_records_error_string() {
-        let health = StartupHealth::new();
-        let err = AppError::Storage("permission denied".to_owned());
-        let expected = err.to_string();
-        record_subscriber_settings_load_failure(&health, &err);
-        let report = health.report();
-        assert!(!report.ready);
-        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
-    }
-
-    /// First-outcome-wins must hold across both spawn helpers: a
-    /// capture-side ready followed by a subscriber-side abort cannot
-    /// downgrade an already-ready signal. This is critical for the
-    /// desktop notification — once "Nagori is running" has fired, a
-    /// late subscriber failure must not retroactively rewrite history.
-    #[test]
-    fn helpers_respect_first_outcome_wins() {
-        let health = StartupHealth::new();
-        assert!(note_capture_settings_load_outcome(
-            &health,
-            &Ok(AppSettings::default()),
-        ));
-        record_subscriber_settings_load_failure(
-            &health,
-            &AppError::Storage("late failure".to_owned()),
+        let proceed = note_settings_load_outcome(&health, &result);
+        assert!(
+            !proceed,
+            "gated workers must abort when settings load fails"
         );
         let report = health.report();
+        assert!(!report.ready);
+        assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
+    }
+
+    /// Settings-load success path: a settled load must flip ready, with no
+    /// error recorded. Combined with the failure test, this fixes the helper
+    /// as the single source of truth for "did startup reach a serving
+    /// state?" — the gated "Nagori is running" notification reads it.
+    #[test]
+    fn note_settings_load_outcome_records_ready_on_success() {
+        let health = StartupHealth::new();
+        let result: Result<AppSettings> = Ok(AppSettings::default());
+        let proceed = note_settings_load_outcome(&health, &result);
+        assert!(proceed, "gated workers must continue when settings load");
+        let report = health.report();
         assert!(report.ready);
         assert!(report.last_error.is_none());
+    }
+
+    /// The startup gate must resolve a gated worker to the coordinator's
+    /// terminal state — and, crucially, never wedge it: a coordinator that
+    /// dies before publishing (its sender dropped while still `Pending`)
+    /// must resolve to a fail-closed `false` rather than blocking forever.
+    #[tokio::test]
+    async fn settings_loaded_ok_resolves_to_the_gate_state() {
+        use tokio::sync::watch;
+
+        let (tx, mut rx) = watch::channel(SettingsLoadGate::Pending);
+        tx.send(SettingsLoadGate::Loaded).expect("send loaded");
+        assert!(
+            settings_loaded_ok(&mut rx).await,
+            "Loaded gate must proceed"
+        );
+
+        let (tx, mut rx) = watch::channel(SettingsLoadGate::Pending);
+        tx.send(SettingsLoadGate::Failed).expect("send failed");
+        assert!(
+            !settings_loaded_ok(&mut rx).await,
+            "Failed gate must not proceed"
+        );
+
+        // Sender dropped while still Pending → fail-closed, no hang.
+        let (tx, mut rx) = watch::channel(SettingsLoadGate::Pending);
+        drop(tx);
+        assert!(
+            !settings_loaded_ok(&mut rx).await,
+            "a coordinator that dies before resolving must fail closed",
+        );
+
+        // Late waiter: the terminal value is retained after the sender drops.
+        let (tx, mut rx) = watch::channel(SettingsLoadGate::Pending);
+        tx.send(SettingsLoadGate::Loaded).expect("send loaded");
+        drop(tx);
+        assert!(
+            settings_loaded_ok(&mut rx).await,
+            "a retained Loaded value must still resolve after the sender drops",
+        );
+    }
+
+    /// Backstop against a wedge: a gated worker awaiting a gate that never
+    /// resolves (its sender held, e.g. the coordinator was never started)
+    /// must still give up the moment shutdown is signalled rather than wait
+    /// forever. The `tx` is deliberately kept alive so the gate stays Pending.
+    #[tokio::test]
+    async fn settings_loaded_or_shutdown_gives_up_on_shutdown() {
+        let state = AppState::build(SqliteStore::open_memory().expect("memory store"))
+            .expect("app state should build on the host target");
+        let mut shutdown = state.runtime.shutdown_handle();
+        let (_tx, mut rx) = tokio::sync::watch::channel(SettingsLoadGate::Pending);
+
+        shutdown.cancel();
+        assert!(
+            !settings_loaded_or_shutdown(&mut rx, &mut shutdown).await,
+            "a pending gate must not block past shutdown",
+        );
     }
 
     /// Desktop maintenance loop must record `record_failure` with the
@@ -1379,31 +1551,6 @@ mod tests {
         let daemon_after = daemon_health.report();
         assert!(desktop_after.degraded);
         assert_eq!(desktop_after, daemon_after);
-    }
-
-    /// The mirror case: if the subscriber's initial `get_settings()`
-    /// fails before the capture task races in, the failure must stick
-    /// even if the capture task later loads settings successfully.
-    /// Treating this as "intentional sticky failure" (rather than a
-    /// surprise) is the deliberate trade-off documented on
-    /// `StartupHealthReport` — either task aborting on settings load
-    /// means the desktop is not fully running, so the gated
-    /// notification stays in its failed wording until the next launch.
-    #[test]
-    fn subscriber_failure_sticks_even_if_capture_later_succeeds() {
-        let health = StartupHealth::new();
-        record_subscriber_settings_load_failure(
-            &health,
-            &AppError::Storage("subscriber abort".to_owned()),
-        );
-        let proceed = note_capture_settings_load_outcome(&health, &Ok(AppSettings::default()));
-        // Helper return value still reflects the capture-side outcome
-        // (so the spawn body can enter polling if its own refresh
-        // landed), but the externally-visible report stays failed.
-        assert!(proceed);
-        let report = health.report();
-        assert!(!report.ready, "subscriber failure must remain sticky");
-        assert!(report.last_error.is_some());
     }
 
     /// `NAGORI_DB_PATH` is advertised in the startup-failure hint

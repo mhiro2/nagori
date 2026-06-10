@@ -1587,15 +1587,21 @@ retention loop, `capture` for the steady-state capture loop, and
 canonical first step for support tickets.
 
 **Startup health.** `NagoriRuntime::startup_health()` returns a
-shared `StartupHealth` snapshot. The host process (`serve.rs` for the
-daemon, `state.rs::spawn_background_tasks` for the desktop) records
-either `record_capture_ready()` once settings load and the capture
-loop is entering polling, or `record_capture_failed(reason)` on the
-silent-abort path that used to leave the user staring at a "Clipboard
-history is ready." notification while capture quietly never started.
-The snapshot is sticky after the first outcome, so transient
-re-inits cannot mask the original failure — both `nagori doctor` and
-the desktop's gated startup notification read the same signal.
+shared `StartupHealth` snapshot. The host loads persisted settings
+once, up front — the daemon in `run_daemon`, the desktop in a single
+settings-load coordinator (`state.rs`) — and records either
+`record_capture_ready()` on success or `record_capture_failed(reason)`
+on the silent-abort path that used to leave the user staring at a
+"Clipboard history is ready." notification while capture quietly never
+started. On the desktop the coordinator broadcasts the outcome through a
+startup gate: the capture loop, the CLI IPC host, and the settings
+subscriber each wait on the gate rather than re-reading the store, so
+they observe one consistent snapshot and all stay down together if the
+load fails (a coordinator that dies before publishing resolves every
+waiter to failed, fail-closed). The snapshot is sticky after the first
+outcome, so transient re-inits cannot mask the original failure — both
+`nagori doctor` and the desktop's gated startup notification read the
+same signal.
 
 **Capture health.** `NagoriRuntime::capture_health()` returns a shared
 `CaptureHealth` snapshot covering the capture loop's *steady-state*
