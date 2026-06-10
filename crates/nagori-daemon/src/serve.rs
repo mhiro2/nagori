@@ -304,6 +304,52 @@ fn spawn_ipc_server(
     }
 }
 
+/// Prepare the IPC runtime directories and bind the endpoint.
+///
+/// Bundling the two means every path that (re)starts the server — daemon
+/// startup, the settings-ON arm, and the backoff retry — recreates a
+/// missing socket / token directory instead of assuming a one-time setup
+/// call already ran. Without this, an initial directory failure would make
+/// every retry fail forever: `spawn_ipc_server` alone never recreates the
+/// parent directories.
+fn start_ipc_server(
+    runtime: NagoriRuntime,
+    config: &CliIpcConfig,
+    shutdown: ShutdownHandle,
+) -> Result<IpcServerTask> {
+    ensure_ipc_runtime_dirs(config)?;
+    spawn_ipc_server(runtime, config, shutdown)
+}
+
+/// State the IPC supervisor starts from. [`run_daemon`] always enters with
+/// `Running` or `Disabled` (an initial bind failure aborts daemon startup),
+/// while [`spawn_cli_ipc_supervisor`] maps an initial failure to
+/// `RetryPending` so the host keeps running and the supervisor's existing
+/// backoff loop brings IPC up once the cause clears.
+enum InitialIpcState {
+    /// The endpoint is already bound; supervise it.
+    Running(IpcServerTask),
+    /// `cli_ipc_enabled` was off at startup; wait for the settings watch.
+    Disabled,
+    /// The initial bind failed while IPC is enabled; retry with backoff.
+    RetryPending,
+}
+
+impl InitialIpcState {
+    /// Decompose into the supervisor loop's `(server, restart_pending)`
+    /// pair. `RetryPending` arms the backoff timer right away: with
+    /// settings already enabled, neither the settings arm nor the join
+    /// arm would ever fire for a server that never came up, and IPC
+    /// would stay dead for good.
+    fn into_parts(self) -> (Option<IpcServerTask>, bool) {
+        match self {
+            Self::Running(server) => (Some(server), false),
+            Self::Disabled => (None, false),
+            Self::RetryPending => (None, true),
+        }
+    }
+}
+
 struct IpcServerTask {
     handle: tokio::task::JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
@@ -404,10 +450,10 @@ async fn supervise_ipc_server(
     config: CliIpcConfig,
     mut settings_rx: watch::Receiver<nagori_core::AppSettings>,
     mut shutdown: ShutdownHandle,
-    mut server: Option<IpcServerTask>,
+    initial: InitialIpcState,
 ) {
     let mut backoff = IPC_RESTART_BACKOFF_INITIAL;
-    let mut restart_pending = false;
+    let (mut server, mut restart_pending) = initial.into_parts();
     loop {
         // The restart timer is only active when we've observed an unexpected
         // accept-loop exit and IPC is still enabled. Encoding it as a future
@@ -467,7 +513,7 @@ async fn supervise_ipc_server(
                     // and no restart was pending. Start one immediately;
                     // the restart-timer arm will handle the post-failure
                     // backoff path on its own.
-                    match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()) {
+                    match start_ipc_server(runtime.clone(), &config, shutdown.clone()) {
                         Ok(next) => {
                             info!(socket = %config.socket_path.display(), "ipc_server_started");
                             server = Some(next);
@@ -546,7 +592,7 @@ async fn supervise_ipc_server(
             // would bail to the other arms after a single failed retry and
             // never recover.
             () = restart_timer => {
-                match spawn_ipc_server(runtime.clone(), &config, shutdown.clone()) {
+                match start_ipc_server(runtime.clone(), &config, shutdown.clone()) {
                     Ok(next) => {
                         info!(
                             socket = %config.socket_path.display(),
@@ -685,11 +731,54 @@ fn spawn_ipc_supervisor(
     config: CliIpcConfig,
     settings_rx: watch::Receiver<nagori_core::AppSettings>,
     shutdown: ShutdownHandle,
-    initial_server: Option<IpcServerTask>,
+    initial: InitialIpcState,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        supervise_ipc_server(runtime, config, settings_rx, shutdown, initial_server).await;
+        supervise_ipc_server(runtime, config, settings_rx, shutdown, initial).await;
     })
+}
+
+/// Spawn the CLI IPC supervisor against an already-built runtime.
+///
+/// Used by the desktop shell so it serves the same IPC surface as
+/// `nagori daemon run`: same bind path, token handshake, settings-driven
+/// ON/OFF, liveness probe, and shutdown cleanup. The caller MUST hold the
+/// data-directory `ProcessLock` for the runtime's lifetime — the
+/// stale-socket reclaim inside the bind path treats a leftover socket as
+/// dead *because* the lock proves no peer owns the store.
+///
+/// The caller is also responsible for loading persisted settings into the
+/// runtime first: `cli_ipc_enabled` is read from `current_settings()`, so
+/// serving before the store snapshot lands would honor the compiled-in
+/// default instead of the user's choice.
+///
+/// Unlike [`run_daemon`] — which treats an initial bind failure as a fatal
+/// startup error — a failure here only arms the supervisor's backoff
+/// retry. A GUI host must keep running when the endpoint is temporarily
+/// unavailable (e.g. another process still draining it), and the retry
+/// loop brings IPC up once the cause clears.
+pub fn spawn_cli_ipc_supervisor(
+    runtime: NagoriRuntime,
+    config: CliIpcConfig,
+    shutdown: ShutdownHandle,
+) -> tokio::task::JoinHandle<()> {
+    let settings_rx = runtime.settings_subscribe();
+    let initial = if runtime.current_settings().cli_ipc_enabled {
+        match start_ipc_server(runtime.clone(), &config, shutdown.clone()) {
+            Ok(server) => {
+                info!(socket = %config.socket_path.display(), "ipc_server_started");
+                InitialIpcState::Running(server)
+            }
+            Err(err) => {
+                warn!(error = %err, "ipc_server_start_failed");
+                InitialIpcState::RetryPending
+            }
+        }
+    } else {
+        info!("ipc_disabled_by_settings");
+        InitialIpcState::Disabled
+    };
+    spawn_ipc_supervisor(runtime, config, settings_rx, shutdown, initial)
 }
 
 /// Take the daemon's data-directory lifetime lock.
@@ -1092,22 +1181,25 @@ where
     let ngram_rebuild_handle =
         spawn_ngram_rebuild_supervisor(runtime.clone(), grace, shutdown.clone());
 
-    let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
-        Some(spawn_ipc_server(
+    // Unlike the desktop host, an initial bind failure is fatal here: a
+    // headless daemon whose whole purpose is serving IPC should refuse to
+    // start half-alive rather than retry in the background.
+    let initial_ipc_state = if runtime.current_settings().cli_ipc_enabled {
+        InitialIpcState::Running(spawn_ipc_server(
             runtime.clone(),
             &config.ipc,
             shutdown.clone(),
         )?)
     } else {
         info!("ipc_disabled_by_settings");
-        None
+        InitialIpcState::Disabled
     };
     let serve_handle = spawn_ipc_supervisor(
         runtime.clone(),
         config.ipc.clone(),
         settings_rx.clone(),
         shutdown.clone(),
-        initial_ipc_server,
+        initial_ipc_state,
     );
 
     info!(socket = %config.ipc.socket_path.display(), "daemon_started");
@@ -1418,7 +1510,7 @@ mod tests {
             config.clone(),
             settings_rx,
             shutdown.clone(),
-            Some(initial_server),
+            InitialIpcState::Running(initial_server),
         ));
         let token = nagori_ipc::read_token_file(&config.token_path).expect("token file");
         let client = IpcClient::new(config.socket_path.to_string_lossy().into_owned(), token)
@@ -1457,6 +1549,139 @@ mod tests {
             .await
             .expect("supervisor should stop")
             .expect("supervisor should not panic");
+    }
+
+    fn test_ipc_config(dir: &std::path::Path) -> CliIpcConfig {
+        CliIpcConfig {
+            socket_path: dir.join("nagori.sock"),
+            token_path: dir.join("nagori.token"),
+            shutdown_grace: Duration::from_millis(50),
+            ..CliIpcConfig::default()
+        }
+    }
+
+    fn test_ipc_client(config: &CliIpcConfig) -> IpcClient {
+        let token = nagori_ipc::read_token_file(&config.token_path).expect("token file");
+        IpcClient::new(config.socket_path.to_string_lossy().into_owned(), token)
+            .with_connect_timeout(Duration::from_millis(100))
+            .with_request_timeout(Duration::from_secs(1))
+    }
+
+    #[tokio::test]
+    async fn cli_ipc_supervisor_serves_health_and_cleans_up_on_shutdown() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = test_ipc_config(temp.path());
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let supervisor =
+            spawn_cli_ipc_supervisor(runtime.clone(), config.clone(), shutdown.clone());
+
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("health over the desktop-hosted endpoint");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
+        assert!(
+            !config.socket_path.exists(),
+            "socket should be removed on shutdown",
+        );
+        assert!(
+            !config.token_path.exists(),
+            "token file should be removed on shutdown",
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_ipc_supervisor_initially_disabled_starts_on_settings_enable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = test_ipc_config(temp.path());
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        runtime
+            .save_settings(AppSettings {
+                cli_ipc_enabled: false,
+                ..AppSettings::default()
+            })
+            .await
+            .expect("disable cli ipc");
+        let shutdown = runtime.shutdown_handle();
+        let supervisor =
+            spawn_cli_ipc_supervisor(runtime.clone(), config.clone(), shutdown.clone());
+
+        // Give the supervisor a beat: a disabled start must not create the
+        // socket or leak a token file even transiently.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !config.socket_path.exists(),
+            "disabled start must not bind the socket",
+        );
+        assert!(
+            !config.token_path.exists(),
+            "disabled start must not write a token file",
+        );
+
+        runtime
+            .save_settings(AppSettings::default())
+            .await
+            .expect("enable cli ipc");
+        wait_until(Duration::from_secs(2), || config.socket_path.exists())
+            .await
+            .expect("socket should appear after enabling");
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("health after enabling");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
+    }
+
+    #[tokio::test]
+    async fn cli_ipc_supervisor_recovers_after_initial_bind_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        // Occupy the runtime directory's path with a plain file so the
+        // initial `ensure_ipc_runtime_dirs` (and therefore the bind) fails.
+        let blocked_dir = temp.path().join("ipc");
+        std::fs::write(&blocked_dir, b"squatter").expect("plant blocking file");
+        let config = test_ipc_config(&blocked_dir);
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let supervisor =
+            spawn_cli_ipc_supervisor(runtime.clone(), config.clone(), shutdown.clone());
+
+        // Clear the cause; the armed backoff retry must bring IPC up
+        // without any settings change.
+        std::fs::remove_file(&blocked_dir).expect("remove blocking file");
+        wait_until(Duration::from_secs(3), || config.socket_path.exists())
+            .await
+            .expect("socket should appear once the retry succeeds");
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("health after recovery");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
+        assert!(
+            !config.socket_path.exists(),
+            "socket should be removed on shutdown",
+        );
     }
 
     #[tokio::test]

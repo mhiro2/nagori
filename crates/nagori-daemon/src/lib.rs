@@ -22,5 +22,5 @@ pub use search_cache::{
 };
 pub use serve::{
     CliIpcConfig, DaemonConfig, WorkerRestart, acquire_data_dir_lock, default_socket_path,
-    run_daemon, supervise_worker,
+    run_daemon, spawn_cli_ipc_supervisor, supervise_worker,
 };
