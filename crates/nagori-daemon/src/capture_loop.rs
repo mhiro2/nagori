@@ -446,6 +446,18 @@ impl CaptureFailurePolicy {
     }
 }
 
+/// Outcome of [`CaptureLoop::admit_entry`]'s policy / admission stage.
+enum Admission {
+    /// Entry passed every gate, was classified, and is ready for the
+    /// durable insert. Boxed because `ClipboardEntry` carries the full
+    /// payload and the enum would otherwise be its size on every return.
+    Ready(Box<nagori_core::ClipboardEntry>),
+    /// The loop intentionally dropped the clip (kind filter, size budget,
+    /// policy block, secret drop, empty payload). The dedup state stays
+    /// anchored — the clip is decided, not retried.
+    Dropped,
+}
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
@@ -601,31 +613,13 @@ where
         self.capture_once_at(SystemTime::now()).await
     }
 
-    /// Test seam for `capture_once` that lets the caller pin the wall-clock
-    /// "now" used for gap detection. Production callers should use
-    /// `capture_once`; tests use this to simulate sleep gaps without driving
-    /// real time.
-    #[allow(clippy::too_many_lines)]
-    pub async fn capture_once_at(&mut self, now: SystemTime) -> Result<Option<EntryId>> {
-        // Snapshot settings at the start of the tick. Today the polling
-        // loop's `tokio::select!` already serialises `update_settings`
-        // and `capture_once`, so settings can't actually change between
-        // the `capture_enabled` check at the top and the secret-handling
-        // check at the bottom. But a future refactor that adds an extra
-        // `.await` boundary, or moves capture into its own task, would
-        // re-open that race — and the consequence is observably wrong:
-        // a tick could read the *new* `max_entry_size_bytes` for the
-        // pre-read cap and the *old* `capture_kinds` for the post-read
-        // filter, producing inconsistent admission decisions for one
-        // clip. Take one local clone and use it everywhere.
-        let settings = self.settings.clone();
-
-        // Detect a host-paused gap (sleep / suspend / lid close). We do not
-        // clear `last_sequence` here — clearing the baseline outright would
-        // re-capture an unchanged pre-launch clipboard once
-        // `capture_initial_clipboard_on_launch=false` had already discarded
-        // it. Instead, arm a one-shot `force_content_check` flag that makes
-        // the next tick's dedup decision content-aware.
+    /// Detect a host-paused gap (sleep / suspend / lid close) since the
+    /// previous tick. We do not clear `last_sequence` here — clearing the
+    /// baseline outright would re-capture an unchanged pre-launch clipboard
+    /// once `capture_initial_clipboard_on_launch=false` had already
+    /// discarded it. Instead, arm a one-shot `force_content_check` flag that
+    /// makes the next tick's dedup decision content-aware.
+    async fn detect_wake_gap(&mut self, now: SystemTime) {
         if let Some(prev) = self.last_tick_at {
             // `duration_since` is `Err` if the wall clock was rolled back
             // (NTP step backwards, manual change). Treat that as zero gap
@@ -653,6 +647,249 @@ where
             }
         }
         self.last_tick_at = Some(now);
+    }
+
+    /// Anchor the dedup baseline to whatever was on the clipboard before
+    /// launch, without capturing it.
+    ///
+    /// Reads through the bounded path rather than the unbounded
+    /// `current_snapshot`, so a huge pre-launch text/image isn't fully
+    /// materialised just to seed the dedup state and blow up startup
+    /// latency / memory. Bound it by the internal hard limit
+    /// (`MAX_ENTRY_SIZE_BYTES`), *not* the live `max_entry_size_bytes`:
+    /// since the setting is validated to never exceed the hard limit, any
+    /// clip that could ever become capturable (even after the user later
+    /// raises the setting) is within this read and gets its dedup hash
+    /// anchored here. Without that, a baseline left unhashed because it
+    /// was over the *current* setting would be re-captured on a post-raise
+    /// wake-resync instead of being recognised as the pre-launch clip.
+    /// `current_snapshot_with_max` also enforces the internal
+    /// decoded-pixel cap, so a forged-dimension image can't OOM the probe.
+    ///
+    /// `pristine` flips only after the snapshot read succeeds — a transient
+    /// platform error propagates first, keeping us in the pristine state so
+    /// the next tick retries instead of stranding the loop with no baseline.
+    async fn seed_pristine_baseline(&mut self) -> Result<()> {
+        match self
+            .reader
+            .current_snapshot_with_max(MAX_ENTRY_SIZE_BYTES)
+            .await?
+        {
+            CapturedSnapshot::Captured(snapshot) => {
+                self.dedup.last_sequence = Some(snapshot.sequence.clone());
+                if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
+                    self.dedup.last_content_hash = Some(effective_dedupe_hash(&entry));
+                }
+            }
+            CapturedSnapshot::Oversized { sequence, .. } => {
+                // Larger than the hard limit, so it can never be captured
+                // under any setting — there's no body worth hashing. Anchor
+                // the sequence so the next poll skips it without re-probing;
+                // a later wake-resync re-reads through the bounded steady-state
+                // path, hits the same oversize guard, and skips it again.
+                self.dedup.last_sequence = Some(sequence);
+            }
+        }
+        self.dedup.pristine = false;
+        Ok(())
+    }
+
+    /// Resolve the frontmost app and whether a secure text field has focus.
+    ///
+    /// Runs both AX queries concurrently — each spawns its own system-wide
+    /// AX walk via `spawn_blocking`, so the wall-clock cost is parallel
+    /// rather than additive on the per-tick hot path.
+    ///
+    /// A *single* error from `frontmost_focused_is_secure` degrades to
+    /// `false` so a transient FFI hiccup or in-flight permission grant
+    /// doesn't strand the capture loop; the `SensitivityClassifier` secret
+    /// detector and password-manager bundle denylist still run downstream
+    /// as the second line of defence. But a *sustained* run of AX failures
+    /// means we've genuinely lost visibility, and the safer default at that
+    /// point is to fail closed and skip the next clip — see
+    /// `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD`. Likewise, a frontmost bundle
+    /// id matching `SECURE_FOCUS_BUNDLE_OVERRIDES` (system password UIs)
+    /// forces secure regardless of the AX result, so we don't depend on AX
+    /// accurately reporting on windows whose entire purpose is to defeat
+    /// keyloggers.
+    async fn resolve_secure_focus(&mut self) -> (Option<nagori_core::SourceApp>, bool) {
+        let Some(window) = &self.window else {
+            return (None, false);
+        };
+        let (front_res, secure_res) =
+            tokio::join!(window.frontmost_app(), window.frontmost_focused_is_secure(),);
+        let source = front_res.ok().flatten().map(|front| front.source);
+        let bundle_override = source
+            .as_ref()
+            .and_then(|src| src.bundle_id.as_deref())
+            .is_some_and(|bid| SECURE_FOCUS_BUNDLE_OVERRIDES.contains(&bid));
+        let secure_focus = match secure_res {
+            Ok(value) => {
+                self.consecutive_secure_ax_failures = 0;
+                value || bundle_override
+            }
+            Err(err) => {
+                self.consecutive_secure_ax_failures =
+                    self.consecutive_secure_ax_failures.saturating_add(1);
+                let ax_threshold_tripped = self.secure_focus_fail_closed_enabled
+                    && self.consecutive_secure_ax_failures >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD;
+                if ax_threshold_tripped || bundle_override {
+                    warn!(
+                        error = %err,
+                        consecutive_failures = self.consecutive_secure_ax_failures,
+                        bundle_override,
+                        "secure_focus_fail_closed",
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        (source, secure_focus)
+    }
+
+    /// Run the admission gates and policy classification for one
+    /// snapshot-derived entry.
+    ///
+    /// Covers, in order: the `capture_kinds` filter, the storage-payload
+    /// size budget, sensitivity classification (fail closed if the persisted
+    /// `regex_denylist` contains an uncompilable pattern — silently dropping
+    /// it would let secret matches the user explicitly asked us to redact
+    /// slip into history), the Blocked / secret-drop refusals, the
+    /// alternatives trim, and the image-dimension probe. Intentional drops
+    /// resolve to [`Admission::Dropped`] with the dedup state left anchored
+    /// (the clip is decided); only a config failure propagates as `Err`, and
+    /// the caller owns the dedup rollback for that case.
+    async fn admit_entry(
+        &self,
+        mut entry: nagori_core::ClipboardEntry,
+        settings: &AppSettings,
+    ) -> Result<Admission> {
+        if !settings.capture_kinds.contains(&entry.content_kind()) {
+            info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
+            let _ = self
+                .audit
+                .record("capture_skipped", Some(entry.id), Some("kind_disabled"))
+                .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
+            return Ok(Admission::Dropped);
+        }
+        // Size each entry by the bytes that will actually land in storage,
+        // not the plain-text projection. RichText's primary is HTML/RTF
+        // markup, so a large markup body with short plain text used to slip
+        // past this guard and write an oversized primary representation
+        // row. Image entries don't carry plain text either, so size them by
+        // the captured byte payload. Synthesised entries that never built a
+        // representation set (CLI `add_text`, post-secret-clear rows) keep
+        // the legacy plain-text length so existing oversize semantics hold.
+        let payload_bytes = match &entry.content {
+            ClipboardContent::Image(img) => img.byte_count,
+            _ => entry.pending_representations.first().map_or_else(
+                || entry.plain_text().map_or(0, str::len),
+                StoredClipboardRepresentation::byte_count,
+            ),
+        };
+        if payload_bytes == 0 {
+            return Ok(Admission::Dropped);
+        }
+        if payload_bytes > settings.max_entry_size_bytes {
+            warn!(bytes = payload_bytes, "capture_skipped reason=oversized");
+            let _ = self
+                .audit
+                .record("capture_skipped", Some(entry.id), Some("oversized"))
+                .await;
+            self.note_capture_drop(CaptureEventCategory::OversizedDrop);
+            return Ok(Admission::Dropped);
+        }
+        let classifier = SensitivityClassifier::try_new(settings.clone())?;
+        let classification = classifier.classify(&entry);
+        entry.sensitivity = classification.sensitivity;
+        if matches!(classification.sensitivity, Sensitivity::Blocked) {
+            info!(reasons = ?classification.reasons, "entry_blocked");
+            let _ = self
+                .audit
+                .record(
+                    "entry_blocked",
+                    Some(entry.id),
+                    Some(&format!("{:?}", classification.reasons)),
+                )
+                .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
+            return Ok(Admission::Dropped);
+        }
+        if let Some(preview) = classification.redacted_preview {
+            entry.search.preview = preview;
+        }
+        if matches!(
+            classifier.apply_secret_handling(&mut entry, settings.secret_handling),
+            SecretAction::Drop,
+        ) {
+            info!(reasons = ?classification.reasons, "secret_blocked");
+            let _ = self
+                .audit
+                .record(
+                    "secret_blocked",
+                    Some(entry.id),
+                    Some(&format!("{:?}", classification.reasons)),
+                )
+                .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
+            return Ok(Admission::Dropped);
+        }
+
+        // Secret entries had their `pending_representations` dropped (and the
+        // set hash realigned to the primary) inside `apply_secret_handling`,
+        // so the source's HTML / RTF / plain alternatives can no longer leak
+        // the raw secret here. Non-secret entries keep their alternatives.
+
+        // Enforce the user's `max_entry_size_bytes` budget across the full
+        // representation set, not just the primary. The pre-classify guard
+        // above already rejected entries whose primary exceeds the cap, so
+        // here we only have to trim alternatives; when anything is dropped
+        // the set hash has to be recomputed so dedupe matches what storage
+        // actually wrote.
+        if entry.trim_alternatives_to_budget(settings.max_entry_size_bytes) {
+            let new_hash = compute_representation_set_hash(&entry.pending_representations);
+            entry.metadata.representation_set_hash = Some(new_hash);
+        }
+
+        // Record image pixel dimensions from a header-only probe so the
+        // preview pane and result rows can show "1920×1080" without decoding
+        // the full payload. Done here (just before insert) so dropped clips
+        // never pay for the probe; the factory leaves `width`/`height` `None`
+        // because `nagori-core` deliberately has no `image` dependency.
+        if let ClipboardContent::Image(image) = &mut entry.content
+            && image.width.is_none()
+            && let Some(bytes) = image.pending_bytes.as_deref()
+            && let Some((w, h)) = probe_image_dimensions(bytes)
+        {
+            image.width = Some(w);
+            image.height = Some(h);
+        }
+
+        Ok(Admission::Ready(Box::new(entry)))
+    }
+
+    /// Test seam for `capture_once` that lets the caller pin the wall-clock
+    /// "now" used for gap detection. Production callers should use
+    /// `capture_once`; tests use this to simulate sleep gaps without driving
+    /// real time.
+    pub async fn capture_once_at(&mut self, now: SystemTime) -> Result<Option<EntryId>> {
+        // Snapshot settings at the start of the tick. Today the polling
+        // loop's `tokio::select!` already serialises `update_settings`
+        // and `capture_once`, so settings can't actually change between
+        // the `capture_enabled` check at the top and the secret-handling
+        // check at the bottom. But a future refactor that adds an extra
+        // `.await` boundary, or moves capture into its own task, would
+        // re-open that race — and the consequence is observably wrong:
+        // a tick could read the *new* `max_entry_size_bytes` for the
+        // pre-read cap and the *old* `capture_kinds` for the post-read
+        // filter, producing inconsistent admission decisions for one
+        // clip. Take one local clone and use it everywhere.
+        let settings = self.settings.clone();
+
+        self.detect_wake_gap(now).await;
 
         if !settings.capture_enabled {
             return Ok(None);
@@ -691,96 +928,10 @@ where
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
         if self.dedup.pristine && !settings.capture_initial_clipboard_on_launch {
-            // Read the pre-launch clipboard through the bounded path rather than
-            // the unbounded `current_snapshot`, so a huge pre-launch text/image
-            // isn't fully materialised just to seed the dedup state and blow up
-            // startup latency / memory. Bound it by the internal hard limit
-            // (`MAX_ENTRY_SIZE_BYTES`), *not* the live `max_entry_size_bytes`:
-            // since the setting is validated to never exceed the hard limit, any
-            // clip that could ever become capturable (even after the user later
-            // raises the setting) is within this read and gets its dedup hash
-            // anchored here. Without that, a baseline left unhashed because it
-            // was over the *current* setting would be re-captured on a post-raise
-            // wake-resync instead of being recognised as the pre-launch clip.
-            // `current_snapshot_with_max` also enforces the internal
-            // decoded-pixel cap, so a forged-dimension image can't OOM the probe.
-            match self
-                .reader
-                .current_snapshot_with_max(MAX_ENTRY_SIZE_BYTES)
-                .await?
-            {
-                CapturedSnapshot::Captured(snapshot) => {
-                    self.dedup.last_sequence = Some(snapshot.sequence.clone());
-                    if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                        self.dedup.last_content_hash = Some(effective_dedupe_hash(&entry));
-                    }
-                }
-                CapturedSnapshot::Oversized { sequence, .. } => {
-                    // Larger than the hard limit, so it can never be captured
-                    // under any setting — there's no body worth hashing. Anchor
-                    // the sequence so the next poll skips it without re-probing;
-                    // a later wake-resync re-reads through the bounded steady-state
-                    // path, hits the same oversize guard, and skips it again.
-                    self.dedup.last_sequence = Some(sequence);
-                }
-            }
-            self.dedup.pristine = false;
+            self.seed_pristine_baseline().await?;
             return Ok(None);
         }
-        // Run both AX queries concurrently — each spawns its own
-        // system-wide AX walk via spawn_blocking, so the wall-clock
-        // cost is parallel rather than additive on the per-tick hot
-        // path.
-        //
-        // A *single* error from `frontmost_focused_is_secure` degrades
-        // to `false` so a transient FFI hiccup or in-flight permission
-        // grant doesn't strand the capture loop; the
-        // `SensitivityClassifier` secret detector and password-manager
-        // bundle denylist still run downstream as the second line of
-        // defence. But a *sustained* run of AX failures means we've
-        // genuinely lost visibility, and the safer default at that
-        // point is to fail closed and skip the next clip — see
-        // `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD`. Likewise, a frontmost
-        // bundle id matching `SECURE_FOCUS_BUNDLE_OVERRIDES` (system
-        // password UIs) forces secure regardless of the AX result, so
-        // we don't depend on AX accurately reporting on windows whose
-        // entire purpose is to defeat keyloggers.
-        let (frontmost_source, secure_focus) = if let Some(window) = &self.window {
-            let (front_res, secure_res) =
-                tokio::join!(window.frontmost_app(), window.frontmost_focused_is_secure(),);
-            let source = front_res.ok().flatten().map(|front| front.source);
-            let bundle_override = source
-                .as_ref()
-                .and_then(|src| src.bundle_id.as_deref())
-                .is_some_and(|bid| SECURE_FOCUS_BUNDLE_OVERRIDES.contains(&bid));
-            let secure_focus = match secure_res {
-                Ok(value) => {
-                    self.consecutive_secure_ax_failures = 0;
-                    value || bundle_override
-                }
-                Err(err) => {
-                    self.consecutive_secure_ax_failures =
-                        self.consecutive_secure_ax_failures.saturating_add(1);
-                    let ax_threshold_tripped = self.secure_focus_fail_closed_enabled
-                        && self.consecutive_secure_ax_failures
-                            >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD;
-                    if ax_threshold_tripped || bundle_override {
-                        warn!(
-                            error = %err,
-                            consecutive_failures = self.consecutive_secure_ax_failures,
-                            bundle_override,
-                            "secure_focus_fail_closed",
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            (source, secure_focus)
-        } else {
-            (None, false)
-        };
+        let (frontmost_source, secure_focus) = self.resolve_secure_focus().await;
 
         // Anchor `last_sequence` so a steady-state focus on the same
         // field doesn't loop the AX query every poll for the same
@@ -850,7 +1001,7 @@ where
             snapshot.source = frontmost_source;
         }
 
-        let Some(mut entry) = EntryFactory::from_snapshot(snapshot) else {
+        let Some(entry) = EntryFactory::from_snapshot(snapshot) else {
             // An empty snapshot can mean we read the pasteboard mid-write: an
             // external writer's `clearContents()` advanced the changeCount but
             // the following `writeObjects()` / `setData` hasn't landed yet, and
@@ -882,47 +1033,10 @@ where
             return Ok(None);
         }
         self.dedup.last_content_hash = Some(dedupe_hash);
-        if !settings.capture_kinds.contains(&entry.content_kind()) {
-            info!(kind = ?entry.content_kind(), "capture_skipped reason=kind_disabled");
-            let _ = self
-                .audit
-                .record("capture_skipped", Some(entry.id), Some("kind_disabled"))
-                .await;
-            self.note_capture_drop(CaptureEventCategory::Policy);
-            return Ok(None);
-        }
-        // Size each entry by the bytes that will actually land in storage,
-        // not the plain-text projection. RichText's primary is HTML/RTF
-        // markup, so a large markup body with short plain text used to slip
-        // past this guard and write an oversized primary representation
-        // row. Image entries don't carry plain text either, so size them by
-        // the captured byte payload. Synthesised entries that never built a
-        // representation set (CLI `add_text`, post-secret-clear rows) keep
-        // the legacy plain-text length so existing oversize semantics hold.
-        let payload_bytes = match &entry.content {
-            ClipboardContent::Image(img) => img.byte_count,
-            _ => entry.pending_representations.first().map_or_else(
-                || entry.plain_text().map_or(0, str::len),
-                StoredClipboardRepresentation::byte_count,
-            ),
-        };
-        if payload_bytes == 0 {
-            return Ok(None);
-        }
-        if payload_bytes > settings.max_entry_size_bytes {
-            warn!(bytes = payload_bytes, "capture_skipped reason=oversized");
-            let _ = self
-                .audit
-                .record("capture_skipped", Some(entry.id), Some("oversized"))
-                .await;
-            self.note_capture_drop(CaptureEventCategory::OversizedDrop);
-            return Ok(None);
-        }
-        // Fail closed if the persisted regex_denylist contains an
-        // uncompilable pattern — silently dropping it would let secret
-        // matches the user explicitly asked us to redact slip into history.
-        let classifier = match SensitivityClassifier::try_new(settings.clone()) {
-            Ok(classifier) => classifier,
+
+        let entry = match self.admit_entry(entry, &settings).await {
+            Ok(Admission::Ready(entry)) => *entry,
+            Ok(Admission::Dropped) => return Ok(None),
             Err(err) => {
                 // A denylist regex that won't compile is a config failure,
                 // not a decided outcome for this clip. Roll the dedup state
@@ -932,75 +1046,23 @@ where
                 return Err(err);
             }
         };
-        let classification = classifier.classify(&entry);
-        entry.sensitivity = classification.sensitivity;
-        if matches!(classification.sensitivity, Sensitivity::Blocked) {
-            info!(reasons = ?classification.reasons, "entry_blocked");
-            let _ = self
-                .audit
-                .record(
-                    "entry_blocked",
-                    Some(entry.id),
-                    Some(&format!("{:?}", classification.reasons)),
-                )
-                .await;
-            self.note_capture_drop(CaptureEventCategory::Policy);
-            return Ok(None);
-        }
-        if let Some(preview) = classification.redacted_preview {
-            entry.search.preview = preview;
-        }
-        if matches!(
-            classifier.apply_secret_handling(&mut entry, settings.secret_handling),
-            SecretAction::Drop,
-        ) {
-            info!(reasons = ?classification.reasons, "secret_blocked");
-            let _ = self
-                .audit
-                .record(
-                    "secret_blocked",
-                    Some(entry.id),
-                    Some(&format!("{:?}", classification.reasons)),
-                )
-                .await;
-            self.note_capture_drop(CaptureEventCategory::Policy);
-            return Ok(None);
-        }
 
-        // Secret entries had their `pending_representations` dropped (and the
-        // set hash realigned to the primary) inside `apply_secret_handling`,
-        // so the source's HTML / RTF / plain alternatives can no longer leak
-        // the raw secret here. Non-secret entries keep their alternatives.
+        let id = self.persist_entry(entry, rollback).await?;
+        Ok(Some(id))
+    }
 
-        // Enforce the user's `max_entry_size_bytes` budget across the full
-        // representation set, not just the primary. The pre-classify guard
-        // above already rejected entries whose primary exceeds the cap, so
-        // here we only have to trim alternatives; when anything is dropped
-        // the set hash has to be recomputed so dedupe matches what storage
-        // actually wrote.
-        if entry.trim_alternatives_to_budget(settings.max_entry_size_bytes) {
-            let new_hash = compute_representation_set_hash(&entry.pending_representations);
-            entry.metadata.representation_set_hash = Some(new_hash);
-        }
-
-        // Record image pixel dimensions from a header-only probe so the
-        // preview pane and result rows can show "1920×1080" without decoding
-        // the full payload. Done here (just before insert) so dropped clips
-        // never pay for the probe; the factory leaves `width`/`height` `None`
-        // because `nagori-core` deliberately has no `image` dependency.
-        if let ClipboardContent::Image(image) = &mut entry.content
-            && image.width.is_none()
-            && let Some(bytes) = image.pending_bytes.as_deref()
-            && let Some((w, h)) = probe_image_dimensions(bytes)
-        {
-            image.width = Some(w);
-            image.height = Some(h);
-        }
-
-        // Invalidate before *and* after the insert. Without the pre-call,
-        // a concurrent `runtime.search()` could lock the cache between
-        // SQLite commit and our post-invalidate and serve a pre-insert hit
-        // even though the new row is already durable.
+    /// Durably insert an admitted entry and fan out the post-insert
+    /// notifications (search-cache invalidation, capture notifier).
+    ///
+    /// Invalidates the search cache before *and* after the insert. Without
+    /// the pre-call, a concurrent `runtime.search()` could lock the cache
+    /// between `SQLite` commit and our post-invalidate and serve a
+    /// pre-insert hit even though the new row is already durable.
+    async fn persist_entry(
+        &mut self,
+        entry: nagori_core::ClipboardEntry,
+        rollback: DedupRollback,
+    ) -> Result<EntryId> {
         if let Some(cache) = &self.search_cache {
             lock_or_recover(cache).invalidate();
         }
@@ -1031,7 +1093,7 @@ where
                 tracing::warn!(entry_id = %id, "capture_notifier_panicked");
             }
         }
-        Ok(Some(id))
+        Ok(id)
     }
 
     pub async fn run_polling(
