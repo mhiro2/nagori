@@ -16,6 +16,11 @@ pub struct MaintenanceReport {
     pub deleted_by_age: usize,
     pub deleted_by_count: usize,
     pub deleted_by_size: usize,
+    /// Tombstoned rows physically reclaimed this sweep. Distinct from the
+    /// retention counters: those evict *live* rows over a cap, whereas this is
+    /// the deferred hard delete of rows a per-entry delete already tombstoned —
+    /// the only path that reclaims a deleted *pinned* secret.
+    pub purged_deleted: usize,
     pub vacuumed: bool,
 }
 
@@ -94,6 +99,18 @@ impl MaintenanceService {
         } else {
             0
         };
+        // Reclaim tombstoned rows. `mark_deleted` only soft-deletes, so a
+        // per-entry delete leaves the body, blobs, embeddings, thumbnail, and
+        // search index on disk until this runs — and for a *pinned* deleted
+        // row this is the only purge path (every retention sweep above is
+        // `pinned = 0` or `deleted_at IS NULL` limited). No cache invalidate:
+        // tombstoned rows are already filtered out of every live query, so
+        // dropping them can't change a cached search result.
+        let purged_deleted = self.store.purge_deleted().await?;
+        if purged_deleted > 0 {
+            self.record_retention_drop("tombstone_purge", purged_deleted, settings)
+                .await;
+        }
         // Thumbnail budget is enforced opportunistically every time a
         // new thumbnail is generated, but a stale history (settings
         // tightened, schema replayed) can leave the table above the
@@ -110,7 +127,7 @@ impl MaintenanceService {
                 }
             }
         }
-        let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size;
+        let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size + purged_deleted;
         let vacuumed = if total_deleted >= VACUUM_DELETION_THRESHOLD {
             self.store.vacuum().await?;
             true
@@ -121,6 +138,7 @@ impl MaintenanceService {
             deleted_by_age,
             deleted_by_count,
             deleted_by_size,
+            purged_deleted,
             vacuumed,
         };
         info!(?report, "maintenance_completed");
@@ -165,6 +183,7 @@ impl MaintenanceService {
                     .max_thumbnail_total_bytes
                     .map_or_else(|| "none".to_owned(), |b| b.to_string())
             ),
+            "tombstone_purge" => format!("purged={deleted}"),
             _ => format!("deleted={deleted}"),
         };
         if let Err(err) = self.store.record(kind, None, Some(&detail)).await {
@@ -239,6 +258,43 @@ mod tests {
 
         assert!(report.deleted_by_count >= VACUUM_DELETION_THRESHOLD);
         assert!(report.vacuumed, "vacuum must run on large sweeps");
+    }
+
+    #[tokio::test]
+    async fn run_purges_tombstoned_rows() {
+        // A per-entry delete only tombstones; the maintenance sweep is what
+        // physically reclaims it. A *pinned* deleted row is reclaimed here too
+        // — the only path that does so, since every retention sweep is
+        // `pinned = 0` / `deleted_at IS NULL` limited.
+        let store = SqliteStore::open_memory().expect("memory store");
+        let pinned = EntryFactory::from_text("pinned secret to delete");
+        let pinned_id = pinned.id;
+        store.insert(pinned).await.expect("insert");
+        store.set_pinned(pinned_id, true).await.expect("pin");
+        store.mark_deleted(pinned_id).await.expect("soft delete");
+        store
+            .insert(EntryFactory::from_text("still here"))
+            .await
+            .expect("insert");
+
+        let service = MaintenanceService::new(store.clone());
+        let report = service
+            .run(&AppSettings::default())
+            .await
+            .expect("maintenance run");
+
+        assert_eq!(
+            report.purged_deleted, 1,
+            "the tombstoned pinned row must be reclaimed",
+        );
+        assert_eq!(report.deleted_by_count, 0);
+        assert_eq!(report.deleted_by_age, 0);
+        let surviving = store.list_recent(10).await.expect("list");
+        assert_eq!(surviving.len(), 1, "only the live row remains");
+        assert!(
+            !surviving.iter().any(|entry| entry.id == pinned_id),
+            "the deleted pinned row must not resurface",
+        );
     }
 
     fn populated_cache() -> Arc<Mutex<RecentSearchCache>> {

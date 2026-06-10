@@ -82,6 +82,38 @@ impl SqliteStore {
         .await
     }
 
+    /// Physically delete every soft-deleted (tombstoned) row, regardless of
+    /// pin state. `mark_deleted` only tombstones — it filters the row out of
+    /// every live query immediately but leaves its body, representation blobs,
+    /// embeddings, thumbnails, and search/ngram index on disk so the
+    /// interactive delete stays cheap. This is the deferred reclaim the
+    /// maintenance loop runs: the FK cascade (plus `recursive_triggers`) drops
+    /// each tombstoned row's children, so a deleted secret actually leaves the
+    /// file rather than lingering indefinitely.
+    ///
+    /// Crucially this is the *only* path that reclaims a tombstoned **pinned**
+    /// row. Every other hard-delete path is `pinned = 0` limited
+    /// (`clear_older_than` / `clear_non_pinned`) or `deleted_at IS NULL`
+    /// limited (`enforce_retention_count` / `enforce_total_bytes`), so a
+    /// "delete this pinned secret" would otherwise keep its content, blobs,
+    /// thumbnail, and embedding on disk forever — contradicting the
+    /// `secure_delete` design. The `wal_checkpoint(TRUNCATE)` follow-up matches
+    /// the documented purge contract so the pre-deletion cleartext cannot
+    /// survive in historical WAL frames.
+    pub async fn purge_deleted(&self) -> Result<usize> {
+        self.run_blocking(move |store| {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let changed = tx
+                .execute("DELETE FROM entries WHERE deleted_at IS NOT NULL", [])
+                .map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(|err| storage_err(&err))?;
+            checkpoint_truncate_after_purge(&conn, changed);
+            Ok(changed)
+        })
+        .await
+    }
+
     pub async fn enforce_retention_count(&self, max_entries: usize) -> Result<usize> {
         if max_entries == 0 {
             return Ok(0);

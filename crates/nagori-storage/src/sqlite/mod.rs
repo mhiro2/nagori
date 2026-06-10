@@ -1401,6 +1401,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn purge_deleted_hard_deletes_tombstones_including_pinned() {
+        // `mark_deleted` only tombstones; `purge_deleted` is the deferred
+        // reclaim. It must physically drop *every* tombstoned row — including a
+        // pinned one, which no `pinned = 0` retention path would ever reach —
+        // while leaving a live (non-deleted) row untouched. Without it a
+        // "delete this pinned secret" would keep its body/blobs on disk forever.
+        let store = SqliteStore::open_memory().unwrap();
+        let pinned_deleted = insert_text(&store, "pinned secret to delete").await;
+        let plain_deleted = insert_text(&store, "ordinary deleted").await;
+        let live = insert_text(&store, "still here").await;
+        store.set_pinned(pinned_deleted, true).await.unwrap();
+        store.mark_deleted(pinned_deleted).await.unwrap();
+        store.mark_deleted(plain_deleted).await.unwrap();
+
+        // Soft delete leaves the rows on disk, just hidden from live queries.
+        assert_eq!(count_total(&store), 3);
+        assert_eq!(count_active(&store), 1);
+
+        let purged = store.purge_deleted().await.unwrap();
+        assert_eq!(
+            purged, 2,
+            "both tombstones (incl. the pinned one) must be reclaimed",
+        );
+
+        // Only the live row remains anywhere in the table, with its content.
+        assert_eq!(count_total(&store), 1);
+        assert_eq!(count_active(&store), 1);
+        let conn = store.conn().unwrap();
+        for id in [pinned_deleted, plain_deleted] {
+            for (table, column) in [
+                ("entries", "id"),
+                ("entry_representations", "entry_id"),
+                ("search_documents", "entry_id"),
+                ("ngrams", "entry_id"),
+            ] {
+                let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+                let count: i64 = conn
+                    .query_row(&sql, params![id.to_string()], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(count, 0, "{table} rows for the purged entry must be gone");
+            }
+        }
+        let live_reps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_representations WHERE entry_id = ?1",
+                params![live.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(live_reps > 0, "the live row must keep its representations");
+        drop(conn);
+
+        // Idempotent: a second purge with no tombstones removes nothing.
+        assert_eq!(store.purge_deleted().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn reinserting_after_mark_deleted_creates_new_row() {
         // The content-hash UNIQUE index is `WHERE deleted_at IS NULL`, so
         // tombstoned rows must not block re-inserts of the same text.
