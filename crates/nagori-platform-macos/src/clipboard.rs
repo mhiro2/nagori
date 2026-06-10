@@ -129,126 +129,160 @@ impl ClipboardReader for MacosClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
-        // Same locking discipline as `current_snapshot` — hold the arboard
-        // mutex across both the AppKit size probe and the per-rep load so a
-        // concurrent writer cannot race a torn snapshot in between. The
-        // arboard mutex protects us against same-process writes, but any
-        // other macOS app can still publish onto the shared `NSPasteboard`
-        // mid-load; mirror the Windows `before == after` check (see
-        // `crates/nagori-platform-windows/src/clipboard.rs::capture_snapshot`)
-        // to catch torn snapshots and retry rather than store a stitched
-        // entry whose representations came from different writes.
         let clipboard = self.clipboard.clone();
-        clipboard_blocking(
-            "current_snapshot_with_max",
-            move || -> Result<CapturedSnapshot> {
-                const MAX_RETRIES: usize = 3;
-                let mut attempt = 0;
-                loop {
-                    attempt += 1;
-                    let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-                    let before = pasteboard_sequence();
-
-                    // First pass: peek byte sizes without materialising payloads. On
-                    // macOS, NSData backs each `dataForType` result with bytes
-                    // already paged into our address space, but skipping `to_vec()`
-                    // still avoids the second copy into a Rust `Vec<u8>` and lets
-                    // NSData drop on scope exit, freeing both copies promptly.
-                    // NSString::len() reports UTF-8 bytes without materialising a
-                    // Rust String. This pass is still only an admission pre-filter:
-                    // it catches oversized single reps and file URL aggregates
-                    // before we allocate Rust payload buffers, while the capture
-                    // loop's post-load check remains authoritative for the final
-                    // ClipboardEntry payload.
-                    #[cfg(target_os = "macos")]
-                    if let Some(observed) = oversized_payload(max_bytes) {
-                        let after = pasteboard_sequence();
-                        drop(guard);
-                        if before != after && attempt < MAX_RETRIES {
-                            // Foreign writer landed between the changeCount
-                            // baseline and the size probe — `observed` may
-                            // describe the previous publish event while
-                            // `after` already names the next one. Anchoring
-                            // `last_sequence` to `after` here would skip the
-                            // next clip on the very next tick because the
-                            // capture loop dedupes on sequence equality.
-                            continue;
-                        }
-                        return Ok(CapturedSnapshot::Oversized {
-                            sequence: after,
-                            observed_bytes: observed,
-                            limit: max_bytes,
-                        });
-                    }
-
-                    // Second pass: load the snapshot. The first pass only rejected
-                    // the obvious oversize cases; reps that pass it can still grow
-                    // past `max_bytes` once decoded to UTF-8, and the aggregate
-                    // of multiple reps is not bounded here at all. The capture
-                    // loop's post-load `payload_bytes > max_entry_size_bytes`
-                    // check is the authoritative limit — the first pass just spares
-                    // us the worst allocations. Mirror `current_snapshot`
-                    // exactly so the two entry points cannot drift.
-                    let plain = match guard.get_text() {
-                        Ok(text) => Some(text),
-                        Err(arboard::Error::ContentNotAvailable) => None,
-                        Err(err) => return Err(platform_err(&err)),
-                    };
-
-                    let mut representations = Vec::new();
-
-                    #[cfg(target_os = "macos")]
-                    if let Some(observed) =
-                        collect_macos_extras(&mut representations, Some(max_bytes))
-                    {
-                        let after = pasteboard_sequence();
-                        drop(guard);
-                        if before != after && attempt < MAX_RETRIES {
-                            continue;
-                        }
-                        return Ok(CapturedSnapshot::Oversized {
-                            sequence: after,
-                            observed_bytes: observed,
-                            limit: max_bytes,
-                        });
-                    }
-
-                    if let Some(text) = plain {
-                        representations.push(ClipboardRepresentation {
-                            mime_type: "text/plain".to_owned(),
-                            data: ClipboardData::Text(text),
-                        });
-                    }
-
-                    let after = pasteboard_sequence();
-                    drop(guard);
-                    if before != after && attempt < MAX_RETRIES {
-                        // A foreign writer landed on the pasteboard between
-                        // our oversize probe and the rep load. The reps we
-                        // just collected are stitched across two distinct
-                        // publish events — discard and retry rather than
-                        // store an inconsistent entry. Bounded to MAX_RETRIES
-                        // so a write storm can't park the capture loop here
-                        // forever; the final attempt accepts whatever it
-                        // observed (matching Windows' behaviour) so torn
-                        // snapshots still surface as a normal entry rather
-                        // than as a hard error that pauses capture.
-                        continue;
-                    }
-                    let snapshot = ClipboardSnapshot {
-                        sequence: after,
-                        captured_at: OffsetDateTime::now_utc(),
-                        source: None,
-                        representations,
-                    };
-                    return Ok(CapturedSnapshot::Captured(snapshot));
-                }
-            },
-        )
+        clipboard_blocking("current_snapshot_with_max", move || {
+            capture_snapshot_with_max(&clipboard, max_bytes)
+        })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
+    }
+}
+
+/// What one bounded capture attempt observed.
+///
+/// `Torn` means the pasteboard `changeCount` drifted between the attempt's
+/// `before` baseline and its final sample — the collected representations
+/// (or the oversize observation) may be stitched across two distinct
+/// publish events. The attempt's result is still carried so the *final*
+/// retry can accept it (matching Windows' behaviour): torn snapshots
+/// surface as a normal entry rather than as a hard error that pauses
+/// capture. Returning the torn `Oversized` sequence matters for the same
+/// reason as on the clean path — anchoring `last_sequence` to an older
+/// changeCount would make the capture loop skip the next clip, because it
+/// dedupes on sequence equality.
+enum CaptureAttempt {
+    Settled(CapturedSnapshot),
+    Torn(CapturedSnapshot),
+}
+
+/// Bounded snapshot read with torn-snapshot retry.
+///
+/// Same locking discipline as `current_snapshot` — each attempt holds the
+/// arboard mutex across both the `AppKit` size probe and the per-rep load so
+/// a concurrent writer cannot race a torn snapshot in between. The arboard
+/// mutex protects us against same-process writes, but any other macOS app
+/// can still publish onto the shared `NSPasteboard` mid-load; mirror the
+/// Windows `before == after` check (see
+/// `crates/nagori-platform-windows/src/clipboard.rs::capture_snapshot`) to
+/// catch torn snapshots and retry rather than store a stitched entry whose
+/// representations came from different writes. Bounded to `MAX_RETRIES` so
+/// a write storm can't park the capture loop here forever; the final
+/// attempt accepts whatever it observed.
+fn capture_snapshot_with_max(
+    clipboard: &Mutex<Clipboard>,
+    max_bytes: usize,
+) -> Result<CapturedSnapshot> {
+    const MAX_RETRIES: usize = 3;
+    for attempt in 1..=MAX_RETRIES {
+        match capture_attempt(clipboard, max_bytes)? {
+            CaptureAttempt::Settled(snapshot) => return Ok(snapshot),
+            CaptureAttempt::Torn(snapshot) => {
+                if attempt == MAX_RETRIES {
+                    return Ok(snapshot);
+                }
+                // Foreign writer landed mid-attempt — discard and retry.
+            }
+        }
+    }
+    unreachable!("the final retry returns its result unconditionally")
+}
+
+/// One probe → load → verify pass over the pasteboard.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<CaptureAttempt> {
+    let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+    let before = pasteboard_sequence();
+
+    // First pass: peek byte sizes without materialising payloads. On
+    // macOS, NSData backs each `dataForType` result with bytes
+    // already paged into our address space, but skipping `to_vec()`
+    // still avoids the second copy into a Rust `Vec<u8>` and lets
+    // NSData drop on scope exit, freeing both copies promptly.
+    // NSString::len() reports UTF-8 bytes without materialising a
+    // Rust String. This pass is still only an admission pre-filter:
+    // it catches oversized single reps and file URL aggregates
+    // before we allocate Rust payload buffers, while the capture
+    // loop's post-load check remains authoritative for the final
+    // ClipboardEntry payload.
+    #[cfg(target_os = "macos")]
+    if let Some(observed) = oversized_payload(max_bytes) {
+        let after = pasteboard_sequence();
+        drop(guard);
+        return Ok(settle(
+            &before,
+            &after,
+            CapturedSnapshot::Oversized {
+                sequence: after.clone(),
+                observed_bytes: observed,
+                limit: max_bytes,
+            },
+        ));
+    }
+
+    // Second pass: load the snapshot. The first pass only rejected
+    // the obvious oversize cases; reps that pass it can still grow
+    // past `max_bytes` once decoded to UTF-8, and the aggregate
+    // of multiple reps is not bounded here at all. The capture
+    // loop's post-load `payload_bytes > max_entry_size_bytes`
+    // check is the authoritative limit — the first pass just spares
+    // us the worst allocations. Mirror `current_snapshot`
+    // exactly so the two entry points cannot drift.
+    let plain = match guard.get_text() {
+        Ok(text) => Some(text),
+        Err(arboard::Error::ContentNotAvailable) => None,
+        Err(err) => return Err(platform_err(&err)),
+    };
+
+    let mut representations = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    if let Some(observed) = collect_macos_extras(&mut representations, Some(max_bytes)) {
+        let after = pasteboard_sequence();
+        drop(guard);
+        return Ok(settle(
+            &before,
+            &after,
+            CapturedSnapshot::Oversized {
+                sequence: after.clone(),
+                observed_bytes: observed,
+                limit: max_bytes,
+            },
+        ));
+    }
+
+    if let Some(text) = plain {
+        representations.push(ClipboardRepresentation {
+            mime_type: "text/plain".to_owned(),
+            data: ClipboardData::Text(text),
+        });
+    }
+
+    let after = pasteboard_sequence();
+    drop(guard);
+    Ok(settle(
+        &before,
+        &after,
+        CapturedSnapshot::Captured(ClipboardSnapshot {
+            sequence: after.clone(),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations,
+        }),
+    ))
+}
+
+/// Classify an attempt's result by whether the changeCount stayed stable
+/// across it.
+fn settle(
+    before: &ClipboardSequence,
+    after: &ClipboardSequence,
+    snapshot: CapturedSnapshot,
+) -> CaptureAttempt {
+    if before == after {
+        CaptureAttempt::Settled(snapshot)
+    } else {
+        CaptureAttempt::Torn(snapshot)
     }
 }
 
