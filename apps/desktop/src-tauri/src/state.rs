@@ -198,13 +198,16 @@ struct BackgroundTasks {
 const WORKER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Extra drain budget for the CLI IPC host on top of the caller's worker
-/// grace. The IPC supervisor's shutdown branch waits `shutdown_grace + 1s`
-/// for in-flight handlers before it removes the socket / token files
-/// (`stop_ipc_server`), so giving it only the shared worker budget could
-/// abort the task between the drain and the file cleanup, leaving a stale
-/// socket behind. Mirrors the `grace + 2s` the daemon's `drain_workers`
-/// grants its IPC supervisor.
-const CLI_IPC_DRAIN_SLACK: Duration = Duration::from_secs(2);
+/// grace. The IPC supervisor's shutdown branch (`stop_ipc_server`) waits
+/// `shutdown_grace + 1s` for in-flight handlers, then — when one is wedged
+/// — aborts it and waits up to another 2s for the post-abort join, before
+/// it finishes removing the socket / token files. With the default 5s
+/// grace that is 8s worst-case, so the slack must put the outer budget
+/// beyond it (5s + 4s = 9s, leaving ~1s for the file cleanup itself);
+/// a shorter budget could abort the supervisor between the drain and the
+/// cleanup and leave a stale socket behind. Matches the accounting in the
+/// daemon's `drain_workers` (`grace + POST_ABORT_JOIN_TIMEOUT + 1s`).
+const CLI_IPC_DRAIN_SLACK: Duration = Duration::from_secs(4);
 
 impl AppState {
     pub fn record_last_pasted(&self, id: EntryId) {
