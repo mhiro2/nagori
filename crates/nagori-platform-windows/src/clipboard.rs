@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use image::{ImageFormat, ImageReader};
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
+    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, Result,
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
-    clipboard_write_blocking,
+    clipboard_write_blocking, has_publishable_representation,
 };
 use time::OffsetDateTime;
 
@@ -233,31 +233,6 @@ impl ClipboardWriter for WindowsClipboard {
             ))
         }
     }
-}
-
-/// True when at least one stored rep has a known Windows mapping.
-///
-/// Pre-scan used by `write_representations` so an entry whose stored reps
-/// are all outside the publisher's table (e.g. only `application/json`
-/// without a plain fallback) falls back to `write_entry` instead of
-/// issuing an `EmptyClipboard` for nothing. The body inspects only
-/// `nagori-core` types so it stays target-independent — the workspace
-/// builds every platform crate on every host and this helper has to
-/// resolve on non-Windows targets too.
-fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
-    reps.iter()
-        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
-            (
-                "text/plain" | "text/html" | "application/rtf",
-                RepresentationDataRef::InlineText(_),
-            )
-            | (
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
-                RepresentationDataRef::DatabaseBlob(_),
-            ) => true,
-            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
-            _ => false,
-        })
 }
 
 impl WindowsClipboard {
@@ -1489,39 +1464,6 @@ fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nagori_core::RepresentationRole;
-
-    #[test]
-    fn has_publishable_representation_matches_known_mimes() {
-        let plain = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "text/plain".to_owned(),
-            ordinal: 0,
-            data: RepresentationDataRef::InlineText("hi".to_owned()),
-        };
-        let html = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "text/html".to_owned(),
-            ordinal: 1,
-            data: RepresentationDataRef::InlineText("<p>hi</p>".to_owned()),
-        };
-        let png = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "image/png".to_owned(),
-            ordinal: 2,
-            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50, 0x4e, 0x47]),
-        };
-        let paths = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "text/uri-list".to_owned(),
-            ordinal: 3,
-            data: RepresentationDataRef::FilePaths(vec!["C:\\one".to_owned()]),
-        };
-        assert!(has_publishable_representation(&[plain]));
-        assert!(has_publishable_representation(&[html]));
-        assert!(has_publishable_representation(&[png]));
-        assert!(has_publishable_representation(&[paths]));
-    }
 
     /// CRC-32 (PNG/IEEE 802.3 polynomial 0xEDB88320).
     ///
@@ -1763,24 +1705,6 @@ mod tests {
         let forged = forge_png_header(dim, dim);
         let err = win::build_dibv5_payload(&forged).expect_err("must reject above cap");
         assert!(matches!(err, AppError::Unsupported(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn has_publishable_representation_rejects_unmapped_mimes() {
-        let json = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "application/json".to_owned(),
-            ordinal: 0,
-            data: RepresentationDataRef::InlineText("{}".to_owned()),
-        };
-        let empty_paths = StoredClipboardRepresentation {
-            role: RepresentationRole::Primary,
-            mime_type: "text/uri-list".to_owned(),
-            ordinal: 1,
-            data: RepresentationDataRef::FilePaths(Vec::new()),
-        };
-        assert!(!has_publishable_representation(&[]));
-        assert!(!has_publishable_representation(&[json, empty_paths]));
     }
 
     #[cfg(windows)]

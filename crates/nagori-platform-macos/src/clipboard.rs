@@ -15,7 +15,7 @@ use nagori_core::{
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
-    clipboard_write_blocking,
+    clipboard_write_blocking, has_publishable_representation,
 };
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -556,32 +556,6 @@ enum PublishOutcome {
     /// Mapped to a known `NSPasteboardType` but `setString` / `setData`
     /// returned `NO` — exceptional, the caller surfaces it at warn.
     Failed,
-}
-
-/// True when at least one rep has a known `NSPasteboardType` mapping.
-///
-/// Used as a pre-scan before `clearContents()` so an entry whose stored
-/// reps are *all* outside the macOS publisher's MIME table (file URLs,
-/// `image/jpeg`, etc.) falls back through `write_entry` instead of clearing
-/// the pasteboard and erroring after the fact. The body only inspects MIME
-/// strings and `RepresentationDataRef` variants from `nagori-core`, so it
-/// stays `cfg`-free even though its only caller is the macOS impl — the
-/// crate is a workspace member built on every host and the helper has to
-/// resolve on non-mac targets too.
-fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
-    reps.iter()
-        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
-            (
-                "text/plain" | "text/html" | "application/rtf",
-                RepresentationDataRef::InlineText(_),
-            )
-            | (
-                "image/png" | "image/tiff" | "image/jpeg" | "image/gif" | "image/webp",
-                RepresentationDataRef::DatabaseBlob(_),
-            ) => true,
-            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
-            _ => false,
-        })
 }
 
 /// The pasteboard items built for a multi-rep `writeObjects` batch, plus

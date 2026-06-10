@@ -15,7 +15,10 @@ pub use capability::{
     Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
     unsupported_capabilities,
 };
-pub use clipboard::{CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard};
+pub use clipboard::{
+    CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard,
+    has_publishable_representation,
+};
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
 pub use paste::{NoopPasteController, PasteController, PasteResult};
 pub use permissions::{

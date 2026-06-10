@@ -168,6 +168,38 @@ impl<T: ClipboardWriter + ?Sized> ClipboardWriter for Arc<T> {
     }
 }
 
+/// True when at least one stored rep has a mapping in the platform
+/// publishers' shared MIME table.
+///
+/// Pre-scan used by every adapter's `write_representations` so an entry
+/// whose stored reps are *all* outside the publisher's table (e.g. only
+/// `application/json` without a plain fallback) falls back through
+/// `write_entry` instead of clearing the OS clipboard and erroring after the
+/// fact. `write_representation_exact` uses the same scan to refuse a MIME it
+/// cannot publish without touching the clipboard.
+///
+/// All three desktop adapters publish the same table — plain text / HTML /
+/// RTF as inline text, the allowlisted image formats (PNG / TIFF / JPEG /
+/// GIF / WebP) as blobs, and non-empty file lists — so the scan is shared
+/// here. If one platform's table ever diverges, parameterise the MIME sets
+/// instead of forking the function back into the adapters.
+#[must_use]
+pub fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
+    reps.iter()
+        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
+            (
+                "text/plain" | "text/html" | "application/rtf",
+                RepresentationDataRef::InlineText(_),
+            )
+            | (
+                "image/png" | "image/tiff" | "image/jpeg" | "image/gif" | "image/webp",
+                RepresentationDataRef::DatabaseBlob(_),
+            ) => true,
+            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
+            _ => false,
+        })
+}
+
 #[derive(Debug, Default)]
 pub struct MemoryClipboard {
     state: Mutex<Option<String>>,
@@ -322,5 +354,55 @@ mod tests {
         assert!(clipboard.write_representation_exact(&image).await.is_err());
         // The refused write left the prior contents untouched.
         assert_eq!(clipboard.current_text().as_deref(), Some("<p>just me</p>"));
+    }
+
+    #[test]
+    fn has_publishable_representation_matches_known_mimes() {
+        let plain = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/plain".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("hi".to_owned()),
+        };
+        let html = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/html".to_owned(),
+            ordinal: 1,
+            data: RepresentationDataRef::InlineText("<p>hi</p>".to_owned()),
+        };
+        let png = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "image/png".to_owned(),
+            ordinal: 2,
+            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50, 0x4e, 0x47]),
+        };
+        let paths = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 3,
+            data: RepresentationDataRef::FilePaths(vec!["/tmp/one".to_owned()]),
+        };
+        assert!(has_publishable_representation(&[plain]));
+        assert!(has_publishable_representation(&[html]));
+        assert!(has_publishable_representation(&[png]));
+        assert!(has_publishable_representation(&[paths]));
+    }
+
+    #[test]
+    fn has_publishable_representation_rejects_unmapped_mimes() {
+        let json = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "application/json".to_owned(),
+            ordinal: 0,
+            data: RepresentationDataRef::InlineText("{}".to_owned()),
+        };
+        let empty_paths = StoredClipboardRepresentation {
+            role: RepresentationRole::Primary,
+            mime_type: "text/uri-list".to_owned(),
+            ordinal: 1,
+            data: RepresentationDataRef::FilePaths(Vec::new()),
+        };
+        assert!(!has_publishable_representation(&[]));
+        assert!(!has_publishable_representation(&[json, empty_paths]));
     }
 }

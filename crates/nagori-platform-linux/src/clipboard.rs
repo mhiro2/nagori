@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot,
-    RepresentationDataRef, Result, StoredClipboardRepresentation,
+    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot, Result,
+    StoredClipboardRepresentation,
 };
 #[cfg(target_os = "linux")]
-use nagori_core::{ClipboardData, ClipboardRepresentation};
-use nagori_platform::{CapturedSnapshot, ClipboardReader, ClipboardWriter};
+use nagori_core::{ClipboardData, ClipboardRepresentation, RepresentationDataRef};
+use nagori_platform::{
+    CapturedSnapshot, ClipboardReader, ClipboardWriter, has_publishable_representation,
+};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
@@ -492,31 +494,6 @@ impl LinuxClipboard {
         })
         .await
     }
-}
-
-/// True when at least one rep has a known Wayland MIME mapping.
-///
-/// Pre-scan used by `write_representations` so an entry whose stored
-/// reps are all outside the publisher's table (e.g. only `application/json`
-/// without a plain fallback) falls back to `write_entry` instead of
-/// issuing a `copy_multi` for nothing. The body inspects only `nagori-core`
-/// types so it stays target-independent — the workspace builds every
-/// platform crate on every host and this helper has to resolve on
-/// non-Linux targets too.
-fn has_publishable_representation(reps: &[StoredClipboardRepresentation]) -> bool {
-    reps.iter()
-        .any(|rep| match (rep.mime_type.as_str(), &rep.data) {
-            (
-                "text/plain" | "text/html" | "application/rtf",
-                RepresentationDataRef::InlineText(_),
-            )
-            | (
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff",
-                RepresentationDataRef::DatabaseBlob(_),
-            ) => true,
-            ("text/uri-list", RepresentationDataRef::FilePaths(paths)) => !paths.is_empty(),
-            _ => false,
-        })
 }
 
 /// Map stored representations into a `MimeSource` batch for
