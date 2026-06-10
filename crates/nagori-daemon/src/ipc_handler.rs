@@ -82,14 +82,8 @@ impl NagoriRuntime {
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text =
                     include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-                let entry_id = entry.id;
-                let summaries = self
-                    .store
-                    .list_representation_summaries(&[entry_id])
-                    .await?;
-                let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                 Ok(IpcResponse::Entry(
-                    EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
+                    self.hydrate_entry_dto(entry, include_text).await?,
                 ))
             }
             IpcRequest::ListRecent(ListRecentRequest {
@@ -97,16 +91,12 @@ impl NagoriRuntime {
                 include_sensitive,
             }) => {
                 let entries = self.list_recent(limit).await?;
-                let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
-                let summaries = self.store.list_representation_summaries(&ids).await?;
-                let dtos = entry_dtos_within_budget(entries, &summaries, include_sensitive);
+                let dtos = self.hydrate_entry_dtos(entries, include_sensitive).await?;
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::ListPinned(ListPinnedRequest { include_sensitive }) => {
                 let entries = self.list_pinned().await?;
-                let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
-                let summaries = self.store.list_representation_summaries(&ids).await?;
-                let dtos = entry_dtos_within_budget(entries, &summaries, include_sensitive);
+                let dtos = self.hydrate_entry_dtos(entries, include_sensitive).await?;
                 Ok(IpcResponse::Entries(dtos))
             }
             IpcRequest::AddEntry(AddEntryRequest { text }) => {
@@ -114,14 +104,8 @@ impl NagoriRuntime {
                 self.notify_external_mutation();
                 let entry = self.get_entry(id).await?.ok_or(AppError::NotFound)?;
                 let include_text = is_text_safe_for_default_output(entry.sensitivity);
-                let entry_id = entry.id;
-                let summaries = self
-                    .store
-                    .list_representation_summaries(&[entry_id])
-                    .await?;
-                let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
                 Ok(IpcResponse::Entry(
-                    EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
+                    self.hydrate_entry_dto(entry, include_text).await?,
                 ))
             }
             // Copy / paste also count as corpus mutations: they bump the
@@ -214,6 +198,41 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Ack)
             }
         }
+    }
+
+    /// Attach the entry's representation summaries and convert it into the
+    /// wire DTO. Shared by every single-entry response (`GetEntry`,
+    /// `AddEntry`) so the summary lookup and DTO conversion cannot drift
+    /// between request kinds.
+    async fn hydrate_entry_dto(
+        &self,
+        entry: ClipboardEntry,
+        include_text: bool,
+    ) -> Result<EntryDto> {
+        let entry_id = entry.id;
+        let summaries = self
+            .store
+            .list_representation_summaries(&[entry_id])
+            .await?;
+        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+        Ok(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps))
+    }
+
+    /// Batch-load representation summaries for a list response and hydrate
+    /// the rows within the response byte budget (see
+    /// [`entry_dtos_within_budget`]). Shared by `ListRecent` / `ListPinned`.
+    async fn hydrate_entry_dtos(
+        &self,
+        entries: Vec<ClipboardEntry>,
+        include_sensitive: bool,
+    ) -> Result<Vec<EntryDto>> {
+        let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+        let summaries = self.store.list_representation_summaries(&ids).await?;
+        Ok(entry_dtos_within_budget(
+            entries,
+            &summaries,
+            include_sensitive,
+        ))
     }
 
     pub(crate) async fn build_doctor_report(&self) -> Result<DoctorReport> {
