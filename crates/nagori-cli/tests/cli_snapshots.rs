@@ -332,3 +332,72 @@ fn write_without_db_falls_back_to_direct_write_when_nothing_runs() {
         "the fallback write must land in the default DB",
     );
 }
+
+/// A `--db` pointing at the real store through a file symlink must contend
+/// for the real directory's lock, not the symlink's parent — otherwise an
+/// alias path writes underneath a running instance.
+#[cfg(unix)]
+#[test]
+fn write_through_symlinked_db_is_refused_while_the_real_store_is_owned() {
+    let (real_dir, real_db) = temp_db();
+    // The DB file must exist for the alias to resolve.
+    let seeded = nagori(&real_db)
+        .args(["add", "--text", "seed"])
+        .output()
+        .expect("invoke add");
+    assert!(seeded.status.success(), "seeding the real DB should work");
+    let _owner = nagori_storage::ProcessLock::try_acquire(real_dir.path())
+        .expect("lock io")
+        .expect("lock should be free");
+
+    let alias_dir = tempfile::tempdir().expect("tempdir");
+    let alias_db = alias_dir.path().join("alias.sqlite");
+    std::os::unix::fs::symlink(&real_db, &alias_db).expect("create symlink");
+
+    let output = nagori(&alias_db)
+        .args(["add", "--text", "via alias"])
+        .output()
+        .expect("invoke add");
+    assert!(
+        !output.status.success(),
+        "an aliased write must contend for the real directory's lock",
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        stderr.contains("owns"),
+        "the refusal should name the owning instance: {stderr}"
+    );
+}
+
+/// With an instance owning the default store but no reachable endpoint
+/// (`cli_ipc_enabled` off), a write without `--db` must fail with the
+/// Settings hint instead of silently writing underneath the owner.
+#[cfg(unix)]
+#[test]
+fn write_without_db_is_refused_with_hint_when_owner_has_no_endpoint() {
+    let home = tempfile::tempdir().expect("tempdir");
+    #[cfg(target_os = "macos")]
+    let data_dir = home.path().join("Library/Application Support/nagori");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = home.path().join(".local/share/nagori");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let _owner = nagori_storage::ProcessLock::try_acquire(&data_dir)
+        .expect("lock io")
+        .expect("lock should be free");
+
+    let mut cmd = Command::cargo_bin("nagori").expect("nagori binary");
+    cmd.env("HOME", home.path());
+    cmd.env("XDG_DATA_HOME", home.path().join(".local/share"));
+    cmd.env_remove("NAGORI_DB_PATH");
+    cmd.args(["add", "--text", "should not land"]);
+    let output = cmd.output().expect("invoke add");
+    assert!(
+        !output.status.success(),
+        "a write must not bypass an owner whose endpoint is unreachable",
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        stderr.contains("cli_ipc_enabled"),
+        "the failure should hint at the Settings toggle: {stderr}"
+    );
+}

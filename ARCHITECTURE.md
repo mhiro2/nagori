@@ -197,9 +197,10 @@ Two execution modes:
   `--db <path>` is a read/write fallback that bypasses the daemon and
   is documented as **repair / offline mode** in
   [`docs/cli.md`](./docs/cli.md). Direct *writes* — via `--db` or the
-  automatic fallback when no endpoint is reachable — first take the
-  same store-directory `ProcessLock` the app and daemon hold, so they
-  only proceed when nothing owns the store and can never desync a
+  automatic routing when neither flag is given — first take the same
+  store-directory `ProcessLock` the app and daemon hold (computed from
+  the canonicalized DB path so a symlinked alias cannot dodge it), so
+  they only proceed when nothing owns the store and can never desync a
   running instance's caches.
 
 The two surfaces speak different DTOs on purpose: the daemon serves

@@ -61,9 +61,9 @@ struct Cli {
     #[arg(long, global = true)]
     ipc: Option<PathBuf>,
     /// For read commands: try the default IPC endpoint first and fall back
-    /// to reading the local DB when unreachable. Write commands behave
-    /// this way by default (their fallback takes the single-instance
-    /// lock), so the flag only changes reads.
+    /// to reading the local DB when unreachable. Write commands route
+    /// automatically (direct write when no instance is running, IPC
+    /// otherwise), so the flag only changes reads.
     #[arg(long, global = true)]
     auto_ipc: bool,
     /// Pretty JSON output (single payload).
@@ -233,14 +233,33 @@ async fn dispatch(cli: Cli) -> Result<()> {
         return run_ipc_command(cli, socket).await;
     }
     let writes = is_write_command(&cli.command);
-    // `--db <path>` is an explicit direct-DB request; honor it without
-    // probing IPC so the user can still poke at an offline DB. For writes
-    // the instance lock below still gates it.
-    if cli.db.is_none() && (writes || cli.auto_ipc) {
-        // Writes default to IPC so the running instance stays the single
-        // source of truth for capture / settings / clipboard state. Reads
-        // only try IPC under explicit `--auto-ipc`, preserving the
-        // existing "read straight from disk" UX for casual queries.
+    if writes && cli.db.is_none() {
+        // Route the write by the single-instance lock, decided once:
+        // acquiring it proves nothing owns the store (a direct write
+        // cannot desync anyone), failing it proves an owner exists (so
+        // the write must go through its IPC endpoint). Probing the
+        // endpoint first would leave a gap between the health check and
+        // the command's own connection in which the owner can exit.
+        if let Some(lock) = try_acquire_direct_write_lock(&default_db_path())? {
+            init_tracing();
+            tracing::warn!(
+                "ipc_fallback_to_local_db reason=no_running_instance mode=write-fallback"
+            );
+            let _write_lock = lock;
+            return run_local_command(cli).await;
+        }
+        let candidate = default_socket_path();
+        return run_ipc_command(cli, candidate).await.with_context(|| {
+            "a running nagori owns the store but its IPC endpoint was unreachable. \
+             Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
+             `nagori daemon run`, or quit the running instance to write to the DB \
+             directly."
+                .to_owned()
+        });
+    }
+    if cli.db.is_none() && cli.auto_ipc {
+        // Reads only try IPC under explicit `--auto-ipc`, preserving the
+        // "read straight from disk" UX for casual queries.
         let candidate = default_socket_path();
         if let Ok(token) =
             nagori_ipc::read_token_file(&nagori_ipc::token_path_for_endpoint(&candidate))
@@ -252,67 +271,68 @@ async fn dispatch(cli: Cli) -> Result<()> {
             return run_ipc_command(cli, candidate).await;
         }
         // The endpoint either had no readable token or failed the health
-        // probe. Both reads and writes fall back to the local DB below —
-        // reads unconditionally (SQLite tolerates a concurrent owner),
-        // writes only once the instance lock proves nothing is running.
-        // Surface the fallback at warn! (stderr) so a user debugging
-        // stale results or an unexpected direct write sees the mismatch
-        // instead of having to bisect why their query lags.
+        // probe. Reads fall back to opening the SQLite file directly —
+        // safe against a concurrent owner, but any cache invalidation
+        // we'd normally trigger via IPC isn't delivered. Surface the
+        // fallback at warn! (stderr) so a user debugging stale results
+        // sees the mismatch instead of having to bisect why their query
+        // lags.
         init_tracing();
         tracing::warn!(
             socket = %candidate.display(),
-            mode = if writes { "write-fallback" } else { "local-fallback" },
-            "ipc_fallback_to_local_db reason=endpoint_unreachable"
+            "ipc_fallback_to_local_db reason=endpoint_unreachable mode=local-fallback"
         );
     }
-    // Gate every direct write on the same single-instance lock the desktop
-    // app and the daemon hold for their lifetime. Acquisition succeeding
-    // proves nothing owns the store, so a direct write cannot desync a
-    // running instance's in-memory caches; the lock is held until the
-    // command finishes. Reads stay lock-free.
+    // Explicit `--db` writes are gated on the same lock; a held lock means
+    // a running instance owns that store and the write must not bypass it.
     let _write_lock = if writes {
-        Some(acquire_direct_write_lock(cli.db.as_deref())?)
+        let db_path = cli.db.clone().unwrap_or_else(default_db_path);
+        match try_acquire_direct_write_lock(&db_path)? {
+            Some(lock) => Some(lock),
+            None => anyhow::bail!(
+                "a running nagori (desktop app or daemon) owns {}. Write through it \
+                 instead (drop --db), or quit it before writing to the DB directly.",
+                db_path.display()
+            ),
+        }
     } else {
         None
     };
     run_local_command(cli).await
 }
 
-/// Take the single-instance lock over the DB's directory before a direct
-/// write, mirroring `lock_dir_for` in the desktop shell (DB parent, falling
-/// back to `.` for a bare filename) so all three surfaces contend for the
-/// same `nagori.lock`.
+/// Try to take the single-instance lock over the DB's directory before a
+/// direct write — the same `nagori.lock` the desktop shell and the daemon
+/// hold for their lifetime, so all three surfaces contend for one gate. A
+/// held lock means writing here would land in `SQLite` without ever
+/// invalidating the owner's search cache or refreshing its palette.
 ///
-/// A held lock means a desktop app or daemon owns the store: writing
-/// underneath it would land in `SQLite` but never invalidate the owner's
-/// search cache or refresh its palette, so the CLI refuses and points at
-/// the IPC path instead. The two refusal messages differ because the
-/// reachable fix differs: with an explicit `--db` the user opted out of
-/// IPC, while the auto-fallback only gets here when the owner's endpoint
-/// is unreachable (typically `cli_ipc_enabled` off).
-fn acquire_direct_write_lock(db_override: Option<&Path>) -> Result<nagori_storage::ProcessLock> {
-    let explicit_db = db_override.is_some();
-    let db_path = db_override.map_or_else(default_db_path, Path::to_path_buf);
-    let lock_dir = match db_path.parent() {
+/// The lock directory is derived from the *canonicalized* DB path: locking
+/// the lexical parent would let an alias (`--db` through a file or
+/// directory symlink) acquire a different `nagori.lock` than the owner of
+/// the real directory and bypass the gate. A DB that doesn't exist yet
+/// (fresh store) can't be canonicalized itself, so its parent is resolved
+/// instead and the filename re-attached.
+fn try_acquire_direct_write_lock(db_path: &Path) -> Result<Option<nagori_storage::ProcessLock>> {
+    let lexical_parent = match db_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    nagori_storage::ensure_private_directory(lock_dir)
-        .with_context(|| format!("failed to create {}", lock_dir.display()))?;
-    match nagori_storage::ProcessLock::try_acquire(lock_dir)? {
-        Some(lock) => Ok(lock),
-        None if explicit_db => anyhow::bail!(
-            "a running nagori (desktop app or daemon) owns {}. Write through it \
-             instead (drop --db), or quit it before writing to the DB directly.",
-            lock_dir.display()
-        ),
-        None => anyhow::bail!(
-            "a running nagori owns {} but its IPC endpoint is unreachable. Enable \
-             Settings → CLI (cli_ipc_enabled) in the desktop app or start \
-             `nagori daemon run`, or quit the running instance to write directly.",
-            lock_dir.display()
-        ),
-    }
+    nagori_storage::ensure_private_directory(lexical_parent)
+        .with_context(|| format!("failed to create {}", lexical_parent.display()))?;
+    let resolved_db = std::fs::canonicalize(db_path).unwrap_or_else(|_| {
+        let resolved_parent =
+            std::fs::canonicalize(lexical_parent).unwrap_or_else(|_| lexical_parent.to_path_buf());
+        match db_path.file_name() {
+            Some(name) => resolved_parent.join(name),
+            None => resolved_parent,
+        }
+    });
+    let lock_dir = resolved_db
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
 }
 
 /// Treat an env var as a boolean opt-in. Only an explicit truthy token

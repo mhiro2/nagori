@@ -45,12 +45,12 @@ separate download — there is one artifact to install and update.
 | Forced IPC  | Always go through IPC; error if the endpoint is missing      | `--ipc <endpoint>`  |
 
 Write commands (`add`, `copy`, `paste`, `pin`, `unpin`, `delete`,
-`clear`) default to IPC so the process that owns the store stays the
-single source of truth and its search cache is invalidated on every
-mutation. When the endpoint is unreachable they fall back to writing
-the local DB directly — but only after taking the same single-instance
-lock the desktop app and the daemon hold, so the fallback can never
-desync a running instance:
+`clear`) route by the single-instance lock the desktop app and the
+daemon hold for their lifetime, decided once per invocation: when the
+lock is free, nothing owns the store and the CLI writes the local DB
+directly; when it is held, the write goes through the owner's IPC
+endpoint so its search cache is invalidated and the palette updates —
+a direct write can never desync a running instance:
 
 | What's running                      | Where the write goes                       |
 |-------------------------------------|--------------------------------------------|
