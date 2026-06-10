@@ -16,7 +16,7 @@ use nagori_core::{
 };
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use nagori_daemon::run_daemon;
-use nagori_daemon::{DaemonConfig, NagoriRuntime, default_socket_path};
+use nagori_daemon::{CliIpcConfig, DaemonConfig, NagoriRuntime, default_socket_path};
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
     DeleteEntryRequest, DoctorReport, EntryDto, GetEntryRequest, IpcClient, IpcRequest,
@@ -556,13 +556,17 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
     // (and vice versa). The CLI's `run_ipc_command` mirrors this derivation
     // so client and daemon agree on the path.
     let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
-    let defaults = DaemonConfig::default();
+    let ipc_defaults = CliIpcConfig::default();
     let max_concurrent_connections = args
         .ipc_max_connections
-        .unwrap_or(defaults.max_concurrent_connections);
+        .unwrap_or(ipc_defaults.max_concurrent_connections);
     let config = DaemonConfig {
-        socket_path,
-        token_path,
+        ipc: CliIpcConfig {
+            socket_path,
+            token_path,
+            max_concurrent_connections,
+            ..ipc_defaults
+        },
         capture_interval: std::time::Duration::from_millis(args.capture_interval_ms),
         // The clap range above already keeps this well clear of overflow;
         // `saturating_mul` is belt-and-suspenders in case the bound is ever
@@ -571,8 +575,6 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
             args.maintenance_interval_min.saturating_mul(60),
         ),
         secure_focus_fail_closed,
-        max_concurrent_connections,
-        ..defaults
     };
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -580,7 +582,7 @@ async fn run_daemon_command(cli: Cli) -> Result<()> {
         let parts = build_native_runtime(
             store,
             NativeRuntimeOptions {
-                socket_path: Some(config.socket_path.clone()),
+                socket_path: Some(config.ipc.socket_path.clone()),
                 ai_engine: None,
             },
         )?;

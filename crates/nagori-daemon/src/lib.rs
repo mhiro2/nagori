@@ -21,6 +21,6 @@ pub use search_cache::{
     SharedSearchCache, new_shared_cache,
 };
 pub use serve::{
-    DaemonConfig, WorkerRestart, acquire_data_dir_lock, default_socket_path, run_daemon,
-    supervise_worker,
+    CliIpcConfig, DaemonConfig, WorkerRestart, acquire_data_dir_lock, default_socket_path,
+    run_daemon, supervise_worker,
 };

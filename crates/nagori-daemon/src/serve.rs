@@ -59,27 +59,28 @@ const IPC_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// this window even when the handler pool is saturated.
 const IPC_LIVENESS_PROBE_SETTLE: Duration = Duration::from_millis(200);
 
+/// Everything the CLI IPC server needs to bind, authenticate, and drain.
+///
+/// Split out of [`DaemonConfig`] so a host that only serves IPC (the desktop
+/// shell) doesn't have to carry capture / maintenance tunables it never
+/// reads. The defaults are the contract the CLI's auto-ipc relies on:
+/// `token_path` must stay derivable from `socket_path` via
+/// `nagori_ipc::token_path_for_endpoint`.
 #[derive(Debug, Clone)]
-pub struct DaemonConfig {
+pub struct CliIpcConfig {
     /// On Unix this is a filesystem path for the Unix-domain socket. On
     /// Windows it is the named-pipe name (e.g. `\\.\pipe\nagori`) packed in
     /// a `PathBuf` so existing call-sites that store the IPC endpoint keep
     /// working without a platform-conditional type.
     pub socket_path: PathBuf,
     pub token_path: PathBuf,
-    pub capture_interval: Duration,
-    pub maintenance_interval: Duration,
     /// Maximum time to wait for in-flight IPC handlers to commit during
     /// shutdown before they're aborted. Picked to be longer than the
     /// slowest expected DB write (FTS index update on a large entry) but
     /// short enough that `Ctrl-C` on a stuck daemon still returns quickly.
+    /// `run_daemon` reuses this as the drain grace for its background
+    /// workers so the daemon has a single shutdown budget.
     pub shutdown_grace: Duration,
-    /// Whether the capture loop's "after N AX errors, treat focus as
-    /// secure" escalation is enabled. Production runs leave this `true`
-    /// (the safe default); only test harnesses that can't grant
-    /// Accessibility programmatically flip it to `false`. See
-    /// `CaptureLoop::without_secure_focus_fail_closed`.
-    pub secure_focus_fail_closed: bool,
     /// Upper bound on concurrent IPC handlers — forwarded into
     /// [`IpcServerConfig`] at startup so the CLI / doctor / regression
     /// tests can tune the in-flight ceiling instead of relying on the
@@ -87,28 +88,51 @@ pub struct DaemonConfig {
     pub max_concurrent_connections: NonZeroUsize,
 }
 
-impl Default for DaemonConfig {
+impl Default for CliIpcConfig {
     fn default() -> Self {
         Self {
             socket_path: default_socket_path(),
             token_path: default_token_path_local(),
-            capture_interval: Duration::from_millis(500),
-            maintenance_interval: Duration::from_mins(30),
             shutdown_grace: Duration::from_secs(5),
-            secure_focus_fail_closed: true,
             max_concurrent_connections: IpcServerConfig::default().max_concurrent_connections,
         }
     }
 }
 
-impl DaemonConfig {
-    /// Project the daemon's tunables onto the [`IpcServerConfig`] surface
+impl CliIpcConfig {
+    /// Project the host's tunables onto the [`IpcServerConfig`] surface
     /// the IPC crate consumes. Keeps the accept-loop call sites in
     /// `spawn_ipc_server` to a single line each so the function stays
     /// inside clippy's `too_many_lines` budget.
     const fn ipc_server_config(&self) -> IpcServerConfig {
         IpcServerConfig {
             max_concurrent_connections: self.max_concurrent_connections,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonConfig {
+    /// CLI IPC endpoint configuration, shared verbatim with the desktop
+    /// shell so both surfaces serve byte-identical IPC.
+    pub ipc: CliIpcConfig,
+    pub capture_interval: Duration,
+    pub maintenance_interval: Duration,
+    /// Whether the capture loop's "after N AX errors, treat focus as
+    /// secure" escalation is enabled. Production runs leave this `true`
+    /// (the safe default); only test harnesses that can't grant
+    /// Accessibility programmatically flip it to `false`. See
+    /// `CaptureLoop::without_secure_focus_fail_closed`.
+    pub secure_focus_fail_closed: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            ipc: CliIpcConfig::default(),
+            capture_interval: Duration::from_millis(500),
+            maintenance_interval: Duration::from_mins(30),
+            secure_focus_fail_closed: true,
         }
     }
 }
@@ -162,7 +186,7 @@ fn default_token_path_local() -> PathBuf {
 // the spawn still finds an ambient executor.
 fn spawn_ipc_server(
     runtime: NagoriRuntime,
-    config: &DaemonConfig,
+    config: &CliIpcConfig,
     shutdown: ShutdownHandle,
 ) -> Result<IpcServerTask> {
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -377,7 +401,7 @@ async fn ipc_stop_requested(stop_rx: &mut watch::Receiver<bool>) {
 
 async fn supervise_ipc_server(
     runtime: NagoriRuntime,
-    config: DaemonConfig,
+    config: CliIpcConfig,
     mut settings_rx: watch::Receiver<nagori_core::AppSettings>,
     mut shutdown: ShutdownHandle,
     mut server: Option<IpcServerTask>,
@@ -562,7 +586,7 @@ async fn liveness_tick(have_server: bool) {
 /// [`IPC_LIVENESS_WEDGE_THRESHOLD`]. `None` means the loop is healthy
 /// (or the probe could not establish a reliable measurement, in which
 /// case we conservatively wait for the next tick rather than restart).
-async fn wedged_accept_age(runtime: &NagoriRuntime, config: &DaemonConfig) -> Option<Duration> {
+async fn wedged_accept_age(runtime: &NagoriRuntime, config: &CliIpcConfig) -> Option<Duration> {
     // Probe success vs failure is informational — the wedge check below
     // measures whether the accept arm bumped the timestamp, which is a
     // stricter test than "the socket file resolves to a listener" (a
@@ -591,7 +615,7 @@ async fn wedged_accept_age(runtime: &NagoriRuntime, config: &DaemonConfig) -> Op
 /// immediately on success — the per-connection handler enforces its own
 /// `FIRST_READ_TIMEOUT`, so a probe that never sends bytes tears down
 /// inside ~1s and doesn't park a handler permit.
-async fn probe_ipc_endpoint(config: &DaemonConfig) -> bool {
+async fn probe_ipc_endpoint(config: &CliIpcConfig) -> bool {
     #[cfg(unix)]
     {
         tokio::net::UnixStream::connect(&config.socket_path)
@@ -644,7 +668,7 @@ async fn ipc_server_exit(
 /// rename-to-private-name step race-free in the common shutdown path —
 /// after the rename the public path is unmapped, so the eventual `unlink`
 /// can only touch the file we just moved, not a fresh daemon's entry.
-async fn stop_ipc_server(server: IpcServerTask, config: &DaemonConfig) {
+async fn stop_ipc_server(server: IpcServerTask, config: &CliIpcConfig) {
     let staged = stage_runtime_files(config, &server.fingerprints);
     server.request_stop();
     drain_one(
@@ -658,7 +682,7 @@ async fn stop_ipc_server(server: IpcServerTask, config: &DaemonConfig) {
 
 fn spawn_ipc_supervisor(
     runtime: NagoriRuntime,
-    config: DaemonConfig,
+    config: CliIpcConfig,
     settings_rx: watch::Receiver<nagori_core::AppSettings>,
     shutdown: ShutdownHandle,
     initial_server: Option<IpcServerTask>,
@@ -812,7 +836,7 @@ fn spawn_capture_supervisor(
 ) -> tokio::task::JoinHandle<()> {
     let interval = config.capture_interval;
     let secure_focus_fail_closed = config.secure_focus_fail_closed;
-    let grace = config.shutdown_grace;
+    let grace = config.ipc.shutdown_grace;
     let store = runtime.store().clone();
     tokio::spawn(async move {
         supervise_worker(
@@ -976,7 +1000,7 @@ fn spawn_ngram_rebuild_supervisor(
     })
 }
 
-fn ensure_ipc_runtime_dirs(config: &DaemonConfig) -> Result<()> {
+fn ensure_ipc_runtime_dirs(config: &CliIpcConfig) -> Result<()> {
     // On Windows the socket_path is a pipe name (e.g. `\\.\pipe\nagori`),
     // not a filesystem path. Only ensure the parent directory exists when
     // we actually need a filesystem-resident IPC endpoint.
@@ -1025,7 +1049,7 @@ where
     // re-enable a more permissive policy.
     runtime.refresh_settings_from_store().await?;
     let settings_rx = runtime.settings_subscribe();
-    ensure_ipc_runtime_dirs(&config)?;
+    ensure_ipc_runtime_dirs(&config.ipc)?;
 
     // Every long-running worker runs under a supervisor that restarts it after
     // a panic or unexpected early return (capture / maintenance / semantic) and
@@ -1037,7 +1061,7 @@ where
     // `reader` becomes shared so a respawn can rebuild a fresh capture loop over
     // the same adapter.
     let reader: Arc<dyn ClipboardReader> = Arc::new(reader);
-    let grace = config.shutdown_grace;
+    let grace = config.ipc.shutdown_grace;
 
     // `refresh_settings_from_store` already succeeded above, so the daemon's
     // pre-poll init is healthy by definition — record it here (once, before the
@@ -1071,7 +1095,7 @@ where
     let initial_ipc_server = if runtime.current_settings().cli_ipc_enabled {
         Some(spawn_ipc_server(
             runtime.clone(),
-            &config,
+            &config.ipc,
             shutdown.clone(),
         )?)
     } else {
@@ -1080,13 +1104,13 @@ where
     };
     let serve_handle = spawn_ipc_supervisor(
         runtime.clone(),
-        config.clone(),
+        config.ipc.clone(),
         settings_rx.clone(),
         shutdown.clone(),
         initial_ipc_server,
     );
 
-    info!(socket = %config.socket_path.display(), "daemon_started");
+    info!(socket = %config.ipc.socket_path.display(), "daemon_started");
 
     let mut shutdown_wait = shutdown.clone();
     tokio::select! {
@@ -1107,7 +1131,7 @@ where
         semantic_handle,
         ai_watchdog_handle,
         ngram_rebuild_handle,
-        config.shutdown_grace,
+        config.ipc.shutdown_grace,
     )
     .await;
     // The IPC supervisor's shutdown branch calls `stop_ipc_server`, which
@@ -1251,7 +1275,7 @@ impl StagedRuntimeFiles {
 /// could bind and write its token, and our subsequent token stage would
 /// snatch B's freshly written file.
 fn stage_runtime_files(
-    config: &DaemonConfig,
+    config: &CliIpcConfig,
     fingerprints: &RuntimeFingerprints,
 ) -> StagedRuntimeFiles {
     let token = stage_token(&config.token_path, &fingerprints.token);
@@ -1377,11 +1401,11 @@ mod tests {
     #[tokio::test]
     async fn settings_change_stops_existing_ipc_server() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let config = DaemonConfig {
+        let config = CliIpcConfig {
             socket_path: temp.path().join("nagori.sock"),
             token_path: temp.path().join("nagori.token"),
             shutdown_grace: Duration::from_millis(50),
-            ..DaemonConfig::default()
+            ..CliIpcConfig::default()
         };
         let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
             .build_for_test();
