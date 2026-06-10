@@ -36,6 +36,70 @@
 
 use std::time::Duration;
 
+/// Upper bound on a single blocking clipboard *read* operation.
+///
+/// arboard + OS clipboard calls run on the blocking pool via
+/// `spawn_blocking`. A healthy clipboard answers in milliseconds, but a
+/// wedged host clipboard (a frozen source app mid-publish on macOS, a
+/// foreground app that never calls `CloseClipboard` on Windows) would
+/// otherwise pin the blocking worker — and any clipboard mutex guard it
+/// holds — indefinitely, cascading into every later capture / copy / paste
+/// that needs the same lock. Capping each read keeps the daemon's async flow
+/// responsive: it always gets a degraded result back within the window. This
+/// mirrors the Linux adapter's internal `PIPE_READ_TIMEOUT`.
+///
+/// On timeout the detached blocking thread (and any mutex guard it holds) is
+/// leaked until the OS call finally unwedges — `spawn_blocking` tasks cannot
+/// be aborted. That is acceptable for the realistic *transient* hang: the
+/// thread frees itself when the call returns, and the sequence-only poll
+/// path does not take the mutex, so steady-state change detection keeps
+/// working through a hung body read.
+pub const CLIPBOARD_OP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Run a blocking clipboard *read* on the blocking pool, bounded by
+/// [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// Drop-in replacement for `tokio::task::spawn_blocking` at the adapters'
+/// call sites: the returned future still resolves to `Result<T, _>` so the
+/// existing `.await.map_err(..)` tail is unchanged, but a wedged OS call now
+/// resolves to [`BlockingError::Timeout`] instead of hanging forever. A late
+/// read result is simply discarded, so the leaked-thread caveat above
+/// applies harmlessly here.
+pub async fn clipboard_blocking<F, T>(op: &'static str, f: F) -> Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    run_blocking_with_timeout(op, CLIPBOARD_OP_TIMEOUT, f).await
+}
+
+/// Run a *side-effecting* clipboard write on the blocking pool, awaited to
+/// completion — deliberately **without** [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// A timeout would be unsafe here. `spawn_blocking` tasks cannot be aborted,
+/// so a timed-out write would not stop: the detached thread keeps running and
+/// still lands on the OS clipboard once the call unwedges, overwriting
+/// whatever the user copied in the meantime — silently clobbering newer (and
+/// possibly sensitive) clipboard content. We therefore await the write to
+/// completion, so the caller either learns the clipboard truly holds the
+/// intended content or blocks until a wedged clipboard recovers. This mirrors
+/// the synthetic-paste contract of [`run_blocking_with_timeout`]'s module
+/// docs. Reads keep [`clipboard_blocking`] because a late read result is
+/// simply discarded.
+pub async fn clipboard_write_blocking<F, T>(op: &'static str, f: F) -> Result<T, BlockingError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => Ok(value),
+        Err(join_err) => {
+            tracing::error!(op, error = %join_err, "platform_blocking_op_panicked");
+            Err(BlockingError::Panicked { op })
+        }
+    }
+}
+
 /// Why a blocking platform op did not return a value.
 ///
 /// Both variants mean "the closure produced no result"; callers map them onto
@@ -149,6 +213,24 @@ mod tests {
         // Release the blocking worker so it returns instead of blocking on
         // `recv` until the test process exits.
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn clipboard_write_blocking_returns_the_closure_value() {
+        let value = clipboard_write_blocking("write_ok", || 11_u32)
+            .await
+            .expect("write closure must complete");
+        assert_eq!(value, 11);
+    }
+
+    #[tokio::test]
+    async fn clipboard_write_blocking_maps_a_panicking_closure_to_panicked() {
+        let err = clipboard_write_blocking("write_boom", || -> u32 {
+            panic!("write closure blew up");
+        })
+        .await
+        .expect_err("a panicking write closure must surface as Panicked");
+        assert!(matches!(err, BlockingError::Panicked { op: "write_boom" }));
     }
 
     #[tokio::test]
