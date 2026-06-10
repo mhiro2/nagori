@@ -25,7 +25,18 @@ impl NagoriRuntime {
         }
     }
 
+    /// Re-read the persisted settings and publish them on the watch channel.
+    ///
+    /// Runs under the settings write lock like every writer: multiple
+    /// startup tasks (capture supervisor, CLI IPC host, settings
+    /// subscriber) refresh concurrently, and an unlocked read → publish
+    /// could interleave with a concurrent save so that the *stale*
+    /// snapshot is published last — resurrecting on the watch channel a
+    /// value (e.g. `cli_ipc_enabled`) the user just changed, while the
+    /// store holds the new one. With the lock, whichever publish lands
+    /// last always matches the store.
     pub async fn refresh_settings_from_store(&self) -> Result<AppSettings> {
+        let _guard = self.settings_write_lock.lock().await;
         let settings = self.store.get_settings().await?;
         self.publish_settings(settings.clone());
         Ok(settings)
