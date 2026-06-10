@@ -13,9 +13,8 @@ use nagori_core::{AppError, Result};
 use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
-use tracing::warn;
 
+use super::accept::{acquire_permit_or_shutdown, drain_handlers};
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
 use crate::AuthToken;
@@ -229,31 +228,22 @@ where
                 // means even a saturated handler pool keeps the timestamp
                 // advancing as long as accept() itself is still firing.
                 server_health.record_accept();
-                // Race permit acquisition against shutdown. Without this
-                // arm, a saturated handler pool (32 in flight) would pin
-                // the loop on `acquire_owned().await` and we would not
-                // observe `shutdown` again until one of the in-flight
-                // handlers freed a permit — which, in a degenerate case
-                // where every handler is itself stuck on a slow DB write,
-                // means the listener is not dropped until `drain_grace`
-                // aborts those handlers. Selecting on shutdown here keeps
-                // shutdown observation latency independent of handler
-                // progress.
-                let permit = tokio::select! {
-                    biased;
-                    () = &mut shutdown => {
-                        // Refuse the just-accepted connection by dropping
-                        // its stream; the client sees EOF and we proceed
-                        // to drain stage on the next iteration.
+                // Race permit acquisition against shutdown (see
+                // `acquire_permit_or_shutdown`); on shutdown, refuse the
+                // just-accepted connection by dropping its stream — the
+                // client sees EOF and we proceed to the drain stage.
+                let permit = match acquire_permit_or_shutdown(
+                    shutdown.as_mut(),
+                    semaphore.clone(),
+                )
+                .await
+                {
+                    Ok(Some(permit)) => permit,
+                    Ok(None) => {
                         drop(stream);
                         break Ok(());
                     }
-                    permit = semaphore.clone().acquire_owned() => match permit {
-                        Ok(permit) => permit,
-                        Err(err) => break Err(AppError::Platform(format!(
-                            "failed to acquire IPC connection permit: {err}"
-                        ))),
-                    },
+                    Err(err) => break Err(err),
                 };
                 let handler = handler.clone();
                 let token = token.clone();
@@ -270,29 +260,10 @@ where
     };
 
     // Stage 1: drop the listener so no further `accept()` succeeds even
-    // for clients that beat the shutdown signal in.
+    // for clients that beat the shutdown signal in. Stages 2 and 3 (bounded
+    // drain, then abort-and-reap) are shared with the named-pipe loop.
     drop(listener);
-
-    // Stage 2: wait up to `drain_grace` for in-flight handlers to commit.
-    if !tasks.is_empty() {
-        let drain = async {
-            while let Some(result) = tasks.join_next().await {
-                observe_handler_outcome(&server_health, result);
-            }
-        };
-        if timeout(drain_grace, drain).await.is_err() {
-            // Stage 3: anything still running has had its grace period;
-            // abort and reap so the JoinSet drops cleanly.
-            warn!(
-                grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX),
-                "ipc_drain_timeout_aborting_inflight",
-            );
-            tasks.abort_all();
-            while let Some(result) = tasks.join_next().await {
-                observe_handler_outcome(&server_health, result);
-            }
-        }
-    }
+    drain_handlers(tasks, drain_grace, &server_health).await;
 
     accept_result
 }

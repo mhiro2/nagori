@@ -7,6 +7,8 @@
 //!   panic-message redactor behind the doctor / health surfaces.
 //! - [`connection`] — the transport-agnostic per-connection driver (bounded
 //!   read, auth check, bounded write-back) shared by every platform.
+//! - [`accept`] — the accept-loop scaffolding (permit-vs-shutdown race,
+//!   two-stage handler drain) shared by both transports.
 //! - `unix` — the Unix-domain-socket listener, accept loops, and bind helper.
 //! - `windows` — the Windows named-pipe equivalents.
 //!
@@ -16,6 +18,8 @@
 mod health;
 pub use health::{IpcServerConfig, IpcServerHealth};
 
+#[cfg(any(unix, windows))]
+mod accept;
 #[cfg(any(unix, windows))]
 mod connection;
 

@@ -11,9 +11,8 @@ use std::time::Duration;
 use nagori_core::{AppError, Result};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
-use tracing::warn;
 
+use super::accept::{acquire_permit_or_shutdown, drain_handlers};
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
 use crate::AuthToken;
@@ -168,18 +167,21 @@ where
                     Ok(next) => Some(next),
                     Err(err) => break Err(err),
                 };
-                let permit = tokio::select! {
-                    biased;
-                    () = &mut shutdown => {
+                // Same permit-vs-shutdown race as the Unix path; on
+                // shutdown the just-connected client is refused by dropping
+                // its handle.
+                let permit = match acquire_permit_or_shutdown(
+                    shutdown.as_mut(),
+                    semaphore.clone(),
+                )
+                .await
+                {
+                    Ok(Some(permit)) => permit,
+                    Ok(None) => {
                         drop(connected);
                         break Ok(());
                     }
-                    permit = semaphore.clone().acquire_owned() => match permit {
-                        Ok(permit) => permit,
-                        Err(err) => break Err(AppError::Platform(format!(
-                            "failed to acquire IPC connection permit: {err}"
-                        ))),
-                    },
+                    Err(err) => break Err(err),
                 };
                 let handler = handler.clone();
                 let token = token.clone();
@@ -192,26 +194,10 @@ where
     };
 
     // Drop the unconnected server (if any is still pending) so no
-    // further clients can attach to this name.
+    // further clients can attach to this name. The bounded drain and
+    // abort-and-reap stages are shared with the Unix loop.
     drop(server);
-
-    if !tasks.is_empty() {
-        let drain = async {
-            while let Some(result) = tasks.join_next().await {
-                observe_handler_outcome(&server_health, result);
-            }
-        };
-        if timeout(drain_grace, drain).await.is_err() {
-            warn!(
-                grace_ms = u64::try_from(drain_grace.as_millis()).unwrap_or(u64::MAX),
-                "ipc_drain_timeout_aborting_inflight",
-            );
-            tasks.abort_all();
-            while let Some(result) = tasks.join_next().await {
-                observe_handler_outcome(&server_health, result);
-            }
-        }
-    }
+    drain_handlers(tasks, drain_grace, &server_health).await;
     accept_result
 }
 
