@@ -189,18 +189,28 @@ fn spawn_ipc_server(
     config: &CliIpcConfig,
     shutdown: ShutdownHandle,
 ) -> Result<IpcServerTask> {
+    // Take the endpoint-ownership lock before binding. It is the deterministic
+    // gate for "who owns this endpoint", keyed on the endpoint itself rather
+    // than the data directory: a desktop launched with a custom `--db` and a
+    // default-DB daemon lock *different* data directories yet target the *same*
+    // default socket, and only the endpoint-lock holder gets to bind it. The
+    // loser fails here (fatal for `run_daemon`, a backoff retry for the desktop
+    // host), and when the owner exits the lock releases so a waiting retry
+    // takes over — a deterministic hand-off the bare bind path lacked.
+    let endpoint_lock = acquire_endpoint_lock(config)?;
     let (stop_tx, stop_rx) = watch::channel(false);
     #[cfg(unix)]
     {
-        // `run_daemon` holds the data-directory lifetime lock
-        // (`nagori_storage::ProcessLock`) for as long as this daemon runs, so
-        // no peer daemon owns the same store. A socket inode left behind by a
-        // crashed predecessor — or by this daemon's own dead accept loop on a
-        // supervisor restart — refuses `connect()` and is reclaimed.
+        // We hold the endpoint-ownership lock above, so no live peer can be
+        // serving this socket: a socket inode left behind by a crashed
+        // predecessor — or by this daemon's own dead accept loop on a
+        // supervisor restart — is known-stale and reclaimed. Unlike a
+        // `connect()` probe, a held file lock cannot be faked by a dead
+        // process, so the reclaim is sound even when the data-directory lock
+        // lives elsewhere (custom `--db` / `NAGORI_DB_PATH`).
         // `bind_unix_replacing_stale` still refuses a socket with a *live*
-        // listener (a daemon sharing this `--ipc` under a different `--db`, or
-        // a squatter), so we never unlink a socket someone is serving; removal
-        // never hinges on a connect failure alone (the lock is the gate).
+        // listener as defense in depth; removal never hinges on a connect
+        // failure alone (the endpoint lock is the gate).
         let listener = bind_unix_replacing_stale(&config.socket_path)?;
         let socket_fingerprint = SocketFingerprint::capture(&config.socket_path);
         let (token, listener) = mint_token_unlinking_socket_on_failure(config, listener)?;
@@ -240,6 +250,7 @@ fn spawn_ipc_server(
                 socket: socket_fingerprint,
                 token: token_fingerprint,
             },
+            endpoint_lock,
         })
     }
     #[cfg(windows)]
@@ -292,11 +303,12 @@ fn spawn_ipc_server(
                 socket: SocketFingerprint,
                 token: token_fingerprint,
             },
+            endpoint_lock,
         })
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (runtime, config, shutdown, stop_tx, stop_rx);
+        let _ = (runtime, config, shutdown, stop_tx, stop_rx, endpoint_lock);
         Err(AppError::Unsupported(
             "IPC requires a Unix-like or Windows platform".to_owned(),
         ))
@@ -334,6 +346,38 @@ fn mint_token_unlinking_socket_on_failure(
             }
             Err(err)
         }
+    }
+}
+
+/// Path of the endpoint-ownership lock for `config`'s endpoint.
+///
+/// Keyed on the token path — which `token_path_for_endpoint` already derives
+/// to be unique per endpoint and to live under the per-user app-data dir
+/// (filesystem-backed on every platform, even where the socket is a Windows
+/// pipe name) — with a `.lock` suffix. Two endpoints sharing a directory
+/// therefore get distinct lock files, and the lock sits in a directory
+/// `ensure_ipc_runtime_dirs` has already created before any bind.
+fn endpoint_lock_path(config: &CliIpcConfig) -> PathBuf {
+    let mut path = config.token_path.clone().into_os_string();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// Acquire the endpoint-ownership lock, mapping contention to an error.
+///
+/// `Ok(None)` from the lock means a live peer already owns this endpoint, so
+/// we surface a `Platform` error rather than binding behind it — the caller
+/// treats it like any other bind failure (fatal startup for `run_daemon`, a
+/// backoff retry for the desktop host). A held lock, not a `connect()` probe,
+/// is what proves the peer is alive, so this can never be fooled into binding
+/// over a process that is genuinely still serving.
+fn acquire_endpoint_lock(config: &CliIpcConfig) -> Result<nagori_storage::ProcessLock> {
+    match nagori_storage::ProcessLock::try_acquire_at(&endpoint_lock_path(config))? {
+        Some(lock) => Ok(lock),
+        None => Err(nagori_core::AppError::Platform(format!(
+            "the IPC endpoint {} is already owned by another nagori process",
+            config.socket_path.display()
+        ))),
     }
 }
 
@@ -387,6 +431,15 @@ struct IpcServerTask {
     handle: tokio::task::JoinHandle<()>,
     stop_tx: watch::Sender<bool>,
     fingerprints: RuntimeFingerprints,
+    /// Endpoint-ownership lock held for as long as this server is bound.
+    /// Keyed on the IPC endpoint (not the data directory), so only the lock
+    /// holder may bind the socket / pipe — see [`acquire_endpoint_lock`].
+    /// Never read; held purely so dropping the task (on shutdown via
+    /// [`stop_ipc_server`], or when a dead accept loop is reaped) releases
+    /// the endpoint for a successor. The release happens *after* the socket
+    /// and token files are removed, so a waiter cannot bind mid-cleanup.
+    #[allow(dead_code)]
+    endpoint_lock: nagori_storage::ProcessLock,
 }
 
 impl IpcServerTask {
@@ -541,10 +594,11 @@ async fn supervise_ipc_server(
                         // files of the previously-dead server in place: we
                         // no longer hold its fingerprints, and a blind
                         // unlink here would reopen the TOCTOU described at
-                        // the join arm below. The files are known-stale
-                        // (we hold the data-dir lock) and the next bind —
-                        // settings re-enable or a fresh launch — replaces
-                        // them atomically.
+                        // the join arm below. The dead server already
+                        // released its endpoint lock when it was reaped, so
+                        // the next bind — settings re-enable or a fresh
+                        // launch — re-acquires the lock and replaces the
+                        // known-stale files atomically.
                         info!("ipc_restart_cancelled_by_settings");
                     }
                     restart_pending = false;
@@ -579,19 +633,18 @@ async fn supervise_ipc_server(
             //
             // We deliberately do NOT call `cleanup_runtime_files` here even
             // though the accept-loop task (and therefore the listener) is
-            // already gone. The next `spawn_ipc_server` below safely
-            // replaces both files atomically: `bind_unix_replacing_stale`
-            // removes the socket inode our dead listener left behind and
-            // rebinds — safe because this process still holds the daemon
-            // lifetime lock, so the leftover socket is known-stale, not a
-            // peer's; `write_token_file` writes to a sibling temp and renames
-            // over the target. Adding a fingerprint-check + rename here would
-            // re-introduce a listener-less TOCTOU window — a concurrent fresh
-            // daemon (which is no longer blocked at bind because our listener
-            // is dead) could write its token between our check and our rename
-            // and we'd rename *its* file out from under it. Leaving the
-            // stale entries in place until the next spawn is the safer
-            // choice.
+            // already gone. Dropping `dead` below releases its endpoint lock,
+            // and the next `spawn_ipc_server` re-acquires it before rebinding:
+            // `bind_unix_replacing_stale` removes the socket inode our dead
+            // listener left behind and rebinds — sound because re-holding the
+            // endpoint lock proves no live peer owns it, so the leftover
+            // socket is known-stale; `write_token_file` writes to a sibling
+            // temp and renames over the target. Adding a fingerprint-check +
+            // rename here would re-introduce a listener-less TOCTOU window —
+            // once `dead` is dropped a concurrent daemon could grab the
+            // endpoint lock and write its token between our check and our
+            // rename and we'd rename *its* file out from under it. Leaving the
+            // stale entries in place until the next spawn is the safer choice.
             join_result = ipc_server_exit(&mut server) => {
                 let dead = server.take().expect("ipc_server_exit only fires when server is Some");
                 match join_result {
@@ -755,6 +808,11 @@ async fn ipc_server_exit(
 /// rename-to-private-name step race-free in the common shutdown path —
 /// after the rename the public path is unmapped, so the eventual `unlink`
 /// can only touch the file we just moved, not a fresh daemon's entry.
+///
+/// `server` (and therefore its `endpoint_lock`) is dropped only when this
+/// function returns — i.e. *after* `staged.remove()` has unlinked the socket
+/// and token files — so a successor blocked on the endpoint lock cannot bind
+/// in the middle of our cleanup.
 async fn stop_ipc_server(server: IpcServerTask, config: &CliIpcConfig) {
     let staged = stage_runtime_files(config, &server.fingerprints);
     server.request_stop();
@@ -1763,6 +1821,92 @@ mod tests {
             !config.socket_path.exists(),
             "socket should be removed on shutdown",
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_lock_hands_the_socket_off_between_owners() {
+        // Two runtimes targeting the *same* endpoint (as a custom-`--db`
+        // desktop and a default-DB daemon would) must not both bind it. The
+        // endpoint lock makes the first the deterministic owner; the second
+        // is refused with a clear error and can only take over once the first
+        // releases — exactly the hand-off the bare bind path could not
+        // guarantee across distinct data-directory locks.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = test_ipc_config(temp.path());
+        let runtime_a = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store a"))
+            .build_for_test();
+        let runtime_b = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store b"))
+            .build_for_test();
+
+        let server_a = spawn_ipc_server(runtime_a.clone(), &config, runtime_a.shutdown_handle())
+            .expect("first owner should bind the endpoint");
+
+        match spawn_ipc_server(runtime_b.clone(), &config, runtime_b.shutdown_handle()) {
+            Ok(_) => panic!("a second owner must be refused while the first holds the endpoint"),
+            Err(nagori_core::AppError::Platform(message)) => assert!(
+                message.contains("already owned"),
+                "the conflict error should name the endpoint-ownership refusal, got {message}"
+            ),
+            Err(other) => panic!("unexpected error refusing the second owner: {other:?}"),
+        }
+
+        // The first owner releasing (its normal shutdown) frees the endpoint
+        // and removes its files, so the successor binds cleanly.
+        stop_ipc_server(server_a, &config).await;
+        assert!(
+            !config.socket_path.exists(),
+            "the first owner's shutdown should remove its socket before releasing the lock",
+        );
+        let server_b = spawn_ipc_server(runtime_b.clone(), &config, runtime_b.shutdown_handle())
+            .expect("successor should bind once the first owner releases the endpoint");
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("successor should answer health");
+        assert!(matches!(health, IpcResponse::Health(_)));
+        stop_ipc_server(server_b, &config).await;
+    }
+
+    #[tokio::test]
+    async fn cli_ipc_supervisor_recovers_when_endpoint_lock_frees() {
+        // An external holder of the endpoint lock (a peer process still
+        // serving, or one mid-shutdown) must keep the supervisor from binding;
+        // once it releases, the armed backoff retry brings IPC up with no
+        // settings change — the same recovery path as a transient bind error.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = test_ipc_config(temp.path());
+        let external = nagori_storage::ProcessLock::try_acquire_at(&endpoint_lock_path(&config))
+            .expect("endpoint lock io")
+            .expect("endpoint lock should be free");
+
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let shutdown = runtime.shutdown_handle();
+        let supervisor =
+            spawn_cli_ipc_supervisor(runtime.clone(), config.clone(), shutdown.clone());
+
+        // While the endpoint is owned elsewhere the supervisor must not bind.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !config.socket_path.exists(),
+            "the supervisor must not bind while another owner holds the endpoint lock",
+        );
+
+        drop(external);
+        wait_until(Duration::from_secs(3), || config.socket_path.exists())
+            .await
+            .expect("socket should appear once the endpoint lock frees");
+        let health = test_ipc_client(&config)
+            .send(IpcRequest::Health)
+            .await
+            .expect("health after the endpoint frees");
+        assert!(matches!(health, IpcResponse::Health(_)));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should stop")
+            .expect("supervisor should not panic");
     }
 
     #[tokio::test]

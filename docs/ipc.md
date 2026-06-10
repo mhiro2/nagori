@@ -16,6 +16,14 @@ in-process runtime. The two are mutually exclusive per store directory
 fail-closed — it serves only after the persisted settings loaded — and
 retries a failed bind with backoff instead of aborting the app.
 
+Binding the endpoint is gated by a second lock keyed on the endpoint
+itself (independent of the store lock). Even when `NAGORI_DB_PATH` /
+`--db` let a custom-store process and a default-store process run at once,
+only the endpoint-lock holder serves the default endpoint; the other is
+refused and retries until the owner exits and releases it — a
+deterministic hand-off rather than a race to reclaim the socket. See
+ARCHITECTURE.md "Single-instance & stale-socket handling".
+
 ## Endpoint location
 
 * **macOS** (default): `~/Library/Application Support/nagori/nagori.sock`.

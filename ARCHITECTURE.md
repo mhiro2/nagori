@@ -1096,19 +1096,29 @@ rather than co-owning it and double-capturing. (Windows additionally
 gets daemon-vs-daemon exclusion from the named pipe's
 `first_pipe_instance(true)`, but the store-directory lock is the gate
 that also covers the app.) The store lock is the authoritative
-single-instance gate. `bind_unix` (the conservative primitive used by
-`serve_unix` and tests) refuses any pre-existing socket; only a
-lock-holding daemon's `bind_unix_replacing_stale` reclaims one, and it
-does so only when the socket is **dead** (a `connect()` is refused) — a
-crashed predecessor's, or its own after a supervisor restart. A socket
-with a *live* listener (e.g. a daemon sharing this `--ipc` endpoint under
-a *different* `--db`, whose distinct store lock did not exclude it, or a
-non-nagori squatter) is refused rather than unlinked, so a live peer is
-never left unreachable. Removal never hinges on a connect failure
-*alone* — that failure mode is exactly what the lifetime lock was added
-to close — it requires both the held store lock and a dead socket. The
-kernel drops the lock on process exit — including a crash — so there is
-no stale-lock file to clean up.
+single-instance gate for the **store**.
+
+Binding the IPC endpoint is gated by a *second*, independent
+process-lifetime lock keyed on the **endpoint** rather than the store
+directory: `ProcessLock::try_acquire_at` over a `<token>.lock` file
+(the token path is already derived per endpoint and lives under the
+per-user app-data dir, so it is filesystem-backed even where the socket
+is a Windows pipe name). `spawn_ipc_server` takes it before binding and
+the bound server holds it for its lifetime, releasing it only *after*
+shutdown has removed the socket / token files — so the next owner cannot
+bind mid-cleanup. Only the endpoint-lock holder may bind, which is what
+makes `bind_unix_replacing_stale` sound: `bind_unix` (the conservative
+primitive used by `serve_unix` and tests) refuses any pre-existing
+socket, while `bind_unix_replacing_stale` reclaims one only when the
+socket is **dead** — a crashed predecessor's, or its own after a
+supervisor restart. Re-holding the endpoint lock (not a fragile
+`connect()` probe, which a dead process can fool) is what proves no live
+peer owns it, so the leftover socket is known-stale; this holds even when
+the store lock lives in a *different* directory (custom `--db` /
+`NAGORI_DB_PATH`). A socket with a *live* listener is still refused
+rather than unlinked as defense in depth, so removal never hinges on a
+connect failure alone. The kernel drops both locks on process exit —
+including a crash — so there is no stale-lock file to clean up.
 
 An auth-token file sits in the same directory as the IPC endpoint:
 `nagori.token` next to the socket on Unix (`0600` mode set explicitly
@@ -1140,16 +1150,18 @@ runtime, so the CLI reaches whichever surface currently owns the store —
 both serve byte-identical IPC on the same default endpoint, and the
 store-directory lock guarantees at most one of them runs per store. One
 caveat when `NAGORI_DB_PATH` / `--db` point a process at a non-default
-store: the lock is per store directory while the default endpoint is one
-per system, so a custom-store desktop and a default-store daemon can run
-concurrently and contend for the endpoint. The live-listener refusal
-above means the second binder retries with backoff rather than stealing
-the socket, but which store the CLI reaches then depends on which
-process owns the endpoint. The desktop always serves the default
-endpoint (it is not configurable), so the only way to address two
-instances deterministically is to start the *daemon* with a custom
-`--ipc <endpoint>` and point the CLI at it; the desktop then owns the
-default endpoint uncontended.
+store: the store lock is per store directory while the default endpoint
+is one per system, so a custom-store desktop and a default-store daemon
+can run concurrently and both want the endpoint. The endpoint-ownership
+lock makes that deterministic: whichever binds first owns the endpoint,
+the other is refused at the lock and retries with backoff, and when the
+owner exits (releasing the lock after its files are cleaned) the waiter
+takes over cleanly — a race-free hand-off rather than a `connect()`-probe
+contest. Which store the CLI reaches is still "whichever process owns the
+endpoint", so to address two instances *intentionally* start the
+*daemon* with a custom `--ipc <endpoint>` and point the CLI at it; the
+desktop always serves the default endpoint (it is not configurable) and
+then owns it uncontended.
 
 **Request / response types** (`nagori-ipc::protocol`):
 

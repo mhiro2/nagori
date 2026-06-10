@@ -59,10 +59,26 @@ impl ProcessLock {
     /// `dir` must already exist; callers prepare it with
     /// [`ensure_private_directory`](crate::ensure_private_directory) first.
     pub fn try_acquire(dir: &Path) -> Result<Option<Self>> {
-        let path = dir.join(LOCK_FILE_NAME);
-        let file = open_lock_file(&path)?;
+        Self::try_acquire_at(&dir.join(LOCK_FILE_NAME))
+    }
+
+    /// Try to take the exclusive lock on the file at `path` directly.
+    ///
+    /// Like [`try_acquire`](Self::try_acquire) but keyed on an explicit lock
+    /// file rather than the conventional `nagori.lock` inside a directory.
+    /// Used for locks that guard something other than the data directory —
+    /// e.g. ownership of a specific IPC endpoint, whose lock file is keyed on
+    /// the endpoint path so two endpoints in the same directory don't share a
+    /// lock. The semantics of the three outcomes match `try_acquire`.
+    ///
+    /// `path`'s parent directory must already exist.
+    pub fn try_acquire_at(path: &Path) -> Result<Option<Self>> {
+        let file = open_lock_file(path)?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(Self { file, path })),
+            Ok(()) => Ok(Some(Self {
+                file,
+                path: path.to_path_buf(),
+            })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(err)) => Err(AppError::Platform(format!(
                 "failed to acquire process lock at {}: {err}",
@@ -156,6 +172,33 @@ mod tests {
         assert!(
             b.is_some(),
             "locks on different directories must be independent"
+        );
+    }
+
+    #[test]
+    fn try_acquire_at_keys_on_the_file_not_the_directory() {
+        // Two distinct lock files in the *same* directory must not contend —
+        // this is what lets an endpoint lock (keyed on the endpoint path)
+        // coexist with the data-directory lock in the same leaf without one
+        // blocking the other.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_a = dir.path().join("a.lock");
+        let lock_b = dir.path().join("b.lock");
+        let _a = ProcessLock::try_acquire_at(&lock_a)
+            .expect("acquire a should not error")
+            .expect("acquire a should obtain the lock");
+        let b = ProcessLock::try_acquire_at(&lock_b).expect("acquire b should not error");
+        assert!(
+            b.is_some(),
+            "locks on different files must be independent even in one directory"
+        );
+
+        // A second acquirer of the *same* file still observes contention.
+        let a_again =
+            ProcessLock::try_acquire_at(&lock_a).expect("second acquire of a should not error");
+        assert!(
+            a_again.is_none(),
+            "a held lock file must make a second acquire return None"
         );
     }
 
