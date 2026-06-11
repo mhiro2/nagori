@@ -1282,13 +1282,28 @@ where
 
     // Unlike the desktop host, an initial bind failure is fatal here: a
     // headless daemon whose whole purpose is serving IPC should refuse to
-    // start half-alive rather than retry in the background.
+    // start half-alive rather than retry in the background. Fatal must not
+    // mean leaky, though — the worker supervisors above are already running,
+    // so a bare `?` here would strand the capture / maintenance / semantic /
+    // watchdog / ngram tasks mid-write with no shutdown signal. Cancel and
+    // drain them first, then propagate the bind error.
     let initial_ipc_state = if runtime.current_settings().cli_ipc_enabled {
-        InitialIpcState::Running(spawn_ipc_server(
-            runtime.clone(),
-            &config.ipc,
-            shutdown.clone(),
-        )?)
+        match spawn_ipc_server(runtime.clone(), &config.ipc, shutdown.clone()) {
+            Ok(server) => InitialIpcState::Running(server),
+            Err(err) => {
+                shutdown.cancel();
+                drain_worker_supervisors(
+                    capture_handle,
+                    maintenance_handle,
+                    semantic_handle,
+                    ai_watchdog_handle,
+                    ngram_rebuild_handle,
+                    grace,
+                )
+                .await;
+                return Err(err);
+            }
+        }
     } else {
         info!("ipc_disabled_by_settings");
         InitialIpcState::Disabled
@@ -1369,6 +1384,30 @@ async fn drain_workers(
         grace + Duration::from_secs(2),
     )
     .await;
+    drain_worker_supervisors(
+        capture_handle,
+        maintenance_handle,
+        semantic_handle,
+        ai_watchdog_handle,
+        ngram_rebuild_handle,
+        grace,
+    )
+    .await;
+}
+
+/// Drain the five worker supervisors (everything but the IPC supervisor).
+/// Shared between the normal shutdown path ([`drain_workers`]) and the
+/// startup-failure path in [`run_daemon`], where the IPC server never came
+/// up but the workers are already running. The caller must have cancelled
+/// the shutdown handle first.
+async fn drain_worker_supervisors(
+    capture_handle: tokio::task::JoinHandle<()>,
+    maintenance_handle: tokio::task::JoinHandle<()>,
+    semantic_handle: tokio::task::JoinHandle<()>,
+    ai_watchdog_handle: tokio::task::JoinHandle<()>,
+    ngram_rebuild_handle: tokio::task::JoinHandle<()>,
+    grace: Duration,
+) {
     // A worker supervisor's own shutdown branch runs `drain_one(worker, grace)`
     // (worst case `grace + POST_ABORT_JOIN_TIMEOUT`), so the supervisor task
     // needs more than `grace` to wind down.
@@ -1648,6 +1687,53 @@ mod tests {
             .await
             .expect("supervisor should stop")
             .expect("supervisor should not panic");
+    }
+
+    /// `run_daemon` spawns the worker supervisors (capture / maintenance /
+    /// semantic / AI watchdog / ngram rebuild) before binding IPC, and an IPC
+    /// bind failure is fatal. Fatal must not mean leaky: the failure path has
+    /// to cancel the shared shutdown handle and drain those workers before
+    /// propagating the error, rather than returning with five supervisors
+    /// still running detached. The bind is made to lose deterministically by
+    /// holding the endpoint-ownership lock from the test.
+    #[tokio::test]
+    async fn run_daemon_drains_workers_when_ipc_bind_fails() {
+        use nagori_platform::MemoryClipboard;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let config = DaemonConfig {
+            ipc: test_ipc_config(temp.path()),
+            ..DaemonConfig::default()
+        };
+        // Occupy the endpoint lock so the daemon's own `spawn_ipc_server`
+        // loses the bind after its workers are already running.
+        let _endpoint_owner =
+            acquire_endpoint_lock(&config.ipc).expect("test should take the endpoint lock");
+
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        let mut shutdown = runtime.shutdown_handle();
+        let instance_lock = acquire_data_dir_lock(&data_dir).expect("data dir lock");
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_daemon(runtime, MemoryClipboard::new(), config, None, instance_lock),
+        )
+        .await
+        .expect("the failure path must drain the workers within the grace budget")
+        .expect_err("a lost endpoint bind must be fatal for run_daemon");
+        assert!(
+            err.to_string().contains("endpoint")
+                || matches!(err, nagori_core::AppError::Platform(_)),
+            "the error should be the bind failure, got: {err}"
+        );
+        // The cancel is what stopped the workers; `run_daemon` returning within
+        // the timeout above shows the drain completed rather than detaching.
+        tokio::time::timeout(Duration::from_millis(100), shutdown.cancelled())
+            .await
+            .expect("the failure path must cancel the shared shutdown handle");
     }
 
     fn test_ipc_config(dir: &std::path::Path) -> CliIpcConfig {
