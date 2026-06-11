@@ -29,6 +29,9 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `test-util` enables `#[tokio::test(start_paused = true)]` so the
+# embedding-permit timeout test advances the deadline without sleeping.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

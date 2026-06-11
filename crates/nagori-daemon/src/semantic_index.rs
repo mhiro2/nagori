@@ -46,6 +46,15 @@ const EMBED_BATCH: usize = 16;
 /// missed wake so backfill always makes progress without a capture.
 const IDLE_TICK: Duration = Duration::from_mins(1);
 
+/// How long an interactive semantic query waits for the shared embedding
+/// permit before giving up. The background indexer holds the permit for a
+/// whole batch (up to [`EMBED_BATCH`] items, each allowed the backend's
+/// per-item timeout), so an unbounded wait could park the query — and the
+/// IPC connection slot driving it — for minutes behind backfill. A palette
+/// search is interactive: better to fail fast with a clear "busy" error the
+/// caller can surface than to look wedged.
+const QUERY_EMBED_PERMIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Backoff schedule applied after a rate-limited / timed-out batch before the
 /// next attempt, capped so a wedged model never spins.
 const BACKOFF_STEPS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000, 16_000];
@@ -185,8 +194,22 @@ impl NagoriRuntime {
             query.normalized.clone()
         };
         // One embedding at a time across the whole process: share the registry's
-        // embedding permit with the background indexer.
-        let _permit = self.embedding_semaphore().acquire_owned().await.ok();
+        // embedding permit with the background indexer — but never wait for it
+        // unboundedly. A closed semaphore (`Err` from `acquire_owned`) degrades
+        // to running without the permit, as before.
+        let _permit = tokio::time::timeout(
+            QUERY_EMBED_PERMIT_TIMEOUT,
+            self.embedding_semaphore().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            AppError::Ai(
+                "semantic search timed out waiting for the embedding model \
+                 (busy indexing); try again shortly"
+                    .to_owned(),
+            )
+        })?
+        .ok();
         let vectors = embedder
             .embed_batch(
                 vec![EmbeddingInput {
@@ -636,6 +659,50 @@ mod tests {
             languages: vec!["en".to_owned(), "ja".to_owned()],
             index_version: INDEX_VERSION,
         }
+    }
+
+    /// The interactive query path shares the single embedding permit with the
+    /// background indexer, which holds it for a whole batch (potentially
+    /// minutes of model time). The query-side acquire is deadline-bounded so a
+    /// search arriving while the permit is held fails fast with a clear "busy"
+    /// error instead of parking the IPC handler — and its connection slot —
+    /// behind backfill.
+    #[tokio::test(start_paused = true)]
+    async fn semantic_query_times_out_when_embedding_permit_is_held() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{
+            AiProviderKind, AppError, AppSettings, SearchMode, SearchQuery, SettingsRepository,
+        };
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let mut settings = AppSettings::default();
+        settings.ai.semantic_index_enabled = true;
+        store.save_settings(settings).await.unwrap();
+        store.semantic_set_meta(compatible_meta()).await.unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store)
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        // Stand in for the background indexer mid-batch.
+        let _held = runtime.embedding_semaphore().acquire_owned().await.unwrap();
+
+        let mut query = SearchQuery::new("hello", "hello".to_owned(), 10);
+        query.mode = SearchMode::Semantic;
+        let err = runtime
+            .semantic_search_results(query)
+            .await
+            .expect_err("query must not wait unboundedly for the permit");
+        assert!(
+            matches!(err, AppError::Ai(_)),
+            "busy-permit timeout should surface as an AI error, got: {err:?}"
+        );
     }
 
     /// A semantic query must not rank against stored vectors whose model is
