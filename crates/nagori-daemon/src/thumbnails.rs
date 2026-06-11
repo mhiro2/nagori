@@ -105,7 +105,15 @@ impl ThumbnailGate {
     }
 
     pub(crate) fn try_acquire(&self, id: EntryId) -> Option<ThumbnailGateGuard> {
-        let mut set = self.in_flight.lock().ok()?;
+        // Recover from a poisoned mutex instead of treating it as "busy":
+        // the set only tracks in-flight ids (no invariant a panicked holder
+        // could have half-applied), and refusing here would silently disable
+        // thumbnail generation until the daemon restarts after a single
+        // panic while the lock was held.
+        let mut set = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if set.insert(id) {
             Some(ThumbnailGateGuard {
                 gate: self.clone(),
@@ -139,9 +147,14 @@ pub(crate) struct ThumbnailGateGuard {
 
 impl Drop for ThumbnailGateGuard {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.gate.in_flight.lock() {
-            set.remove(&self.id);
-        }
+        // Same poison recovery as `try_acquire`: skipping the removal on a
+        // poisoned lock would leave this id stranded in the set, refusing
+        // every future regeneration attempt for the entry.
+        self.gate
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
     }
 }
 
@@ -396,6 +409,38 @@ mod tests {
             .expect("a slot frees once a permit drops");
         drop(p2);
         drop(p3);
+    }
+
+    /// A panic while the in-flight set's lock is held must not degrade the
+    /// gate until daemon restart. The set carries no invariant a panicked
+    /// holder could have half-applied, so both `try_acquire` and the guard's
+    /// `Drop` recover the poisoned mutex — refusing in `try_acquire` would
+    /// silently disable thumbnail generation, and skipping the `Drop` removal
+    /// would pin the panicking request's id as forever in-flight.
+    #[test]
+    fn thumbnail_gate_recovers_from_mutex_poison() {
+        let gate = ThumbnailGate::default();
+        let poisoner = gate.clone();
+        std::thread::spawn(move || {
+            let _guard = poisoner.in_flight.lock().unwrap();
+            panic!("poison the in-flight set");
+        })
+        .join()
+        .expect_err("the poisoning thread must panic");
+
+        let id = nagori_core::EntryId::new();
+        let guard = gate
+            .try_acquire(id)
+            .expect("a poisoned lock must not refuse admission");
+        assert!(
+            gate.try_acquire(id).is_none(),
+            "per-entry dedupe must still hold after recovery"
+        );
+        drop(guard);
+        assert!(
+            gate.try_acquire(id).is_some(),
+            "the guard's Drop must release the id even on a poisoned lock"
+        );
     }
 
     /// Passing `0` for `max_concurrent` would otherwise refuse every
