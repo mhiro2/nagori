@@ -94,10 +94,19 @@ impl UrlContent {
         // casing the whole string here used to break case-sensitive paths
         // and query parameters (e.g. signed S3 URLs whose signature is
         // mixed-case), so the canonical form is taken verbatim from the
-        // parser.
+        // parser. The trim only applies when the URL carries no query and no
+        // fragment: with either present a trailing `/` belongs to that
+        // component (e.g. `?sig=AbC/`), and stripping it would corrupt signed
+        // URLs and dedupe genuinely different ones.
+        let canonical = parsed.as_str();
+        let normalized = if parsed.query().is_none() && parsed.fragment().is_none() {
+            canonical.trim_end_matches('/')
+        } else {
+            canonical
+        };
         Some(Self {
             raw: raw.to_owned(),
-            normalized: parsed.as_str().trim_end_matches('/').to_owned(),
+            normalized: normalized.to_owned(),
             domain: parsed.domain().map(ToOwned::to_owned),
         })
     }

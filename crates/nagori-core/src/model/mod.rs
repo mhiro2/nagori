@@ -346,6 +346,37 @@ mod tests {
     }
 
     #[test]
+    fn url_normalization_keeps_trailing_slash_in_query_and_fragment() {
+        // A trailing `/` inside the query (e.g. a base64-ish signature) or the
+        // fragment is data, not path separator noise — trimming it would
+        // corrupt signed URLs and dedupe genuinely different ones.
+        let cases = [
+            "https://example.com/download?sig=AbC/",
+            "https://example.com/path/?a=1",
+            "https://example.com/docs#section/",
+        ];
+        for case in cases {
+            let ClipboardContent::Url(url) = ClipboardContent::from_plain_text(case) else {
+                panic!("expected URL content for {case}");
+            };
+            assert_eq!(url.normalized, case, "must keep {case} verbatim");
+        }
+    }
+
+    #[test]
+    fn url_normalization_trims_trailing_slash_without_query_or_fragment() {
+        for (input, expected) in [
+            ("https://example.com/", "https://example.com"),
+            ("https://example.com/path/", "https://example.com/path"),
+        ] {
+            let ClipboardContent::Url(url) = ClipboardContent::from_plain_text(input) else {
+                panic!("expected URL content for {input}");
+            };
+            assert_eq!(url.normalized, expected);
+        }
+    }
+
+    #[test]
     fn plain_text_classifies_multiline_code() {
         let content = ClipboardContent::from_plain_text("fn main() {\n    println!(\"hi\");\n}");
 
