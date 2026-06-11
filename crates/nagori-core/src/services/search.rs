@@ -255,8 +255,19 @@ where
             push_unique(&mut candidates, &mut seen, hit.candidate);
         }
 
+        // The `Recent` plan is a recency listing: an explicit
+        // `SearchMode::Recent` ignores any typed query rather than scoring
+        // candidates against it. Ranking recent entries with a non-empty
+        // query would silently cull every >7-day, non-pinned entry that does
+        // not match the text (their score never clears the `> 0.0` gate),
+        // turning "newest first" into a partial text filter.
+        let ranking_query = if matches!(plan, SearchPlan::Recent) {
+            ""
+        } else {
+            normalized.as_str()
+        };
         let mut results = self.rank_all(
-            &normalized,
+            ranking_query,
             candidates,
             &fts_scores,
             &ngram_overlap,
@@ -520,6 +531,51 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(*provider.seen.lock().unwrap(), vec!["recent"]);
+    }
+
+    #[tokio::test]
+    async fn explicit_recent_with_query_ranks_as_recency_listing() {
+        // `SearchMode::Recent` is a recency listing: a typed query must be
+        // ignored at ranking time, not used to cull non-matching entries.
+        struct QueryRecorder(Mutex<Vec<String>>);
+        impl Ranker for QueryRecorder {
+            fn rank(
+                &self,
+                query: &str,
+                candidate: SearchCandidate,
+                fts_score: f32,
+                ngram_overlap: f32,
+                now: OffsetDateTime,
+                recent_order: RecentOrder,
+            ) -> Option<SearchResult> {
+                self.0.lock().unwrap().push(query.to_owned());
+                SumRanker.rank(
+                    query,
+                    candidate,
+                    fts_score,
+                    ngram_overlap,
+                    now,
+                    recent_order,
+                )
+            }
+        }
+        let provider = StubProvider {
+            recent: vec![entry("alpha"), entry("beta")],
+            ..Default::default()
+        };
+        let recorder = QueryRecorder(Mutex::new(Vec::new()));
+        let svc = SearchService::new(&provider, &recorder);
+
+        let mut q = SearchQuery::new("no-match", "no-match".to_owned(), 10);
+        q.mode = SearchMode::Recent;
+        let results = svc.search(q).await.unwrap();
+
+        assert_eq!(results.len(), 2, "query must not cull recent entries");
+        assert_eq!(*provider.seen.lock().unwrap(), vec!["recent"]);
+        assert!(
+            recorder.0.lock().unwrap().iter().all(String::is_empty),
+            "Recent plan must rank with an empty query"
+        );
     }
 
     #[tokio::test]
