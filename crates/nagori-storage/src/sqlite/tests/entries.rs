@@ -619,6 +619,67 @@ async fn enforce_retention_count_truncates_wal_sidecar() {
     );
 }
 
+/// The byte-budget purge selects eviction candidates in bounded rounds
+/// (`TOTAL_BYTES_EVICTION_BATCH` oldest rows at a time) instead of loading
+/// every live, unpinned row id into memory inside the write lock. Verify a
+/// backlog larger than one round is still drained completely and that
+/// pinned rows survive — the loop must terminate on "nothing evictable
+/// left" rather than spinning when only pinned rows remain over budget.
+#[tokio::test]
+async fn enforce_total_bytes_drains_backlog_across_eviction_rounds() {
+    use super::super::maintenance::TOTAL_BYTES_EVICTION_BATCH;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let backlog = usize::try_from(TOTAL_BYTES_EVICTION_BATCH).unwrap() + 5;
+    for index in 0..backlog {
+        insert_text(&store, &format!("eviction round row {index}")).await;
+    }
+    let pinned_id = insert_text(&store, "pinned survivor").await;
+    store.set_pinned(pinned_id, true).await.unwrap();
+
+    // A zero budget forces eviction of every unpinned row, which takes
+    // more than one candidate round; the pinned row keeps the total
+    // above budget, so the loop must still stop once only pinned rows
+    // are left.
+    let deleted = store.enforce_total_bytes(0).await.unwrap();
+    assert_eq!(deleted, backlog, "every unpinned row should be evicted");
+    assert!(
+        store.get(pinned_id).await.unwrap().is_some(),
+        "pinned rows must survive the byte budget"
+    );
+}
+
+/// Same-instant rows must leave largest-first (the `total_byte_count DESC`
+/// tie-break): when freeing the budget needs only the big row of a
+/// same-`created_at` pair, evicting the small one first would then take
+/// the big one too — deleting two rows where one suffices.
+#[tokio::test]
+async fn enforce_total_bytes_evicts_largest_first_within_one_instant() {
+    let store = SqliteStore::open_memory().unwrap();
+    // Insert the large row first: without the tie-break, incidental scan
+    // order returns the *later* insert first within one instant, so this
+    // ordering is the one where dropping `total_byte_count DESC` would
+    // evict the small row before the large one and the test would catch it.
+    let large_id = insert_text(&store, &"l".repeat(1000)).await;
+    let small_id = insert_text(&store, &"s".repeat(10)).await;
+    let same_instant = OffsetDateTime::now_utc() - time::Duration::days(1);
+    backdate_entry(&store, small_id, same_instant);
+    backdate_entry(&store, large_id, same_instant);
+
+    // 1010 bytes live; a 20-byte budget is satisfied by evicting the
+    // 1000-byte row alone.
+    let deleted = store.enforce_total_bytes(20).await.unwrap();
+    assert_eq!(deleted, 1, "evicting the large row alone frees the budget");
+    assert!(
+        store.get(large_id).await.unwrap().is_none(),
+        "the large same-instant row should be the one evicted"
+    );
+    assert!(
+        store.get(small_id).await.unwrap().is_some(),
+        "the small same-instant row should survive"
+    );
+}
+
 /// Same WAL contract as above, for the byte-budget purge path.
 #[tokio::test]
 async fn enforce_total_bytes_truncates_wal_sidecar() {

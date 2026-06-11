@@ -5,6 +5,12 @@ use time::OffsetDateTime;
 use super::SqliteStore;
 use super::convert::{format_time, storage_err};
 
+/// Rows fetched per eviction round in [`SqliteStore::enforce_total_bytes`].
+/// Bounds the writer transaction's working set; one round usually clears a
+/// typical overshoot, and a pathological backlog just runs more rounds
+/// within the same transaction.
+pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
+
 /// Fold the WAL back into the main file and truncate it to zero length after
 /// a purge that deleted at least one row.
 ///
@@ -185,54 +191,70 @@ impl SqliteStore {
                 return Ok(0);
             }
 
-            let candidates = {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT id, total_byte_count AS entry_bytes
-                         FROM entries
-                         WHERE deleted_at IS NULL AND pinned = 0
-                         ORDER BY created_at ASC, entry_bytes DESC",
-                    )
-                    .map_err(storage_err)?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })
-                    .map_err(storage_err)?;
-                let rows = rows
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(storage_err)?;
-                rows.into_iter()
-                    .map(|(id, bytes)| {
-                        u64::try_from(bytes)
-                            .map(|bytes| (id, bytes))
-                            .map_err(|err| {
-                                AppError::storage(format!(
-                                    "entry size overflowed u64 conversion: {err}"
-                                ))
-                            })
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            };
-
+            // Evict oldest-first in bounded rounds rather than loading every
+            // live, unpinned row into memory up front: a 100k-row history
+            // would otherwise materialise the whole id list inside the write
+            // lock. The `total_byte_count DESC` tie-break keeps same-instant
+            // rows leaving largest-first, so freeing the budget costs as few
+            // rows as before; SQLite holds only the LIMIT-sized top-N while
+            // sorting, so the tie-break no longer forces the full-table Vec
+            // the old implementation paid for it. Each round re-selects from
+            // the live set, so rows deleted by the previous round never
+            // reappear (the DELETE is in this same transaction).
             let mut deleted = 0;
-            for (id, bytes) in candidates {
-                if total <= max_total_bytes {
+            'evict: while total > max_total_bytes {
+                let candidates = {
+                    let mut stmt = tx
+                        .prepare_cached(
+                            "SELECT id, total_byte_count
+                             FROM entries
+                             WHERE deleted_at IS NULL AND pinned = 0
+                             ORDER BY created_at ASC, total_byte_count DESC
+                             LIMIT ?1",
+                        )
+                        .map_err(storage_err)?;
+                    let rows = stmt
+                        .query_map(params![TOTAL_BYTES_EVICTION_BATCH], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        })
+                        .map_err(storage_err)?;
+                    let rows = rows
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(storage_err)?;
+                    rows.into_iter()
+                        .map(|(id, bytes)| {
+                            u64::try_from(bytes)
+                                .map(|bytes| (id, bytes))
+                                .map_err(|err| {
+                                    AppError::storage(format!(
+                                        "entry size overflowed u64 conversion: {err}"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                };
+                if candidates.is_empty() {
+                    // Everything evictable is gone; the remainder is pinned.
                     break;
                 }
-                // Hard-delete (cascade drops representations / blobs /
-                // embeddings / search index) so trimming to the byte budget
-                // reclaims real disk. `pinned = 0` is a defensive guard; the
-                // candidate set is already unpinned and live.
-                let changed = tx
-                    .execute(
-                        "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
-                        params![id],
-                    )
-                    .map_err(storage_err)?;
-                if changed > 0 {
-                    deleted += changed;
-                    total = total.saturating_sub(bytes);
+                for (id, bytes) in candidates {
+                    if total <= max_total_bytes {
+                        break 'evict;
+                    }
+                    // Hard-delete (cascade drops representations / blobs /
+                    // embeddings / search index) so trimming to the byte budget
+                    // reclaims real disk. `pinned = 0` is a defensive guard; the
+                    // candidate set is already unpinned and live.
+                    let changed = tx
+                        .execute(
+                            "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
+                            params![id],
+                        )
+                        .map_err(storage_err)?;
+                    if changed > 0 {
+                        deleted += changed;
+                        total = total.saturating_sub(bytes);
+                    }
                 }
             }
             tx.commit().map_err(storage_err)?;
