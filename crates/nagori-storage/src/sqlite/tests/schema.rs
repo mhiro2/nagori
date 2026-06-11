@@ -123,6 +123,53 @@ async fn pooled_connections_enable_secure_delete() {
     );
 }
 
+/// The `(gram, entry_id)` index duplicated a strict prefix of the ngrams
+/// PRIMARY KEY's automatic index, taxing every insert/delete on the
+/// schema's largest table for nothing. A fresh install must not create
+/// it, and a database that already has it (created by the pre-103
+/// consolidated schema) must lose it when the drop migration applies.
+#[test]
+fn redundant_ngram_gram_index_is_absent_and_dropped_on_upgrade() {
+    let index_exists = |conn: &Connection| -> bool {
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_ngrams_gram_entry'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    // Fresh install: the consolidated schema no longer creates the index.
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn).unwrap();
+    assert!(
+        !index_exists(&conn),
+        "a fresh database must not create idx_ngrams_gram_entry"
+    );
+
+    // Upgrade: simulate a database that the pre-103 schema left at
+    // version 102 with the redundant index in place, then re-run
+    // migrations and verify the drop applied.
+    conn.execute_batch(
+        "CREATE INDEX idx_ngrams_gram_entry ON ngrams(gram, entry_id);
+         PRAGMA user_version = 102;",
+    )
+    .unwrap();
+    assert!(index_exists(&conn));
+    run_migrations(&mut conn).unwrap();
+    assert!(
+        !index_exists(&conn),
+        "migration 103 must drop idx_ngrams_gram_entry from upgraded databases"
+    );
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+}
+
 #[test]
 fn fresh_db_has_consolidated_shape() {
     // Fresh installs apply the single consolidated migration. Probe

@@ -24,6 +24,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (100, SCHEMA_V1),
     (101, ADD_NGRAM_INDEX_VERSION),
     (102, ADD_SETTINGS_REVISION),
+    (103, DROP_REDUNDANT_NGRAM_GRAM_INDEX),
 ];
 
 /// Highest schema version supported by this binary. A DB whose
@@ -367,12 +368,14 @@ CREATE TABLE IF NOT EXISTS ngrams (
     PRIMARY KEY (gram, entry_id, position)
 );
 
--- `idx_ngrams_gram_entry` is for the ngram fan-out: `WHERE n.gram IN (…)`
--- then `GROUP BY entry_id`. `idx_ngrams_entry_id` keeps per-entry-id
--- deletes cheap — both the soft-delete prune path (`delete_search_rows`)
--- and the FK `ON DELETE CASCADE` fired when a retention/clear hard-delete
--- removes the parent row.
-CREATE INDEX IF NOT EXISTS idx_ngrams_gram_entry ON ngrams(gram, entry_id);
+-- The ngram fan-out (`WHERE n.gram IN (…)` then `GROUP BY entry_id`) is
+-- served by the PRIMARY KEY's automatic index: (gram, entry_id, position)
+-- covers the (gram, entry_id) prefix, so a separate gram-first index would
+-- only double the insert/delete and disk cost of the schema's largest
+-- table. `idx_ngrams_entry_id` keeps per-entry-id deletes cheap — both
+-- the soft-delete prune path (`delete_search_rows`) and the FK
+-- `ON DELETE CASCADE` fired when a retention/clear hard-delete removes
+-- the parent row.
 CREATE INDEX IF NOT EXISTS idx_ngrams_entry_id ON ngrams(entry_id);
 
 CREATE TABLE IF NOT EXISTS entry_thumbnails (
@@ -459,4 +462,15 @@ CREATE INDEX IF NOT EXISTS idx_search_documents_ngram_version_doc_id
 // pause/resume) made after the snapshot was loaded.
 const ADD_SETTINGS_REVISION: &str = r"
 ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+";
+
+/// `idx_ngrams_gram_entry` `(gram, entry_id)` duplicated a strict prefix of
+/// the PRIMARY KEY's automatic index `(gram, entry_id, position)`: every
+/// fan-out query it served is satisfied by the autoindex, while inserts and
+/// deletes on the schema's largest table (tens of millions of rows at a
+/// 100k-entry history) paid to maintain both. Dropped here for databases
+/// that already created it; the consolidated v100 schema no longer creates
+/// it, so the `IF EXISTS` makes this a no-op on fresh installs.
+const DROP_REDUNDANT_NGRAM_GRAM_INDEX: &str = r"
+DROP INDEX IF EXISTS idx_ngrams_gram_entry;
 ";
