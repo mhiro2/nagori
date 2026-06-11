@@ -1218,14 +1218,56 @@ mod tests {
         }
     }
 
+    struct StubWindowBehavior;
+
+    #[async_trait::async_trait]
+    impl WindowBehavior for StubWindowBehavior {
+        async fn frontmost_app(&self) -> Result<Option<nagori_platform::FrontmostApp>> {
+            Ok(None)
+        }
+
+        async fn show_palette(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn hide_palette(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build an `AppState` over in-memory adapters. These tests exercise
+    /// desktop-side wiring (the settings gate, the CLI IPC host, shutdown
+    /// draining), not platform adapters — and `AppState::build` initialises
+    /// the host's real clipboard, which needs a live session (a Wayland
+    /// compositor on Linux) that headless CI runners don't provide.
+    fn build_test_state() -> AppState {
+        use nagori_platform::{MemoryClipboard, UnsupportedPreviewController};
+
+        let clipboard = Arc::new(MemoryClipboard::new());
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .clipboard(clipboard.clone())
+            .build_for_test();
+        let (settings_load_tx, settings_load_rx) =
+            tokio::sync::watch::channel(SettingsLoadGate::Pending);
+        AppState {
+            runtime,
+            window: Arc::new(StubWindowBehavior),
+            preview: Arc::new(UnsupportedPreviewController),
+            capture_reader: clipboard,
+            background_tasks: Mutex::new(None),
+            previous_frontmost: Arc::new(Mutex::new(None)),
+            last_pasted_id: Mutex::new(None),
+            last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
+            instance_lock: None,
+            clear_on_quit_marker: None,
+            settings_load_rx,
+            settings_load_tx: Mutex::new(Some(settings_load_tx)),
+        }
+    }
+
     #[cfg(unix)]
     mod cli_ipc {
         use super::*;
-
-        fn test_state() -> AppState {
-            AppState::build(SqliteStore::open_memory().expect("memory store"))
-                .expect("app state should build on the host target")
-        }
 
         fn test_ipc_config(dir: &std::path::Path) -> CliIpcConfig {
             CliIpcConfig {
@@ -1257,7 +1299,7 @@ mod tests {
         #[tokio::test]
         async fn host_skips_without_instance_lock() {
             let temp = tempfile::tempdir().expect("temp dir");
-            let state = test_state();
+            let state = build_test_state();
             let config = test_ipc_config(temp.path());
             let handle = state.spawn_cli_ipc_host(config.clone());
             tokio::time::timeout(Duration::from_secs(1), handle)
@@ -1280,7 +1322,7 @@ mod tests {
         #[tokio::test]
         async fn host_serves_health_and_cleans_up_on_shutdown() {
             let temp = tempfile::tempdir().expect("temp dir");
-            let mut state = test_state();
+            let mut state = build_test_state();
             state.instance_lock = Some(
                 nagori_storage::ProcessLock::try_acquire(temp.path())
                     .expect("lock io")
@@ -1336,7 +1378,7 @@ mod tests {
         #[tokio::test]
         async fn host_does_not_serve_when_settings_load_failed() {
             let temp = tempfile::tempdir().expect("temp dir");
-            let mut state = test_state();
+            let mut state = build_test_state();
             state.instance_lock = Some(
                 nagori_storage::ProcessLock::try_acquire(temp.path())
                     .expect("lock io")
@@ -1468,8 +1510,7 @@ mod tests {
     /// forever. The `tx` is deliberately kept alive so the gate stays Pending.
     #[tokio::test]
     async fn settings_loaded_or_shutdown_gives_up_on_shutdown() {
-        let state = AppState::build(SqliteStore::open_memory().expect("memory store"))
-            .expect("app state should build on the host target");
+        let state = build_test_state();
         let mut shutdown = state.runtime.shutdown_handle();
         let (_tx, mut rx) = tokio::sync::watch::channel(SettingsLoadGate::Pending);
 
