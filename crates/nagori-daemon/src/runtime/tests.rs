@@ -703,6 +703,40 @@ async fn list_pinned_honours_include_sensitive_flag() {
 }
 
 #[tokio::test]
+async fn search_before_watch_seed_reads_persisted_recent_order() {
+    // The settings watch starts at `AppSettings::default()` until the startup
+    // refresh lands. A search racing that window must not serve the default
+    // order: it refreshes the watch from the store itself, after which the
+    // fast path takes over.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let persisted = AppSettings {
+        recent_order: nagori_core::RecentOrder::ByUseCount,
+        ..Default::default()
+    };
+    // Write straight to the store so the runtime's publish path never runs —
+    // exactly the pre-seed state a freshly built runtime is in.
+    runtime
+        .store()
+        .save_settings(persisted)
+        .await
+        .expect("settings should persist");
+    assert!(!runtime.settings_watch_seeded());
+
+    runtime
+        .search(SearchQuery::new("", String::new(), 5))
+        .await
+        .expect("search should succeed");
+
+    // The fallback read seeded the watch with the persisted value, so later
+    // searches use the snapshot.
+    assert!(runtime.settings_watch_seeded());
+    assert_eq!(
+        runtime.current_settings().recent_order,
+        nagori_core::RecentOrder::ByUseCount
+    );
+}
+
+#[tokio::test]
 async fn update_settings_ipc_persists_and_publishes_current_settings() {
     let (runtime, _) = runtime_with_memory_clipboard();
     let settings = AppSettings {

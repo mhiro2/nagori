@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use nagori_core::{Result, SearchMode, SearchQuery, SearchResult, SettingsRepository};
+use nagori_core::{Result, SearchMode, SearchQuery, SearchResult};
 
 use crate::search_cache::{CacheKey, CacheLookup, SharedSearchCache, lock_or_recover};
 
@@ -44,7 +44,22 @@ impl NagoriRuntime {
         // text. That keeps the search path's observability free of clipboard
         // contents while still surfacing slow or cache-missing queries.
         let mode = query.mode;
-        query.recent_order = self.store.get_settings().await?.recent_order;
+        // Read the order preference from the in-memory watch snapshot, not the
+        // store: this runs on every keystroke, and `get_settings()` would pay a
+        // SQLite round-trip plus a full `validate()` (which recompiles every
+        // `regex_denylist` pattern) per call. Every settings writer re-publishes
+        // the watch, so it is current — except before the startup
+        // `refresh_settings_from_store` lands, when it still holds
+        // `AppSettings::default()`. A search racing that window (palette opened
+        // before the async startup refresh finishes) refreshes the watch itself
+        // so a persisted `ByUseCount` / `PinnedFirstThenRecency` is honoured
+        // from the very first keystroke; this pays the old per-search store
+        // read at most a handful of times.
+        query.recent_order = if self.settings_watch_seeded() {
+            self.current_settings().recent_order
+        } else {
+            self.refresh_settings_from_store().await?.recent_order
+        };
         // Semantic mode needs a query embedding (only available here, where the
         // embedder lives), so it routes to its own embed-then-rank path rather
         // than the text-candidate cache. An empty query falls through to the

@@ -23,6 +23,10 @@ impl NagoriRuntime {
         if let Err(err) = self.settings_tx.send(settings) {
             error!(error = %err, "settings_broadcast_failed reason=no_receivers");
         }
+        // From here the watch reflects a persisted value (every publish is
+        // preceded by a store read or write), so watch readers no longer need
+        // the store-read fallback for pre-seed correctness.
+        self.mark_settings_seeded();
     }
 
     /// Re-read the persisted settings and publish them on the watch channel.

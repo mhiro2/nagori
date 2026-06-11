@@ -62,6 +62,13 @@ pub struct NagoriRuntime {
     shutdown_rx: watch::Receiver<bool>,
     settings_tx: watch::Sender<AppSettings>,
     settings_rx: watch::Receiver<AppSettings>,
+    /// Whether the settings watch channel has been published to at least
+    /// once. The channel starts at `AppSettings::default()` until the
+    /// startup `refresh_settings_from_store` lands, so readers that need a
+    /// *persisted* value before then (the search hot path's `recent_order`)
+    /// check this flag and fall back to a store read instead of serving the
+    /// default. `Arc`ed so every runtime clone observes the same seed state.
+    settings_seeded: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) socket_path: Arc<std::path::PathBuf>,
     /// Front-of-store LRU for recent search results. Hits skip the `SQLite`
     /// round-trip on the empty-query (`Recent`) and short-prefix paths;
@@ -228,6 +235,20 @@ impl NagoriRuntime {
 
     pub fn current_settings(&self) -> AppSettings {
         self.settings_rx.borrow().clone()
+    }
+
+    /// Whether the settings watch has been published to at least once and
+    /// therefore reflects persisted state rather than its
+    /// `AppSettings::default()` starting value. See the `settings_seeded`
+    /// field for the startup window this guards.
+    pub(crate) fn settings_watch_seeded(&self) -> bool {
+        self.settings_seeded
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_settings_seeded(&self) {
+        self.settings_seeded
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The wired embedding backend, if any. The semantic index pipeline drives
@@ -416,6 +437,7 @@ impl NagoriRuntimeBuilder {
             shutdown_rx,
             settings_tx,
             settings_rx,
+            settings_seeded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
