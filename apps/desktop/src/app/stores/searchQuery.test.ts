@@ -1,16 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  searchClipboard: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 import { searchClipboard } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { SearchResponse, SearchResultDto } from '../lib/types';
+import { sampleSearchResult } from '../test-helpers/fixtures';
 import {
   cancelPendingQuery,
   refreshRecent,
@@ -19,17 +18,7 @@ import {
   searchState,
 } from './searchQuery.svelte';
 
-const result = (id: string): SearchResultDto => ({
-  id,
-  kind: 'text',
-  preview: `value-${id}`,
-  score: 0,
-  createdAt: '2026-05-05T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: ['Recent'],
-  representationSummary: [],
-});
+const result = (id: string): SearchResultDto => sampleSearchResult({ id, preview: `value-${id}` });
 
 const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({
   results: [],

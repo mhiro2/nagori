@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { SearchResultDto } from '../lib/types';
+import { sampleSearchResult } from '../test-helpers/fixtures';
 import ResultList from './ResultList.svelte';
 
 beforeAll(() => {
@@ -10,18 +11,8 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = function () {};
 });
 
-const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
-  id: 'id-1',
-  kind: 'text',
-  preview: 'value',
-  score: 0,
-  createdAt: '2026-05-05T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: [],
-  representationSummary: [],
-  ...overrides,
-});
+const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
+  sampleSearchResult({ id: 'id-1', preview: 'value', rankReasons: [], ...overrides });
 
 afterEach(cleanup);
 

@@ -5,17 +5,14 @@ vi.mock('../components/Palette.svelte', () => ({
   default: vi.fn(),
 }));
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => false),
-}));
+vi.mock('../lib/tauri', async () => {
+  const { tauriMock } = await import('../test-helpers/moduleMocks');
+  return tauriMock({ isTauri: vi.fn(() => false) });
+});
 
-vi.mock('../lib/commands', () => ({
-  // The route only mounts <Palette/>, but Palette imports the command surface
-  // and the i18n + stores; stub everything to keep the route test isolated.
-  closePalette: vi.fn(),
-  refreshRecent: vi.fn(),
-  refreshSettings: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 import PaletteRoute from './PaletteRoute.svelte';
 

@@ -1,12 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  getEntryPreview: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 import { getEntryPreview } from '../lib/commands';
 import { isTauri } from '../lib/tauri';

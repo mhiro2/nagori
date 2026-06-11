@@ -2,13 +2,14 @@ import { cleanup, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => false),
-}));
+vi.mock('../lib/tauri', async () => {
+  const { tauriMock } = await import('../test-helpers/moduleMocks');
+  return tauriMock({ isTauri: vi.fn(() => false) });
+});
 
-vi.mock('../lib/commands', () => ({
-  searchClipboard: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 import type { SearchResultDto } from '../lib/types';
 import { clearFilters, filterState } from '../stores/searchFilters.svelte';

@@ -1,32 +1,12 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-  currentWindowLabel: vi.fn(() => undefined),
-  subscribe: vi.fn((_event, _handler, onReady) => {
-    onReady?.();
-    return () => {};
-  }),
-  TAURI_EVENTS: {
-    navigate: 'nagori://navigate',
-    pasteFailed: 'nagori://paste_failed',
-    hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
-    hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
-    settingsChanged: 'nagori://settings_changed',
-  },
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  getSettings: vi.fn(),
-  updateSettings: vi.fn(),
-  getCapabilities: vi.fn(),
-  getPermissions: vi.fn(),
-  checkForUpdates: vi.fn(),
-  cliInstallStatus: vi.fn(),
-  installCli: vi.fn(),
-  passwordManagerPreset: vi.fn(async () => []),
-}));
+vi.mock('../lib/commands', async () => {
+  const { commandsMock } = await import('../test-helpers/moduleMocks');
+  return commandsMock({ passwordManagerPreset: vi.fn(async () => []) });
+});
 
 // `onMount` reaches into `@tauri-apps/api/event` to subscribe to hotkey
 // failures. The runtime is unavailable in jsdom, so stub the dynamic import.

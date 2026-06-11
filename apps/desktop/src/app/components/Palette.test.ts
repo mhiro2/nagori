@@ -2,31 +2,23 @@ import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => false),
-  subscribe: vi.fn(() => () => undefined),
-  TAURI_EVENTS: {
-    clipboardChanged: 'nagori://clipboard_changed',
-  },
-}));
+vi.mock('../lib/tauri', async () => {
+  const { tauriMock } = await import('../test-helpers/moduleMocks');
+  // No onReady: the palette tests drive refreshes themselves rather than
+  // through subscription readiness.
+  return tauriMock({ isTauri: vi.fn(() => false), subscribe: vi.fn(() => () => undefined) });
+});
 
-vi.mock('../lib/commands', () => ({
-  closePalette: vi.fn(async () => undefined),
-  openSettingsWindow: vi.fn(async () => undefined),
-  // PreviewPane / settings store reach the same module.
-  requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
-  getEntryPreview: vi.fn(),
-  getSettings: vi.fn(),
-  getPermissions: vi.fn(),
-  searchClipboard: vi.fn(),
-  listRecent: vi.fn(async () => []),
-  pasteEntryFromPalette: vi.fn(),
-  copyEntryFromPalette: vi.fn(),
-  pinEntry: vi.fn(),
-  deleteEntry: vi.fn(),
-  previewEntry: vi.fn(async () => undefined),
-  getCapabilities: vi.fn(),
-}));
+vi.mock('../lib/commands', async () => {
+  const { commandsMock } = await import('../test-helpers/moduleMocks');
+  return commandsMock({
+    closePalette: vi.fn(async () => undefined),
+    openSettingsWindow: vi.fn(async () => undefined),
+    requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
+    listRecent: vi.fn(async () => []),
+    previewEntry: vi.fn(async () => undefined),
+  });
+});
 
 vi.mock('../stores/searchActions', () => ({
   confirmSelection: vi.fn(async () => undefined),
@@ -132,6 +124,7 @@ import {
 } from '../stores/searchSelection';
 import { settingsState } from '../stores/settings.svelte';
 import { showSettings } from '../stores/view.svelte';
+import { sampleEntryPreview, sampleSearchResult } from '../test-helpers/fixtures';
 import Palette from './Palette.svelte';
 
 const dispatch = (init: KeyboardEventInit): KeyboardEvent => {
@@ -139,69 +132,50 @@ const dispatch = (init: KeyboardEventInit): KeyboardEvent => {
   return event;
 };
 
-const resultRow = (id: string, snippet: string): SearchResultDto => ({
-  id,
-  kind: 'text',
-  preview: snippet,
-  score: 1,
-  createdAt: '2026-05-27T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: [],
-  representationSummary: [],
-});
+const resultRow = (id: string, snippet: string): SearchResultDto =>
+  sampleSearchResult({
+    id,
+    preview: snippet,
+    score: 1,
+    createdAt: '2026-05-27T00:00:00Z',
+    rankReasons: [],
+  });
 
-const textPreview = (id: string, body: string): EntryPreviewDto => ({
-  id,
-  kind: 'text',
-  title: 'T',
-  previewText: body,
-  body: { type: 'text', text: body },
-  metadata: {
-    byteCount: body.length,
-    charCount: body.length,
-    lineCount: 1,
-    truncated: false,
-    sensitive: false,
-    fullContentAvailable: true,
-  },
-});
+const textPreview = (id: string, body: string): EntryPreviewDto =>
+  sampleEntryPreview({
+    id,
+    title: 'T',
+    previewText: body,
+    body: { type: 'text', text: body },
+    metadata: { byteCount: body.length, charCount: body.length },
+  });
 
-const urlRow = (id: string, url: string): SearchResultDto => ({
-  id,
-  kind: 'url',
-  preview: url,
-  score: 1,
-  createdAt: '2026-05-27T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: [],
-  representationSummary: [],
-});
+const urlRow = (id: string, url: string): SearchResultDto =>
+  sampleSearchResult({
+    id,
+    kind: 'url',
+    preview: url,
+    score: 1,
+    createdAt: '2026-05-27T00:00:00Z',
+    rankReasons: [],
+  });
 
-const urlPreview = (id: string, url: string): EntryPreviewDto => ({
-  id,
-  kind: 'url',
-  title: 'U',
-  previewText: url,
-  body: {
-    type: 'url',
-    url,
-    domain: 'example.com',
-    scheme: 'https',
-    hostDisplay: 'example.com',
-    pathAndQuery: '/',
-  },
-  metadata: {
-    byteCount: url.length,
-    charCount: url.length,
-    lineCount: 1,
-    truncated: false,
-    sensitive: false,
-    fullContentAvailable: true,
-    domain: 'example.com',
-  },
-});
+const urlPreview = (id: string, url: string): EntryPreviewDto =>
+  sampleEntryPreview({
+    id,
+    kind: 'url',
+    title: 'U',
+    previewText: url,
+    body: {
+      type: 'url',
+      url,
+      domain: 'example.com',
+      scheme: 'https',
+      hostDisplay: 'example.com',
+      pathAndQuery: '/',
+    },
+    metadata: { byteCount: url.length, charCount: url.length, domain: 'example.com' },
+  });
 
 beforeEach(() => {
   vi.clearAllMocks();

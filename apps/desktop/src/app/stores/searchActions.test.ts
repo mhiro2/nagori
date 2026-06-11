@@ -1,22 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  copyEntriesCombined: vi.fn(),
-  copyEntryFromPalette: vi.fn(),
-  deleteEntries: vi.fn(),
-  deleteEntry: vi.fn(),
-  listPasteOptions: vi.fn(async () => []),
-  pasteEntryFromPalette: vi.fn(),
-  pasteEntryRepresentationFromPalette: vi.fn(),
-  pinEntry: vi.fn(),
-  previewEntry: vi.fn(),
-  listRecent: vi.fn(async () => []),
-  searchClipboard: vi.fn(),
-}));
+vi.mock('../lib/commands', async () => {
+  const { commandsMock } = await import('../test-helpers/moduleMocks');
+  return commandsMock({
+    listPasteOptions: vi.fn(async () => []),
+    listRecent: vi.fn(async () => []),
+  });
+});
 
 import {
   copyEntriesCombined,
@@ -32,6 +24,7 @@ import {
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { PasteOption, SearchResultDto } from '../lib/types';
+import { sampleSearchResult } from '../test-helpers/fixtures';
 import { closePasteFormatPicker, pasteFormatPickerState } from './pasteFormatPicker.svelte';
 import {
   confirmPasteFormat,
@@ -48,18 +41,8 @@ import {
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
 import { searchState } from './searchQuery.svelte';
 
-const result = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
-  id: 'r1',
-  kind: 'text',
-  preview: 'hello',
-  score: 1,
-  createdAt: '2026-05-05T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: ['Recent'],
-  representationSummary: [],
-  ...overrides,
-});
+const result = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
+  sampleSearchResult({ id: 'r1', preview: 'hello', score: 1, ...overrides });
 
 beforeEach(() => {
   vi.clearAllMocks();

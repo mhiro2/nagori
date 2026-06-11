@@ -2,15 +2,14 @@ import { cleanup, render, waitFor } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
-  getSettings: vi.fn(),
-  getPermissions: vi.fn(),
-}));
+vi.mock('../lib/commands', async () => {
+  const { commandsMock } = await import('../test-helpers/moduleMocks');
+  return commandsMock({
+    requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
+  });
+});
 
 vi.mock('../stores/settings.svelte', async () => {
   // Wire a real `$state`-style object so the component sees reactive

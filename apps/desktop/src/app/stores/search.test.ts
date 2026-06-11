@@ -1,17 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  searchClipboard: vi.fn(),
-  copyEntryFromPalette: vi.fn(),
-  pasteEntryFromPalette: vi.fn(),
-  getEntryPreview: vi.fn(),
-  pinEntry: vi.fn(),
-  deleteEntry: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 import {
   copyEntryFromPalette as copyEntryCmd,

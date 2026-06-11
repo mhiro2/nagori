@@ -1,17 +1,12 @@
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/tauri', () => ({
-  isTauri: vi.fn(() => true),
-}));
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
-vi.mock('../lib/commands', () => ({
-  getSettings: vi.fn(),
-  getPermissions: vi.fn(),
-  getCapabilities: vi.fn(),
-  openSettingsWindow: vi.fn(async () => undefined),
-  setCaptureEnabled: vi.fn(),
-}));
+vi.mock('../lib/commands', async () => {
+  const { commandsMock } = await import('../test-helpers/moduleMocks');
+  return commandsMock({ openSettingsWindow: vi.fn(async () => undefined) });
+});
 
 import {
   getPermissions,

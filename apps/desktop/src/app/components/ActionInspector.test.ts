@@ -60,13 +60,9 @@ vi.mock('../lib/tauri', () => ({
   ),
 }));
 
-vi.mock('../lib/commands', () => ({
-  runQuickAction: vi.fn(),
-  startAiAction: vi.fn(),
-  cancelAiAction: vi.fn(),
-  getAiAvailability: vi.fn(),
-  saveAiResult: vi.fn(),
-}));
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
 
 // AI surfaces gate on a wired backend. Default to supported (macOS) so the
 // AI-action tests render the buttons; the gating test flips it to false.
@@ -84,20 +80,11 @@ import {
 import { isTauri } from '../lib/tauri';
 import type { SearchResultDto } from '../lib/types';
 import { aiActionsSupported } from '../stores/capabilities.svelte';
+import { sampleSearchResult } from '../test-helpers/fixtures';
 import ActionInspector from './ActionInspector.svelte';
 
-const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
-  id: 'entry-id',
-  kind: 'text',
-  preview: 'value',
-  score: 0,
-  createdAt: '2026-05-05T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: [],
-  representationSummary: [],
-  ...overrides,
-});
+const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
+  sampleSearchResult({ id: 'entry-id', preview: 'value', rankReasons: [], ...overrides });
 
 // The streaming text actions the inspector surfaces (Translate is CLI-only).
 const TEXT_ACTIONS: AiActionId[] = [

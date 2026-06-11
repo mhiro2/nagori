@@ -1,7 +1,11 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { EntryPreviewDto, FileEntry, SearchResultDto } from '../lib/types';
+import type { FileEntry } from '../lib/types';
+import {
+  sampleEntryPreview as samplePreview,
+  sampleSearchResult as sampleItem,
+} from '../test-helpers/fixtures';
 import PreviewPane from './PreviewPane.svelte';
 
 // A backend-shaped file row: the preview no longer parses paths, so tests feed
@@ -9,38 +13,6 @@ import PreviewPane from './PreviewPane.svelte';
 const fileEntry = (overrides: Partial<FileEntry> & { name: string }): FileEntry => ({
   parentDisplay: '',
   kind: 'unknown',
-  ...overrides,
-});
-
-const sampleItem = (overrides: Partial<SearchResultDto> = {}): SearchResultDto => ({
-  id: 'entry-id',
-  kind: 'text',
-  preview: 'preview body',
-  score: 0,
-  createdAt: '2026-05-05T00:00:00Z',
-  pinned: false,
-  sensitivity: 'Public',
-  rankReasons: ['Recent'],
-  representationSummary: [],
-  ...overrides,
-});
-
-const samplePreview = (
-  overrides: Partial<EntryPreviewDto> & { body?: EntryPreviewDto['body'] } = {},
-): EntryPreviewDto => ({
-  id: 'entry-id',
-  kind: 'text',
-  title: 'Title',
-  previewText: 'preview body',
-  body: { type: 'text', text: 'preview body' },
-  metadata: {
-    byteCount: 12,
-    charCount: 12,
-    lineCount: 1,
-    truncated: false,
-    sensitive: false,
-    fullContentAvailable: true,
-  },
   ...overrides,
 });
 
