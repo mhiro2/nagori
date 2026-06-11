@@ -149,6 +149,7 @@ impl SqliteStore {
                 )
                 .map_err(storage_err)?;
             tx.commit().map_err(storage_err)?;
+            checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
         .await
@@ -235,6 +236,7 @@ impl SqliteStore {
                 }
             }
             tx.commit().map_err(storage_err)?;
+            checkpoint_truncate_after_purge(&conn, deleted);
             Ok(deleted)
         })
         .await

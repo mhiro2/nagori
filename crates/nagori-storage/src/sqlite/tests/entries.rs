@@ -588,6 +588,62 @@ async fn duplicate_live_insert_does_not_duplicate_search_rows() {
     }
 }
 
+/// Retention hard-deletes must leave nothing recoverable in the WAL
+/// sidecar. `secure_delete` zeroes the freed pages in the main file, but
+/// the pre-deletion content also lives in the historical WAL frames
+/// written before the delete, and a passive autocheckpoint neither
+/// truncates the WAL nor guarantees those frames are gone. The purge
+/// contract (`checkpoint_truncate_after_purge`) therefore requires every
+/// hard-delete path — retention included — to follow up with
+/// `wal_checkpoint(TRUNCATE)`, which shrinks the sidecar to zero.
+#[tokio::test]
+async fn enforce_retention_count_truncates_wal_sidecar() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    let store = SqliteStore::open(&db_path).unwrap();
+    for index in 0..4 {
+        insert_text(&store, &format!("retention wal row {index}")).await;
+    }
+    let wal_path = temp.path().join("nagori.sqlite-wal");
+    assert!(
+        wal_path.metadata().unwrap().len() > 0,
+        "inserts must have written WAL frames for the truncate assertion to mean anything"
+    );
+
+    let removed = store.enforce_retention_count(1).await.unwrap();
+    assert_eq!(removed, 3);
+    assert_eq!(
+        wal_path.metadata().unwrap().len(),
+        0,
+        "retention purge must checkpoint-truncate the WAL sidecar"
+    );
+}
+
+/// Same WAL contract as above, for the byte-budget purge path.
+#[tokio::test]
+async fn enforce_total_bytes_truncates_wal_sidecar() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    let store = SqliteStore::open(&db_path).unwrap();
+    for index in 0..4 {
+        insert_text(&store, &format!("byte budget wal row {index}")).await;
+    }
+    let wal_path = temp.path().join("nagori.sqlite-wal");
+    assert!(
+        wal_path.metadata().unwrap().len() > 0,
+        "inserts must have written WAL frames for the truncate assertion to mean anything"
+    );
+
+    // A zero budget evicts every live, unpinned row.
+    let removed = store.enforce_total_bytes(0).await.unwrap();
+    assert_eq!(removed, 4);
+    assert_eq!(
+        wal_path.metadata().unwrap().len(),
+        0,
+        "byte-budget purge must checkpoint-truncate the WAL sidecar"
+    );
+}
+
 #[tokio::test]
 async fn enforce_total_bytes_includes_representation_payload() {
     // The retention budget must count every preserved representation
