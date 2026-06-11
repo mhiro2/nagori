@@ -509,7 +509,11 @@ fn sensitive_regexes() -> &'static [Regex] {
             r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]{8,}"#,
         ]
         .iter()
-        .filter_map(|pattern| Regex::new(pattern).ok())
+        // These are static, test-covered patterns: a compile failure is a
+        // programming error, and silently dropping the broken one (the old
+        // `filter_map(.ok())`) would fail open by skipping that detector on
+        // a security path. Panic instead, like the other built-in regexes.
+        .map(|pattern| Regex::new(pattern).expect("built-in sensitive regex compiles"))
         .collect()
     })
 }
