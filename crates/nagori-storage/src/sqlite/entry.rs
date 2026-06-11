@@ -31,7 +31,7 @@ impl SqliteStore {
                     "UPDATE entries SET pinned = ?1, updated_at = ?2 WHERE id = ?3 AND deleted_at IS NULL",
                     params![bool_int(pinned), now, id.to_string()],
                 )
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
             };
             if changed == 0 {
                 return Err(AppError::NotFound);
@@ -52,7 +52,7 @@ impl SqliteStore {
                      WHERE id = ?2 AND deleted_at IS NULL",
                     params![now, id.to_string()],
                 )
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
             };
             if changed == 0 {
                 return Err(AppError::NotFound);
@@ -90,7 +90,7 @@ impl SqliteStore {
                 },
             )
             .optional()
-            .map_err(|err| storage_err(&err))
+            .map_err(storage_err)
             .map(Option::flatten)
         })
         .await
@@ -147,7 +147,7 @@ impl SqliteStore {
                 Ok(blob.zip(mime))
             })
             .optional()
-            .map_err(|err| storage_err(&err))
+            .map_err(storage_err)
             .map(Option::flatten)
         })
         .await
@@ -189,7 +189,7 @@ impl EntryRepository for SqliteStore {
                 row_to_entry,
             )
             .optional()
-            .map_err(|err| storage_err(&err))
+            .map_err(storage_err)
         })
         .await
     }
@@ -226,7 +226,7 @@ impl EntryRepository for SqliteStore {
                         id.to_string(),
                     ],
                 )
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
             };
             if changed == 0 {
                 return Err(AppError::NotFound);
@@ -240,18 +240,18 @@ impl EntryRepository for SqliteStore {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             let changed = tx
                 .execute(
                     "UPDATE entries SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                     params![now, id.to_string()],
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             if changed == 0 {
                 return Err(AppError::NotFound);
             }
             delete_search_rows(&tx, &id.to_string())?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -292,12 +292,12 @@ impl EntryRepository for SqliteStore {
                      ORDER BY e.updated_at DESC
                      LIMIT ?1",
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let entries = stmt
                 .query_map([MAX_READ_LIMIT as i64], row_to_entry)
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             Ok(entries)
         })
         .await
@@ -326,7 +326,7 @@ impl EntryRepository for SqliteStore {
                          END,
                          r.ordinal ASC",
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let rows = stmt
                 .query_map(params![id.to_string()], |row| {
                     let role: String = row.get(0)?;
@@ -336,15 +336,15 @@ impl EntryRepository for SqliteStore {
                     let blob: Option<Vec<u8>> = row.get(4)?;
                     Ok((role, mime, ordinal, text, blob))
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut out = Vec::new();
             for row in rows {
-                let (role_str, mime, ordinal, text, blob) = row.map_err(|err| storage_err(&err))?;
+                let (role_str, mime, ordinal, text, blob) = row.map_err(storage_err)?;
                 let role = RepresentationRole::from_db_str(&role_str).ok_or_else(|| {
-                    AppError::Storage(format!("unknown representation role: {role_str}"))
+                    AppError::storage(format!("unknown representation role: {role_str}"))
                 })?;
                 let ordinal = u32::try_from(ordinal).map_err(|err| {
-                    AppError::Storage(format!("representation ordinal out of range: {err}"))
+                    AppError::storage(format!("representation ordinal out of range: {err}"))
                 })?;
                 let data = decode_representation_payload(&mime, text, blob)?;
                 out.push(StoredClipboardRepresentation {
@@ -397,7 +397,7 @@ impl EntryRepository for SqliteStore {
                  END, \
                  r.ordinal ASC",
             );
-            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
             let params: Vec<&dyn ToSql> = id_strings.iter().map(|s| s as &dyn ToSql).collect();
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -407,19 +407,18 @@ impl EntryRepository for SqliteStore {
                     let byte_count: i64 = row.get(3)?;
                     Ok((entry_id_str, role, mime, byte_count))
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut out: HashMap<EntryId, Vec<RepresentationSummary>> = HashMap::new();
             for row in rows {
-                let (entry_id_str, role_str, mime, byte_count) =
-                    row.map_err(|err| storage_err(&err))?;
+                let (entry_id_str, role_str, mime, byte_count) = row.map_err(storage_err)?;
                 let entry_id = EntryId::from_str(&entry_id_str).map_err(|err| {
-                    AppError::Storage(format!("invalid entry_id in summary row: {err}"))
+                    AppError::storage(format!("invalid entry_id in summary row: {err}"))
                 })?;
                 let role = RepresentationRole::from_db_str(&role_str).ok_or_else(|| {
-                    AppError::Storage(format!("unknown representation role: {role_str}"))
+                    AppError::storage(format!("unknown representation role: {role_str}"))
                 })?;
                 let byte_count = u64::try_from(byte_count).map_err(|err| {
-                    AppError::Storage(format!("representation byte_count out of range: {err}"))
+                    AppError::storage(format!("representation byte_count out of range: {err}"))
                 })?;
                 out.entry(entry_id)
                     .or_default()
@@ -459,7 +458,7 @@ impl EntryRepository for SqliteStore {
                 sql.push('?');
             }
             sql.push(')');
-            let mut stmt = conn.prepare(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
             let params: Vec<&dyn ToSql> = id_strings.iter().map(|s| s as &dyn ToSql).collect();
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -467,15 +466,15 @@ impl EntryRepository for SqliteStore {
                     let content_json: String = row.get(1)?;
                     Ok((entry_id_str, content_json))
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut out: HashMap<EntryId, Vec<String>> = HashMap::new();
             for row in rows {
-                let (entry_id_str, content_json) = row.map_err(|err| storage_err(&err))?;
+                let (entry_id_str, content_json) = row.map_err(storage_err)?;
                 let entry_id = EntryId::from_str(&entry_id_str).map_err(|err| {
-                    AppError::Storage(format!("invalid entry_id in file-summary row: {err}"))
+                    AppError::storage(format!("invalid entry_id in file-summary row: {err}"))
                 })?;
                 let content: ClipboardContent =
-                    serde_json::from_str(&content_json).map_err(|err| json_err(&err))?;
+                    serde_json::from_str(&content_json).map_err(json_err)?;
                 // The `content_kind = 'file_list'` filter should make every row
                 // a `FileList`, but decode defensively rather than unwrap a
                 // mismatched variant from a hand-edited / corrupt row.
@@ -511,7 +510,7 @@ fn decode_representation_payload(
             }
         }
         (None, Some(bytes)) => Ok(RepresentationDataRef::DatabaseBlob(bytes)),
-        (Some(_), Some(_)) | (None, None) => Err(AppError::Storage(
+        (Some(_), Some(_)) | (None, None) => Err(AppError::storage(
             "entry_representations row violated text_content/payload_blob CHECK".to_owned(),
         )),
     }
@@ -567,7 +566,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     // takes the UPDATE (dedupe) branch instead of racing the INSERT.
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     // Resolve dedupe explicitly via SELECT-then-INSERT/UPDATE rather than
     // `INSERT ... ON CONFLICT(representation_set_hash) WHERE deleted_at IS NULL`,
     // because conflict resolution against a partial unique index is
@@ -584,7 +583,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     let stored_id_str = if let Some(existing) = existing {
         // Identical `representation_set_hash` implies the rep set is
         // byte-for-byte identical, so the reps don't need to be replaced.
@@ -622,7 +621,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
                 existing,
             ],
         )
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
         existing
     } else {
         tx.execute(
@@ -640,7 +639,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             params![
                 requested_id.to_string(),
                 kind_to_str(entry.content_kind()),
-                serde_json::to_string(&content_for_storage).map_err(|err| json_err(&err))?,
+                serde_json::to_string(&content_for_storage).map_err(json_err)?,
                 entry
                     .metadata
                     .source
@@ -669,7 +668,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
                 format_opt_time(entry.lifecycle.deleted_at)?,
             ],
         )
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
         // When the capture pipeline filled `pending_representations` (the
         // snapshot path), persist every preserved rep so copy-back can
         // re-publish whatever flavour the source advertised. Otherwise fall
@@ -693,12 +692,12 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         entry_id_str
     };
     let stored_id =
-        EntryId::from_str(&stored_id_str).map_err(|err| AppError::Storage(err.to_string()))?;
+        EntryId::from_str(&stored_id_str).map_err(|err| AppError::storage(err.to_string()))?;
     if stored_id != requested_id {
         doc.entry_id = stored_id;
     }
     upsert_document_blocking(&tx, &doc)?;
-    tx.commit().map_err(|err| storage_err(&err))?;
+    tx.commit().map_err(storage_err)?;
     Ok(stored_id)
 }
 
@@ -717,7 +716,7 @@ fn insert_primary_representation(
     match payload {
         PrimaryPayload::Text(text) => {
             let byte_count = i64::try_from(text.len()).map_err(|err| {
-                AppError::Storage(format!(
+                AppError::storage(format!(
                     "representation text byte count overflowed i64: {err}"
                 ))
             })?;
@@ -730,11 +729,11 @@ fn insert_primary_representation(
                          ?3, NULL, ?4, ?5)",
                 params![representation_id, entry_id, text, byte_count, created_at],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
         }
         PrimaryPayload::Bytes { mime, bytes } => {
             let byte_count = i64::try_from(bytes.len()).map_err(|err| {
-                AppError::Storage(format!("representation byte count overflowed i64: {err}"))
+                AppError::storage(format!("representation byte count overflowed i64: {err}"))
             })?;
             tx.execute(
                 "INSERT INTO entry_representations (
@@ -752,7 +751,7 @@ fn insert_primary_representation(
                     created_at
                 ],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
         }
     }
     Ok(())
@@ -769,7 +768,7 @@ fn insert_pending_representations(
         let representation_id = format!("{entry_id}#{role}-{}", rep.ordinal);
         let ordinal = i64::from(rep.ordinal);
         let byte_count = i64::try_from(rep.byte_count()).map_err(|err| {
-            AppError::Storage(format!("representation byte count overflowed i64: {err}"))
+            AppError::storage(format!("representation byte count overflowed i64: {err}"))
         })?;
         match &rep.data {
             RepresentationDataRef::InlineText(text) => {
@@ -791,7 +790,7 @@ fn insert_pending_representations(
                         created_at,
                     ],
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             }
             RepresentationDataRef::DatabaseBlob(bytes) => {
                 tx.execute(
@@ -812,7 +811,7 @@ fn insert_pending_representations(
                         created_at,
                     ],
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             }
             RepresentationDataRef::FilePaths(paths) => {
                 // Encode as a JSON array under text_content so the schema's
@@ -839,7 +838,7 @@ fn insert_pending_representations(
                         created_at,
                     ],
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             }
         }
     }

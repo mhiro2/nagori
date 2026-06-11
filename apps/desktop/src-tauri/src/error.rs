@@ -74,8 +74,8 @@ impl From<AppError> for CommandError {
 
 const fn error_code(err: &AppError) -> &'static str {
     match err {
-        AppError::Storage(_) => "storage_error",
-        AppError::Search(_) => "search_error",
+        AppError::Storage { .. } => "storage_error",
+        AppError::Search { .. } => "search_error",
         AppError::Platform(_) => "platform_error",
         AppError::Permission(_) => "permission_error",
         AppError::Ai(_) => "ai_error",
@@ -97,8 +97,8 @@ const fn error_code(err: &AppError) -> &'static str {
 /// don't leak.
 fn user_message(err: &AppError) -> String {
     match err {
-        AppError::Storage(_) => "Storage error. Please try again.".to_owned(),
-        AppError::Search(_) => "Search failed. Please retry the query.".to_owned(),
+        AppError::Storage { .. } => "Storage error. Please try again.".to_owned(),
+        AppError::Search { .. } => "Search failed. Please retry the query.".to_owned(),
         AppError::Platform(_) => "Platform integration failed.".to_owned(),
         AppError::Ai(_) => "AI action failed.".to_owned(),
         AppError::Policy(_) => "Action blocked by policy.".to_owned(),
@@ -226,10 +226,10 @@ mod tests {
     fn storage_and_search_messages_are_generic() {
         // SQL-shaped detail (paths, statements, FTS column names) must not
         // reach the WebView — those errors collapse to a generic prompt.
-        let storage: CommandError = AppError::Storage("disk I/O".to_owned()).into();
+        let storage: CommandError = AppError::storage("disk I/O".to_owned()).into();
         assert_eq!(storage.code, "storage_error");
         assert_eq!(storage.message, "Storage error. Please try again.");
-        let search: CommandError = AppError::Search("syntax error".to_owned()).into();
+        let search: CommandError = AppError::search("syntax error".to_owned()).into();
         assert_eq!(search.code, "search_error");
         assert_eq!(search.message, "Search failed. Please retry the query.");
     }

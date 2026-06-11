@@ -48,9 +48,9 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
         .query_row("SELECT user_version FROM pragma_user_version", [], |row| {
             row.get(0)
         })
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     if current > SCHEMA_VERSION {
-        return Err(AppError::Storage(format!(
+        return Err(AppError::storage(format!(
             "database schema version {current} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
         )));
     }
@@ -63,7 +63,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
     // against a structurally different table.
     let first_version = MIGRATIONS.first().map_or(0, |(version, _)| *version);
     if current > 0 && current < first_version {
-        return Err(AppError::Storage(format!(
+        return Err(AppError::storage(format!(
             "database schema version {current} predates the consolidated pre-release schema ({first_version}); delete the local DB and let it be recreated",
         )));
     }
@@ -77,7 +77,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
             continue;
         }
         if *version != last_applied + 1 {
-            return Err(AppError::Storage(format!(
+            return Err(AppError::storage(format!(
                 "schema migrations are non-contiguous: jumped from {last_applied} to {version}",
             )));
         }
@@ -92,7 +92,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
         // makes the loser wait here instead of erroring out.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
         // Re-read `user_version` now that we hold the write lock. A peer may
         // have applied this migration (or more) while we waited for the
         // lock, so the pre-lock `current` read is stale — trust the locked
@@ -101,9 +101,9 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
             .query_row("SELECT user_version FROM pragma_user_version", [], |row| {
                 row.get(0)
             })
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
         if locked_version > SCHEMA_VERSION {
-            return Err(AppError::Storage(format!(
+            return Err(AppError::storage(format!(
                 "database schema version {locked_version} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
             )));
         }
@@ -124,9 +124,8 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
         // a literal (it can't be bound), and `version` comes from the
         // hard-coded `MIGRATIONS` table, so inlining is safe.
         let stamped = format!("{sql}\nPRAGMA user_version = {version};");
-        tx.execute_batch(&stamped)
-            .map_err(|err| storage_err(&err))?;
-        tx.commit().map_err(|err| storage_err(&err))?;
+        tx.execute_batch(&stamped).map_err(storage_err)?;
+        tx.commit().map_err(storage_err)?;
         last_applied = *version;
     }
     Ok(())

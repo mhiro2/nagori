@@ -24,7 +24,7 @@ fn reject_if_symlink(path: &Path, role: &str) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
-                Err(AppError::Storage(format!(
+                Err(AppError::storage(format!(
                     "{} is a symlink; refusing to use it as {role}",
                     path.display()
                 )))
@@ -33,7 +33,7 @@ fn reject_if_symlink(path: &Path, role: &str) -> Result<bool> {
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(storage_err_io(&err)),
+        Err(err) => Err(storage_err_io(err)),
     }
 }
 
@@ -41,14 +41,14 @@ fn reject_if_symlink(path: &Path, role: &str) -> Result<bool> {
 pub(crate) fn harden_db_file_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = || std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, mode()).map_err(|err| storage_err_io(&err))?;
+    std::fs::set_permissions(path, mode()).map_err(storage_err_io)?;
     // WAL/SHM sidecars are created by SQLite under the process umask once
     // `PRAGMA journal_mode = WAL` runs. Tighten any that already exist, but
     // refuse to follow a symlink raced into a sidecar path.
     for suffix in DB_SIDECAR_SUFFIXES {
         let sibling = db_sidecar_path(path, suffix);
         if reject_if_symlink(&sibling, "a database sidecar")? {
-            std::fs::set_permissions(&sibling, mode()).map_err(|err| storage_err_io(&err))?;
+            std::fs::set_permissions(&sibling, mode()).map_err(storage_err_io)?;
         }
     }
     Ok(())
@@ -74,7 +74,7 @@ pub(crate) fn pre_create_db_file_private(path: &Path) -> Result<()> {
     // Refuse to chmod / open a symlink planted at the DB path itself.
     if reject_if_symlink(path, "the database file")? {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|err| storage_err_io(&err))?;
+            .map_err(storage_err_io)?;
     } else {
         // `create_new` (O_EXCL) refuses to follow a symlink raced into the
         // path between the stat above and this open, so the create path needs
@@ -84,7 +84,7 @@ pub(crate) fn pre_create_db_file_private(path: &Path) -> Result<()> {
             .write(true)
             .mode(0o600)
             .open(path)
-            .map_err(|err| storage_err_io(&err))?;
+            .map_err(storage_err_io)?;
     }
     // Reject a symlink planted at the WAL/SHM sidecar paths *before*
     // `Connection::open` runs `journal_mode = WAL` — SQLite would otherwise
@@ -102,8 +102,8 @@ pub(crate) fn pre_create_db_file_private(_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn storage_err_io(err: &std::io::Error) -> AppError {
-    AppError::Storage(err.to_string())
+fn storage_err_io(err: std::io::Error) -> AppError {
+    AppError::storage_with(err.to_string(), err)
 }
 
 /// Create missing directory components with `0o700` perms on Unix.
@@ -112,7 +112,7 @@ fn storage_err_io(err: &std::io::Error) -> AppError {
 /// custom paths under shared parents such as `/tmp` from mutating permissions
 /// outside Nagori's ownership.
 pub fn ensure_private_directory(dir: &Path) -> Result<()> {
-    ensure_private_directory_inner(dir).map_err(|err| AppError::Storage(err.to_string()))
+    ensure_private_directory_inner(dir).map_err(|err| AppError::storage_with(err.to_string(), err))
 }
 
 #[cfg(unix)]
@@ -251,9 +251,9 @@ fn ensure_db_parent_strictly_private(path: &Path) -> Result<()> {
     if parent.as_os_str().is_empty() {
         return Ok(());
     }
-    let metadata = std::fs::symlink_metadata(parent).map_err(|err| storage_err_io(&err))?;
+    let metadata = std::fs::symlink_metadata(parent).map_err(storage_err_io)?;
     validate_existing_directory_with(parent, &metadata, false)
-        .map_err(|err| AppError::Storage(err.to_string()))
+        .map_err(|err| AppError::storage(err.to_string()))
 }
 
 #[cfg(not(unix))]

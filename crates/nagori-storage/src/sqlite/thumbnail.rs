@@ -36,14 +36,14 @@ impl SqliteStore {
                     },
                 )
                 .optional()
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             if record.is_some() {
                 let now = format_time(OffsetDateTime::now_utc())?;
                 conn.execute(
                     "UPDATE entry_thumbnails SET last_accessed_at = ?1 WHERE entry_id = ?2",
                     params![now, id.to_string()],
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             }
             Ok(record)
         })
@@ -65,7 +65,7 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
             let byte_count = i64::try_from(record.payload.len()).map_err(|err| {
-                AppError::Storage(format!(
+                AppError::storage(format!(
                     "thumbnail byte_count overflowed i64 conversion: {err}"
                 ))
             })?;
@@ -88,7 +88,7 @@ impl SqliteStore {
                     now,
                 ],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -102,7 +102,7 @@ impl SqliteStore {
                 "DELETE FROM entry_thumbnails WHERE entry_id = ?1",
                 params![id.to_string()],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -122,9 +122,9 @@ impl SqliteStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             u64::try_from(total).map_err(|err| {
-                AppError::Storage(format!(
+                AppError::storage(format!(
                     "thumbnail size total overflowed u64 conversion: {err}"
                 ))
             })
@@ -145,21 +145,21 @@ impl SqliteStore {
     pub async fn enforce_thumbnail_budget(&self, budget: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             let total_i64: i64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(byte_count), 0) FROM entry_thumbnails",
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut total = u64::try_from(total_i64).map_err(|err| {
-                AppError::Storage(format!(
+                AppError::storage(format!(
                     "thumbnail size total overflowed u64 conversion: {err}"
                 ))
             })?;
             if total <= budget {
-                tx.commit().map_err(|err| storage_err(&err))?;
+                tx.commit().map_err(storage_err)?;
                 return Ok(0);
             }
             let candidates = {
@@ -169,14 +169,14 @@ impl SqliteStore {
                          FROM entry_thumbnails
                          ORDER BY last_accessed_at ASC",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                     })
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|err| storage_err(&err))?
+                    .map_err(storage_err)?
             };
             let mut evicted = 0usize;
             for (entry_id, bytes) in candidates {
@@ -188,14 +188,14 @@ impl SqliteStore {
                         "DELETE FROM entry_thumbnails WHERE entry_id = ?1",
                         params![entry_id],
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 if changed > 0 {
                     evicted += changed;
                     let bytes = u64::try_from(bytes).unwrap_or(0);
                     total = total.saturating_sub(bytes);
                 }
             }
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(evicted)
         })
         .await

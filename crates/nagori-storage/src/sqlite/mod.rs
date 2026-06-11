@@ -69,7 +69,7 @@ impl SqliteStore {
         // history during that window; pre-creating with the right mode
         // means SQLite never sees a permissive file.
         pre_create_db_file_private(path)?;
-        let mut primary = Connection::open(path).map_err(|err| storage_err(&err))?;
+        let mut primary = Connection::open(path).map_err(storage_err)?;
         configure_connection(&primary)?;
         // Defensive post-open tighten: covers the WAL/SHM sidecars that
         // `PRAGMA journal_mode = WAL` just created under the process
@@ -83,7 +83,7 @@ impl SqliteStore {
         let mut slots = Vec::with_capacity(POOL_CAPACITY);
         slots.push(primary);
         for _ in 1..POOL_CAPACITY {
-            let conn = Connection::open(path).map_err(|err| storage_err(&err))?;
+            let conn = Connection::open(path).map_err(storage_err)?;
             configure_connection(&conn)?;
             slots.push(conn);
         }
@@ -104,7 +104,7 @@ impl SqliteStore {
         // connections without enabling shared-cache + a named URI. For
         // tests we keep the pool at capacity 1 — equivalent to the prior
         // single-`Mutex<Connection>` behaviour.
-        let mut conn = Connection::open_in_memory().map_err(|err| storage_err(&err))?;
+        let mut conn = Connection::open_in_memory().map_err(storage_err)?;
         configure_connection(&conn)?;
         run_migrations(&mut conn)?;
         Ok(Self {
@@ -133,7 +133,7 @@ impl SqliteStore {
         let store = self.clone();
         tokio::task::spawn_blocking(move || f(store))
             .await
-            .map_err(|err| AppError::Storage(format!("blocking task failed: {err}")))?
+            .map_err(|err| AppError::storage_with(format!("blocking task failed: {err}"), err))?
     }
 
     /// Like [`Self::run_blocking`], but for the read-only search candidate
@@ -175,7 +175,7 @@ impl SqliteStore {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| AppError::Storage("search admission semaphore closed".to_owned()))?;
+            .map_err(|_| AppError::storage("search admission semaphore closed".to_owned()))?;
 
         let store = self.clone();
         let cancel = cancel.clone();
@@ -192,7 +192,7 @@ impl SqliteStore {
             f(&conn)
         })
         .await
-        .map_err(|err| AppError::Storage(format!("blocking task failed: {err}")))?
+        .map_err(|err| AppError::storage_with(format!("blocking task failed: {err}"), err))?
     }
 }
 
@@ -214,7 +214,7 @@ struct ProgressGuard<'a> {
 impl<'a> ProgressGuard<'a> {
     fn install(conn: &'a Connection, cancel: CancellationToken) -> Result<Self> {
         conn.progress_handler(SEARCH_PROGRESS_OPS, Some(move || cancel.is_cancelled()))
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
         Ok(Self { conn })
     }
 }
@@ -275,7 +275,7 @@ fn configure_connection(conn: &Connection) -> Result<()> {
          PRAGMA wal_autocheckpoint = 1000;
          PRAGMA mmap_size = 67108864;",
     )
-    .map_err(|err| storage_err(&err))
+    .map_err(storage_err)
 }
 
 pub(super) const MAX_READ_LIMIT: usize = 200;
@@ -1082,7 +1082,7 @@ mod tests {
                         [],
                         |row| row.get(0),
                     )
-                    .map_err(|err| AppError::Storage(err.to_string()))?;
+                    .map_err(|err| AppError::storage(err.to_string()))?;
                 Ok(count)
             }),
         )
@@ -1097,7 +1097,7 @@ mod tests {
         let ok = store
             .run_search_blocking(&CancellationToken::new(), |conn| {
                 conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                    .map_err(|err| AppError::Storage(err.to_string()))
+                    .map_err(|err| AppError::storage(err.to_string()))
             })
             .await
             .expect("the connection should be reusable after an interrupt");

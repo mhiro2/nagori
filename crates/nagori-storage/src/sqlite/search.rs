@@ -54,7 +54,7 @@ impl SqliteStore {
                     params![NGRAM_INDEX_VERSION],
                     |row| row.get(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             Ok(u64::try_from(count).unwrap_or(0))
         })
         .await
@@ -87,16 +87,16 @@ impl SqliteStore {
                          ORDER BY doc_id
                          LIMIT ?2",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let limit = i64::try_from(NGRAM_REBUILD_BATCH).unwrap_or(i64::MAX);
                 let rows = stmt
                     .query_map(params![NGRAM_INDEX_VERSION, limit], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let mut out = Vec::new();
                 for row in rows {
-                    out.push(row.map_err(|err| storage_err(&err))?);
+                    out.push(row.map_err(storage_err)?);
                 }
                 out
             };
@@ -110,26 +110,26 @@ impl SqliteStore {
                 .map(|(entry_id, normalized)| (entry_id, generate_document_ngrams(&normalized)))
                 .collect();
 
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             {
                 let mut current = tx
                     .prepare_cached(
                         "SELECT ngram_index_version FROM search_documents WHERE entry_id = ?1",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let mut delete = tx
                     .prepare_cached("DELETE FROM ngrams WHERE entry_id = ?1")
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let mut insert = tx
                     .prepare_cached(
                         "INSERT OR IGNORE INTO ngrams (gram, entry_id, position) VALUES (?1, ?2, ?3)",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let mut stamp = tx
                     .prepare_cached(
                         "UPDATE search_documents SET ngram_index_version = ?2 WHERE entry_id = ?1",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 for (entry_id, grams) in &prepared {
                     // Under the writer lock this read is authoritative: if a
                     // capture refreshed the row since we fetched it (stamping
@@ -138,25 +138,25 @@ impl SqliteStore {
                     let version: i64 = current
                         .query_row(params![entry_id], |row| row.get(0))
                         .optional()
-                        .map_err(|err| storage_err(&err))?
+                        .map_err(storage_err)?
                         .unwrap_or(NGRAM_INDEX_VERSION);
                     if version >= NGRAM_INDEX_VERSION {
                         continue;
                     }
                     delete
                         .execute(params![entry_id])
-                        .map_err(|err| storage_err(&err))?;
+                        .map_err(storage_err)?;
                     for (position, gram) in grams.iter().enumerate() {
                         insert
                             .execute(params![gram, entry_id, position as i64])
-                            .map_err(|err| storage_err(&err))?;
+                            .map_err(storage_err)?;
                     }
                     stamp
                         .execute(params![entry_id, NGRAM_INDEX_VERSION])
-                        .map_err(|err| storage_err(&err))?;
+                        .map_err(storage_err)?;
                 }
             }
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(fetched)
         })
         .await
@@ -179,9 +179,9 @@ impl SearchRepository for SqliteStore {
         let entry_id = doc.entry_id;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             upsert_document_blocking(&tx, &doc)?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(())
         })
         .await?;
@@ -204,9 +204,9 @@ impl SearchRepository for SqliteStore {
     async fn delete_document(&self, entry_id: EntryId) -> Result<()> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             delete_search_rows(&tx, &entry_id.to_string())?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -289,7 +289,7 @@ impl SearchCandidateProvider for SqliteStore {
                     extra = filter.sql,
                 )
             };
-            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = Vec::new();
             if bounded {
                 bound.push(&scan_window);
@@ -300,9 +300,9 @@ impl SearchCandidateProvider for SqliteStore {
             let mut entries = Vec::new();
             for row in stmt
                 .query_map(rusqlite::params_from_iter(bound), row_to_entry)
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
             {
-                entries.push(row.map_err(|err| storage_err(&err))?);
+                entries.push(row.map_err(storage_err)?);
             }
             Ok(entries)
         })
@@ -341,7 +341,7 @@ impl SearchCandidateProvider for SqliteStore {
                  LIMIT ?",
                 extra = filter.sql,
             );
-            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = vec![&fts];
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
@@ -355,10 +355,10 @@ impl SearchCandidateProvider for SqliteStore {
                         fts_score: score as f32,
                     })
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut hits = Vec::new();
             for row in rows {
-                hits.push(row.map_err(|err| storage_err(&err))?);
+                hits.push(row.map_err(storage_err)?);
             }
             Ok(hits)
         })
@@ -421,7 +421,7 @@ impl SearchCandidateProvider for SqliteStore {
                  LIMIT ?",
                 extra = filter.sql,
             );
-            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = query_grams.iter().map(|g| g as &dyn ToSql).collect();
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
@@ -433,10 +433,10 @@ impl SearchCandidateProvider for SqliteStore {
                     let entry = row_to_entry(row)?;
                     Ok((entry, hits))
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut out = Vec::new();
             for row in rows {
-                let (entry, hits) = row.map_err(|err| storage_err(&err))?;
+                let (entry, hits) = row.map_err(storage_err)?;
                 #[allow(clippy::cast_precision_loss)]
                 let overlap = (hits as f32 / total).clamp(0.0, 1.0);
                 out.push(NgramCandidate {
@@ -481,18 +481,18 @@ pub(super) fn upsert_document_blocking(
             NGRAM_INDEX_VERSION,
         ],
     )
-    .map_err(|err| storage_err(&err))?;
+    .map_err(storage_err)?;
     tx.execute("DELETE FROM ngrams WHERE entry_id = ?1", params![entry_id])
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     let mut stmt = tx
         .prepare("INSERT OR IGNORE INTO ngrams (gram, entry_id, position) VALUES (?1, ?2, ?3)")
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     for (position, gram) in generate_document_ngrams(&doc.normalized_text)
         .iter()
         .enumerate()
     {
         stmt.execute(params![gram, entry_id, position as i64])
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
     }
     Ok(())
 }
@@ -504,9 +504,9 @@ pub(super) fn delete_search_rows(tx: &rusqlite::Transaction<'_>, entry_id: &str)
         "DELETE FROM search_documents WHERE entry_id = ?1",
         params![entry_id],
     )
-    .map_err(|err| storage_err(&err))?;
+    .map_err(storage_err)?;
     tx.execute("DELETE FROM ngrams WHERE entry_id = ?1", params![entry_id])
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     Ok(())
 }
 
@@ -534,15 +534,15 @@ pub(super) fn fetch_recent_entries(
          LIMIT ?",
         extra = filter.sql,
     );
-    let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
     let mut bound: Vec<&dyn ToSql> = filter.params.iter().map(|p| &**p as &dyn ToSql).collect();
     bound.push(&limit);
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bound), row_to_entry)
-        .map_err(|err| storage_err(&err))?;
+        .map_err(storage_err)?;
     let mut entries = Vec::new();
     for row in rows {
-        entries.push(row.map_err(|err| storage_err(&err))?);
+        entries.push(row.map_err(storage_err)?);
     }
     Ok(entries)
 }

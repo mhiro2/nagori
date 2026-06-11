@@ -406,8 +406,8 @@ pub(crate) fn result_code<T>(result: &Result<T>) -> &'static str {
 
 pub(crate) const fn error_code(err: &AppError) -> &'static str {
     match err {
-        AppError::Storage(_) => "storage_error",
-        AppError::Search(_) => "search_error",
+        AppError::Storage { .. } => "storage_error",
+        AppError::Search { .. } => "search_error",
         AppError::Platform(_) => "platform_error",
         AppError::Permission(_) => "permission_error",
         AppError::Ai(_) => "ai_error",

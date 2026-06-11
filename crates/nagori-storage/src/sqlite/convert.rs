@@ -113,7 +113,7 @@ pub(crate) fn parse_sensitivity_strict(value: &str) -> rusqlite::Result<Sensitiv
         other => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
-            Box::new(AppError::Storage(format!(
+            Box::new(AppError::storage(format!(
                 "unknown sensitivity label in DB row: {other:?}"
             ))),
         )),
@@ -164,7 +164,7 @@ pub(crate) fn format_time(value: OffsetDateTime) -> Result<String> {
     value
         .to_offset(UtcOffset::UTC)
         .format(&Rfc3339)
-        .map_err(|err| AppError::Storage(err.to_string()))
+        .map_err(|err| AppError::storage_with(err.to_string(), err))
 }
 
 pub(crate) fn format_opt_time(value: Option<OffsetDateTime>) -> Result<Option<String>> {
@@ -182,16 +182,21 @@ fn parse_opt_time(value: Option<String>) -> rusqlite::Result<Option<OffsetDateTi
     value.as_deref().map(parse_time).transpose()
 }
 
-pub(crate) fn storage_err(err: &rusqlite::Error) -> AppError {
-    AppError::Storage(err.to_string())
+pub(crate) fn storage_err(err: rusqlite::Error) -> AppError {
+    // Keep the rendered message for display parity, and the typed error in
+    // the `#[source]` chain so callers can classify the root cause (e.g.
+    // `SQLITE_BUSY` vs schema corruption) without string matching.
+    AppError::storage_with(err.to_string(), err)
 }
 
-pub(crate) fn json_err(err: &serde_json::Error) -> AppError {
-    AppError::Storage(err.to_string())
+pub(crate) fn json_err(err: serde_json::Error) -> AppError {
+    AppError::storage_with(err.to_string(), err)
 }
 
+// `PoisonError` owns the guard (not `Send`/`'static`), so only the message
+// survives here.
 pub(crate) fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
-    AppError::Storage(err.to_string())
+    AppError::storage(err.to_string())
 }
 
 #[cfg(test)]
@@ -233,5 +238,23 @@ mod tests {
         let value = OffsetDateTime::from_unix_timestamp_nanos(1_780_000_000_123_456_789).unwrap();
         let stored = format_time(value).unwrap();
         assert_eq!(parse_time(&stored).unwrap(), value);
+    }
+
+    #[test]
+    fn storage_err_keeps_typed_cause_in_source_chain() {
+        // Root-cause classification (e.g. SQLITE_BUSY vs corruption) walks the
+        // `#[source]` chain rather than string-matching the message, so the
+        // helper must carry the original `rusqlite::Error` as a typed cause.
+        let err = storage_err(rusqlite::Error::QueryReturnedNoRows);
+        let source = std::error::Error::source(&err).expect("source must be preserved");
+        assert!(source.downcast_ref::<rusqlite::Error>().is_some());
+    }
+
+    #[test]
+    fn json_err_keeps_typed_cause_in_source_chain() {
+        let parse_failure = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let err = json_err(parse_failure);
+        let source = std::error::Error::source(&err).expect("source must be preserved");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
     }
 }

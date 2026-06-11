@@ -398,7 +398,7 @@ impl AppState {
     pub fn try_new_at(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             nagori_storage::ensure_private_directory(parent)
-                .map_err(|err| annotate_startup_error(&err, db_path, StartupStage::Directory))?;
+                .map_err(|err| annotate_startup_error(err, db_path, StartupStage::Directory))?;
         }
         // Take the single-instance lock *before* opening the store, so a
         // second launch never runs migrations or starts a capture loop
@@ -408,7 +408,7 @@ impl AppState {
         // store is refused too.
         let instance_lock = acquire_instance_lock(lock_dir_for(db_path))?;
         let store = SqliteStore::open(db_path)
-            .map_err(|err| annotate_startup_error(&err, db_path, StartupStage::OpenDb))?;
+            .map_err(|err| annotate_startup_error(err, db_path, StartupStage::OpenDb))?;
         let mut state = Self::build(store)?;
         state.instance_lock = Some(instance_lock);
         state.clear_on_quit_marker = Some(clear_on_quit_marker_path(db_path));
@@ -678,14 +678,14 @@ impl AppState {
         }
         tracing::warn!("clear_on_quit_resuming_pending_purge");
         tauri::async_runtime::block_on(self.runtime.clear_non_pinned()).map_err(|err| {
-            AppError::Storage(format!(
+            AppError::storage(format!(
                 "could not finish the clear-on-quit purge left pending by the previous session: \
                  {err}. The clipboard history you asked to clear on quit is still present; relaunch \
                  to retry, or move the database aside to start fresh."
             ))
         })?;
         self.clear_clear_on_quit_pending().map_err(|err| {
-            AppError::Storage(format!(
+            AppError::storage(format!(
                 "finished the clear-on-quit purge but could not remove its marker: {err}. Remove \
                  the clear-on-quit.pending file in the database directory so the next launch does \
                  not purge again."
@@ -1394,7 +1394,7 @@ mod tests {
     #[test]
     fn note_settings_load_outcome_records_failure() {
         let health = StartupHealth::new();
-        let err = AppError::Storage("disk full".to_owned());
+        let err = AppError::storage("disk full".to_owned());
         let expected = err.to_string();
         let result: Result<AppSettings> = Err(err);
         let proceed = note_settings_load_outcome(&health, &result);
@@ -1489,7 +1489,7 @@ mod tests {
     #[test]
     fn note_maintenance_outcome_records_failure_string() {
         let health = MaintenanceHealth::new();
-        let err = AppError::Storage("locked".to_owned());
+        let err = AppError::storage("locked".to_owned());
         let expected = err.to_string();
         let result: Result<MaintenanceReport> = Err(err);
         note_maintenance_outcome(&health, &result);
@@ -1508,7 +1508,7 @@ mod tests {
         let health = MaintenanceHealth::new();
         note_maintenance_outcome(
             &health,
-            &Err::<MaintenanceReport, _>(AppError::Storage("transient".to_owned())),
+            &Err::<MaintenanceReport, _>(AppError::storage("transient".to_owned())),
         );
         note_maintenance_outcome(&health, &Ok(MaintenanceReport::default()));
         let report = health.report();
@@ -1530,7 +1530,7 @@ mod tests {
         let desktop_health = MaintenanceHealth::new();
         let daemon_health = MaintenanceHealth::new();
 
-        let failure = AppError::Storage("disk full".to_owned());
+        let failure = AppError::storage("disk full".to_owned());
         let failure_string = failure.to_string();
         note_maintenance_outcome(&desktop_health, &Err::<MaintenanceReport, _>(failure));
         daemon_health.record_failure(failure_string.clone());
@@ -1543,7 +1543,7 @@ mod tests {
         // Three consecutive failures should flip both reports to
         // `degraded` simultaneously — same threshold (3) feeds both.
         for _ in 0..3 {
-            let err = AppError::Storage("disk full".to_owned());
+            let err = AppError::storage("disk full".to_owned());
             note_maintenance_outcome(&desktop_health, &Err::<MaintenanceReport, _>(err));
             daemon_health.record_failure(failure_string.clone());
         }
@@ -1674,7 +1674,7 @@ enum StartupStage {
 /// recovery hint. Tauri's `setup` closure has no UI yet, so the only way to
 /// guide the user through DB corruption / permission errors is to put the
 /// command they need to run into the error string itself.
-fn annotate_startup_error(err: &AppError, db_path: &Path, stage: StartupStage) -> AppError {
+fn annotate_startup_error(err: AppError, db_path: &Path, stage: StartupStage) -> AppError {
     let path = db_path.display();
     let hint = match stage {
         StartupStage::Directory => format!(
@@ -1688,5 +1688,8 @@ fn annotate_startup_error(err: &AppError, db_path: &Path, stage: StartupStage) -
              \"{path}.broken\"`) and relaunch nagori — a fresh DB will be created"
         ),
     };
-    AppError::Storage(hint)
+    // The hint repeats the original error's Display form for the dialog, but
+    // keep the typed cause (`rusqlite::Error`, `io::Error`, …) in the source
+    // chain instead of flattening it into the string.
+    AppError::storage_with(hint, err)
 }

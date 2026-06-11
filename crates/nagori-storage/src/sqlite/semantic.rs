@@ -18,7 +18,7 @@ use nagori_core::{
     AppError, EntryId, RankReason, Result, SearchFilters, SearchResult, SemanticIndexMeta,
     Sensitivity,
 };
-use rusqlite::{ToSql, params};
+use rusqlite::{OptionalExtension, ToSql, params};
 use time::OffsetDateTime;
 
 use super::SqliteStore;
@@ -110,28 +110,22 @@ impl SqliteStore {
                         ))
                     },
                 )
-                .map_err(|err| match err {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        AppError::Storage("semantic_index_meta empty".to_owned())
-                    }
-                    other => storage_err(&other),
-                });
-            match row {
-                Ok((model_identifier, revision, dimension, max_seq, languages, index_version)) => {
+                .optional()
+                .map_err(storage_err)?;
+            Ok(row.map(
+                |(model_identifier, revision, dimension, max_seq, languages, index_version)| {
                     let languages: Vec<String> =
                         serde_json::from_str(&languages).unwrap_or_default();
-                    Ok(Some(SemanticIndexMeta {
+                    SemanticIndexMeta {
                         model_identifier,
                         revision: u32::try_from(revision).unwrap_or(0),
                         dimension: u32::try_from(dimension).unwrap_or(0),
                         max_sequence_length: u32::try_from(max_seq).unwrap_or(0),
                         languages,
                         index_version: u32::try_from(index_version).unwrap_or(0),
-                    }))
-                }
-                Err(AppError::Storage(ref msg)) if msg == "semantic_index_meta empty" => Ok(None),
-                Err(err) => Err(err),
-            }
+                    }
+                },
+            ))
         })
         .await
     }
@@ -165,7 +159,7 @@ impl SqliteStore {
                     now,
                 ],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -176,12 +170,12 @@ impl SqliteStore {
     pub async fn semantic_clear(&self) -> Result<()> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             tx.execute("DELETE FROM entry_embeddings", [])
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             tx.execute("DELETE FROM semantic_index_meta", [])
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -213,14 +207,14 @@ impl SqliteStore {
             return Ok(());
         }
         if items.iter().any(|(_, _, vector)| vector.is_empty()) {
-            return Err(AppError::Storage(
+            return Err(AppError::storage(
                 "refusing to store an empty embedding vector".to_owned(),
             ));
         }
         let now = format_time(OffsetDateTime::now_utc())?;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             {
                 let mut stmt = tx
                     .prepare_cached(
@@ -233,7 +227,7 @@ impl SqliteStore {
                             content_hash = excluded.content_hash,
                             created_at = excluded.created_at",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 for (entry_id, content_hash, vector) in &items {
                     let dimension = i64::try_from(vector.len()).unwrap_or(i64::MAX);
                     let blob = vector_to_blob(vector);
@@ -244,10 +238,10 @@ impl SqliteStore {
                         content_hash,
                         now
                     ])
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 }
             }
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -261,7 +255,7 @@ impl SqliteStore {
                 "DELETE FROM entry_embeddings WHERE entry_id = ?1",
                 params![entry_id.to_string()],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -284,7 +278,7 @@ impl SqliteStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let indexed: i64 = conn
                 .query_row(
                     // Only count vectors whose `content_hash` still matches the
@@ -303,7 +297,7 @@ impl SqliteStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             Ok(SemanticIndexCounts {
                 indexed: u64::try_from(indexed).unwrap_or(0),
                 total: u64::try_from(total).unwrap_or(0),
@@ -345,7 +339,7 @@ impl SqliteStore {
                      ORDER BY e.created_at DESC
                      LIMIT ?1",
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let rows = stmt
                 .query_map(params![limit], |row| {
                     let sensitivity = parse_sensitivity_strict(&row.get::<_, String>(3)?)?;
@@ -356,10 +350,10 @@ impl SqliteStore {
                         sensitivity,
                     ))
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut pending = Vec::new();
             for row in rows {
-                let (id, content_hash, text, sensitivity) = row.map_err(|err| storage_err(&err))?;
+                let (id, content_hash, text, sensitivity) = row.map_err(storage_err)?;
                 let Ok(entry_id) = id.parse::<EntryId>() else {
                     continue;
                 };
@@ -416,7 +410,7 @@ impl SqliteStore {
                  LIMIT ?",
                 extra = filter.sql,
             );
-            let mut stmt = conn.prepare_cached(&sql).map_err(|err| storage_err(&err))?;
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = vec![&blob, &dimension];
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit);
@@ -452,10 +446,10 @@ impl SqliteStore {
                         image_height,
                     })
                 })
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut results = Vec::new();
             for row in rows {
-                results.push(row.map_err(|err| storage_err(&err))?);
+                results.push(row.map_err(storage_err)?);
             }
             Ok(results)
         })

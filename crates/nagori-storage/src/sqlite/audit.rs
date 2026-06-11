@@ -23,7 +23,7 @@ impl SqliteStore {
                 params![kind],
                 |row| row.get(0),
             )
-            .map_err(|err| storage_err(&err))
+            .map_err(storage_err)
         })
         .await
     }
@@ -53,7 +53,7 @@ impl AuditLog for SqliteStore {
                     now,
                 ],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await

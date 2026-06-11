@@ -212,7 +212,7 @@ pub async fn generate_thumbnail(
     // we don't stall tokio workers.
     let record = tokio::task::spawn_blocking(move || encode_thumbnail(&bytes))
         .await
-        .map_err(|err| AppError::Storage(format!("thumbnail task join failed: {err}")))?;
+        .map_err(|err| AppError::storage(format!("thumbnail task join failed: {err}")))?;
     match record {
         Some(record) => {
             store.put_thumbnail(id, record.clone()).await?;

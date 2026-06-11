@@ -35,7 +35,7 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let cutoff = format_time(cutoff)?;
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             // Physically delete aged-out, non-pinned rows. `ON DELETE CASCADE`
             // (plus `recursive_triggers` firing `search_documents_ad_fts`)
             // drops each row's representations, image/blob payloads,
@@ -50,8 +50,8 @@ impl SqliteStore {
                      WHERE pinned = 0 AND created_at < ?1",
                     params![cutoff],
                 )
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
@@ -71,11 +71,11 @@ impl SqliteStore {
     pub async fn clear_non_pinned(&self) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             let changed = tx
                 .execute("DELETE FROM entries WHERE pinned = 0", [])
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
@@ -103,11 +103,11 @@ impl SqliteStore {
     pub async fn purge_deleted(&self) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             let changed = tx
                 .execute("DELETE FROM entries WHERE deleted_at IS NOT NULL", [])
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
@@ -123,13 +123,13 @@ impl SqliteStore {
         // (FFI, manual maintenance hook) gets a clean error instead of a
         // silently truncated `OFFSET` from `as i64`.
         let max_entries_i64 = i64::try_from(max_entries).map_err(|err| {
-            AppError::Storage(format!(
+            AppError::storage(format!(
                 "history_retention_count {max_entries} exceeds i64 range: {err}"
             ))
         })?;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             // Physically delete the oldest live, unpinned rows beyond the cap.
             // The cap bounds *live* history, so the subquery selects from
             // `deleted_at IS NULL` rows; the cascade drops each evicted row's
@@ -147,8 +147,8 @@ impl SqliteStore {
                      )",
                     params![max_entries_i64],
                 )
-                .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             Ok(changed)
         })
         .await
@@ -157,7 +157,7 @@ impl SqliteStore {
     pub async fn enforce_total_bytes(&self, max_total_bytes: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(|err| storage_err(&err))?;
+            let tx = conn.transaction().map_err(storage_err)?;
             // Budget the retained representation payload only — the
             // `content_json` envelope is bookkeeping, not user content, and
             // for text-shaped entries the same text already appears in
@@ -175,12 +175,12 @@ impl SqliteStore {
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let mut total = u64::try_from(total_i64).map_err(|err| {
-                AppError::Storage(format!("entry size total overflowed u64 conversion: {err}"))
+                AppError::storage(format!("entry size total overflowed u64 conversion: {err}"))
             })?;
             if total <= max_total_bytes {
-                tx.commit().map_err(|err| storage_err(&err))?;
+                tx.commit().map_err(storage_err)?;
                 return Ok(0);
             }
 
@@ -192,21 +192,21 @@ impl SqliteStore {
                          WHERE deleted_at IS NULL AND pinned = 0
                          ORDER BY created_at ASC, entry_bytes DESC",
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let rows = stmt
                     .query_map([], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                     })
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 let rows = rows
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 rows.into_iter()
                     .map(|(id, bytes)| {
                         u64::try_from(bytes)
                             .map(|bytes| (id, bytes))
                             .map_err(|err| {
-                                AppError::Storage(format!(
+                                AppError::storage(format!(
                                     "entry size overflowed u64 conversion: {err}"
                                 ))
                             })
@@ -228,13 +228,13 @@ impl SqliteStore {
                         "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
                         params![id],
                     )
-                    .map_err(|err| storage_err(&err))?;
+                    .map_err(storage_err)?;
                 if changed > 0 {
                     deleted += changed;
                     total = total.saturating_sub(bytes);
                 }
             }
-            tx.commit().map_err(|err| storage_err(&err))?;
+            tx.commit().map_err(storage_err)?;
             Ok(deleted)
         })
         .await
@@ -243,8 +243,7 @@ impl SqliteStore {
     pub async fn vacuum(&self) -> Result<()> {
         self.run_blocking(|store| {
             let conn = store.conn()?;
-            conn.execute_batch("VACUUM")
-                .map_err(|err| storage_err(&err))?;
+            conn.execute_batch("VACUUM").map_err(storage_err)?;
             Ok(())
         })
         .await

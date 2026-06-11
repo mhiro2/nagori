@@ -2,12 +2,31 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, AppError>;
 
+/// Boxed cause carried in `#[source]` chains. `Send + Sync` so an `AppError`
+/// stays transferable across task boundaries.
+pub type ErrorSource = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("storage error: {0}")]
-    Storage(String),
-    #[error("search error: {0}")]
-    Search(String),
+    /// Storage-layer failure. `source` preserves the originating typed error
+    /// (`rusqlite::Error`, `serde_json::Error`, `std::io::Error`, …) so
+    /// callers can walk the chain for root-cause classification instead of
+    /// string-matching the formatted message. Construct via
+    /// [`AppError::storage`] / [`AppError::storage_with`].
+    #[error("storage error: {message}")]
+    Storage {
+        message: String,
+        #[source]
+        source: Option<ErrorSource>,
+    },
+    /// Search-layer failure; see [`AppError::Storage`] for the `source`
+    /// contract. Construct via [`AppError::search`] / [`AppError::search_with`].
+    #[error("search error: {message}")]
+    Search {
+        message: String,
+        #[source]
+        source: Option<ErrorSource>,
+    },
     #[error("platform error: {0}")]
     Platform(String),
     #[error("permission error: {0}")]
@@ -40,6 +59,44 @@ pub enum AppError {
         reason: PasteFailureReason,
         message: String,
     },
+}
+
+impl AppError {
+    /// Message-only [`AppError::Storage`], for failures whose context is
+    /// already fully rendered in the message (overflow checks, invariant
+    /// violations, …).
+    pub fn storage(message: impl Into<String>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// [`AppError::Storage`] that keeps the originating typed error in the
+    /// `#[source]` chain.
+    pub fn storage_with(message: impl Into<String>, source: impl Into<ErrorSource>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Message-only [`AppError::Search`]; see [`AppError::storage`].
+    pub fn search(message: impl Into<String>) -> Self {
+        Self::Search {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// [`AppError::Search`] with a `#[source]` cause; see
+    /// [`AppError::storage_with`].
+    pub fn search_with(message: impl Into<String>, source: impl Into<ErrorSource>) -> Self {
+        Self::Search {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
 }
 
 /// Why an auto-paste attempt failed.

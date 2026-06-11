@@ -83,8 +83,8 @@ impl CaptureErrorKind {
 
     const fn from_error(err: &AppError) -> Self {
         match err {
-            AppError::Storage(_) => Self::Storage,
-            AppError::Search(_) => Self::Search,
+            AppError::Storage { .. } => Self::Storage,
+            AppError::Search { .. } => Self::Search,
             // Auto-paste never runs inside the capture loop, so a `Paste` error
             // here would only be a wiring mistake; bucket it with the other
             // adapter-level failures rather than adding a dead variant.
@@ -1226,7 +1226,7 @@ mod tests {
     impl EntryRepository for FlakyInsertRepo {
         async fn insert(&self, entry: nagori_core::ClipboardEntry) -> Result<EntryId> {
             if self.fail_insert.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(AppError::Storage(
+                return Err(AppError::storage(
                     "simulated transient insert failure".to_owned(),
                 ));
             }
@@ -3253,8 +3253,8 @@ mod tests {
         let store = SqliteStore::open_memory().expect("memory store");
         let mut loop_ = loop_for(clipboard, store, AppSettings::default());
 
-        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
-        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::storage("disk full".to_owned()));
         let storage_slot = CaptureErrorKind::Storage as usize;
         assert_eq!(loop_.failures.suppressed_warns[storage_slot], 1);
 
@@ -3285,7 +3285,7 @@ mod tests {
         let mut loop_ =
             loop_for(clipboard, store, AppSettings::default()).with_capture_health(health.clone());
 
-        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::storage("disk full".to_owned()));
         loop_.note_capture_error(&AppError::Platform("ax read failed".to_owned()));
         let report = health.report();
         // The most recent non-success outcome was the Platform error,
@@ -3298,7 +3298,7 @@ mod tests {
 
         // And the Storage variant routes correctly when it is the
         // most recent.
-        loop_.note_capture_error(&AppError::Storage("disk full".to_owned()));
+        loop_.note_capture_error(&AppError::storage("disk full".to_owned()));
         let report = health.report();
         assert_eq!(
             report.last_event_category,

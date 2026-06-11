@@ -16,9 +16,9 @@ impl SettingsRepository for SqliteStore {
                     row.get(0)
                 })
                 .optional()
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let settings: AppSettings = match value {
-                Some(value) => serde_json::from_str(&value).map_err(|err| json_err(&err))?,
+                Some(value) => serde_json::from_str(&value).map_err(json_err)?,
                 None => return Ok(AppSettings::default()),
             };
             // Hand-edited or downgraded rows can carry out-of-range values
@@ -40,7 +40,7 @@ impl SettingsRepository for SqliteStore {
         // settings.
         settings.validate()?;
         self.run_blocking(move |store| {
-            let value = serde_json::to_string_pretty(&settings).map_err(|err| json_err(&err))?;
+            let value = serde_json::to_string_pretty(&settings).map_err(json_err)?;
             let now = format_time(OffsetDateTime::now_utc())?;
             let conn = store.conn()?;
             // Every persisted write advances `revision` (the optimistic-
@@ -56,7 +56,7 @@ impl SettingsRepository for SqliteStore {
                      revision = settings.revision + 1",
                 params![value, now],
             )
-            .map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
             Ok(())
         })
         .await
@@ -84,12 +84,11 @@ impl SqliteStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let Some((value, revision)) = row else {
                 return Ok((AppSettings::default(), 0));
             };
-            let settings: AppSettings =
-                serde_json::from_str(&value).map_err(|err| json_err(&err))?;
+            let settings: AppSettings = serde_json::from_str(&value).map_err(json_err)?;
             // Mirror `get_settings`: a hand-edited or downgraded row surfaces
             // loudly here too instead of wedging the consumer.
             settings.validate()?;
@@ -112,18 +111,18 @@ impl SqliteStore {
     ) -> Result<u64> {
         settings.validate()?;
         self.run_blocking(move |store| {
-            let value = serde_json::to_string_pretty(&settings).map_err(|err| json_err(&err))?;
+            let value = serde_json::to_string_pretty(&settings).map_err(json_err)?;
             let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|err| storage_err(&err))?;
+                .map_err(storage_err)?;
             let current: i64 = tx
                 .query_row("SELECT revision FROM settings WHERE key = 'app'", [], |row| {
                     row.get(0)
                 })
                 .optional()
-                .map_err(|err| storage_err(&err))?
+                .map_err(storage_err)?
                 .unwrap_or(0);
             let current = u64::try_from(current).unwrap_or(0);
             if current != expected_revision {
@@ -133,7 +132,7 @@ impl SqliteStore {
             }
             let next = current.saturating_add(1);
             let next_i64 = i64::try_from(next).map_err(|err| {
-                AppError::Storage(format!("settings revision overflowed i64: {err}"))
+                AppError::storage(format!("settings revision overflowed i64: {err}"))
             })?;
             tx.execute(
                 "INSERT INTO settings (key, value, updated_at, revision) VALUES ('app', ?1, ?2, ?3)
@@ -143,8 +142,8 @@ impl SqliteStore {
                      revision = excluded.revision",
                 params![value, now, next_i64],
             )
-            .map_err(|err| storage_err(&err))?;
-            tx.commit().map_err(|err| storage_err(&err))?;
+            .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
             Ok(next)
         })
         .await

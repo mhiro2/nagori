@@ -341,8 +341,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
             AppError::InvalidInput(_) => 2,
             AppError::Permission(_) => 6,
             AppError::Unsupported(_) => 7,
-            AppError::Storage(_)
-            | AppError::Search(_)
+            AppError::Storage { .. }
+            | AppError::Search { .. }
             | AppError::Platform(_)
             | AppError::Ai(_)
             | AppError::Paste { .. }
@@ -454,8 +454,8 @@ mod tests {
             (AppError::Policy("x".into()), 5),
             (AppError::Permission("x".into()), 6),
             (AppError::Unsupported("x".into()), 7),
-            (AppError::Storage("x".into()), 8),
-            (AppError::Search("x".into()), 8),
+            (AppError::storage("x"), 8),
+            (AppError::search("x"), 8),
             (AppError::Platform("x".into()), 8),
             (AppError::Ai("x".into()), 8),
             (AppError::Configuration("x".into()), 8),
