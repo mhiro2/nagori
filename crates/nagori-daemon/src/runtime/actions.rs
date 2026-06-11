@@ -165,7 +165,7 @@ impl NagoriRuntime {
         // acquire, so permit waiters can't deadlock against the map mutation.
         let cancel = CancellationToken::new();
         self.ai_registry
-            .register(request_id, action, cancel.clone(), deadline);
+            .register(request_id, cancel.clone(), deadline);
 
         // Acquire the backend's concurrency permit, bounded by the cancel token
         // *and* the remaining budget so a queued request is aborted before it

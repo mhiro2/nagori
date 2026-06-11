@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nagori_ai::BackendKind;
-use nagori_core::{AiActionId, RequestId};
+use nagori_core::RequestId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -68,8 +68,6 @@ impl AiSemaphores {
 
 /// Bookkeeping for one in-flight request.
 struct RequestHandle {
-    #[allow(dead_code)]
-    action: AiActionId,
     /// Absolute budget for the whole request, mirroring the deadline its
     /// pre-stream phases and streamed generation already enforce. The watchdog
     /// cancels + drops a handle still present past `deadline + REAP_GRACE`,
@@ -119,18 +117,11 @@ impl AiRequestRegistry {
     ///
     /// The mutex is only ever held for the map mutation — never across a
     /// semaphore acquire — so this can't deadlock against permit waiters.
-    pub fn register(
-        &self,
-        request_id: RequestId,
-        action: AiActionId,
-        cancel: CancellationToken,
-        deadline: Instant,
-    ) {
+    pub fn register(&self, request_id: RequestId, cancel: CancellationToken, deadline: Instant) {
         let mut handles = self.lock();
         handles.insert(
             request_id,
             RequestHandle {
-                action,
                 deadline,
                 cancel,
                 permit: None,
@@ -215,7 +206,7 @@ mod tests {
         let registry = AiRequestRegistry::new();
         let id = RequestId::new();
         let token = CancellationToken::new();
-        registry.register(id, AiActionId::Summarize, token.clone(), far_deadline());
+        registry.register(id, token.clone(), far_deadline());
         assert_eq!(registry.active_count(), 1);
         assert!(registry.cancel(id));
         assert!(token.is_cancelled());
@@ -227,12 +218,7 @@ mod tests {
     fn remove_drops_handle() {
         let registry = AiRequestRegistry::new();
         let id = RequestId::new();
-        registry.register(
-            id,
-            AiActionId::Summarize,
-            CancellationToken::new(),
-            far_deadline(),
-        );
+        registry.register(id, CancellationToken::new(), far_deadline());
         registry.remove(id);
         assert_eq!(registry.active_count(), 0);
     }
@@ -246,7 +232,6 @@ mod tests {
         let expired_token = CancellationToken::new();
         registry.register(
             expired_id,
-            AiActionId::Summarize,
             expired_token.clone(),
             Instant::now()
                 .checked_sub(REAP_GRACE + Duration::from_secs(1))
@@ -256,12 +241,7 @@ mod tests {
         // Still within its budget: must survive the sweep.
         let live_id = RequestId::new();
         let live_token = CancellationToken::new();
-        registry.register(
-            live_id,
-            AiActionId::Summarize,
-            live_token.clone(),
-            far_deadline(),
-        );
+        registry.register(live_id, live_token.clone(), far_deadline());
 
         assert_eq!(registry.active_count(), 2);
         assert_eq!(registry.reap_expired(), 1);
