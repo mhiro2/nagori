@@ -6,10 +6,11 @@ use async_trait::async_trait;
 use image::{ImageEncoder, codecs::png::PngEncoder};
 #[cfg(target_os = "macos")]
 use nagori_core::MAX_DECODED_IMAGE_PIXELS;
+#[cfg(target_os = "macos")]
+use nagori_core::RepresentationDataRef;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, RepresentationDataRef, Result,
-    StoredClipboardRepresentation,
+    ClipboardSequence, ClipboardSnapshot, Result, StoredClipboardRepresentation,
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
