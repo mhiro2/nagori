@@ -11,8 +11,9 @@ use nagori_core::{
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
-    clipboard_write_blocking, decode_rgba_with_pixel_cap, has_publishable_representation,
+    CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
+    clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
+    has_publishable_representation, lock_err, platform_err,
 };
 use time::OffsetDateTime;
 
@@ -396,7 +397,7 @@ fn capture_snapshot(
     clipboard: &Mutex<Clipboard>,
     max_bytes: Option<usize>,
 ) -> Result<CapturedSnapshot> {
-    const MAX_RETRIES: usize = 3;
+    const MAX_RETRIES: usize = SNAPSHOT_CAPTURE_MAX_RETRIES;
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -1416,14 +1417,6 @@ mod win {
         }
         Ok(out)
     }
-}
-
-fn platform_err(err: &arboard::Error) -> AppError {
-    AppError::Platform(err.to_string())
-}
-
-fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
-    AppError::Platform(err.to_string())
 }
 
 #[cfg(test)]

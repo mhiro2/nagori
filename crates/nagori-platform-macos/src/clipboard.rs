@@ -13,8 +13,9 @@ use nagori_core::{
     ClipboardSequence, ClipboardSnapshot, Result, StoredClipboardRepresentation,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, ClipboardWriter, clipboard_blocking,
-    clipboard_write_blocking, has_publishable_representation,
+    CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
+    clipboard_blocking, clipboard_write_blocking, has_publishable_representation, lock_err,
+    platform_err,
 };
 #[cfg(target_os = "macos")]
 use nagori_platform::{DecodeRgbaError, decode_rgba_with_pixel_cap};
@@ -174,7 +175,7 @@ fn capture_snapshot_with_max(
     clipboard: &Mutex<Clipboard>,
     max_bytes: usize,
 ) -> Result<CapturedSnapshot> {
-    const MAX_RETRIES: usize = 3;
+    const MAX_RETRIES: usize = SNAPSHOT_CAPTURE_MAX_RETRIES;
     for attempt in 1..=MAX_RETRIES {
         match capture_attempt(clipboard, max_bytes)? {
             CaptureAttempt::Settled(snapshot) => return Ok(snapshot),
@@ -1173,14 +1174,6 @@ fn file_url_to_path(raw: &str) -> Option<String> {
         .to_file_path()
         .ok()
         .and_then(|path| path.into_os_string().into_string().ok())
-}
-
-fn platform_err(err: &arboard::Error) -> AppError {
-    AppError::Platform(err.to_string())
-}
-
-fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
-    AppError::Platform(err.to_string())
 }
 
 #[cfg(test)]

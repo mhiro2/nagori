@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -6,6 +7,14 @@ use nagori_core::{
     ClipboardSnapshot, ContentHash, RepresentationDataRef, Result, StoredClipboardRepresentation,
 };
 use time::OffsetDateTime;
+
+/// Maximum number of torn-read retries a polling clipboard adapter makes when
+/// the change-count moves between the pre-read probe and the byte read.
+///
+/// macOS and Windows both re-probe up to this many times before accepting the
+/// most recent read; sharing the bound here keeps the two adapters from
+/// drifting apart.
+pub const SNAPSHOT_CAPTURE_MAX_RETRIES: usize = 3;
 
 /// Outcome of [`ClipboardReader::current_snapshot_with_max`].
 ///
@@ -283,7 +292,22 @@ impl ClipboardWriter for MemoryClipboard {
     }
 }
 
-fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
+/// Wrap any displayable backend error as an [`AppError::Platform`].
+///
+/// Clipboard adapters call this for `arboard` failures. Keeping it generic
+/// over [`Display`] lets `nagori-platform` own the helper without taking a
+/// dependency on a specific clipboard backend crate.
+#[must_use]
+pub fn platform_err<E: Display + ?Sized>(err: &E) -> AppError {
+    AppError::Platform(err.to_string())
+}
+
+/// Wrap a poisoned-lock error as an [`AppError::Platform`].
+///
+/// A distinct name from [`platform_err`] so the call site reads as "the mutex
+/// guarding the clipboard was poisoned" rather than a generic backend failure.
+#[must_use]
+pub fn lock_err<T>(err: &std::sync::PoisonError<T>) -> AppError {
     AppError::Platform(err.to_string())
 }
 
