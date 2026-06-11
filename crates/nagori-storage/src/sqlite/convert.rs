@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nagori_core::{
     AppError, ClipboardContent, ClipboardEntry, ContentHash, ContentKind, EntryId, EntryLifecycle,
-    EntryMetadata, HashAlgorithm, Result, SearchDocument, Sensitivity, SourceApp,
+    EntryMetadata, HashAlgorithm, Result, SearchCandidate, SearchDocument, Sensitivity, SourceApp,
 };
 use nagori_search::normalize_text;
 use rusqlite::Row;
@@ -75,6 +75,59 @@ pub(crate) fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
     })
 }
 
+/// Search-path projection of a candidate row into the fields ranking reads.
+///
+/// `candidate_content_json` is a CASE-gated copy of `content_json` the
+/// candidate queries emit only for image rows (the result row surfaces pixel
+/// dimensions) and for rows missing their `search_documents` join (the
+/// preview / normalized-text fallback needs the body) — for ordinary text
+/// candidates it is NULL, so the potentially large entry body is never
+/// deserialized on the per-keystroke search path.
+pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidate> {
+    let entry_id = EntryId::from_str(&row.get::<_, String>("id")?)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+    let content_kind = parse_kind_strict(&row.get::<_, String>("content_kind")?)?;
+    let content: Option<ClipboardContent> = row
+        .get::<_, Option<String>>("candidate_content_json")?
+        .map(|json| {
+            serde_json::from_str(&json)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
+        })
+        .transpose()?;
+    let fallback_text = || {
+        content
+            .as_ref()
+            .and_then(ClipboardContent::plain_text)
+            .unwrap_or_default()
+    };
+    let normalized_text = match row.get::<_, Option<String>>("normalized_text")? {
+        Some(text) => text,
+        None => normalize_text(fallback_text()),
+    };
+    let preview = match row.get::<_, Option<String>>("preview")? {
+        Some(preview) => preview,
+        None => nagori_core::make_preview(fallback_text(), 180),
+    };
+    let (image_width, image_height) = match &content {
+        Some(ClipboardContent::Image(image)) => (image.width, image.height),
+        _ => (None, None),
+    };
+    Ok(SearchCandidate {
+        entry_id,
+        normalized_text,
+        preview,
+        language: row.get("language")?,
+        content_kind,
+        created_at: parse_time(&row.get::<_, String>("created_at")?)?,
+        use_count: row.get("use_count")?,
+        pinned: row.get::<_, i64>("pinned")? != 0,
+        sensitivity: parse_sensitivity_strict(&row.get::<_, String>("sensitivity")?)?,
+        source_app_name: row.get("source_app_name")?,
+        image_width,
+        image_height,
+    })
+}
+
 pub(crate) const fn kind_to_str(kind: ContentKind) -> &'static str {
     match kind {
         ContentKind::Text => "text",
@@ -84,6 +137,29 @@ pub(crate) const fn kind_to_str(kind: ContentKind) -> &'static str {
         ContentKind::FileList => "file_list",
         ContentKind::RichText => "rich_text",
         ContentKind::Unknown => "unknown",
+    }
+}
+
+/// Strict reverse of [`kind_to_str`], mirroring [`parse_sensitivity_strict`]:
+/// a label this build doesn't know means the schema drifted ahead of it or the
+/// column was tampered with, so surface the error instead of coercing the row
+/// into [`ContentKind::Unknown`].
+pub(crate) fn parse_kind_strict(value: &str) -> rusqlite::Result<ContentKind> {
+    match value {
+        "text" => Ok(ContentKind::Text),
+        "url" => Ok(ContentKind::Url),
+        "code" => Ok(ContentKind::Code),
+        "image" => Ok(ContentKind::Image),
+        "file_list" => Ok(ContentKind::FileList),
+        "rich_text" => Ok(ContentKind::RichText),
+        "unknown" => Ok(ContentKind::Unknown),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(AppError::storage(format!(
+                "unknown content_kind label in DB row: {other:?}"
+            ))),
+        )),
     }
 }
 

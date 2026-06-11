@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use nagori_core::{
     ClipboardEntry, EntryId, FtsCandidate, NgramCandidate, NgramQueryMode, RecentOrder, Result,
-    SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
-    SearchResult, SearchService,
+    SearchCandidate, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
+    SearchRepository, SearchResult, SearchService,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_document_ngrams, generate_query_ngrams, has_cjk,
@@ -14,7 +14,20 @@ use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use tokio_util::sync::CancellationToken;
 
 use super::SqliteStore;
-use super::convert::{format_time, fts_query, kind_to_str, row_to_entry, storage_err};
+use super::convert::{
+    format_time, fts_query, kind_to_str, row_to_candidate, row_to_entry, storage_err,
+};
+
+/// Projection column list shared by every candidate query, consumed by
+/// [`row_to_candidate`]. The `CASE` keeps `content_json` out of the result set
+/// for ordinary text rows: it only travels when the row is an image (the
+/// result surfaces pixel dimensions) or its `search_documents` join is missing
+/// (the preview / normalized-text fallback needs the body), so the search hot
+/// path never reads or deserializes multi-hundred-KiB bodies per candidate.
+const CANDIDATE_COLUMNS: &str = "e.id, e.content_kind, e.created_at, e.use_count, e.pinned,
+            e.sensitivity, e.source_app_name, d.preview, d.normalized_text, d.language,
+            CASE WHEN e.content_kind = 'image' OR d.entry_id IS NULL
+                 THEN e.content_json END AS candidate_content_json";
 
 /// Current ngram-generator revision. Bump whenever
 /// [`generate_document_ngrams`]'s output for a given `normalized_text` changes
@@ -221,11 +234,37 @@ impl SearchCandidateProvider for SqliteStore {
         order: RecentOrder,
         limit: usize,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ClipboardEntry>> {
+    ) -> Result<Vec<SearchCandidate>> {
         let filter = build_filter_fragment(filters)?;
         let limit_i64 = clamp_limit(limit);
         self.run_search_blocking(cancel, move |conn| {
-            fetch_recent_entries(conn, &filter, order, limit_i64)
+            // Same shape as `fetch_recent_entries` (which `list_recent` keeps
+            // for full-entry reads) but projected through `CANDIDATE_COLUMNS`
+            // so the per-keystroke empty-query path never carries bodies.
+            let order_sql = recent_order_sql(order);
+            let sql = format!(
+                "SELECT {CANDIDATE_COLUMNS}
+                 FROM entries e
+                 LEFT JOIN search_documents d ON d.entry_id = e.id
+                 WHERE e.deleted_at IS NULL
+                   AND e.sensitivity != 'blocked'
+                   {extra}
+                 {order_sql}
+                 LIMIT ?",
+                extra = filter.sql,
+            );
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
+            let mut bound: Vec<&dyn ToSql> =
+                filter.params.iter().map(|p| &**p as &dyn ToSql).collect();
+            bound.push(&limit_i64);
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
+                .map_err(storage_err)?;
+            let mut candidates = Vec::new();
+            for row in rows {
+                candidates.push(row.map_err(storage_err)?);
+            }
+            Ok(candidates)
         })
         .await
     }
@@ -237,7 +276,7 @@ impl SearchCandidateProvider for SqliteStore {
         limit: usize,
         bounded: bool,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ClipboardEntry>> {
+    ) -> Result<Vec<SearchCandidate>> {
         let filter = build_filter_fragment(filters)?;
         let like = format!("%{}%", escape_like(normalized));
         let limit_i64 = clamp_limit(limit);
@@ -263,7 +302,7 @@ impl SearchCandidateProvider for SqliteStore {
                          ORDER BY pinned DESC, created_at DESC
                          LIMIT ?
                      )
-                     SELECT DISTINCT e.*, d.title, d.preview, d.normalized_text, d.language
+                     SELECT DISTINCT {CANDIDATE_COLUMNS}
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      JOIN recent_live r ON r.id = e.id
@@ -277,7 +316,7 @@ impl SearchCandidateProvider for SqliteStore {
                 )
             } else {
                 format!(
-                    "SELECT e.*, d.title, d.preview, d.normalized_text, d.language
+                    "SELECT {CANDIDATE_COLUMNS}
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      WHERE e.deleted_at IS NULL
@@ -297,14 +336,14 @@ impl SearchCandidateProvider for SqliteStore {
             bound.push(&like);
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
-            let mut entries = Vec::new();
+            let mut candidates = Vec::new();
             for row in stmt
-                .query_map(rusqlite::params_from_iter(bound), row_to_entry)
+                .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
                 .map_err(storage_err)?
             {
-                entries.push(row.map_err(storage_err)?);
+                candidates.push(row.map_err(storage_err)?);
             }
-            Ok(entries)
+            Ok(candidates)
         })
         .await
     }
@@ -328,7 +367,7 @@ impl SearchCandidateProvider for SqliteStore {
             // `search_fts.rowid = search_documents.doc_id` (the explicit
             // INTEGER PRIMARY KEY that aliases the source rowid).
             let sql = format!(
-                "SELECT e.*, d.title, d.preview, d.normalized_text, d.language,
+                "SELECT {CANDIDATE_COLUMNS},
                         bm25(search_fts) AS fts_score
                  FROM search_fts
                  JOIN search_documents d ON d.doc_id = search_fts.rowid
@@ -348,10 +387,10 @@ impl SearchCandidateProvider for SqliteStore {
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(bound), |row| {
                     let score: f64 = row.get("fts_score").unwrap_or(0.0);
-                    let entry = row_to_entry(row)?;
+                    let candidate = row_to_candidate(row)?;
                     #[allow(clippy::cast_possible_truncation)]
                     Ok(FtsCandidate {
-                        entry,
+                        candidate,
                         fts_score: score as f32,
                     })
                 })
@@ -407,7 +446,7 @@ impl SearchCandidateProvider for SqliteStore {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT e.*, d.title, d.preview, d.normalized_text, d.language,
+                "SELECT {CANDIDATE_COLUMNS},
                         COUNT(DISTINCT n.gram) AS hits
                  FROM ngrams n
                  JOIN entries e ON e.id = n.entry_id
@@ -430,17 +469,17 @@ impl SearchCandidateProvider for SqliteStore {
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(bound), |row| {
                     let hits: i64 = row.get("hits").unwrap_or(0);
-                    let entry = row_to_entry(row)?;
-                    Ok((entry, hits))
+                    let candidate = row_to_candidate(row)?;
+                    Ok((candidate, hits))
                 })
                 .map_err(storage_err)?;
             let mut out = Vec::new();
             for row in rows {
-                let (entry, hits) = row.map_err(storage_err)?;
+                let (candidate, hits) = row.map_err(storage_err)?;
                 #[allow(clippy::cast_precision_loss)]
                 let overlap = (hits as f32 / total).clamp(0.0, 1.0);
                 out.push(NgramCandidate {
-                    entry,
+                    candidate,
                     ngram_overlap: overlap,
                 });
             }
@@ -510,19 +549,23 @@ pub(super) fn delete_search_rows(tx: &rusqlite::Transaction<'_>, entry_id: &str)
     Ok(())
 }
 
+const fn recent_order_sql(order: RecentOrder) -> &'static str {
+    match order {
+        RecentOrder::ByRecency => "ORDER BY e.created_at DESC",
+        RecentOrder::ByUseCount => {
+            "ORDER BY e.use_count DESC, COALESCE(e.last_used_at, e.created_at) DESC, e.created_at DESC"
+        }
+        RecentOrder::PinnedFirstThenRecency => "ORDER BY e.pinned DESC, e.created_at DESC",
+    }
+}
+
 pub(super) fn fetch_recent_entries(
     conn: &Connection,
     filter: &FilterFragment,
     order: RecentOrder,
     limit: i64,
 ) -> Result<Vec<ClipboardEntry>> {
-    let order_sql = match order {
-        RecentOrder::ByRecency => "ORDER BY e.created_at DESC",
-        RecentOrder::ByUseCount => {
-            "ORDER BY e.use_count DESC, COALESCE(e.last_used_at, e.created_at) DESC, e.created_at DESC"
-        }
-        RecentOrder::PinnedFirstThenRecency => "ORDER BY e.pinned DESC, e.created_at DESC",
-    };
+    let order_sql = recent_order_sql(order);
     let sql = format!(
         "SELECT e.*, d.title, d.preview, d.normalized_text, d.language
          FROM entries e

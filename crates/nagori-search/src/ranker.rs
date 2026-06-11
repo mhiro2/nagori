@@ -1,6 +1,5 @@
 use nagori_core::{
-    ClipboardContent, ClipboardEntry, ContentKind, EntryId, RankReason, Ranker, RecentOrder,
-    SearchResult,
+    ContentKind, EntryId, RankReason, Ranker, RecentOrder, SearchCandidate, SearchResult,
 };
 use time::OffsetDateTime;
 use tracing::debug;
@@ -20,23 +19,23 @@ impl Ranker for DefaultRanker {
     fn rank(
         &self,
         query: &str,
-        entry: ClipboardEntry,
+        candidate: SearchCandidate,
         fts_score: f32,
         ngram_overlap: f32,
         now: OffsetDateTime,
         recent_order: RecentOrder,
     ) -> Option<SearchResult> {
-        let text = &entry.search.normalized_text;
+        let text = &candidate.normalized_text;
         let query = query.trim();
         if query.is_empty() {
-            return Some(rank_recent(entry, recent_order));
+            return Some(rank_recent(candidate, recent_order));
         }
 
         // Defend against NaN/Inf coming from the storage layer (e.g. an
         // unexpectedly malformed bm25 row) so the final `score > 0.0` cull
         // below does not silently drop otherwise valid candidates.
-        let fts_score = sanitize_signal(fts_score, "fts_score", entry.id);
-        let ngram_overlap = sanitize_signal(ngram_overlap, "ngram_overlap", entry.id);
+        let fts_score = sanitize_signal(fts_score, "fts_score", candidate.entry_id);
+        let ngram_overlap = sanitize_signal(ngram_overlap, "ngram_overlap", candidate.entry_id);
 
         let mut score = 0.0;
         let mut reasons = Vec::new();
@@ -67,7 +66,7 @@ impl Ranker for DefaultRanker {
             reasons.push(RankReason::NgramMatch);
         }
 
-        let age_hours = (now - entry.metadata.created_at).whole_hours();
+        let age_hours = (now - candidate.created_at).whole_hours();
         if age_hours < 24 {
             score += 20.0;
             reasons.push(RankReason::Recent);
@@ -76,22 +75,22 @@ impl Ranker for DefaultRanker {
             reasons.push(RankReason::Recent);
         }
 
-        if entry.metadata.use_count > 0 {
-            score += (entry.metadata.use_count as f32).ln_1p().min(15.0);
+        if candidate.use_count > 0 {
+            score += (candidate.use_count as f32).ln_1p().min(15.0);
             reasons.push(RankReason::FrequentlyUsed);
         }
-        if entry.lifecycle.pinned {
+        if candidate.pinned {
             score += 25.0;
             reasons.push(RankReason::Pinned);
         }
-        if matches!(entry.content_kind(), ContentKind::Code) && query.len() > 1 {
+        if matches!(candidate.content_kind, ContentKind::Code) && query.len() > 1 {
             score += 3.0;
             // Nagori leans developer-oriented: a code snippet copied from an
             // editor / terminal / IDE is a stronger recall target than the
             // same text pasted from a chat window. Keep the bump small and
             // strictly code-scoped so it nudges ties without letting ordinary
             // prose copied in a dev app outrank a real text match.
-            if is_developer_source_app(&entry) {
+            if is_developer_source_app(&candidate) {
                 score += 2.0;
             }
         }
@@ -108,7 +107,7 @@ impl Ranker for DefaultRanker {
             score -= penalty;
         }
 
-        (score > 0.0).then(|| result(entry, score, reasons))
+        (score > 0.0).then(|| result(candidate, score, reasons))
     }
 }
 
@@ -134,55 +133,44 @@ fn sanitize_signal(value: f32, signal: &'static str, entry_id: EntryId) -> f32 {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn rank_recent(entry: ClipboardEntry, recent_order: RecentOrder) -> SearchResult {
+fn rank_recent(candidate: SearchCandidate, recent_order: RecentOrder) -> SearchResult {
     let mut score = 1.0;
     let mut reasons = vec![RankReason::Recent];
     match recent_order {
         RecentOrder::ByRecency => {}
         RecentOrder::ByUseCount => {
-            if entry.metadata.use_count > 0 {
-                score += (entry.metadata.use_count as f32).ln_1p().min(15.0);
+            if candidate.use_count > 0 {
+                score += (candidate.use_count as f32).ln_1p().min(15.0);
                 reasons.push(RankReason::FrequentlyUsed);
             }
         }
         RecentOrder::PinnedFirstThenRecency => {
-            if entry.lifecycle.pinned {
+            if candidate.pinned {
                 score += 25.0;
                 reasons.push(RankReason::Pinned);
             }
         }
     }
-    result(entry, score, reasons)
+    result(candidate, score, reasons)
 }
 
-fn result(entry: ClipboardEntry, score: f32, rank_reason: Vec<RankReason>) -> SearchResult {
-    let content_kind = entry.content_kind();
-    let source_app_name = entry
-        .metadata
-        .source
-        .as_ref()
-        .and_then(|source| source.name.clone());
-    // Surface the canonical code language and image dimensions so the result
-    // row can show the same metadata the preview pane does without a second
-    // round-trip. Both come straight off the stored entry (no decoding here).
-    let language = entry.search.language.clone();
-    let (image_width, image_height) = match &entry.content {
-        ClipboardContent::Image(image) => (image.width, image.height),
-        _ => (None, None),
-    };
+fn result(candidate: SearchCandidate, score: f32, rank_reason: Vec<RankReason>) -> SearchResult {
+    // The candidate projection already carries the canonical code language
+    // and image dimensions, so the result row shows the same metadata the
+    // preview pane does without a second round-trip.
     SearchResult {
-        entry_id: entry.id,
+        entry_id: candidate.entry_id,
         score,
         rank_reason,
-        preview: entry.search.preview,
-        content_kind,
-        created_at: entry.metadata.created_at,
-        pinned: entry.lifecycle.pinned,
-        sensitivity: entry.sensitivity,
-        source_app_name,
-        language,
-        image_width,
-        image_height,
+        preview: candidate.preview,
+        content_kind: candidate.content_kind,
+        created_at: candidate.created_at,
+        pinned: candidate.pinned,
+        sensitivity: candidate.sensitivity,
+        source_app_name: candidate.source_app_name,
+        language: candidate.language,
+        image_width: candidate.image_width,
+        image_height: candidate.image_height,
     }
 }
 
@@ -192,7 +180,7 @@ fn result(entry: ClipboardEntry, score: f32, rank_reason: Vec<RankReason>) -> Se
 /// common macOS / Windows / Linux apps. Substring (not exact) so variants
 /// like "Visual Studio Code - Insiders" or "iTerm2" still match; the set is
 /// deliberately narrow to avoid sweeping in general-purpose apps.
-fn is_developer_source_app(entry: &ClipboardEntry) -> bool {
+fn is_developer_source_app(candidate: &SearchCandidate) -> bool {
     const DEV_APP_MARKERS: &[&str] = &[
         "code",     // VS Code / VSCodium / "Visual Studio Code"
         "terminal", // macOS Terminal, GNOME Terminal
@@ -220,10 +208,7 @@ fn is_developer_source_app(entry: &ClipboardEntry) -> bool {
         "powershell",
         "konsole",
     ];
-    let Some(source) = entry.metadata.source.as_ref() else {
-        return false;
-    };
-    let Some(name) = source.name.as_deref() else {
+    let Some(name) = candidate.source_app_name.as_deref() else {
         return false;
     };
     let lower = name.to_ascii_lowercase();
@@ -232,27 +217,34 @@ fn is_developer_source_app(entry: &ClipboardEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use nagori_core::{EntryFactory, EntryLifecycle};
+    use nagori_core::EntryFactory;
     use time::Duration;
 
     use super::*;
     use crate::normalize_text;
 
-    fn entry(text: &str) -> ClipboardEntry {
+    fn entry(text: &str) -> SearchCandidate {
         let mut entry = EntryFactory::from_text(text);
         entry.search.normalized_text = normalize_text(text);
-        entry
+        SearchCandidate::from_entry(&entry)
     }
 
     fn rank(
         query: &str,
-        entry: ClipboardEntry,
+        candidate: SearchCandidate,
         fts_score: f32,
         ngram_overlap: f32,
         now: OffsetDateTime,
         recent_order: RecentOrder,
     ) -> Option<SearchResult> {
-        DefaultRanker.rank(query, entry, fts_score, ngram_overlap, now, recent_order)
+        DefaultRanker.rank(
+            query,
+            candidate,
+            fts_score,
+            ngram_overlap,
+            now,
+            recent_order,
+        )
     }
 
     fn now() -> OffsetDateTime {
@@ -296,11 +288,8 @@ mod tests {
     #[test]
     fn pinned_and_frequent_entries_gain_reasons() {
         let mut entry = entry("clipboard manager");
-        entry.lifecycle = EntryLifecycle {
-            pinned: true,
-            ..Default::default()
-        };
-        entry.metadata.use_count = 9;
+        entry.pinned = true;
+        entry.use_count = 9;
 
         let result = rank("manager", entry, 0.0, 0.0, now(), RecentOrder::ByRecency)
             .expect("substring match");
@@ -331,7 +320,7 @@ mod tests {
     fn old_non_matching_candidate_is_dropped() {
         let now = OffsetDateTime::now_utc();
         let mut entry = entry("alpha beta");
-        entry.metadata.created_at = now - Duration::days(8);
+        entry.created_at = now - Duration::days(8);
 
         assert!(rank("missing", entry, 0.0, 0.0, now, RecentOrder::ByRecency).is_none());
     }
@@ -358,23 +347,12 @@ mod tests {
         // A code snippet copied from an editor is a stronger recall target
         // than the identical snippet pasted from a chat app, but the bump is
         // small and strictly code-scoped so it only nudges ties.
-        use nagori_core::SourceApp;
-        let dev_source = SourceApp {
-            bundle_id: Some("com.microsoft.VSCode".to_owned()),
-            name: Some("Visual Studio Code".to_owned()),
-            executable_path: None,
-        };
-        let chat_source = SourceApp {
-            bundle_id: Some("com.tinyspeck.slackmacgap".to_owned()),
-            name: Some("Slack".to_owned()),
-            executable_path: None,
-        };
         let body = "fn main() {\n    handler();\n}";
         let mut from_editor = entry(body);
-        from_editor.metadata.source = Some(dev_source);
+        from_editor.source_app_name = Some("Visual Studio Code".to_owned());
         let mut from_chat = entry(body);
-        from_chat.metadata.source = Some(chat_source);
-        assert_eq!(from_editor.content_kind(), ContentKind::Code);
+        from_chat.source_app_name = Some("Slack".to_owned());
+        assert_eq!(from_editor.content_kind, ContentKind::Code);
 
         let editor = rank(
             "handler",
@@ -407,17 +385,11 @@ mod tests {
         // The dev-source bump is gated on `ContentKind::Code`; a plain text
         // clip from a terminal must not get it, so ordinary prose copied in a
         // dev app never outranks a real text match elsewhere.
-        use nagori_core::SourceApp;
-        let term_source = SourceApp {
-            bundle_id: Some("com.googlecode.iterm2".to_owned()),
-            name: Some("iTerm2".to_owned()),
-            executable_path: None,
-        };
         let body = "just a plain sentence about handler stuff";
         let mut from_term = entry(body);
-        from_term.metadata.source = Some(term_source);
+        from_term.source_app_name = Some("iTerm2".to_owned());
         let plain = entry(body);
-        assert_eq!(from_term.content_kind(), ContentKind::Text);
+        assert_eq!(from_term.content_kind, ContentKind::Text);
 
         let term = rank(
             "handler",

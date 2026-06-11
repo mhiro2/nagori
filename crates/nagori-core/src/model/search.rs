@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::content::{ClipboardContent, ContentKind};
-use super::{EntryId, Sensitivity};
+use super::{ClipboardEntry, EntryId, Sensitivity};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchDocument {
@@ -118,6 +118,66 @@ pub enum SearchMode {
     Fuzzy,
     FullText,
     Semantic,
+}
+
+/// Search-time projection of a stored entry: exactly the fields the ranker
+/// scores on plus what a [`SearchResult`] carries — nothing else.
+///
+/// Candidate fetches used to return full [`ClipboardEntry`] values, which
+/// meant deserialising and carrying up to 512 KiB of body per candidate
+/// (`limit × 8` per branch, three branches) on every keystroke even though
+/// ranking never reads the content. Providers project rows into this type
+/// instead so the per-candidate payload stays proportional to what ranking
+/// actually consumes (`normalized_text` is needed for the substring / exact
+/// checks and is the one potentially large field).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCandidate {
+    pub entry_id: EntryId,
+    /// Same value as [`SearchDocument::normalized_text`].
+    pub normalized_text: String,
+    pub preview: String,
+    /// Canonical language id for `Code` rows; see [`SearchResult::language`].
+    pub language: Option<String>,
+    pub content_kind: ContentKind,
+    pub created_at: OffsetDateTime,
+    pub use_count: u32,
+    pub pinned: bool,
+    pub sensitivity: Sensitivity,
+    pub source_app_name: Option<String>,
+    /// Pixel dimensions for `Image` rows; see [`SearchResult::image_width`].
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+}
+
+impl SearchCandidate {
+    /// Project a full entry down to its rankable fields. Storage backends
+    /// project at the SQL layer instead; this is for in-memory providers and
+    /// tests that start from a [`ClipboardEntry`].
+    #[must_use]
+    pub fn from_entry(entry: &ClipboardEntry) -> Self {
+        let (image_width, image_height) = match &entry.content {
+            ClipboardContent::Image(image) => (image.width, image.height),
+            _ => (None, None),
+        };
+        Self {
+            entry_id: entry.id,
+            normalized_text: entry.search.normalized_text.clone(),
+            preview: entry.search.preview.clone(),
+            language: entry.search.language.clone(),
+            content_kind: entry.content_kind(),
+            created_at: entry.metadata.created_at,
+            use_count: entry.metadata.use_count,
+            pinned: entry.lifecycle.pinned,
+            sensitivity: entry.sensitivity,
+            source_app_name: entry
+                .metadata
+                .source
+                .as_ref()
+                .and_then(|source| source.name.clone()),
+            image_width,
+            image_height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ClipboardEntry, EntryId, RecentOrder, Result, SearchFilters, SearchMode, SearchQuery,
+    EntryId, RecentOrder, Result, SearchCandidate, SearchFilters, SearchMode, SearchQuery,
     SearchResult,
     text::{has_cjk, normalize_text},
 };
@@ -25,7 +25,7 @@ const CANDIDATE_OVERSAMPLE: usize = 8;
 /// The [`Ranker`] inverts it; the provider must not.
 #[derive(Debug, Clone)]
 pub struct FtsCandidate {
-    pub entry: ClipboardEntry,
+    pub candidate: SearchCandidate,
     pub fts_score: f32,
 }
 
@@ -37,7 +37,7 @@ pub struct FtsCandidate {
 /// "is this worth running at all" net and may return an empty vector.
 #[derive(Debug, Clone)]
 pub struct NgramCandidate {
-    pub entry: ClipboardEntry,
+    pub candidate: SearchCandidate,
     pub ngram_overlap: f32,
 }
 
@@ -65,7 +65,9 @@ pub enum NgramQueryMode {
 ///
 /// Each method returns raw candidates with whatever per-method signal the
 /// ranker needs; the [`SearchService`] is responsible for plan dispatch,
-/// dedup, ranking, sorting, and truncation.
+/// dedup, ranking, sorting, and truncation. Hits travel as the
+/// [`SearchCandidate`] projection, not full entries, so a provider never has
+/// to deserialise entry bodies just to let the ranker drop the row.
 #[async_trait]
 pub trait SearchCandidateProvider: Send + Sync {
     /// Most recent active entries, optionally with pinned rows hoisted to the
@@ -81,7 +83,7 @@ pub trait SearchCandidateProvider: Send + Sync {
         order: RecentOrder,
         limit: usize,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ClipboardEntry>>;
+    ) -> Result<Vec<SearchCandidate>>;
 
     /// Substring (LIKE) matches against `normalized_text`.
     ///
@@ -99,7 +101,7 @@ pub trait SearchCandidateProvider: Send + Sync {
         limit: usize,
         bounded: bool,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ClipboardEntry>>;
+    ) -> Result<Vec<SearchCandidate>>;
 
     /// Full-text matches with raw `bm25` scores attached. See
     /// [`Self::recent_entries`] for `cancel`.
@@ -132,7 +134,7 @@ pub trait Ranker: Send + Sync {
     fn rank(
         &self,
         query: &str,
-        entry: ClipboardEntry,
+        candidate: SearchCandidate,
         fts_score: f32,
         ngram_overlap: f32,
         now: OffsetDateTime,
@@ -222,18 +224,18 @@ where
         let cancel = CancellationToken::new();
         let _cancel_guard = cancel.clone().drop_guard();
 
-        let mut entries: Vec<ClipboardEntry> = Vec::new();
+        let mut candidates: Vec<SearchCandidate> = Vec::new();
         let mut seen: HashSet<EntryId> = HashSet::new();
         let mut fts_scores: HashMap<EntryId, f32> = HashMap::new();
         let mut ngram_overlap: HashMap<EntryId, f32> = HashMap::new();
 
         if matches!(plan, SearchPlan::Recent) {
-            for entry in self
+            for candidate in self
                 .provider
                 .recent_entries(filters, query.recent_order, candidate_limit, &cancel)
                 .await?
             {
-                push_unique(&mut entries, &mut seen, entry);
+                push_unique(&mut candidates, &mut seen, candidate);
             }
         }
 
@@ -241,21 +243,21 @@ where
             .fetch_candidates(plan, &normalized, filters, candidate_limit, &cancel)
             .await?;
 
-        for entry in substring_hits {
-            push_unique(&mut entries, &mut seen, entry);
+        for candidate in substring_hits {
+            push_unique(&mut candidates, &mut seen, candidate);
         }
         for hit in fts_hits {
-            fts_scores.insert(hit.entry.id, hit.fts_score);
-            push_unique(&mut entries, &mut seen, hit.entry);
+            fts_scores.insert(hit.candidate.entry_id, hit.fts_score);
+            push_unique(&mut candidates, &mut seen, hit.candidate);
         }
         for hit in ngram_hits {
-            ngram_overlap.insert(hit.entry.id, hit.ngram_overlap);
-            push_unique(&mut entries, &mut seen, hit.entry);
+            ngram_overlap.insert(hit.candidate.entry_id, hit.ngram_overlap);
+            push_unique(&mut candidates, &mut seen, hit.candidate);
         }
 
         let mut results = self.rank_all(
             &normalized,
-            entries,
+            candidates,
             &fts_scores,
             &ngram_overlap,
             query.recent_order,
@@ -289,7 +291,7 @@ where
         filters: &SearchFilters,
         candidate_limit: usize,
         cancel: &CancellationToken,
-    ) -> Result<(Vec<ClipboardEntry>, Vec<FtsCandidate>, Vec<NgramCandidate>)> {
+    ) -> Result<(Vec<SearchCandidate>, Vec<FtsCandidate>, Vec<NgramCandidate>)> {
         let want_substring = matches!(
             plan,
             SearchPlan::Exact | SearchPlan::Fuzzy | SearchPlan::Hybrid
@@ -365,18 +367,18 @@ where
     fn rank_all(
         &self,
         normalized: &str,
-        entries: Vec<ClipboardEntry>,
+        candidates: Vec<SearchCandidate>,
         fts_scores: &HashMap<EntryId, f32>,
         ngram_overlap: &HashMap<EntryId, f32>,
         recent_order: RecentOrder,
     ) -> Vec<SearchResult> {
         let now = OffsetDateTime::now_utc();
-        let mut results = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let id = entry.id;
+        let mut results = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let id = candidate.entry_id;
             if let Some(result) = self.ranker.rank(
                 normalized,
-                entry,
+                candidate,
                 fts_scores.get(&id).copied().unwrap_or(0.0),
                 ngram_overlap.get(&id).copied().unwrap_or(0.0),
                 now,
@@ -390,12 +392,12 @@ where
 }
 
 fn push_unique(
-    entries: &mut Vec<ClipboardEntry>,
+    candidates: &mut Vec<SearchCandidate>,
     seen: &mut HashSet<EntryId>,
-    entry: ClipboardEntry,
+    candidate: SearchCandidate,
 ) {
-    if seen.insert(entry.id) {
-        entries.push(entry);
+    if seen.insert(candidate.entry_id) {
+        candidates.push(candidate);
     }
 }
 
@@ -409,8 +411,8 @@ mod tests {
 
     #[derive(Default)]
     struct StubProvider {
-        recent: Vec<ClipboardEntry>,
-        substring: Vec<ClipboardEntry>,
+        recent: Vec<SearchCandidate>,
+        substring: Vec<SearchCandidate>,
         fts: Vec<FtsCandidate>,
         ngram: Vec<NgramCandidate>,
         seen: Mutex<Vec<&'static str>>,
@@ -425,7 +427,7 @@ mod tests {
             _order: RecentOrder,
             _limit: usize,
             _cancel: &CancellationToken,
-        ) -> Result<Vec<ClipboardEntry>> {
+        ) -> Result<Vec<SearchCandidate>> {
             self.seen.lock().unwrap().push("recent");
             Ok(self.recent.clone())
         }
@@ -437,7 +439,7 @@ mod tests {
             _limit: usize,
             _bounded: bool,
             _cancel: &CancellationToken,
-        ) -> Result<Vec<ClipboardEntry>> {
+        ) -> Result<Vec<SearchCandidate>> {
             self.seen.lock().unwrap().push("substring");
             Ok(self.substring.clone())
         }
@@ -476,38 +478,32 @@ mod tests {
         fn rank(
             &self,
             _query: &str,
-            entry: ClipboardEntry,
+            candidate: SearchCandidate,
             fts_score: f32,
             ngram_overlap: f32,
             _now: OffsetDateTime,
             _recent_order: RecentOrder,
         ) -> Option<SearchResult> {
             let score = fts_score.abs() + ngram_overlap + 1.0;
-            let content_kind = entry.content_kind();
-            let source_app_name = entry
-                .metadata
-                .source
-                .as_ref()
-                .and_then(|source| source.name.clone());
             Some(SearchResult {
-                entry_id: entry.id,
+                entry_id: candidate.entry_id,
                 score,
                 rank_reason: vec![RankReason::Recent],
-                content_kind,
-                created_at: entry.metadata.created_at,
-                pinned: entry.lifecycle.pinned,
-                sensitivity: entry.sensitivity,
-                source_app_name,
-                language: entry.search.language,
-                preview: entry.search.preview,
+                content_kind: candidate.content_kind,
+                created_at: candidate.created_at,
+                pinned: candidate.pinned,
+                sensitivity: candidate.sensitivity,
+                source_app_name: candidate.source_app_name,
+                language: candidate.language,
+                preview: candidate.preview,
                 image_width: None,
                 image_height: None,
             })
         }
     }
 
-    fn entry(text: &str) -> ClipboardEntry {
-        EntryFactory::from_text(text)
+    fn entry(text: &str) -> SearchCandidate {
+        SearchCandidate::from_entry(&EntryFactory::from_text(text))
     }
 
     #[tokio::test]
@@ -534,11 +530,11 @@ mod tests {
         let provider = StubProvider {
             substring: vec![a.clone()],
             fts: vec![FtsCandidate {
-                entry: b.clone(),
+                candidate: b.clone(),
                 fts_score: -1.5,
             }],
             ngram: vec![NgramCandidate {
-                entry: c.clone(),
+                candidate: c.clone(),
                 ngram_overlap: 0.75,
             }],
             ..Default::default()
@@ -567,11 +563,11 @@ mod tests {
         let provider = StubProvider {
             substring: vec![entry("alpha")],
             fts: vec![FtsCandidate {
-                entry: entry("beta"),
+                candidate: entry("beta"),
                 fts_score: -1.5,
             }],
             ngram: vec![NgramCandidate {
-                entry: entry("gamma"),
+                candidate: entry("gamma"),
                 ngram_overlap: 0.75,
             }],
             ..Default::default()
@@ -594,7 +590,7 @@ mod tests {
         let provider = StubProvider {
             substring: vec![entry("alpha")],
             ngram: vec![NgramCandidate {
-                entry: entry("gamma"),
+                candidate: entry("gamma"),
                 ngram_overlap: 0.75,
             }],
             ..Default::default()
@@ -621,11 +617,11 @@ mod tests {
         let provider = StubProvider {
             substring: vec![shared.clone()],
             fts: vec![FtsCandidate {
-                entry: shared.clone(),
+                candidate: shared.clone(),
                 fts_score: -2.0,
             }],
             ngram: vec![NgramCandidate {
-                entry: shared.clone(),
+                candidate: shared.clone(),
                 ngram_overlap: 0.5,
             }],
             ..Default::default()
@@ -649,7 +645,7 @@ mod tests {
         let mut hits = Vec::new();
         for fts in [-5.0_f32, -1.0, -3.0, -2.0] {
             hits.push(FtsCandidate {
-                entry: entry(&format!("fts{fts}")),
+                candidate: entry(&format!("fts{fts}")),
                 fts_score: fts,
             });
         }
@@ -710,11 +706,11 @@ mod tests {
             recent: vec![entry("alpha")],
             substring: vec![entry("beta")],
             fts: vec![FtsCandidate {
-                entry: entry("gamma"),
+                candidate: entry("gamma"),
                 fts_score: -1.0,
             }],
             ngram: vec![NgramCandidate {
-                entry: entry("delta"),
+                candidate: entry("delta"),
                 ngram_overlap: 0.5,
             }],
             ..Default::default()

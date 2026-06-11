@@ -1028,7 +1028,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            ascii_full.iter().any(|c| c.entry.id == ascii),
+            ascii_full.iter().any(|c| c.candidate.entry_id == ascii),
             "Full keeps ASCII grams so the ASCII entry still matches",
         );
 
@@ -1045,7 +1045,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            mixed_cjk_only.iter().any(|c| c.entry.id == mixed),
+            mixed_cjk_only.iter().any(|c| c.candidate.entry_id == mixed),
             "CjkOnly must keep CJK-bearing grams for mixed queries",
         );
     }
