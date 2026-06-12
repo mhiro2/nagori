@@ -60,6 +60,17 @@ const ERROR_PIPE_BUSY: i32 = 231;
 #[cfg(windows)]
 const PIPE_BUSY_RETRY: Duration = Duration::from_millis(50);
 
+/// `SECURITY_IDENTIFICATION` impersonation level (`winbase.h`, `0x0001_0000`).
+///
+/// Without an explicit `QoS` level, a process that squatted `\\.\pipe\nagori`
+/// before the daemon bound it could attempt to impersonate the connecting
+/// client at the default (`Impersonation`) level. Identification lets the
+/// server learn who connected but never act under the client's token.
+/// tokio's `security_qos_flags` ORs in `SECURITY_SQOS_PRESENT` itself, so
+/// only the level is specified here.
+#[cfg(windows)]
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+
 #[derive(Debug, Clone)]
 pub struct IpcClient {
     path: String,
@@ -210,7 +221,10 @@ async fn open_pipe_client(
     use tokio::net::windows::named_pipe::ClientOptions;
 
     loop {
-        match ClientOptions::new().open(path) {
+        match ClientOptions::new()
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(path)
+        {
             Ok(client) => return Ok(client),
             Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 tokio::time::sleep(PIPE_BUSY_RETRY).await;
