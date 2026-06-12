@@ -1,12 +1,16 @@
 //! Clipboard-entry CRUD: capture, copy/paste, listing, deletion, pinning.
 
+use std::time::Instant;
+
 use nagori_core::{
     AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
     PasteFormat, PasteOption, Result, SecretAction, Sensitivity, SensitivityClassifier,
     SettingsRepository, build_paste_options, select_representation,
 };
 
-use super::NagoriRuntime;
+use crate::ipc_handler::result_code;
+
+use super::{NagoriRuntime, elapsed_ms};
 
 impl NagoriRuntime {
     pub async fn add_text(&self, text: String) -> Result<EntryId> {
@@ -170,6 +174,22 @@ impl NagoriRuntime {
     }
 
     pub async fn paste_entry(&self, id: EntryId, format: Option<PasteFormat>) -> Result<()> {
+        // Wrap the body so every exit emits a completion event: the paste
+        // path otherwise only surfaces scattered failure warns, leaving
+        // ARCHITECTURE §17's grep recipes with no success signal.
+        // `result_code` collapses to a static label, so the event never
+        // carries clipboard content.
+        let started = Instant::now();
+        let result = self.paste_entry_inner(id, format).await;
+        tracing::debug!(
+            result_code = result_code(&result),
+            elapsed_ms = elapsed_ms(started),
+            "paste_entry"
+        );
+        result
+    }
+
+    async fn paste_entry_inner(&self, id: EntryId, format: Option<PasteFormat>) -> Result<()> {
         // The clipboard write always runs so the user can hit ⌘V manually,
         // but we only synthesise the keystroke while `auto_paste_enabled`
         // is on. The palette command has a separate fallback path that
@@ -184,7 +204,19 @@ impl NagoriRuntime {
     }
 
     pub async fn paste_frontmost(&self) -> Result<()> {
-        ensure_pasted(self.paste.paste_frontmost().await?)
+        // Same completion-event wrap as `paste_entry`: the desktop palette
+        // drives synthesis through this entry point after its own copy step.
+        let started = Instant::now();
+        let result = match self.paste.paste_frontmost().await {
+            Ok(outcome) => ensure_pasted(outcome),
+            Err(err) => Err(err),
+        };
+        tracing::debug!(
+            result_code = result_code(&result),
+            elapsed_ms = elapsed_ms(started),
+            "paste_frontmost"
+        );
+        result
     }
 
     pub async fn list_recent(&self, limit: usize) -> Result<Vec<ClipboardEntry>> {

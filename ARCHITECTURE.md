@@ -2121,23 +2121,33 @@ change.
 
 ## 17. Observability
 
-Tracing is the single source of truth. Events:
+Tracing is the single source of truth. The stable event vocabulary on
+the hot paths (one event per outcome, carrying enum/static fields plus
+`elapsed_ms` — never the typed or captured text):
 
 ```
-capture_started · capture_skipped · entry_inserted · entry_blocked
-search_started · search_completed
-paste_started · paste_completed
-ai_action_started · ai_action_completed
-permission_missing
+capture:  entry_inserted · capture_skipped · entry_blocked ·
+          secret_blocked · capture_failed
+search:   runtime_search          (mode · cache_hit · row_count)
+paste:    paste_entry · paste_frontmost      (result_code)
+actions:  quick_action · ai_action_started   (action slug · provider)
+desktop:  command_error           (command · error code)
 ```
+
+Failure diagnostics around these (worker drains, IPC accept errors,
+permission probes, …) use ad-hoc `*_failed` event names; the list above
+is the contract grep recipes can rely on.
 
 **Never log full clipboard content by default.** Previews are
 truncated; `Sensitivity::Secret | Blocked` payloads are referenced by
 `entry_id` only. Tracing events are English-only; operator-facing logs
 are intentionally not localized to keep grep recipes portable.
 
-`audit_events` rows carry the same machine-readable `event_kind` as the
-tracing event so the desktop UI and operators see the same vocabulary.
+`audit_events` rows reuse the same machine-readable `event_kind`
+tokens where the two overlap (`capture_skipped` / `entry_blocked` /
+`secret_blocked`; retention sweeps add `retention_count` /
+`retention_age` / `retention_size`), so the desktop UI and operators
+see one vocabulary.
 
 ---
 
