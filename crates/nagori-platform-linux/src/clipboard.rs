@@ -5,6 +5,8 @@ use nagori_core::{
 };
 #[cfg(target_os = "linux")]
 use nagori_core::{ClipboardData, ClipboardRepresentation, RepresentationDataRef};
+#[cfg(target_os = "linux")]
+use nagori_platform::SNAPSHOT_CAPTURE_MAX_RETRIES;
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, has_publishable_representation,
 };
@@ -622,101 +624,191 @@ async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipe
     pipe_read_multi_pass_internal(None, sequence_ceiling, read_ceiling).await
 }
 
+/// Outcome of one multi-MIME read attempt: the assembled pass plus whether
+/// the offered MIME set drifted while the attempt was reading it.
+#[cfg(target_os = "linux")]
+struct MultiPassAttempt {
+    pass: MultiPipePass,
+    torn: bool,
+}
+
+/// Total wall-clock budget shared by every torn-snapshot retry of one
+/// multi-MIME pass. A single attempt is already bounded per MIME by
+/// `PIPE_READ_TIMEOUT`, but without a shared budget an owner who streams
+/// each MIME just under its deadline *and* keeps flipping the offer set
+/// could stack `SNAPSHOT_CAPTURE_MAX_RETRIES` worst-case attempts —
+/// tens of seconds on one blocking worker. Once the budget is spent the
+/// current (possibly torn) result is accepted, matching the final-attempt
+/// semantics of the other adapters.
+#[cfg(target_os = "linux")]
+const TORN_RETRY_BUDGET: Duration = Duration::from_secs(3);
+
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass_internal(
     buffer_cap: Option<usize>,
     sequence_ceiling: usize,
     read_ceiling: usize,
 ) -> Result<MultiPipePass> {
+    // Torn detection is only worth paying for when the pass *buffers*
+    // representations destined for the history (`buffer_cap.is_some()`):
+    // a stitched snapshot persists wrong data. The no-buffer fingerprint
+    // path (`current_sequence*`, every poll tick) only feeds change
+    // detection — a transiently stitched hash at worst triggers one
+    // spurious snapshot read, which then runs its own torn check — so it
+    // skips both the re-enumeration roundtrip and the retries.
+    let detect_torn = buffer_cap.is_some();
     tokio::task::spawn_blocking(move || -> Result<MultiPipePass> {
-        let available = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
-            Ok(set) => set,
-            // Empty selection / no seats → treat as empty so the
-            // capture loop's body-empty short-circuit kicks in without
-            // logging an error every poll.
-            Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => {
-                return Ok(MultiPipePass {
-                    representations: buffer_cap.map(|_| Vec::new()),
-                    observed_total: 0,
-                    sequence: hex::encode(Sha256::new().finalize()),
-                });
-            }
-            Err(err) => {
-                return Err(AppError::Platform(format!(
-                    "wl-clipboard mime enumeration failed: {err}"
-                )));
-            }
-        };
-
-        let mut state = MultiReadState::new(buffer_cap, sequence_ceiling, read_ceiling);
-        let mut representations: Vec<ClipboardRepresentation> = Vec::new();
-
-        if let Some(image_mime) = pick_image_mime(&available)
-            && !state.aborted()
-            && let Some(body) = read_specific_mime(&image_mime, &mut state)?
-        {
-            representations.push(ClipboardRepresentation {
-                mime_type: image_mime,
-                data: ClipboardData::Bytes(body),
-            });
-        }
-
-        if available.contains("text/uri-list")
-            && !state.aborted()
-            && let Some(body) = read_specific_mime("text/uri-list", &mut state)?
-            && let Some(paths) = parse_uri_list(&body)
-        {
-            representations.push(ClipboardRepresentation {
-                mime_type: "text/uri-list".to_owned(),
-                data: ClipboardData::FilePaths(paths),
-            });
-        }
-
-        if available
-            .iter()
-            .any(|m| TEXT_MIME_HINTS.contains(&m.as_str()))
-            && !state.aborted()
-            && let Some(body) = read_text(&mut state)?
-        {
-            // A `text/*` MIME promised UTF-8 but a publisher can still hand
-            // us malformed bytes (truncated transfers, a broken X11 bridge,
-            // a mislabelled latin-1 source). Recover lossily rather than
-            // dropping the whole text representation to an empty string —
-            // the image and uri-list drop paths warn instead of staying
-            // silent, so keep this branch symmetric.
-            let text = match String::from_utf8(body) {
-                Ok(text) => text,
-                Err(err) => {
-                    let valid_up_to = err.utf8_error().valid_up_to();
-                    let bytes = err.into_bytes();
-                    tracing::warn!(
-                        valid_up_to,
-                        byte_len = bytes.len(),
-                        "clipboard_text_invalid_utf8_lossy"
-                    );
-                    String::from_utf8_lossy(&bytes).into_owned()
+        // Wayland exposes no changeCount / sequence-number equivalent, so
+        // the image → uri-list → text reads in `multi_pass_attempt` cannot
+        // be anchored to an owner generation the way the macOS / Windows
+        // adapters anchor theirs. The closest available signal is the
+        // offered MIME set: re-enumerate it after the reads and treat a
+        // drift as a torn snapshot — an owner change mid-read can stitch
+        // representations from two distinct clips into one history entry.
+        // The detection is deliberately weak (a new owner offering the
+        // *same* MIME set is indistinguishable), but it catches the common
+        // cross-kind races: an image clip replaced by a text clip, a file
+        // copy replaced by a screenshot. Retries are bounded both by count
+        // and by [`TORN_RETRY_BUDGET`], with the final attempt accepted,
+        // mirroring the other adapters' torn-snapshot semantics.
+        let started = Instant::now();
+        for attempt in 1..=SNAPSHOT_CAPTURE_MAX_RETRIES {
+            let outcome =
+                multi_pass_attempt(buffer_cap, sequence_ceiling, read_ceiling, detect_torn)?;
+            let out_of_retries =
+                attempt == SNAPSHOT_CAPTURE_MAX_RETRIES || started.elapsed() >= TORN_RETRY_BUDGET;
+            if !outcome.torn || out_of_retries {
+                if outcome.torn {
+                    tracing::warn!("clipboard_multi_read_torn_accepted");
                 }
-            };
-            if !text.is_empty() {
-                representations.push(ClipboardRepresentation {
-                    mime_type: "text/plain".to_owned(),
-                    data: ClipboardData::Text(text),
-                });
+                return Ok(outcome.pass);
             }
+            // Owner changed mid-read — discard the stitched result and retry.
         }
-
-        let observed_total = state.observed_total;
-        let dropped = state.buffer_overflow || state.ceiling_hit;
-        let sequence = state.finalize_sequence();
-
-        Ok(MultiPipePass {
-            representations: if dropped { None } else { Some(representations) },
-            observed_total,
-            sequence,
-        })
+        unreachable!("the final retry returns its result unconditionally")
     })
     .await
     .map_err(|err| AppError::Platform(err.to_string()))?
+}
+
+/// One enumerate → read → re-enumerate pass over the Wayland clipboard.
+/// `detect_torn` gates the trailing offer re-enumeration; when `false` the
+/// pass reports `torn: false` without the extra Wayland roundtrip.
+#[cfg(target_os = "linux")]
+fn multi_pass_attempt(
+    buffer_cap: Option<usize>,
+    sequence_ceiling: usize,
+    read_ceiling: usize,
+    detect_torn: bool,
+) -> Result<MultiPassAttempt> {
+    let available = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(set) => set,
+        // Empty selection / no seats → treat as empty so the
+        // capture loop's body-empty short-circuit kicks in without
+        // logging an error every poll.
+        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => {
+            return Ok(MultiPassAttempt {
+                pass: MultiPipePass {
+                    representations: buffer_cap.map(|_| Vec::new()),
+                    observed_total: 0,
+                    sequence: hex::encode(Sha256::new().finalize()),
+                },
+                torn: false,
+            });
+        }
+        Err(err) => {
+            return Err(AppError::Platform(format!(
+                "wl-clipboard mime enumeration failed: {err}"
+            )));
+        }
+    };
+
+    let mut state = MultiReadState::new(buffer_cap, sequence_ceiling, read_ceiling);
+    let mut representations: Vec<ClipboardRepresentation> = Vec::new();
+
+    if let Some(image_mime) = pick_image_mime(&available)
+        && !state.aborted()
+        && let Some(body) = read_specific_mime(&image_mime, &mut state)?
+    {
+        representations.push(ClipboardRepresentation {
+            mime_type: image_mime,
+            data: ClipboardData::Bytes(body),
+        });
+    }
+
+    if available.contains("text/uri-list")
+        && !state.aborted()
+        && let Some(body) = read_specific_mime("text/uri-list", &mut state)?
+        && let Some(paths) = parse_uri_list(&body)
+    {
+        representations.push(ClipboardRepresentation {
+            mime_type: "text/uri-list".to_owned(),
+            data: ClipboardData::FilePaths(paths),
+        });
+    }
+
+    if available
+        .iter()
+        .any(|m| TEXT_MIME_HINTS.contains(&m.as_str()))
+        && !state.aborted()
+        && let Some(body) = read_text(&mut state)?
+    {
+        // A `text/*` MIME promised UTF-8 but a publisher can still hand
+        // us malformed bytes (truncated transfers, a broken X11 bridge,
+        // a mislabelled latin-1 source). Recover lossily rather than
+        // dropping the whole text representation to an empty string —
+        // the image and uri-list drop paths warn instead of staying
+        // silent, so keep this branch symmetric.
+        let text = match String::from_utf8(body) {
+            Ok(text) => text,
+            Err(err) => {
+                let valid_up_to = err.utf8_error().valid_up_to();
+                let bytes = err.into_bytes();
+                tracing::warn!(
+                    valid_up_to,
+                    byte_len = bytes.len(),
+                    "clipboard_text_invalid_utf8_lossy"
+                );
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
+        if !text.is_empty() {
+            representations.push(ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text(text),
+            });
+        }
+    }
+
+    let observed_total = state.observed_total;
+    let dropped = state.buffer_overflow || state.ceiling_hit;
+    let sequence = state.finalize_sequence();
+
+    Ok(MultiPassAttempt {
+        pass: MultiPipePass {
+            representations: if dropped { None } else { Some(representations) },
+            observed_total,
+            sequence,
+        },
+        torn: detect_torn && offers_drifted(&available),
+    })
+}
+
+/// Re-enumerate the current offer set and compare it with the one the
+/// attempt started from. `ClipboardEmpty` / `NoSeats` after a non-empty
+/// initial set count as drift — the owner went away mid-read. An enumeration
+/// *error* is inconclusive and treated as settled rather than failing the
+/// snapshot or churning retries against a flaky compositor.
+#[cfg(target_os = "linux")]
+fn offers_drifted(initial: &HashSet<String>) -> bool {
+    match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(now) => now != *initial,
+        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => true,
+        Err(err) => {
+            tracing::debug!(error = %err, "clipboard_offer_recheck_inconclusive");
+            false
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
