@@ -1327,6 +1327,9 @@ where
             }
             shutdown.cancel();
         }
+        () = terminate_request() => {
+            shutdown.cancel();
+        }
     }
 
     info!("daemon_shutting_down");
@@ -1346,6 +1349,85 @@ where
     // here — that would race a freshly-launched daemon that re-claimed the
     // path between our shutdown signal and this point.
     Ok(())
+}
+
+/// Resolve when the OS asks the daemon to terminate through a channel other
+/// than Ctrl-C: SIGTERM on Unix (what launchd, systemd, and a bare `kill`
+/// send), the console-close / system-shutdown notifications on Windows.
+/// Routing these into the same shutdown cancel as Ctrl-C makes the
+/// three-stage graceful drain (in-flight DB commits, fingerprint-checked
+/// socket/token removal) run on service-manager stops instead of only on
+/// interactive interrupts.
+///
+/// A failure to install the listener is logged and then parks forever: a
+/// broken listener is not a reason to stop the daemon, and Ctrl-C plus the
+/// IPC `Shutdown` request remain as stop paths.
+#[cfg(unix)]
+async fn terminate_request() {
+    match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+        Ok(mut term) => {
+            if term.recv().await.is_some() {
+                info!("sigterm_received");
+                return;
+            }
+            // The stream can no longer yield signals; never resolve rather
+            // than fabricating a termination that was not requested.
+            std::future::pending::<()>().await;
+        }
+        Err(err) => {
+            warn!(error = %err, "sigterm_listener_failed");
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Windows variant of [`terminate_request`]: `taskkill` / console close
+/// deliver `CTRL_CLOSE_EVENT`, system shutdown delivers `CTRL_SHUTDOWN_EVENT`.
+/// Both give the process a short OS-imposed grace budget after the handler
+/// returns, so starting the drain immediately is the best use of it.
+#[cfg(windows)]
+async fn terminate_request() {
+    let close = async {
+        match signal::windows::ctrl_close() {
+            Ok(mut stream) => {
+                if stream.recv().await.is_some() {
+                    return;
+                }
+                std::future::pending::<()>().await;
+            }
+            Err(err) => {
+                warn!(error = %err, "ctrl_close_listener_failed");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    let system_shutdown = async {
+        match signal::windows::ctrl_shutdown() {
+            Ok(mut stream) => {
+                if stream.recv().await.is_some() {
+                    return;
+                }
+                std::future::pending::<()>().await;
+            }
+            Err(err) => {
+                warn!(error = %err, "ctrl_shutdown_listener_failed");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        () = close => {},
+        () = system_shutdown => {},
+    }
+    info!("terminate_event_received");
+}
+
+/// Hosts with neither Unix signals nor the Windows console control events
+/// have no extra termination channel to bridge; Ctrl-C and the IPC
+/// `Shutdown` request are the only stop paths.
+#[cfg(not(any(unix, windows)))]
+async fn terminate_request() {
+    std::future::pending::<()>().await;
 }
 
 /// Three-stage graceful shutdown:
