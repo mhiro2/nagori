@@ -36,6 +36,22 @@ use time::OffsetDateTime;
 #[cfg(target_os = "macos")]
 const MAX_FILE_URL_ITEMS: usize = 4096;
 
+/// Hard ceiling on a single pasteboard image representation copied into the
+/// daemon's heap.
+///
+/// The pasteboard owner controls `NSData.length`, and TIFF is deliberately
+/// exempt from the `oversized_payload` pre-filter (it is normalised to PNG
+/// *before* the entry-size gate so an uncompressed screenshot does not look
+/// oversized) — so without this check a malicious owner advertising a
+/// multi-GB TIFF would land its full payload in `ns_data_to_vec`. PNG is
+/// covered by the pre-filter on the bounded path but not on the unbounded
+/// `current_snapshot` path, so both branches check the constant-time
+/// `length()` before copying. Mirrors the Linux adapter's
+/// `INTERNAL_BODY_CEILING_BYTES` defence-in-depth ceiling: 256 MiB is far
+/// above any realistic screenshot or copied image.
+#[cfg(target_os = "macos")]
+const MAX_IMAGE_REP_BYTES: usize = 256 * 1024 * 1024;
+
 /// UTI mapped to `image/jpeg` for pasteboard publishing.
 ///
 /// `NSPasteboardType` is a `NSString` newtype, so MIMEs that lack a static
@@ -898,8 +914,13 @@ fn collect_macos_extras(
             // Prefer PNG when both PNG and TIFF are present. macOS screenshot
             // shortcuts commonly publish TIFF only; normalize that to PNG
             // before the entry-size gate so the uncompressed pasteboard form
-            // does not make ordinary screenshots look oversized.
+            // does not make ordinary screenshots look oversized. Both
+            // branches probe the constant-time `length()` against
+            // `MAX_IMAGE_REP_BYTES` before `ns_data_to_vec` copies the
+            // payload — see the constant's doc for why TIFF has no other
+            // allocation bound.
             if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
+                && image_rep_within_ceiling("image/png", &data)
                 && let Some(bytes) = ns_data_to_vec(&data)
             {
                 out.push(ClipboardRepresentation {
@@ -907,6 +928,7 @@ fn collect_macos_extras(
                     data: ClipboardData::Bytes(bytes),
                 });
             } else if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
+                && image_rep_within_ceiling("image/tiff", &data)
                 && let Some(bytes) = ns_data_to_vec(&data)
                 && let Some((mime_type, bytes)) = prepare_tiff_capture(bytes)
             {
@@ -923,6 +945,26 @@ fn collect_macos_extras(
         }
         None
     })
+}
+
+/// Pre-copy admission check for a pasteboard image representation: `true`
+/// when `data` fits under [`MAX_IMAGE_REP_BYTES`]. The over-ceiling case is
+/// logged (length only, never content) and the representation is skipped —
+/// the rest of the snapshot still flows through, matching how an
+/// undecodable TIFF is dropped.
+#[cfg(target_os = "macos")]
+fn image_rep_within_ceiling(mime: &str, data: &objc2_foundation::NSData) -> bool {
+    let byte_count = data.length();
+    if byte_count > MAX_IMAGE_REP_BYTES {
+        tracing::warn!(
+            mime,
+            byte_count,
+            ceiling = MAX_IMAGE_REP_BYTES,
+            "pasteboard_image_rep_exceeds_ceiling"
+        );
+        return false;
+    }
+    true
 }
 
 /// Normalise a captured TIFF to PNG, guarded by the shared decoded-pixel
