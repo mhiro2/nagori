@@ -14,8 +14,8 @@ use nagori_core::{
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
-    clipboard_blocking, clipboard_write_blocking, has_publishable_representation, lock_err,
-    platform_err,
+    clipboard_blocking, clipboard_write_blocking, has_publishable_representation,
+    lock_clipboard_for_write, lock_err, platform_err,
 };
 #[cfg(target_os = "macos")]
 use nagori_platform::{DecodeRgbaError, decode_rgba_with_pixel_cap};
@@ -347,9 +347,10 @@ impl ClipboardWriter for MacosClipboard {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
         clipboard_write_blocking("write_text", move || -> Result<()> {
-            clipboard
-                .lock()
-                .map_err(|err| lock_err(&err))?
+            // Bounded lock acquisition (no OS side effect yet) so a guard
+            // leaked by a timed-out read cannot park this write forever;
+            // the `set_text` itself still runs to completion unbounded.
+            lock_clipboard_for_write(&clipboard, "write_text")?
                 .set_text(owned)
                 .map_err(|err| platform_err(&err))
         })
@@ -404,7 +405,9 @@ impl MacosClipboard {
             // Take the same arboard mutex `current_snapshot` and the text
             // path use so a concurrent reader/writer cannot race the
             // clearContents+setData pair below on the shared NSPasteboard.
-            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            // Acquisition is bounded (see `lock_clipboard_for_write`) so a
+            // guard leaked by a timed-out read cannot park the write.
+            let _guard = lock_clipboard_for_write(&clipboard, "write_image_bytes")?;
             // Drain the AppKit autoreleased temporaries (`generalPasteboard`,
             // the `NSData` copy, dynamic-UTI `NSString`s) on every call. The
             // capture/copy work runs on a tokio blocking-pool thread with no
@@ -499,8 +502,9 @@ impl MacosClipboard {
             // Hold the arboard mutex across `clearContents` + `writeObjects`
             // so a concurrent reader cannot observe the cleared-but-not-yet-
             // written window, matching `write_image_bytes` /
-            // `publish_representations`.
-            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            // `publish_representations`. Acquisition is bounded so a guard
+            // leaked by a timed-out read cannot park the write.
+            let _guard = lock_clipboard_for_write(&clipboard, "write_files")?;
             // Drain AppKit autoreleased temporaries (`generalPasteboard`, the
             // per-path `NSPasteboardItem` / `NSString`s) on every call: the
             // copy work runs on a tokio blocking-pool thread with no implicit
@@ -549,8 +553,9 @@ impl MacosClipboard {
             // Hold the arboard mutex across the whole clearContents +
             // writeObjects batch so a concurrent reader cannot observe a
             // partial state with the primary published but the plain
-            // fallback still missing.
-            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            // fallback still missing. Acquisition is bounded so a guard
+            // leaked by a timed-out read cannot park the write.
+            let _guard = lock_clipboard_for_write(&clipboard, "publish_representations")?;
             objc2::rc::autoreleasepool(|_pool| -> Result<()> {
                 // Build every pasteboard item off-pasteboard first, then
                 // publish the whole batch atomically with `writeObjects`.

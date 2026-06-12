@@ -100,6 +100,66 @@ where
     }
 }
 
+/// Acquire a clipboard adapter's mutex for a *write*, bounded by
+/// [`CLIPBOARD_OP_TIMEOUT`].
+///
+/// Write closures deliberately run without the operation timeout (see
+/// [`clipboard_write_blocking`]): once the OS side effect starts it must run
+/// to completion. But the *lock acquisition* in front of it has no side
+/// effect — and a guard leaked by a timed-out read (the detached blocking
+/// thread keeps holding the `Mutex` until the wedged OS call returns) would
+/// otherwise park a plain `lock()` here indefinitely, freezing every later
+/// copy-back / paste behind a single wedged read. Bounding only the lock
+/// stage preserves the no-timeout write contract: failing here touches
+/// nothing, and once the guard is held the OS write still runs unbounded.
+///
+/// Poisoning is reported as an error exactly like the `lock_err` mapping the
+/// adapters used before.
+pub fn lock_clipboard_for_write<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    op: &'static str,
+) -> nagori_core::Result<std::sync::MutexGuard<'a, T>> {
+    lock_for_write_with_limit(mutex, op, CLIPBOARD_OP_TIMEOUT)
+}
+
+/// [`lock_clipboard_for_write`] with an injectable deadline so tests do not
+/// have to sit out the production window.
+fn lock_for_write_with_limit<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    op: &'static str,
+    limit: Duration,
+) -> nagori_core::Result<std::sync::MutexGuard<'a, T>> {
+    /// Poll interval between `try_lock` attempts. Coarse enough to stay
+    /// invisible next to OS clipboard latency, fine enough that a freed
+    /// guard is picked up promptly.
+    const LOCK_RETRY: Duration = Duration::from_millis(10);
+
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(err)) => {
+                return Err(nagori_core::AppError::Platform(err.to_string()));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        op,
+                        timeout_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+                        "clipboard_write_lock_timed_out",
+                    );
+                    return Err(nagori_core::AppError::Platform(format!(
+                        "{op}: clipboard lock not acquired within {}s — a previous \
+                         clipboard operation is still holding it",
+                        limit.as_secs_f32()
+                    )));
+                }
+                std::thread::sleep(LOCK_RETRY);
+            }
+        }
+    }
+}
+
 /// Why a blocking platform op did not return a value.
 ///
 /// Both variants mean "the closure produced no result"; callers map them onto
@@ -231,6 +291,40 @@ mod tests {
         .await
         .expect_err("a panicking write closure must surface as Panicked");
         assert!(matches!(err, BlockingError::Panicked { op: "write_boom" }));
+    }
+
+    #[test]
+    fn write_lock_times_out_while_another_thread_holds_the_guard() {
+        // Model the leaked-read-guard scenario: a detached thread holds the
+        // clipboard mutex past the deadline. The write-side lock must give
+        // up with an error instead of parking forever.
+        use std::sync::{Arc, Mutex};
+
+        let mutex = Arc::new(Mutex::new(()));
+        let holder_mutex = mutex.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _guard = holder_mutex.lock().expect("holder lock");
+            held_tx.send(()).expect("signal held");
+            let _ = release_rx.recv();
+        });
+        held_rx
+            .recv()
+            .expect("guard must be held before the attempt");
+
+        let err = lock_for_write_with_limit(&mutex, "test_write", Duration::from_millis(50))
+            .expect_err("a held guard must time the write lock out");
+        assert!(
+            err.to_string().contains("not acquired"),
+            "unexpected error: {err}"
+        );
+
+        // Release the holder; the next acquisition must succeed promptly.
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread");
+        let _guard = lock_for_write_with_limit(&mutex, "test_write", Duration::from_millis(50))
+            .expect("freed guard must be acquirable");
     }
 
     #[tokio::test]

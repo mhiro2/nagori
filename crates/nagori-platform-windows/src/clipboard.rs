@@ -13,7 +13,7 @@ use nagori_core::{
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
     clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
-    has_publishable_representation, lock_err, platform_err,
+    has_publishable_representation, lock_clipboard_for_write, lock_err, platform_err,
 };
 use time::OffsetDateTime;
 
@@ -124,9 +124,10 @@ impl ClipboardWriter for WindowsClipboard {
         let clipboard = self.clipboard.clone();
         let owned = text.to_owned();
         clipboard_write_blocking("write_text", move || -> Result<()> {
-            clipboard
-                .lock()
-                .map_err(|err| lock_err(&err))?
+            // Bounded lock acquisition (no OS side effect yet) so a guard
+            // leaked by a timed-out read cannot park this write forever;
+            // the `set_text` itself still runs to completion unbounded.
+            lock_clipboard_for_write(&clipboard, "write_text")?
                 .set_text(owned)
                 .map_err(|err| platform_err(&err))
         })
@@ -176,7 +177,9 @@ impl ClipboardWriter for WindowsClipboard {
                 // EmptyClipboard and the last SetClipboardData call and wipe
                 // a partial offer. Only the cheap HGLOBAL copies + Win32
                 // publish run here — the image decode already happened above.
-                let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                // Acquisition is bounded so a guard leaked by a timed-out
+                // read cannot park the write.
+                let _guard = lock_clipboard_for_write(&clipboard, "write_representations")?;
                 win::write_multi_rep(&reps, &dibv5)
             })
             .await
@@ -221,7 +224,7 @@ impl ClipboardWriter for WindowsClipboard {
 
             let clipboard = self.clipboard.clone();
             clipboard_write_blocking("write_representation_exact", move || -> Result<()> {
-                let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                let _guard = lock_clipboard_for_write(&clipboard, "write_representation_exact")?;
                 win::write_multi_rep(&reps, &dibv5)
             })
             .await
@@ -249,8 +252,9 @@ impl WindowsClipboard {
             // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
             // concurrent text-write through arboard cannot land between
             // our `EmptyClipboard` call (which would wipe our CF_HDROP
-            // offer) and `SetClipboardData`.
-            let _guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+            // offer) and `SetClipboardData`. Acquisition is bounded so a
+            // guard leaked by a timed-out read cannot park the write.
+            let _guard = lock_clipboard_for_write(&clipboard, "write_files")?;
             #[cfg(windows)]
             {
                 win::write_file_list(&paths)
@@ -306,9 +310,9 @@ impl WindowsClipboard {
         // cancelled and would clobber newer clipboard content on late return.
         let clipboard = self.clipboard.clone();
         clipboard_write_blocking("write_image_bytes", move || -> Result<()> {
-            clipboard
-                .lock()
-                .map_err(|err| lock_err(&err))?
+            // Bounded lock acquisition; the `set_image` itself still runs
+            // to completion unbounded (see the decode rationale above).
+            lock_clipboard_for_write(&clipboard, "write_image_bytes")?
                 .set_image(image_data)
                 .map_err(|err| platform_err(&err))
         })
