@@ -10,6 +10,24 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::OutputFormat;
 
+/// Print one JSON record under the shared machine-output contract
+/// (docs/cli.md): `--json` renders a pretty multi-line document, `--jsonl`
+/// exactly one compact line so line-oriented consumers can split on
+/// newlines. Every single-record `print_*` routes its JSON arms through
+/// here so no printer can drift back to a pretty dump under `--jsonl`.
+/// Callers keep their own `Text` arm; a stray `Text` call still emits the
+/// compact single-line form rather than panicking.
+pub(crate) fn print_json_record<T: serde::Serialize>(
+    value: &T,
+    format: OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
+        OutputFormat::Jsonl | OutputFormat::Text => println!("{}", serde_json::to_string(value)?),
+    }
+    Ok(())
+}
+
 pub(crate) fn print_entries(
     entries: Vec<ClipboardEntry>,
     format: OutputFormat,
@@ -59,14 +77,9 @@ pub(crate) fn print_entry(
     include_text: bool,
 ) -> Result<()> {
     match format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&entry_json(entry, include_text)?)?
-        ),
-        OutputFormat::Jsonl => println!(
-            "{}",
-            serde_json::to_string(&entry_json(entry, include_text)?)?
-        ),
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            print_json_record(&entry_json(entry, include_text)?, format)?;
+        }
         OutputFormat::Text => {
             if include_text {
                 println!("{}", entry.plain_text().unwrap_or_default());
@@ -140,8 +153,7 @@ pub(crate) fn print_dto_entries(entries: Vec<EntryDto>, format: OutputFormat) ->
 
 pub(crate) fn print_dto_entry(entry: &EntryDto, format: OutputFormat) -> Result<()> {
     match format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(entry)?),
-        OutputFormat::Jsonl => println!("{}", serde_json::to_string(entry)?),
+        OutputFormat::Json | OutputFormat::Jsonl => print_json_record(entry, format)?,
         OutputFormat::Text => {
             if let Some(text) = &entry.text {
                 println!("{text}");
@@ -202,7 +214,7 @@ pub(crate) fn shorten_home(path: &Path) -> String {
 pub(crate) fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => {
-            println!("{}", serde_json::to_string_pretty(report)?);
+            print_json_record(report, format)?;
         }
         OutputFormat::Text => {
             println!("version\t{}", report.version);
@@ -348,16 +360,7 @@ pub(crate) const fn format_capture_event_category(
 
 pub(crate) fn print_capabilities(caps: &PlatformCapabilities, format: OutputFormat) -> Result<()> {
     match format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(caps)?);
-        }
-        OutputFormat::Jsonl => {
-            // `--jsonl` is contractually one record per line (see
-            // docs/cli.md). A capability report is a single record, so
-            // emit one compact line — never a multi-line pretty dump,
-            // which would break line-oriented consumers.
-            println!("{}", serde_json::to_string(caps)?);
-        }
+        OutputFormat::Json | OutputFormat::Jsonl => print_json_record(caps, format)?,
         OutputFormat::Text => {
             // Tab-separated to match `nagori doctor`. Every row has the
             // form `<field>\t<status>[\tdetail…]`; downstream scripts
@@ -438,11 +441,7 @@ pub(crate) fn print_ack(format: OutputFormat) {
 
 pub(crate) fn print_ai_output(output: &AiOutputDto, format: OutputFormat) -> Result<()> {
     match format {
-        // `--json` is pretty; `--jsonl` must stay one record per line so the
-        // non-streaming AI path emits valid JSON Lines (a pretty multi-line
-        // blob would break line-oriented consumers).
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(output)?),
-        OutputFormat::Jsonl => println!("{}", serde_json::to_string(output)?),
+        OutputFormat::Json | OutputFormat::Jsonl => print_json_record(output, format)?,
         OutputFormat::Text => {
             println!("{}", output.text);
             for warning in &output.warnings {
@@ -453,25 +452,31 @@ pub(crate) fn print_ai_output(output: &AiOutputDto, format: OutputFormat) -> Res
     Ok(())
 }
 
+/// `nagori daemon status` local arm. This path inspects the `SQLite` store
+/// directly and never contacts a daemon, so the output names its source
+/// (`local`) instead of claiming `ok` — an earlier version printed `ok`,
+/// which read as "the daemon is healthy" even when nothing was running.
+/// Probing the daemon requires the `--ipc` / `--auto-ipc` routes.
 pub(crate) fn print_status(
     db_path: &Path,
     settings: &AppSettings,
     format: OutputFormat,
 ) -> Result<()> {
     if format.is_json() {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
+        print_json_record(
+            &serde_json::json!({
+                "source": "local",
+                "daemon_probed": false,
                 "db": db_path,
                 "capture_enabled": settings.capture_enabled,
                 "ai_enabled": settings.ai.enabled,
                 "auto_paste_enabled": settings.auto_paste_enabled,
                 "history_retention_count": settings.history_retention_count,
-            }))?
-        );
+            }),
+            format,
+        )?;
     } else {
-        println!("ok\t{}", db_path.display());
+        println!("local (daemon not probed)\t{}", db_path.display());
     }
     Ok(())
 }

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use nagori_core::SettingsRepository;
-use nagori_ipc::IpcRequest;
+use nagori_ipc::{DoctorPermission, DoctorReport, IpcRequest};
 use nagori_storage::SqliteStore;
 
 use super::{Executor, expect_doctor};
@@ -22,7 +22,7 @@ pub async fn run(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
             let store = ctx.open_store()?;
-            print_local_doctor(&ctx.db_path, &store).await
+            print_local_doctor(&ctx.db_path, &store, format).await
         }
         Executor::Ipc(ctx) => {
             let resp = ctx.client.send(IpcRequest::Doctor).await?;
@@ -40,8 +40,80 @@ const fn ai_provider_label(provider: nagori_core::AiProviderKind) -> &'static st
     }
 }
 
-async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
+/// Run the host permission checker and collect its rows so the text and
+/// JSON arms render the same probe results. A probe failure degrades to
+/// "no rows" rather than aborting the report, matching the daemon's
+/// best-effort doctor behaviour.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+async fn collect_permission_statuses(
+    ctx: &PermissionCheckContext,
+) -> Vec<nagori_platform::PermissionStatus> {
+    #[cfg(target_os = "macos")]
+    let checker = MacosPermissionChecker;
+    #[cfg(target_os = "windows")]
+    let checker = WindowsPermissionChecker;
+    #[cfg(target_os = "linux")]
+    let checker = LinuxPermissionChecker;
+    checker.check(ctx).await.unwrap_or_default()
+}
+
+async fn print_local_doctor(
+    db_path: &Path,
+    store: &SqliteStore,
+    format: OutputFormat,
+) -> Result<()> {
     let settings = store.get_settings().await?;
+    // The macOS checker keys NotDetermined vs Denied off this timestamp;
+    // build the context once and share it across the per-OS branches.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let statuses = collect_permission_statuses(&PermissionCheckContext {
+        accessibility_prompted_at: settings.onboarding.accessibility_prompted_at,
+    })
+    .await;
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let statuses: Vec<nagori_platform::PermissionStatus> = Vec::new();
+    let thumbnail_total_bytes = store.total_thumbnail_bytes().await.ok();
+
+    if format.is_json() {
+        // Build a real `DoctorReport` so the local arm's JSON is the same
+        // schema as the daemon's — a consumer must be able to deserialize
+        // either arm's output into one type without branching on which
+        // transport happened to serve the report. Daemon-only sections
+        // (maintenance / capture / IPC / startup health) carry their serde
+        // defaults — exactly what a legacy-daemon report deserializes to —
+        // and `socket_path` is empty because no endpoint was contacted;
+        // `latest_version` stays `None` because the local arm never probes
+        // the network.
+        let report = DoctorReport {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            db_path: db_path.display().to_string(),
+            socket_path: String::new(),
+            capture_enabled: settings.capture_enabled,
+            auto_paste_enabled: settings.auto_paste_enabled,
+            ai_enabled: settings.ai.enabled,
+            auto_update_check: settings.auto_update_check,
+            ai_provider: ai_provider_label(settings.ai.provider).to_owned(),
+            ai_availability: None,
+            permissions: statuses
+                .iter()
+                .map(|status| DoctorPermission {
+                    kind: format!("{:?}", status.kind),
+                    state: format!("{:?}", status.state),
+                    message: status.message.clone(),
+                })
+                .collect(),
+            maintenance: nagori_ipc::MaintenanceHealthReport::default(),
+            capture: nagori_ipc::CaptureHealthReport::default(),
+            ipc: nagori_ipc::IpcHealthReport::default(),
+            startup: nagori_ipc::StartupHealthReport::default(),
+            update_channel: settings.update_channel.as_str().to_owned(),
+            latest_version: None,
+            thumbnail_total_bytes,
+            thumbnail_budget_bytes: settings.max_thumbnail_total_bytes,
+        };
+        return print_doctor_report(&report, format);
+    }
+
     println!("version\t{}", env!("CARGO_PKG_VERSION"));
     println!("version_latest\t(unknown)");
     println!("update_channel\t{}", settings.update_channel.as_str());
@@ -51,64 +123,18 @@ async fn print_local_doctor(db_path: &Path, store: &SqliteStore) -> Result<()> {
     println!("ai_enabled\t{}", settings.ai.enabled);
     println!("auto_update_check\t{}", settings.auto_update_check);
     println!("ai_provider\t{}", ai_provider_label(settings.ai.provider));
-    // The macOS checker keys NotDetermined vs Denied off this timestamp;
-    // build the context once and share it across the per-OS branches.
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    let permission_ctx = PermissionCheckContext {
-        accessibility_prompted_at: settings.onboarding.accessibility_prompted_at,
-    };
-    #[cfg(target_os = "macos")]
-    {
-        let checker = MacosPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
+    for status in &statuses {
+        let suffix = status
+            .message
+            .as_deref()
+            .map_or_else(String::new, |msg| format!("\t{msg}"));
+        println!(
+            "permission\t{:?}\t{:?}{}",
+            status.kind, status.state, suffix
+        );
     }
-    #[cfg(target_os = "windows")]
-    {
-        let checker = WindowsPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let checker = LinuxPermissionChecker;
-        if let Ok(statuses) = checker.check(&permission_ctx).await {
-            for status in statuses {
-                let suffix = status
-                    .message
-                    .as_deref()
-                    .map_or_else(String::new, |msg| format!("\t{msg}"));
-                println!(
-                    "permission\t{:?}\t{:?}{}",
-                    status.kind, status.state, suffix
-                );
-            }
-        }
-    }
-    let thumb_used = store
-        .total_thumbnail_bytes()
-        .await
-        .map_or_else(|_| "(unknown)".to_owned(), |b| b.to_string());
+    let thumb_used =
+        thumbnail_total_bytes.map_or_else(|| "(unknown)".to_owned(), |b| b.to_string());
     let thumb_cap = settings
         .max_thumbnail_total_bytes
         .map_or_else(|| "disabled".to_owned(), |b| b.to_string());

@@ -7,7 +7,7 @@ use nagori_ipc::{IpcRequest, IpcResponse};
 use nagori_storage::SqliteStore;
 
 use super::{Executor, expect_ack};
-use crate::output::{print_ack, print_status};
+use crate::output::{print_ack, print_json_record, print_status};
 use crate::{DaemonRunArgs, OutputFormat, default_db_path};
 
 pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
@@ -23,13 +23,14 @@ pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
                 anyhow::bail!("unexpected ipc response");
             };
             if format.is_json() {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                print_json_record(
+                    &serde_json::json!({
+                        "source": "daemon",
                         "ok": health.ok,
                         "version": health.version,
-                    }))?
-                );
+                    }),
+                    format,
+                )?;
             } else {
                 println!("ok\t{}", health.version);
             }

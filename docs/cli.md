@@ -241,7 +241,13 @@ Send a shutdown request via IPC. Requires `--ipc <endpoint>`.
 
 ### `nagori daemon status`
 
-Print IPC endpoint and DB metadata without contacting a daemon.
+Report status for the store the command can see. Without `--ipc` /
+`--auto-ipc` the command reads the local DB directly and **does not
+probe a daemon** — the output is prefixed `local (daemon not probed)`
+(JSON: `"source": "local", "daemon_probed": false`) so a dead daemon is
+never reported as healthy. With `--ipc <endpoint>` (or `--auto-ipc` when
+the endpoint is reachable) the daemon itself answers and the output
+reports `ok` plus its version (JSON: `"source": "daemon"`).
 
 ## Exit codes
 

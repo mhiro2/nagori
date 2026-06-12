@@ -23,6 +23,7 @@ nagori-platform = { path = "../nagori-platform" }
 nagori-platform-native = { path = "../nagori-platform-native" }
 nagori-search = { path = "../nagori-search" }
 nagori-storage = { path = "../nagori-storage" }
+serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
