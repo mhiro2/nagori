@@ -196,6 +196,22 @@ pub(crate) fn parse_sensitivity_strict(value: &str) -> rusqlite::Result<Sensitiv
     }
 }
 
+/// Protection-priority rank for [`Sensitivity`], used by the dedupe path to
+/// merge the stored row's sensitivity with a re-captured snapshot's. Higher
+/// means more protected. Ordering matters for privacy: an unclassified
+/// re-capture of the same bytes (e.g. CLI `add`, which never runs the
+/// classifier) must not demote a `Secret` row back to `Unknown` and re-expose
+/// it through default listings, previews, and embedding.
+pub(crate) const fn sensitivity_rank(sensitivity: Sensitivity) -> u8 {
+    match sensitivity {
+        Sensitivity::Unknown => 0,
+        Sensitivity::Public => 1,
+        Sensitivity::Private => 2,
+        Sensitivity::Secret => 3,
+        Sensitivity::Blocked => 4,
+    }
+}
+
 pub(crate) fn bool_int(value: bool) -> i64 {
     i64::from(value)
 }

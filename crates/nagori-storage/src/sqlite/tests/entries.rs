@@ -27,9 +27,9 @@ async fn duplicate_insert_returns_existing_id() {
 async fn duplicate_insert_with_identical_reps_refreshes_source() {
     // Dedupe is keyed on `representation_set_hash`, so two snapshots
     // with the same primary AND the same alternatives collide. The
-    // dedupe path must then refresh the entries row's source/sensitivity
-    // columns and bump `created_at`/`updated_at` so the source_app
-    // filter sees the latest copy — not the first one.
+    // dedupe path must then refresh the entries row's source columns
+    // and bump `created_at`/`updated_at` so the source_app filter sees
+    // the latest copy — not the first one.
     use nagori_core::{
         ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, SourceApp,
     };
@@ -77,6 +77,88 @@ async fn duplicate_insert_with_identical_reps_refreshes_source() {
     let hits = store.search(query).await.unwrap();
     assert_eq!(hits.len(), 1, "source filter must hit the new source");
     assert_eq!(hits[0].entry_id, first_id);
+}
+
+#[tokio::test]
+async fn duplicate_insert_never_demotes_sensitivity() {
+    // Rep-less entries fall back to `representation_set_hash =
+    // content_hash`, so re-adding the same text through a path that never
+    // classifies (CLI `add` stores `Unknown`) collides with the secret row.
+    // The dedupe UPDATE must keep the more protective classification —
+    // otherwise the row would re-enter default listings, search previews,
+    // and the semantic-embedding/thumbnail gates.
+    let store = SqliteStore::open_memory().unwrap();
+
+    let mut secret = EntryFactory::from_text("sk-live-very-secret-token");
+    secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+    secret.sensitivity = Sensitivity::Secret;
+    let secret_id = store.insert(secret).await.unwrap();
+
+    let unknown_id = insert_text(&store, "sk-live-very-secret-token").await;
+    assert_eq!(unknown_id, secret_id, "dedupe should reuse the row");
+
+    let fetched = store.get(secret_id).await.unwrap().expect("row exists");
+    assert_eq!(
+        fetched.sensitivity,
+        Sensitivity::Secret,
+        "an unclassified re-capture must not demote a secret row"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_insert_never_restores_raw_search_document_on_secret_row() {
+    // Sensitivity surviving the dedupe is not enough on its own: the search
+    // document of a `Secret` row was redacted by the classifier at capture
+    // time, while an unclassified re-capture carries the raw preview /
+    // normalized text. The dedupe upsert must keep the redacted document —
+    // `Secret` previews ship verbatim in default DTOs on the assumption
+    // they are redacted, and the raw text must not become searchable.
+    let store = SqliteStore::open_memory().unwrap();
+
+    let mut secret = EntryFactory::from_text("sk-live-very-secret-token");
+    secret.sensitivity = Sensitivity::Secret;
+    secret.search.preview = "sk-live-[redacted]".to_owned();
+    secret.search.normalized_text = normalize_text("sk-live-[redacted]");
+    let secret_id = store.insert(secret).await.unwrap();
+
+    let unknown_id = insert_text(&store, "sk-live-very-secret-token").await;
+    assert_eq!(unknown_id, secret_id, "dedupe should reuse the row");
+
+    let fetched = store.get(secret_id).await.unwrap().expect("row exists");
+    assert_eq!(
+        fetched.search.preview, "sk-live-[redacted]",
+        "the redacted preview must survive an unclassified re-capture"
+    );
+    assert!(
+        !fetched.search.normalized_text.contains("very-secret-token"),
+        "raw text must not re-enter the search document"
+    );
+
+    let query = SearchQuery::new("very-secret-token", normalize_text("very-secret-token"), 10);
+    let hits = store.search(query).await.unwrap();
+    assert!(
+        hits.is_empty(),
+        "the raw secret must not be searchable after the dedupe"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_insert_still_promotes_sensitivity() {
+    // The monotone merge is one-way: a re-capture that classifies *more*
+    // protectively (e.g. a denylist rule added after the first copy) must
+    // still land on the stored row.
+    let store = SqliteStore::open_memory().unwrap();
+
+    let unknown_id = insert_text(&store, "soon to be denylisted").await;
+
+    let mut secret = EntryFactory::from_text("soon to be denylisted");
+    secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+    secret.sensitivity = Sensitivity::Secret;
+    let secret_id = store.insert(secret).await.unwrap();
+    assert_eq!(secret_id, unknown_id, "dedupe should reuse the row");
+
+    let fetched = store.get(unknown_id).await.unwrap().expect("row exists");
+    assert_eq!(fetched.sensitivity, Sensitivity::Secret);
 }
 
 #[tokio::test]

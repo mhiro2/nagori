@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 
 use super::SqliteStore;
 use super::convert::{
-    bool_int, format_opt_time, format_time, json_err, kind_to_str, row_to_entry,
-    sensitivity_to_str, storage_err,
+    bool_int, format_opt_time, format_time, json_err, kind_to_str, parse_sensitivity_strict,
+    row_to_entry, sensitivity_rank, sensitivity_to_str, storage_err,
 };
 use super::search::{
     FilterFragment, delete_search_rows, fetch_recent_entries, upsert_document_blocking,
@@ -578,19 +578,47 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     // later capture would silently overwrite the earlier row's alternatives.
     let existing = tx
         .query_row(
-            "SELECT id FROM entries WHERE representation_set_hash = ?1 AND deleted_at IS NULL",
+            "SELECT id, sensitivity FROM entries
+             WHERE representation_set_hash = ?1 AND deleted_at IS NULL",
             params![representation_set_hash],
-            |row| row.get::<_, String>(0),
+            |row| {
+                let id = row.get::<_, String>(0)?;
+                let sensitivity = parse_sensitivity_strict(&row.get::<_, String>(1)?)?;
+                Ok((id, sensitivity))
+            },
         )
         .optional()
         .map_err(storage_err)?;
-    let stored_id_str = if let Some(existing) = existing {
+    let mut preserve_existing_document = false;
+    let stored_id_str = if let Some((existing, existing_sensitivity)) = existing {
         // Identical `representation_set_hash` implies the rep set is
         // byte-for-byte identical, so the reps don't need to be replaced.
-        // Refresh source/sensitivity and bump timestamps so the dedupe
-        // record reflects the most recent capture. Lifecycle flags
-        // (`pinned`, `archived`, `use_count`, `last_used_at`, `expires_at`,
-        // `deleted_at`) belong to the original row and are preserved.
+        // Refresh source and bump timestamps so the dedupe record reflects
+        // the most recent capture. Lifecycle flags (`pinned`, `archived`,
+        // `use_count`, `last_used_at`, `expires_at`, `deleted_at`) belong to
+        // the original row and are preserved.
+        //
+        // Sensitivity merges monotonically non-decreasing: the row keeps
+        // whichever classification is more protective. Re-capturing the same
+        // bytes through a path that never classifies (CLI `add` stores
+        // `Unknown`) must not demote a `Secret` row and re-expose its text
+        // through default listings, search previews, semantic embedding, and
+        // thumbnail generation. A more protective re-classification (e.g. a
+        // new denylist rule matching old content) still propagates.
+        //
+        // When the existing classification wins, the existing search document
+        // must survive too: the classifier redacted its preview / normalized
+        // text at capture time, while the less-protective re-capture carries
+        // them raw. Letting the upsert below run would restore the raw text
+        // under a `Secret`-labelled row — and `Secret` previews are shipped
+        // verbatim by default DTOs on the assumption they are redacted.
+        preserve_existing_document =
+            sensitivity_rank(existing_sensitivity) > sensitivity_rank(entry.sensitivity);
+        let merged_sensitivity = if preserve_existing_document {
+            existing_sensitivity
+        } else {
+            entry.sensitivity
+        };
         tx.execute(
             "UPDATE entries SET
                 source_app_name = ?1,
@@ -616,7 +644,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
                     .source
                     .as_ref()
                     .and_then(|s| s.executable_path.as_deref()),
-                sensitivity_to_str(entry.sensitivity),
+                sensitivity_to_str(merged_sensitivity),
                 updated_at,
                 existing,
             ],
@@ -696,7 +724,9 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     if stored_id != requested_id {
         doc.entry_id = stored_id;
     }
-    upsert_document_blocking(&tx, &doc)?;
+    if !preserve_existing_document {
+        upsert_document_blocking(&tx, &doc)?;
+    }
     tx.commit().map_err(storage_err)?;
     Ok(stored_id)
 }
