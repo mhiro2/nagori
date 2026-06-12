@@ -8,7 +8,7 @@ pub use engine::{
     AiActionRequest, AiAvailabilityReport, AiCapability, AiCapabilitySet, AiError, AiErrorCode,
     AiEvent, AiOverallStatus, AiPriority, AiProviderKind, AiRequestOptions, GuidedSchema,
     PerActionAvailability, PerActionStatus, Remediation, RemediationAction, RequestId,
-    SemanticIndexAvailability, estimate_tokens,
+    SemanticIndexAvailability, char_token_quarters, estimate_tokens,
 };
 
 /// A rule-based "Quick action": always available on-device.

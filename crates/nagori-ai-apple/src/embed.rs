@@ -16,7 +16,7 @@ use nagori_ai::{
     BackendAvailability, BackendUnavailableReason, Embedder, EmbeddingInput,
     EmbeddingModelMetadata, EmbeddingVector,
 };
-use nagori_core::{AiError, AiErrorCode};
+use nagori_core::{AiError, AiErrorCode, char_token_quarters};
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
@@ -94,10 +94,10 @@ impl AppleEmbedderBackend {
     async fn embed_pooled(
         &self,
         text: &str,
-        max_chars: usize,
+        max_tokens: usize,
         cancel: &CancellationToken,
     ) -> Result<Vec<f32>, AiError> {
-        let chunks = chunk_chars(text, max_chars, MAX_EMBED_CHARS);
+        let chunks = chunk_estimated_tokens(text, max_tokens, MAX_EMBED_CHARS);
         match chunks.as_slice() {
             [] => Err(AiError::new(
                 AiErrorCode::BackendInternal,
@@ -156,13 +156,18 @@ impl Embedder for AppleEmbedderBackend {
         inputs: Vec<EmbeddingInput>,
         cancel: CancellationToken,
     ) -> Result<Vec<EmbeddingVector>, AiError> {
-        let max_chars = self.cached_metadata().await?.max_sequence_length.max(1);
+        // `max_sequence_length` is a *token* cap (the model silently truncates
+        // past it), so chunking treats it as one and estimates tokens per
+        // character rather than equating one char to one token — a Latin-heavy
+        // clip would otherwise be split into chunks ~4x over the cap and lose
+        // their tails inside the model.
+        let max_tokens = self.cached_metadata().await?.max_sequence_length.max(1);
         let mut out = Vec::with_capacity(inputs.len());
         for input in inputs {
             if cancel.is_cancelled() {
                 return Err(AiError::new(AiErrorCode::Unknown, "embedding cancelled"));
             }
-            let vector = self.embed_pooled(&input.text, max_chars, &cancel).await?;
+            let vector = self.embed_pooled(&input.text, max_tokens, &cancel).await?;
             out.push(EmbeddingVector {
                 id: input.id,
                 vector,
@@ -172,22 +177,35 @@ impl Embedder for AppleEmbedderBackend {
     }
 }
 
-/// Splits `text` into char-boundary chunks of at most `max_chars`, capping the
-/// total characters consumed at `total_cap`. Returns no chunks for empty input.
-fn chunk_chars(text: &str, max_chars: usize, total_cap: usize) -> Vec<String> {
-    let max_chars = max_chars.max(1);
+/// Splits `text` into char-boundary chunks whose *estimated* token count
+/// stays within `max_tokens`, capping the total characters consumed at
+/// `total_cap`. Returns no chunks for empty input.
+///
+/// The model's `max_sequence_length` is a token cap with silent truncation
+/// past it, so chunking on raw character counts would let a Latin-heavy chunk
+/// carry ~4x the cap in tokens and lose its tail inside the model — breaking
+/// the "never silently drop the tail" contract pooling exists for. The
+/// per-char weight starts from the dispatch guard's [`char_token_quarters`]
+/// (CJK / wide = 1 token, the rest = ¼ token) but floors the non-wide weight
+/// at ½ token: the ¼-token figure is tuned to Apple FM's billing of prose,
+/// while the embedding tokenizer splits code, identifiers, and high-entropy
+/// strings more finely — the floor keeps such chunks under the cap instead of
+/// trusting the prose ratio.
+fn chunk_estimated_tokens(text: &str, max_tokens: usize, total_cap: usize) -> Vec<String> {
+    let max_quarters = max_tokens.max(1).saturating_mul(4);
     let mut chunks = Vec::new();
     let mut current = String::new();
-    let mut current_len = 0_usize;
+    let mut current_quarters = 0_usize;
     // `take(total_cap)` bounds the total characters consumed without a manual
-    // monotonic counter; `current_len` only tracks the in-progress chunk.
+    // monotonic counter; `current_quarters` only tracks the in-progress chunk.
     for ch in text.chars().take(total_cap) {
-        current.push(ch);
-        current_len += 1;
-        if current_len >= max_chars {
+        let quarters = char_token_quarters(ch).max(2);
+        if !current.is_empty() && current_quarters + quarters > max_quarters {
             chunks.push(std::mem::take(&mut current));
-            current_len = 0;
+            current_quarters = 0;
         }
+        current.push(ch);
+        current_quarters += quarters;
     }
     if !current.is_empty() {
         chunks.push(current);
@@ -232,22 +250,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunk_chars_splits_on_char_boundaries() {
-        // Multibyte input must split on char boundaries, not bytes.
-        let chunks = chunk_chars("あいうえお", 2, 100);
+    fn chunk_splits_cjk_at_one_token_per_char() {
+        // CJK chars are estimated at one token each, so a 2-token cap takes
+        // two chars per chunk — split on char boundaries, never bytes.
+        let chunks = chunk_estimated_tokens("あいうえお", 2, 100);
         assert_eq!(chunks, vec!["あい", "うえ", "お"]);
     }
 
     #[test]
-    fn chunk_chars_caps_total() {
-        let chunks = chunk_chars("abcdefghij", 3, 5);
-        // Only the first 5 chars are consumed: "abc" + "de".
-        assert_eq!(chunks, vec!["abc", "de"]);
+    fn chunk_packs_latin_at_half_a_token_per_char() {
+        // Latin chars are floored at ½ token (the embedding tokenizer splits
+        // code / high-entropy text more finely than prose), so a 1-token cap
+        // fits two of them per chunk — raw-char chunking would cut at one.
+        let chunks = chunk_estimated_tokens("abcdefghij", 1, 100);
+        assert_eq!(chunks, vec!["ab", "cd", "ef", "gh", "ij"]);
     }
 
     #[test]
-    fn chunk_chars_empty_input_yields_no_chunks() {
-        assert!(chunk_chars("", 10, 100).is_empty());
+    fn chunk_never_exceeds_the_estimated_token_cap() {
+        // Mixed input: each chunk's own estimate must stay within the cap.
+        let text = "abcあいdefうえghお";
+        for chunk in chunk_estimated_tokens(text, 2, 100) {
+            assert!(
+                nagori_core::estimate_tokens(&chunk) <= 2,
+                "chunk {chunk:?} exceeds the token cap"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_caps_total_chars() {
+        let chunks = chunk_estimated_tokens("abcdefghij", 1, 5);
+        // Only the first 5 chars are consumed: "ab" + "cd" + "e".
+        assert_eq!(chunks, vec!["ab", "cd", "e"]);
+    }
+
+    #[test]
+    fn chunk_empty_input_yields_no_chunks() {
+        assert!(chunk_estimated_tokens("", 10, 100).is_empty());
     }
 
     #[test]

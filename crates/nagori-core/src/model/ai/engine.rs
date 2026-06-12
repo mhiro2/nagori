@@ -395,14 +395,20 @@ pub enum SemanticIndexAvailability {
 /// the guard errs on the side of rejecting borderline input.
 #[must_use]
 pub fn estimate_tokens(input: &str) -> usize {
-    let mut weighted = 0usize;
-    for ch in input.chars() {
-        // Scale by 4 so a non-CJK character contributes 1 (≈ 0.25 token) and a
-        // CJK / wide character contributes 4 (= 1 token); divide at the end.
-        weighted += if is_cjk_or_wide(ch) { 4 } else { 1 };
-    }
+    let weighted: usize = input.chars().map(char_token_quarters).sum();
     // Round up so any non-empty input is at least one token.
     weighted.div_ceil(4)
+}
+
+/// Per-character weight, in quarter-tokens, backing [`estimate_tokens`].
+///
+/// A CJK / wide scalar counts as one full token (4) and anything else as a
+/// quarter-token (1). Exposed so chunkers (e.g. the embedding backend, whose
+/// model cap is in tokens) can split text on the same conservative estimate
+/// the dispatch guard uses, instead of re-deriving their own heuristic.
+#[must_use]
+pub const fn char_token_quarters(ch: char) -> usize {
+    if is_cjk_or_wide(ch) { 4 } else { 1 }
 }
 
 /// Whether a scalar belongs to a script Apple bills at ~1 token per character.
