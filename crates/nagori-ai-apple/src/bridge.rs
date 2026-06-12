@@ -37,6 +37,9 @@ unsafe extern "C" {
     fn nagori_apple_generate_c(
         instructions_ptr: *const c_char,
         prompt_ptr: *const c_char,
+        max_output_tokens: i64,
+        temperature: f64,
+        timeout_ms: u64,
         ctx: *mut c_void,
         is_cancelled: extern "C" fn(*mut c_void) -> u8,
         on_snapshot: extern "C" fn(*mut c_void, *const u8, usize),
@@ -306,12 +309,56 @@ fn generate_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> 
 /// Drains a [`GenerateCtx`]'s receiver into the engine's [`AiEventStream`]. The
 /// stream ends after exactly one terminal item (`Ok(Done)` / `Ok(Cancelled)` /
 /// `Err`).
-fn generate_event_stream(rx: mpsc::UnboundedReceiver<Result<AiEvent, AiError>>) -> AiEventStream {
-    futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
+///
+/// `stall_timeout` is the last line of defence: it sits *behind* the Swift
+/// watchdog, so it only fires when the Swift side wedged so hard that its own
+/// timeout never produced `onDone` (a framework that ignores task
+/// cancellation). Without it, a consumer that drives this stream directly —
+/// the CLI's in-process `nagori ai` path has no daemon `guard_event_stream`
+/// in front of it — would pend on `recv()` forever. On expiry the stream
+/// yields a terminal `Timeout` error and drops the receiver; a late
+/// `generate_on_done` still reclaims its box, its send just lands nowhere.
+fn generate_event_stream(
+    rx: mpsc::UnboundedReceiver<Result<AiEvent, AiError>>,
+    stall_timeout: std::time::Duration,
+) -> AiEventStream {
+    futures::stream::unfold(Some(rx), move |state| async move {
+        let mut rx = state?;
+        match tokio::time::timeout(stall_timeout, rx.recv()).await {
+            Ok(item) => item.map(|item| (item, Some(rx))),
+            Err(_) => Some((
+                Err(AiError::new(
+                    AiErrorCode::Timeout,
+                    "the on-device model stopped responding",
+                )),
+                None,
+            )),
+        }
     })
     .boxed()
 }
+
+/// Generation knobs forwarded across the FFI to `GenerationOptions` on the
+/// Swift side. `None` leaves the corresponding knob at the framework default.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GenerateOptions {
+    pub max_output_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    /// The consumer-side request deadline (`AiRequestOptions::timeout_ms`,
+    /// already clamped by the daemon's `EffectiveAiPolicy`). The Swift
+    /// watchdog is derived from it (deadline + slack) so it stays a
+    /// wedge-protection backstop that fires *after* the consumer deadline,
+    /// instead of a fixed 20 s that silently cancelled any longer generation
+    /// the user's `request_timeout_ms` allowed.
+    pub timeout_ms: Option<u64>,
+}
+
+/// Watchdog used when the caller supplies no deadline, matching the translate
+/// / embed timeouts.
+const DEFAULT_GENERATE_TIMEOUT_MS: u64 = 20_000;
+/// Slack added on top of the consumer deadline so the Swift watchdog only
+/// fires once the consumer has certainly given up.
+const GENERATE_TIMEOUT_SLACK_MS: u64 = 5_000;
 
 /// Generates text from `input` under the system prompt `instructions` via the
 /// on-device language model. Serves every plain text-generation action
@@ -325,6 +372,7 @@ fn generate_event_stream(rx: mpsc::UnboundedReceiver<Result<AiEvent, AiError>>) 
 pub(crate) fn generate_stream(
     instructions: &str,
     input: &str,
+    options: GenerateOptions,
     cancel: CancellationToken,
 ) -> AiEventStream {
     let (tx, rx) = mpsc::unbounded_channel::<Result<AiEvent, AiError>>();
@@ -339,6 +387,23 @@ pub(crate) fn generate_stream(
     let c_instructions = CString::new(instructions.replace('\0', " ")).unwrap_or_default();
     let source = CString::new(input.replace('\0', " ")).unwrap_or_default();
 
+    // Swift watchdog: consumer deadline + slack, floored at the legacy 20 s
+    // and capped at the settings ceiling (`MAX_AI_REQUEST_TIMEOUT_MS`) plus
+    // slack so a corrupt deadline can't park a wedged task for hours.
+    let swift_timeout_ms = options.timeout_ms.map_or(DEFAULT_GENERATE_TIMEOUT_MS, |t| {
+        t.saturating_add(GENERATE_TIMEOUT_SLACK_MS).clamp(
+            DEFAULT_GENERATE_TIMEOUT_MS,
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + GENERATE_TIMEOUT_SLACK_MS,
+        )
+    });
+    // Sentinels across the C ABI: <= 0 means "framework default".
+    let max_output_tokens = options
+        .max_output_tokens
+        .map_or(0, |tokens| i64::from(tokens.max(1)));
+    let temperature = options
+        .temperature
+        .map_or(-1.0, |temp| f64::from(temp.max(0.0)));
+
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
     // the call (reclaimed in `generate_on_done`), and the callbacks are plain
     // `fn` items that read the cancel token through the ctx atomically.
@@ -346,6 +411,9 @@ pub(crate) fn generate_stream(
         nagori_apple_generate_c(
             c_instructions.as_ptr(),
             source.as_ptr(),
+            max_output_tokens,
+            temperature,
+            swift_timeout_ms,
             ctx_ptr,
             generate_is_cancelled,
             generate_on_snapshot,
@@ -353,7 +421,12 @@ pub(crate) fn generate_stream(
         );
     }
 
-    generate_event_stream(rx)
+    // The stream-side stall guard sits behind the Swift watchdog so it can
+    // only fire when Swift never reported back at all.
+    generate_event_stream(
+        rx,
+        std::time::Duration::from_millis(swift_timeout_ms.saturating_add(10_000)),
+    )
 }
 
 /// Opaque context handed to Swift for one translation. It owns the oneshot

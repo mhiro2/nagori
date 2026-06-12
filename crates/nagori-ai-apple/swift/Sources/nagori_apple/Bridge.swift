@@ -94,8 +94,9 @@ public func nagoriAppleStreamSnapshotsC(
     }
 }
 
-/// Hard cap on how long one text generation may run before the bridge cancels
-/// it. `LanguageModelSession.streamResponse` can wedge — outside an app bundle,
+/// Fallback watchdog for a text generation whose caller supplied no deadline
+/// (`timeoutMs == 0`); a caller-supplied deadline replaces it.
+/// `LanguageModelSession.streamResponse` can wedge — outside an app bundle,
 /// or if the framework stops yielding snapshots — and because the Rust-side
 /// cancel flag is only polled *between* snapshots, a stream that never yields
 /// one would never observe it and the work task would never fire `onDone`,
@@ -103,8 +104,9 @@ public func nagoriAppleStreamSnapshotsC(
 /// timeout task cancels the work `Task`; for any framework that honours Swift
 /// task cancellation the pending `await` then throws, the work task unwinds,
 /// fires `onDone`, and the Rust box is reclaimed. Kept at the same 20s as the
-/// translate / embed timeouts; the daemon's consumer-side request timeout is
-/// the deadline that normally fires first.
+/// translate / embed timeouts; the deadline the Rust side passes in is derived
+/// from the request's consumer-side timeout plus slack, so the watchdog only
+/// fires after the consumer has certainly given up.
 ///
 /// Crucially the timeout never calls `onDone` itself — the work task is the
 /// *sole* caller. Unlike the one-shot translate / embed paths (which touch
@@ -139,10 +141,18 @@ private let generateTimeoutNanoseconds: UInt64 = 20_000_000_000
 /// so a pending `await` throws and the work task unwinds to its single `onDone`
 /// call. See `generateTimeoutNanoseconds` for why the timeout must not call
 /// `onDone` directly.
+/// `maxOutputTokens` / `temperature` carry the request's generation knobs
+/// (sentinels: `maxOutputTokens <= 0` and `temperature < 0` mean "framework
+/// default"). `timeoutMs` is the watchdog deadline computed on the Rust side
+/// (consumer deadline + slack); `0` falls back to
+/// `generateTimeoutNanoseconds`.
 @_cdecl("nagori_apple_generate_c")
 public func nagoriAppleGenerateC(
     instructionsPtr: UnsafePointer<CChar>,
     promptPtr: UnsafePointer<CChar>,
+    maxOutputTokens: Int64,
+    temperature: Double,
+    timeoutMs: UInt64,
     ctx: UnsafeMutableRawPointer?,
     isCancelled: @convention(c) (UnsafeMutableRawPointer?) -> UInt8,
     onSnapshot: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>, Int) -> Void,
@@ -150,6 +160,16 @@ public func nagoriAppleGenerateC(
 ) {
     let instructions = String(cString: instructionsPtr)
     let input = String(cString: promptPtr)
+    let generationOptions = GenerationOptions(
+        temperature: temperature >= 0 ? temperature : nil,
+        maximumResponseTokens: maxOutputTokens > 0 ? Int(maxOutputTokens) : nil
+    )
+    // The Rust side already clamps the deadline to the settings ceiling; the
+    // hour cap here only guards against a corrupt value crossing the ABI.
+    let timeoutNanoseconds =
+        timeoutMs == 0
+        ? generateTimeoutNanoseconds
+        : min(timeoutMs, 3_600_000) * 1_000_000
 
     let ctxCopy = ctx
     let isCancelledCopy = isCancelled
@@ -160,7 +180,7 @@ public func nagoriAppleGenerateC(
         let session = LanguageModelSession(instructions: instructions)
         var doneCode: Int32 = 0
         do {
-            let stream = session.streamResponse(to: input)
+            let stream = session.streamResponse(to: input, options: generationOptions)
             for try await snapshot in stream {
                 if isCancelledCopy(ctxCopy) != 0 {
                     doneCode = 1
@@ -187,7 +207,7 @@ public func nagoriAppleGenerateC(
     }
 
     Task.detached(priority: .utility) {
-        try? await Task.sleep(nanoseconds: generateTimeoutNanoseconds)
+        try? await Task.sleep(nanoseconds: timeoutNanoseconds)
         // Break a wedged stream out of its pending `await`; the work task then
         // unwinds and fires `onDone` itself. The timeout deliberately does not
         // call `onDone` — see `generateTimeoutNanoseconds`.

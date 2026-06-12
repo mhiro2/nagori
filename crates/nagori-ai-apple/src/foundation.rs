@@ -89,7 +89,21 @@ impl TextGenerator for AppleFoundationBackend {
             .as_deref()
             .and_then(resolve_language_name);
         let instructions = instructions_for(req.action, output_language);
-        Ok(bridge::generate_stream(&instructions, &req.input, cancel))
+        // Forward the generation knobs the daemon stamped onto the request
+        // (`EffectiveAiPolicy`): without this the output-token cap and the
+        // deadline were never enforced on the on-device path — the only
+        // effective bound was the bridge's fixed 20 s watchdog.
+        let options = bridge::GenerateOptions {
+            max_output_tokens: req.options.max_output_tokens,
+            temperature: req.options.temperature,
+            timeout_ms: req.options.timeout_ms,
+        };
+        Ok(bridge::generate_stream(
+            &instructions,
+            &req.input,
+            options,
+            cancel,
+        ))
     }
 }
 

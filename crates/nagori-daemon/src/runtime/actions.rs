@@ -142,7 +142,7 @@ impl NagoriRuntime {
         effective.apply_to(&mut options);
 
         let request_id = RequestId::new();
-        let req = AiActionRequest {
+        let mut req = AiActionRequest {
             request_id,
             action,
             input,
@@ -177,6 +177,16 @@ impl NagoriRuntime {
         // Bind the permit to the registry handle so a normal removal *and* the
         // TTL reaper both release it, even if the stream is never polled out.
         self.ai_registry.attach_permit(request_id, permit);
+
+        // The permit wait drew down the shared budget, so restamp the
+        // request's timeout with what's actually left. Backend-side
+        // watchdogs (the Apple bridge derives its wedge-protection deadline
+        // from `timeout_ms`) then track this request's remaining budget
+        // instead of re-anchoring the full figure at generation start —
+        // without this, a long permit wait would let a wedged backend task
+        // outlive the consumer deadline by almost the whole budget.
+        req.options.timeout_ms =
+            Some(u64::try_from(remaining_until(deadline).as_millis()).unwrap_or(u64::MAX));
 
         // Bound `engine.start` by what's left of the budget so a model that
         // stalls during init / asset load can't pin the permit indefinitely.
