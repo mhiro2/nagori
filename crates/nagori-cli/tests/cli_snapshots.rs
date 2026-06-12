@@ -401,3 +401,218 @@ fn write_without_db_is_refused_with_hint_when_owner_has_no_endpoint() {
         "the failure should hint at the Settings toggle: {stderr}"
     );
 }
+
+#[test]
+fn add_then_get_json_shape_snapshot() {
+    // Pins the `--json get` payload shape: a downstream script reading
+    // `nagori get <id> --json` must keep seeing these fields. The id and
+    // timestamps are redacted so the snapshot stays deterministic.
+    let (_dir, db) = temp_db();
+    let add = nagori(&db)
+        .args(["--json", "add", "--text", "json get value"])
+        .output()
+        .expect("invoke add");
+    assert!(add.status.success(), "exit: {:?}", add.status);
+    let added: serde_json::Value =
+        serde_json::from_str(&stdout_string(&add)).expect("add --json emits one JSON document");
+    let id = added["id"].as_str().expect("add output carries the id");
+
+    let get = nagori(&db)
+        .args(["--json", "get", id])
+        .output()
+        .expect("invoke get");
+    assert!(get.status.success(), "exit: {:?}", get.status);
+    insta::assert_snapshot!(redact(&stdout_string(&get)), @r#"{
+  "created_at": "[ts]",
+  "id": "[id]",
+  "kind": "Text",
+  "last_used_at": null,
+  "pinned": false,
+  "preview": "json get value",
+  "sensitivity": "Public",
+  "text": "json get value",
+  "updated_at": "[ts]",
+  "use_count": 0
+}
+"#);
+}
+
+#[test]
+fn search_jsonl_emits_one_parseable_record_per_line() {
+    let (_dir, db) = temp_db();
+    let _ = nagori(&db)
+        .args(["add", "--text", "searchable jsonl payload"])
+        .output()
+        .expect("invoke add");
+
+    let search = nagori(&db)
+        .args(["--jsonl", "search", "searchable"])
+        .output()
+        .expect("invoke search");
+    assert!(search.status.success(), "exit: {:?}", search.status);
+    let stdout = stdout_string(&search);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "one hit → one JSONL line, got {stdout:?}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSONL record");
+    assert_eq!(
+        record["preview"],
+        serde_json::json!("searchable jsonl payload")
+    );
+    assert_eq!(record["kind"], serde_json::json!("Text"));
+    assert_eq!(record["pinned"], serde_json::json!(false));
+    assert!(record["score"].is_number(), "score must be numeric");
+    assert!(
+        record["rank_reasons"].is_array() || record["rank_reasons"].is_null(),
+        "rank_reasons shape drifted: {record}"
+    );
+}
+
+#[test]
+fn quick_action_json_shape_snapshot() {
+    // `quick` shares `print_ai_output` with `nagori ai --no-stream`; pinning
+    // the deterministic quick-action output also pins the AI output DTO
+    // shape (`text` / `created_entry` / `warnings`) without needing a model.
+    let (_dir, db) = temp_db();
+    let add = nagori(&db)
+        .args(["--json", "add", "--text", "{\"b\":2,\"a\":1}"])
+        .output()
+        .expect("invoke add");
+    assert!(add.status.success(), "exit: {:?}", add.status);
+    let added: serde_json::Value =
+        serde_json::from_str(&stdout_string(&add)).expect("add --json emits one JSON document");
+    let id = added["id"].as_str().expect("add output carries the id");
+
+    let quick = nagori(&db)
+        .args(["--json", "quick", "format-json", id])
+        .output()
+        .expect("invoke quick");
+    assert!(quick.status.success(), "exit: {:?}", quick.status);
+    insta::assert_snapshot!(redact(&stdout_string(&quick)), @r#"{
+  "text": "{\n  \"a\": 1,\n  \"b\": 2\n}",
+  "created_entry": null,
+  "warnings": []
+}
+"#);
+
+    let quick_jsonl = nagori(&db)
+        .args(["--jsonl", "quick", "format-json", id])
+        .output()
+        .expect("invoke quick");
+    assert!(quick_jsonl.status.success());
+    let stdout = stdout_string(&quick_jsonl);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "--jsonl must emit exactly one line, got {stdout:?}"
+    );
+}
+
+#[test]
+fn add_stdin_oversized_exits_with_invalid_input_code() {
+    // The CLI-side stdin bound: one byte over `MAX_ENTRY_SIZE_BYTES` must be
+    // rejected as invalid input (exit 2), not OOM the process or surface as
+    // an internal error.
+    let (_dir, db) = temp_db();
+    let oversized = "a".repeat(nagori_core::MAX_ENTRY_SIZE_BYTES + 1);
+    let mut cmd = assert_cmd::Command::cargo_bin("nagori").expect("nagori binary");
+    cmd.arg("--db")
+        .arg(&db)
+        .args(["add", "--stdin"])
+        .write_stdin(oversized);
+    let assert = cmd.assert().failure().code(2);
+    let output = assert.get_output();
+    let stderr = String::from_utf8(output.stderr.clone()).expect("stderr utf-8");
+    assert!(
+        stderr.contains("maximum entry size"),
+        "stderr should explain the size cap: {stderr:?}"
+    );
+}
+
+#[test]
+fn capabilities_jsonl_is_a_single_line_record() {
+    // docs/cli.md: `--jsonl` is one record per line. The capability matrix
+    // is a single record, so the output must be exactly one parseable line.
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["--jsonl", "capabilities"])
+        .output()
+        .expect("invoke capabilities");
+    assert!(output.status.success(), "exit: {:?}", output.status);
+    let stdout = stdout_string(&output);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "--jsonl capabilities must be one line, got {stdout:?}"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("valid JSON record");
+    assert!(record["platform"].is_string(), "shape drifted: {record}");
+}
+
+#[test]
+fn doctor_jsonl_is_a_single_line_record() {
+    // Regression: the doctor report used to be pretty-printed (multi-line)
+    // under `--jsonl`, and the local arm ignored `--json` entirely.
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["--jsonl", "doctor"])
+        .output()
+        .expect("invoke doctor");
+    assert!(output.status.success(), "exit: {:?}", output.status);
+    let stdout = stdout_string(&output);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "--jsonl doctor must be one line, got {stdout:?}"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("valid JSON record");
+    assert_eq!(
+        record["version"],
+        serde_json::json!(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(record["permissions"].is_array(), "shape drifted: {record}");
+    // The local arm must emit the same schema as a daemon-served report: a
+    // consumer deserializes either into `DoctorReport` without branching on
+    // which transport answered.
+    let _typed: nagori_ipc::DoctorReport =
+        serde_json::from_str(stdout.trim_end()).expect("local doctor JSON matches DoctorReport");
+}
+
+#[test]
+fn daemon_status_local_does_not_claim_ok() {
+    // Without `--ipc` / `--auto-ipc` the status command reads the local DB
+    // and never probes a daemon — so it must not print `ok`, which reads as
+    // "the daemon is healthy" even when nothing is running.
+    let (_dir, db) = temp_db();
+    let text = nagori(&db)
+        .args(["daemon", "status"])
+        .output()
+        .expect("invoke daemon status");
+    assert!(text.status.success(), "exit: {:?}", text.status);
+    let stdout = stdout_string(&text);
+    assert!(
+        stdout.starts_with("local (daemon not probed)\t"),
+        "local status must name its source, got {stdout:?}"
+    );
+
+    let jsonl = nagori(&db)
+        .args(["--jsonl", "daemon", "status"])
+        .output()
+        .expect("invoke daemon status");
+    assert!(jsonl.status.success());
+    let stdout = stdout_string(&jsonl);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "--jsonl daemon status must be one line, got {stdout:?}"
+    );
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("valid JSON record");
+    assert_eq!(record["source"], serde_json::json!("local"));
+    assert_eq!(record["daemon_probed"], serde_json::json!(false));
+    assert!(
+        record.get("ok").is_none(),
+        "the unprobed arm must not claim ok: {record}"
+    );
+}
