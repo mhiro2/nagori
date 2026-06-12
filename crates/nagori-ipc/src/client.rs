@@ -60,6 +60,19 @@ const ERROR_PIPE_BUSY: i32 = 231;
 #[cfg(windows)]
 const PIPE_BUSY_RETRY: Duration = Duration::from_millis(50);
 
+/// `ERROR_FILE_NOT_FOUND` (2): the daemon's accept loop has a window between
+/// a successful `connect()` and creating the next chained pipe instance
+/// during which *no* instance exists at the name, so `CreateFile` fails with
+/// this code rather than `ERROR_PIPE_BUSY`. It is also the steady-state error
+/// when no daemon is running at all, so it is only retried within the short
+/// budget below — long enough to ride out the instance-switchover window,
+/// short enough that a dead daemon still fails fast instead of burning the
+/// whole connect budget.
+#[cfg(windows)]
+const ERROR_FILE_NOT_FOUND: i32 = 2;
+#[cfg(windows)]
+const PIPE_NOT_FOUND_RETRY_BUDGET: Duration = Duration::from_millis(250);
+
 /// `SECURITY_IDENTIFICATION` impersonation level (`winbase.h`, `0x0001_0000`).
 ///
 /// Without an explicit `QoS` level, a process that squatted `\\.\pipe\nagori`
@@ -209,17 +222,22 @@ where
     serde_json::from_slice(&response).map_err(|err| AppError::Platform(err.to_string()))
 }
 
-/// Open a Windows named-pipe client, retrying briefly on `ERROR_PIPE_BUSY`.
-/// The server can only hold a single connected instance at a time per
-/// `NamedPipeServer` handle; if the daemon's accept loop is between
-/// `connect()` returning and re-creating the next instance, we transiently
-/// see `ERROR_PIPE_BUSY` and just retry within the caller's connect budget.
+/// Open a Windows named-pipe client, retrying briefly on the two transient
+/// connect failures the daemon's accept loop can legitimately produce:
+/// `ERROR_PIPE_BUSY` when every instance is mid-handshake, and
+/// `ERROR_FILE_NOT_FOUND` during the window between a successful server-side
+/// `connect()` and the creation of the next chained instance (when no
+/// instance exists at the name at all). `ERROR_PIPE_BUSY` retries within the
+/// caller's connect budget; `ERROR_FILE_NOT_FOUND` only within
+/// [`PIPE_NOT_FOUND_RETRY_BUDGET`] because it is also the steady-state
+/// "daemon not running" error and must keep failing fast in that case.
 #[cfg(windows)]
 async fn open_pipe_client(
     path: &str,
 ) -> std::result::Result<tokio::net::windows::named_pipe::NamedPipeClient, std::io::Error> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
+    let started = tokio::time::Instant::now();
     loop {
         match ClientOptions::new()
             .security_qos_flags(SECURITY_IDENTIFICATION)
@@ -227,6 +245,12 @@ async fn open_pipe_client(
         {
             Ok(client) => return Ok(client),
             Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(PIPE_BUSY_RETRY).await;
+            }
+            Err(err)
+                if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND)
+                    && started.elapsed() < PIPE_NOT_FOUND_RETRY_BUDGET =>
+            {
                 tokio::time::sleep(PIPE_BUSY_RETRY).await;
             }
             Err(err) => return Err(err),
