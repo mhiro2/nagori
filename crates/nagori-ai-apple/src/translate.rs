@@ -37,7 +37,18 @@ impl Translator for AppleTranslateBackend {
     }
 
     async fn pair_status(&self, source: Option<&str>, target: &str) -> BackendAvailability {
-        map_pair_status(bridge::translation_pair_status(source, target))
+        // The Swift probe parks its calling thread on a `DispatchSemaphore`
+        // for up to 3 s, so it runs on the blocking pool instead of wedging
+        // a tokio worker. A join failure maps to the probe's own "unknown"
+        // code rather than panicking an availability query.
+        let source = source.map(str::to_owned);
+        let target = target.to_owned();
+        let code = tokio::task::spawn_blocking(move || {
+            bridge::translation_pair_status(source.as_deref(), &target)
+        })
+        .await
+        .unwrap_or(3);
+        map_pair_status(code)
     }
 
     async fn translate(
