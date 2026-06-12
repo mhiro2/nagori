@@ -38,7 +38,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 parking_lot = "0.12"
 png = "0.18"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Only the daemon's GitHub update probe (one GET in `runtime/doctor.rs`) uses
+# this directly, so default features stay off (no http2/charset/proxy). The
+# version tracks the 0.13 line `tauri-plugin-updater` resolves to, so the
+# desktop binary compiles a single reqwest/hyper/rustls stack instead of two.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 # `hooks` enables `Connection::progress_handler`, which the search path uses to
 # abort a superseded query mid-execution (cooperative cancellation that an
 # after-the-fact `sqlite3_interrupt` would race).
