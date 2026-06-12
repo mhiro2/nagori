@@ -412,23 +412,28 @@ impl MacosClipboard {
                     // alive across `setData_forType` — AppKit copies the type
                     // string before returning. Static `NSPasteboardType*` constants
                     // are handed straight back to AppKit by reference.
-                    let pb = NSPasteboard::generalPasteboard();
-                    pb.clearContents();
-                    let data = NSData::with_bytes(&bytes);
-                    let accepted = match mime_owned.as_str() {
-                        "image/png" => pb.setData_forType(Some(&data), NSPasteboardTypePNG),
-                        "image/tiff" => pb.setData_forType(Some(&data), NSPasteboardTypeTIFF),
+                    //
+                    // Resolve the pasteboard type and build the NSData *before*
+                    // `clearContents` so an unsupported MIME (or a failed NSData
+                    // construction) leaves the user's clipboard intact instead of
+                    // blanking it and then erroring — the same "build and
+                    // validate before clearing" contract `publish_representations`
+                    // follows for the multi-rep path.
+                    let dynamic_ty: Retained<NSString>;
+                    let ty: &NSString = match mime_owned.as_str() {
+                        "image/png" => NSPasteboardTypePNG,
+                        "image/tiff" => NSPasteboardTypeTIFF,
                         "image/jpeg" => {
-                            let ty = NSString::from_str(UTI_JPEG);
-                            pb.setData_forType(Some(&data), &ty)
+                            dynamic_ty = NSString::from_str(UTI_JPEG);
+                            &dynamic_ty
                         }
                         "image/gif" => {
-                            let ty = NSString::from_str(UTI_GIF);
-                            pb.setData_forType(Some(&data), &ty)
+                            dynamic_ty = NSString::from_str(UTI_GIF);
+                            &dynamic_ty
                         }
                         "image/webp" => {
-                            let ty = NSString::from_str(UTI_WEBP);
-                            pb.setData_forType(Some(&data), &ty)
+                            dynamic_ty = NSString::from_str(UTI_WEBP);
+                            &dynamic_ty
                         }
                         other => {
                             return Err(AppError::Unsupported(format!(
@@ -436,7 +441,10 @@ impl MacosClipboard {
                             )));
                         }
                     };
-                    if !accepted {
+                    let data = NSData::with_bytes(&bytes);
+                    let pb = NSPasteboard::generalPasteboard();
+                    pb.clearContents();
+                    if !pb.setData_forType(Some(&data), ty) {
                         return Err(AppError::Platform(
                             "NSPasteboard::setData failed for image type".to_owned(),
                         ));
