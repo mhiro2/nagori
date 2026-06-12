@@ -81,6 +81,10 @@ pub enum IpcResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    /// Requested result count. The daemon clamps this to its internal read
+    /// ceiling (200) before any allocation or query work, so an absurd wire
+    /// value (`usize::MAX`) cannot drive an unbounded fetch — see
+    /// `MAX_RESULT_LIMIT` in `nagori-core`'s search service.
     pub limit: usize,
 }
 
@@ -97,6 +101,9 @@ pub struct GetEntryRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListRecentRequest {
+    /// Requested row count. Clamped storage-side to `MAX_READ_LIMIT` (200)
+    /// before the SQL `LIMIT` binds, so a wire value of `usize::MAX` cannot
+    /// trigger an unbounded scan or `Vec` allocation in the daemon.
     pub limit: usize,
     #[serde(default)]
     pub include_sensitive: bool,
