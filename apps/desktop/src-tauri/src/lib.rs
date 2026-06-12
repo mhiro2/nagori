@@ -713,6 +713,14 @@ fn spawn_tray_health_refresher(handle: &tauri::AppHandle) {
 /// `setupNeeded` gate so the window-surface and the tab-visibility decisions
 /// stay in sync. The daemon / hotkey registration is intentionally left
 /// running (§3.1); this only surfaces the window.
+///
+/// The onboarding markers live in `AppSettings`, whose watch channel starts
+/// at the compiled-in default until the coordinator's one-shot startup load
+/// publishes the persisted snapshot. Reading them synchronously from
+/// `setup()` would race that load and see "never set up" on every launch for
+/// a configured user, so the decision runs in a spawned task that awaits the
+/// settings-load gate — fail-closed (no window) on load failure or shutdown,
+/// like every other gated subscriber.
 fn surface_first_launch_setup(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         // No state means setup() bailed before `manage(state)` ran.
@@ -728,13 +736,23 @@ fn surface_first_launch_setup(handle: &tauri::AppHandle) {
     if !setup_needed {
         return;
     }
-    let onboarding = state.runtime.current_settings().onboarding;
-    if onboarding.completed_at.is_some() || onboarding.accessibility_first_granted_at.is_some() {
-        return;
-    }
-    if let Err(err) = commands::show_settings_window(handle) {
-        tracing::warn!(error = ?err, "first_launch_setup_window_failed");
-    }
+    let runtime = state.runtime.clone();
+    let mut settings_gate = state.settings_load_gate();
+    let mut shutdown = runtime.shutdown_handle();
+    let app = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if !state::settings_loaded_or_shutdown(&mut settings_gate, &mut shutdown).await {
+            return;
+        }
+        let onboarding = runtime.current_settings().onboarding;
+        if onboarding.completed_at.is_some() || onboarding.accessibility_first_granted_at.is_some()
+        {
+            return;
+        }
+        if let Err(err) = commands::show_settings_window(&app) {
+            tracing::warn!(error = ?err, "first_launch_setup_window_failed");
+        }
+    });
 }
 
 pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
