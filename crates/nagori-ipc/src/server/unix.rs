@@ -14,7 +14,9 @@ use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::accept::{acquire_permit_or_shutdown, drain_handlers};
+use super::accept::{
+    ACCEPT_RETRY_BACKOFF, acquire_permit_or_shutdown, drain_handlers, is_transient_accept_error,
+};
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
 use crate::AuthToken;
@@ -220,6 +222,21 @@ where
             accept = listener.accept() => {
                 let (stream, _) = match accept {
                     Ok(accepted) => accepted,
+                    // `EMFILE`/`ENFILE`, `ECONNABORTED`, … resolve on their
+                    // own; breaking here would tear down the whole IPC
+                    // surface (and pay a supervisor respawn + re-bind) over
+                    // a single hiccup. Back off briefly — raced against
+                    // shutdown so a draining daemon never waits it out —
+                    // and keep accepting.
+                    Err(err) if is_transient_accept_error(&err) => {
+                        tracing::warn!(error = %err, "ipc_accept_transient_error");
+                        tokio::select! {
+                            biased;
+                            () = &mut shutdown => break Ok(()),
+                            () = tokio::time::sleep(ACCEPT_RETRY_BACKOFF) => {}
+                        }
+                        continue;
+                    }
                     Err(err) => break Err(AppError::Platform(err.to_string())),
                 };
                 // Bump the liveness timestamp before we touch the

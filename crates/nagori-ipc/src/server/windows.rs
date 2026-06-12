@@ -12,7 +12,9 @@ use nagori_core::{AppError, Result};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::accept::{acquire_permit_or_shutdown, drain_handlers};
+use super::accept::{
+    ACCEPT_RETRY_BACKOFF, acquire_permit_or_shutdown, drain_handlers, is_transient_accept_error,
+};
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
 use crate::AuthToken;
@@ -148,6 +150,20 @@ where
             () = &mut shutdown => break Ok(()),
             result = current.connect() => {
                 if let Err(err) = result {
+                    // Same rationale as the Unix accept loop: resource
+                    // exhaustion and clients that vanish mid-connect are
+                    // transient — retry the connect on this instance after
+                    // a short backoff (raced against shutdown) instead of
+                    // tearing down the pipe series over one hiccup.
+                    if is_transient_accept_error(&err) {
+                        tracing::warn!(error = %err, "ipc_pipe_connect_transient_error");
+                        tokio::select! {
+                            biased;
+                            () = &mut shutdown => break Ok(()),
+                            () = tokio::time::sleep(ACCEPT_RETRY_BACKOFF) => {}
+                        }
+                        continue;
+                    }
                     break Err(AppError::Platform(err.to_string()));
                 }
                 // Same liveness-bump rationale as the Unix path: record

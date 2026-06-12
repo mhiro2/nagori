@@ -20,6 +20,57 @@ use tracing::warn;
 
 use super::health::{IpcServerHealth, observe_handler_outcome};
 
+/// Backoff before the accept loop retries after a transient accept error.
+///
+/// Long enough that an fd-exhaustion storm cannot spin the loop hot, short
+/// enough that a recovered listener resumes accepting promptly. The sleep is
+/// raced against shutdown at the call sites so a draining daemon never waits
+/// it out.
+pub(super) const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Whether an accept-stage I/O error is transient — i.e. expected to resolve
+/// on its own without rebinding the listener.
+///
+/// `accept(2)` routinely surfaces fd exhaustion (`EMFILE`/`ENFILE`),
+/// connections aborted by the peer before we accepted them
+/// (`ECONNABORTED`), interrupted syscalls, and kernel memory pressure.
+/// None of these say anything about the listener itself; breaking the
+/// accept loop on them would take the whole IPC surface down — and pay a
+/// supervisor respawn plus re-bind — over a single hiccup. Errors that *do*
+/// indicate a broken listener (`EBADF`, `EINVAL`, …) stay fatal so the
+/// supervisor can rebuild it.
+pub(super) fn is_transient_accept_error(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        err.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+    // Resource-exhaustion codes have no stable `ErrorKind` mapping, so
+    // match the raw OS codes per platform.
+    #[cfg(unix)]
+    if let Some(code) = err.raw_os_error() {
+        return matches!(
+            code,
+            libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM | libc::EPROTO
+        );
+    }
+    #[cfg(windows)]
+    if let Some(code) = err.raw_os_error() {
+        // ERROR_TOO_MANY_OPEN_FILES (4), ERROR_NOT_ENOUGH_MEMORY (8),
+        // ERROR_OUTOFMEMORY (14), ERROR_NO_DATA (232: the client connected
+        // and disconnected before the server-side connect observed it),
+        // ERROR_NO_SYSTEM_RESOURCES (1450).
+        return matches!(code, 4 | 8 | 14 | 232 | 1450);
+    }
+    false
+}
+
 /// Race handler-permit acquisition against shutdown.
 ///
 /// Without this race, a saturated handler pool would pin the accept loop on
@@ -81,6 +132,45 @@ pub(super) async fn drain_handlers(
         tasks.abort_all();
         while let Some(result) = tasks.join_next().await {
             observe_handler_outcome(server_health, result);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_exhaustion_and_aborted_connections_are_transient() {
+        for code in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ECONNABORTED,
+            libc::EINTR,
+            libc::ENOBUFS,
+            libc::ENOMEM,
+        ] {
+            let err = std::io::Error::from_raw_os_error(code);
+            assert!(
+                is_transient_accept_error(&err),
+                "code {code} ({err}) must be retried, not kill the accept loop",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_listener_errors_stay_fatal() {
+        // A closed/invalid listener fd means retrying can never succeed —
+        // the loop must exit so the supervisor rebinds.
+        for code in [libc::EBADF, libc::EINVAL, libc::ENOTSOCK] {
+            let err = std::io::Error::from_raw_os_error(code);
+            assert!(
+                !is_transient_accept_error(&err),
+                "code {code} ({err}) must break the accept loop",
+            );
         }
     }
 }
