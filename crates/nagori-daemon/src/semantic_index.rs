@@ -274,7 +274,7 @@ impl NagoriRuntime {
             let _ = self.purge_incompatible_index_version().await;
             let settings = settings_rx.borrow().clone();
             if settings.ai.semantic_index_enabled {
-                self.semantic_index_pass(embedder.as_ref(), &settings, &cancel)
+                self.semantic_index_pass(embedder.as_ref(), &settings, &settings_rx, &cancel)
                     .await;
             } else {
                 self.semantic.set_state(SemanticIndexState::Disabled);
@@ -299,6 +299,7 @@ impl NagoriRuntime {
         &self,
         embedder: &dyn Embedder,
         settings: &AppSettings,
+        settings_rx: &tokio::sync::watch::Receiver<AppSettings>,
         cancel: &CancellationToken,
     ) {
         let ac_power_only = settings.ai.semantic_index_ac_power_only;
@@ -334,6 +335,20 @@ impl NagoriRuntime {
         loop {
             if cancel.is_cancelled() || !self.semantic.power_allows(ac_power_only) {
                 self.semantic.set_state(SemanticIndexState::Paused);
+                return;
+            }
+            // A settings change observed mid-backfill must take effect
+            // promptly, not after this pass (a multi-hour backfill on a large
+            // history) drains. `semantic_index_enabled` toggling OFF is a
+            // privacy operation, and an edited `regex_denylist` changes what
+            // the per-pass classifier scrubs before content reaches the
+            // model. Abort to the outer loop, which re-reads the fresh
+            // settings and resumes, disables, or rebuilds the classifier as
+            // needed; its `settings_rx.changed()` then clears the flag so the
+            // next pass runs to completion. `has_changed` errors only once
+            // every sender is dropped (shutdown) — treat that as a reason to
+            // stop too.
+            if settings_rx.has_changed().unwrap_or(true) {
                 return;
             }
             let pending = match self.store.semantic_pending(EMBED_BATCH).await {
