@@ -25,6 +25,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (101, ADD_NGRAM_INDEX_VERSION),
     (102, ADD_SETTINGS_REVISION),
     (103, DROP_REDUNDANT_NGRAM_GRAM_INDEX),
+    (104, SCOPE_FTS_UPDATE_TRIGGER),
 ];
 
 /// Highest schema version supported by this binary. A DB whose
@@ -351,8 +352,14 @@ BEGIN
     VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
 END;
 
+-- Scoped to the FTS-backed columns with `OF` so a metadata-only UPDATE
+-- (e.g. `rebuild_stale_ngrams` stamping `ngram_index_version`) does not
+-- fire a full delete+insert over the FTS index. A bare `AFTER UPDATE`
+-- would rebuild the FTS row on every version stamp, so the post-upgrade
+-- bulk ngram rebuild (migration 101 zeroes every row) would pay a second
+-- full-index rebuild and hold the writer lock longer.
 CREATE TRIGGER IF NOT EXISTS search_documents_au_fts
-AFTER UPDATE ON search_documents
+AFTER UPDATE OF title, preview, normalized_text ON search_documents
 BEGIN
     INSERT INTO search_fts(search_fts, rowid, title, preview, normalized_text)
     VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
@@ -473,4 +480,25 @@ ALTER TABLE settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
 /// it, so the `IF EXISTS` makes this a no-op on fresh installs.
 const DROP_REDUNDANT_NGRAM_GRAM_INDEX: &str = r"
 DROP INDEX IF EXISTS idx_ngrams_gram_entry;
+";
+
+/// Recreate `search_documents_au_fts` scoped to the FTS columns with `OF`.
+/// The original trigger fired on *any* UPDATE, so a metadata-only stamp
+/// (`rebuild_stale_ngrams` writing `ngram_index_version`) rebuilt the FTS
+/// row needlessly — and the post-upgrade bulk ngram rebuild that follows
+/// migration 101 touches every row, so each stamp paid a full FTS
+/// delete+insert and held the writer lock longer. The consolidated v100
+/// schema now creates the scoped trigger directly; this migration brings
+/// pre-release databases (already at `user_version = 100`) onto the same
+/// shape. `DROP` + `CREATE` keeps it idempotent across either prior shape.
+const SCOPE_FTS_UPDATE_TRIGGER: &str = r"
+DROP TRIGGER IF EXISTS search_documents_au_fts;
+CREATE TRIGGER search_documents_au_fts
+AFTER UPDATE OF title, preview, normalized_text ON search_documents
+BEGIN
+    INSERT INTO search_fts(search_fts, rowid, title, preview, normalized_text)
+    VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
+    INSERT INTO search_fts(rowid, title, preview, normalized_text)
+    VALUES (NEW.doc_id, NEW.title, NEW.preview, NEW.normalized_text);
+END;
 ";

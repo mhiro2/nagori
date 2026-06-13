@@ -170,6 +170,62 @@ fn redundant_ngram_gram_index_is_absent_and_dropped_on_upgrade() {
     assert_eq!(version, SCHEMA_VERSION);
 }
 
+/// The FTS update trigger must be scoped to the content columns with `OF`
+/// so a metadata-only stamp (`rebuild_stale_ngrams` writing
+/// `ngram_index_version`) does not rebuild the FTS row. A fresh install must
+/// create the scoped trigger, and a database left with the old bare
+/// `AFTER UPDATE` trigger (pre-104) must be recreated on upgrade.
+#[test]
+fn fts_update_trigger_is_scoped_and_recreated_on_upgrade() {
+    let trigger_sql = |conn: &Connection| -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'search_documents_au_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    // Fresh install: the consolidated schema creates the scoped trigger.
+    let mut conn = Connection::open_in_memory().unwrap();
+    run_migrations(&mut conn).unwrap();
+    assert!(
+        trigger_sql(&conn).contains("UPDATE OF title, preview, normalized_text"),
+        "a fresh database must scope search_documents_au_fts with OF"
+    );
+
+    // Upgrade: simulate a database the pre-104 schema left at version 103
+    // with the unscoped trigger, then re-run migrations and verify the
+    // scoped trigger replaced it.
+    conn.execute_batch(
+        "DROP TRIGGER search_documents_au_fts;
+         CREATE TRIGGER search_documents_au_fts
+         AFTER UPDATE ON search_documents
+         BEGIN
+             INSERT INTO search_fts(search_fts, rowid, title, preview, normalized_text)
+             VALUES ('delete', OLD.doc_id, OLD.title, OLD.preview, OLD.normalized_text);
+             INSERT INTO search_fts(rowid, title, preview, normalized_text)
+             VALUES (NEW.doc_id, NEW.title, NEW.preview, NEW.normalized_text);
+         END;
+         PRAGMA user_version = 103;",
+    )
+    .unwrap();
+    assert!(
+        !trigger_sql(&conn).contains("UPDATE OF"),
+        "test setup must install the unscoped trigger"
+    );
+    run_migrations(&mut conn).unwrap();
+    assert!(
+        trigger_sql(&conn).contains("UPDATE OF title, preview, normalized_text"),
+        "migration 104 must recreate the scoped trigger on upgraded databases"
+    );
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+}
+
 #[test]
 fn fresh_db_has_consolidated_shape() {
     // Fresh installs apply the single consolidated migration. Probe
