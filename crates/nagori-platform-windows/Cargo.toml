@@ -9,7 +9,10 @@ rust-version.workspace = true
 [dependencies]
 arboard.workspace = true
 async-trait.workspace = true
-image.workspace = true
+# `bmp` decodes the headerless `CF_DIBV5` clipboard payload off the read
+# timeout — the same `image`-crate decoder arboard uses internally. The
+# workspace default features omit it.
+image = { workspace = true, features = ["bmp"] }
 nagori-core = { path = "../nagori-core" }
 nagori-platform = { path = "../nagori-platform" }
 time.workspace = true

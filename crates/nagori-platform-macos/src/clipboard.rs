@@ -99,42 +99,46 @@ impl ClipboardReader for MacosClipboard {
         // tokio worker thread (the daemon only has a handful of workers,
         // and a stuck `current_snapshot` previously starved IPC handlers).
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
-            // Hold the arboard mutex across `get_text` *and* the AppKit
-            // extras read so a concurrent `write_image_bytes` cannot slip
-            // its `clearContents`/`setData` pair between the two and stitch
-            // a torn snapshot (e.g. old text paired with new image, or an
-            // empty pasteboard observed mid-write).
-            let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-            let plain = match guard.get_text() {
-                Ok(text) => Some(text),
-                Err(arboard::Error::ContentNotAvailable) => None,
-                Err(err) => return Err(platform_err(&err)),
-            };
+        let snapshot =
+            clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
+                // Hold the arboard mutex across `get_text` *and* the AppKit
+                // extras read so a concurrent `write_image_bytes` cannot slip
+                // its `clearContents`/`setData` pair between the two and stitch
+                // a torn snapshot (e.g. old text paired with new image, or an
+                // empty pasteboard observed mid-write).
+                let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+                let plain = match guard.get_text() {
+                    Ok(text) => Some(text),
+                    Err(arboard::Error::ContentNotAvailable) => None,
+                    Err(err) => return Err(platform_err(&err)),
+                };
 
-            let mut representations = Vec::new();
+                let mut representations = Vec::new();
 
-            #[cfg(target_os = "macos")]
-            let _ = collect_macos_extras(&mut representations, None);
+                #[cfg(target_os = "macos")]
+                let _ = collect_macos_extras(&mut representations, None);
 
-            if let Some(text) = plain {
-                representations.push(ClipboardRepresentation {
-                    mime_type: "text/plain".to_owned(),
-                    data: ClipboardData::Text(text),
-                });
-            }
+                if let Some(text) = plain {
+                    representations.push(ClipboardRepresentation {
+                        mime_type: "text/plain".to_owned(),
+                        data: ClipboardData::Text(text),
+                    });
+                }
 
-            let snapshot = ClipboardSnapshot {
-                sequence: pasteboard_sequence(),
-                captured_at: OffsetDateTime::now_utc(),
-                source: None,
-                representations,
-            };
-            drop(guard);
-            Ok(snapshot)
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+                let snapshot = ClipboardSnapshot {
+                    sequence: pasteboard_sequence(),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations,
+                };
+                drop(guard);
+                Ok(snapshot)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
+        // Normalise any captured TIFF to PNG off the read timeout — the raw
+        // bytes are already captured (and torn-checked) under the lock above.
+        transcode_snapshot(snapshot).await
     }
 
     async fn current_sequence(&self) -> Result<ClipboardSequence> {
@@ -149,11 +153,15 @@ impl ClipboardReader for MacosClipboard {
 
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("current_snapshot_with_max", move || {
+        let captured = clipboard_blocking("current_snapshot_with_max", move || {
             capture_snapshot_with_max(&clipboard, max_bytes)
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+        .map_err(|err| AppError::Platform(err.to_string()))??;
+        // Normalise any captured TIFF to PNG off the read timeout, then
+        // re-apply the size budget to the transcoded image (see
+        // `finalize_captured`).
+        finalize_captured(captured, max_bytes).await
     }
 }
 
@@ -917,9 +925,10 @@ fn collect_macos_extras(
             }
 
             // Prefer PNG when both PNG and TIFF are present. macOS screenshot
-            // shortcuts commonly publish TIFF only; normalize that to PNG
-            // before the entry-size gate so the uncompressed pasteboard form
-            // does not make ordinary screenshots look oversized. Both
+            // shortcuts commonly publish TIFF only; that gets normalised to
+            // PNG after this timed read (see `transcode_tiff_representations`)
+            // so the uncompressed pasteboard form does not make ordinary
+            // screenshots look oversized against the entry-size gate. Both
             // branches probe the constant-time `length()` against
             // `MAX_IMAGE_REP_BYTES` before `ns_data_to_vec` copies the
             // payload — see the constant's doc for why TIFF has no other
@@ -935,15 +944,16 @@ fn collect_macos_extras(
             } else if let Some(data) = pb.dataForType(NSPasteboardTypeTIFF)
                 && image_rep_within_ceiling("image/tiff", &data)
                 && let Some(bytes) = ns_data_to_vec(&data)
-                && let Some((mime_type, bytes)) = prepare_tiff_capture(bytes)
             {
-                if let Some(limit) = max_file_url_bytes
-                    && bytes.len() > limit
-                {
-                    return Some(bytes.len());
-                }
+                // Emit the *raw* TIFF here. The CPU-bound TIFF->PNG
+                // normalisation runs outside the clipboard-read timeout (see
+                // `transcode_tiff_representations`); only the raw-byte copy —
+                // already bounded by `image_rep_within_ceiling` — stays under
+                // the pasteboard lock. The transcoded image's size budget is
+                // re-applied off the timed path (`finalize_captured`), so the
+                // `max_file_url_bytes` oversize check moves there too.
                 out.push(ClipboardRepresentation {
-                    mime_type,
+                    mime_type: "image/tiff".to_owned(),
                     data: ClipboardData::Bytes(bytes),
                 });
             }
@@ -1029,6 +1039,108 @@ fn prepare_tiff_capture(bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
         );
         Some(("image/tiff".to_owned(), bytes))
     }
+}
+
+/// Replace any captured `image/tiff` representation with its PNG
+/// normalisation, dropping it when the TIFF is undecodable / over the pixel
+/// cap (`prepare_tiff_capture` returns `None`).
+///
+/// Runs **outside** [`CLIPBOARD_OP_TIMEOUT`]: the TIFF decode + PNG
+/// re-encode is CPU-bound (bounded by `MAX_DECODED_IMAGE_PIXELS`), touches
+/// neither the pasteboard nor the arboard mutex, and so is not the OS hang
+/// the read timeout guards against. Running it inside the timed read made a
+/// legitimately large screenshot — one that passes the 64-megapixel cap but
+/// whose transcode exceeds 3s — time out *permanently*, and pinned the
+/// leaked blocking thread's mutex against later writes. The raw bytes are
+/// already captured and torn-checked under the lock, so transcoding the
+/// owned buffer here is safe. Mirrors the write path's `write_image_bytes`,
+/// which already decodes off the timed section.
+#[cfg(target_os = "macos")]
+fn transcode_tiff_representations(
+    representations: Vec<ClipboardRepresentation>,
+) -> Vec<ClipboardRepresentation> {
+    representations
+        .into_iter()
+        .filter_map(|rep| match rep {
+            ClipboardRepresentation {
+                mime_type,
+                data: ClipboardData::Bytes(bytes),
+            } if mime_type == "image/tiff" => {
+                prepare_tiff_capture(bytes).map(|(mime_type, bytes)| ClipboardRepresentation {
+                    mime_type,
+                    data: ClipboardData::Bytes(bytes),
+                })
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
+/// Run [`transcode_tiff_representations`] on the blocking pool, *without*
+/// the read timeout.
+#[cfg(target_os = "macos")]
+async fn transcode_representations(
+    representations: Vec<ClipboardRepresentation>,
+) -> Result<Vec<ClipboardRepresentation>> {
+    tokio::task::spawn_blocking(move || transcode_tiff_representations(representations))
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))
+}
+
+/// Normalise a `current_snapshot` result after the timed read returns.
+#[cfg(target_os = "macos")]
+async fn transcode_snapshot(mut snapshot: ClipboardSnapshot) -> Result<ClipboardSnapshot> {
+    snapshot.representations = transcode_representations(snapshot.representations).await?;
+    Ok(snapshot)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unused_async)]
+async fn transcode_snapshot(snapshot: ClipboardSnapshot) -> Result<ClipboardSnapshot> {
+    Ok(snapshot)
+}
+
+/// Normalise a bounded capture after the timed read returns, then re-apply
+/// the entry-size budget to the transcoded image.
+///
+/// The raw pasteboard probe (`oversized_payload`) never sizes TIFF — only
+/// PNG / HTML / RTF / text / file URLs — so the normalised image size is
+/// first known here. Surfacing it as `Oversized` keeps the pre-read drop
+/// semantics the in-timed transcode used to enforce.
+#[cfg(target_os = "macos")]
+async fn finalize_captured(
+    captured: CapturedSnapshot,
+    max_bytes: usize,
+) -> Result<CapturedSnapshot> {
+    let CapturedSnapshot::Captured(mut snapshot) = captured else {
+        // `Oversized` was already decided on raw pasteboard sizes.
+        return Ok(captured);
+    };
+    snapshot.representations = transcode_representations(snapshot.representations).await?;
+    if let Some(observed) = snapshot
+        .representations
+        .iter()
+        .find_map(|rep| match &rep.data {
+            ClipboardData::Bytes(bytes) if bytes.len() > max_bytes => Some(bytes.len()),
+            _ => None,
+        })
+    {
+        return Ok(CapturedSnapshot::Oversized {
+            sequence: snapshot.sequence,
+            observed_bytes: observed,
+            limit: max_bytes,
+        });
+    }
+    Ok(CapturedSnapshot::Captured(snapshot))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unused_async)]
+async fn finalize_captured(
+    captured: CapturedSnapshot,
+    _max_bytes: usize,
+) -> Result<CapturedSnapshot> {
+    Ok(captured)
 }
 
 #[cfg(target_os = "macos")]
@@ -1336,6 +1448,50 @@ mod tests {
         tiff[31] = 0xFF; // ImageLength high byte
 
         assert!(prepare_tiff_capture(tiff).is_none());
+    }
+
+    #[test]
+    fn transcode_tiff_representations_normalizes_tiff_and_keeps_others() {
+        let reps = vec![
+            ClipboardRepresentation {
+                mime_type: "text/plain".to_owned(),
+                data: ClipboardData::Text("keep me".to_owned()),
+            },
+            ClipboardRepresentation {
+                mime_type: "image/tiff".to_owned(),
+                data: ClipboardData::Bytes(TINY_TIFF.to_vec()),
+            },
+        ];
+
+        let out = transcode_tiff_representations(reps);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].mime_type, "text/plain");
+        assert_eq!(out[1].mime_type, "image/png");
+        match &out[1].data {
+            ClipboardData::Bytes(bytes) => assert!(
+                bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+                "TIFF must normalise to a PNG payload off the read timeout"
+            ),
+            other => panic!("expected PNG bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transcode_tiff_representations_drops_undecodable_tiff() {
+        // Same corrupt-dimensions TIFF as `prepare_tiff_capture_rejects_*`:
+        // an undecodable image rep is dropped rather than carried forward.
+        let mut tiff = TINY_TIFF.to_vec();
+        tiff[18] = 0xFF;
+        tiff[19] = 0xFF;
+        tiff[30] = 0xFF;
+        tiff[31] = 0xFF;
+        let reps = vec![ClipboardRepresentation {
+            mime_type: "image/tiff".to_owned(),
+            data: ClipboardData::Bytes(tiff),
+        }];
+
+        assert!(transcode_tiff_representations(reps).is_empty());
     }
 
     /// Bypass `current_snapshot` and read the raw `NSPasteboardTypeTIFF`

@@ -58,14 +58,18 @@ impl ClipboardReader for WindowsClipboard {
         // last attempt. The retry bound prevents an infinite loop if a
         // process is steadily flooding the clipboard.
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
-            match capture_snapshot(&clipboard, None)? {
-                CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
-                CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
-            }
+        let (captured, image) = clipboard_blocking("current_snapshot", move || {
+            capture_snapshot(&clipboard, None)
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+        .map_err(|err| AppError::Platform(err.to_string()))??;
+        // Encode any captured image to PNG off the read timeout (see
+        // `finalize_capture`); the raw bytes are already captured under the
+        // clipboard lock above.
+        match finalize_capture(captured, image, None).await? {
+            CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
+            CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
+        }
     }
 
     async fn current_sequence(&self) -> Result<ClipboardSequence> {
@@ -81,11 +85,14 @@ impl ClipboardReader for WindowsClipboard {
 
     async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
-        clipboard_blocking("current_snapshot_with_max", move || {
+        let (captured, image) = clipboard_blocking("current_snapshot_with_max", move || {
             capture_snapshot(&clipboard, Some(max_bytes))
         })
         .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+        .map_err(|err| AppError::Platform(err.to_string()))??;
+        // Encode any captured image to PNG off the read timeout, then apply
+        // the entry-size budget to the full payload (see `finalize_capture`).
+        finalize_capture(captured, image, Some(max_bytes)).await
     }
 }
 
@@ -397,10 +404,23 @@ fn png_pixel_count_from_ihdr(bytes: &[u8]) -> Option<u64> {
     Some(u64::from(width).saturating_mul(u64::from(height)))
 }
 
+/// One bounded clipboard read, deferring the CPU-bound image encode.
+///
+/// Returns the captured snapshot together with any *raw* image payload
+/// (`CF_DIBV5` / registered `"PNG"` bytes, copied out under the clipboard
+/// lock) and the index it should occupy in the representation order. The
+/// CPU-bound decode (DIB/PNG -> RGBA) and PNG re-encode are **not** done
+/// here: they run outside [`CLIPBOARD_OP_TIMEOUT`] in [`finalize_capture`].
+/// Copying the raw bytes is a bounded memcpy (`image_pixel_overflow` already
+/// rejected pathological dimensions, so the uncompressed DIB is at most
+/// `MAX_DECODED_IMAGE_PIXELS × 4` bytes); the slow width×height RGBA
+/// expansion and the deflate-heavy PNG encode are what made a large-but-valid
+/// screenshot trip the 3s read timeout permanently and pinned the detached
+/// thread's mutex against later writes.
 fn capture_snapshot(
     clipboard: &Mutex<Clipboard>,
     max_bytes: Option<usize>,
-) -> Result<CapturedSnapshot> {
+) -> Result<(CapturedSnapshot, Option<(usize, RawImage)>)> {
     const MAX_RETRIES: usize = SNAPSHOT_CAPTURE_MAX_RETRIES;
     let mut attempt = 0;
     loop {
@@ -409,11 +429,14 @@ fn capture_snapshot(
         if let Some(limit) = max_bytes {
             #[cfg(windows)]
             if let Some(observed) = win::oversized_payload(limit) {
-                return Ok(CapturedSnapshot::Oversized {
-                    sequence: ClipboardSequence::native(i64::from(native_sequence_number())),
-                    observed_bytes: observed,
-                    limit,
-                });
+                return Ok((
+                    CapturedSnapshot::Oversized {
+                        sequence: ClipboardSequence::native(i64::from(native_sequence_number())),
+                        observed_bytes: observed,
+                        limit,
+                    },
+                    None,
+                ));
             }
             #[cfg(not(windows))]
             let _ = limit;
@@ -425,46 +448,37 @@ fn capture_snapshot(
             Err(arboard::Error::ContentNotAvailable) => None,
             Err(err) => return Err(platform_err(&err)),
         };
-        // arboard's `get_image` opens its own `OpenClipboard` session and
-        // pulls the raw `CF_DIBV5` (falling back to `CF_DIB`) bytes into a
-        // freshly allocated RGBA buffer. Encode to PNG so the rest of the
-        // pipeline (storage, search snippets, IPC, copy-back) can treat
-        // Windows captures the same way macOS publishes `image/png` straight
-        // off the pasteboard. Format unavailability is the common case and
-        // surfaces as `ContentNotAvailable`, which we silently skip — only
-        // true Win32 failures bubble up as `AppError::Platform`.
+        // Copy the *raw* clipboard image bytes (registered "PNG" then
+        // `CF_DIBV5`, the same order arboard's `get_image` honours) out under
+        // the lock, but defer the decode + PNG re-encode to `finalize_capture`
+        // outside the read timeout. The rest of the pipeline (storage, search
+        // snippets, IPC, copy-back) still sees `image/png` once finalised, the
+        // same way macOS publishes it straight off the pasteboard.
         //
-        // Probe the published image dimensions before letting arboard
-        // materialise an RGBA buffer: arboard's `read_png` /
-        // `read_cf_dibv5` allocate `width × height × 4` bytes
-        // unconditionally, so a small encoded PNG with pathological
-        // dimensions (e.g. 65535×65535) would OOM the daemon long before
-        // the post-load byte-budget check runs. Skip the image rep when
-        // the cap is exceeded and continue with whatever text / file-list
-        // also rode on this snapshot.
+        // Probe the published image dimensions before copying any bytes:
+        // a `CF_DIBV5` is uncompressed (`width × height × 4`), so a
+        // pathological 65535×65535 header would otherwise have us copy a
+        // multi-GB payload here. `image_pixel_overflow` reads the dimensions
+        // from the header prefix and lets us skip the image rep — continuing
+        // with whatever text / file-list also rode on this snapshot — before
+        // the copy. The off-timeout decode is then bounded too.
         #[cfg(windows)]
-        let skip_image = match win::image_pixel_overflow(MAX_DECODED_IMAGE_PIXELS) {
+        let image: Option<RawImage> = match win::image_pixel_overflow(MAX_DECODED_IMAGE_PIXELS) {
             Some(observed) => {
                 tracing::warn!(
                     observed_pixels = observed,
                     max_pixels = MAX_DECODED_IMAGE_PIXELS,
                     "image_rep_dropped reason=decoded_pixels_exceed_cap"
                 );
-                true
+                None
             }
-            None => false,
+            // Propagate a transient read failure (`?`) so the capture retries
+            // rather than committing a text-only snapshot — and consuming its
+            // sequence — while an image that should have been read is lost.
+            None => win::read_image_payload()?,
         };
         #[cfg(not(windows))]
-        let skip_image = false;
-        let image = if skip_image {
-            None
-        } else {
-            match guard.get_image() {
-                Ok(img) => Some(img),
-                Err(arboard::Error::ContentNotAvailable) => None,
-                Err(err) => return Err(platform_err(&err)),
-            }
-        };
+        let image: Option<RawImage> = None;
         // Drop the arboard guard before the second Win32 read so we don't hold
         // it across the CF_HDROP OpenClipboard call; the sequence-stability
         // check is what protects us against a write landing in between.
@@ -480,14 +494,13 @@ fn capture_snapshot(
             });
         }
 
-        if let Some(img) = image
-            && let Some(png) = encode_rgba_to_png(img)
-        {
-            representations.push(ClipboardRepresentation {
-                mime_type: "image/png".to_owned(),
-                data: ClipboardData::Bytes(png),
-            });
-        }
+        // The image rep goes here — after the file list, before text. Record
+        // the index so the deferred decode+encode can splice the PNG back in
+        // at the same position, preserving the captured representation order
+        // (and the dedup `representation_set_hash`). The raw image bytes are
+        // returned to the caller for off-timeout decoding rather than decoded
+        // here.
+        let image_index = representations.len();
 
         if let Some(text) = plain {
             representations.push(ClipboardRepresentation {
@@ -504,19 +517,188 @@ fn capture_snapshot(
                 source: None,
                 representations,
             };
-            if let Some(limit) = max_bytes {
-                let observed_bytes = total_payload_bytes(&snapshot);
-                if observed_bytes > limit {
-                    return Ok(CapturedSnapshot::Oversized {
-                        sequence: snapshot.sequence,
-                        observed_bytes,
-                        limit,
-                    });
-                }
-            }
-            return Ok(CapturedSnapshot::Captured(snapshot));
+            // The post-encode `total_payload_bytes` size gate moves to
+            // `finalize_capture`, which knows the encoded image size.
+            return Ok((
+                CapturedSnapshot::Captured(snapshot),
+                image.map(|img| (image_index, img)),
+            ));
         }
     }
+}
+
+/// Decode a deferred raw image to RGBA and PNG-encode it outside the read
+/// timeout, splice it into the captured representations at its recorded
+/// index, and apply the entry-size budget to the full payload.
+///
+/// Both the DIB/PNG -> RGBA decode and the PNG encode are CPU-bound and touch
+/// neither the clipboard nor its mutex, so they run on a plain blocking task
+/// here — mirroring the write path's `write_image_bytes`, which already
+/// decodes off the timed section. `win::oversized_payload` deliberately never
+/// sizes raw `CF_DIBV5` (it is uncompressed and routinely several MiB for
+/// ordinary screenshots), so the normalised image size is first known here;
+/// surfacing it as `Oversized` preserves the gate the in-timed
+/// `total_payload_bytes` check used to apply.
+async fn finalize_capture(
+    captured: CapturedSnapshot,
+    image: Option<(usize, RawImage)>,
+    max_bytes: Option<usize>,
+) -> Result<CapturedSnapshot> {
+    let CapturedSnapshot::Captured(snapshot) = captured else {
+        // `Oversized` was already decided on raw clipboard sizes.
+        return Ok(captured);
+    };
+    let encoded = if let Some((index, image)) = image {
+        let png = tokio::task::spawn_blocking(move || decode_raw_image_to_png(image))
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?;
+        // A decode/encode failure is deterministic (the raw bytes were already
+        // copied), so retrying would wedge capture on the same payload every
+        // tick. Drop just the image and keep the rest of the snapshot — the
+        // same way the macOS adapter drops an undecodable TIFF. A *transient*
+        // read failure is handled earlier, in `capture_snapshot`, by an `Err`.
+        png.map(|png| (index, png))
+    } else {
+        None
+    };
+    Ok(assemble_capture(snapshot, encoded, max_bytes))
+}
+
+/// Raw clipboard image bytes copied out under the clipboard lock but not yet
+/// decoded. Carried out of [`capture_snapshot`] so the CPU-bound decode +
+/// PNG encode can run outside [`CLIPBOARD_OP_TIMEOUT`].
+// Only `win::read_image_payload` (Windows-only) constructs these; the decode
+// helpers compile on every target so `finalize_capture` stays platform-
+// agnostic.
+#[cfg_attr(not(windows), allow(dead_code))]
+enum RawImage {
+    /// Registered `"PNG"` clipboard format — already an encoded PNG.
+    Png(Vec<u8>),
+    /// `CF_DIBV5` payload: a `BITMAPV5HEADER` followed by pixel data.
+    Dibv5(Vec<u8>),
+}
+
+/// Decode a raw clipboard image to RGBA, then PNG-encode it.
+///
+/// Faithfully mirrors arboard's `read_png` / `read_cf_dibv5` (both decode to
+/// RGBA through the same `image`-crate decoders this calls) followed by this
+/// adapter's [`encode_rgba_to_png`], so the stored bytes are byte-identical
+/// to the previous in-arboard `get_image` path — only moved off the read
+/// timeout.
+fn decode_raw_image_to_png(image: RawImage) -> Option<Vec<u8>> {
+    encode_rgba_to_png(decode_raw_image_to_rgba(image)?)
+}
+
+fn decode_raw_image_to_rgba(image: RawImage) -> Option<ImageData<'static>> {
+    use image::codecs::bmp::BmpDecoder;
+    use image::codecs::png::PngDecoder;
+
+    let (width, height, rgba) = match image {
+        RawImage::Png(bytes) => decode_within_pixel_cap(PngDecoder::new(Cursor::new(bytes)).ok()?)?,
+        RawImage::Dibv5(mut bytes) => {
+            // `CF_DIBV5` is a headerless BMP (no `BITMAPFILEHEADER`).
+            maybe_tweak_dibv5_header(&mut bytes);
+            decode_within_pixel_cap(BmpDecoder::new_without_file_header(Cursor::new(&bytes)).ok()?)?
+        }
+    };
+    Some(ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: Cow::Owned(rgba.into_raw()),
+    })
+}
+
+/// Decode to RGBA only after confirming the advertised canvas fits under
+/// [`MAX_DECODED_IMAGE_PIXELS`].
+///
+/// `image_pixel_overflow` probes dimensions in a separate `OpenClipboard`
+/// session, so it cannot bound this allocation on its own: the clipboard may
+/// have flipped between the probe and the copy, the probe may have failed to
+/// read a header it treats as "safe to proceed", or a low-bit-depth `CF_DIBV5`
+/// under the raw-byte ceiling can still expand past the pixel cap. Re-checking
+/// `decoder.dimensions()` here — before `into_rgba8` allocates `width × height
+/// × 4` — makes the RGBA buffer strictly bounded, matching the macOS adapter's
+/// `decode_rgba_with_pixel_cap`.
+fn decode_within_pixel_cap<D: image::ImageDecoder>(
+    decoder: D,
+) -> Option<(u32, u32, image::RgbaImage)> {
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_DECODED_IMAGE_PIXELS {
+        tracing::warn!(
+            width,
+            height,
+            max_pixels = MAX_DECODED_IMAGE_PIXELS,
+            "image_rep_dropped reason=decoded_pixels_exceed_cap"
+        );
+        return None;
+    }
+    let rgba = image::DynamicImage::from_decoder(decoder)
+        .ok()?
+        .into_rgba8();
+    Some((width, height, rgba))
+}
+
+/// Replicate arboard's `maybe_tweak_header`: a 32-bit `BI_RGB` `CF_DIBV5`
+/// whose alpha mask is `0xff000000` is reinterpreted as `BI_BITFIELDS` (and
+/// given default channel masks when they are absent) so the `image`-crate BMP
+/// decoder reads the alpha channel the same way arboard does. Field offsets
+/// follow the `BITMAPV5HEADER` layout (little-endian).
+fn maybe_tweak_dibv5_header(bytes: &mut [u8]) {
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+    /// `size_of::<BITMAPV5HEADER>()`. arboard rejects a shorter `CF_DIBV5`
+    /// outright; we leave it untouched and let the decoder reject it.
+    const BITMAPV5HEADER_SIZE: usize = 124;
+    // Offsets within BITMAPV5HEADER: bV5BitCount @14 (u16), bV5Compression
+    // @16 (u32), bV5{Red,Green,Blue}Mask @40/44/48, bV5AlphaMask @52 (u32).
+    if bytes.len() < BITMAPV5HEADER_SIZE {
+        return;
+    }
+    let read_u32 =
+        |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    let bit_count = u16::from_le_bytes([bytes[14], bytes[15]]);
+    let compression = read_u32(bytes, 16);
+    let alpha_mask = read_u32(bytes, 52);
+    if bit_count == 32 && compression == BI_RGB && alpha_mask == 0xff00_0000 {
+        bytes[16..20].copy_from_slice(&BI_BITFIELDS.to_le_bytes());
+        if read_u32(bytes, 40) == 0 && read_u32(bytes, 44) == 0 && read_u32(bytes, 48) == 0 {
+            bytes[40..44].copy_from_slice(&0x00ff_0000u32.to_le_bytes());
+            bytes[44..48].copy_from_slice(&0x0000_ff00u32.to_le_bytes());
+            bytes[48..52].copy_from_slice(&0x0000_00ffu32.to_le_bytes());
+        }
+    }
+}
+
+/// Splice the already-encoded image PNG back into `snapshot` at its recorded
+/// index and apply the entry-size budget. Kept synchronous and pure so the
+/// representation-order preservation and the oversize gate are unit-testable
+/// without a runtime (the CPU-bound encode happens in `finalize_capture`).
+fn assemble_capture(
+    mut snapshot: ClipboardSnapshot,
+    image: Option<(usize, Vec<u8>)>,
+    max_bytes: Option<usize>,
+) -> CapturedSnapshot {
+    if let Some((index, png)) = image {
+        let index = index.min(snapshot.representations.len());
+        snapshot.representations.insert(
+            index,
+            ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(png),
+            },
+        );
+    }
+    if let Some(limit) = max_bytes {
+        let observed_bytes = total_payload_bytes(&snapshot);
+        if observed_bytes > limit {
+            return CapturedSnapshot::Oversized {
+                sequence: snapshot.sequence,
+                observed_bytes,
+                limit,
+            };
+        }
+    }
+    CapturedSnapshot::Captured(snapshot)
 }
 
 fn total_payload_bytes(snapshot: &ClipboardSnapshot) -> usize {
@@ -823,6 +1005,93 @@ mod win {
             .sum();
         let _ = unsafe { GlobalUnlock(handle) };
         Some(utf8_len)
+    }
+
+    /// Hard ceiling on a raw clipboard image payload we will copy out.
+    ///
+    /// A valid image within [`MAX_DECODED_IMAGE_PIXELS`] occupies at most
+    /// `width × height × 4` uncompressed bytes (a `CF_DIBV5`) plus its header;
+    /// a PNG of the same canvas is smaller. `image_pixel_overflow` rejects
+    /// oversized *dimensions* before we get here, but it runs in a separate
+    /// `OpenClipboard` session, so a clipboard that flips to a huge image (or
+    /// a crafted small-dimension payload backed by a padded `HGLOBAL`) between
+    /// the probe and this copy would otherwise force an unbounded allocation.
+    /// This cap bounds the copy regardless of what the probe saw — the
+    /// sequence-stability retry then discards a payload that changed under us.
+    const MAX_RAW_IMAGE_BYTES: u64 = MAX_DECODED_IMAGE_PIXELS * 4 + 4096;
+
+    /// Copy the bytes backing a clipboard global-memory handle, bounded by
+    /// [`MAX_RAW_IMAGE_BYTES`].
+    ///
+    /// `Err` on a genuine (possibly transient) read failure — the format was
+    /// advertised as available but the handle / lock could not be obtained —
+    /// so the caller propagates it and the capture retries instead of
+    /// silently dropping an image that should have been read. `Ok(None)` when
+    /// the payload exceeds the ceiling (skip the oversized image, keep the
+    /// rest of the snapshot).
+    unsafe fn read_bounded_image_bytes(format: u32) -> Result<Option<Vec<u8>>> {
+        let handle = unsafe { GetClipboardData(format) };
+        if handle.is_null() {
+            return Err(AppError::Platform(
+                "clipboard image handle was unavailable".to_owned(),
+            ));
+        }
+        let size = unsafe { GlobalSize(handle) };
+        if size == 0 {
+            return Err(AppError::Platform(
+                "clipboard image payload was empty".to_owned(),
+            ));
+        }
+        if size as u64 > MAX_RAW_IMAGE_BYTES {
+            tracing::warn!(
+                byte_count = size,
+                ceiling = MAX_RAW_IMAGE_BYTES,
+                "image_rep_dropped reason=raw_payload_exceeds_ceiling"
+            );
+            return Ok(None);
+        }
+        let locked = unsafe { GlobalLock(handle) };
+        if locked.is_null() {
+            return Err(AppError::Platform("clipboard image lock failed".to_owned()));
+        }
+        let bytes = unsafe { slice::from_raw_parts(locked.cast::<u8>(), size) }.to_vec();
+        let _ = unsafe { GlobalUnlock(handle) };
+        Ok(Some(bytes))
+    }
+
+    /// Copy the raw clipboard image payload — the registered `"PNG"` format
+    /// first, then `CF_DIBV5` — mirroring the lookup order arboard's
+    /// `get_image` honours. Returns the bytes uninterpreted; the decode to
+    /// RGBA + PNG re-encode happens off the read timeout in `finalize_capture`
+    /// so a large image cannot wedge the clipboard read. The copy is bounded
+    /// by [`MAX_RAW_IMAGE_BYTES`]. `Err` surfaces a transient read failure for
+    /// an advertised format so the capture retries rather than losing the
+    /// image; `Ok(None)` means no image format is present (or it was over the
+    /// ceiling).
+    pub(super) fn read_image_payload() -> Result<Option<super::RawImage>> {
+        // SAFETY: `OpenClipboard(null)` attaches to the calling thread and the
+        // `ClipboardGuard` closes it on every return path. The borrowed
+        // `GetClipboardData` handles are only read while the clipboard stays
+        // open (inside `read_bounded_image_bytes`, before the guard drops).
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return Err(AppError::Platform(
+                    "OpenClipboard failed for image read".to_owned(),
+                ));
+            }
+            let _guard = ClipboardGuard;
+            if let Some(png_id) = png_format_id()
+                && IsClipboardFormatAvailable(png_id) != 0
+            {
+                return Ok(read_bounded_image_bytes(png_id)?.map(super::RawImage::Png));
+            }
+            if IsClipboardFormatAvailable(u32::from(CF_DIBV5)) != 0 {
+                return Ok(
+                    read_bounded_image_bytes(u32::from(CF_DIBV5))?.map(super::RawImage::Dibv5)
+                );
+            }
+            Ok(None)
+        }
     }
 
     /// Read the `CF_HDROP` representation from the system clipboard, if
@@ -1806,6 +2075,131 @@ mod tests {
             bytes: Cow::Owned(vec![0u8; 4]), // needs 64 bytes
         });
         assert!(png.is_none());
+    }
+
+    #[test]
+    fn decode_raw_image_to_png_round_trips_a_png_payload() {
+        // The deferred decode path: a registered-"PNG" clipboard payload is
+        // decoded to RGBA and re-encoded to PNG (matching arboard's
+        // get_image -> read_png -> RGBA, then this adapter's encode), all off
+        // the read timeout. The pixels must survive the round-trip.
+        let source = encode_rgba_to_png(ImageData {
+            width: 2,
+            height: 1,
+            bytes: Cow::Owned(vec![
+                0xFF, 0x00, 0x00, 0xFF, // red
+                0x00, 0xFF, 0x00, 0xFF, // green
+            ]),
+        })
+        .expect("seed PNG encodes");
+
+        let png = decode_raw_image_to_png(RawImage::Png(source))
+            .expect("PNG payload decodes + re-encodes");
+        let decoded = ImageReader::new(Cursor::new(&png))
+            .with_guessed_format()
+            .expect("guess format")
+            .decode()
+            .expect("decode PNG")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [0xFF, 0x00, 0x00, 0xFF]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0x00, 0xFF, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn maybe_tweak_dibv5_header_promotes_bi_rgb_with_alpha_mask() {
+        // arboard reinterprets a 32-bit BI_RGB DIBV5 carrying an alpha mask as
+        // BI_BITFIELDS and fills in default channel masks so the BMP decoder
+        // reads alpha. Replicate that exactly: build a 124-byte header with
+        // bitCount=32, compression=BI_RGB, alphaMask=0xff000000, zero RGB
+        // masks.
+        let mut header = vec![0u8; 124];
+        header[14..16].copy_from_slice(&32u16.to_le_bytes()); // bV5BitCount
+        header[16..20].copy_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        header[52..56].copy_from_slice(&0xff00_0000u32.to_le_bytes()); // bV5AlphaMask
+
+        maybe_tweak_dibv5_header(&mut header);
+
+        let read = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        assert_eq!(read(16), 3, "compression must become BI_BITFIELDS");
+        assert_eq!(read(40), 0x00ff_0000, "default red mask");
+        assert_eq!(read(44), 0x0000_ff00, "default green mask");
+        assert_eq!(read(48), 0x0000_00ff, "default blue mask");
+    }
+
+    #[test]
+    fn maybe_tweak_dibv5_header_leaves_other_headers_untouched() {
+        // A 24-bit header (no alpha mask trigger) must be passed through
+        // verbatim so non-alpha bitmaps decode exactly as before.
+        let mut header = vec![0u8; 124];
+        header[14..16].copy_from_slice(&24u16.to_le_bytes());
+        let original = header.clone();
+        maybe_tweak_dibv5_header(&mut header);
+        assert_eq!(header, original);
+    }
+
+    fn rep(mime: &str, data: ClipboardData) -> ClipboardRepresentation {
+        ClipboardRepresentation {
+            mime_type: mime.to_owned(),
+            data,
+        }
+    }
+
+    #[test]
+    fn assemble_capture_splices_image_at_recorded_index() {
+        // The deferred encode reinserts the PNG after the file list and
+        // before text — the same order `capture_snapshot` would have built —
+        // so the dedup `representation_set_hash` is unchanged by deferral.
+        let snapshot = snapshot_with(vec![
+            rep(
+                "text/uri-list",
+                ClipboardData::FilePaths(vec!["C:/a.txt".to_owned()]),
+            ),
+            rep("text/plain", ClipboardData::Text("body".to_owned())),
+        ]);
+        let assembled = assemble_capture(snapshot, Some((1, vec![1, 2, 3, 4])), Some(1024));
+        let CapturedSnapshot::Captured(out) = assembled else {
+            panic!("expected captured");
+        };
+        let order: Vec<&str> = out
+            .representations
+            .iter()
+            .map(|r| r.mime_type.as_str())
+            .collect();
+        assert_eq!(order, ["text/uri-list", "image/png", "text/plain"]);
+    }
+
+    #[test]
+    fn assemble_capture_reports_oversized_after_encode() {
+        // `oversized_payload` never sizes raw DIB, so an image whose encoded
+        // PNG blows the budget is only caught here, after the off-timeout
+        // encode — surfaced as `Oversized`, matching the old in-timed gate.
+        let snapshot = snapshot_with(vec![rep(
+            "text/plain",
+            ClipboardData::Text("hi".to_owned()),
+        )]);
+        let assembled = assemble_capture(snapshot, Some((0, vec![0u8; 64])), Some(32));
+        match assembled {
+            CapturedSnapshot::Oversized {
+                observed_bytes,
+                limit,
+                ..
+            } => {
+                assert_eq!(limit, 32);
+                assert!(observed_bytes > 32);
+            }
+            CapturedSnapshot::Captured(_) => panic!("expected oversized"),
+        }
+    }
+
+    #[test]
+    fn assemble_capture_without_max_never_reports_oversized() {
+        let snapshot = snapshot_with(vec![rep(
+            "text/plain",
+            ClipboardData::Text("hi".to_owned()),
+        )]);
+        let assembled = assemble_capture(snapshot, Some((0, vec![0u8; 4096])), None);
+        assert!(matches!(assembled, CapturedSnapshot::Captured(_)));
     }
 
     #[cfg(windows)]
