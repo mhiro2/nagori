@@ -69,6 +69,9 @@ impl ClipboardReader for WindowsClipboard {
         match finalize_capture(captured, image, None).await? {
             CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
             CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
+            CapturedSnapshot::Excluded { .. } => {
+                unreachable!("windows capture does not detect owner exclusion markers")
+            }
         }
     }
 
@@ -2188,7 +2191,7 @@ mod tests {
                 assert_eq!(limit, 32);
                 assert!(observed_bytes > 32);
             }
-            CapturedSnapshot::Captured(_) => panic!("expected oversized"),
+            other => panic!("expected oversized, got {other:?}"),
         }
     }
 

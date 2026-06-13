@@ -17,7 +17,7 @@ pub use capability::{
     unsupported_capabilities,
 };
 pub use clipboard::{
-    CapturedSnapshot, ClipboardReader, ClipboardWriter, MemoryClipboard,
+    CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, ClipboardWriter, MemoryClipboard,
     SNAPSHOT_CAPTURE_MAX_RETRIES, has_publishable_representation, lock_err, platform_err,
 };
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};

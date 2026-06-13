@@ -18,7 +18,7 @@ use nagori_platform::{
     lock_clipboard_for_write, lock_err, platform_err,
 };
 #[cfg(target_os = "macos")]
-use nagori_platform::{DecodeRgbaError, decode_rgba_with_pixel_cap};
+use nagori_platform::{ClipboardExclusionKind, DecodeRgbaError, decode_rgba_with_pixel_cap};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -66,6 +66,16 @@ const UTI_JPEG: &str = "public.jpeg";
 const UTI_GIF: &str = "com.compuserve.gif";
 #[cfg(target_os = "macos")]
 const UTI_WEBP: &str = "org.webmproject.webp";
+
+/// nspasteboard.org marker an owner sets to declare "do not record this in
+/// history". A password manager flags a copied secret with
+/// [`MARKER_CONCEALED`]; an app that puts a throwaway value on the clipboard
+/// flags it with [`MARKER_TRANSIENT`]. We treat both as a hard skip — see
+/// [`pasteboard_exclusion`].
+#[cfg(target_os = "macos")]
+const MARKER_CONCEALED: &str = "org.nspasteboard.ConcealedType";
+#[cfg(target_os = "macos")]
+const MARKER_TRANSIENT: &str = "org.nspasteboard.TransientType";
 
 /// macOS clipboard adapter.
 ///
@@ -220,6 +230,27 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
     let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
     let before = pasteboard_sequence();
 
+    // Owner-declared exclusion marker (nspasteboard.org Concealed / Transient)
+    // takes precedence over everything else: a password manager's secret is
+    // skipped *before* `get_text` reads it, so in the common case the secret
+    // never enters our address space (a marker that only becomes visible after
+    // this point is caught by the post-read re-check below). Treated as a
+    // settled-or-torn outcome like `Oversized` so a foreign write mid-attempt
+    // retries rather than acting on a stale type list.
+    #[cfg(target_os = "macos")]
+    if let Some(kind) = pasteboard_exclusion() {
+        let after = pasteboard_sequence();
+        drop(guard);
+        return Ok(settle(
+            &before,
+            &after,
+            CapturedSnapshot::Excluded {
+                sequence: after.clone(),
+                kind,
+            },
+        ));
+    }
+
     // First pass: peek byte sizes without materialising payloads. On
     // macOS, NSData backs each `dataForType` result with bytes
     // already paged into our address space, but skipping `to_vec()`
@@ -282,6 +313,39 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
             mime_type: "text/plain".to_owned(),
             data: ClipboardData::Text(text),
         });
+    }
+
+    // Re-check the exclusion marker *after* the body read. The pre-read probe
+    // and `get_text` are two separate pasteboard queries, so a marker can
+    // appear between them within a single publish (macOS folds a
+    // clear-then-write into one `changeCount`, and the final torn retry below
+    // accepts whatever it read). Re-probing here binds the skip decision to a
+    // post-read confirmation: the `representations` we just built — including
+    // any secret body — are dropped unreturned, so a marked clip is never
+    // emitted to the capture loop even when it landed mid-attempt.
+    //
+    // This covers every single-publish ordering (the concealed *type* is
+    // observable at-or-before its data under both `writeObjects` and
+    // `declareTypes` + `setData`, so a body we could read was always
+    // accompanied by a marker one of the two probes sees). The one residual is
+    // a *multi*-publish torn race — an unmarked clip, then a marked one whose
+    // body `get_text` samples, then another unmarked one before this probe —
+    // on the final retry, where `before != after` is accepted unconditionally
+    // below. That requires three foreign publishes inside this sub-millisecond
+    // attempt and is the same torn-snapshot tradeoff every capture makes; we
+    // accept it rather than dropping every torn body.
+    #[cfg(target_os = "macos")]
+    if let Some(kind) = pasteboard_exclusion() {
+        let after = pasteboard_sequence();
+        drop(guard);
+        return Ok(settle(
+            &before,
+            &after,
+            CapturedSnapshot::Excluded {
+                sequence: after.clone(),
+                kind,
+            },
+        ));
     }
 
     let after = pasteboard_sequence();
@@ -1113,7 +1177,9 @@ async fn finalize_captured(
     max_bytes: usize,
 ) -> Result<CapturedSnapshot> {
     let CapturedSnapshot::Captured(mut snapshot) = captured else {
-        // `Oversized` was already decided on raw pasteboard sizes.
+        // `Oversized` was already decided on raw pasteboard sizes, and
+        // `Excluded` skipped the body read entirely — neither has anything to
+        // transcode, so pass them through untouched.
         return Ok(captured);
     };
     snapshot.representations = transcode_representations(snapshot.representations).await?;
@@ -1199,6 +1265,54 @@ fn collect_file_url_paths(
     }
 
     FileUrlPaths::Captured(paths)
+}
+
+/// Detect an owner-declared "do not record this" marker on the general
+/// pasteboard, returning the [`ClipboardExclusionKind`] when present.
+///
+/// `availableTypeFromArray` returns the first candidate type the pasteboard
+/// offers, so listing `Concealed` before `Transient` fixes the priority the
+/// capture loop relies on: when an owner sets both markers, the concealed
+/// (secret) signal wins. Only the marker's *presence* matters — we never ask
+/// for its data — so the secret body is never pulled into our address space.
+/// This runs before the `oversized_payload` probe and the `get_text` body
+/// read in [`capture_attempt`], mirroring how the capture loop skips a secure
+/// focus before reading the clipboard.
+#[cfg(target_os = "macos")]
+fn pasteboard_exclusion() -> Option<ClipboardExclusionKind> {
+    // Same autoreleasepool discipline as `oversized_payload` /
+    // `pasteboard_sequence`: drain the AppKit temporaries (`+generalPasteboard`,
+    // the candidate NSStrings, the returned type) on every call so the
+    // blocking-pool thread does not accumulate them across polls.
+    objc2::rc::autoreleasepool(|_pool| exclusion_for(&NSPasteboard::generalPasteboard()))
+}
+
+/// Marker test for a specific pasteboard. Split out from
+/// [`pasteboard_exclusion`] so a unit test can exercise the detection and
+/// `Concealed`-priority logic against an isolated `pasteboardWithUniqueName`
+/// rather than clobbering the shared general pasteboard.
+///
+/// `availableTypeFromArray` returns the first candidate the receiver offers,
+/// so listing `Concealed` before `Transient` makes a concealed secret win
+/// when an owner sets both. It is a presence test on the receiver's declared
+/// types and is unrelated to the `NSPasteboard` Filter Services that convert
+/// between known UTIs, so it never spuriously reports an opaque marker type.
+#[cfg(target_os = "macos")]
+fn exclusion_for(pb: &NSPasteboard) -> Option<ClipboardExclusionKind> {
+    let candidates = NSArray::from_retained_slice(&[
+        NSString::from_str(MARKER_CONCEALED),
+        NSString::from_str(MARKER_TRANSIENT),
+    ]);
+    let present = pb.availableTypeFromArray(&candidates)?;
+    let ty = present.to_string();
+    if ty == MARKER_TRANSIENT {
+        Some(ClipboardExclusionKind::Transient)
+    } else {
+        // `availableTypeFromArray` only returns a type we listed, and the
+        // array lists `Concealed` first, so anything that is not the
+        // transient marker is the concealed one.
+        Some(ClipboardExclusionKind::Concealed)
+    }
 }
 
 /// Probe `NSPasteboard` for any single representation whose byte length
@@ -2036,5 +2150,58 @@ mod tests {
             panic!("a small file URL list must be captured on the unbounded path");
         };
         assert_eq!(paths.len(), few.len());
+    }
+
+    /// Publish an `NSPasteboardItem` carrying `types` (each with a dummy
+    /// string payload) onto an *isolated* `pasteboardWithUniqueName`, so the
+    /// marker-detection tests never touch — or race on — the shared general
+    /// pasteboard that `make test` runs against.
+    fn pasteboard_with_types(types: &[&str]) -> Retained<NSPasteboard> {
+        let pb = NSPasteboard::pasteboardWithUniqueName();
+        pb.clearContents();
+        let item = NSPasteboardItem::new();
+        for ty in types {
+            assert!(
+                item.setString_forType(&NSString::from_str("marker"), &NSString::from_str(ty)),
+                "NSPasteboardItem rejected type {ty}"
+            );
+        }
+        assert!(write_pasteboard_items(&pb, vec![item]));
+        pb
+    }
+
+    #[test]
+    fn exclusion_for_detects_concealed_marker() {
+        objc2::rc::autoreleasepool(|_| {
+            let pb = pasteboard_with_types(&[MARKER_CONCEALED]);
+            assert_eq!(exclusion_for(&pb), Some(ClipboardExclusionKind::Concealed));
+        });
+    }
+
+    #[test]
+    fn exclusion_for_detects_transient_marker() {
+        objc2::rc::autoreleasepool(|_| {
+            let pb = pasteboard_with_types(&[MARKER_TRANSIENT]);
+            assert_eq!(exclusion_for(&pb), Some(ClipboardExclusionKind::Transient));
+        });
+    }
+
+    #[test]
+    fn exclusion_for_prefers_concealed_when_both_present() {
+        objc2::rc::autoreleasepool(|_| {
+            // List transient first on the item to prove the priority comes
+            // from the candidate-array order in `exclusion_for`, not from the
+            // order the owner happened to declare its types in.
+            let pb = pasteboard_with_types(&[MARKER_TRANSIENT, MARKER_CONCEALED]);
+            assert_eq!(exclusion_for(&pb), Some(ClipboardExclusionKind::Concealed));
+        });
+    }
+
+    #[test]
+    fn exclusion_for_ignores_unmarked_clipboard() {
+        objc2::rc::autoreleasepool(|_| {
+            let pb = pasteboard_with_types(&["public.utf8-plain-text"]);
+            assert_eq!(exclusion_for(&pb), None);
+        });
     }
 }

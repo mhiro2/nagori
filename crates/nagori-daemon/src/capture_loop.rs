@@ -7,7 +7,7 @@ use nagori_core::{
     SensitivityClassifier, StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
 use nagori_ipc::CaptureEventCategory;
-use nagori_platform::{CapturedSnapshot, ClipboardReader, WindowBehavior};
+use nagori_platform::{CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, WindowBehavior};
 use time::OffsetDateTime;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -689,6 +689,13 @@ where
                 // path, hits the same oversize guard, and skips it again.
                 self.dedup.last_sequence = Some(sequence);
             }
+            CapturedSnapshot::Excluded { sequence, .. } => {
+                // The pre-launch clipboard carries an owner exclusion marker
+                // (concealed / transient), so its body was never read and
+                // there is nothing to hash. Anchor the sequence like the
+                // oversized case so the next poll skips it without re-probing.
+                self.dedup.last_sequence = Some(sequence);
+            }
         }
         self.dedup.pristine = false;
         Ok(())
@@ -747,6 +754,33 @@ where
             }
         };
         (source, secure_focus)
+    }
+
+    /// Honour an owner-declared exclusion marker (nspasteboard.org Concealed /
+    /// Transient) surfaced by the bounded read.
+    ///
+    /// The adapter detected the marker before reading the body, so no secret
+    /// reached us; we record the skip reason and count it as an intentional
+    /// policy drop — not a lost-visibility failure — then anchor the dedup
+    /// sequence so the next poll doesn't re-probe the same marked clip.
+    async fn skip_owner_exclusion(
+        &mut self,
+        sequence: ClipboardSequence,
+        kind: ClipboardExclusionKind,
+    ) {
+        let reason = match kind {
+            ClipboardExclusionKind::Concealed => "concealed_marker",
+            ClipboardExclusionKind::Transient => "transient_marker",
+        };
+        info!(?kind, "capture_skipped reason=clipboard_exclusion");
+        let _ = self
+            .audit
+            .record("capture_skipped", None, Some(reason))
+            .await;
+        self.note_capture_drop(CaptureEventCategory::Policy);
+        self.dedup.force_content_check = false;
+        self.dedup.pristine = false;
+        self.dedup.last_sequence = Some(sequence);
     }
 
     /// Run the admission gates and policy classification for one
@@ -984,6 +1018,12 @@ where
                 self.dedup.force_content_check = false;
                 self.dedup.pristine = false;
                 self.dedup.last_sequence = Some(sequence);
+                return Ok(None);
+            }
+            CapturedSnapshot::Excluded { sequence, kind } => {
+                // The clipboard owner published a "do not record" marker and
+                // the adapter skipped the body read — honour the contract.
+                self.skip_owner_exclusion(sequence, kind).await;
                 return Ok(None);
             }
         };
@@ -1860,6 +1900,117 @@ mod tests {
             .unwrap()
             .expect("AX error must fail open and capture proceeds");
         assert!(store.get(id).await.unwrap().is_some());
+    }
+
+    /// Drive a single owner-exclusion-marker capture and assert the clip is
+    /// skipped, the right audit reason is logged, and the sequence is anchored
+    /// so the next poll dedup-skips without re-reading the body. Shared by the
+    /// concealed / transient cases so the two only differ by the expected
+    /// reason string.
+    async fn assert_owner_marker_skipped(kind: ClipboardExclusionKind, expected_reason: &str) {
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+        use nagori_core::ClipboardSnapshot;
+
+        // Reader whose bounded read reports an owner-marked clip without ever
+        // producing a body — mirroring the macOS adapter detecting the marker
+        // before `get_text`. `snapshot_reads` lets the test prove the second
+        // tick short-circuits on the dedup baseline instead of re-reading.
+        struct MarkerReader {
+            sequence: ClipboardSequence,
+            kind: ClipboardExclusionKind,
+            snapshot_reads: Mutex<u32>,
+        }
+
+        #[async_trait]
+        impl ClipboardReader for MarkerReader {
+            async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+                // Not exercised on the bounded capture path; return a benign
+                // empty snapshot so the trait is satisfiable.
+                Ok(ClipboardSnapshot {
+                    sequence: self.sequence.clone(),
+                    captured_at: OffsetDateTime::now_utc(),
+                    source: None,
+                    representations: Vec::new(),
+                })
+            }
+            async fn current_sequence(&self) -> Result<ClipboardSequence> {
+                Ok(self.sequence.clone())
+            }
+            async fn current_snapshot_with_max(&self, _max: usize) -> Result<CapturedSnapshot> {
+                *self.snapshot_reads.lock().unwrap() += 1;
+                Ok(CapturedSnapshot::Excluded {
+                    sequence: self.sequence.clone(),
+                    kind: self.kind,
+                })
+            }
+        }
+
+        // Audit recorder that captures `(kind, message)` so we can assert the
+        // skip *reason*, not merely that something was recorded. Cloning
+        // shares the inner log so the loop and the test observe the same Vec.
+        type AuditRecords = Arc<Mutex<Vec<(String, Option<String>)>>>;
+        #[derive(Clone, Default)]
+        struct RecordingAudit {
+            records: AuditRecords,
+        }
+        #[async_trait]
+        impl AuditLog for RecordingAudit {
+            async fn record(
+                &self,
+                kind: &str,
+                _entry_id: Option<EntryId>,
+                message: Option<&str>,
+            ) -> Result<()> {
+                self.records
+                    .lock()
+                    .unwrap()
+                    .push((kind.to_owned(), message.map(str::to_owned)));
+                Ok(())
+            }
+        }
+
+        let reader = Arc::new(MarkerReader {
+            sequence: ClipboardSequence::native(7),
+            kind,
+            snapshot_reads: Mutex::new(0),
+        });
+        let store = SqliteStore::open_memory().expect("memory store");
+        let audit = RecordingAudit::default();
+        let mut loop_ = CaptureLoop::new(
+            reader.clone(),
+            store.clone(),
+            audit.clone(),
+            AppSettings::default(),
+        );
+
+        // First tick: the marker is honoured before any body read, so nothing
+        // lands in history and the skip reason is recorded.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert!(store.list_recent(10).await.unwrap().is_empty());
+        {
+            let records = audit.records.lock().unwrap();
+            assert_eq!(records.len(), 1, "exactly one audit record on first tick");
+            assert_eq!(records[0].0, "capture_skipped");
+            assert_eq!(records[0].1.as_deref(), Some(expected_reason));
+        }
+
+        // Second tick: the sequence was anchored, so the cheap dedup
+        // short-circuit fires — no extra body read, no extra audit record.
+        assert!(loop_.capture_once().await.unwrap().is_none());
+        assert_eq!(*reader.snapshot_reads.lock().unwrap(), 1);
+        assert_eq!(audit.records.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capture_once_skips_concealed_owner_marker() {
+        assert_owner_marker_skipped(ClipboardExclusionKind::Concealed, "concealed_marker").await;
+    }
+
+    #[tokio::test]
+    async fn capture_once_skips_transient_owner_marker() {
+        assert_owner_marker_skipped(ClipboardExclusionKind::Transient, "transient_marker").await;
     }
 
     #[tokio::test]

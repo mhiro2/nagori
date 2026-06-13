@@ -16,6 +16,28 @@ use time::OffsetDateTime;
 /// drifting apart.
 pub const SNAPSHOT_CAPTURE_MAX_RETRIES: usize = 3;
 
+/// A clipboard owner's explicit "do not record this in history" marker.
+///
+/// Producers that publish secrets or throwaway values onto the clipboard
+/// flag them with a well-known marker type so cooperating clipboard
+/// managers skip recording them. On macOS these are the nspasteboard.org
+/// convention types `org.nspasteboard.ConcealedType` (passwords and other
+/// secrets, set by password managers) and `org.nspasteboard.TransientType`
+/// (content not meant to outlive the current paste). The kind is named
+/// platform-neutrally rather than `PasteboardMarker` because the same
+/// "owner-declared exclusion" contract has analogues on other platforms
+/// (Windows' `Clipboard Viewer Ignore`, Linux's `x-kde-passwordManagerHint`)
+/// that can map onto the same skip path once each is verified to mean
+/// "refuse third-party history storage".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardExclusionKind {
+    /// Concealed secret (e.g. a password). The strongest signal — when an
+    /// owner publishes both markers this one wins.
+    Concealed,
+    /// Transient content the owner does not want persisted.
+    Transient,
+}
+
 /// Outcome of [`ClipboardReader::current_snapshot_with_max`].
 ///
 /// `Oversized` carries the change-count `sequence` so the capture loop can
@@ -23,6 +45,12 @@ pub const SNAPSHOT_CAPTURE_MAX_RETRIES: usize = 3;
 /// every poll, plus `observed_bytes` for audit logging. The variant is
 /// intentionally separate from [`AppError`] because hitting the configured
 /// `max_entry_size_bytes` is a benign skip, not a platform-level failure.
+///
+/// `Excluded` is the same shape for an owner-declared exclusion marker (see
+/// [`ClipboardExclusionKind`]): the adapter detects the marker and skips the
+/// clip without emitting its body, normally without reading it at all. It
+/// carries the `sequence` so the capture loop anchors dedup and skips the
+/// clip without ever materialising it as an entry.
 #[derive(Debug)]
 pub enum CapturedSnapshot {
     Captured(ClipboardSnapshot),
@@ -30,6 +58,10 @@ pub enum CapturedSnapshot {
         sequence: ClipboardSequence,
         observed_bytes: usize,
         limit: usize,
+    },
+    Excluded {
+        sequence: ClipboardSequence,
+        kind: ClipboardExclusionKind,
     },
 }
 
