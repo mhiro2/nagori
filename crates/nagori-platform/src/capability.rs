@@ -132,8 +132,10 @@ pub struct PlatformCapabilities {
     /// Clipboard capture for text payloads (plain + rich where the OS
     /// exposes both). Always the most-supported capability.
     pub capture_text: Capability,
-    /// Image clipboard capture (PNG / TIFF / `CF_DIB`). macOS only at
-    /// the moment.
+    /// Image clipboard capture. Available on all three desktop adapters:
+    /// macOS reads PNG / TIFF off the pasteboard, Windows reads
+    /// `CF_DIBV5` / `CF_DIB`, and Linux Wayland enumerates
+    /// PNG / JPEG / GIF / WebP / TIFF.
     pub capture_image: Capability,
     /// File-list clipboard capture (`CF_HDROP` on Windows, file URLs
     /// on macOS). Surfaced separately from `capture_text` because the
@@ -143,14 +145,16 @@ pub struct PlatformCapabilities {
     pub capture_files: Capability,
     /// Writing text back to the clipboard.
     pub write_text: Capability,
-    /// Writing images back to the clipboard. macOS only.
+    /// Writing images back to the clipboard. Available on all three
+    /// desktop adapters.
     pub write_image: Capability,
     /// Publishing every captured representation (primary, plain
     /// fallback, and alternatives) in a single pasteboard transaction
     /// so a `PasteFormat::Preserve` copy-back can re-offer the same
-    /// MIME set the source advertised. macOS exposes this through
-    /// `NSPasteboard`'s `setData:forType:` API; Windows and Wayland
-    /// fall back to the primary-only `write_text` / `write_image` path.
+    /// MIME set the source advertised. Available on all three desktop
+    /// adapters: macOS through an `NSPasteboardItem` batch, Windows
+    /// through `EmptyClipboard` + N × `SetClipboardData`, and Linux
+    /// Wayland through a single `copy::copy_multi` offer.
     pub clipboard_multi_representation_write: Capability,
     /// Synthesising Ctrl/Cmd+V into the previous frontmost surface.
     pub auto_paste: Capability,

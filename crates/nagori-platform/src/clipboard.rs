@@ -91,11 +91,13 @@ pub trait ClipboardWriter: Send + Sync {
     /// Used by `PasteFormat::Preserve` copy-back so a receiver that
     /// understands HTML / RTF / image bytes can pick the richest
     /// representation the source originally offered, while a plain-text
-    /// target still finds the matching `text/plain` fallback. Platforms
-    /// whose `clipboard_multi_representation_write` capability is
-    /// `Unsupported` (Windows / Linux Wayland today) inherit the default
-    /// implementation that delegates back to `write_entry`, preserving
-    /// the primary-only contract every adapter already honours.
+    /// target still finds the matching `text/plain` fallback. All three
+    /// desktop adapters (macOS / Windows / Linux Wayland) override this
+    /// and report `clipboard_multi_representation_write = Available`; the
+    /// default implementation here delegates back to `write_entry` and
+    /// exists for any future adapter that cannot publish a
+    /// multi-representation transaction, preserving the primary-only
+    /// contract.
     async fn write_representations(
         &self,
         entry: &ClipboardEntry,
