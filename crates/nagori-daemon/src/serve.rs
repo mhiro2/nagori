@@ -1710,6 +1710,54 @@ mod tests {
             acquire_data_dir_lock(dir).expect("lock should be reacquirable after release");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn drain_one_aborts_a_worker_that_overruns_the_grace() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A worker that only "finishes" after an hour must be aborted once it
+        // overruns the short drain grace, not awaited to completion — otherwise
+        // shutdown would hang on a wedged worker. With paused time the runtime
+        // advances to the nearest timer (the 50 ms grace) first, so the
+        // timeout→abort path fires deterministically.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_hours(1)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        drain_one("test_worker", handle, Duration::from_millis(50)).await;
+
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "a worker that overruns the grace must be aborted before it completes",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_one_joins_a_worker_that_finishes_within_the_grace() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The happy path: a worker that completes inside the grace is joined
+        // cleanly rather than aborted, so its final work (here, setting the
+        // flag) is allowed to land.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        drain_one("test_worker", handle, Duration::from_mins(1)).await;
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "a worker that finishes within the grace must run to completion",
+        );
+    }
+
     #[tokio::test]
     async fn settings_change_stops_existing_ipc_server() {
         let temp = tempfile::tempdir().expect("temp dir");

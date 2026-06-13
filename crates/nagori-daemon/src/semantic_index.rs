@@ -912,6 +912,50 @@ mod tests {
         }
     }
 
+    /// An embedder that blocks *inside* `embed_batch` until the token is
+    /// cancelled, then fails — mirroring the Apple bridge observing an
+    /// in-flight cancellation and surfacing it as an `AiError`. It announces
+    /// when the batch has started so the test can cancel genuinely mid-batch
+    /// (after the permit is held and the embed call is in progress) rather than
+    /// before it begins.
+    struct BlockUntilCancelledEmbedder {
+        dimension: usize,
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for BlockUntilCancelledEmbedder {
+        async fn availability(&self) -> nagori_ai::BackendAvailability {
+            nagori_ai::BackendAvailability::Available
+        }
+
+        async fn metadata(
+            &self,
+        ) -> std::result::Result<nagori_ai::EmbeddingModelMetadata, nagori_core::AiError> {
+            Ok(nagori_ai::EmbeddingModelMetadata {
+                model_identifier: "block-until-cancelled".to_owned(),
+                revision: 1,
+                dimension: self.dimension,
+                max_sequence_length: 256,
+                languages: vec!["en".to_owned()],
+            })
+        }
+
+        async fn embed_batch(
+            &self,
+            _inputs: Vec<EmbeddingInput>,
+            cancel: CancellationToken,
+        ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
+            // The batch is now in flight; let the test cancel mid-call.
+            let _ = self.started.send(());
+            cancel.cancelled().await;
+            Err(nagori_core::AiError::new(
+                nagori_core::AiErrorCode::Unknown,
+                "embedding cancelled mid-batch",
+            ))
+        }
+    }
+
     /// An embedder whose declared dimension disagrees with what `embed_batch`
     /// actually returns. The indexer must reject the whole batch rather than
     /// storing vectors that mismatch the model-tagged index metadata.
@@ -995,6 +1039,69 @@ mod tests {
             store.semantic_counts().await.unwrap().indexed,
             0,
             "a rejected batch must store nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_and_store_aborts_the_batch_on_cancellation() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        // A cancellation that lands mid-pass (shutdown, or the privacy toggle
+        // flipping `semantic_index_enabled` off) must abort the in-flight batch
+        // at the permit gate and persist nothing — not finish embedding the
+        // backlog it had already dequeued.
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("a document"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let embedder = BlockUntilCancelledEmbedder {
+            dimension: 8,
+            started: started_tx,
+        };
+        let cancel = CancellationToken::new();
+
+        let store_fut = runtime.embed_and_store(&embedder, &classifier, &pending, &cancel);
+        tokio::pin!(store_fut);
+
+        // Drive `embed_and_store` until the embedder reports the batch is in
+        // flight — proving the permit is held and the embed call has begun.
+        tokio::select! {
+            _ = &mut store_fut => panic!("embed_and_store returned before the batch started"),
+            started = started_rx.recv() => assert!(started.is_some(), "the batch must start"),
+        }
+
+        // Cancel genuinely mid-batch; the in-flight embed must abort and the
+        // whole batch must be rejected so nothing is persisted.
+        cancel.cancel();
+        let err = store_fut
+            .await
+            .expect_err("a mid-batch cancellation must not report success");
+        assert!(
+            !err.is_transient,
+            "cancellation is terminal, not a retryable backend error",
+        );
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "a cancelled batch must persist nothing",
         );
     }
 

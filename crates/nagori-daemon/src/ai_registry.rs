@@ -258,6 +258,45 @@ mod tests {
     }
 
     #[test]
+    fn attach_permit_after_reap_is_a_noop_and_releases_the_permit() {
+        // The watchdog can reap a request in the window between its permit being
+        // acquired and `attach_permit` running. Attaching to an already-removed
+        // handle must not resurrect it, and the orphaned permit must be released
+        // (dropped here) rather than leaked — otherwise the reaped request would
+        // pin the single text-generation slot for the rest of the process.
+        let registry = AiRequestRegistry::new();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_owned()
+            .expect("the sole permit is free");
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let id = RequestId::new();
+        registry.register(
+            id,
+            CancellationToken::new(),
+            Instant::now()
+                .checked_sub(REAP_GRACE + Duration::from_secs(1))
+                .expect("test clock is well past the epoch"),
+        );
+        assert_eq!(registry.reap_expired(), 1, "the expired handle is reaped");
+        assert_eq!(registry.active_count(), 0);
+
+        // The permit belongs to a request that no longer exists.
+        registry.attach_permit(id, Some(permit));
+        assert_eq!(
+            registry.active_count(),
+            0,
+            "attaching to a reaped id must not resurrect the handle",
+        );
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the orphaned permit must be released, not leaked",
+        );
+    }
+
+    #[test]
     fn semaphores_map_each_backend() {
         let semaphores = AiSemaphores::default();
         // Text generation is serialised to a single permit.
