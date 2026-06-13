@@ -289,6 +289,86 @@ where
     Ok(line)
 }
 
+/// Unit tests for the request framing read by [`read_bounded_line`] — the
+/// server's sole entry point for an incoming request line. Exercises the
+/// chunk-boundary handling, the request size ceiling, and the first-read
+/// slow-loris timeout in isolation from any transport.
+#[cfg(test)]
+mod tests_framing {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    use super::{FIRST_READ_TIMEOUT, MAX_IPC_REQUEST_BYTES, read_bounded_line};
+
+    /// Reader that is forever `Pending`, modelling a peer that connects and
+    /// then sends nothing — the slow-loris the first-read timeout defends.
+    struct NeverReady;
+
+    impl AsyncRead for NeverReady {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_a_short_line_and_stops_at_the_newline() {
+        let mut input: &[u8] = b"hello world\ntrailing ignored";
+        let line = read_bounded_line(&mut input).await.expect("line");
+        assert_eq!(line, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn assembles_a_line_that_spans_the_4096_byte_chunk_boundary() {
+        // The reader fills at most 4096 bytes per read, so a 5000-byte line
+        // with its newline only in the *third* chunk must be assembled across
+        // reads — a newline scan that only looked at the first chunk would
+        // truncate the request.
+        let mut payload = vec![b'a'; 5000];
+        payload.push(b'\n');
+        payload.extend_from_slice(b"after the newline");
+        let mut input: &[u8] = &payload;
+
+        let line = read_bounded_line(&mut input).await.expect("line");
+        assert_eq!(line.len(), 5000);
+        assert!(line.iter().all(|&b| b == b'a'));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_request_that_exceeds_the_size_ceiling() {
+        // A newline-less stream larger than the ceiling must be refused rather
+        // than buffered without bound.
+        let oversized = vec![b'a'; MAX_IPC_REQUEST_BYTES + 64];
+        let mut input: &[u8] = &oversized;
+        let err = read_bounded_line(&mut input)
+            .await
+            .expect_err("oversized request must be rejected");
+        assert!(err.contains("too large"), "got {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_read_times_out_when_the_peer_sends_nothing() {
+        // The first read carries a tight `FIRST_READ_TIMEOUT` budget so a peer
+        // that connects and never writes cannot pin a connection permit for
+        // the full read timeout. Paused time auto-advances to the timer.
+        let start = tokio::time::Instant::now();
+        let mut reader = NeverReady;
+        let err = read_bounded_line(&mut reader)
+            .await
+            .expect_err("a silent peer must trip the first-read timeout");
+        assert!(err.contains("no data"), "got {err}");
+        assert!(
+            start.elapsed() >= FIRST_READ_TIMEOUT,
+            "the timeout must wait the first-read budget"
+        );
+    }
+}
+
 /// Transport-agnostic tests for the shared [`handle_connection`] driver.
 ///
 /// Both the Unix-socket and named-pipe servers funnel through

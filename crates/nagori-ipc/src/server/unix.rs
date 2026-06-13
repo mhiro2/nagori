@@ -892,4 +892,93 @@ mod tests {
         shutdown.notify_waiters();
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
+
+    #[tokio::test]
+    async fn oversized_handler_response_is_replaced_with_a_structured_error() {
+        // A handler whose serialized response exceeds the wire cap must not be
+        // sent verbatim (it would blow the client's bounded reader and look
+        // like a truncated half-JSON). The server replaces it with a small
+        // `response_too_large` envelope the caller can act on.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("toobig.sock");
+        let token = test_token();
+        let server = spawn_handler(path.clone(), token.clone(), |_request| async {
+            IpcResponse::Error(crate::IpcError {
+                code: "huge".to_owned(),
+                // The message alone overruns the 1 MiB response ceiling.
+                message: "x".repeat(crate::MAX_IPC_BYTES + 1024),
+                recoverable: false,
+            })
+        })
+        .await;
+
+        let client = IpcClient::new(path.to_string_lossy().to_string(), token);
+        let response = client
+            .send(IpcRequest::Health)
+            .await
+            .expect("the small replacement envelope round-trips");
+        let IpcResponse::Error(err) = response else {
+            panic!("expected an error response, got {response:?}");
+        };
+        assert_eq!(err.code, "response_too_large");
+        assert!(!err.recoverable);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn server_rejects_an_oversized_request_line() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Writing raw bytes bypasses the client's pre-send size check, so this
+        // exercises the *server's* request-size ceiling end to end. The handler
+        // must never run — `read_bounded_line` rejects the line before parse.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bigreq.sock");
+        let server = spawn_handler(path.clone(), test_token(), |_request| async {
+            IpcResponse::Ack
+        })
+        .await;
+
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect");
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        // Push the oversized line from a separate task: once the server hits
+        // the ceiling it stops reading and closes, so the tail write fails —
+        // splitting lets us read the rejection concurrently rather than
+        // deadlocking on a half-flushed write.
+        let writer = tokio::spawn(async move {
+            let oversized = vec![b'a'; crate::MAX_IPC_BYTES + 64];
+            let _ = write_half.write_all(&oversized).await;
+            let _ = write_half.write_all(b"\n").await;
+            let _ = write_half.flush().await;
+        });
+
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = read_half.read(&mut chunk).await.expect("read response");
+            if read == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..read]);
+            if buf.contains(&b'\n') {
+                break;
+            }
+        }
+        writer.abort();
+
+        let line = buf
+            .split(|&b| b == b'\n')
+            .next()
+            .expect("a response line before EOF");
+        let response: IpcResponse = serde_json::from_slice(line).expect("parse response");
+        let IpcResponse::Error(err) = response else {
+            panic!("expected an error response, got {response:?}");
+        };
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("too large"), "got {}", err.message);
+        server.abort();
+    }
 }
