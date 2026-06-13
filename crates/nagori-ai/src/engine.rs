@@ -666,6 +666,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn availability_allowlist_disables_unlisted_actions() {
+        // A non-empty `allowed_actions` allow-list restricts which actions the
+        // engine offers: a listed action stays Available while an unlisted but
+        // otherwise-wired text-generation action reports DisabledBySettings.
+        // (The empty-list default — "all actions enabled" — is covered by the
+        // summarize/rewrite available test above.)
+        let engine = apple_engine(MockBackend::new());
+        let mut settings = settings(true, AiProviderKind::AppleNative);
+        settings.allowed_actions = vec![AiActionId::Summarize];
+        let report = engine.availability(&settings).await;
+
+        let summarize = report
+            .per_action
+            .iter()
+            .find(|entry| entry.action == AiActionId::Summarize)
+            .expect("summarize entry");
+        assert_eq!(
+            summarize.status,
+            PerActionStatus::Available,
+            "a listed action stays available"
+        );
+
+        let rewrite = report
+            .per_action
+            .iter()
+            .find(|entry| entry.action == AiActionId::Rewrite)
+            .expect("rewrite entry");
+        assert_eq!(
+            rewrite.status,
+            PerActionStatus::DisabledBySettings,
+            "an unlisted action is disabled even though its backend is wired"
+        );
+    }
+
+    #[tokio::test]
     async fn availability_is_disabled_when_master_toggle_off() {
         let engine = apple_engine(MockBackend::new());
         let report = engine

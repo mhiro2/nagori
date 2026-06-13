@@ -360,6 +360,31 @@ const DEFAULT_GENERATE_TIMEOUT_MS: u64 = 20_000;
 /// fires once the consumer has certainly given up.
 const GENERATE_TIMEOUT_SLACK_MS: u64 = 5_000;
 
+/// Converts [`GenerateOptions`] into the three values forwarded across the C
+/// ABI: `(max_output_tokens, temperature, swift_timeout_ms)`.
+///
+/// The first two use out-of-band sentinels — a non-positive token count and a
+/// negative temperature both mean "leave the framework default" on the Swift
+/// side, so `None` maps to `0` / `-1.0`. `swift_timeout_ms` is the watchdog
+/// derived from the consumer deadline (deadline + slack), floored at the legacy
+/// 20 s and capped at the settings ceiling plus slack so a corrupt deadline
+/// cannot park a wedged task for hours.
+fn generate_ffi_sentinels(options: &GenerateOptions) -> (i64, f64, u64) {
+    let swift_timeout_ms = options.timeout_ms.map_or(DEFAULT_GENERATE_TIMEOUT_MS, |t| {
+        t.saturating_add(GENERATE_TIMEOUT_SLACK_MS).clamp(
+            DEFAULT_GENERATE_TIMEOUT_MS,
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + GENERATE_TIMEOUT_SLACK_MS,
+        )
+    });
+    let max_output_tokens = options
+        .max_output_tokens
+        .map_or(0, |tokens| i64::from(tokens.max(1)));
+    let temperature = options
+        .temperature
+        .map_or(-1.0, |temp| f64::from(temp.max(0.0)));
+    (max_output_tokens, temperature, swift_timeout_ms)
+}
+
 /// Generates text from `input` under the system prompt `instructions` via the
 /// on-device language model. Serves every plain text-generation action
 /// (summarize, rewrite, reformat, explain); the action's steering lives in
@@ -387,22 +412,7 @@ pub(crate) fn generate_stream(
     let c_instructions = CString::new(instructions.replace('\0', " ")).unwrap_or_default();
     let source = CString::new(input.replace('\0', " ")).unwrap_or_default();
 
-    // Swift watchdog: consumer deadline + slack, floored at the legacy 20 s
-    // and capped at the settings ceiling (`MAX_AI_REQUEST_TIMEOUT_MS`) plus
-    // slack so a corrupt deadline can't park a wedged task for hours.
-    let swift_timeout_ms = options.timeout_ms.map_or(DEFAULT_GENERATE_TIMEOUT_MS, |t| {
-        t.saturating_add(GENERATE_TIMEOUT_SLACK_MS).clamp(
-            DEFAULT_GENERATE_TIMEOUT_MS,
-            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + GENERATE_TIMEOUT_SLACK_MS,
-        )
-    });
-    // Sentinels across the C ABI: <= 0 means "framework default".
-    let max_output_tokens = options
-        .max_output_tokens
-        .map_or(0, |tokens| i64::from(tokens.max(1)));
-    let temperature = options
-        .temperature
-        .map_or(-1.0, |temp| f64::from(temp.max(0.0)));
+    let (max_output_tokens, temperature, swift_timeout_ms) = generate_ffi_sentinels(&options);
 
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
     // the call (reclaimed in `generate_on_done`), and the callbacks are plain
@@ -811,6 +821,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use futures::StreamExt;
+
     use super::{bridge_snapshot_stream, hello, probe_real_availability, spawn_bridge};
     use crate::availability::AppleAvailability;
     use crate::event::AppleStreamEvent;
@@ -964,5 +976,166 @@ mod tests {
         let copied = super::read_f32(values.as_ptr(), values.len());
         assert_eq!(copied, vec![0.5, -1.0, 2.5]);
         assert!(super::read_f32(std::ptr::null(), 0).is_empty());
+    }
+
+    #[test]
+    fn generate_terminal_maps_success_to_done() {
+        let event = super::generate_terminal(0, "result".to_owned()).expect("code 0 is success");
+        match event {
+            nagori_core::AiEvent::Done {
+                final_text,
+                created_entry,
+                warnings,
+            } => {
+                assert_eq!(final_text, "result");
+                assert!(created_entry.is_none());
+                assert!(warnings.is_empty());
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_terminal_maps_cancellation() {
+        let event =
+            super::generate_terminal(1, "partial".to_owned()).expect("code 1 is a clean cancel");
+        assert!(matches!(event, nagori_core::AiEvent::Cancelled));
+    }
+
+    #[test]
+    fn generate_terminal_maps_distinct_error_codes() {
+        use nagori_core::AiErrorCode;
+        // The named codes each carry their own reason, mirroring the Swift
+        // `generationErrorCode` table. Asymmetric with translate/embed before
+        // this test: generate had no code-table coverage at all.
+        let cases = [
+            (3, AiErrorCode::InputTooLarge),
+            (4, AiErrorCode::RateLimited),
+            (8, AiErrorCode::RateLimited),
+            (5, AiErrorCode::AssetMissing),
+            (6, AiErrorCode::BackendInternal), // guardrail block
+            (7, AiErrorCode::BackendInternal), // unsupported locale
+        ];
+        for (code, expected) in cases {
+            let err = super::generate_terminal(code, String::new())
+                .expect_err("non-zero/non-cancel codes are errors");
+            assert_eq!(err.code, expected, "code {code} mapped wrong");
+        }
+    }
+
+    #[test]
+    fn generate_terminal_maps_unknown_codes_to_backend_internal() {
+        use nagori_core::AiErrorCode;
+        for code in [2, 9, 99, -1] {
+            let err = super::generate_terminal(code, String::new()).expect_err("error");
+            assert_eq!(err.code, AiErrorCode::BackendInternal, "code {code}");
+        }
+    }
+
+    #[test]
+    fn generate_ffi_sentinels_uses_framework_defaults_for_none() {
+        let (tokens, temperature, timeout) =
+            super::generate_ffi_sentinels(&super::GenerateOptions::default());
+        // `0` tokens / negative temperature are the "use framework default"
+        // sentinels Swift looks for; the timeout falls back to the legacy 20 s.
+        assert_eq!(tokens, 0);
+        assert!(temperature < 0.0);
+        assert_eq!(timeout, super::DEFAULT_GENERATE_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn generate_ffi_sentinels_clamps_and_floors_the_watchdog() {
+        // Token count floors at 1, temperature floors at 0.0, and the watchdog
+        // is the consumer deadline + slack — but never below the 20 s floor.
+        let tiny = super::generate_ffi_sentinels(&super::GenerateOptions {
+            max_output_tokens: Some(0),
+            temperature: Some(-2.0),
+            timeout_ms: Some(1),
+        });
+        assert_eq!(tiny.0, 1, "token count floors at 1");
+        assert!(
+            (tiny.1 - 0.0).abs() < f64::EPSILON,
+            "temperature floors at 0.0"
+        );
+        assert_eq!(
+            tiny.2,
+            super::DEFAULT_GENERATE_TIMEOUT_MS,
+            "a tiny deadline still gets the 20 s watchdog floor"
+        );
+
+        // A normal deadline becomes deadline + slack.
+        let normal = super::generate_ffi_sentinels(&super::GenerateOptions {
+            max_output_tokens: Some(256),
+            temperature: Some(0.7),
+            timeout_ms: Some(60_000),
+        });
+        assert_eq!(normal.0, 256);
+        assert_eq!(
+            normal.2,
+            60_000 + super::GENERATE_TIMEOUT_SLACK_MS,
+            "watchdog is deadline + slack"
+        );
+
+        // A deadline above the settings ceiling is capped at ceiling + slack.
+        let huge = super::generate_ffi_sentinels(&super::GenerateOptions {
+            max_output_tokens: None,
+            temperature: None,
+            timeout_ms: Some(u64::MAX),
+        });
+        assert_eq!(
+            huge.2,
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + super::GENERATE_TIMEOUT_SLACK_MS,
+            "a corrupt deadline is capped at the ceiling + slack"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_event_stream_yields_the_terminal_item_then_ends() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(Ok(nagori_core::AiEvent::Done {
+            final_text: "ok".to_owned(),
+            created_entry: None,
+            warnings: Vec::new(),
+        }))
+        .unwrap();
+        drop(tx); // close after one item
+
+        let mut stream = super::generate_event_stream(rx, std::time::Duration::from_mins(1));
+        let first = stream.next().await.expect("one terminal item");
+        assert!(matches!(first, Ok(nagori_core::AiEvent::Done { .. })));
+        assert!(
+            stream.next().await.is_none(),
+            "stream ends after the closed channel"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generate_event_stream_times_out_when_swift_never_reports() {
+        // The stall guard is the last line of defence for direct consumers
+        // (the CLI in-process path) when Swift wedges so hard `onDone` never
+        // fires. Holding `_tx` keeps the channel open with nothing ever sent,
+        // so `recv()` pends forever and only the deadline can end the stream.
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Result<nagori_core::AiEvent, nagori_core::AiError>,
+        >();
+        let mut stream = super::generate_event_stream(rx, std::time::Duration::from_secs(30));
+
+        // The guard must NOT fire before its deadline: a shorter probe timer
+        // wins this race. With paused time the runtime advances to the nearest
+        // timer (the 10 s probe), so a regression to an immediate timeout would
+        // let the `stream.next()` arm win and fail the test.
+        tokio::select! {
+            _ = stream.next() => panic!("stall guard fired before its deadline"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+        }
+
+        // Once the deadline elapses with nothing sent, the guard yields a
+        // terminal `Timeout` error.
+        let item = stream
+            .next()
+            .await
+            .expect("stall guard yields a terminal item");
+        let err = item.expect_err("a wedged Swift side must surface as an error");
+        assert_eq!(err.code, nagori_core::AiErrorCode::Timeout);
     }
 }
