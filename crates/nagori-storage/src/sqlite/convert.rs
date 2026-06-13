@@ -349,4 +349,16 @@ mod tests {
         let source = std::error::Error::source(&err).expect("source must be preserved");
         assert!(source.downcast_ref::<serde_json::Error>().is_some());
     }
+
+    #[test]
+    fn sensitivity_rank_is_strictly_increasing_in_protection() {
+        // The dedupe merge keeps `max(stored, recaptured)` by this rank, so the
+        // ordering is the privacy invariant: Unknown is the least protected and
+        // Blocked the most. A reordering here would let a re-capture demote a
+        // protected row.
+        assert!(sensitivity_rank(Sensitivity::Unknown) < sensitivity_rank(Sensitivity::Public));
+        assert!(sensitivity_rank(Sensitivity::Public) < sensitivity_rank(Sensitivity::Private));
+        assert!(sensitivity_rank(Sensitivity::Private) < sensitivity_rank(Sensitivity::Secret));
+        assert!(sensitivity_rank(Sensitivity::Secret) < sensitivity_rank(Sensitivity::Blocked));
+    }
 }

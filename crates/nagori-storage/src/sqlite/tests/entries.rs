@@ -7,6 +7,57 @@ use super::super::*;
 
 use super::{backdate_entry, insert_text};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_inserts_of_identical_content_dedupe_to_one_row() {
+    // A file-backed store has the real connection pool (capacity 4), so the
+    // inserts contend on separate connections — the in-memory store is
+    // capacity 1 and would serialise them, hiding any dedupe race. The dedupe
+    // SELECT-then-INSERT runs inside a `BEGIN IMMEDIATE` transaction, so the
+    // first writer takes the write lock and the rest observe its row and
+    // collapse onto it rather than racing to insert duplicates. This pins the
+    // IMMEDIATE behaviour: dropping it (to DEFERRED) would let two readers both
+    // miss the row and both insert.
+    const WRITERS: usize = 12;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path().join("history.db")).unwrap();
+
+    // A barrier releases every task into `insert` at once so the writers
+    // genuinely collide on the pool + write lock — without it the runtime
+    // could serialise them and a DEFERRED transaction (the regression this
+    // guards) would slip through unnoticed.
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..WRITERS {
+        let store = store.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        tasks.spawn(async move {
+            let mut entry = EntryFactory::from_text("racing clipboard value");
+            entry.search.normalized_text = normalize_text(entry.plain_text().unwrap());
+            barrier.wait().await;
+            store.insert(entry).await.unwrap()
+        });
+    }
+
+    let mut ids = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        ids.push(res.unwrap());
+    }
+
+    assert_eq!(ids.len(), WRITERS);
+    let first = ids[0];
+    assert!(
+        ids.iter().all(|id| *id == first),
+        "every concurrent insert must dedupe to the same id: {ids:?}"
+    );
+    let recent = store.list_recent(50).await.unwrap();
+    assert_eq!(
+        recent.len(),
+        1,
+        "concurrent identical inserts must not create duplicate rows"
+    );
+}
+
 #[tokio::test]
 async fn duplicate_insert_returns_existing_id() {
     let store = SqliteStore::open_memory().unwrap();
@@ -159,6 +210,63 @@ async fn duplicate_insert_still_promotes_sensitivity() {
 
     let fetched = store.get(unknown_id).await.unwrap().expect("row exists");
     assert_eq!(fetched.sensitivity, Sensitivity::Secret);
+}
+
+#[tokio::test]
+async fn duplicate_insert_promotes_across_every_lower_starting_rank() {
+    // The monotone merge must promote toward `Secret` from each rank below it,
+    // not just from `Unknown`. Walk the ladder so a future change to the rank
+    // table or the merge CASE that breaks an intermediate rung is caught.
+    for (text, lower) in [
+        ("promote from public", Sensitivity::Public),
+        ("promote from private", Sensitivity::Private),
+    ] {
+        let store = SqliteStore::open_memory().unwrap();
+
+        let mut seed = EntryFactory::from_text(text);
+        seed.search.normalized_text = normalize_text(seed.plain_text().unwrap());
+        seed.sensitivity = lower;
+        let seed_id = store.insert(seed).await.unwrap();
+
+        let mut secret = EntryFactory::from_text(text);
+        secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+        secret.sensitivity = Sensitivity::Secret;
+        let secret_id = store.insert(secret).await.unwrap();
+        assert_eq!(secret_id, seed_id, "dedupe should reuse the {lower:?} row");
+
+        let fetched = store.get(seed_id).await.unwrap().expect("row exists");
+        assert_eq!(
+            fetched.sensitivity,
+            Sensitivity::Secret,
+            "a {lower:?} row must promote to Secret on re-capture"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_insert_never_demotes_secret_to_an_intermediate_rank() {
+    // A re-capture that classifies as `Private` (more than Unknown, less than
+    // Secret) must still leave a `Secret` row untouched — the merge keeps the
+    // max, not the latest.
+    let store = SqliteStore::open_memory().unwrap();
+
+    let mut secret = EntryFactory::from_text("intermediate downgrade attempt");
+    secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+    secret.sensitivity = Sensitivity::Secret;
+    let secret_id = store.insert(secret).await.unwrap();
+
+    let mut private = EntryFactory::from_text("intermediate downgrade attempt");
+    private.search.normalized_text = normalize_text(private.plain_text().unwrap());
+    private.sensitivity = Sensitivity::Private;
+    let private_id = store.insert(private).await.unwrap();
+    assert_eq!(private_id, secret_id, "dedupe should reuse the row");
+
+    let fetched = store.get(secret_id).await.unwrap().expect("row exists");
+    assert_eq!(
+        fetched.sensitivity,
+        Sensitivity::Secret,
+        "a Private re-capture must not demote a Secret row"
+    );
 }
 
 #[tokio::test]

@@ -85,3 +85,83 @@ impl Drop for PooledConn<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_of(capacity: usize) -> ConnPool {
+        let slots = (0..capacity)
+            .map(|_| Connection::open_in_memory().expect("open in-memory conn"))
+            .collect();
+        ConnPool {
+            slots: Mutex::new(slots),
+            available: Condvar::new(),
+        }
+    }
+
+    #[test]
+    fn release_returns_connections_so_repeated_acquire_never_deadlocks() {
+        let pool = pool_of(2);
+        // Acquire to capacity, then drop, more times than the pool is deep.
+        // Each guard drop must return its connection so the next round finds
+        // a free slot — a leak here would deadlock the second iteration.
+        for _ in 0..10 {
+            let a = pool.acquire().unwrap();
+            let b = pool.acquire().unwrap();
+            assert!(
+                pool.slots.lock().unwrap().is_empty(),
+                "both connections are checked out"
+            );
+            drop(a);
+            drop(b);
+            assert_eq!(
+                pool.slots.lock().unwrap().len(),
+                2,
+                "every connection must return to the pool on drop"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_parks_until_a_connection_is_released_then_wakes_the_waiter() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Leak the pool to `'static` and run the waiter on a *detached* thread
+        // (not `thread::scope`): if `release`/`notify_one` regresses, the
+        // waiter parks forever, and a scoped join would then hang the whole
+        // suite. Detached + `recv_timeout` turns that regression into a clean
+        // test *failure* instead — the abandoned thread is never joined.
+        let pool: &'static ConnPool = Box::leak(Box::new(pool_of(1)));
+
+        // Hold the sole connection: a second acquirer has no slot and must
+        // park on the condvar rather than spin or fail.
+        let held = pool.acquire().unwrap();
+
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Blocks inside `acquire` until the held connection is released.
+            let _conn = pool.acquire().unwrap();
+            let _ = acquired_tx.send(());
+        });
+
+        // Give the waiter ample time to reach `Condvar::wait` and park. The
+        // duration is not asserted on — it only ensures the waiter is parked
+        // *before* the release, so the wakeup genuinely depends on
+        // `notify_one` rather than the waiter arriving late to a free slot.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            acquired_rx.try_recv().is_err(),
+            "waiter must park while the only connection is held"
+        );
+
+        // Releasing notifies the condvar and hands the connection over. A
+        // broken `release`/`notify_one` leaves the waiter parked, so the
+        // `recv_timeout` fails the test rather than blocking forever.
+        drop(held);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("releasing a connection must wake the parked waiter");
+    }
+}

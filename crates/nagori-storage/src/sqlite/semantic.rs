@@ -722,4 +722,88 @@ mod tests {
         store.semantic_delete(id).await.unwrap();
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
     }
+
+    #[tokio::test]
+    async fn soft_deleted_entries_drop_out_of_search_pending_and_counts() {
+        // `mark_deleted` only stamps `deleted_at`; the vector row survives until
+        // the maintenance purge. Every semantic query joins on
+        // `e.deleted_at IS NULL`, so a soft-deleted entry must vanish from
+        // search, the pending backlog, and the counts immediately — long before
+        // its vector is physically removed.
+        let store = SqliteStore::open_memory().unwrap();
+        let keep = insert_text(&store, "keep this vector").await;
+        let drop = insert_text(&store, "drop this vector").await;
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        let hash = |id: EntryId| {
+            pending
+                .iter()
+                .find(|p| p.entry_id == id)
+                .unwrap()
+                .content_hash
+                .clone()
+        };
+        store
+            .semantic_upsert(keep, hash(keep), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        store
+            .semantic_upsert(drop, hash(drop), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        // Both are searchable and counted while live.
+        let hits = store
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(store.semantic_counts().await.unwrap().total, 2);
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 2);
+
+        store.mark_deleted(drop).await.unwrap();
+
+        // The soft-deleted entry is gone from every read path even though its
+        // vector row has not been purged yet.
+        let hits = store
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry_id, keep);
+
+        let counts = store.semantic_counts().await.unwrap();
+        assert_eq!(counts.total, 1, "soft-deleted entry leaves the total");
+        assert_eq!(
+            counts.indexed, 1,
+            "soft-deleted entry leaves the indexed count"
+        );
+
+        assert!(
+            store
+                .semantic_pending(10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|p| p.entry_id != drop),
+            "a soft-deleted entry must not reappear in the embedding backlog"
+        );
+    }
+
+    #[tokio::test]
+    async fn soft_deleted_unembedded_entry_leaves_the_pending_backlog() {
+        // The pending list must also drop soft-deleted entries that were never
+        // embedded — otherwise the indexer would keep computing embeddings for
+        // rows that are on their way out.
+        let store = SqliteStore::open_memory().unwrap();
+        let live = insert_text(&store, "still pending").await;
+        let gone = insert_text(&store, "deleted before embedding").await;
+
+        store.mark_deleted(gone).await.unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        let ids: Vec<_> = pending.iter().map(|p| p.entry_id).collect();
+        assert_eq!(ids, vec![live]);
+        assert_eq!(store.semantic_counts().await.unwrap().total, 1);
+    }
 }
