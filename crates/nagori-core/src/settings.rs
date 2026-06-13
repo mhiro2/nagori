@@ -222,6 +222,15 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// the user's rules on first launch. Reading either shape — and
 /// mapping the legacy strings to [`AppDenyRule::Pattern`] — keeps
 /// every existing rule active across the upgrade.
+///
+/// Parsing is per-element so a single unreadable rule cannot abort the
+/// whole [`AppSettings`] deserialize. A future `AppDenyRule` variant seen
+/// by an older build (downgrade) or a hand-edited DB row would otherwise
+/// fail the entire settings read — and a caller that falls back to
+/// `AppSettings::default()` on that error would drop *every* denylist
+/// rule, a fail-open privacy regression. Each element is buffered as an
+/// untyped value first, then converted; the ones that do not parse are
+/// warned about and skipped, so every still-readable rule survives.
 pub fn deserialize_app_denylist<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Vec<AppDenyRule>, D::Error>
@@ -234,14 +243,18 @@ where
         Rule(AppDenyRule),
         Legacy(String),
     }
-    let raw: Vec<RuleOrString> = Vec::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .map(|item| match item {
-            RuleOrString::Rule(rule) => rule,
-            RuleOrString::Legacy(value) => AppDenyRule::Pattern { value },
-        })
-        .collect())
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    let mut rules = Vec::with_capacity(raw.len());
+    for value in raw {
+        match serde_json::from_value::<RuleOrString>(value) {
+            Ok(RuleOrString::Rule(rule)) => rules.push(rule),
+            Ok(RuleOrString::Legacy(value)) => rules.push(AppDenyRule::Pattern { value }),
+            Err(err) => {
+                tracing::warn!(error = %err, "app_denylist_rule_skipped");
+            }
+        }
+    }
+    Ok(rules)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -931,6 +944,86 @@ mod tests {
         AppSettings::default()
             .validate()
             .expect("default settings must validate");
+    }
+
+    #[test]
+    fn deserialize_app_denylist_keeps_legacy_and_typed_rules() {
+        let json = r#"[
+            "1Password",
+            { "type": "pattern", "value": "Secrets" },
+            { "type": "source_app", "kind": "macos_bundle_id", "value": "com.example.app", "label": "Example", "source": "preset" }
+        ]"#;
+        let rules: Vec<AppDenyRule> =
+            deserialize_app_denylist(&mut serde_json::Deserializer::from_str(json))
+                .expect("mixed shapes deserialize");
+        assert_eq!(
+            rules,
+            vec![
+                AppDenyRule::Pattern {
+                    value: "1Password".to_owned()
+                },
+                AppDenyRule::Pattern {
+                    value: "Secrets".to_owned()
+                },
+                AppDenyRule::SourceApp {
+                    kind: SourceAppIdKind::MacosBundleId,
+                    value: "com.example.app".to_owned(),
+                    label: Some("Example".to_owned()),
+                    source: RuleSource::Preset,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn deserialize_app_denylist_skips_unreadable_rule() {
+        // A rule shape this build cannot parse (e.g. a future variant seen
+        // after a downgrade, or a hand-edited row) must be skipped rather
+        // than aborting the whole settings deserialize and dropping every
+        // surviving rule.
+        let json = r#"[
+            "1Password",
+            { "type": "future_variant", "value": "x" },
+            { "type": "pattern", "value": "Secrets" }
+        ]"#;
+        let rules: Vec<AppDenyRule> =
+            deserialize_app_denylist(&mut serde_json::Deserializer::from_str(json))
+                .expect("one bad rule must not fail the whole list");
+        assert_eq!(
+            rules,
+            vec![
+                AppDenyRule::Pattern {
+                    value: "1Password".to_owned()
+                },
+                AppDenyRule::Pattern {
+                    value: "Secrets".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn app_settings_deserialize_survives_bad_denylist_rule() {
+        let settings = AppSettings {
+            app_denylist: vec![AppDenyRule::Pattern {
+                value: "keep-me".to_owned(),
+            }],
+            ..AppSettings::default()
+        };
+        let mut value = serde_json::to_value(&settings).expect("settings serialize");
+        // Splice an unreadable rule into the persisted blob alongside a good
+        // one and confirm the whole `AppSettings` still deserializes.
+        value["app_denylist"] = serde_json::json!([
+            { "type": "future_variant", "value": "x" },
+            { "type": "pattern", "value": "keep-me" }
+        ]);
+        let restored: AppSettings = serde_json::from_value(value).expect("settings deserialize");
+        assert_eq!(
+            restored.app_denylist,
+            vec![AppDenyRule::Pattern {
+                value: "keep-me".to_owned()
+            }]
+        );
     }
 
     #[test]
