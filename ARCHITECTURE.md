@@ -224,7 +224,10 @@ ClipboardReader.current_sequence_with_max()
                                             touching the body)
   → ClipboardReader.current_snapshot_with_max()
                                             (pre-read size guard where
-                                             platform supports it)
+                                             platform supports it; macOS
+                                             also detects an owner exclusion
+                                             marker here → Excluded → audit
+                                             + drop without reading the body)
   → EntryFactory.from_snapshot()           (decode → ClipboardEntry +
                                             SHA-256 content hash +
                                             search document +
@@ -284,6 +287,32 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
 - `app_denylist` is enforced inside `SensitivityClassifier::classify`
   against the snapshot's `source` (bundle id / name), not in the
   factory.
+- Owner exclusion markers (the nspasteboard.org convention types
+  `org.nspasteboard.ConcealedType`, set by password managers, and
+  `org.nspasteboard.TransientType`, set for throwaway values) are an
+  independent defence layer that sits *outside* `SensitivityClassifier`.
+  The macOS adapter probes them via `NSPasteboard.availableTypeFromArray`
+  inside the bounded read **both before `get_text`** (so a marked secret is
+  normally never read into the daemon's address space) **and again after
+  it** (so a marker that races in within a single clear-then-write publish
+  still discards the just-read body unstored — macOS folds clear-then-write
+  into one `changeCount`, and the final torn retry would otherwise accept a
+  body it read mid-write). This covers every single-publish ordering; the
+  only residual is a multi-publish torn race (three foreign publishes —
+  unmarked, marked, unmarked — interleaved inside one sub-millisecond
+  attempt on the final retry), which is the same torn-snapshot tradeoff
+  every capture makes and is accepted rather than dropping every torn body.
+  Either probe surfaces as
+  `CapturedSnapshot::Excluded { kind }` and the capture loop audits
+  (`capture_skipped` with `concealed_marker` / `transient_marker`) and
+  skips it as an intentional policy drop. `Concealed` wins when both
+  markers are present. The behaviour is always on (no setting): the marker
+  is the clipboard owner's explicit "do not record" contract, mirroring how
+  the AX secure-field guard is unconditionally honoured. The kind is named
+  `ClipboardExclusionKind` (not `PasteboardMarker`) so the same skip path
+  can later carry the Windows (`Clipboard Viewer Ignore`) / Linux
+  (`x-kde-passwordManagerHint`) analogues once each is verified to mean the
+  same thing.
 - `EntryRepository::insert` upserts `entries`, `search_documents`, and
   `ngrams` in one SQLite transaction, so search is consistent the
   moment the row commits — there is no separate
@@ -319,7 +348,9 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   is within this read and gets its dedup hash anchored, so a post-raise
   wake-resync still recognises it. A clip over the hard limit can never be
   captured under any setting, so it anchors only the sequence and is
-  skipped.
+  skipped. A pre-launch clip carrying an owner exclusion marker is handled
+  the same way: the baseline read surfaces `Excluded`, anchors only the
+  sequence, and never hashes the body.
 - After frontmost is captured, the loop asks the platform whether the
   frontmost app's currently-focused element is a secure text field
   (`kAXSecureTextField` role/subrole). When true, the clip is dropped

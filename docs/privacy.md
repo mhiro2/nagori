@@ -110,6 +110,40 @@ Custom patterns are the right place for:
   browser's bundle ID when the extension is open in a dedicated
   profile.
 
+## Owner exclusion markers (macOS, always on)
+
+Independently of the denylist, nagori honours the
+[nspasteboard.org](https://nspasteboard.org) convention markers that a
+clipboard owner sets to declare "do not record this in history":
+
+- `org.nspasteboard.ConcealedType` — a secret (set by password managers
+  such as 1Password / KeePassXC when you copy a credential).
+- `org.nspasteboard.TransientType` — a throwaway value not meant to
+  outlive the current paste.
+
+When either marker is present, the capture is skipped: the adapter probes
+for the marker **before reading the clipboard body**, so a marked secret is
+normally never read at all, and **re-checks after the read** so a marker
+that races in mid-publish still discards the just-read body without storing
+it. The skip is audited as `capture_skipped` (`concealed_marker` /
+`transient_marker`); when both markers are present, the concealed one wins.
+
+This is robust for every normal single-publish copy. The one residual gap is
+a multi-publish torn race — a different app's clipboard write flickering an
+unmarked → marked → unmarked sequence inside the same sub-millisecond read —
+which is the same torn-snapshot tradeoff every capture makes and is not a
+realistic accident or attack vector.
+
+This is **always on and has no setting**. The marker is the source app's
+explicit non-persistence contract — exposing a toggle would only let nagori
+break that contract — which is the same reasoning behind the unconditional
+secure-text-field guard. The denylist and secret classifier still run as
+independent additional layers for apps that do not set a marker.
+
+Other platforms have analogous conventions (Windows' `Clipboard Viewer
+Ignore`, Linux's `x-kde-passwordManagerHint`); these are not wired yet but
+the internal `ClipboardExclusionKind` skip path is shaped to carry them.
+
 ## User regex denylist
 
 The privacy panel accepts user-defined patterns under
