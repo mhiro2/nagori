@@ -1,4 +1,11 @@
+use super::super::file_url::exclusion_for;
+use super::super::write::write_pasteboard_items;
 use super::super::*;
+
+use nagori_platform::ClipboardExclusionKind;
+use objc2::rc::Retained;
+use objc2_app_kit::NSPasteboardItem;
+use objc2_foundation::NSString;
 
 /// Publish an `NSPasteboardItem` carrying `types` (each with a dummy
 /// string payload) onto an *isolated* `pasteboardWithUniqueName`, so the

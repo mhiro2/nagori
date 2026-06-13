@@ -1,7 +1,14 @@
+use super::super::file_url::ns_data_to_vec;
 use super::super::*;
 use super::{TINY_PNG, TINY_TIFF};
 
-use nagori_core::{EntryFactory, ImageContent, RepresentationRole};
+use nagori_core::{
+    AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardSnapshot, EntryFactory,
+    ImageContent, RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+};
+use nagori_platform::{ClipboardReader, ClipboardWriter};
+use objc2_app_kit::{NSPasteboardTypeFileURL, NSPasteboardTypeTIFF};
+use objc2_foundation::NSString;
 
 fn image_entry(bytes: Vec<u8>, mime: &str) -> ClipboardEntry {
     let byte_count = bytes.len();

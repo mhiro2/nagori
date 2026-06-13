@@ -1,5 +1,7 @@
-use super::super::*;
+use super::super::transcode::{prepare_tiff_capture, transcode_tiff_representations};
 use super::TINY_TIFF;
+
+use nagori_core::{ClipboardData, ClipboardRepresentation};
 
 #[test]
 fn tiff_capture_is_normalized_to_png() {

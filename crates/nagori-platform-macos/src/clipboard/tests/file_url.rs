@@ -1,4 +1,8 @@
+use super::super::file_url::{FileUrlPaths, collect_file_url_paths, oversized_file_urls};
 use super::super::*;
+
+use objc2_app_kit::{NSPasteboardItem, NSPasteboardTypeFileURL};
+use objc2_foundation::{NSArray, NSString, NSURL};
 
 fn file_url_items(urls: &[String]) -> objc2::rc::Retained<NSArray<NSPasteboardItem>> {
     let items = urls

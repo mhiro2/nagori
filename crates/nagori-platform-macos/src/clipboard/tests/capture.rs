@@ -1,4 +1,7 @@
+use super::super::read::{CaptureAttempt, resolve_capture_attempts, settle};
 use super::super::*;
+
+use nagori_platform::CapturedSnapshot;
 
 /// A `CapturedSnapshot` tagged by sequence so tests can assert *which*
 /// attempt's snapshot the retry loop returned.
