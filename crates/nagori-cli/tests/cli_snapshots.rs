@@ -190,6 +190,57 @@ fn clear_invalid_older_than_days_exits_non_one() {
 }
 
 #[test]
+fn add_without_text_or_stdin_exits_internal() {
+    // `nagori add` with neither --text nor --stdin is a usage error. It
+    // currently surfaces as a bare anyhow (not a typed AppError), so it maps to
+    // exit 8 via `exit_code_for`'s default arm. Pinned here so the exit-code
+    // contract is explicit; realigning these input errors to
+    // InvalidInput/exit 2 is tracked separately.
+    let (_dir, db) = temp_db();
+    let output = nagori(&db).arg("add").output().expect("invoke nagori");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(8), "missing input → exit 8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        stderr.contains("--text") || stderr.contains("--stdin"),
+        "error must mention the required flags, got: {stderr:?}",
+    );
+}
+
+#[test]
+fn add_with_non_utf8_stdin_exits_internal() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    // Non-UTF-8 stdin is rejected after the size check. Like the missing-input
+    // case it is a bare anyhow today, so it maps to exit 8. Pinned alongside
+    // the missing-input contract.
+    let (_dir, db) = temp_db();
+    let mut child = nagori(&db)
+        .args(["add", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn nagori");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        // 0xFF / 0xFE are never valid UTF-8 lead bytes.
+        .write_all(&[0xFF, 0xFE, 0x80])
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait for nagori");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(8), "non-UTF-8 stdin → exit 8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
+    assert!(
+        stderr.contains("not valid UTF-8"),
+        "error must explain the UTF-8 failure, got: {stderr:?}",
+    );
+}
+
+#[test]
 fn add_then_get_text_round_trip_snapshot() {
     // Exercises the full add → get pipeline, redacting the entry id and
     // timestamps before the snapshot so the assertion is deterministic.

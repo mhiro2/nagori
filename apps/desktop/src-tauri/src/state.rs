@@ -1265,6 +1265,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clear_on_quit_marker_path_is_keyed_to_the_db_file() {
+        // Suffixing the full DB path (not just its directory) keeps two DBs in
+        // the same directory from inheriting each other's stale marker.
+        let marker = clear_on_quit_marker_path(std::path::Path::new("/data/nagori.sqlite"));
+        assert_eq!(
+            marker,
+            std::path::PathBuf::from("/data/nagori.sqlite.clear-on-quit.pending"),
+        );
+    }
+
+    #[test]
+    fn clear_on_quit_marker_write_probe_remove_cycle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marker = tmp.path().join("nagori.sqlite.clear-on-quit.pending");
+        let mut state = build_test_state();
+        state.clear_on_quit_marker = Some(marker.clone());
+
+        // Nothing pending until a shutdown purge is staged.
+        assert!(!state.clear_on_quit_marker_present());
+
+        // Marking writes the sentinel so a crash before the purge finishes is
+        // resumed on the next launch.
+        state
+            .mark_clear_on_quit_pending()
+            .expect("mark writes the file");
+        assert!(state.clear_on_quit_marker_present());
+        assert!(marker.exists());
+
+        // Clearing after a completed purge removes the sentinel, and clearing
+        // again (already gone) is success — a missing marker is not an error.
+        state
+            .clear_clear_on_quit_pending()
+            .expect("clear removes the file");
+        assert!(!state.clear_on_quit_marker_present());
+        assert!(!marker.exists());
+        state
+            .clear_clear_on_quit_pending()
+            .expect("clearing an absent marker is idempotent");
+    }
+
+    #[test]
+    fn clear_on_quit_marker_ops_are_noops_without_a_configured_path() {
+        // A disabled clear-on-quit (or in-memory store) leaves the marker path
+        // `None`; every op must be a silent no-op and nothing is ever pending.
+        let state = build_test_state();
+        assert!(state.clear_on_quit_marker.is_none());
+        assert!(!state.clear_on_quit_marker_present());
+        state
+            .mark_clear_on_quit_pending()
+            .expect("mark is a no-op when unconfigured");
+        assert!(!state.clear_on_quit_marker_present());
+        state
+            .clear_clear_on_quit_pending()
+            .expect("clear is a no-op when unconfigured");
+    }
+
     #[cfg(unix)]
     mod cli_ipc {
         use super::*;

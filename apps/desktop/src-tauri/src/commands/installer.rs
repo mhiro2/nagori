@@ -312,3 +312,90 @@ pub fn install_cli() -> CommandResult<CliInstallResultDto> {
 pub fn install_cli() -> CommandResult<CliInstallResultDto> {
     Err(CommandError::unsupported("install_cli"))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn cli_source_is_stable_rejects_ephemeral_app_locations() {
+        // Gatekeeper translocation, mounted disk images, and AppImage fuse
+        // mounts all expose the executable from a path that vanishes when the
+        // app quits — a symlink into one would dangle, so linking is refused.
+        assert!(!cli_source_is_stable(Path::new(
+            "/private/var/folders/AppTranslocation/abc/d/Nagori.app/Contents/MacOS/nagori"
+        )));
+        assert!(!cli_source_is_stable(Path::new(
+            "/Volumes/Nagori/Nagori.app/Contents/MacOS/nagori"
+        )));
+        assert!(!cli_source_is_stable(Path::new(
+            "/tmp/.mount_Nagoriabc/usr/bin/nagori"
+        )));
+
+        // A normal install location is stable. Guard the positive case on
+        // APPDIR being unset so a test host that happens to export it (an
+        // AppImage CI runner) does not flip the result.
+        if std::env::var_os("APPDIR").is_none() {
+            assert!(cli_source_is_stable(Path::new(
+                "/Applications/Nagori.app/Contents/MacOS/nagori"
+            )));
+        }
+    }
+
+    #[test]
+    fn dir_in_matches_through_a_symlinked_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real_bin");
+        std::fs::create_dir(&real).expect("create dir");
+        let alias = tmp.path().join("alias_bin");
+        symlink(&real, &alias).expect("symlink dir");
+
+        // The alias resolves to the same directory, so a PATH listing either
+        // form must count as a match.
+        assert!(dir_in(&alias, std::slice::from_ref(&real)));
+        assert!(dir_in(&real, std::slice::from_ref(&alias)));
+        assert!(!dir_in(&real, &[tmp.path().join("unrelated")]));
+    }
+
+    #[test]
+    fn find_linked_cli_prefers_a_link_that_is_on_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source_nagori");
+        std::fs::write(&source, b"#!/bin/sh\n").expect("write source");
+
+        // The installer's own ~/.local/bin target (not on PATH) and a
+        // PATH directory both link to the same source.
+        let local_bin = tmp.path().join("local_bin");
+        std::fs::create_dir(&local_bin).expect("create local_bin");
+        symlink(&source, local_bin.join("nagori")).expect("symlink local");
+
+        let path_bin = tmp.path().join("path_bin");
+        std::fs::create_dir(&path_bin).expect("create path_bin");
+        symlink(&source, path_bin.join("nagori")).expect("symlink path");
+
+        let found = find_linked_cli(&source, Some(&local_bin), std::slice::from_ref(&path_bin))
+            .expect("an installed link is found");
+        assert_eq!(
+            found,
+            path_bin.join("nagori"),
+            "a link on PATH is preferred over the off-PATH ~/.local/bin link",
+        );
+    }
+
+    #[test]
+    fn find_linked_cli_returns_none_when_no_link_resolves_to_the_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source_nagori");
+        std::fs::write(&source, b"#!/bin/sh\n").expect("write source");
+
+        let empty_bin = tmp.path().join("empty_bin");
+        std::fs::create_dir(&empty_bin).expect("create empty_bin");
+
+        assert!(
+            find_linked_cli(&source, Some(&empty_bin), &[]).is_none(),
+            "no symlink points at the source, so nothing is reported installed",
+        );
+    }
+}
