@@ -232,3 +232,67 @@ pub enum RankReason {
     FrequentlyUsed,
     Pinned,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{keyword_followed_by_whitespace, make_preview};
+
+    #[test]
+    fn keyword_match_needs_whitespace_on_the_right() {
+        // The bare keyword at the start of the text with a following space is
+        // the canonical "this looks like code" signal.
+        assert!(keyword_followed_by_whitespace("fn main()", "fn"));
+        assert!(keyword_followed_by_whitespace("function call", "function"));
+    }
+
+    #[test]
+    fn keyword_at_end_without_trailing_whitespace_does_not_match() {
+        // `right_ok` requires a byte after the keyword, so a keyword that ends
+        // the string never qualifies — it has no whitespace boundary.
+        assert!(!keyword_followed_by_whitespace("use fn", "fn"));
+    }
+
+    #[test]
+    fn keyword_inside_an_identifier_does_not_match() {
+        // Left boundary must be a non-word byte: `somefn` and `myfn` carry a
+        // word byte immediately before the keyword.
+        assert!(!keyword_followed_by_whitespace("somefn x", "fn"));
+        // URL path segments like `/function/docs` end the keyword on `/`,
+        // which is not whitespace, so the right boundary rejects them.
+        assert!(!keyword_followed_by_whitespace(
+            "/function/docs",
+            "function"
+        ));
+    }
+
+    #[test]
+    fn scans_past_a_failed_match_to_a_later_valid_one() {
+        // First "fn" sits inside "myfn" (word byte on the left); the loop must
+        // keep scanning and accept the standalone "fn" later in the string.
+        assert!(keyword_followed_by_whitespace("myfn fn x", "fn"));
+    }
+
+    #[test]
+    fn punctuation_is_a_valid_left_boundary() {
+        // A non-word byte such as `(` opens the left boundary even mid-string.
+        assert!(keyword_followed_by_whitespace("x=(fn arg)", "fn"));
+    }
+
+    #[test]
+    fn empty_keyword_never_matches() {
+        assert!(!keyword_followed_by_whitespace("anything", ""));
+        assert!(!keyword_followed_by_whitespace("", ""));
+    }
+
+    #[test]
+    fn make_preview_caps_at_max_chars_counting_the_ellipsis() {
+        let preview = make_preview("abcdef", 4);
+        assert_eq!(preview, "abc…");
+        assert_eq!(preview.chars().count(), 4);
+    }
+
+    #[test]
+    fn make_preview_compacts_whitespace_without_truncating_short_text() {
+        assert_eq!(make_preview("  a\t\n b  ", 180), "a b");
+    }
+}

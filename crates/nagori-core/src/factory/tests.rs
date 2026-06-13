@@ -332,6 +332,43 @@ fn strip_html_handles_angle_brackets_inside_attribute_quotes() {
 }
 
 #[test]
+fn strip_html_compacts_whitespace_across_nested_tags() {
+    // Tag boundaries collapse to plain text and the trailing whitespace
+    // normalisation joins the surviving words with single spaces.
+    let stripped = super::strip_html("<div>\n  <p>hello</p>\n  <span>world</span>\n</div>");
+    assert_eq!(stripped, "hello world");
+}
+
+#[test]
+fn strip_html_keeps_script_and_style_body_text() {
+    // The stripper only removes tag markup, not the text *between* tags, so
+    // `<script>`/`<style>` bodies survive into the fallback preview. This is
+    // the documented "intentionally lossy" contract: HTML-only clips fall back
+    // to this path and full rendering is the WebView's job. Pinned here so a
+    // future refactor that drops script/style bodies updates the contract
+    // deliberately rather than by accident.
+    assert_eq!(
+        super::strip_html("<script>alert('x')</script>body"),
+        "alert('x')body"
+    );
+    assert_eq!(
+        super::strip_html("<style>red bold</style>text"),
+        "red boldtext"
+    );
+}
+
+#[test]
+fn strip_html_does_not_decode_entities() {
+    // Entity decoding is out of scope for the fallback stripper — `&amp;`
+    // stays literal rather than collapsing to `&`. Documented here so the
+    // search document / preview content is predictable.
+    assert_eq!(
+        super::strip_html("a &amp; b &lt;c&gt;"),
+        "a &amp; b &lt;c&gt;"
+    );
+}
+
+#[test]
 fn snapshot_file_paths_yields_file_list_content() {
     let snapshot = ClipboardSnapshot {
         sequence: crate::ClipboardSequence::content_hash("fl-1"),
@@ -609,4 +646,80 @@ fn representation_set_hash_diverges_from_content_hash_when_alternatives_present(
         .representation_set_hash
         .expect("multi-rep entry must carry a representation_set_hash");
     assert_ne!(set_hash.value, entry.metadata.content_hash.value);
+}
+
+fn text_rep(
+    role: crate::RepresentationRole,
+    mime: &str,
+    ordinal: u32,
+    text: &str,
+) -> crate::StoredClipboardRepresentation {
+    crate::StoredClipboardRepresentation {
+        role,
+        mime_type: mime.to_owned(),
+        ordinal,
+        data: crate::RepresentationDataRef::InlineText(text.to_owned()),
+    }
+}
+
+#[test]
+fn representation_set_hash_is_independent_of_input_order() {
+    use crate::RepresentationRole::{Alternative, Primary};
+    let a = text_rep(Primary, "text/html", 0, "<p>x</p>");
+    let b = text_rep(Alternative, "application/rtf", 1, "{\\rtf x}");
+
+    let forward = super::compute_representation_set_hash(&[a.clone(), b.clone()]);
+    let reversed = super::compute_representation_set_hash(&[b, a]);
+    assert_eq!(
+        forward.value, reversed.value,
+        "the canonical (role, ordinal, mime) sort must make the hash order-free"
+    );
+}
+
+#[test]
+fn representation_set_hash_diverges_on_any_distinguishing_field() {
+    use crate::RepresentationRole::{Alternative, Primary};
+    let base =
+        super::compute_representation_set_hash(&[text_rep(Primary, "text/html", 0, "<p>x</p>")]);
+
+    // Different payload.
+    let payload =
+        super::compute_representation_set_hash(&[text_rep(Primary, "text/html", 0, "<p>y</p>")]);
+    assert_ne!(
+        base.value, payload.value,
+        "payload bytes must change the hash"
+    );
+
+    // Different mime, same payload.
+    let mime =
+        super::compute_representation_set_hash(&[text_rep(Primary, "text/plain", 0, "<p>x</p>")]);
+    assert_ne!(base.value, mime.value, "mime must change the hash");
+
+    // Different role, same payload + mime + ordinal.
+    let role = super::compute_representation_set_hash(&[text_rep(
+        Alternative,
+        "text/html",
+        0,
+        "<p>x</p>",
+    )]);
+    assert_ne!(base.value, role.value, "role must change the hash");
+
+    // Different ordinal.
+    let ordinal =
+        super::compute_representation_set_hash(&[text_rep(Primary, "text/html", 7, "<p>x</p>")]);
+    assert_ne!(base.value, ordinal.value, "ordinal must change the hash");
+}
+
+#[test]
+fn representation_set_hash_separates_a_superset_from_its_member() {
+    use crate::RepresentationRole::{Alternative, Primary};
+    let single = super::compute_representation_set_hash(&[text_rep(Primary, "text/html", 0, "x")]);
+    let pair = super::compute_representation_set_hash(&[
+        text_rep(Primary, "text/html", 0, "x"),
+        text_rep(Alternative, "text/plain", 1, "x"),
+    ]);
+    assert_ne!(
+        single.value, pair.value,
+        "adding a rep must not collide with the single-rep set"
+    );
 }

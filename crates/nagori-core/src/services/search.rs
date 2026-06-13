@@ -782,4 +782,123 @@ mod tests {
         assert!(results.is_empty());
         assert!(provider.seen.lock().unwrap().is_empty());
     }
+
+    /// Provider that fails exactly one branch and returns empty for the rest,
+    /// so each test pins which fetch the error surfaced from.
+    struct FailingProvider {
+        fail_on: &'static str,
+    }
+
+    #[async_trait]
+    impl SearchCandidateProvider for FailingProvider {
+        async fn recent_entries(
+            &self,
+            _filters: &SearchFilters,
+            _order: RecentOrder,
+            _limit: usize,
+            _cancel: &CancellationToken,
+        ) -> Result<Vec<SearchCandidate>> {
+            if self.fail_on == "recent" {
+                return Err(crate::AppError::search("recent boom"));
+            }
+            Ok(Vec::new())
+        }
+
+        async fn substring_candidates(
+            &self,
+            _normalized: &str,
+            _filters: &SearchFilters,
+            _limit: usize,
+            _bounded: bool,
+            _cancel: &CancellationToken,
+        ) -> Result<Vec<SearchCandidate>> {
+            if self.fail_on == "substring" {
+                return Err(crate::AppError::search("substring boom"));
+            }
+            Ok(Vec::new())
+        }
+
+        async fn fulltext_candidates(
+            &self,
+            _normalized: &str,
+            _filters: &SearchFilters,
+            _limit: usize,
+            _cancel: &CancellationToken,
+        ) -> Result<Vec<FtsCandidate>> {
+            if self.fail_on == "fts" {
+                return Err(crate::AppError::search("fts boom"));
+            }
+            Ok(Vec::new())
+        }
+
+        async fn ngram_candidates(
+            &self,
+            _normalized: &str,
+            _filters: &SearchFilters,
+            _limit: usize,
+            _mode: NgramQueryMode,
+            _cancel: &CancellationToken,
+        ) -> Result<Vec<NgramCandidate>> {
+            if self.fail_on == "ngram" {
+                return Err(crate::AppError::search("ngram boom"));
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_branch_error_propagates() {
+        let provider = FailingProvider { fail_on: "recent" };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let mut q = SearchQuery::new("", String::new(), 10);
+        q.mode = SearchMode::Recent;
+        let err = svc
+            .search(q)
+            .await
+            .expect_err("recent failure must propagate");
+        assert!(err.to_string().contains("recent boom"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn substring_branch_error_propagates_through_try_join() {
+        let provider = FailingProvider {
+            fail_on: "substring",
+        };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        // Auto/Hybrid ASCII query fans out substring + FTS; the failed branch
+        // must abort the `try_join!` and surface as an `Err`.
+        let q = SearchQuery::new("needle", "needle".to_owned(), 10);
+        let err = svc
+            .search(q)
+            .await
+            .expect_err("substring failure must propagate");
+        assert!(err.to_string().contains("substring boom"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn fulltext_branch_error_propagates_through_try_join() {
+        let provider = FailingProvider { fail_on: "fts" };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let q = SearchQuery::new("needle", "needle".to_owned(), 10);
+        let err = svc.search(q).await.expect_err("fts failure must propagate");
+        assert!(err.to_string().contains("fts boom"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn ngram_branch_error_propagates_through_try_join() {
+        let provider = FailingProvider { fail_on: "ngram" };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        // Explicit Fuzzy keeps the ngram branch for ASCII queries.
+        let mut q = SearchQuery::new("needel", "needel".to_owned(), 10);
+        q.mode = SearchMode::Fuzzy;
+        let err = svc
+            .search(q)
+            .await
+            .expect_err("ngram failure must propagate");
+        assert!(err.to_string().contains("ngram boom"), "got {err}");
+    }
 }
