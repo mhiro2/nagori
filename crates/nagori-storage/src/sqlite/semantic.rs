@@ -310,7 +310,11 @@ impl SqliteStore {
     /// yet, most-recent first, so the background indexer embeds fresh clips
     /// before backfilling history.
     pub async fn semantic_pending(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // Clamp to `MAX_READ_LIMIT` like `semantic_search` and the other read
+        // paths: every caller passes a small batch size today, but a stray
+        // `usize::MAX` would otherwise materialise an unbounded `Vec` of
+        // pending rows inside the blocking pool.
+        let limit = i64::try_from(limit.clamp(1, super::MAX_READ_LIMIT)).unwrap_or(200);
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             let mut stmt = conn
