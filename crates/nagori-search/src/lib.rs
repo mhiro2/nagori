@@ -1,7 +1,6 @@
 pub mod ngram;
 pub mod normalizer;
 pub mod ranker;
-pub mod semantic;
 
 pub use nagori_core::has_cjk;
 pub use ngram::{
@@ -10,4 +9,3 @@ pub use ngram::{
 };
 pub use normalizer::normalize_text;
 pub use ranker::DefaultRanker;
-pub use semantic::{Embedding, SemanticIndexer, SemanticSearchHit};
