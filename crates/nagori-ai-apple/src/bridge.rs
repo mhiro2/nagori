@@ -636,6 +636,7 @@ pub(crate) fn preferred_language() -> String {
 /// Runtime metadata of the contextual-embedding model, read from the Swift
 /// bridge. The backend wraps this in `nagori-ai`'s `EmbeddingModelMetadata`,
 /// adding the configured language list.
+#[derive(Debug)]
 pub(crate) struct RawEmbedMetadata {
     pub model_identifier: String,
     pub revision: u32,
@@ -671,20 +672,61 @@ extern "C" fn embed_metadata_on_complete(
     // SAFETY: the sole, final callback for this metadata read, so reclaiming the
     // box here is sound — Swift does not touch `ctx` afterwards.
     let ctx = unsafe { Box::from_raw(ctx.cast::<EmbedMetaCtx>()) };
-    let result = if code == 0 {
-        Ok(RawEmbedMetadata {
-            model_identifier: read_utf8(id_ptr, id_len),
-            revision: u32::try_from(revision).unwrap_or(0),
-            dimension: usize::try_from(dimension).unwrap_or(0),
-            max_sequence_length: usize::try_from(max_sequence_length).unwrap_or(0),
-        })
-    } else {
-        Err(AiError::new(
+    let result = build_embed_metadata(
+        code,
+        revision,
+        dimension,
+        max_sequence_length,
+        read_utf8(id_ptr, id_len),
+    );
+    let _ = ctx.tx.send(result);
+}
+
+/// Builds [`RawEmbedMetadata`] from the Swift callback's status code and numeric
+/// fields. The numeric fields persist as `u32` in the index metadata, so each is
+/// validated against that range here — and `dimension` / `max_sequence_length`
+/// must additionally be non-zero — rather than collapsed to `0` downstream. A
+/// `revision` silently forced to `0` would make the index's "revision changed →
+/// rebuild" check a false negative (a real revision could coincide with the
+/// stored `0`), and a `0` / collapsed dimension or sequence length is a
+/// degenerate embedding space. `current_semantic_meta` still guards with
+/// `unwrap_or(0)`; bounding at this FFI boundary keeps both sites consistent
+/// instead of papering over a bad value. A `revision` of `0` is legitimate, so
+/// only an out-of-range revision (negative or past `u32`) is rejected.
+fn build_embed_metadata(
+    code: i32,
+    revision: isize,
+    dimension: isize,
+    max_sequence_length: isize,
+    model_identifier: String,
+) -> Result<RawEmbedMetadata, AiError> {
+    if code != 0 {
+        return Err(AiError::new(
             AiErrorCode::BackendInternal,
             "no embedding model is available for the configured language",
-        ))
-    };
-    let _ = ctx.tx.send(result);
+        ));
+    }
+    let revision = u32::try_from(revision).ok();
+    // Non-negative, non-zero, and within the `u32` range the metadata persists
+    // in (so the downstream `u32::try_from(...).unwrap_or(0)` never collapses).
+    let dimension = usize::try_from(dimension)
+        .ok()
+        .filter(|&n| n > 0 && u32::try_from(n).is_ok());
+    let max_sequence_length = usize::try_from(max_sequence_length)
+        .ok()
+        .filter(|&n| n > 0 && u32::try_from(n).is_ok());
+    match (revision, dimension, max_sequence_length) {
+        (Some(revision), Some(dimension), Some(max_sequence_length)) => Ok(RawEmbedMetadata {
+            model_identifier,
+            revision,
+            dimension,
+            max_sequence_length,
+        }),
+        _ => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "the embedding model returned out-of-range metadata",
+        )),
+    }
 }
 
 /// Reads the contextual-embedding model's runtime metadata for `language`.
@@ -721,6 +763,13 @@ extern "C" fn embed_assets_on_complete(ctx: *mut c_void, code: i32) {
     let result = match code {
         0 => Ok(()),
         1 => Err(BackendUnavailableReason::AssetMissing.into_error()),
+        // The language has no embedding model at all — distinct from a download
+        // that was attempted and failed, so the caller can tell "wrong language"
+        // apart from "transient download failure".
+        2 => Err(AiError::new(
+            AiErrorCode::BackendInternal,
+            "no embedding model exists for this language",
+        )),
         6 => Err(AiError::new(
             AiErrorCode::Timeout,
             "the embedding asset download did not respond in time",
@@ -982,6 +1031,58 @@ mod tests {
         let copied = super::read_f32(values.as_ptr(), values.len());
         assert_eq!(copied, vec![0.5, -1.0, 2.5]);
         assert!(super::read_f32(std::ptr::null(), 0).is_empty());
+    }
+
+    #[test]
+    fn build_embed_metadata_accepts_in_range_values() {
+        let meta = super::build_embed_metadata(0, 3, 512, 256, "model.id".to_owned())
+            .expect("in-range metadata");
+        assert_eq!(meta.revision, 3);
+        assert_eq!(meta.dimension, 512);
+        assert_eq!(meta.max_sequence_length, 256);
+        assert_eq!(meta.model_identifier, "model.id");
+    }
+
+    #[test]
+    fn build_embed_metadata_accepts_revision_zero() {
+        // A revision of 0 is a legitimate value (only negative / out-of-range
+        // revisions are rejected); the false-negative guard is about *collapsing*
+        // a bad revision to 0, not about forbidding a genuine 0.
+        let meta =
+            super::build_embed_metadata(0, 0, 512, 256, "model.id".to_owned()).expect("revision 0");
+        assert_eq!(meta.revision, 0);
+    }
+
+    #[test]
+    fn build_embed_metadata_rejects_out_of_range_fields() {
+        use nagori_core::AiErrorCode;
+        // A negative revision must not collapse to 0 (which would make the
+        // index's "revision changed → rebuild" check a false negative); negative
+        // or zero dimension / sequence length is a degenerate embedding space.
+        // `None` on a 32-bit host (the value exceeds `isize`), where the u32
+        // overflow case is unreachable anyway — `flatten` then skips it.
+        let past_u32 = isize::try_from(u64::from(u32::MAX) + 1).ok();
+        let cases = [
+            Some((-1_isize, 512_isize, 256_isize)), // negative revision
+            Some((3, -1, 256)),                     // negative dimension
+            Some((3, 512, -1)),                     // negative sequence length
+            Some((3, 0, 256)),                      // zero dimension
+            Some((3, 512, 0)),                      // zero sequence length
+            past_u32.map(|n| (3, n, 256)),          // dimension past u32 range
+        ];
+        for (revision, dimension, max_seq) in cases.into_iter().flatten() {
+            let err = super::build_embed_metadata(0, revision, dimension, max_seq, String::new())
+                .expect_err("out-of-range metadata is rejected");
+            assert_eq!(err.code, AiErrorCode::BackendInternal);
+        }
+    }
+
+    #[test]
+    fn build_embed_metadata_maps_nonzero_code_to_error() {
+        use nagori_core::AiErrorCode;
+        let err = super::build_embed_metadata(2, 0, 0, 0, String::new())
+            .expect_err("code 2 means no model for the language");
+        assert_eq!(err.code, AiErrorCode::BackendInternal);
     }
 
     #[test]
