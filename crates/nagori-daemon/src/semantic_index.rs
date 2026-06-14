@@ -55,6 +55,14 @@ const IDLE_TICK: Duration = Duration::from_mins(1);
 /// caller can surface than to look wedged.
 const QUERY_EMBED_PERMIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long an interactive query waits for its single embedding to come back
+/// once it holds the permit. An explicit consumer-side deadline so a wedged
+/// backend can't park the palette search (and its IPC connection slot) on the
+/// embedding model's own internal timeout — which the Apple bridge applies
+/// per item but may not always fire. Generous relative to a sub-second
+/// on-device embed, tight enough that a stall surfaces as a clear error.
+const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Backoff schedule applied after a rate-limited / timed-out batch before the
 /// next attempt, capped so a wedged model never spins.
 const BACKOFF_STEPS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000, 16_000];
@@ -159,8 +167,24 @@ impl NagoriRuntime {
         &self,
         query: SearchQuery,
     ) -> Result<Vec<SearchResult>> {
-        let settings = self.store.get_settings().await?.ai;
-        if !settings.semantic_index_enabled {
+        // Read the enable flag from the in-memory watch, not the store: this is
+        // the interactive query path, and `get_settings()` pays a SQLite
+        // round-trip plus a full `validate()` (which recompiles every
+        // `regex_denylist` pattern) on each call — the same cost the text
+        // search path already dropped. Mirror that path's seed guard: before
+        // the startup `refresh_settings_from_store` lands the watch still holds
+        // `AppSettings::default()`, so fall back to a store read until it does
+        // (a handful of times at most) rather than reporting "disabled" off the
+        // compile-time default.
+        let semantic_enabled = if self.settings_watch_seeded() {
+            self.with_settings(|settings| settings.ai.semantic_index_enabled)
+        } else {
+            self.refresh_settings_from_store()
+                .await?
+                .ai
+                .semantic_index_enabled
+        };
+        if !semantic_enabled {
             return Err(AppError::Unsupported(
                 "semantic search is disabled; enable the semantic index in settings".to_owned(),
             ));
@@ -210,16 +234,30 @@ impl NagoriRuntime {
             )
         })?
         .ok();
-        let vectors = embedder
-            .embed_batch(
+        // Bound the embed itself, not just the permit wait. Cancel the token on
+        // timeout so the backend unwinds any in-flight FFI work rather than
+        // outliving this request.
+        let cancel = CancellationToken::new();
+        let vectors = match tokio::time::timeout(
+            QUERY_EMBED_TIMEOUT,
+            embedder.embed_batch(
                 vec![EmbeddingInput {
                     id: "query".to_owned(),
                     text: normalized,
                 }],
-                CancellationToken::new(),
-            )
-            .await
-            .map_err(|err| AppError::Ai(err.message))?;
+                cancel.clone(),
+            ),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|err| AppError::Ai(err.message))?,
+            Err(_elapsed) => {
+                cancel.cancel();
+                return Err(AppError::Ai(
+                    "semantic query embedding timed out".to_owned(),
+                ));
+            }
+        };
         let Some(query_vector) = vectors.into_iter().next() else {
             return Ok(Vec::new());
         };
@@ -255,12 +293,22 @@ impl NagoriRuntime {
         // batch, the semaphore wait, and the backoff sleep — is interrupted
         // promptly instead of running to the Swift-side 20s timeout per item.
         let cancel = CancellationToken::new();
+        // Bound the bridge task to this function's lifetime. Without `done` the
+        // spawned task parks on `shutdown.cancelled()` until *global* shutdown,
+        // so each panic-respawn of the indexer leaks another live bridge task
+        // (the supervisor re-enters here with a fresh `cancel`). The drop guard
+        // fires `done` when this function returns — including a panic unwind —
+        // so the bridge exits with it instead of accumulating.
+        let done = CancellationToken::new();
+        let _done_guard = done.clone().drop_guard();
         {
             let cancel = cancel.clone();
             let mut shutdown = shutdown.clone();
             tokio::spawn(async move {
-                shutdown.cancelled().await;
-                cancel.cancel();
+                tokio::select! {
+                    () = shutdown.cancelled() => cancel.cancel(),
+                    () = done.cancelled() => {}
+                }
             });
         }
         let mut settings_rx = self.settings_subscribe();
