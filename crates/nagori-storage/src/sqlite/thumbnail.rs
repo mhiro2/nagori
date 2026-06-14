@@ -5,6 +5,12 @@ use time::OffsetDateTime;
 use super::SqliteStore;
 use super::convert::{format_time, storage_err};
 
+/// Rows fetched per eviction round in [`SqliteStore::enforce_thumbnail_budget`].
+/// Mirrors `TOTAL_BYTES_EVICTION_BATCH`: bounds the writer transaction's
+/// working set so a large over-budget table evicts in `LIMIT`-sized rounds
+/// instead of loading every thumbnail row into memory up front.
+const THUMBNAIL_EVICTION_BATCH: i64 = 64;
+
 impl SqliteStore {
     /// Fetch a previously stored thumbnail for `id`.
     ///
@@ -38,12 +44,17 @@ impl SqliteStore {
                 .optional()
                 .map_err(storage_err)?;
             if record.is_some() {
+                // The LRU bump is best-effort: the caller already has the
+                // thumbnail bytes in hand, so a failed `last_accessed_at`
+                // write must not turn a successful read into an error. It only
+                // affects eviction ordering, and the next hit re-bumps it.
                 let now = format_time(OffsetDateTime::now_utc())?;
-                conn.execute(
+                if let Err(err) = conn.execute(
                     "UPDATE entry_thumbnails SET last_accessed_at = ?1 WHERE entry_id = ?2",
                     params![now, id.to_string()],
-                )
-                .map_err(storage_err)?;
+                ) {
+                    tracing::warn!(error = %err, "thumbnail_lru_bump_failed");
+                }
             }
             Ok(record)
         })
@@ -61,6 +72,12 @@ impl SqliteStore {
     /// (a direct CLI/plugin path) could persist a derived image of sensitive
     /// content at rest. The caller is still responsible for clamping the byte
     /// count before this call.
+    ///
+    /// `deleted_at IS NULL` keeps a thumbnail generation that was kicked off
+    /// before a soft-delete from landing on the tombstoned row afterwards: the
+    /// `ON DELETE CASCADE` only fires on the deferred hard purge, so without
+    /// this guard the late write would re-add derived bytes that linger until
+    /// the next maintenance sweep (up to 30 minutes).
     pub async fn put_thumbnail(&self, id: EntryId, record: ThumbnailRecord) -> Result<()> {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
@@ -77,7 +94,9 @@ impl SqliteStore {
                  )
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7
                  FROM entries
-                 WHERE id = ?1 AND sensitivity IN ('public', 'unknown')",
+                 WHERE id = ?1
+                   AND sensitivity IN ('public', 'unknown')
+                   AND deleted_at IS NULL",
                 params![
                     id.to_string(),
                     record.payload,
@@ -142,6 +161,13 @@ impl SqliteStore {
     /// evicted. The deletion is unconditional on the entry's pin state
     /// — thumbnails are pure derived data and are transparently
     /// regenerable on the next preview request.
+    ///
+    /// Eviction runs in bounded rounds (`THUMBNAIL_EVICTION_BATCH` rows each)
+    /// rather than loading every thumbnail row up front, so a table far over
+    /// budget never materialises the full id list inside the write lock. Each
+    /// round re-selects the oldest survivors from the live set, so rows the
+    /// previous round deleted never reappear (the DELETE is in this same
+    /// transaction).
     pub async fn enforce_thumbnail_budget(&self, budget: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
@@ -162,37 +188,43 @@ impl SqliteStore {
                 tx.commit().map_err(storage_err)?;
                 return Ok(0);
             }
-            let candidates = {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT entry_id, byte_count
-                         FROM entry_thumbnails
-                         ORDER BY last_accessed_at ASC",
-                    )
-                    .map_err(storage_err)?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                    })
-                    .map_err(storage_err)?;
-                rows.collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(storage_err)?
-            };
             let mut evicted = 0usize;
-            for (entry_id, bytes) in candidates {
-                if total <= budget {
+            'evict: while total > budget {
+                let candidates = {
+                    let mut stmt = tx
+                        .prepare_cached(
+                            "SELECT entry_id, byte_count
+                             FROM entry_thumbnails
+                             ORDER BY last_accessed_at ASC
+                             LIMIT ?1",
+                        )
+                        .map_err(storage_err)?;
+                    let rows = stmt
+                        .query_map(params![THUMBNAIL_EVICTION_BATCH], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        })
+                        .map_err(storage_err)?;
+                    rows.collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(storage_err)?
+                };
+                if candidates.is_empty() {
                     break;
                 }
-                let changed = tx
-                    .execute(
-                        "DELETE FROM entry_thumbnails WHERE entry_id = ?1",
-                        params![entry_id],
-                    )
-                    .map_err(storage_err)?;
-                if changed > 0 {
-                    evicted += changed;
-                    let bytes = u64::try_from(bytes).unwrap_or(0);
-                    total = total.saturating_sub(bytes);
+                for (entry_id, bytes) in candidates {
+                    if total <= budget {
+                        break 'evict;
+                    }
+                    let changed = tx
+                        .execute(
+                            "DELETE FROM entry_thumbnails WHERE entry_id = ?1",
+                            params![entry_id],
+                        )
+                        .map_err(storage_err)?;
+                    if changed > 0 {
+                        evicted += changed;
+                        let bytes = u64::try_from(bytes).unwrap_or(0);
+                        total = total.saturating_sub(bytes);
+                    }
                 }
             }
             tx.commit().map_err(storage_err)?;
