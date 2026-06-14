@@ -1097,13 +1097,17 @@ IPC/CLI search result keeps its flat `preview`).
 
 **Transport.** Newline-delimited JSON over a per-platform stream
 transport: Unix-domain sockets on macOS / Linux, Win32 named pipes on
-Windows. The client writes one `IpcEnvelope { token, request:
-IpcRequest }` line and reads one `IpcResponse` line. Defaults:
+Windows. The client writes one `IpcEnvelope { version, token, request:
+IpcRequest }` line and reads one `IpcResponse` line. `version` is an
+optional (`#[serde(default)]`) reserved wire-protocol version (currently
+`1`); the daemon tolerates any value. Defaults:
 
 - **Unix.** Socket at
   `~/Library/Application Support/nagori/nagori.sock` (macOS) or the
   equivalent XDG location on Linux. The bind sets a tight umask so the
-  socket inode is born `0o600`.
+  socket inode is born owner-only (`0o700`); the owner-execute bit is
+  irrelevant for a socket, and there is no follow-up `chmod` to avoid a
+  symlink-follow race in a shared parent.
 - **Windows.** Named pipe `\\.\pipe\nagori`. The first instance is
   bound synchronously during daemon startup with
   `ServerOptions::first_pipe_instance(true)` so a second daemon trying
@@ -2289,7 +2293,7 @@ under 80 ms for 100k text entries on a developer machine.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.
-- **IPC** — Unix-domain socket (macOS / Linux, `0600` mode) or Win32
+- **IPC** — Unix-domain socket (macOS / Linux, owner-only `0700` mode) or Win32
   named pipe (Windows, explicit current-user-only DACL plus
   `reject_remote_clients(true)`, so neither a remote UNC peer nor another
   local user can open the pipe). A per-launch token file is an independent

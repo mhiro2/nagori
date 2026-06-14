@@ -73,6 +73,8 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Run lint (Windows platform crate)
         run: cargo clippy -p nagori-platform-windows --all-targets -- -D warnings
+      - name: Run lint (IPC crate, Windows-only code)
+        run: cargo clippy -p nagori-ipc --all-targets -- -D warnings
       - name: Run tests (Windows platform crate)
         run: cargo test -p nagori-platform-windows
       - name: Run tests (cross-platform crates)

@@ -27,8 +27,11 @@ ARCHITECTURE.md "Single-instance & stale-socket handling".
 ## Endpoint location
 
 * **macOS** (default): `~/Library/Application Support/nagori/nagori.sock`.
-  The bind path is created with a `0o077` umask and explicitly `chmod`ed to
-  `0o600`, so only the daemon's user can `connect(2)` it.
+  The bind path is born owner-only (`0o700`) under a `0o077` umask, so only the
+  daemon's user can `connect(2)` it. There is no follow-up `chmod`: the umask
+  pins the mode atomically at creation (the owner-execute bit is irrelevant for
+  a socket — connecting needs write, not execute), and a post-bind `chmod`
+  would follow a symlink a co-tenant could plant in a shared parent.
 * **Windows** (default): `\\.\pipe\nagori`. The pipe is created with an
   explicit DACL whose single ACE grants only the daemon's user
   (`GENERIC_READ | GENERIC_WRITE`); no other local user — even on the same
@@ -79,6 +82,14 @@ constant-time comparison.
 Requests and responses are externally-tagged serde enums: a unit variant is a
 plain string (`"Health"`), and a payload variant nests under the variant name
 (`{"Search": { ... }}`). Field names in payloads are `snake_case`.
+
+The request line is wrapped in an envelope alongside the auth token:
+`{"version": <u32>, "token": "<hex>", "request": <request>}`. `version` is the
+wire-protocol version (currently `1`) and is **optional**: a client that omits
+it is treated as version `0`, so the hand-rolled examples below still work. The
+daemon does not reject on it today — it is reserved so a future
+wire-incompatible change can branch on the value rather than guess from the
+payload shape.
 
 ## Request kinds
 
