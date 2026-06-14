@@ -28,7 +28,6 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{
     accept_loop, accept_loop_with_shutdown, bind_unix, bind_unix_replacing_stale, serve_unix,
-    serve_unix_with_health,
 };
 
 #[cfg(windows)]

@@ -7,16 +7,32 @@ use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+/// Wire-protocol version stamped onto every outgoing [`IpcEnvelope`].
+///
+/// Reserved ahead of the v0.1.0 wire freeze so the envelope can evolve
+/// without an ambiguous "version 0" (the `#[serde(default)]` value a
+/// pre-versioning client serialises). The server tolerates any value today —
+/// it does not gate on it — but a future breaking change can branch on this
+/// to distinguish a current client from a pre-version one (`0`) instead of
+/// guessing from the payload shape. Bump only on a wire-incompatible change.
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
 /// Wire-level envelope wrapping every IPC request with the per-launch auth token.
 ///
 /// Every connection ships a single line of JSON whose shape is
-/// `{"token": "<hex>", "request": <IpcRequest>}`. The daemon validates `token`
-/// in constant time before dispatching `request`; clients without the
-/// per-launch token cannot reach any handler — including `Health` and
-/// `Shutdown`. Adding the wrapper at the protocol layer (vs the server layer)
-/// keeps tests, traces, and any future transports honest.
+/// `{"version": <u32>, "token": "<hex>", "request": <IpcRequest>}`. The daemon
+/// validates `token` in constant time before dispatching `request`; clients
+/// without the per-launch token cannot reach any handler — including `Health`
+/// and `Shutdown`. Adding the wrapper at the protocol layer (vs the server
+/// layer) keeps tests, traces, and any future transports honest.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct IpcEnvelope {
+    /// Wire-protocol version (see [`IPC_PROTOCOL_VERSION`]). `#[serde(default)]`
+    /// so a pre-versioning client (which omits the field) deserialises as `0`
+    /// rather than failing the parse — the field is additive and the server
+    /// does not currently reject on it.
+    #[serde(default)]
+    pub version: u32,
     pub token: String,
     pub request: IpcRequest,
 }
@@ -27,6 +43,7 @@ pub struct IpcEnvelope {
 impl std::fmt::Debug for IpcEnvelope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IpcEnvelope")
+            .field("version", &self.version)
             .field("token", &"[redacted]")
             .field("request", &self.request)
             .finish()
@@ -619,6 +636,7 @@ mod tests {
     #[test]
     fn envelope_debug_redacts_token() {
         let envelope = IpcEnvelope {
+            version: IPC_PROTOCOL_VERSION,
             token: "deadbeef".repeat(8),
             request: IpcRequest::Health,
         };
@@ -699,6 +717,32 @@ mod tests {
             .expect("StartupHealthReport must silently ignore unknown fields");
         assert!(!parsed.ready);
         assert_eq!(parsed.last_error.as_deref(), Some("settings load failed"));
+    }
+
+    /// The envelope's reserved `version` field must be additive: a
+    /// pre-versioning client (which omits it) deserialises as `0` rather than
+    /// failing the parse, and a current client stamps [`IPC_PROTOCOL_VERSION`].
+    /// This pins the backward-compatibility contract so the field can't later
+    /// be made mandatory without a deliberate wire break.
+    #[test]
+    fn envelope_version_is_additive_and_defaults_to_zero() {
+        // A legacy envelope with no `version` key still parses, defaulting to 0.
+        let legacy = r#"{"token":"abcd","request":"Health"}"#;
+        let parsed: IpcEnvelope =
+            serde_json::from_str(legacy).expect("a pre-versioning envelope must still parse");
+        assert_eq!(parsed.version, 0);
+
+        // A current envelope carries the stamped version and round-trips.
+        let envelope = IpcEnvelope {
+            version: IPC_PROTOCOL_VERSION,
+            token: "abcd".to_owned(),
+            request: IpcRequest::Health,
+        };
+        let json = serde_json::to_string(&envelope).expect("envelope must serialize");
+        assert!(json.contains(&format!("\"version\":{IPC_PROTOCOL_VERSION}")));
+        let round_tripped: IpcEnvelope =
+            serde_json::from_str(&json).expect("envelope must round-trip");
+        assert_eq!(round_tripped.version, IPC_PROTOCOL_VERSION);
     }
 
     /// The `Clear` request's on-the-wire JSON must match what `docs/ipc.md`

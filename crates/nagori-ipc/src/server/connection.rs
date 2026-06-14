@@ -32,10 +32,15 @@ const MAX_IPC_RESPONSE_BYTES: usize = crate::MAX_IPC_BYTES;
 /// Hard ceiling on how long a single connection can block before the
 /// envelope is fully read. CLI clients send one short JSON line and
 /// disconnect, so a few seconds is plenty of slack for the slowest
-/// realistic local round-trip. Kept tight because on Windows the named
-/// pipe uses the default DACL — any local user can open a connection
-/// and would otherwise park one of the 32 permits for the full window
-/// without ever sending a byte, starving the legitimate CLI.
+/// realistic local round-trip. Both transports already restrict who can
+/// connect at all — the Unix socket is owner-only (`0o700`) and the Windows
+/// pipe carries a current-user-only DACL plus `reject_remote_clients` — so the
+/// threat
+/// here is not an arbitrary local user but a *same-user* peer (a buggy
+/// integration, a stuck CLI, a process that connects and stalls) parking one
+/// of the 32 connection permits without ever completing its request. Kept
+/// tight so such a peer frees its permit promptly instead of starving the
+/// legitimate CLI for the full window.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Sub-budget for the first read. If the peer hasn't sent any bytes
@@ -92,9 +97,21 @@ pub(super) async fn handle_connection<S, F, Fut>(
     let _permit = permit;
     // Bound the time we will hold a connection slot for a slow or stalled
     // client. Without this, an idle peer that never writes a newline would
-    // pin one of the 32 semaphore permits forever.
-    let line = match timeout(READ_TIMEOUT, read_bounded_line(&mut stream)).await {
-        Ok(result) => result,
+    // pin one of the 32 semaphore permits forever. The first-read budget is
+    // threaded into the shared reader so a connected-but-silent peer trips
+    // `FirstReadTimeout` well inside the outer `READ_TIMEOUT`.
+    let read = crate::framing::read_line_bounded(
+        &mut stream,
+        MAX_IPC_REQUEST_BYTES,
+        Some(FIRST_READ_TIMEOUT),
+    );
+    let line = match timeout(READ_TIMEOUT, read).await {
+        Ok(Ok(line)) => Ok(line),
+        Ok(Err(crate::framing::FrameError::TooLarge)) => Err("IPC request is too large".to_owned()),
+        Ok(Err(crate::framing::FrameError::FirstReadTimeout)) => {
+            Err("IPC peer sent no data".to_owned())
+        }
+        Ok(Err(crate::framing::FrameError::Io(message))) => Err(message),
         Err(_) => Err("IPC request timed out".to_owned()),
     };
     let response = match line {
@@ -132,7 +149,12 @@ pub(super) async fn handle_connection<S, F, Fut>(
         }),
     };
     let payload = match serde_json::to_vec(&response) {
-        Ok(payload) if payload.len() < MAX_IPC_RESPONSE_BYTES => Some(payload),
+        // Inclusive boundary: a payload of exactly `MAX_IPC_RESPONSE_BYTES` is
+        // sent, matching what the shared frame reader accepts on the other end
+        // (it rejects only payloads *strictly* larger than the cap). Using `<`
+        // here once made the writer reject an exact-cap response both readers
+        // would have accepted — a one-byte asymmetry this `<=` removes.
+        Ok(payload) if payload.len() <= MAX_IPC_RESPONSE_BYTES => Some(payload),
         Ok(payload) => {
             // The daemon already paid the allocation by the time we get
             // here, so this branch protects the *wire* and the client's
@@ -226,146 +248,45 @@ where
     }
 }
 
+/// Upper bound on the post-request bytes [`wait_for_peer_close`] will read and
+/// discard before it stops tolerating a chatty peer. A well-behaved client
+/// sends nothing after its one request line, so any volume of trailing bytes
+/// is already a protocol violation; 64 KiB is generous slack for a benign
+/// pipelined fragment while capping the CPU a peer can burn streaming garbage
+/// for the whole handler window (up to `HANDLER_DEADLINE` × 32 connections).
+const PEER_CLOSE_DISCARD_LIMIT: usize = 64 * 1024;
+
 /// Resolve once the peer closes its end of `stream` (or the read errors).
 ///
-/// Never resolves while the peer is alive and waiting: the one-line
+/// Never resolves while the peer is alive and quietly waiting: the one-line
 /// request/response protocol means a well-behaved peer sends nothing after its
-/// request, so the read stays pending until EOF. Any stray bytes a peer
-/// pipelines after the request line are ignored (we keep watching) rather than
-/// mistaken for a disconnect. The read is only ever dropped while pending (when
-/// another `select!` arm wins), so it cannot swallow buffered response bytes.
+/// request, so the read stays pending until EOF. Stray bytes a peer pipelines
+/// after the request line are ignored (we keep watching) rather than mistaken
+/// for a disconnect — but only up to [`PEER_CLOSE_DISCARD_LIMIT`]. Past that we
+/// treat the connection as protocol-violating and resolve, which the caller
+/// handles exactly like a disconnect (skip the write, cancel the handler). The
+/// read is only ever dropped while pending (when another `select!` arm wins),
+/// so it cannot swallow buffered response bytes.
 async fn wait_for_peer_close<S>(stream: &mut S)
 where
     S: AsyncRead + Unpin,
 {
     let mut scratch = [0_u8; 256];
+    let mut discarded: usize = 0;
     loop {
         match stream.read(&mut scratch).await {
             Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-    }
-}
-
-async fn read_bounded_line<R>(stream: &mut R) -> std::result::Result<Vec<u8>, String>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut line = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    let mut first_read = true;
-    loop {
-        // The first read gets a tight budget so a connecting peer that
-        // never writes anything (slow-loris) cannot hold a permit for
-        // the full `READ_TIMEOUT`; subsequent reads inherit the
-        // surrounding `READ_TIMEOUT` set in `handle_connection`.
-        let read = if first_read {
-            match timeout(FIRST_READ_TIMEOUT, stream.read(&mut chunk)).await {
-                Ok(result) => result.map_err(|err| err.to_string())?,
-                Err(_) => return Err("IPC peer sent no data".to_owned()),
+            Ok(read) => {
+                discarded = discarded.saturating_add(read);
+                if discarded > PEER_CLOSE_DISCARD_LIMIT {
+                    warn!(
+                        discarded_bytes = discarded,
+                        "ipc_peer_exceeded_post_request_byte_limit",
+                    );
+                    return;
+                }
             }
-        } else {
-            stream
-                .read(&mut chunk)
-                .await
-                .map_err(|err| err.to_string())?
-        };
-        first_read = false;
-        if read == 0 {
-            break;
         }
-        if let Some(newline) = chunk[..read].iter().position(|byte| *byte == b'\n') {
-            if line.len() + newline > MAX_IPC_REQUEST_BYTES {
-                return Err("IPC request is too large".to_owned());
-            }
-            line.extend_from_slice(&chunk[..newline]);
-            break;
-        }
-        if line.len() + read > MAX_IPC_REQUEST_BYTES {
-            return Err("IPC request is too large".to_owned());
-        }
-        line.extend_from_slice(&chunk[..read]);
-    }
-    Ok(line)
-}
-
-/// Unit tests for the request framing read by [`read_bounded_line`] — the
-/// server's sole entry point for an incoming request line. Exercises the
-/// chunk-boundary handling, the request size ceiling, and the first-read
-/// slow-loris timeout in isolation from any transport.
-#[cfg(test)]
-mod tests_framing {
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    use tokio::io::{AsyncRead, ReadBuf};
-
-    use super::{FIRST_READ_TIMEOUT, MAX_IPC_REQUEST_BYTES, read_bounded_line};
-
-    /// Reader that is forever `Pending`, modelling a peer that connects and
-    /// then sends nothing — the slow-loris the first-read timeout defends.
-    struct NeverReady;
-
-    impl AsyncRead for NeverReady {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Poll::Pending
-        }
-    }
-
-    #[tokio::test]
-    async fn reads_a_short_line_and_stops_at_the_newline() {
-        let mut input: &[u8] = b"hello world\ntrailing ignored";
-        let line = read_bounded_line(&mut input).await.expect("line");
-        assert_eq!(line, b"hello world");
-    }
-
-    #[tokio::test]
-    async fn assembles_a_line_that_spans_the_4096_byte_chunk_boundary() {
-        // The reader fills at most 4096 bytes per read, so a 5000-byte line
-        // with its newline only in the *third* chunk must be assembled across
-        // reads — a newline scan that only looked at the first chunk would
-        // truncate the request.
-        let mut payload = vec![b'a'; 5000];
-        payload.push(b'\n');
-        payload.extend_from_slice(b"after the newline");
-        let mut input: &[u8] = &payload;
-
-        let line = read_bounded_line(&mut input).await.expect("line");
-        assert_eq!(line.len(), 5000);
-        assert!(line.iter().all(|&b| b == b'a'));
-    }
-
-    #[tokio::test]
-    async fn rejects_a_request_that_exceeds_the_size_ceiling() {
-        // A newline-less stream larger than the ceiling must be refused rather
-        // than buffered without bound.
-        let oversized = vec![b'a'; MAX_IPC_REQUEST_BYTES + 64];
-        let mut input: &[u8] = &oversized;
-        let err = read_bounded_line(&mut input)
-            .await
-            .expect_err("oversized request must be rejected");
-        assert!(err.contains("too large"), "got {err}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn first_read_times_out_when_the_peer_sends_nothing() {
-        // The first read carries a tight `FIRST_READ_TIMEOUT` budget so a peer
-        // that connects and never writes cannot pin a connection permit for
-        // the full read timeout. Paused time auto-advances to the timer.
-        let start = tokio::time::Instant::now();
-        let mut reader = NeverReady;
-        let err = read_bounded_line(&mut reader)
-            .await
-            .expect_err("a silent peer must trip the first-read timeout");
-        assert!(err.contains("no data"), "got {err}");
-        assert!(
-            start.elapsed() >= FIRST_READ_TIMEOUT,
-            "the timeout must wait the first-read budget"
-        );
     }
 }
 
@@ -422,6 +343,7 @@ mod tests_transport {
         assert_eq!(semaphore.available_permits(), 0);
 
         let request = serde_json::to_vec(&IpcEnvelope {
+            version: crate::IPC_PROTOCOL_VERSION,
             token: token.as_str().to_owned(),
             request: IpcRequest::Health,
         })
@@ -504,6 +426,7 @@ mod tests_transport {
         assert_eq!(semaphore.available_permits(), 0);
 
         let request = serde_json::to_vec(&IpcEnvelope {
+            version: crate::IPC_PROTOCOL_VERSION,
             token: token.as_str().to_owned(),
             request: IpcRequest::Health,
         })
@@ -545,6 +468,90 @@ mod tests_transport {
         );
     }
 
+    #[tokio::test]
+    async fn peer_flooding_post_request_bytes_is_treated_as_a_disconnect() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A peer that never closes but streams bytes after its request line
+        // would, without a bound, keep `wait_for_peer_close` reading and
+        // discarding forever — burning CPU for the whole handler window. Once
+        // the discarded volume passes `PEER_CLOSE_DISCARD_LIMIT` we treat it
+        // as a protocol violation and resolve, cancelling the never-completing
+        // handler (proven via the drop flag) instead of waiting out the
+        // deadline.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handler = {
+            let cancelled = cancelled.clone();
+            Arc::new(move |_request: IpcRequest| {
+                let cancelled = cancelled.clone();
+                async move {
+                    struct DropFlag(Arc<AtomicBool>);
+                    impl Drop for DropFlag {
+                        fn drop(&mut self) {
+                            self.0.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    let _flag = DropFlag(cancelled);
+                    std::future::pending::<IpcResponse>().await
+                }
+            })
+        };
+
+        let token = Arc::new(test_token());
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+
+        let request = serde_json::to_vec(&IpcEnvelope {
+            version: crate::IPC_PROTOCOL_VERSION,
+            token: token.as_str().to_owned(),
+            request: IpcRequest::Health,
+        })
+        .expect("serialise envelope");
+
+        // Buffer large enough to hold the request plus a flood comfortably over
+        // the discard limit so the client never blocks on a full pipe.
+        let (server_io, mut client_io) = tokio::io::duplex(PEER_CLOSE_DISCARD_LIMIT * 2 + 4096);
+        let start = tokio::time::Instant::now();
+        let server = handle_connection(server_io, permit, handler, token);
+        let client = async move {
+            client_io
+                .write_all(&request)
+                .await
+                .expect("client should write the request envelope");
+            client_io
+                .write_all(b"\n")
+                .await
+                .expect("client should terminate the request line");
+            // Flood past the discard limit without ever closing the stream.
+            let flood = vec![b'x'; PEER_CLOSE_DISCARD_LIMIT + 4096];
+            client_io
+                .write_all(&flood)
+                .await
+                .expect("client should write the flood");
+            // Keep the write half open so the only thing that can break the
+            // stalemate is the server's discard-limit bailout (not an EOF).
+            std::future::pending::<()>().await;
+        };
+
+        tokio::select! {
+            () = server => {}
+            () = client => unreachable!("the flooding peer never finishes on its own"),
+        }
+
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the handler must be cancelled once the peer floods past the discard limit",
+        );
+        assert!(
+            start.elapsed() < HANDLER_DEADLINE,
+            "the discard-limit bailout must fire well before the handler deadline",
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn wedged_handler_is_force_released_at_the_deadline() {
         // A handler that never completes, paired with a peer that neither reads
@@ -564,6 +571,7 @@ mod tests_transport {
         assert_eq!(semaphore.available_permits(), 0);
 
         let request = serde_json::to_vec(&IpcEnvelope {
+            version: crate::IPC_PROTOCOL_VERSION,
             token: token.as_str().to_owned(),
             request: IpcRequest::Health,
         })

@@ -4,7 +4,7 @@
 //! three-stage graceful shutdown.
 
 use std::future::Future;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +47,7 @@ impl Drop for UmaskGuard {
     }
 }
 
-/// Bind a `UnixListener` at `path` with `0o600` perms, refusing to touch an
+/// Bind a `UnixListener` at `path` with owner-only perms, refusing to touch an
 /// entry that already exists.
 ///
 /// This never removes a pre-existing socket. Deciding that a leftover socket
@@ -126,20 +126,29 @@ pub fn bind_unix_replacing_stale(path: impl AsRef<Path>) -> Result<UnixListener>
     bind_unix_fresh(path)
 }
 
-/// Bind a fresh listener at `path` (which must not already exist) with a
-/// `0o600` socket inode. Shared by [`bind_unix`] and
+/// Bind a fresh listener at `path` (which must not already exist) as an
+/// owner-only socket inode. Shared by [`bind_unix`] and
 /// [`bind_unix_replacing_stale`].
 fn bind_unix_fresh(path: &Path) -> Result<UnixListener> {
-    // `bind` creates the socket inode using the process umask. Tighten the
-    // mask to 0o077 around the call so the file is born `0o600` and there
-    // is no window where a co-tenant on the same machine could `connect()`
-    // before the explicit chmod below.
+    // `bind` creates the socket inode with mode `0o777 & ~umask`, so tightening
+    // the mask to 0o077 around the call makes the file *born* owner-only
+    // (`0o700`) — atomically, with no window where a co-tenant could
+    // `connect()` before the permissions are applied. The owner-execute bit is
+    // irrelevant for socket access (connecting needs write, not execute), so
+    // `0o700` is equivalent to `0o600` for this purpose; what matters is that
+    // group / other get no access at all.
+    //
+    // We deliberately do NOT follow up with a `set_permissions`/chmod down to
+    // `0o600`: the umask already pins the inode owner-only at creation, so the
+    // chmod would be redundant, and `std::fs::set_permissions` follows
+    // symlinks. In a shared parent (e.g. `--ipc /tmp/dev.sock`) a co-tenant
+    // could unlink our socket and plant a symlink between `bind` and the chmod,
+    // redirecting the mode change onto an arbitrary target. Relying on the
+    // race-free umask birth closes that TOCTOU entirely.
     let listener = {
         let _restore = UmaskGuard::set(0o077);
         UnixListener::bind(path).map_err(|err| AppError::Platform(err.to_string()))?
     };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|err| AppError::Platform(err.to_string()))?;
     Ok(listener)
 }
 
@@ -216,6 +225,18 @@ where
 
     tokio::pin!(shutdown);
     let accept_result = loop {
+        // Reap handlers that finished since the last iteration before we
+        // block in the select. The `join_next` arm below is starved under
+        // sustained accept pressure — `biased` polls `accept` first, and a
+        // listener with a ready backlog keeps winning that arm — so completed
+        // handlers (and the panic accounting routed through
+        // `observe_handler_outcome`) would otherwise accumulate in the
+        // `JoinSet` for as long as connections keep arriving. This
+        // non-blocking drain bounds the set to roughly the in-flight permit
+        // count regardless of select fairness.
+        while let Some(result) = tasks.try_join_next() {
+            observe_handler_outcome(&server_health, result);
+        }
         tokio::select! {
             biased;
             () = &mut shutdown => break Ok(()),
@@ -294,33 +315,6 @@ where
     accept_loop(listener, token, handler).await
 }
 
-/// `serve_unix` variant that threads through a caller-supplied
-/// `IpcServerHealth` so per-connection handler panics are counted and
-/// surfaced via `nagori health` / `nagori doctor`.
-pub async fn serve_unix_with_health<F, Fut>(
-    path: impl AsRef<Path>,
-    token: AuthToken,
-    handler: F,
-    server_health: IpcServerHealth,
-    config: IpcServerConfig,
-) -> Result<()>
-where
-    F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = IpcResponse> + Send + 'static,
-{
-    let listener = bind_unix(path)?;
-    accept_loop_with_shutdown(
-        listener,
-        token,
-        handler,
-        std::future::pending::<()>(),
-        Duration::from_secs(0),
-        server_health,
-        config,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -389,6 +383,33 @@ mod tests {
             bind_unix_replacing_stale(&path).expect("a dead socket should be reclaimable");
         // The fresh listener owns a new socket inode at the same path.
         assert!(path.exists());
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_unix_births_the_socket_owner_only() {
+        // Regression: the bind used to chmod the socket down to 0o600 *after*
+        // `bind`. That chmod was dropped (it follows symlinks — a TOCTOU in a
+        // shared parent) in favour of relying solely on the umask birthing the
+        // inode owner-only. Pin that group / other get no access at creation
+        // regardless of the test process's ambient umask, so a future refactor
+        // that loses the `UmaskGuard` can't silently widen the socket's
+        // permissions. The owner bits (0o700 vs 0o600) are irrelevant for
+        // socket access, so we assert only on the group/other mask.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("perms.sock");
+        let listener = bind_unix(&path).expect("bind a fresh socket");
+        let mode = std::fs::symlink_metadata(&path)
+            .expect("socket inode metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "socket must be born private (no group/other access), got {:o}",
+            mode & 0o777,
+        );
         drop(listener);
     }
 

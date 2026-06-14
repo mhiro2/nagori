@@ -199,6 +199,15 @@ where
 
     tokio::pin!(shutdown);
     let accept_result = loop {
+        // Reap handlers that finished since the last iteration before we
+        // block in the select. The `join_next` arm below is starved under
+        // sustained connect pressure (`biased` polls the connect arm first),
+        // so without this non-blocking drain completed handlers — and the
+        // panic accounting routed through `observe_handler_outcome` — would
+        // accumulate in the `JoinSet` for as long as clients keep arriving.
+        while let Some(result) = tasks.try_join_next() {
+            observe_handler_outcome(&server_health, result);
+        }
         let current = server
             .as_mut()
             .expect("server slot is repopulated after every accept");
@@ -214,6 +223,19 @@ where
                     // tearing down the pipe series over one hiccup.
                     if is_transient_accept_error(&err) {
                         tracing::warn!(error = %err, "ipc_pipe_connect_transient_error");
+                        // Retry the connect on this same instance after a short
+                        // backoff. The transient codes that reach here are
+                        // resource-exhaustion failures (`ERROR_NOT_ENOUGH_MEMORY`
+                        // etc.) where `ConnectNamedPipe` never completed a
+                        // connection, so the instance is still in the listening
+                        // state and is safe to re-`connect()`. We deliberately
+                        // do *not* `DisconnectNamedPipe` first: the one case a
+                        // reset would matter for — `ERROR_NO_DATA` (232), a
+                        // client that connected and closed before we observed
+                        // it — never surfaces here, because mio's named-pipe
+                        // backend maps `ERROR_NO_DATA` (and `ERROR_PIPE_CONNECTED`)
+                        // to a *successful* connect, so it takes the Ok path
+                        // below rather than this transient branch.
                         tokio::select! {
                             biased;
                             () = &mut shutdown => break Ok(()),

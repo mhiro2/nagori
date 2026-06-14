@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use nagori_core::{AppError, Result};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::{AuthToken, IpcEnvelope, IpcRequest, IpcResponse};
@@ -73,16 +73,20 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 #[cfg(windows)]
 const PIPE_NOT_FOUND_RETRY_BUDGET: Duration = Duration::from_millis(250);
 
-/// `SECURITY_IDENTIFICATION` impersonation level (`winbase.h`, `0x0001_0000`).
+/// `SECURITY_ANONYMOUS` impersonation level (`winbase.h`, `0x0000_0000`).
 ///
 /// Without an explicit `QoS` level, a process that squatted `\\.\pipe\nagori`
 /// before the daemon bound it could attempt to impersonate the connecting
-/// client at the default (`Impersonation`) level. Identification lets the
-/// server learn who connected but never act under the client's token.
-/// tokio's `security_qos_flags` ORs in `SECURITY_SQOS_PRESENT` itself, so
-/// only the level is specified here.
+/// client at the default (`Impersonation`) level. We pin the *tightest*
+/// level — `Anonymous` — because the daemon authenticates purely by the
+/// per-launch token and never inspects, identifies, or impersonates the
+/// connecting client. So even letting a squatter merely *identify* the client
+/// (the next level up, `Identification`) is more than the protocol needs;
+/// `Anonymous` denies that too. tokio's `security_qos_flags` ORs in
+/// `SECURITY_SQOS_PRESENT` itself, so passing the bare `0` level still marks
+/// the `QoS` as present rather than falling back to the permissive default.
 #[cfg(windows)]
-const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+const SECURITY_ANONYMOUS: u32 = 0x0000_0000;
 
 #[derive(Debug, Clone)]
 pub struct IpcClient {
@@ -187,6 +191,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let envelope = IpcEnvelope {
+        version: crate::IPC_PROTOCOL_VERSION,
         token: token.as_str().to_owned(),
         request,
     };
@@ -218,7 +223,21 @@ where
         .flush()
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?;
-    let response = read_bounded_line(&mut stream).await?;
+    // No first-read budget: the whole round-trip is already bounded by the
+    // caller's request timeout, so the client tolerates a daemon that takes a
+    // moment to start writing the response.
+    let response = crate::framing::read_line_bounded(&mut stream, MAX_IPC_RESPONSE_BYTES, None)
+        .await
+        .map_err(|err| match err {
+            crate::framing::FrameError::TooLarge => {
+                AppError::Platform("IPC response is too large".to_owned())
+            }
+            crate::framing::FrameError::Io(message) => AppError::Platform(message),
+            // Unreachable with `None`, but map defensively rather than panic.
+            crate::framing::FrameError::FirstReadTimeout => {
+                AppError::Platform("IPC response read timed out".to_owned())
+            }
+        })?;
     serde_json::from_slice(&response).map_err(|err| AppError::Platform(err.to_string()))
 }
 
@@ -240,7 +259,7 @@ async fn open_pipe_client(
     let started = tokio::time::Instant::now();
     loop {
         match ClientOptions::new()
-            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .security_qos_flags(SECURITY_ANONYMOUS)
             .open(path)
         {
             Ok(client) => return Ok(client),
@@ -256,35 +275,6 @@ async fn open_pipe_client(
             Err(err) => return Err(err),
         }
     }
-}
-
-async fn read_bounded_line<R>(reader: &mut R) -> Result<Vec<u8>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut line = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let read = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        if let Some(newline) = chunk[..read].iter().position(|byte| *byte == b'\n') {
-            if line.len() + newline > MAX_IPC_RESPONSE_BYTES {
-                return Err(AppError::Platform("IPC response is too large".to_owned()));
-            }
-            line.extend_from_slice(&chunk[..newline]);
-            break;
-        }
-        if line.len() + read > MAX_IPC_RESPONSE_BYTES {
-            return Err(AppError::Platform("IPC response is too large".to_owned()));
-        }
-        line.extend_from_slice(&chunk[..read]);
-    }
-    Ok(line)
 }
 
 #[cfg(test)]
@@ -333,11 +323,11 @@ mod tests {
             server.write_all(b"\n").await.expect("write should succeed");
         });
 
-        let err = read_bounded_line(&mut client)
+        let err = crate::framing::read_line_bounded(&mut client, MAX_IPC_RESPONSE_BYTES, None)
             .await
             .expect_err("oversized response should fail");
 
-        assert!(matches!(err, AppError::Platform(message) if message.contains("too large")));
+        assert!(matches!(err, crate::framing::FrameError::TooLarge));
         writer.await.expect("writer task should finish");
     }
 
@@ -405,7 +395,7 @@ mod tests {
                 .expect("write should succeed");
         });
 
-        let line = read_bounded_line(&mut client)
+        let line = crate::framing::read_line_bounded(&mut client, MAX_IPC_RESPONSE_BYTES, None)
             .await
             .expect("line should be read");
 
