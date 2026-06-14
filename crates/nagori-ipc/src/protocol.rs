@@ -681,6 +681,43 @@ mod tests {
         assert_eq!(parsed.last_error.as_deref(), Some("settings load failed"));
     }
 
+    /// The `Clear` request's on-the-wire JSON must match what `docs/ipc.md`
+    /// documents: `ClearRequest` is an externally-tagged enum nested under the
+    /// `IpcRequest::Clear` variant, so `All` is `{"Clear":"All"}` and
+    /// `OlderThanDays` is `{"Clear":{"OlderThanDays":{"days":N}}}`. A
+    /// hand-rolled client copying the doc example must round-trip; the historic
+    /// doc shape (`{"Clear":{"older_than_days":N}}`) must be rejected so the
+    /// docs and the parser cannot drift apart again.
+    #[test]
+    fn clear_request_wire_format_matches_docs() {
+        let all = serde_json::to_string(&IpcRequest::Clear(ClearRequest::All))
+            .expect("Clear(All) must serialize");
+        assert_eq!(all, r#"{"Clear":"All"}"#);
+
+        let older =
+            serde_json::to_string(&IpcRequest::Clear(ClearRequest::OlderThanDays { days: 30 }))
+                .expect("Clear(OlderThanDays) must serialize");
+        assert_eq!(older, r#"{"Clear":{"OlderThanDays":{"days":30}}}"#);
+
+        // Both documented shapes parse back to the matching request.
+        assert!(matches!(
+            serde_json::from_str::<IpcRequest>(r#"{"Clear":"All"}"#).expect("parse All"),
+            IpcRequest::Clear(ClearRequest::All)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<IpcRequest>(r#"{"Clear":{"OlderThanDays":{"days":7}}}"#)
+                .expect("parse OlderThanDays"),
+            IpcRequest::Clear(ClearRequest::OlderThanDays { days: 7 })
+        ));
+
+        // The pre-fix doc shape is *not* valid and must fail rather than
+        // silently decode to a default — that mismatch is the bug this guards.
+        assert!(
+            serde_json::from_str::<IpcRequest>(r#"{"Clear":{"older_than_days":30}}"#).is_err(),
+            "the historic doc shape must be rejected, not silently accepted"
+        );
+    }
+
     /// Full round-trip of a populated `startup` field — ensures the
     /// serialized shape matches the schema embedded in `nagori doctor`
     /// JSON output and the desktop notification gate.

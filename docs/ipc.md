@@ -29,31 +29,45 @@ ARCHITECTURE.md "Single-instance & stale-socket handling".
 * **macOS** (default): `~/Library/Application Support/nagori/nagori.sock`.
   The bind path is created with a `0o077` umask and explicitly `chmod`ed to
   `0o600`, so only the daemon's user can `connect(2)` it.
-* **Windows** (default): `\\.\pipe\nagori`. The pipe is created with the
-  default named-pipe security descriptor inherited from the daemon process
-  — there is no custom DACL yet. Authentication is enforced via the
-  sibling token file rather than the pipe ACL.
+* **Windows** (default): `\\.\pipe\nagori`. The pipe is created with an
+  explicit DACL whose single ACE grants only the daemon's user
+  (`GENERIC_READ | GENERIC_WRITE`); no other local user — even on the same
+  desktop session — can open it. `reject_remote_clients(true)` additionally
+  closes the UNC/SMB surface. The sibling token file is a second,
+  independent gate on top of the pipe ACL.
 * Override with `--ipc <endpoint>` on both the daemon and the CLI. On
   Windows pass the pipe name (e.g. `\\.\pipe\nagori-dev`).
 
-The auth token is a 32-byte random hex string written to a sibling file:
+The auth token is a 32-byte random hex string written to a token file:
 
-* On Unix, `nagori.token` lives next to the socket and is created with
-  `0o600` mode, so only the daemon's user can read it.
-* On Windows, the token file lives under `%LOCALAPPDATA%\nagori\` with
-  the default NTFS permissions inherited from the per-user directory.
-  There is no custom DACL on either the pipe or the token file yet.
+* On Unix it is created with `0o600` mode (born under a `0o077` umask via an
+  `O_CREAT|O_EXCL` temp file that is then `rename(2)`d into place, so it is
+  never world-readable for an instant and a planted symlink is replaced, not
+  followed). The token always lives inside the daemon's private `0o700`
+  app-data directory: for the default endpoint that directory also holds the
+  socket, but for a custom `--ipc` endpoint the token stays in the app-data
+  directory rather than beside the socket — so a world-writable socket
+  parent (e.g. `/tmp`) cannot be used to attack the token path.
+* On Windows the token file lives under `%LOCALAPPDATA%\nagori\` and is
+  written with an explicit DACL granting the current user,
+  `BUILTIN\Administrators`, and `NT AUTHORITY\SYSTEM`. The DACL is forced
+  onto every launch by creating a `CREATE_NEW` temp file with the descriptor
+  attached and atomically `MoveFileExW`-ing it over any previous entry — a
+  plain `CREATE_ALWAYS` write would truncate but inherit the stale
+  descriptor.
 
 When you launch the daemon with `--ipc <custom>`, the CLI and daemon both
-derive the token filename from the endpoint. On Unix the derivation uses
-the socket stem (e.g. `dev.token` for `…/dev.sock`). On Windows the
-default pipe `\\.\pipe\nagori` keeps the historic filename
-`nagori.token`; every other pipe gets `<sanitised>-<8 hex>.token` where
-the suffix is the first eight hex characters of `SHA-256(pipe name)` —
-without the hash, two pipe names that sanitise to the same segment (e.g.
-`\\.\pipe\a:b` and `\\.\pipe\a?b` both collapse to `a_b`) would race for
-the same token file. Every envelope is rejected unless its `token`
-matches via constant-time comparison.
+derive the token filename from the endpoint using one scheme on every
+platform. The default endpoint keeps the historic `nagori.token`; every
+other endpoint gets `<sanitised>-<8 hex>.token`, where `<sanitised>` is the
+endpoint's last path / pipe segment with filesystem-unsafe characters
+replaced and the suffix is the first eight hex characters of
+`SHA-256(<full endpoint>)`. So `…/dev.sock` becomes `dev.sock-<8 hex>.token`
+and `\\.\pipe\nagori-dev` becomes `nagori-dev-<8 hex>.token`. Without the
+hash, two endpoints that sanitise to the same segment (e.g. `\\.\pipe\a:b`
+and `\\.\pipe\a?b`, both collapsing to `a_b`) would race for the same token
+file. Every envelope is rejected unless its `token` matches via
+constant-time comparison.
 
 ## Framing
 
@@ -76,19 +90,30 @@ plain string (`"Health"`), and a payload variant nests under the variant name
 { "AddEntry":       { "text": "hello" } }
 { "CopyEntry":      { "id": "<uuid>" } }
 { "PasteEntry":     { "id": "<uuid>" } }
+{ "PasteEntry":     { "id": "<uuid>", "format": "plain_text" } }
 { "DeleteEntry":    { "id": "<uuid>" } }
 { "PinEntry":       { "id": "<uuid>", "pinned": true } }
+{ "RunQuickAction": { "id": "<uuid>", "action": "FormatJson" } }
 { "RunAiAction":    { "id": "<uuid>", "action": "Summarize" } }
 { "RunAiAction":    { "id": "<uuid>", "action": "Translate",
                       "options": { "target_language": "ja", "source_language": "en" } } }
 "GetSettings"
 { "UpdateSettings": { "value": { /* AppSettings */ } } }
-{ "Clear":          { "older_than_days": 30 } }
+{ "Clear":          "All" }
+{ "Clear":          { "OlderThanDays": { "days": 30 } } }
 "Doctor"
 "Health"
 "Capabilities"
 "Shutdown"
 ```
+
+`PasteEntry.format` is optional (`PasteFormat`, `"preserve"` / `"plain_text"`);
+omit it to paste with the entry's preserved formatting. `RunQuickAction` runs a
+deterministic on-device transform (`"FormatJson"`, `"ExtractTasks"`,
+`"RedactSecrets"`, `"SummarizeFirstSentence"`) — distinct from the model-backed
+`RunAiAction`. `Clear` is an externally-tagged enum: `"All"` wipes every
+unpinned entry, `{"OlderThanDays":{"days":N}}` wipes unpinned entries older than
+`N` days.
 
 `RunAiAction.options` is optional (`AiRequestOptions`, defaulted when absent).
 It carries per-request overrides — `translate`'s `target_language` /

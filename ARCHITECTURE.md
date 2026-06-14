@@ -1110,10 +1110,11 @@ IpcRequest }` line and reads one `IpcResponse` line. Defaults:
   to publish the same name fails the launch (rather than only logging a
   warn line from a background task). The accept loop then chains fresh
   `NamedPipeServer` instances after each connect, mirroring the Unix
-  `accept` semantics. The pipe is created with the default named-pipe
-  security descriptor inherited from the daemon process — there is no
-  custom DACL yet, so authentication relies on the sibling token file
-  rather than on ACL filtering at the pipe level.
+  `accept` semantics. Every instance — first and chained alike — is
+  created with an explicit DACL whose single ACE grants only the daemon's
+  user (`GENERIC_READ | GENERIC_WRITE`), and `reject_remote_clients(true)`
+  closes the UNC/SMB surface, so the pipe ACL and the sibling token file
+  act as two independent gates.
 
 **Single-instance & stale-socket handling.** A daemon takes a
 process-lifetime advisory lock (`nagori_storage::ProcessLock`, an
@@ -1151,21 +1152,32 @@ rather than unlinked as defense in depth, so removal never hinges on a
 connect failure alone. The kernel drops both locks on process exit —
 including a crash — so there is no stale-lock file to clean up.
 
-An auth-token file sits in the same directory as the IPC endpoint:
-`nagori.token` next to the socket on Unix (`0600` mode set explicitly
-during write), and under `dirs::data_local_dir()/nagori/` on Windows
-(default NTFS permissions inherited from `fs::write`; no custom DACL).
-When the user passes `--ipc <custom>` to either the daemon or the CLI,
-both sides derive the token filename from the endpoint. On Unix the
-derivation reuses the socket stem (e.g. `dev.token` for `…/dev.sock`).
-On Windows the default pipe `\\.\pipe\nagori` keeps the historic
-`nagori.token` filename; every other pipe is written as
-`<sanitised>-<8 hex>.token` where the suffix is the first eight hex
-characters of `SHA-256(pipe name)` — without it, two pipe names whose
-sanitised tail collides (e.g. `\\.\pipe\a:b` and `\\.\pipe\a?b` both
-sanitise to `a_b`) would race for the same token file. The server
-rejects envelopes whose token does not match via constant-time
-comparison.
+An auth-token file is written into the daemon's private per-user app-data
+directory (`0o700` on Unix). On Unix it is `0600` (created `O_CREAT|O_EXCL`
+under a `0o077` umask, then `rename(2)`d into place, so it is never
+world-readable for an instant and a planted symlink is replaced rather than
+followed); on Windows it lives under `dirs::data_local_dir()/nagori/` with an
+explicit DACL granting the current user, `BUILTIN\Administrators`, and
+`NT AUTHORITY\SYSTEM` (forced onto every launch via a `CREATE_NEW` temp file
+with the descriptor attached plus an atomic `MoveFileExW`, since a plain
+`CREATE_ALWAYS` write would truncate but inherit whatever descriptor a prior
+launch left behind). On Unix the default endpoint's socket lives in that same
+directory (token and socket side by side), while a custom `--ipc` socket can
+sit in a world-writable parent — the token stays in the app-data dir rather
+than following it there, keeping its symlink / ownership guarantees
+independent of where the endpoint lives. (A Windows pipe name has no
+filesystem location, so the token directory is always the app-data dir.)
+When the user passes `--ipc <custom>` to either the daemon or the CLI, both
+sides derive the token filename from the endpoint with one scheme on every
+platform: the default endpoint keeps the historic `nagori.token`, while every
+other endpoint becomes `<sanitised>-<8 hex>.token` — the endpoint's last
+path / pipe segment with filesystem-unsafe characters replaced, plus the
+first eight hex characters of `SHA-256(<full endpoint>)`. So `…/dev.sock`
+becomes `dev.sock-<8 hex>.token` and `\\.\pipe\nagori-dev` becomes
+`nagori-dev-<8 hex>.token`; without the hash, two endpoints whose sanitised
+tail collides (e.g. `\\.\pipe\a:b` and `\\.\pipe\a?b`, both reducing to
+`a_b`) would race for the same token file. The server rejects envelopes
+whose token does not match via constant-time comparison.
 
 `cli_ipc_enabled` is enforced live, not only at daemon startup. The
 daemon supervises the IPC server from the settings watch channel: enabling
@@ -1201,13 +1213,13 @@ enum IpcRequest {
     Search, GetEntry, ListRecent, ListPinned,
     AddEntry, CopyEntry, PasteEntry,
     DeleteEntry, PinEntry, Clear,
-    RunAiAction,
+    RunQuickAction, RunAiAction,
     GetSettings, UpdateSettings,
     Doctor, Health, Capabilities, Shutdown,
 }
 
 enum IpcResponse {
-    Search, Entry, Entries,
+    Search, Entry, Entries, Settings,
     AiOutput, Cleared,
     Doctor, Health, Capabilities,
     Ack, Error,
@@ -2270,11 +2282,12 @@ under 80 ms for 100k text entries on a developer machine.
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.
 - **IPC** — Unix-domain socket (macOS / Linux, `0600` mode) or Win32
-  named pipe (Windows, default named-pipe security descriptor, no
-  custom DACL — `reject_remote_clients(true)` blocks UNC peers but a
-  local user can still open the pipe). Authentication therefore relies
-  on a per-launch token file (`0600` on Unix; default NTFS permissions
-  inherited from `%LOCALAPPDATA%\nagori\` on Windows). Tight read
+  named pipe (Windows, explicit current-user-only DACL plus
+  `reject_remote_clients(true)`, so neither a remote UNC peer nor another
+  local user can open the pipe). A per-launch token file is an independent
+  second gate (`0600` on Unix; an explicit user + `BUILTIN\Administrators`
+  + `NT AUTHORITY\SYSTEM` DACL under `%LOCALAPPDATA%\nagori\` on Windows).
+  Tight read
   timeouts on the unauthenticated handshake (`FIRST_READ_TIMEOUT` 1 s,
   `READ_TIMEOUT` 3 s) cap slow-loris pressure on the 32 connection
   permits; no TCP listener. Token verification uses constant-time
