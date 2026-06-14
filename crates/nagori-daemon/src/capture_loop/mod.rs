@@ -462,7 +462,18 @@ pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
     audit: A,
-    settings: AppSettings,
+    /// `Arc` so the per-tick snapshot in `capture_once_at` is a refcount bump
+    /// rather than a deep clone of the whole `AppSettings` (denylist `Vec`s
+    /// included) on every poll.
+    settings: Arc<AppSettings>,
+    /// Classifier rebuilt only when settings change, not on every admitted
+    /// clip — building it recompiles every `regex_denylist` pattern, so doing
+    /// it per capture made a steady copy stream pay that cost repeatedly. `Err`
+    /// preserves the fail-closed contract: while a denylist pattern won't
+    /// compile, no clip can be admitted (the caller rolls back and retries),
+    /// because silently dropping the broken rule would let secret matches the
+    /// user asked us to redact slip into history.
+    classifier: std::result::Result<SensitivityClassifier, String>,
     /// Dedup / baseline state. Grouped so the optimistic refresh and its
     /// failure rollback stay a single operation instead of three hand-kept
     /// fields — see [`DedupState`].
@@ -515,12 +526,14 @@ where
     E: EntryRepository,
     A: AuditLog,
 {
-    pub const fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
+    pub fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
+        let classifier = build_classifier(&settings);
         Self {
             reader,
             entries,
             audit,
-            settings,
+            settings: Arc::new(settings),
+            classifier,
             dedup: DedupState::new(),
             window: None,
             failures: CaptureFailurePolicy::new(),
@@ -606,7 +619,12 @@ where
     }
 
     pub fn update_settings(&mut self, settings: AppSettings) {
-        self.settings = settings;
+        // Rebuild the cached classifier in lockstep with the settings snapshot
+        // so admission always classifies against the live `regex_denylist` /
+        // `app_denylist` — and never recompiles those patterns on the capture
+        // hot path.
+        self.classifier = build_classifier(&settings);
+        self.settings = Arc::new(settings);
     }
 
     pub async fn capture_once(&mut self) -> Result<Option<EntryId>> {
@@ -836,7 +854,15 @@ where
             self.note_capture_drop(CaptureEventCategory::OversizedDrop);
             return Ok(Admission::Dropped);
         }
-        let classifier = SensitivityClassifier::try_new(settings.clone())?;
+        // Use the classifier cached at the last settings change rather than
+        // recompiling the `regex_denylist` for every admitted clip. A cached
+        // build failure (an uncompilable pattern) fails closed exactly as the
+        // per-call `try_new` did: the clip is not admitted, the caller rolls
+        // back the dedup state, and the next tick retries.
+        let classifier = self
+            .classifier
+            .as_ref()
+            .map_err(|message| AppError::Policy(message.clone()))?;
         let classification = classifier.classify(&entry);
         entry.sensitivity = classification.sensitivity;
         if matches!(classification.sensitivity, Sensitivity::Blocked) {
@@ -920,8 +946,9 @@ where
         // a tick could read the *new* `max_entry_size_bytes` for the
         // pre-read cap and the *old* `capture_kinds` for the post-read
         // filter, producing inconsistent admission decisions for one
-        // clip. Take one local clone and use it everywhere.
-        let settings = self.settings.clone();
+        // clip. Take one snapshot and use it everywhere — an `Arc` bump,
+        // so this is cheap to do every poll.
+        let settings = Arc::clone(&self.settings);
 
         self.detect_wake_gap(now).await;
 
@@ -1183,6 +1210,15 @@ where
             }
         }
     }
+}
+
+/// Build the cached [`SensitivityClassifier`] for the current settings,
+/// collapsing the error to its message so the loop can hold it across ticks
+/// ([`AppError`] is not `Clone`). `try_new` only ever fails with
+/// [`AppError::Policy`] (an uncompilable `regex_denylist` pattern), so
+/// `admit_entry` faithfully reconstructs that variant from the stored message.
+fn build_classifier(settings: &AppSettings) -> std::result::Result<SensitivityClassifier, String> {
+    SensitivityClassifier::try_new(settings.clone()).map_err(|err| err.to_string())
 }
 
 /// Effective dedupe key for the wake-gap cross-check.
