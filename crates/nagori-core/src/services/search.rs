@@ -169,18 +169,22 @@ impl SearchPlan {
     /// for that mode. Direct store/test callers that lack an embedder get an
     /// empty result set (the service performs no text fan-out for the plan)
     /// rather than the old hard `Unsupported` error.
-    pub const fn try_resolve(mode: SearchMode, normalized: &str) -> Result<Self> {
+    ///
+    /// Resolution is total — every mode maps to a plan — so this returns a
+    /// plain `Self` rather than a `Result`.
+    #[must_use]
+    pub const fn resolve(mode: SearchMode, normalized: &str) -> Self {
         if normalized.is_empty() {
-            return Ok(Self::Recent);
+            return Self::Recent;
         }
-        Ok(match mode {
+        match mode {
             SearchMode::Recent => Self::Recent,
             SearchMode::Exact => Self::Exact,
             SearchMode::FullText => Self::FullText,
             SearchMode::Fuzzy => Self::Fuzzy,
             SearchMode::Auto => Self::Hybrid,
             SearchMode::Semantic => Self::Semantic,
-        })
+        }
     }
 }
 
@@ -209,8 +213,19 @@ where
             query.normalized.clone()
         };
         let limit = query.limit.clamp(1, MAX_RESULT_LIMIT);
-        let plan = SearchPlan::try_resolve(query.mode, &normalized)?;
-        let candidate_limit = limit.saturating_mul(CANDIDATE_OVERSAMPLE).max(limit);
+        let plan = SearchPlan::resolve(query.mode, &normalized);
+        // The `Recent` plan is a deterministic recency listing: it fans out to
+        // a single provider call whose SQL `ORDER BY` already returns rows in
+        // final order, and `rank_recent` re-scores monotonically with that
+        // order (and drops nothing), so the top `limit` after sort+truncate are
+        // exactly the first `limit` rows. Oversampling there would fetch and
+        // project 8× the rows for no change in output, so only the
+        // dedup-across-branches plans pay the oversample.
+        let candidate_limit = if matches!(plan, SearchPlan::Recent) {
+            limit
+        } else {
+            limit.saturating_mul(CANDIDATE_OVERSAMPLE).max(limit)
+        };
         let filters = &query.filters;
 
         // One cancellation token for every candidate fetch this search drives.
@@ -428,6 +443,7 @@ mod tests {
         ngram: Vec<NgramCandidate>,
         seen: Mutex<Vec<&'static str>>,
         ngram_mode: Mutex<Option<NgramQueryMode>>,
+        recent_limit: Mutex<Option<usize>>,
     }
 
     #[async_trait]
@@ -436,10 +452,11 @@ mod tests {
             &self,
             _filters: &SearchFilters,
             _order: RecentOrder,
-            _limit: usize,
+            limit: usize,
             _cancel: &CancellationToken,
         ) -> Result<Vec<SearchCandidate>> {
             self.seen.lock().unwrap().push("recent");
+            *self.recent_limit.lock().unwrap() = Some(limit);
             Ok(self.recent.clone())
         }
 
@@ -531,6 +548,24 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(*provider.seen.lock().unwrap(), vec!["recent"]);
+    }
+
+    #[tokio::test]
+    async fn recent_plan_fetches_exactly_limit_candidates() {
+        // The Recent listing order is fully determined by the provider's SQL
+        // ordering, so the service must not oversample it: it asks for exactly
+        // `limit` rows, not `limit * CANDIDATE_OVERSAMPLE`.
+        let provider = StubProvider {
+            recent: vec![entry("alpha")],
+            ..Default::default()
+        };
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let mut q = SearchQuery::new("", String::new(), 10);
+        q.mode = SearchMode::Recent;
+        svc.search(q).await.unwrap();
+
+        assert_eq!(*provider.recent_limit.lock().unwrap(), Some(10));
     }
 
     #[tokio::test]
@@ -725,33 +760,33 @@ mod tests {
     #[test]
     fn search_plan_resolves_modes() {
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Auto, "").unwrap(),
+            SearchPlan::resolve(SearchMode::Auto, ""),
             SearchPlan::Recent
         );
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Auto, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::Auto, "needle"),
             SearchPlan::Hybrid,
         );
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Recent, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::Recent, "needle"),
             SearchPlan::Recent,
         );
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Exact, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::Exact, "needle"),
             SearchPlan::Exact,
         );
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::FullText, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::FullText, "needle"),
             SearchPlan::FullText,
         );
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Fuzzy, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::Fuzzy, "needle"),
             SearchPlan::Fuzzy,
         );
         // Semantic resolves to its own plan; the daemon routes it to the
         // embed-then-rank path, and direct callers get an empty result set.
         assert_eq!(
-            SearchPlan::try_resolve(SearchMode::Semantic, "needle").unwrap(),
+            SearchPlan::resolve(SearchMode::Semantic, "needle"),
             SearchPlan::Semantic,
         );
     }

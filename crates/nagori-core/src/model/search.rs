@@ -55,18 +55,27 @@ pub(crate) fn keyword_followed_by_whitespace(text: &str, keyword: &str) -> bool 
     while let Some(rel) = text[search_from..].find(keyword) {
         let start = search_from + rel;
         let end = start + kw_len;
-        let left_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        // Left boundary checks the preceding *char*, not the preceding byte:
+        // inspecting `bytes[start - 1]` would read a UTF-8 continuation byte
+        // as a non-word boundary, so `あfn x` would wrongly look like code.
+        let left_ok = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|prev| !is_word_char(prev));
         let right_ok = end < bytes.len() && bytes[end].is_ascii_whitespace();
         if left_ok && right_ok {
             return true;
         }
-        search_from = start + 1;
+        // Advance by the first char's byte length so `search_from` always
+        // lands on a char boundary even when `keyword` starts with a
+        // multi-byte char (current callers only pass ASCII keywords).
+        search_from = start + keyword.chars().next().map_or(1, char::len_utf8);
     }
     false
 }
 
-const fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Build a whitespace-compacted preview of `text`, capped at `max_chars`.
@@ -282,6 +291,29 @@ mod tests {
     fn empty_keyword_never_matches() {
         assert!(!keyword_followed_by_whitespace("anything", ""));
         assert!(!keyword_followed_by_whitespace("", ""));
+    }
+
+    #[test]
+    fn multibyte_char_before_keyword_is_a_word_boundary() {
+        // A CJK letter immediately before the keyword is a word char, so the
+        // keyword is part of a larger token and must not match. The left
+        // boundary inspects the preceding char (not its trailing UTF-8 byte),
+        // which would otherwise read as a non-word boundary.
+        assert!(!keyword_followed_by_whitespace("あfn x", "fn"));
+        // A multi-byte char as a clean left boundary (followed by the keyword
+        // then whitespace) still works, and the scan must not panic when it
+        // advances past a match that starts mid-string.
+        assert!(keyword_followed_by_whitespace("　fn x", "fn"));
+    }
+
+    #[test]
+    fn multibyte_keyword_does_not_panic_when_scanning() {
+        // The first "検索" fails the right boundary ('x' follows), so the loop
+        // advances and rescans. The advance must land on a char boundary even
+        // though the keyword starts with a multi-byte char — otherwise the
+        // next `text[search_from..]` slice panics mid-char. The standalone
+        // second "検索" (followed by a space) is then accepted.
+        assert!(keyword_followed_by_whitespace("検索x 検索 y", "検索"));
     }
 
     #[test]
