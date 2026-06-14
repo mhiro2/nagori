@@ -327,6 +327,19 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_scheme_still_classifies_as_url() {
+        // The WHATWG parser lower-cases the scheme, so an uppercase `HTTPS://`
+        // is a real URL — it must classify as Url (with a normalized form) and
+        // not fall through to Text, which would skip dedupe and normalization.
+        let content = ClipboardContent::from_plain_text("HTTPS://Example.COM/Path");
+        let ClipboardContent::Url(url) = content else {
+            panic!("expected URL content for uppercase scheme");
+        };
+        assert_eq!(url.normalized, "https://example.com/Path");
+        assert_eq!(url.domain.as_deref(), Some("example.com"));
+    }
+
+    #[test]
     fn url_normalization_preserves_case_sensitive_path_and_query() {
         // Path / query / fragment are case-sensitive per RFC 3986 §6.2.2.1:
         // only the scheme and host may be lower-cased. Forcing the whole URL

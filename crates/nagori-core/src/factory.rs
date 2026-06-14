@@ -22,7 +22,13 @@ impl EntryFactory {
         // pick the richest survivor as primary, and persist the remainder as
         // plain_fallback / alternatives so copy-back can re-publish each
         // flavour the source advertised.
-        let normalized = normalize_representations(&snapshot.representations);
+        //
+        // Consume `snapshot.representations` so `normalize_representations`
+        // *moves* each payload (image bytes / markup) into the normalized set
+        // rather than cloning it — for a multi-MB image that drops one full
+        // transient copy off the capture path. `source` / `captured_at` are
+        // distinct fields, so the partial move leaves them usable below.
+        let normalized = normalize_representations(snapshot.representations);
         let (content, primary_idx, has_plain_fallback) = pick_primary(&normalized)?;
         let mut entry = Self::from_content(content, snapshot.source, Some(snapshot.captured_at));
         let stored = build_stored_set(&normalized, primary_idx, has_plain_fallback);
@@ -109,28 +115,27 @@ enum NormalizedPayload {
 /// the allowlist + magic-number + non-empty checks. Logs every drop at
 /// `debug!` so packet-level diagnosis is possible without surfacing raw
 /// payload bytes.
-fn normalize_representations(reps: &[ClipboardRepresentation]) -> Vec<NormalizedRep> {
+fn normalize_representations(reps: Vec<ClipboardRepresentation>) -> Vec<NormalizedRep> {
     let mut out = Vec::with_capacity(reps.len());
-    for rep in reps {
-        let bare = bare_mime(&rep.mime_type);
+    for ClipboardRepresentation { mime_type, data } in reps {
+        let bare = bare_mime(&mime_type);
         if let Some(canonical) = canonical_text_mime(bare) {
-            let text = match &rep.data {
-                ClipboardData::Text(t) => t.clone(),
-                ClipboardData::Bytes(b) => {
-                    if let Ok(s) = std::str::from_utf8(b) {
-                        s.to_owned()
-                    } else {
+            let text = match data {
+                ClipboardData::Text(t) => t,
+                ClipboardData::Bytes(b) => match String::from_utf8(b) {
+                    Ok(s) => s,
+                    Err(err) => {
                         tracing::debug!(
-                            mime_type = %rep.mime_type,
-                            byte_count = b.len(),
+                            mime_type = %mime_type,
+                            byte_count = err.as_bytes().len(),
                             "representation_dropped reason=non_utf8_text"
                         );
                         continue;
                     }
-                }
+                },
                 ClipboardData::FilePaths(_) => {
                     tracing::debug!(
-                        mime_type = %rep.mime_type,
+                        mime_type = %mime_type,
                         "representation_dropped reason=text_mime_carried_file_paths"
                     );
                     continue;
@@ -148,8 +153,8 @@ fn normalize_representations(reps: &[ClipboardRepresentation]) -> Vec<Normalized
             continue;
         }
 
-        if starts_with_image_prefix(&rep.mime_type) {
-            let ClipboardData::Bytes(bytes) = &rep.data else {
+        if starts_with_image_prefix(&mime_type) {
+            let ClipboardData::Bytes(bytes) = data else {
                 continue;
             };
             if bytes.is_empty() {
@@ -157,17 +162,17 @@ fn normalize_representations(reps: &[ClipboardRepresentation]) -> Vec<Normalized
             }
             if !is_allowlisted_image_mime(bare) {
                 tracing::debug!(
-                    mime_type = %rep.mime_type,
+                    mime_type = %mime_type,
                     byte_count = bytes.len(),
                     "representation_dropped reason=image_mime_not_allowlisted"
                 );
                 continue;
             }
-            if !crate::image_signature::matches_declared_mime(&rep.mime_type, bytes) {
-                let detected = crate::image_signature::detect(bytes)
+            if !crate::image_signature::matches_declared_mime(&mime_type, &bytes) {
+                let detected = crate::image_signature::detect(&bytes)
                     .map(crate::image_signature::ImageFormat::mime_type);
                 tracing::warn!(
-                    declared_mime = %rep.mime_type,
+                    declared_mime = %mime_type,
                     detected_mime = ?detected,
                     byte_count = bytes.len(),
                     "image_signature_mismatch_dropped"
@@ -177,27 +182,27 @@ fn normalize_representations(reps: &[ClipboardRepresentation]) -> Vec<Normalized
             out.push(NormalizedRep {
                 payload: NormalizedPayload::Image {
                     mime: bare.to_ascii_lowercase(),
-                    bytes: bytes.clone(),
+                    bytes,
                 },
             });
             continue;
         }
 
-        if let ClipboardData::FilePaths(paths) = &rep.data {
+        if let ClipboardData::FilePaths(paths) = data {
             if paths.is_empty() {
                 continue;
             }
             out.push(NormalizedRep {
                 payload: NormalizedPayload::FilePaths {
-                    mime: rep.mime_type.clone(),
-                    paths: paths.clone(),
+                    mime: mime_type,
+                    paths,
                 },
             });
             continue;
         }
 
         tracing::debug!(
-            mime_type = %rep.mime_type,
+            mime_type = %mime_type,
             "representation_dropped reason=mime_not_allowlisted"
         );
     }
@@ -413,13 +418,20 @@ fn stored_from(
 
 /// SHA-256 over the canonical encoding of every persisted representation.
 ///
-/// Encodes each rep as `role|mime|ordinal|sha256(payload_bytes)` and joins
-/// with newlines after sorting by (role, ordinal, mime). The hash diverges
-/// from `content_hash` once an entry carries alternatives or a plain
+/// Encodes each rep as `role|ordinal|<mime_len>|<mime>|sha256(payload_bytes)`
+/// and joins with newlines after sorting by (role, ordinal, mime). The hash
+/// diverges from `content_hash` once an entry carries alternatives or a plain
 /// fallback, giving dedupe a way to recognise "same representation set" vs
 /// "same primary body". `representation_set_hash` is recomputed by the
 /// budget-trim path if any rep is dropped so the hash stays in sync with
 /// what storage actually wrote.
+///
+/// The `mime` field is the only attacker-influenced variable-length component
+/// (a `FilePaths` rep carries the producer's raw mime), so it is length-
+/// prefixed: a `|` or `\n` smuggled into a mime can no longer shift bytes
+/// across a field boundary and forge a collision against a different set.
+/// `role` and `ordinal` are drawn from fixed enums / integers, and the payload
+/// hash is fixed-width hex, so the encoding is injective up to SHA-256.
 #[must_use]
 pub fn compute_representation_set_hash(reps: &[StoredClipboardRepresentation]) -> ContentHash {
     let mut sorted: Vec<&StoredClipboardRepresentation> = reps.iter().collect();
@@ -438,17 +450,22 @@ pub fn compute_representation_set_hash(reps: &[StoredClipboardRepresentation]) -
         let payload_hash = match &r.data {
             RepresentationDataRef::InlineText(text) => ContentHash::sha256(text.as_bytes()),
             RepresentationDataRef::DatabaseBlob(bytes) => ContentHash::sha256(bytes),
+            // Hash the JSON encoding (the persisted form), not a `\n`-join:
+            // joining would collide `["a", "b"]` with `["a\nb"]`, which is a
+            // different file set, and silently dedupe them. JSON escapes the
+            // separator so distinct lists stay distinct.
             RepresentationDataRef::FilePaths(paths) => {
-                ContentHash::sha256(paths.join("\n").as_bytes())
+                ContentHash::sha256(crate::encode_file_paths(paths).as_bytes())
             }
         };
         // `write!` to a String is infallible — drop the Result on purpose.
         let _ = write!(
             &mut buf,
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             r.role.as_str(),
-            r.mime_type,
             r.ordinal,
+            r.mime_type.len(),
+            r.mime_type,
             payload_hash.value
         );
     }
@@ -511,32 +528,157 @@ fn starts_with_image_prefix(mime: &str) -> bool {
 /// HTML rendering belongs in the `WebView`, not the capture path.
 ///
 /// Tracks attribute quoting so a `>` inside `href="x>y"` does not prematurely
-/// close the tag.
+/// close the tag, skips the body of `<script>` / `<style>` raw-text elements
+/// (so executable / stylesheet source never lands in the preview or search
+/// document), and decodes the handful of HTML entities common in pasted text.
 fn strip_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut quote: Option<char> = None;
-    for ch in html.chars() {
-        if in_tag {
-            if let Some(q) = quote {
-                if ch == q {
-                    quote = None;
-                }
-            } else {
-                match ch {
-                    '"' | '\'' => quote = Some(ch),
-                    '>' => in_tag = false,
-                    _ => {}
-                }
+    let bytes = html.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'<' {
+            // Tag name: optional leading '/', then ASCII alphanumerics.
+            let mut j = i + 1;
+            let is_closing = bytes.get(j) == Some(&b'/');
+            if is_closing {
+                j += 1;
             }
-        } else if ch == '<' {
-            in_tag = true;
-            quote = None;
+            let name_start = j;
+            while j < n && bytes[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            let name = &html[name_start..j];
+            // Index just past this tag's closing '>'.
+            let tag_end = scan_to_tag_end(bytes, i + 1);
+            if !is_closing
+                && (name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style"))
+            {
+                // Raw-text element: drop everything through the matching close
+                // tag. `<script>`/`<style>` bodies are not display text.
+                i = find_raw_text_close(bytes, tag_end, name).unwrap_or(n);
+            } else {
+                i = tag_end;
+            }
         } else {
-            out.push(ch);
+            // Copy a run of text up to the next '<'. Both ends sit on a '<'
+            // byte (or the string bounds), which are always char boundaries.
+            let start = i;
+            while i < n && bytes[i] != b'<' {
+                i += 1;
+            }
+            out.push_str(&html[start..i]);
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let decoded = decode_html_entities(&out);
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Scan from `from` (the index just after a `<`) to the index just past the
+/// tag-closing `>`, honoring single/double quoted attribute values so a `>`
+/// inside an attribute does not close the tag early. Returns `bytes.len()`
+/// when the tag is never closed.
+fn scan_to_tag_end(bytes: &[u8], from: usize) -> usize {
+    let mut i = from;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'>' => return i + 1,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Find the index just past the matching `</name ...>` close tag, searching
+/// from `from`. Case-insensitive on the tag name. Returns `None` when no close
+/// tag exists (the caller then drops the rest of the input).
+fn find_raw_text_close(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
+    let name = name.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'<'
+            && bytes.get(i + 1) == Some(&b'/')
+            && bytes
+                .get(i + 2..i + 2 + name.len())
+                .is_some_and(|w| w.eq_ignore_ascii_case(name))
+            // The byte after the name must terminate the tag name, else
+            // `</scripture>` would be mistaken for `</script>`'s close and the
+            // text after it would leak. End-of-input counts as a terminator (an
+            // unterminated close still drops the rest).
+            && bytes
+                .get(i + 2 + name.len())
+                .is_none_or(|b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace())
+        {
+            return Some(scan_to_tag_end(bytes, i + 1));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Decode the small set of HTML entities common in pasted text. Lossy by
+/// design (it pairs with [`strip_html`]): unrecognised `&…;` runs are passed
+/// through verbatim so a stray `&` in prose is never mangled.
+fn decode_html_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        // Entities are short; bound the `;` scan so a bare `&` in prose isn't
+        // treated as the start of a 100-char "entity".
+        let semi = after
+            .char_indices()
+            .take(12)
+            .find(|&(_, c)| c == ';')
+            .map(|(idx, _)| idx);
+        if let Some(semi) = semi
+            && let Some(ch) = decode_one_entity(&after[..semi])
+        {
+            out.push(ch);
+            rest = &after[semi + 1..];
+            continue;
+        }
+        out.push('&');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Decode a single entity body (the text between `&` and `;`). Returns `None`
+/// for anything unrecognised so the caller can emit it verbatim.
+fn decode_one_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" | "#39" => Some('\''),
+        "nbsp" => Some(' '),
+        _ => {
+            let num = entity.strip_prefix('#')?;
+            let code = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
 }
 
 #[cfg(test)]

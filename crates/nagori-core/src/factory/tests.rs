@@ -340,31 +340,38 @@ fn strip_html_compacts_whitespace_across_nested_tags() {
 }
 
 #[test]
-fn strip_html_keeps_script_and_style_body_text() {
-    // The stripper only removes tag markup, not the text *between* tags, so
-    // `<script>`/`<style>` bodies survive into the fallback preview. This is
-    // the documented "intentionally lossy" contract: HTML-only clips fall back
-    // to this path and full rendering is the WebView's job. Pinned here so a
-    // future refactor that drops script/style bodies updates the contract
-    // deliberately rather than by accident.
+fn strip_html_drops_script_and_style_bodies() {
+    // Script / stylesheet source is not display text — its body must never
+    // reach the fallback preview or the search document. Both elements are
+    // case-insensitive and skipped through their matching close tag.
+    assert_eq!(super::strip_html("<script>alert('x')</script>body"), "body");
+    assert_eq!(super::strip_html("<STYLE>red bold</STYLE>text"), "text");
+    // A `>` inside the script body must not be mistaken for the close tag.
     assert_eq!(
-        super::strip_html("<script>alert('x')</script>body"),
-        "alert('x')body"
+        super::strip_html("a <script>if (1 > 0) { f(); }</script> b"),
+        "a b"
     );
+    // An unterminated raw-text element drops the rest of the input rather than
+    // leaking the script source.
+    assert_eq!(super::strip_html("keep <script>secret tail"), "keep");
+    // A close tag whose name only shares a prefix (`</scripture>`) must not
+    // terminate the element early and leak the body after it.
     assert_eq!(
-        super::strip_html("<style>red bold</style>text"),
-        "red boldtext"
+        super::strip_html("<script>secret</scripture>alert(1)</script>visible"),
+        "visible"
     );
 }
 
 #[test]
-fn strip_html_does_not_decode_entities() {
-    // Entity decoding is out of scope for the fallback stripper — `&amp;`
-    // stays literal rather than collapsing to `&`. Documented here so the
-    // search document / preview content is predictable.
+fn strip_html_decodes_common_entities() {
+    // Named and numeric entities common in pasted text decode to their
+    // characters; an unrecognised `&…;` run passes through verbatim.
+    assert_eq!(super::strip_html("a &amp; b &lt;c&gt;"), "a & b <c>");
+    assert_eq!(super::strip_html("Tom &#39;n&#x27; Jerry"), "Tom 'n' Jerry");
+    assert_eq!(super::strip_html("x&nbsp;y"), "x y");
     assert_eq!(
-        super::strip_html("a &amp; b &lt;c&gt;"),
-        "a &amp; b &lt;c&gt;"
+        super::strip_html("rock &amp; roll &unknownentity;"),
+        "rock & roll &unknownentity;"
     );
 }
 
@@ -708,6 +715,48 @@ fn representation_set_hash_diverges_on_any_distinguishing_field() {
     let ordinal =
         super::compute_representation_set_hash(&[text_rep(Primary, "text/html", 7, "<p>x</p>")]);
     assert_ne!(base.value, ordinal.value, "ordinal must change the hash");
+}
+
+#[test]
+fn representation_set_hash_resists_mime_delimiter_injection() {
+    use crate::RepresentationRole::Primary;
+    // A producer-supplied mime carrying the `|`/`\n` field/record delimiters
+    // must not let one rep set forge the encoding of a different one. The
+    // length prefix on `mime` keeps the two distinct.
+    let injected = super::compute_representation_set_hash(&[text_rep(
+        Primary,
+        "x|0|7|deadbeef\nalternative",
+        0,
+        "p",
+    )]);
+    let benign = super::compute_representation_set_hash(&[text_rep(Primary, "x", 0, "p")]);
+    assert_ne!(
+        injected.value, benign.value,
+        "a mime with embedded delimiters must not collide with a plain mime"
+    );
+}
+
+#[test]
+fn representation_set_hash_distinguishes_file_path_lists() {
+    use crate::RepresentationRole::Primary;
+    // `["a", "b"]` and `["a\nb"]` are different file sets; hashing the JSON
+    // encoding (not a `\n`-join) keeps their representation_set_hash distinct.
+    let two = super::compute_representation_set_hash(&[crate::StoredClipboardRepresentation {
+        role: Primary,
+        mime_type: "text/uri-list".to_owned(),
+        ordinal: 0,
+        data: crate::RepresentationDataRef::FilePaths(vec!["a".to_owned(), "b".to_owned()]),
+    }]);
+    let one = super::compute_representation_set_hash(&[crate::StoredClipboardRepresentation {
+        role: Primary,
+        mime_type: "text/uri-list".to_owned(),
+        ordinal: 0,
+        data: crate::RepresentationDataRef::FilePaths(vec!["a\nb".to_owned()]),
+    }]);
+    assert_ne!(
+        two.value, one.value,
+        "distinct file-path lists must not share a representation_set_hash"
+    );
 }
 
 #[test]

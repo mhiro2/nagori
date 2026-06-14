@@ -85,7 +85,18 @@ pub struct UrlContent {
 impl UrlContent {
     pub fn parse(raw: &str) -> Option<Self> {
         let trimmed = raw.trim();
-        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        // Scheme match is case-insensitive: `HTTPS://example.com` is a valid
+        // URL the WHATWG parser lower-cases, so rejecting uppercase here would
+        // misclassify it as Text and skip normalization / dedupe. `get(..n)`
+        // returns `None` rather than panicking when `trimmed` is shorter than
+        // the prefix or `n` isn't a char boundary.
+        let has_http_scheme = trimmed
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+            || trimmed
+                .get(..8)
+                .is_some_and(|p| p.eq_ignore_ascii_case("https://"));
+        if !has_http_scheme {
             return None;
         }
         let parsed = Url::parse(trimmed).ok()?;
