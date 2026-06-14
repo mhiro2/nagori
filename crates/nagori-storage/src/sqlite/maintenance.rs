@@ -27,7 +27,11 @@ pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
 /// successful purge into an error — clear-on-quit relies on the purge result
 /// to clear its fail-closed marker. The next checkpoint or maintenance VACUUM
 /// reclaims the residue instead.
-fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, deleted: usize) {
+///
+/// `pub(super)` so the immediate hard-delete of a `Secret` row in
+/// [`super::entry`]'s `mark_deleted` follows the same WAL-scrub contract as the
+/// deferred purge paths here.
+pub(super) fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, deleted: usize) {
     if deleted == 0 {
         return;
     }

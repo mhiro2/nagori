@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nagori_core::{
     AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryId, EntryMetadata, EntryRepository,
     RecentOrder, RepresentationDataRef, RepresentationRole, RepresentationSummary, Result,
-    StoredClipboardRepresentation,
+    Sensitivity, StoredClipboardRepresentation,
 };
 use nagori_search::{MAX_NGRAM_INPUT_CHARS, ngram_input_was_truncated};
 use rusqlite::{OptionalExtension, ToSql, TransactionBehavior, params};
@@ -16,6 +16,7 @@ use super::convert::{
     bool_int, format_opt_time, format_time, json_err, kind_to_str, parse_sensitivity_strict,
     row_to_entry, sensitivity_rank, sensitivity_to_str, storage_err,
 };
+use super::maintenance::checkpoint_truncate_after_purge;
 use super::search::{
     FilterFragment, delete_search_rows, fetch_recent_entries, upsert_document_blocking,
 };
@@ -240,18 +241,66 @@ impl EntryRepository for SqliteStore {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
-            let changed = tx
-                .execute(
+            // `BEGIN IMMEDIATE`: this transaction reads the row's sensitivity
+            // and then writes (UPDATE or DELETE) based on it. A `DEFERRED`
+            // transaction would take the read snapshot first, and a concurrent
+            // dedupe capture committing between the read and the write would
+            // make the write fail with `SQLITE_BUSY_SNAPSHOT` (not retried by
+            // `busy_timeout`) — silently failing the explicit delete, including
+            // a `Secret`'s immediate purge. Taking the write lock up front
+            // serialises the read+write against other writers.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            // Read the live row's classification before deleting: a `Secret`
+            // row is purged immediately rather than tombstoned. A plain
+            // soft-delete would leave its cleartext body, representation blobs,
+            // embedding, thumbnail, and search/ngram index on disk until the
+            // next maintenance sweep — up to the 30-minute interval after the
+            // user explicitly deleted it. Public / Unknown / Private rows keep
+            // the cheap tombstone (reclaimed later by `purge_deleted`).
+            let sensitivity: Option<String> = tx
+                .query_row(
+                    "SELECT sensitivity FROM entries WHERE id = ?1 AND deleted_at IS NULL",
+                    params![id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_err)?;
+            let Some(sensitivity) = sensitivity else {
+                return Err(AppError::NotFound);
+            };
+            let purge_now =
+                parse_sensitivity_strict(&sensitivity).map_err(storage_err)? == Sensitivity::Secret;
+            let changed = if purge_now {
+                // Hard delete now; the FK `ON DELETE CASCADE` (plus
+                // `recursive_triggers` firing `search_documents_ad_fts`) drops
+                // the row's representations, blobs, embedding, thumbnail, and
+                // search/ngram index in one statement.
+                tx.execute("DELETE FROM entries WHERE id = ?1", params![id.to_string()])
+                    .map_err(storage_err)?
+            } else {
+                tx.execute(
                     "UPDATE entries SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                     params![now, id.to_string()],
                 )
-                .map_err(storage_err)?;
+                .map_err(storage_err)?
+            };
             if changed == 0 {
+                // Lost a race with a concurrent hard-delete between the
+                // sensitivity read and the write; treat it as already gone.
                 return Err(AppError::NotFound);
             }
-            delete_search_rows(&tx, &id.to_string())?;
+            if !purge_now {
+                delete_search_rows(&tx, &id.to_string())?;
+            }
             tx.commit().map_err(storage_err)?;
+            if purge_now {
+                // Scrub the pre-deletion cleartext from the WAL sidecar, the
+                // same contract every other hard-delete path follows;
+                // `secure_delete` only zeroes the freed pages in the main file.
+                checkpoint_truncate_after_purge(&conn, changed);
+            }
             Ok(())
         })
         .await
@@ -589,7 +638,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         )
         .optional()
         .map_err(storage_err)?;
-    let mut preserve_existing_document = false;
+    let mut skip_document_upsert = false;
     let stored_id_str = if let Some((existing, existing_sensitivity)) = existing {
         // Identical `representation_set_hash` implies the rep set is
         // byte-for-byte identical, so the reps don't need to be replaced.
@@ -605,20 +654,36 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         // through default listings, search previews, semantic embedding, and
         // thumbnail generation. A more protective re-classification (e.g. a
         // new denylist rule matching old content) still propagates.
-        //
-        // When the existing classification wins, the existing search document
-        // must survive too: the classifier redacted its preview / normalized
-        // text at capture time, while the less-protective re-capture carries
-        // them raw. Letting the upsert below run would restore the raw text
-        // under a `Secret`-labelled row — and `Secret` previews are shipped
-        // verbatim by default DTOs on the assumption they are redacted.
-        preserve_existing_document =
-            sensitivity_rank(existing_sensitivity) > sensitivity_rank(entry.sensitivity);
-        let merged_sensitivity = if preserve_existing_document {
-            existing_sensitivity
-        } else {
+        let existing_rank = sensitivity_rank(existing_sensitivity);
+        let entry_rank = sensitivity_rank(entry.sensitivity);
+        let merged_sensitivity = if entry_rank > existing_rank {
             entry.sensitivity
+        } else {
+            existing_sensitivity
         };
+        // Skip the (expensive) document rebuild — ngram DELETE + re-INSERT plus
+        // the FTS delete+insert over the largest tables — only when the stored
+        // document is already the correct one:
+        //   * `entry_rank < existing_rank`: the existing row is more
+        //     protective, so its redacted document must survive; overwriting it
+        //     with this less-protective re-capture's raw text would leak it
+        //     (default DTOs ship redacted previews verbatim on that assumption).
+        //   * equal rank AND a default-safe (`Public`/`Unknown`) class: those
+        //     documents are never redacted, so the matching
+        //     `representation_set_hash` (byte-identical content) guarantees a
+        //     byte-identical document — re-running the upsert is pure waste.
+        //     This is the common case the optimization targets (repeatedly
+        //     copying the same snippet).
+        // Equal rank at a *redacted* level (`Private`/`Secret`/`Blocked`) is
+        // NOT skipped: redaction is denylist-rule dependent, so a rule change
+        // since the first capture could redact the same body differently, and
+        // the refreshed document must win.
+        skip_document_upsert = entry_rank < existing_rank
+            || (entry_rank == existing_rank
+                && matches!(
+                    merged_sensitivity,
+                    Sensitivity::Public | Sensitivity::Unknown
+                ));
         tx.execute(
             "UPDATE entries SET
                 source_app_name = ?1,
@@ -724,7 +789,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     if stored_id != requested_id {
         doc.entry_id = stored_id;
     }
-    if !preserve_existing_document {
+    if !skip_document_upsert {
         upsert_document_blocking(&tx, &doc)?;
     }
     tx.commit().map_err(storage_err)?;

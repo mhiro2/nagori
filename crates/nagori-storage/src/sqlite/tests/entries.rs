@@ -778,6 +778,171 @@ async fn duplicate_live_insert_does_not_duplicate_search_rows() {
     }
 }
 
+#[tokio::test]
+async fn duplicate_insert_at_equal_sensitivity_skips_the_ngram_rebuild() {
+    // A re-copy of byte-identical content derives the exact same search
+    // document, so the dedupe path must not pay the ngram DELETE + re-INSERT
+    // (the most expensive write on the largest table) plus the FTS
+    // delete+insert just to land identical rows. Prove the upsert is skipped
+    // by clearing the ngram rows after the first insert: a re-running upsert
+    // would regenerate them, while the skip leaves them cleared.
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(&store, "ngram rebuild skip phrase").await;
+
+    {
+        let conn = store.conn().unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ngrams WHERE entry_id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(before > 0, "the first insert must populate the ngram index");
+        conn.execute(
+            "DELETE FROM ngrams WHERE entry_id = ?1",
+            params![id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let again = insert_text(&store, "ngram rebuild skip phrase").await;
+    assert_eq!(again, id, "dedupe should reuse the row");
+
+    let conn = store.conn().unwrap();
+    let after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ngrams WHERE entry_id = ?1",
+            params![id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, 0,
+        "an equal-sensitivity dedupe must not rebuild the ngram index",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_insert_at_equal_secret_sensitivity_refreshes_redacted_document() {
+    // The ngram-skip optimization must NOT extend to a redacted level: equal
+    // `Secret` rank does not imply an identical document, because redaction is
+    // denylist-rule dependent. A re-capture of the same body that now redacts
+    // more strongly must overwrite the stale (weaker) document — skipping it
+    // would leave the previously-redacted token searchable.
+    let store = SqliteStore::open_memory().unwrap();
+    let body = "rotate xyzzytoken here";
+
+    let mut first = EntryFactory::from_text(body);
+    first.sensitivity = Sensitivity::Secret;
+    // First capture left the token in the document (a weaker rule).
+    first.search.preview = body.to_owned();
+    first.search.normalized_text = normalize_text(body);
+    let first_id = store.insert(first).await.unwrap();
+    assert_eq!(
+        store
+            .search(SearchQuery::new(
+                "xyzzytoken",
+                normalize_text("xyzzytoken"),
+                10
+            ))
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the token is searchable under the first, weaker redaction",
+    );
+
+    let mut second = EntryFactory::from_text(body);
+    second.sensitivity = Sensitivity::Secret;
+    // A stronger rule now scrubs the token entirely.
+    second.search.preview = "rotate [redacted] here".to_owned();
+    second.search.normalized_text = normalize_text("rotate [redacted] here");
+    let second_id = store.insert(second).await.unwrap();
+    assert_eq!(second_id, first_id, "dedupe should reuse the row");
+
+    assert!(
+        store
+            .search(SearchQuery::new(
+                "xyzzytoken",
+                normalize_text("xyzzytoken"),
+                10
+            ))
+            .await
+            .unwrap()
+            .is_empty(),
+        "the equal-Secret re-capture must refresh to the stronger redaction",
+    );
+    let fetched = store.get(first_id).await.unwrap().expect("row exists");
+    assert!(
+        !fetched.search.normalized_text.contains("xyzzytoken"),
+        "the stale token must not survive in the refreshed document",
+    );
+}
+
+#[tokio::test]
+async fn mark_deleted_purges_a_secret_row_immediately() {
+    // A `Secret` row must not linger as a tombstone after an explicit delete:
+    // deferring its physical purge to the maintenance sweep would leave the
+    // cleartext body, blobs, and index on disk for up to the 30-minute
+    // interval. `mark_deleted` hard-deletes a secret in place (cascade drops
+    // its children), while a non-secret row keeps the cheap deferred tombstone.
+    let store = SqliteStore::open_memory().unwrap();
+
+    let mut secret = EntryFactory::from_text("sk-live-delete-me-now");
+    secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+    secret.sensitivity = Sensitivity::Secret;
+    let secret_id = store.insert(secret).await.unwrap();
+    let unknown_id = insert_text(&store, "ordinary clipboard text").await;
+
+    store.mark_deleted(secret_id).await.unwrap();
+    store.mark_deleted(unknown_id).await.unwrap();
+
+    {
+        let conn = store.conn().unwrap();
+        let secret_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE id = ?1",
+                params![secret_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let secret_reps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_representations WHERE entry_id = ?1",
+                params![secret_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unknown_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE id = ?1",
+                params![unknown_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            secret_rows, 0,
+            "a deleted secret must be physically purged, not tombstoned",
+        );
+        assert_eq!(
+            secret_reps, 0,
+            "the cascade must drop the secret's blobs too"
+        );
+        assert_eq!(
+            unknown_rows, 1,
+            "a non-secret delete keeps the deferred tombstone",
+        );
+    }
+
+    // Only the non-secret tombstone is left for the deferred purge to reclaim.
+    let purged = store.purge_deleted().await.unwrap();
+    assert_eq!(
+        purged, 1,
+        "the secret was already gone before the sweep ran"
+    );
+}
+
 /// Retention hard-deletes must leave nothing recoverable in the WAL
 /// sidecar. `secure_delete` zeroes the freed pages in the main file, but
 /// the pre-deletion content also lives in the historical WAL frames
