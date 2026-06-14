@@ -17,6 +17,16 @@
 //! "lifetime lock" property the IPC socket path lacks: a transient
 //! `connect()` failure can mislead a socket-liveness probe, but a held file
 //! lock cannot be faked by a dead process.
+//!
+//! # Network filesystems
+//!
+//! This exclusion is only guaranteed on **local** filesystems. On NFS (older
+//! `nolock` mounts especially) and some SMB/CIFS configurations the kernel may
+//! not honour the advisory lock across hosts — or even across processes on the
+//! same host — so two store owners could both acquire it and double-capture the
+//! clipboard. nagori's data directory is expected to live on local storage;
+//! pointing it at a network share is unsupported, and there is no portable
+//! code-level mitigation (the lock primitive is the OS's to honour).
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};

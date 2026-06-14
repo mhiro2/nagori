@@ -1152,6 +1152,14 @@ rather than unlinked as defense in depth, so removal never hinges on a
 connect failure alone. The kernel drops both locks on process exit —
 including a crash — so there is no stale-lock file to clean up.
 
+> **Local storage only.** Both locks rely on the kernel honouring
+> `flock` / `LockFileEx`, which holds on local filesystems but is *not*
+> guaranteed across hosts (or even across processes on one host) on NFS —
+> older `nolock` mounts especially — and some SMB/CIFS configurations.
+> Pointing the data directory at a network share is therefore unsupported:
+> two owners could both acquire the lock and double-capture. There is no
+> portable code-level mitigation.
+
 An auth-token file is written into the daemon's private per-user app-data
 directory (`0o700` on Unix). On Unix it is `0600` (created `O_CREAT|O_EXCL`
 under a `0o077` umask, then `rename(2)`d into place, so it is never
