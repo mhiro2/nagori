@@ -16,8 +16,7 @@ use nagori_ipc::IpcServerConfig;
 use nagori_ipc::{AuthToken, accept_loop_pipe_with_shutdown, bind_pipe, write_token_file};
 #[cfg(unix)]
 use nagori_ipc::{
-    AuthToken, accept_loop_with_shutdown, bind_unix_replacing_stale, default_token_path,
-    write_token_file,
+    AuthToken, accept_loop_with_shutdown, bind_unix_replacing_stale, write_token_file,
 };
 use nagori_platform::{ClipboardReader, WindowBehavior};
 use tokio::{signal, sync::watch};
@@ -39,7 +38,7 @@ const IPC_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// of minutes rather than waiting for the next external client.
 const IPC_LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Maximum age of `IpcServerHealth::last_accept_at_ms` before the
+/// Maximum age reported by `IpcServerHealth::accept_age` before the
 /// supervisor treats the accept loop as wedged and aborts the server
 /// task. Chosen as three probe intervals so a single slow probe (or one
 /// transient connect failure) does not trigger a restart by itself.
@@ -53,10 +52,10 @@ const IPC_LIVENESS_WEDGE_THRESHOLD: Duration = Duration::from_secs(90);
 /// staleness check decide whether to abort.
 const IPC_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Grace window between issuing the probe and re-reading
-/// `last_accept_at_ms`. The accept arm bumps the timestamp before it
-/// touches the semaphore, so a healthy loop lands the update inside
-/// this window even when the handler pool is saturated.
+/// Grace window between issuing the probe and re-reading the accept age.
+/// The accept arm bumps the timestamp before it touches the semaphore, so
+/// a healthy loop lands the update inside this window even when the handler
+/// pool is saturated.
 const IPC_LIVENESS_PROBE_SETTLE: Duration = Duration::from_millis(200);
 
 /// Everything the CLI IPC server needs to bind, authenticate, and drain.
@@ -100,6 +99,23 @@ impl Default for CliIpcConfig {
 }
 
 impl CliIpcConfig {
+    /// Fallible counterpart to [`Default`] for hosts that must fail closed when
+    /// the per-user data directory can't be resolved (no `HOME` /
+    /// `%LOCALAPPDATA%`). [`Default`] keeps the historic `"."` fallback for
+    /// tests and the degenerate path, but a real host (the desktop shell)
+    /// resolves the token path through [`nagori_ipc::token_path_for_endpoint`]
+    /// so it refuses to serve IPC — and write the auth token — under the
+    /// working directory, matching the CLI's fail-closed token resolution.
+    pub fn resolve_default() -> Result<Self> {
+        let socket_path = default_socket_path();
+        let token_path = nagori_ipc::token_path_for_endpoint(&socket_path)?;
+        Ok(Self {
+            socket_path,
+            token_path,
+            ..Self::default()
+        })
+    }
+
     /// Project the host's tunables onto the [`IpcServerConfig`] surface
     /// the IPC crate consumes. Keeps the accept-loop call sites in
     /// `spawn_ipc_server` to a single line each so the function stays
@@ -155,9 +171,19 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from("nagori.sock")
 }
 
+// Kept self-contained (rather than calling the now-fallible
+// `nagori_ipc::default_token_path`) so `CliIpcConfig::default()` stays
+// infallible. This mirrors `default_socket_path`'s degenerate `"."`
+// fallback for a broken environment with no resolvable data dir: it only
+// affects the *default* config (used by tests and the desktop, which always
+// has a home dir). The production `daemon run` path resolves the real token
+// path through `nagori_ipc::token_path_for_endpoint`, which fails closed.
 #[cfg(unix)]
 fn default_token_path_local() -> PathBuf {
-    default_token_path()
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("nagori")
+        .join("nagori.token")
 }
 
 #[cfg(not(unix))]
@@ -729,8 +755,8 @@ async fn liveness_tick(have_server: bool) {
     }
 }
 
-/// Issue a self-probe and report the staleness of
-/// `IpcServerHealth::last_accept_at_ms` if it exceeds
+/// Issue a self-probe and report the staleness of the most recent accept
+/// (via `IpcServerHealth::accept_age`) if it exceeds
 /// [`IPC_LIVENESS_WEDGE_THRESHOLD`]. `None` means the loop is healthy
 /// (or the probe could not establish a reliable measurement, in which
 /// case we conservatively wait for the next tick rather than restart).
@@ -744,16 +770,13 @@ async fn wedged_accept_age(runtime: &NagoriRuntime, config: &CliIpcConfig) -> Op
     // sample it. Without this an immediate sample races the bump and
     // produces false positives on slow machines.
     tokio::time::sleep(IPC_LIVENESS_PROBE_SETTLE).await;
-    let now_ms = now_unix_ms();
-    let last_ms = runtime.ipc_health().last_accept_at_ms();
-    if last_ms == 0 {
-        // Pre-seed didn't land yet (vanishingly rare in practice — the
-        // accept loop bumps before its first await). Skip this tick.
-        return None;
-    }
-    let age_ms = now_ms.saturating_sub(last_ms);
-    if u128::from(age_ms) > IPC_LIVENESS_WEDGE_THRESHOLD.as_millis() {
-        Some(Duration::from_millis(age_ms))
+    // `accept_age` is measured on the IPC health's monotonic clock, so an NTP
+    // step can't inflate it into a false wedge. `None` means no accept has
+    // been observed yet (pre-seed didn't land — vanishingly rare, since the
+    // accept loop bumps before its first await), so skip this tick.
+    let age = runtime.ipc_health().accept_age()?;
+    if age > IPC_LIVENESS_WEDGE_THRESHOLD {
+        Some(age)
     } else {
         None
     }
@@ -782,16 +805,6 @@ async fn probe_ipc_endpoint(config: &CliIpcConfig) -> bool {
         let _ = config;
         false
     }
-}
-
-/// UNIX millis-since-epoch helper mirroring the one in `nagori-ipc`'s
-/// `IpcServerHealth`. A pre-1970 clock collapses to `0`, which the wedge
-/// check treats as "no measurement yet" so we never flag a restart on
-/// the back of a missing baseline.
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Wait for the accept-loop task to exit. When `server` is `None` returns a

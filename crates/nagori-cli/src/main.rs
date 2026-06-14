@@ -232,8 +232,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         // Reads only try IPC under explicit `--auto-ipc`, preserving the
         // "read straight from disk" UX for casual queries.
         let candidate = default_socket_path();
-        if let Ok(token) =
-            nagori_ipc::read_token_file(&nagori_ipc::token_path_for_endpoint(&candidate))
+        if let Ok(token_path) = nagori_ipc::token_path_for_endpoint(&candidate)
+            && let Ok(token) = nagori_ipc::read_token_file(&token_path)
             && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
                 .send(IpcRequest::Health)
                 .await

@@ -117,7 +117,8 @@ pub async fn run_server(
     // `--ipc <custom>` doesn't trample the default daemon's token file
     // (and vice versa). The CLI's IPC client mirrors this derivation so
     // client and daemon agree on the path.
-    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path);
+    let token_path = nagori_ipc::token_path_for_endpoint(&socket_path)
+        .context("failed to resolve the IPC auth token path")?;
     let ipc_defaults = CliIpcConfig::default();
     let max_concurrent_connections = args
         .ipc_max_connections

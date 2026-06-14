@@ -10,6 +10,19 @@ use nagori_core::{AppError, Result};
 /// 32 random bytes -> 64 hex chars; long enough that brute-forcing across
 /// the daemon's lifetime is not realistic, short enough to fit comfortably
 /// in a single envelope frame.
+///
+/// # In-memory handling
+///
+/// The token is deliberately *not* wrapped in `zeroize` and `verify` rolls
+/// its own constant-time compare rather than pulling in `subtle`. The threat
+/// model is a local, same-user IPC handshake: the secret is regenerated every
+/// launch, never leaves the machine, and already lives in plaintext in the
+/// 0o600 token file and in the kernel's socket / pipe buffers — so scrubbing
+/// the in-process `String` on drop buys negligible additional protection
+/// against an attacker who could read this process's memory (they could read
+/// the file or buffers too). Keeping both dependencies out of the tree avoids
+/// the supply-chain surface for no real defensive gain. Revisit only if the
+/// token ever becomes long-lived or crosses a trust boundary.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthToken(String);
 
@@ -67,17 +80,30 @@ impl AuthToken {
 /// expected to ensure this directory exists and is private (0o700 on Unix)
 /// before any token file is written into it; see
 /// `nagori_storage::ensure_private_directory`.
-fn app_data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("nagori")
+///
+/// Fails closed when the platform cannot resolve a per-user data directory
+/// (no `HOME` on Unix, no `%LOCALAPPDATA%` on Windows). The previous
+/// `unwrap_or_else(|| ".")` fallback dropped the token into the current
+/// working directory — readable by anything sharing that directory — which
+/// defeats the 0o600 / private-leaf guarantees the token relies on. A broken
+/// environment must surface as an error rather than silently relocate the
+/// secret.
+fn app_data_dir() -> Result<PathBuf> {
+    let base = dirs::data_local_dir().ok_or_else(|| {
+        AppError::Platform(
+            "cannot resolve the per-user data directory for the IPC token \
+             (is HOME / %LOCALAPPDATA% set?)"
+                .to_owned(),
+        )
+    })?;
+    Ok(base.join("nagori"))
 }
 
 /// Default location for the daemon's token file: same directory as the
 /// default socket, named `nagori.token`. Co-locating is safe here because
 /// `app_data_dir()` is the daemon's private leaf.
-pub fn default_token_path() -> PathBuf {
-    app_data_dir().join("nagori.token")
+pub fn default_token_path() -> Result<PathBuf> {
+    Ok(app_data_dir()?.join("nagori.token"))
 }
 
 /// Sanitise an endpoint segment for use as a token-filename stem. Replaces
@@ -117,8 +143,8 @@ fn sanitise_segment(segment: &str) -> String {
 ///   full endpoint string disambiguates collisions where two endpoints
 ///   sanitise to the same visible stem (e.g. `/tmp/a:b.sock` and
 ///   `/tmp/a?b.sock` both reduce to `a_b`).
-pub fn token_path_for_endpoint(endpoint: &Path) -> PathBuf {
-    let app_dir = app_data_dir();
+pub fn token_path_for_endpoint(endpoint: &Path) -> Result<PathBuf> {
+    let app_dir = app_data_dir()?;
     #[cfg(unix)]
     {
         // Resolve the default socket path on Unix without depending on
@@ -126,13 +152,13 @@ pub fn token_path_for_endpoint(endpoint: &Path) -> PathBuf {
         // value (not pointer equality) keeps `--ipc <default>` and the
         // implicit default producing the same token filename.
         if endpoint == app_dir.join("nagori.sock") {
-            return app_dir.join("nagori.token");
+            return Ok(app_dir.join("nagori.token"));
         }
     }
     #[cfg(windows)]
     {
         if endpoint.to_string_lossy() == crate::server::DEFAULT_PIPE_NAME {
-            return app_dir.join("nagori.token");
+            return Ok(app_dir.join("nagori.token"));
         }
     }
 
@@ -148,7 +174,7 @@ pub fn token_path_for_endpoint(endpoint: &Path) -> PathBuf {
     let sanitised = sanitise_segment(segment);
     let hash = ContentHash::sha256(raw.as_bytes()).value;
     let suffix = &hash[..8];
-    app_dir.join(format!("{sanitised}-{suffix}.token"))
+    Ok(app_dir.join(format!("{sanitised}-{suffix}.token")))
 }
 
 /// Write the token to `path` with `0o600` permissions on Unix.
@@ -464,8 +490,12 @@ mod tests {
         // Default endpoint (`<app_data_dir>/nagori.sock`) keeps producing
         // exactly `<app_data_dir>/nagori.token` so existing installs
         // don't drift on upgrade.
-        let default = app_data_dir().join("nagori.sock");
-        assert_eq!(token_path_for_endpoint(&default), default_token_path());
+        let app_dir = app_data_dir().expect("test environment must resolve a data dir");
+        let default = app_dir.join("nagori.sock");
+        assert_eq!(
+            token_path_for_endpoint(&default).unwrap(),
+            default_token_path().unwrap()
+        );
 
         // Custom endpoints in a shared parent (e.g. `/tmp/...`) MUST NOT
         // produce a token path in that shared parent. Otherwise a
@@ -473,8 +503,8 @@ mod tests {
         // and trick the daemon into following it. We keep the file in
         // the private app dir and disambiguate with a hash suffix.
         let custom = PathBuf::from("/tmp/other/dev.sock");
-        let custom_token = token_path_for_endpoint(&custom);
-        assert_eq!(custom_token.parent(), Some(app_data_dir().as_path()));
+        let custom_token = token_path_for_endpoint(&custom).unwrap();
+        assert_eq!(custom_token.parent(), Some(app_dir.as_path()));
         let custom_name = custom_token
             .file_name()
             .unwrap()
@@ -493,8 +523,8 @@ mod tests {
         let colon = PathBuf::from("/tmp/a:b.sock");
         let question = PathBuf::from("/tmp/a?b.sock");
         assert_ne!(
-            token_path_for_endpoint(&colon),
-            token_path_for_endpoint(&question),
+            token_path_for_endpoint(&colon).unwrap(),
+            token_path_for_endpoint(&question).unwrap(),
             "endpoints differing only in sanitised characters must not collide",
         );
     }
@@ -536,7 +566,10 @@ mod tests {
         // of their token on upgrade.
         let default = PathBuf::from(crate::server::DEFAULT_PIPE_NAME);
         assert_eq!(
-            token_path_for_endpoint(&default).file_name().unwrap(),
+            token_path_for_endpoint(&default)
+                .unwrap()
+                .file_name()
+                .unwrap(),
             std::ffi::OsStr::new("nagori.token"),
         );
 
@@ -545,7 +578,7 @@ mod tests {
         // (so SHA-256 isn't pinned to the test) — assert the structure:
         // `<sanitised>-<8 hex>.token`, with the visible stem preserved.
         let custom = PathBuf::from(r"\\.\pipe\nagori-dev");
-        let custom_path = token_path_for_endpoint(&custom);
+        let custom_path = token_path_for_endpoint(&custom).unwrap();
         let custom_name = custom_path
             .file_name()
             .unwrap()
@@ -563,8 +596,8 @@ mod tests {
         // closing (`a:b` and `a?b` both sanitise to `a_b`).
         let colon = PathBuf::from(r"\\.\pipe\a:b");
         let question = PathBuf::from(r"\\.\pipe\a?b");
-        let colon_name = token_path_for_endpoint(&colon);
-        let question_name = token_path_for_endpoint(&question);
+        let colon_name = token_path_for_endpoint(&colon).unwrap();
+        let question_name = token_path_for_endpoint(&question).unwrap();
         assert_ne!(
             colon_name, question_name,
             "endpoints differing only in sanitised characters must not collide",

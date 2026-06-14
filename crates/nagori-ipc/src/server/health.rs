@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(any(unix, windows))]
 use tracing::warn;
@@ -102,18 +102,25 @@ impl Default for IpcServerHealth {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct IpcServerHealthInner {
     handler_panics: AtomicU64,
-    /// Wall-clock millis-since-epoch of the most recent `listener.accept()`
-    /// (Unix) / `NamedPipeServer::connect()` (Windows) completion. Zero
-    /// when no accept has been observed yet. The daemon's supervisor uses
-    /// this — combined with periodic self-probes — to detect an accept
-    /// loop that wedged on the OS side (handler deadlock, kernel-level
-    /// resource exhaustion) without exiting the spawned task. Daemon
-    /// liveness alone would miss that class of failure because the
-    /// supervisor only respawns on task exit, not on silent input
-    /// starvation.
+    /// Monotonic millis-since-[`clock_origin`](Self::clock_origin) of the most
+    /// recent `listener.accept()` (Unix) / `NamedPipeServer::connect()`
+    /// (Windows) completion, stored as `elapsed_ms + 1` so a genuine record is
+    /// always non-zero and `0` unambiguously means "no accept observed yet".
+    /// The daemon's supervisor reads the derived freshness via
+    /// [`IpcServerHealth::accept_age`] — combined with periodic self-probes —
+    /// to detect an accept loop that wedged on the OS side (handler deadlock,
+    /// kernel-level resource exhaustion) without exiting the spawned task.
+    /// Daemon liveness alone would miss that class of failure because the
+    /// supervisor only respawns on task exit, not on silent input starvation.
+    ///
+    /// A monotonic base (rather than wall-clock) is deliberate: an NTP step or
+    /// manual clock change must not make a healthy loop look wedged (forward
+    /// jump) or mask a real wedge (backward jump). Both this and the panic
+    /// window are process-internal durations, so `Instant` is the correct
+    /// clock.
     last_accept_at_ms: AtomicU64,
     /// Snapshot of the active [`IpcServerConfig::max_concurrent_connections`].
     /// `0` until the accept loop initialises it, which lets readers
@@ -128,20 +135,49 @@ struct IpcServerHealthInner {
     /// [`PANIC_RING_CAPACITY`] panics — the 5-minute count lives in
     /// `panic_window` so it can exceed this ring's capacity.
     panic_ring: Mutex<VecDeque<PanicEntry>>,
-    /// Timestamps (millis-since-epoch) of every panic observed in the
-    /// last [`PANICS_WINDOW`], capped at [`PANIC_WINDOW_MAX`]. Pruned by
-    /// timestamp on every push and every read so the deque size tracks
-    /// the active panic rate. Separate from `panic_ring` so a tight
-    /// panic loop with more than [`PANIC_RING_CAPACITY`] hits inside the
-    /// window doesn't get under-reported by `panics_last_5m`.
+    /// Timestamps (monotonic millis-since-[`clock_origin`](Self::clock_origin))
+    /// of every panic observed in the last [`PANICS_WINDOW`], capped at
+    /// [`PANIC_WINDOW_MAX`]. Pruned by timestamp on every push and every read
+    /// so the deque size tracks the active panic rate. Separate from
+    /// `panic_ring` so a tight panic loop with more than [`PANIC_RING_CAPACITY`]
+    /// hits inside the window doesn't get under-reported by `panics_last_5m`.
     panic_window: Mutex<VecDeque<u64>>,
+    /// Monotonic reference instant captured at construction. Every timestamp
+    /// the inner stores (`last_accept_at_ms`, `panic_window`) is measured as
+    /// elapsed millis from here, so all freshness/window arithmetic is immune
+    /// to wall-clock steps.
+    clock_origin: Instant,
+}
+
+impl IpcServerHealthInner {
+    /// Millis elapsed since [`Self::clock_origin`], saturating at `u64::MAX`
+    /// (reached only after ~584 million years of uptime).
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.clock_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Earliest `elapsed_ms` timestamp still inside [`PANICS_WINDOW`]. Older
+    /// `panic_window` entries are dropped before its length is read.
+    fn window_cutoff_ms(&self) -> u64 {
+        self.elapsed_ms()
+            .saturating_sub(u64::try_from(PANICS_WINDOW.as_millis()).unwrap_or(u64::MAX))
+    }
 }
 
 impl IpcServerHealth {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(IpcServerHealthInner::default()),
+            // Constructed explicitly (not via `Default`) because the monotonic
+            // `clock_origin` must be stamped with `Instant::now()` at creation.
+            inner: Arc::new(IpcServerHealthInner {
+                handler_panics: AtomicU64::new(0),
+                last_accept_at_ms: AtomicU64::new(0),
+                max_concurrent_connections: AtomicUsize::new(0),
+                panic_ring: Mutex::new(VecDeque::new()),
+                panic_window: Mutex::new(VecDeque::new()),
+                clock_origin: Instant::now(),
+            }),
         }
     }
 
@@ -177,7 +213,7 @@ impl IpcServerHealth {
     /// "still failing right now" vs. "one fluke an hour ago".
     #[must_use]
     pub fn panics_last_5m(&self) -> u32 {
-        let cutoff_ms = window_cutoff_ms();
+        let cutoff_ms = self.inner.window_cutoff_ms();
         let mut guard = match self.inner.panic_window.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -242,7 +278,7 @@ impl IpcServerHealth {
     /// more importantly, keeps a single source of truth for what an
     /// operator sees in logs vs. in `nagori doctor`.
     fn record_redacted_panic(&self, redacted: String) {
-        let timestamp_ms = now_unix_ms();
+        let timestamp_ms = self.inner.elapsed_ms();
         self.inner.handler_panics.fetch_add(1, Ordering::Relaxed);
         {
             let mut ring = match self.inner.panic_ring.lock() {
@@ -254,7 +290,7 @@ impl IpcServerHealth {
             }
             ring.push_back(PanicEntry { message: redacted });
         }
-        let cutoff_ms = window_cutoff_ms();
+        let cutoff_ms = self.inner.window_cutoff_ms();
         let mut window = match self.inner.panic_window.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -277,18 +313,30 @@ impl IpcServerHealth {
     /// from a wedged loop (probe succeeds at the kernel level but the
     /// timestamp never advances).
     pub fn record_accept(&self) {
+        // Store `elapsed + 1` so a genuine record is always non-zero and `0`
+        // stays reserved for "never accepted" (see `accept_age`).
         self.inner
             .last_accept_at_ms
-            .store(now_unix_ms(), Ordering::Relaxed);
+            .store(self.inner.elapsed_ms().saturating_add(1), Ordering::Relaxed);
     }
 
-    /// Wall-clock millis-since-epoch of the most recent successful accept.
-    /// Zero means the loop has not accepted anything yet — the supervisor
-    /// seeds an initial value at spawn time so this is only ever `0`
-    /// before the first `record_accept` lands.
+    /// How long ago the most recent accept landed, on the monotonic clock.
+    /// `None` means no accept has been observed yet — the accept loop seeds a
+    /// value before its first await, so this is only `None` in the narrow
+    /// window before that seed lands. Immune to wall-clock steps, so the
+    /// supervisor's wedge detector can't be tripped by an NTP jump.
     #[must_use]
-    pub fn last_accept_at_ms(&self) -> u64 {
-        self.inner.last_accept_at_ms.load(Ordering::Relaxed)
+    pub fn accept_age(&self) -> Option<Duration> {
+        let stored = self.inner.last_accept_at_ms.load(Ordering::Relaxed);
+        if stored == 0 {
+            return None;
+        }
+        // `stored` is `recorded_elapsed_ms + 1`; recover the original and
+        // subtract from the current elapsed. `saturating_sub` guards the
+        // (impossible on a monotonic clock, but cheap) case of a stale read.
+        let recorded_ms = stored - 1;
+        let age_ms = self.inner.elapsed_ms().saturating_sub(recorded_ms);
+        Some(Duration::from_millis(age_ms))
     }
 }
 
@@ -421,21 +469,6 @@ const fn is_path_terminator(c: char) -> bool {
     )
 }
 
-/// Best-effort UNIX millis-since-epoch. A pre-1970 system clock collapses
-/// to `0`, which the supervisor treats as "no accept observed yet" — the
-/// same fallback we use before the first accept actually fires.
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// Earliest timestamp still considered "inside" [`PANICS_WINDOW`]. Older
-/// entries should be dropped from `panic_window` before reading its length.
-fn window_cutoff_ms() -> u64 {
-    now_unix_ms().saturating_sub(u64::try_from(PANICS_WINDOW.as_millis()).unwrap_or(u64::MAX))
-}
-
 /// Inspect a reaped `JoinSet` result and route panics to `health`
 /// (with a structured warn) while still surfacing non-panic join errors.
 ///
@@ -472,6 +505,30 @@ pub(super) fn observe_handler_outcome(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_age_is_none_before_first_accept_then_recent() {
+        // The supervisor relies on `None` meaning "no accept seen yet" (skip
+        // the wedge check) and a small `Some` meaning "fresh". A genuine record
+        // must never collapse to the `None` sentinel even when it lands at
+        // ~0ms elapsed — that's what the `+1` store offset guards.
+        let health = IpcServerHealth::new();
+        assert!(
+            health.accept_age().is_none(),
+            "no accept observed yet must read as None"
+        );
+        health.record_accept();
+        let age = health
+            .accept_age()
+            .expect("an accept was just recorded, so age must be Some");
+        // Measured on the monotonic clock, so it is a small real duration —
+        // not a wall-clock epoch. Can't pin an exact value, but it must be
+        // recent and well under the 90s wedge threshold.
+        assert!(
+            age < Duration::from_secs(5),
+            "a freshly recorded accept should read as recent: {age:?}"
+        );
+    }
 
     #[test]
     fn panics_last_5m_counts_past_ring_capacity() {

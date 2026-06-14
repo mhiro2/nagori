@@ -471,7 +471,17 @@ impl AppState {
                 self.runtime.clone(),
                 self.runtime.shutdown_handle(),
             ),
-            cli_ipc: self.spawn_cli_ipc_host(CliIpcConfig::default()),
+            // Resolve the IPC config fail-closed: if the per-user data dir
+            // can't be resolved (no HOME), refuse to serve IPC rather than
+            // bind a socket and write the auth token under the working
+            // directory. Mirrors the CLI's fallible token-path resolution.
+            cli_ipc: match CliIpcConfig::resolve_default() {
+                Ok(config) => self.spawn_cli_ipc_host(config),
+                Err(err) => {
+                    tracing::warn!(error = %err, "cli_ipc_token_path_unresolved_not_serving");
+                    tauri::async_runtime::spawn(async {})
+                }
+            },
         });
     }
 
