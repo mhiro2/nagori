@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,11 +62,27 @@ fn pipe_security_handle() -> Result<crate::windows_security::SecurityHandle> {
 /// DACL applied. `first` selects whether `first_pipe_instance(true)` is set,
 /// which the initial instance must use to fail closed if another process is
 /// already publishing the name.
-#[allow(unsafe_code)]
 fn create_pipe_instance(
     pipe_name: &str,
     first: bool,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    // Flatten the raw `CreateNamedPipeW` outcome into an `AppError` for the
+    // callers (startup bind) that don't distinguish transient failures. The
+    // accept loop instead uses `create_pipe_instance_raw` directly so it can
+    // retry a transient resource-exhaustion code.
+    create_pipe_instance_raw(pipe_name, first)?.map_err(|err| AppError::Platform(err.to_string()))
+}
+
+/// Like [`create_pipe_instance`] but surfaces the raw `CreateNamedPipeW`
+/// I/O result so the accept loop can tell a transient resource-exhaustion
+/// failure (worth retrying) apart from a broken-environment one (fatal). The
+/// outer `Result` carries only the security-descriptor build, which is a
+/// fatal logic/system error that is never transient.
+#[allow(unsafe_code)]
+fn create_pipe_instance_raw(
+    pipe_name: &str,
+    first: bool,
+) -> Result<std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer>> {
     let mut opts = pipe_server_options();
     if first {
         opts.first_pipe_instance(true);
@@ -76,10 +93,50 @@ fn create_pipe_instance(
     // `security` for the duration of this call. Windows captures a copy
     // of the descriptor during `CreateNamedPipeW`, so `security` is safe
     // to drop right after the call returns.
-    let server = unsafe { opts.create_with_security_attributes_raw(pipe_name, attrs_ptr) }
-        .map_err(|err| AppError::Platform(err.to_string()))?;
+    let server = unsafe { opts.create_with_security_attributes_raw(pipe_name, attrs_ptr) };
     drop(security);
     Ok(server)
+}
+
+/// Outcome of creating the next chained pipe instance while a just-connected
+/// client waits to be dispatched.
+enum NextInstance {
+    Ready(tokio::net::windows::named_pipe::NamedPipeServer),
+    Shutdown,
+    Fatal(AppError),
+}
+
+/// Create the next chained pipe instance, retrying transient
+/// `CreateNamedPipeW` failures (resource exhaustion) with backoff.
+///
+/// Mirrors the `connect()` transient-retry policy: tearing the whole pipe
+/// series down on a transient create failure would drop every instance,
+/// freeing the pipe name — and a squatter grabbing it before the
+/// supervisor's fail-closed respawn (`first_pipe_instance(true)`) would wedge
+/// IPC permanently. The caller holds the just-connected handle across this
+/// call, so that open instance keeps the name reserved during the gap. The
+/// backoff is raced against `shutdown` so a draining daemon never waits it
+/// out. A security-descriptor build failure or a non-transient create code
+/// stays fatal so the supervisor rebuilds the listener.
+async fn create_next_pipe_instance<S>(pipe_name: &str, mut shutdown: Pin<&mut S>) -> NextInstance
+where
+    S: Future<Output = ()> + Send,
+{
+    loop {
+        match create_pipe_instance_raw(pipe_name, false) {
+            Ok(Ok(next)) => return NextInstance::Ready(next),
+            Ok(Err(err)) if is_transient_accept_error(&err) => {
+                tracing::warn!(error = %err, "ipc_pipe_create_next_transient_error");
+                tokio::select! {
+                    biased;
+                    () = shutdown.as_mut() => return NextInstance::Shutdown,
+                    () = tokio::time::sleep(ACCEPT_RETRY_BACKOFF) => {}
+                }
+            }
+            Ok(Err(err)) => return NextInstance::Fatal(AppError::Platform(err.to_string())),
+            Err(err) => return NextInstance::Fatal(err),
+        }
+    }
 }
 
 /// Create the first instance of `pipe_name` synchronously.
@@ -178,10 +235,17 @@ where
                 // Every chained instance reuses the same baseline + the
                 // explicit DACL so neither the remote-rejection bit nor
                 // the per-user access restriction can drift between
-                // instances.
-                server = match create_pipe_instance(pipe_name, false) {
-                    Ok(next) => Some(next),
-                    Err(err) => break Err(err),
+                // instances. A transient create failure is retried —
+                // holding `connected` to keep the pipe name reserved —
+                // rather than tearing the series down (see
+                // `create_next_pipe_instance`).
+                server = match create_next_pipe_instance(pipe_name, shutdown.as_mut()).await {
+                    NextInstance::Ready(next) => Some(next),
+                    NextInstance::Shutdown => {
+                        drop(connected);
+                        break Ok(());
+                    }
+                    NextInstance::Fatal(err) => break Err(err),
                 };
                 // Same permit-vs-shutdown race as the Unix path; on
                 // shutdown the just-connected client is refused by dropping
