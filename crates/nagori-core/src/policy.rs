@@ -82,6 +82,14 @@ impl SensitivityClassifier {
     /// any other path where bad data reaches the classifier (e.g. a
     /// migrated DB row that bypassed validation, a future test fixture).
     pub fn try_new(settings: AppSettings) -> Result<Self> {
+        // Force-init the built-in detector set now (classifier construction
+        // happens at daemon startup) so a broken built-in pattern fails fast
+        // here rather than panicking on the first `classify`. `OnceLock` never
+        // poisons, so without this the `expect` in `sensitive_regexes` would
+        // re-panic on every classify call instead of once at boot. The
+        // patterns are test-covered, so this only ever fires after an edit
+        // breaks one.
+        sensitive_regexes();
         let mut user_regexes = Vec::with_capacity(settings.regex_denylist.len());
         for pattern in &settings.regex_denylist {
             let compiled = compile_user_regex(pattern)?;
@@ -97,7 +105,28 @@ impl SensitivityClassifier {
         let mut reasons = Vec::new();
         let text = entry.plain_text().unwrap_or_default();
 
-        if text.len() > self.settings.max_entry_size_bytes {
+        // Size gate spans every distinct text-shaped payload that will be
+        // persisted, not just the primary plain projection. A clip with a
+        // tiny plain primary but a multi-MB HTML/RTF markup (kept in
+        // `content_json`) or a large inline-text alternative would otherwise
+        // slip past the ceiling unbounded. Dedup by value so the markup —
+        // which the capture path also stores as a representation — is counted
+        // once.
+        let mut text_payloads: Vec<&str> = vec![text];
+        if let ClipboardContent::RichText(rich) = &entry.content
+            && let Some(markup) = rich.markup.as_deref()
+        {
+            text_payloads.push(markup);
+        }
+        for rep in &entry.pending_representations {
+            if let RepresentationDataRef::InlineText(rep_text) = &rep.data {
+                text_payloads.push(rep_text);
+            }
+        }
+        text_payloads.sort_unstable();
+        text_payloads.dedup();
+        let classified_len: usize = text_payloads.iter().map(|s| s.len()).sum();
+        if classified_len > self.settings.max_entry_size_bytes {
             reasons.push(SensitivityReason::Oversized);
         }
 
@@ -141,11 +170,24 @@ impl SensitivityClassifier {
         // scrub the alternatives before insert.
         self.scan_text_for_patterns(text, &mut reasons);
         for rep in &entry.pending_representations {
-            if let RepresentationDataRef::InlineText(rep_text) = &rep.data {
-                if rep_text.as_str() == text {
-                    continue;
+            match &rep.data {
+                RepresentationDataRef::InlineText(rep_text) => {
+                    if rep_text.as_str() != text {
+                        self.scan_text_for_patterns(rep_text, &mut reasons);
+                    }
                 }
-                self.scan_text_for_patterns(rep_text, &mut reasons);
+                // A file-URL alternative can itself carry a secret (a path
+                // embedding an API-key-shaped token). Scan the joined paths
+                // too — the primary FileList is already covered via `text`,
+                // but an alternative `FilePaths` rep would otherwise go
+                // unscanned and land in `entry_representations` unredacted.
+                RepresentationDataRef::FilePaths(paths) => {
+                    let joined = paths.join("\n");
+                    if joined != text {
+                        self.scan_text_for_patterns(&joined, &mut reasons);
+                    }
+                }
+                RepresentationDataRef::DatabaseBlob(_) => {}
             }
         }
 
@@ -447,7 +489,31 @@ pub fn compile_user_regex(pattern: &str) -> Result<Regex> {
         .size_limit(USER_REGEX_SIZE_LIMIT)
         .dfa_size_limit(USER_REGEX_DFA_SIZE_LIMIT)
         .build()
-        .map_err(|err| AppError::Policy(format!("invalid regex_denylist entry {pattern:?}: {err}")))
+        .map_err(|err| AppError::Policy(redacted_regex_build_error(pattern, &err)))
+}
+
+/// Build a rejection message for a `regex_denylist` pattern that fails to
+/// compile, without echoing the pattern body.
+///
+/// A denylist pattern describes the *shape of the secrets the user wants to
+/// keep out of storage*, so it must not be logged or audited verbatim — and
+/// the `regex` crate's own error `Display` quotes the offending pattern with a
+/// caret, which would leak it just as surely as our own format string did. We
+/// surface only a short prefix and the byte length (enough to identify which
+/// rule the user must fix in the settings UI, where they can already see their
+/// own patterns) plus a coarse reason derived from the error kind.
+fn redacted_regex_build_error(pattern: &str, err: &regex::Error) -> String {
+    let prefix: String = pattern.chars().take(8).collect();
+    let detail = match err {
+        regex::Error::CompiledTooBig(limit) => {
+            format!("compiles to more than {limit} bytes")
+        }
+        _ => "is not a valid regular expression".to_owned(),
+    };
+    format!(
+        "regex_denylist entry (prefix {prefix:?}, {} bytes) {detail}",
+        pattern.len(),
+    )
 }
 
 /// Count the deepest unescaped parenthesis nesting in `pattern`. We only

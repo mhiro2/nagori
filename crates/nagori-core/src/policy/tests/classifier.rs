@@ -51,6 +51,63 @@ fn classifier_detects_secret_inside_alternative_representation() {
 }
 
 #[test]
+fn classifier_detects_secret_inside_file_path_representation() {
+    // A file-URL alternative whose path embeds an API-key-shaped token must
+    // be scanned too. The primary FileList is covered via `plain_text`, but an
+    // alternative `FilePaths` rep would otherwise reach storage unscanned.
+    use crate::{RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation};
+
+    let mut entry = EntryFactory::from_text("safe-looking note");
+    entry.pending_representations = vec![StoredClipboardRepresentation {
+        role: RepresentationRole::Alternative,
+        mime_type: "text/uri-list".to_owned(),
+        ordinal: 1,
+        data: RepresentationDataRef::FilePaths(vec![
+            "/tmp/ghp_abcdefghijklmnopqrstuvwxyz123456".to_owned(),
+        ]),
+    }];
+
+    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+    let result = classifier.classify(&entry);
+    assert_eq!(result.sensitivity, Sensitivity::Secret);
+    assert!(
+        result.reasons.contains(&SensitivityReason::ApiKeyPattern),
+        "file-path alternative API key must surface in reasons: {:?}",
+        result.reasons
+    );
+}
+
+#[test]
+fn oversized_gate_counts_markup_not_just_plain_text() {
+    // A RichText clip with a tiny plain primary but a large HTML markup
+    // (persisted in content_json) must trip the size gate — the gate sums the
+    // distinct text-shaped payloads, not only `plain_text`.
+    use crate::{ClipboardContent, RichTextContent, RichTextMarkup};
+
+    let big_markup = format!("<p>{}</p>", "x".repeat(64));
+    let content = ClipboardContent::RichText(RichTextContent {
+        plain_text: "hi".to_owned(),
+        markup: Some(big_markup),
+        markup_kind: Some(RichTextMarkup::Html),
+    });
+    let entry = EntryFactory::from_content(content, None, None);
+    let settings = AppSettings {
+        max_entry_size_bytes: 32,
+        ..Default::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    let result = classifier.classify(&entry);
+
+    assert!(
+        result.reasons.contains(&SensitivityReason::Oversized),
+        "markup beyond the ceiling must trip Oversized: {:?}",
+        result.reasons
+    );
+    assert_eq!(result.sensitivity, Sensitivity::Blocked);
+}
+
+#[test]
 fn classifies_otp_as_secret() {
     // OTPs are now bucketed with private keys / credit cards so the
     // durable body goes through `apply_secret_handling`. Otherwise an

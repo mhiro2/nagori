@@ -41,6 +41,15 @@ pub const MAX_PALETTE_ROW_COUNT: u32 = 64;
 /// concurrency permit for an unreasonable stretch.
 pub const MAX_AI_REQUEST_TIMEOUT_MS: u64 = 600_000;
 
+/// Maximum number of `regex_denylist` patterns the user can configure.
+///
+/// Each pattern is run against every captured clip, so the per-pattern `DoS`
+/// limits (length / nesting / NFA + DFA size) bound a single rule but not the
+/// aggregate: thousands of rules would turn each capture into thousands of
+/// regex executions. 128 is far above any realistic redaction rule set while
+/// keeping the per-capture classifier cost bounded.
+pub const MAX_USER_REGEX_COUNT: usize = 128;
+
 /// Identifier kind for a [`AppDenyRule::SourceApp`] entry.
 ///
 /// Each variant pins which `SourceApp` field the matcher should compare
@@ -701,6 +710,14 @@ impl AppSettings {
             }
             validate_accelerator(&format!("secondary_hotkeys[{action:?}]"), accel)?;
         }
+        // Cap the rule count before compiling: each pattern runs against every
+        // capture, so an unbounded list defeats the per-pattern DoS limits in
+        // aggregate.
+        if self.regex_denylist.len() > MAX_USER_REGEX_COUNT {
+            return Err(AppError::InvalidInput(format!(
+                "regex_denylist must have at most {MAX_USER_REGEX_COUNT} patterns"
+            )));
+        }
         // Compile every denylist pattern under the same length / nesting /
         // DFA-size limits the classifier enforces, mapping the policy-shaped
         // failure onto an input-validation error so a hostile or malformed
@@ -771,10 +788,17 @@ fn validate_accelerator(field: &str, raw: &str) -> Result<()> {
 }
 
 fn canonical_modifier(token: &str) -> Option<&'static str> {
+    // `meta` / `win` / `windows` / `opt` are kept even though `global-hotkey`'s
+    // `parse_hotkey` does not map them: the desktop hotkey recorder emits a
+    // literal `Win` for the Meta key on Windows/Linux (see the frontend's
+    // `captureFromKeyboardEvent`), so rejecting it here would block saving a
+    // recorded binding. Aligning both sides (recorder → `Super`, validator
+    // drops these) is a coordinated frontend change tracked separately. All
+    // four `CmdOrCtrl` spellings the parser accepts are recognised.
     match token.to_ascii_lowercase().as_str() {
         "cmd" | "command" | "super" | "meta" | "win" | "windows" => Some("super"),
         "ctrl" | "control" => Some("ctrl"),
-        "cmdorctrl" | "commandorcontrol" => Some("cmdorctrl"),
+        "cmdorctrl" | "cmdorcontrol" | "commandorctrl" | "commandorcontrol" => Some("cmdorctrl"),
         "alt" | "option" | "opt" => Some("alt"),
         "shift" => Some("shift"),
         _ => None,
@@ -783,23 +807,47 @@ fn canonical_modifier(token: &str) -> Option<&'static str> {
 
 fn is_valid_hotkey_key(key: &str) -> bool {
     // Single printable ASCII char (letter/digit/punct), or a named key from
-    // the known whitelist. This mirrors what `tauri-plugin-global-shortcut`
-    // accepts on macOS today; new tokens can be added here as needed.
+    // the known whitelist. The named set tracks the accept set of `parse_key`
+    // in `global-hotkey` (the parser `tauri-plugin-global-shortcut` delegates
+    // to via `Shortcut::from_str`) so the validator does not reject a key the
+    // OS would accept at register time. Keep this in sync when bumping the
+    // crate. (`RETURN` is the lone superset entry kept for the settings UI.)
     if key.chars().count() == 1 {
         let c = key.chars().next().expect("len-checked above");
         return c.is_ascii_alphanumeric() || "`-=[]\\;',./".contains(c);
     }
     let upper = key.to_ascii_uppercase();
-    if upper.starts_with('F')
-        && upper.len() <= 3
-        && upper[1..].chars().all(|c| c.is_ascii_digit())
-        && let Ok(n) = upper[1..].parse::<u32>()
+    if let Some(rest) = upper.strip_prefix('F')
+        && (1..=3).contains(&rest.len())
+        && rest.chars().all(|c| c.is_ascii_digit())
+        && let Ok(n) = rest.parse::<u32>()
     {
         return (1..=24).contains(&n);
     }
+    // `KeyA`..`KeyZ` and `Digit0`..`Digit9` — the spelled-out forms of the
+    // single-char keys handled above. `global-hotkey` accepts both spellings.
+    if let Some(rest) = upper.strip_prefix("KEY") {
+        return rest.len() == 1 && rest.as_bytes()[0].is_ascii_uppercase();
+    }
+    if let Some(rest) = upper.strip_prefix("DIGIT") {
+        return rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit();
+    }
     matches!(
         upper.as_str(),
-        "SPACE"
+        // Spelled-out forms of the single-char punctuation keys above.
+        "BACKQUOTE"
+            | "BACKSLASH"
+            | "BRACKETLEFT"
+            | "BRACKETRIGHT"
+            | "COMMA"
+            | "EQUAL"
+            | "MINUS"
+            | "PERIOD"
+            | "QUOTE"
+            | "SEMICOLON"
+            | "SLASH"
+            // Whitespace / editing / navigation.
+            | "SPACE"
             | "ENTER"
             | "RETURN"
             | "ESC"
@@ -808,10 +856,16 @@ fn is_valid_hotkey_key(key: &str) -> bool {
             | "BACKSPACE"
             | "DELETE"
             | "INSERT"
+            | "PAUSE"
+            | "PAUSEBREAK"
             | "UP"
             | "DOWN"
             | "LEFT"
             | "RIGHT"
+            | "ARROWUP"
+            | "ARROWDOWN"
+            | "ARROWLEFT"
+            | "ARROWRIGHT"
             | "HOME"
             | "END"
             | "PAGEUP"
@@ -820,6 +874,35 @@ fn is_valid_hotkey_key(key: &str) -> bool {
             | "NUMLOCK"
             | "SCROLLLOCK"
             | "PRINTSCREEN"
+            // Numeric keypad.
+            | "NUMPAD0" | "NUM0"
+            | "NUMPAD1" | "NUM1"
+            | "NUMPAD2" | "NUM2"
+            | "NUMPAD3" | "NUM3"
+            | "NUMPAD4" | "NUM4"
+            | "NUMPAD5" | "NUM5"
+            | "NUMPAD6" | "NUM6"
+            | "NUMPAD7" | "NUM7"
+            | "NUMPAD8" | "NUM8"
+            | "NUMPAD9" | "NUM9"
+            | "NUMPADADD" | "NUMADD" | "NUMPADPLUS" | "NUMPLUS"
+            | "NUMPADDECIMAL" | "NUMDECIMAL"
+            | "NUMPADDIVIDE" | "NUMDIVIDE"
+            | "NUMPADENTER" | "NUMENTER"
+            | "NUMPADEQUAL" | "NUMEQUAL"
+            | "NUMPADMULTIPLY" | "NUMMULTIPLY"
+            | "NUMPADSUBTRACT" | "NUMSUBTRACT"
+            // Media / volume keys.
+            | "AUDIOVOLUMEDOWN" | "VOLUMEDOWN"
+            | "AUDIOVOLUMEUP" | "VOLUMEUP"
+            | "AUDIOVOLUMEMUTE" | "VOLUMEMUTE"
+            | "MEDIAPLAY"
+            | "MEDIAPAUSE"
+            | "MEDIAPLAYPAUSE"
+            | "MEDIASTOP"
+            | "MEDIATRACKNEXT"
+            | "MEDIATRACKPREV"
+            | "MEDIATRACKPREVIOUS"
     )
 }
 
@@ -914,6 +997,51 @@ mod tests {
         ] {
             validate_hotkey(ok).unwrap_or_else(|err| panic!("expected `{ok}` to validate: {err}"));
         }
+    }
+
+    #[test]
+    fn validate_hotkey_accepts_keypad_media_and_named_keys() {
+        // These are accepted by `global-hotkey`'s `parse_key`, so the
+        // validator must not false-reject them (the previous whitelist did).
+        for ok in [
+            "Cmd+Numpad5",
+            "Cmd+NumpadAdd",
+            "Cmd+NumpadEnter",
+            "CmdOrCtrl+VolumeUp",
+            "Ctrl+MediaPlayPause",
+            "Cmd+Pause",
+            "Cmd+ArrowUp",
+            // Spelled-out forms of single-char keys.
+            "Cmd+KeyA",
+            "Cmd+Digit0",
+            "Cmd+BracketLeft",
+            "Cmd+Comma",
+            // All four CmdOrCtrl spellings global-hotkey accepts.
+            "CmdOrControl+V",
+            "CommandOrControl+V",
+        ] {
+            validate_hotkey(ok).unwrap_or_else(|err| panic!("expected `{ok}` to validate: {err}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_too_many_regex_denylist_patterns() {
+        let settings = AppSettings {
+            regex_denylist: vec!["a".to_owned(); MAX_USER_REGEX_COUNT + 1],
+            ..AppSettings::default()
+        };
+        assert!(matches!(
+            settings.validate(),
+            Err(AppError::InvalidInput(_))
+        ));
+        // The cap itself must remain valid.
+        let at_cap = AppSettings {
+            regex_denylist: vec!["a".to_owned(); MAX_USER_REGEX_COUNT],
+            ..AppSettings::default()
+        };
+        at_cap
+            .validate()
+            .expect("rule count at the cap must validate");
     }
 
     #[test]

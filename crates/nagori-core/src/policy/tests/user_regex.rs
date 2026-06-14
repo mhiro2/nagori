@@ -22,6 +22,30 @@ fn user_regex_overlong_pattern_rejected() {
 }
 
 #[test]
+fn user_regex_compile_error_does_not_echo_pattern_body() {
+    // A denylist pattern describes the shape of secrets, so a compile failure
+    // must not log the pattern verbatim — neither our own message nor the
+    // `regex` crate's caret-annotated `Display` may leak it. Only a short
+    // prefix and the byte length are allowed through.
+    let err = compile_user_regex("SECRETTOKEN(").unwrap_err();
+    let AppError::Policy(msg) = err else {
+        panic!("expected Policy error, got {err:?}");
+    };
+    assert!(
+        !msg.contains("SECRETTOKEN"),
+        "compile error must not echo the pattern body: {msg}"
+    );
+    assert!(
+        msg.contains("is not a valid regular expression"),
+        "compile error should name the failure kind: {msg}"
+    );
+    assert!(
+        msg.contains("12 bytes"),
+        "compile error should report the byte length: {msg}"
+    );
+}
+
+#[test]
 fn user_regex_deep_nesting_rejected() {
     // Catastrophic-backtracking constructions like `((((a*)*)*)*)*`
     // rely on stacked quantified groups. Capping the parser-visible
