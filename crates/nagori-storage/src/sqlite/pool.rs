@@ -1,6 +1,6 @@
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Condvar, Mutex},
+    sync::{Condvar, Mutex, PoisonError},
 };
 
 use nagori_core::Result;
@@ -48,10 +48,17 @@ impl ConnPool {
     }
 
     fn release(&self, conn: Connection) {
-        if let Ok(mut slots) = self.slots.lock() {
-            slots.push(conn);
-            self.available.notify_one();
-        }
+        // The slots mutex only ever guards push/pop of idle connection handles
+        // — no fallible work runs under it — so a poisoned lock can only mean an
+        // unrelated thread panicked while holding the guard, not that the pool
+        // invariant is broken. Recover the guard with `into_inner` rather than
+        // dropping the connection on the floor: silently discarding it would
+        // shrink the pool by one for the rest of the process, and skipping
+        // `notify_one` would leave an `acquire` waiter parked forever (the bug a
+        // bare `if let Ok(..)` introduced).
+        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        slots.push(conn);
+        self.available.notify_one();
     }
 }
 
@@ -163,5 +170,32 @@ mod tests {
         acquired_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("releasing a connection must wake the parked waiter");
+    }
+
+    #[test]
+    fn release_recovers_a_poisoned_mutex_instead_of_dropping_the_connection() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let pool = pool_of(1);
+        // Check the sole connection out, then poison the slots mutex by
+        // panicking while a separate guard is held. The guard is dropped
+        // mid-unwind, so the mutex is now poisoned but the held `PooledConn`
+        // still owns the connection.
+        let held = pool.acquire().unwrap();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = pool.slots.lock().unwrap();
+            panic!("poison the slots mutex");
+        }));
+
+        // Returning the connection must still push it back even though the
+        // mutex is poisoned — a bare `if let Ok(..)` would have dropped it on
+        // the floor and never notified, permanently shrinking the pool.
+        drop(held);
+        let recovered = pool.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            recovered.len(),
+            1,
+            "release must recover the poisoned guard and return the connection",
+        );
     }
 }
