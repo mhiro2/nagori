@@ -234,9 +234,21 @@ fn cli_install_status_blocking() -> CliInstallStatusDto {
 /// needed. The link targets the binary inside the installed app bundle, so it
 /// keeps working across in-place updates that replace the app at the same
 /// path.
+///
+/// Async because the link work shells out to the user's login shell to read
+/// `PATH` (a slow `.zshrc` can take up to the 2 s probe deadline); like
+/// `cli_install_status`, `spawn_blocking` keeps that off the main thread so the
+/// Settings UI never freezes on the button press.
 #[cfg(unix)]
 #[tauri::command]
-pub fn install_cli() -> CommandResult<CliInstallResultDto> {
+pub async fn install_cli() -> CommandResult<CliInstallResultDto> {
+    tauri::async_runtime::spawn_blocking(install_cli_blocking)
+        .await
+        .map_err(|err| CommandError::internal(format!("CLI install task failed: {err}")))?
+}
+
+#[cfg(unix)]
+fn install_cli_blocking() -> CommandResult<CliInstallResultDto> {
     let source = bundled_cli_path().ok_or_else(|| {
         CommandError::internal(
             "the bundled nagori CLI was not found beside the app — install the packaged \
