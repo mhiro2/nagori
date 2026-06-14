@@ -319,11 +319,15 @@ fn generate_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> 
 /// `stall_timeout` is the last line of defence: it sits *behind* the Swift
 /// watchdog, so it only fires when the Swift side wedged so hard that its own
 /// timeout never produced `onDone` (a framework that ignores task
-/// cancellation). Without it, a consumer that drives this stream directly —
-/// the CLI's in-process `nagori ai` path has no daemon `guard_event_stream`
-/// in front of it — would pend on `recv()` forever. On expiry the stream
-/// yields a terminal `Timeout` error and drops the receiver; a late
-/// `generate_on_done` still reclaims its box, its send just lands nowhere.
+/// cancellation). It guards a *direct* consumer of this backend stream — one
+/// that drives it without the daemon's `guard_event_stream` in front of it.
+/// Both the daemon and the CLI's in-process `nagori ai` path go through
+/// `start_ai_action`, which wraps the stream in that guard, so this is
+/// defence-in-depth that also keeps the FFI bounded should that guard ever be
+/// bypassed; without it such a direct consumer would pend on `recv()` forever.
+/// On expiry the stream yields a terminal `Timeout` error and drops the
+/// receiver; a late `generate_on_done` still reclaims its box, its send just
+/// lands nowhere.
 fn generate_event_stream(
     rx: mpsc::UnboundedReceiver<Result<AiEvent, AiError>>,
     stall_timeout: std::time::Duration,
@@ -1219,10 +1223,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn generate_event_stream_times_out_when_swift_never_reports() {
-        // The stall guard is the last line of defence for direct consumers
-        // (the CLI in-process path) when Swift wedges so hard `onDone` never
-        // fires. Holding `_tx` keeps the channel open with nothing ever sent,
-        // so `recv()` pends forever and only the deadline can end the stream.
+        // The stall guard is the last line of defence for a direct consumer
+        // that drives this backend stream without the daemon's
+        // `guard_event_stream` in front, when Swift wedges so hard `onDone`
+        // never fires. Holding `_tx` keeps the channel open with nothing ever
+        // sent, so `recv()` pends forever and only the deadline can end it.
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<
             Result<nagori_core::AiEvent, nagori_core::AiError>,
         >();

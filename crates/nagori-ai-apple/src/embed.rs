@@ -22,9 +22,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bridge;
 
-/// Upper bound on characters embedded per entry. Longer inputs are truncated
-/// explicitly (never silently): semantic ranking of a clip does not improve from
-/// embedding pages of text, and this bounds the work per entry.
+/// Upper bound on characters embedded per entry. Anything past this is dropped
+/// before embedding (silently — no warning is surfaced): semantic ranking of a
+/// clip does not improve from embedding pages of text, and this bounds the work
+/// per entry. Within the cap the tail is never lost — `embed_pooled` chunks to
+/// the model's sequence limit and mean-pools — only characters beyond it go.
 const MAX_EMBED_CHARS: usize = 4_000;
 
 /// The user's preferred language code (e.g. `"en"`, `"ja"`), or `"en"` if it
