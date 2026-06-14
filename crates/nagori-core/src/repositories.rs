@@ -61,6 +61,15 @@ pub trait EntryRepository: Send + Sync {
     /// implementation fetches each entry and filters in memory; the `SQLite`
     /// implementation overrides it with a single gated `IN (...)` query.
     async fn list_file_path_sets(&self, ids: &[EntryId]) -> Result<HashMap<EntryId, Vec<String>>> {
+        // The per-id `get` fallback deserialises a full entry body each call,
+        // so a backend reaching it on a palette-refresh hot path is an N+1
+        // accident. The `SQLite` backend overrides this with a single gated
+        // `IN (...)` query; log here so a new backend that forgets to override
+        // is visible in traces rather than silently slow.
+        tracing::debug!(
+            id_count = ids.len(),
+            "list_file_path_sets using per-id fallback; override for hot paths"
+        );
         let mut out = HashMap::new();
         for id in ids {
             if let Some(entry) = self.get(*id).await?
