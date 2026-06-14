@@ -129,12 +129,35 @@ impl AiRequestRegistry {
         );
     }
 
-    /// Attaches the acquired concurrency permit to a registered request, so the
-    /// permit's lifetime is bound to the registry handle. A no-op if the request
-    /// was already removed (e.g. cancelled while queued).
-    pub fn attach_permit(&self, request_id: RequestId, permit: Option<OwnedSemaphorePermit>) {
-        if let Some(handle) = self.lock().get_mut(&request_id) {
-            handle.permit = permit;
+    /// Attaches the acquired concurrency permit to a registered request, binding
+    /// the permit's lifetime to the registry handle.
+    ///
+    /// Returns `Err(permit)` — handing the orphaned permit back so the caller
+    /// drops it (releasing the slot, not leaking it) and refuses the run — when
+    /// the request must not proceed:
+    ///
+    /// - the handle is gone (the watchdog already reaped it while the permit was
+    ///   being acquired): the token is cancelled and nothing tracks the request;
+    /// - the handle is present but already past its reap deadline
+    ///   (`deadline + REAP_GRACE`): binding the permit here would hand back a run
+    ///   the watchdog is about to reap, releasing the permit a moment later while
+    ///   the run still streams. Checking this *under the same lock* the reaper
+    ///   uses keeps attach and reap from disagreeing about whether a handle is
+    ///   still live, so a returned run always owns its permit for a full grace
+    ///   window rather than racing reclamation.
+    pub fn attach_permit(
+        &self,
+        request_id: RequestId,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> std::result::Result<(), Option<OwnedSemaphorePermit>> {
+        let mut handles = self.lock();
+        match handles.get_mut(&request_id) {
+            Some(handle) if Instant::now() >= handle.deadline + REAP_GRACE => Err(permit),
+            Some(handle) => {
+                handle.permit = permit;
+                Ok(())
+            }
+            None => Err(permit),
         }
     }
 
@@ -258,12 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn attach_permit_after_reap_is_a_noop_and_releases_the_permit() {
+    fn attach_permit_after_reap_returns_the_orphaned_permit() {
         // The watchdog can reap a request in the window between its permit being
         // acquired and `attach_permit` running. Attaching to an already-removed
-        // handle must not resurrect it, and the orphaned permit must be released
-        // (dropped here) rather than leaked — otherwise the reaped request would
-        // pin the single text-generation slot for the rest of the process.
+        // handle must not resurrect it, and must hand the orphaned permit back
+        // so the caller can drop it (releasing the slot) and refuse to start the
+        // run — otherwise the reaped request would pin the single
+        // text-generation slot and a run would proceed under a cancelled,
+        // untracked handle.
         let registry = AiRequestRegistry::new();
         let semaphore = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&semaphore)
@@ -283,16 +308,61 @@ mod tests {
         assert_eq!(registry.active_count(), 0);
 
         // The permit belongs to a request that no longer exists.
-        registry.attach_permit(id, Some(permit));
+        let returned = registry.attach_permit(id, Some(permit));
+        assert!(
+            returned.is_err(),
+            "attaching to a reaped id must report failure, not silently resurrect it",
+        );
         assert_eq!(
             registry.active_count(),
             0,
             "attaching to a reaped id must not resurrect the handle",
         );
+        // The permit is still held until the caller drops the returned error.
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(returned);
         assert_eq!(
             semaphore.available_permits(),
             1,
-            "the orphaned permit must be released, not leaked",
+            "the orphaned permit must be released once the caller drops it",
+        );
+    }
+
+    #[test]
+    fn attach_permit_refuses_a_handle_already_past_its_reap_deadline() {
+        // Even before the watchdog physically removes it, a handle past
+        // `deadline + REAP_GRACE` is reapable: binding the permit to it would
+        // hand back a run the reaper releases moments later. Attach must refuse
+        // (returning the permit) under the same lock the reaper uses, so attach
+        // and reap never disagree about liveness.
+        let registry = AiRequestRegistry::new();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_owned()
+            .expect("the sole permit is free");
+
+        let id = RequestId::new();
+        registry.register(
+            id,
+            CancellationToken::new(),
+            Instant::now()
+                .checked_sub(REAP_GRACE + Duration::from_secs(1))
+                .expect("test clock is well past the epoch"),
+        );
+        // The handle is still present (no reap has run), but expired.
+        assert_eq!(registry.active_count(), 1);
+
+        let returned = registry.attach_permit(id, Some(permit));
+        assert!(
+            returned.is_err(),
+            "attaching to an expired handle must refuse rather than bind a doomed permit",
+        );
+        assert_eq!(semaphore.available_permits(), 0, "still held until dropped");
+        drop(returned);
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "the refused permit is released once the caller drops it",
         );
     }
 

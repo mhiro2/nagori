@@ -554,3 +554,70 @@ async fn ai_availability_reports_disabled_by_default() {
     let report = runtime.ai_availability().await.expect("availability");
     assert_eq!(report.overall_status, AiOverallStatus::Disabled);
 }
+
+/// A backend that streams a `Delta` and then closes the stream without ever
+/// emitting the terminal `Done` — a crashed generation or a truncated FFI
+/// bridge. `run_ai_action` must surface this as an error rather than returning
+/// the partial accumulation as a successful (silently truncated) result.
+#[derive(Debug)]
+struct NoDoneBackend;
+
+#[async_trait::async_trait]
+impl nagori_ai::TextGenerator for NoDoneBackend {
+    fn capabilities(&self) -> nagori_ai::TextGenerationCapabilities {
+        nagori_ai::TextGenerationCapabilities {
+            streaming: true,
+            guided_generation: false,
+            on_device: true,
+        }
+    }
+
+    async fn availability(&self) -> nagori_ai::BackendAvailability {
+        nagori_ai::BackendAvailability::Available
+    }
+
+    async fn stream_text(
+        &self,
+        _req: nagori_ai::TextGenerationRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> std::result::Result<nagori_ai::AiEventStream, nagori_core::AiError> {
+        // One Delta, then the stream ends — no `Done`.
+        let events = futures::stream::iter(vec![Ok(AiEvent::Delta {
+            seq: 0,
+            text: "partial".to_owned(),
+        })]);
+        Ok(events.boxed())
+    }
+}
+
+#[tokio::test]
+async fn run_ai_action_errors_when_stream_ends_without_done() {
+    use nagori_ai::AiEngine;
+    use nagori_core::AiProviderKind;
+
+    let store = SqliteStore::open_memory().expect("memory store should open");
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let engine = AiEngine::builder(AiProviderKind::AppleNative)
+        .text_generator(Arc::new(NoDoneBackend))
+        .build();
+    let runtime = NagoriRuntime::builder(store)
+        .clipboard(clipboard)
+        .ai_engine(Arc::new(engine))
+        .build_for_test();
+    runtime
+        .save_settings(ai_enabled_settings(AppSettings::default()))
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("summarise me".to_owned())
+        .await
+        .expect("entry should be added");
+
+    let err = runtime
+        .run_ai_action(id, AiActionId::Summarize, AiRequestOptions::default())
+        .await
+        .expect_err("a stream that never emits Done must not be reported as success");
+    assert!(matches!(err, AppError::Ai(_)), "got {err:?}");
+    // The registry handle is still released even on the no-Done path.
+    assert_eq!(runtime.ai_registry.active_count(), 0);
+}

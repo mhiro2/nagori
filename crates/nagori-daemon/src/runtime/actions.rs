@@ -171,12 +171,18 @@ impl NagoriRuntime {
         // *and* the remaining budget so a queued request is aborted before it
         // ever reaches the model — whether by an explicit cancel or by the
         // deadline expiring while a wedged predecessor holds the permit.
+        // Hold the permit *locally* across `engine.start`, not in the registry
+        // handle yet. If it were attached now, the watchdog reaping this handle
+        // mid-start (or a starved poll past `deadline + REAP_GRACE`) would drop
+        // the permit while the backend keeps running — and `tokio::time::timeout`
+        // polls the inner future first, so a start that completes right at the
+        // deadline returns a run that holds *no* permit, momentarily breaking
+        // the single-permit cap against the next request. Keeping it local means
+        // the slot stays occupied for the whole start; the reaper can still
+        // cancel this request's token, which `engine.start` observes.
         let permit = self
             .acquire_ai_permit(action, engine.provider(), request_id, &cancel, deadline)
             .await?;
-        // Bind the permit to the registry handle so a normal removal *and* the
-        // TTL reaper both release it, even if the stream is never polled out.
-        self.ai_registry.attach_permit(request_id, permit);
 
         // The permit wait drew down the shared budget, so restamp the
         // request's timeout with what's actually left. Backend-side
@@ -203,7 +209,7 @@ impl NagoriRuntime {
             }
             Err(_elapsed) => {
                 // Cancel the backend so any work `engine.start` kicked off
-                // unwinds, then release the permit via the registry handle.
+                // unwinds; dropping the local `permit` on return releases it.
                 cancel.cancel();
                 self.ai_registry.remove(request_id);
                 return Err(AppError::Ai(
@@ -211,6 +217,26 @@ impl NagoriRuntime {
                 ));
             }
         };
+
+        // Start succeeded: bind the permit to the registry handle for the
+        // streaming lifetime so a normal removal *and* the TTL reaper both
+        // release it even if the returned stream is never polled out. Attach
+        // refuses if the handle was reaped (or is already past its reap
+        // deadline) while `engine.start` ran. In that case tear this run down
+        // *before* releasing the slot — cancel so the backend unwinds, drop the
+        // run's stream, remove any lingering handle — and only then drop the
+        // permit. Releasing the permit first would let the next request begin
+        // generating while this run's backend is still live, two concurrent
+        // generations against a backend that serialises to one.
+        if let Err(orphaned) = self.ai_registry.attach_permit(request_id, permit) {
+            cancel.cancel();
+            drop(run);
+            self.ai_registry.remove(request_id);
+            drop(orphaned);
+            return Err(AppError::Ai(
+                "ai action was cancelled while queued".to_owned(),
+            ));
+        }
 
         let guard = RequestGuard {
             registry: Arc::clone(&self.ai_registry),
@@ -317,6 +343,14 @@ impl NagoriRuntime {
         let mut events = run.events;
         let mut text = String::new();
         let mut warnings = Vec::new();
+        // Only a `Done` event carries the authoritative, complete result. A
+        // backend that closes the stream after some `Delta`s without ever
+        // emitting `Done` (a crashed generation, a truncated FFI bridge) would
+        // otherwise have its partial accumulation returned as a successful
+        // `AiOutput` — a silently truncated summary the CLI would print as if
+        // complete. Track whether the terminal event arrived and surface a
+        // failure if the stream ends without it.
+        let mut saw_done = false;
         while let Some(item) = events.next().await {
             match item {
                 Ok(AiEvent::Delta { text: delta, .. }) => text.push_str(&delta),
@@ -328,6 +362,7 @@ impl NagoriRuntime {
                 }) => {
                     text = final_text;
                     warnings = done_warnings;
+                    saw_done = true;
                     break;
                 }
                 Ok(AiEvent::Cancelled) => {
@@ -335,6 +370,11 @@ impl NagoriRuntime {
                 }
                 Err(err) => return Err(ai_error_to_app(&err)),
             }
+        }
+        if !saw_done {
+            return Err(AppError::Ai(
+                "ai action stream ended before completing".to_owned(),
+            ));
         }
         Ok(AiOutput {
             text,
