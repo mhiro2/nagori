@@ -99,6 +99,7 @@ plain string (`"Health"`), and a payload variant nests under the variant name
                       "options": { "target_language": "ja", "source_language": "en" } } }
 "GetSettings"
 { "UpdateSettings": { "value": { /* AppSettings */ } } }
+{ "UpdateSettings": { "value": { /* AppSettings */ }, "expected_revision": 7 } }
 { "Clear":          "All" }
 { "Clear":          { "OlderThanDays": { "days": 30 } } }
 "Doctor"
@@ -122,12 +123,16 @@ It carries per-request overrides — `translate`'s `target_language` /
 before dispatch. Without it `translate` over IPC would run with no target
 language and fail.
 
-`UpdateSettings` over IPC is a last-writer-wins write: it carries no revision
-token and is not compare-and-swap checked. The CLI has no settings-write
-command, so the only full-blob writer that needs lost-update protection is the
-desktop settings window, which goes through the in-process runtime
-(`save_settings_checked`) rather than this socket — see ARCHITECTURE.md
-"Optimistic concurrency on settings writes".
+`UpdateSettings` over IPC is last-writer-wins by default: omit
+`expected_revision` and the full blob is persisted unconditionally. Supplying
+`expected_revision` (the `revision` from a prior `GetSettings` response) routes
+the write through the compare-and-swap save, so it is rejected with
+`settings_conflict` when the stored revision has moved under the loaded
+snapshot — the protection a client needs when a concurrent single-field change
+(e.g. a tray capture toggle) could otherwise be reverted by a stale blob. The
+CLI has no settings-write command, and the desktop settings window goes through
+the in-process runtime (`save_settings_checked`) rather than this socket — see
+ARCHITECTURE.md "Optimistic concurrency on settings writes".
 
 ## Response kinds
 
@@ -135,7 +140,7 @@ desktop settings window, which goes through the in-process runtime
 { "Search":   { "results": [/* SearchResultDto */] } }
 { "Entries":  [/* EntryDto */] }
 { "Entry":    { /* EntryDto */ } }
-{ "Settings": { /* AppSettings */ } }
+{ "Settings": { "value": { /* AppSettings */ }, "revision": 7 } }
 { "AiOutput": { /* AiOutputDto */ } }
 { "Cleared":  { "deleted": 12 } }
 { "Doctor":       { /* DoctorReport */ } }

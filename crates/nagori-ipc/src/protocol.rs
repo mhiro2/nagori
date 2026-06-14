@@ -68,7 +68,7 @@ pub enum IpcResponse {
     Search(SearchResponse),
     Entry(EntryDto),
     Entries(Vec<EntryDto>),
-    Settings(AppSettings),
+    Settings(SettingsResponse),
     AiOutput(AiOutputDto),
     Cleared(ClearResponse),
     Doctor(DoctorReport),
@@ -167,8 +167,28 @@ pub struct RunAiActionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsResponse {
+    /// The current persisted settings blob.
+    pub value: AppSettings,
+    /// The settings row's optimistic-concurrency token. Echo it back through
+    /// [`UpdateSettingsRequest::expected_revision`] for a compare-and-swap
+    /// write that a concurrent single-field change can't be silently reverted.
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSettingsRequest {
     pub value: serde_json::Value,
+    /// Optional optimistic-concurrency token. When set, the daemon persists
+    /// only if the stored settings revision still equals it, returning
+    /// `Conflict` otherwise — so a client whose loaded snapshot was
+    /// invalidated by a concurrent single-field change (e.g. a tray
+    /// capture-enabled toggle) cannot silently revert it with a stale
+    /// full-blob write. Omitted (`None`) keeps the unconditional
+    /// last-writer-wins save for simple clients that don't track revisions.
+    /// `#[serde(default)]` keeps the field optional for older clients.
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ use nagori_ipc::{
     DeleteEntryRequest, DoctorPermission, DoctorReport, EntryDto, GetEntryRequest, HealthResponse,
     IpcError, IpcRequest, IpcResponse, ListPinnedRequest, ListRecentRequest, PasteEntryRequest,
     PinEntryRequest, RunAiActionRequest, RunQuickActionRequest, SearchRequest, SearchResponse,
-    SearchResultDto, UpdateSettingsRequest,
+    SearchResultDto, SettingsResponse, UpdateSettingsRequest,
 };
 use nagori_platform::PermissionCheckContext;
 use nagori_search::normalize_text;
@@ -53,7 +53,9 @@ impl NagoriRuntime {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_ipc_result(&self, request: IpcRequest) -> Result<IpcResponse> {
-        if !self.current_settings().cli_ipc_enabled && !is_ipc_control_request(&request) {
+        if !self.with_settings(|settings| settings.cli_ipc_enabled)
+            && !is_ipc_control_request(&request)
+        {
             return Err(AppError::Permission(
                 "CLI IPC is disabled in settings".to_owned(),
             ));
@@ -146,13 +148,28 @@ impl NagoriRuntime {
                 Ok(IpcResponse::AiOutput(AiOutputDto::from(output)))
             }
             IpcRequest::GetSettings => {
-                let settings = self.get_settings().await?;
-                Ok(IpcResponse::Settings(settings))
+                // Return the revision alongside the blob so an IPC client can
+                // echo it back as `expected_revision` for a compare-and-swap
+                // update — the read half of the lost-update protection.
+                let (value, revision) = self.get_settings_with_revision().await?;
+                Ok(IpcResponse::Settings(SettingsResponse { value, revision }))
             }
-            IpcRequest::UpdateSettings(UpdateSettingsRequest { value }) => {
+            IpcRequest::UpdateSettings(UpdateSettingsRequest {
+                value,
+                expected_revision,
+            }) => {
                 let settings: AppSettings = serde_json::from_value(value)
                     .map_err(|err| AppError::InvalidInput(err.to_string()))?;
-                self.save_settings(settings).await?;
+                // Route through the compare-and-swap save when the client
+                // supplied a revision so a stale full-blob write can't clobber a
+                // concurrent single-field change; fall back to the unconditional
+                // save for clients that don't track revisions.
+                match expected_revision {
+                    Some(revision) => {
+                        self.save_settings_checked(settings, revision).await?;
+                    }
+                    None => self.save_settings(settings).await?,
+                }
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::Clear(request) => {

@@ -137,7 +137,10 @@ async fn update_settings_ipc_persists_and_publishes_current_settings() {
     let value = serde_json::to_value(&settings).expect("settings should serialize");
 
     let response = runtime
-        .handle_ipc(IpcRequest::UpdateSettings(UpdateSettingsRequest { value }))
+        .handle_ipc(IpcRequest::UpdateSettings(UpdateSettingsRequest {
+            value,
+            expected_revision: None,
+        }))
         .await;
 
     assert!(matches!(response, IpcResponse::Ack));
@@ -149,6 +152,54 @@ async fn update_settings_ipc_persists_and_publishes_current_settings() {
         .await
         .expect("settings should persist");
     assert_eq!(persisted, settings);
+}
+
+#[tokio::test]
+async fn update_settings_ipc_honours_the_compare_and_swap_revision() {
+    let (runtime, _) = runtime_with_memory_clipboard();
+    // Seed a baseline, then read its revision back over IPC (`GetSettings` now
+    // carries the token) so the CAS round-trip is exercised end-to-end.
+    runtime
+        .save_settings(AppSettings::default())
+        .await
+        .expect("seed settings");
+    let revision = match runtime.handle_ipc(IpcRequest::GetSettings).await {
+        IpcResponse::Settings(snapshot) => snapshot.revision,
+        other => panic!("GetSettings must return a Settings response, got {other:?}"),
+    };
+
+    // A stale revision is rejected with Conflict rather than clobbering.
+    let stale = serde_json::to_value(AppSettings {
+        global_hotkey: "CmdOrCtrl+Alt+S".to_owned(),
+        ..Default::default()
+    })
+    .expect("serialize");
+    let response = runtime
+        .handle_ipc(IpcRequest::UpdateSettings(UpdateSettingsRequest {
+            value: stale,
+            expected_revision: Some(revision.wrapping_add(1)),
+        }))
+        .await;
+    assert!(
+        matches!(response, IpcResponse::Error(err) if err.code == "settings_conflict"),
+        "a mismatched revision must be rejected, not applied",
+    );
+    assert_ne!(runtime.current_settings().global_hotkey, "CmdOrCtrl+Alt+S");
+
+    // The current revision is accepted.
+    let fresh = serde_json::to_value(AppSettings {
+        global_hotkey: "CmdOrCtrl+Alt+F".to_owned(),
+        ..Default::default()
+    })
+    .expect("serialize");
+    let response = runtime
+        .handle_ipc(IpcRequest::UpdateSettings(UpdateSettingsRequest {
+            value: fresh,
+            expected_revision: Some(revision),
+        }))
+        .await;
+    assert!(matches!(response, IpcResponse::Ack));
+    assert_eq!(runtime.current_settings().global_hotkey, "CmdOrCtrl+Alt+F");
 }
 
 #[tokio::test]
