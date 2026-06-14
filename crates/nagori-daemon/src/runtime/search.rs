@@ -56,7 +56,7 @@ impl NagoriRuntime {
         // from the very first keystroke; this pays the old per-search store
         // read at most a handful of times.
         query.recent_order = if self.settings_watch_seeded() {
-            self.current_settings().recent_order
+            self.with_settings(|settings| settings.recent_order)
         } else {
             self.refresh_settings_from_store().await?.recent_order
         };

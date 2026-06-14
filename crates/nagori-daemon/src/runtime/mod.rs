@@ -237,6 +237,21 @@ impl NagoriRuntime {
         self.settings_rx.borrow().clone()
     }
 
+    /// Read a single field (or a small projection) from the settings watch
+    /// without cloning the whole [`AppSettings`].
+    ///
+    /// Hot paths that only need one flag — the search order on every keystroke,
+    /// the `cli_ipc_enabled` gate on every IPC request — used to call
+    /// [`Self::current_settings`] and discard all but one field, paying a full
+    /// clone (including the `regex_denylist` / `app_denylist` `Vec`s) each time.
+    /// The closure runs while the cheap watch borrow is held, so only the
+    /// projected value is copied out. `f` must not call back into a settings
+    /// *write* (that would deadlock against the held borrow); it is meant for
+    /// trivial field reads.
+    pub(crate) fn with_settings<R>(&self, f: impl FnOnce(&AppSettings) -> R) -> R {
+        f(&self.settings_rx.borrow())
+    }
+
     /// Whether the settings watch has been published to at least once and
     /// therefore reflects persisted state rather than its
     /// `AppSettings::default()` starting value. See the `settings_seeded`
