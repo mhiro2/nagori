@@ -649,11 +649,19 @@ async fn supervise_ipc_server(
                 let dead = server.take().expect("ipc_server_exit only fires when server is Some");
                 match join_result {
                     Ok(()) => warn!("ipc_server_task_exited_unexpectedly"),
+                    // The liveness probe aborts a wedged accept loop on purpose;
+                    // its join then reports `is_cancelled`. Logging it as a
+                    // join *failure* (alongside genuine join errors) buried the
+                    // deliberate restart in a generic warning, contradicting the
+                    // abort site's own comment that this arm observes the abort.
+                    Err(err) if err.is_cancelled() => {
+                        info!("ipc_server_task_aborted_after_wedge");
+                    }
                     Err(err) if err.is_panic() => warn!(error = %err, "ipc_server_task_panicked"),
                     Err(err) => warn!(error = %err, "ipc_server_task_join_failed"),
                 }
                 drop(dead);
-                restart_pending = runtime.current_settings().cli_ipc_enabled;
+                restart_pending = runtime.with_settings(|settings| settings.cli_ipc_enabled);
             }
             // Periodic liveness probe so a wedged accept loop (handler
             // deadlock, kernel-level resource exhaustion) is force-restarted
@@ -1069,6 +1077,30 @@ fn spawn_capture_supervisor(
     })
 }
 
+/// The settings fields a maintenance sweep actually reads, so the loop can tell
+/// a retention change (re-run now) from an unrelated settings edit (keep
+/// waiting). Mirrors every knob `MaintenanceService::run` consults; add a field
+/// here whenever the sweep starts depending on a new one, or a retention change
+/// would be silently ignored until the next interval tick.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RetentionKnobs {
+    history_retention_count: usize,
+    history_retention_days: Option<u32>,
+    max_total_bytes: Option<u64>,
+    max_thumbnail_total_bytes: Option<u64>,
+}
+
+impl From<&nagori_core::AppSettings> for RetentionKnobs {
+    fn from(settings: &nagori_core::AppSettings) -> Self {
+        Self {
+            history_retention_count: settings.history_retention_count,
+            history_retention_days: settings.history_retention_days,
+            max_total_bytes: settings.max_total_bytes,
+            max_thumbnail_total_bytes: settings.max_thumbnail_total_bytes,
+        }
+    }
+}
+
 /// Supervise the periodic maintenance loop (retention sweep).
 fn spawn_maintenance_supervisor(
     runtime: NagoriRuntime,
@@ -1104,14 +1136,34 @@ fn spawn_maintenance_supervisor(
                                 warn!(error = %err, "maintenance_failed");
                             }
                         }
-                        tokio::select! {
-                            () = worker_shutdown.cancelled() => return,
-                            changed = settings_rx.changed() => {
-                                if changed.is_err() {
-                                    return;
-                                }
-                            },
-                            () = tokio::time::sleep(interval) => {},
+                        let applied_retention = RetentionKnobs::from(&settings);
+                        // Wait for the next trigger: shutdown, the periodic
+                        // interval, or a settings change that actually moves a
+                        // retention knob. A change to an unrelated field (hotkey,
+                        // locale, AI toggles) used to fall straight through to
+                        // another full sweep — including the VACUUM-threshold
+                        // probe and a writer-lock-holding scan — for no benefit,
+                        // since `MaintenanceService::run` only reads the
+                        // retention fields. The sleep is pinned outside the inner
+                        // loop so a burst of unrelated changes can't keep
+                        // resetting the interval and starve the periodic sweep.
+                        let sleep = tokio::time::sleep(interval);
+                        tokio::pin!(sleep);
+                        loop {
+                            tokio::select! {
+                                () = worker_shutdown.cancelled() => return,
+                                () = &mut sleep => break,
+                                changed = settings_rx.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                    if RetentionKnobs::from(&*settings_rx.borrow())
+                                        != applied_retention
+                                    {
+                                        break;
+                                    }
+                                },
+                            }
                         }
                     }
                 })
@@ -1321,10 +1373,7 @@ where
     let mut shutdown_wait = shutdown.clone();
     tokio::select! {
         () = shutdown_wait.cancelled() => {},
-        result = signal::ctrl_c() => {
-            if let Err(err) = result {
-                warn!(error = %err, "ctrl_c_failed");
-            }
+        () = ctrl_c_request() => {
             shutdown.cancel();
         }
         () = terminate_request() => {
@@ -1349,6 +1398,21 @@ where
     // here — that would race a freshly-launched daemon that re-claimed the
     // path between our shutdown signal and this point.
     Ok(())
+}
+
+/// Resolve when an interactive Ctrl-C (SIGINT) arrives.
+///
+/// A failure to install the handler is logged and then parks forever rather
+/// than tearing the daemon down: a broken signal registration is not a request
+/// to stop, and SIGTERM (see [`terminate_request`]) plus the IPC `Shutdown`
+/// request remain as stop paths. Without this guard a registration error
+/// resolved the `select!` arm and shut the daemon down for a reason unrelated
+/// to any stop request — the same fail-open the SIGTERM listener already avoids.
+async fn ctrl_c_request() {
+    if let Err(err) = signal::ctrl_c().await {
+        warn!(error = %err, "ctrl_c_failed");
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Resolve when the OS asks the daemon to terminate through a channel other
