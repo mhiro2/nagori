@@ -269,8 +269,10 @@ fn streaming_event(event: AppleStreamEvent) -> Option<AiEvent> {
     }
 }
 
-/// Maps the Swift terminal status code onto the stream's terminal item. Keep in
-/// sync with `generationErrorCode` in `Bridge.swift`.
+/// Maps the Swift terminal status code onto the stream's terminal item. Codes
+/// 2–8 mirror `generationErrorCode` in `Bridge.swift`; `1` (an observed
+/// consumer cancel) and `9` (the watchdog cancelled a wedged `await`) are set
+/// directly by the Swift work task, so they are distinct from each other.
 fn generate_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> {
     match code {
         0 => Ok(AiEvent::Done {
@@ -292,12 +294,16 @@ fn generate_terminal(code: i32, final_text: String) -> Result<AiEvent, AiError> 
             "a required on-device asset is unavailable",
         )),
         6 => Err(AiError::new(
-            AiErrorCode::BackendInternal,
+            AiErrorCode::GuardrailViolation,
             "the request was blocked by the model guardrail",
         )),
         7 => Err(AiError::new(
             AiErrorCode::BackendInternal,
             "the input language or locale is unsupported",
+        )),
+        9 => Err(AiError::new(
+            AiErrorCode::Timeout,
+            "the on-device model did not respond in time",
         )),
         _ => Err(AiError::new(
             AiErrorCode::BackendInternal,
@@ -1005,16 +1011,17 @@ mod tests {
     #[test]
     fn generate_terminal_maps_distinct_error_codes() {
         use nagori_core::AiErrorCode;
-        // The named codes each carry their own reason, mirroring the Swift
-        // `generationErrorCode` table. Asymmetric with translate/embed before
-        // this test: generate had no code-table coverage at all.
+        // The named codes each carry their own reason. Codes 3–8 mirror the
+        // Swift `generationErrorCode` table; 9 is the watchdog timeout, set
+        // outside that table so it stays distinct from an observed cancel.
         let cases = [
             (3, AiErrorCode::InputTooLarge),
             (4, AiErrorCode::RateLimited),
             (8, AiErrorCode::RateLimited),
             (5, AiErrorCode::AssetMissing),
-            (6, AiErrorCode::BackendInternal), // guardrail block
-            (7, AiErrorCode::BackendInternal), // unsupported locale
+            (6, AiErrorCode::GuardrailViolation), // guardrail block (user-actionable)
+            (7, AiErrorCode::BackendInternal),    // unsupported locale
+            (9, AiErrorCode::Timeout),            // watchdog cancelled a wedged await
         ];
         for (code, expected) in cases {
             let err = super::generate_terminal(code, String::new())
@@ -1026,7 +1033,7 @@ mod tests {
     #[test]
     fn generate_terminal_maps_unknown_codes_to_backend_internal() {
         use nagori_core::AiErrorCode;
-        for code in [2, 9, 99, -1] {
+        for code in [2, 99, -1] {
             let err = super::generate_terminal(code, String::new()).expect_err("error");
             assert_eq!(err.code, AiErrorCode::BackendInternal, "code {code}");
         }

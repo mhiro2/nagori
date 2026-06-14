@@ -555,7 +555,13 @@ fn ai_error_to_app(err: &AiError) -> AppError {
         AiErrorCode::Unavailable | AiErrorCode::CapabilityMismatch | AiErrorCode::AssetMissing => {
             AppError::Unsupported(err.message.clone())
         }
-        AiErrorCode::InputTooLarge => AppError::Policy(err.message.clone()),
+        // Both are user-actionable refusals of the *input* (too large, or its
+        // content tripped the model guardrail), not internal backend failures.
+        // Surfacing them as policy refusals lets the UI/CLI distinguish "edit
+        // your input and retry" from a genuine `BackendInternal` breakage.
+        AiErrorCode::InputTooLarge | AiErrorCode::GuardrailViolation => {
+            AppError::Policy(err.message.clone())
+        }
         _ => AppError::Ai(err.message.clone()),
     }
 }
@@ -772,6 +778,17 @@ mod tests {
             ..AiRequestOptions::default()
         };
         assert!(!EffectiveAiPolicy::resolve(&opts_out, &on).streaming);
+    }
+
+    #[test]
+    fn guardrail_violation_maps_to_a_user_actionable_policy_error() {
+        // A guardrail block is the input content being refused, so it must
+        // surface as a policy refusal the UI/CLI can tell apart from an
+        // internal backend failure (which stays `AppError::Ai`).
+        let guardrail = AiError::new(AiErrorCode::GuardrailViolation, "blocked");
+        assert!(matches!(ai_error_to_app(&guardrail), AppError::Policy(_)));
+        let internal = AiError::new(AiErrorCode::BackendInternal, "boom");
+        assert!(matches!(ai_error_to_app(&internal), AppError::Ai(_)));
     }
 
     #[test]

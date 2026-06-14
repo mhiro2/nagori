@@ -132,10 +132,10 @@ private let generateTimeoutNanoseconds: UInt64 = 20_000_000_000
 /// - `onSnapshot` receives the cumulative partial text so far (not a delta);
 ///   the Rust longest-common-prefix pump turns it into ordered deltas.
 /// - `onDone` reports a terminal status code (fired exactly once, always by the
-///   work task): 0 success, 1 cancelled (an observed Rust-side cancel, or a
-///   timeout-cancelled `await`), and 2–8 map `LanguageModelSession`
-///   `.GenerationError` cases onto stable codes the Rust side translates into
-///   `AiError`s.
+///   work task): 0 success, 1 cancelled (an observed Rust-side cancel), 9 timed
+///   out (the watchdog cancelled a wedged `await`), and 2–8 map
+///   `LanguageModelSession` `.GenerationError` cases onto stable codes the Rust
+///   side translates into `AiError`s.
 ///
 /// A timeout task races the generation: when it wins it cancels the work `Task`
 /// so a pending `await` throws and the work task unwinds to its single `onDone`
@@ -194,8 +194,13 @@ public func nagoriAppleGenerateC(
                 }
             }
         } catch is CancellationError {
-            // Timeout (or any task cancellation) reached us mid-`await`.
-            doneCode = 1
+            // The only task cancellation here is the watchdog's `work.cancel()`
+            // — a Rust-side consumer cancel is observed via `isCancelled`
+            // polling (which breaks with code 1 above), never as task
+            // cancellation — so a `CancellationError` mid-`await` is
+            // unambiguously the timeout. Report it as 9 so the Rust side maps it
+            // to `Timeout` instead of conflating it with an observed cancel (1).
+            doneCode = 9
         } catch let error as LanguageModelSession.GenerationError {
             doneCode = generationErrorCode(error)
         } catch {

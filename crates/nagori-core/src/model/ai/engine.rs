@@ -228,6 +228,10 @@ pub enum AiErrorCode {
     Timeout,
     /// A backend / FFI-layer failure (Swift bridge, Apple API).
     BackendInternal,
+    /// The model's safety guardrail blocked the request. Unlike
+    /// [`Self::BackendInternal`], this is user-actionable: the *input content*
+    /// was refused, so editing it and retrying can succeed.
+    GuardrailViolation,
     /// A required asset (translation pack, embedding model) is missing.
     AssetMissing,
     /// The backend is rate limited (background asset generation, etc.).
