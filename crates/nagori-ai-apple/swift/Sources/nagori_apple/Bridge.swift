@@ -504,10 +504,19 @@ private final class EmbeddingCache: @unchecked Sendable {
     }
 }
 
-/// Hard cap on a single embedding call, mirroring the translation bridge's
-/// timeout so the FFI lifetime is bounded and `ctx` is always reclaimed even if
-/// the framework wedges.
+/// Hard cap on a single embedding *inference* call, mirroring the translation
+/// bridge's timeout so the FFI lifetime is bounded and `ctx` is always
+/// reclaimed even if the framework wedges.
 private let embedTimeoutNanoseconds: UInt64 = 20_000_000_000
+
+/// Hard cap on an asset *download* request. Far longer than the inference cap
+/// because the contextual-embedding assets can be hundreds of megabytes, which
+/// routinely outlasts 20 s on a slow link — applying the inference cap here
+/// would deliver a spurious timeout while the download keeps running in the
+/// background (and breaks `request_assets`' "resolves once the download
+/// finishes or fails" contract on the Rust side). It is still bounded so a
+/// wedged `requestAssets` callback can't leak `ctx` forever.
+private let embedAssetTimeoutNanoseconds: UInt64 = 600_000_000_000
 
 /// Reports whether the contextual-embedding model for `langPtr` is ready:
 /// 0 = assets installed (ready), 1 = assets missing (downloadable),
@@ -584,7 +593,7 @@ public func nagoriAppleEmbedRequestAssetsC(
     }
 
     Task.detached(priority: .utility) {
-        try? await Task.sleep(nanoseconds: embedTimeoutNanoseconds)
+        try? await Task.sleep(nanoseconds: embedAssetTimeoutNanoseconds)
         deliver(6)
     }
 }
