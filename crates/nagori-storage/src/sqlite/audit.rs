@@ -27,6 +27,32 @@ impl SqliteStore {
         })
         .await
     }
+
+    /// Delete audit events recorded before `cutoff`, returning the number
+    /// removed.
+    ///
+    /// `audit_events` has no other reclaim path: every other write to the DB
+    /// is bounded by retention, but the audit log would otherwise accumulate a
+    /// row per privacy/retention event forever. An app whose whole purpose is
+    /// erasing clipboard history should not grow an unbounded, never-pruned log
+    /// table, so the maintenance sweep trims it on a fixed window. The rows
+    /// carry no clipboard content (enum kind + counters), so a plain `DELETE`
+    /// suffices — no WAL scrub is needed the way the entry hard-delete paths
+    /// require one.
+    pub async fn purge_audit_events_older_than(&self, cutoff: OffsetDateTime) -> Result<usize> {
+        self.run_blocking(move |store| {
+            let cutoff = format_time(cutoff)?;
+            let conn = store.conn()?;
+            let removed = conn
+                .execute(
+                    "DELETE FROM audit_events WHERE created_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(storage_err)?;
+            Ok(removed)
+        })
+        .await
+    }
 }
 
 #[async_trait]

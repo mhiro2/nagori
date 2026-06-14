@@ -2,6 +2,7 @@
 //! `#[cfg(test)]` submodules (not `tests/` integration tests) because they
 //! exercise crate-private APIs such as the connection pool and migrations.
 
+mod audit;
 mod entries;
 mod permissions;
 mod representations;

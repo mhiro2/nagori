@@ -31,6 +31,13 @@ pub struct MaintenanceReport {
 /// is large enough that reclaiming pages actually matters.
 const VACUUM_DELETION_THRESHOLD: usize = 256;
 
+/// Age past which audit events are trimmed by the maintenance sweep.
+/// `audit_events` has no other reclaim path, so without a window an app whose
+/// whole job is erasing clipboard history would grow an unbounded, never-pruned
+/// log table over long uptimes. Ninety days keeps a useful "where did my
+/// history go?" trail while bounding the table.
+const AUDIT_RETENTION_DAYS: i64 = 90;
+
 impl MaintenanceService {
     pub const fn new(store: SqliteStore) -> Self {
         Self {
@@ -126,6 +133,16 @@ impl MaintenanceService {
                     warn!(error = %err, "thumbnail_budget_enforce_failed");
                 }
             }
+        }
+        // Trim the audit log to its retention window. Best-effort and not
+        // counted toward `total_deleted`: these rows carry no clipboard content
+        // and are small, so they neither warrant a VACUUM nor justify aborting
+        // a sweep whose retention deletes already landed.
+        let audit_cutoff = OffsetDateTime::now_utc() - Duration::days(AUDIT_RETENTION_DAYS);
+        match self.store.purge_audit_events_older_than(audit_cutoff).await {
+            Ok(removed) if removed > 0 => info!(removed, "audit_log_trimmed"),
+            Ok(_) => {}
+            Err(err) => warn!(error = %err, "audit_log_trim_failed"),
         }
         let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size + purged_deleted;
         let vacuumed = if total_deleted >= VACUUM_DELETION_THRESHOLD {
