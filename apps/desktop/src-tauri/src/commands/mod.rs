@@ -722,6 +722,15 @@ pub async fn copy_entries_combined(
     // Round-trip through `copy_entry` so the clipboard write happens via the
     // same path the palette uses for single-row copies.
     //
+    // Inserting a history row for the combined text is deliberate, not a
+    // leak we tolerate: the joined text lands on the OS clipboard, and the
+    // capture loop would store it on its next tick regardless (this is a
+    // clipboard manager — there is no self-write suppression). Going through
+    // `add_text` up front just makes that row appear immediately, with the
+    // shared sensitivity classification, and lets the later capture dedupe
+    // against it instead of producing a second copy. A copy-only API would
+    // not avoid the row; it would only defer and de-classify it.
+    //
     // A retention sweep or IPC clear can race between `add_text` and
     // `copy_entry` and remove the just-inserted row. Retry once before
     // giving up — the user pressed bulk-copy expecting the OS clipboard
@@ -1342,12 +1351,21 @@ pub async fn request_accessibility(
         // remaining route. Surface a failed `open(1)` as a command
         // error so the Setup card can render it inline (§3.4) instead
         // of silently dropping the user's only escape hatch.
-        let open_status = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            .status()
-            .map_err(|err| {
-                CommandError::internal(format!("failed to open the Accessibility pane: {err}"))
-            })?;
+        //
+        // `open(1)` is a synchronous fork+exec+wait, so run it via
+        // `spawn_blocking` to keep the fork off the async worker thread.
+        let open_status = tauri::async_runtime::spawn_blocking(|| {
+            std::process::Command::new("open")
+                .arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )
+                .status()
+        })
+        .await
+        .map_err(|err| CommandError::internal(format!("the open task did not complete: {err}")))?
+        .map_err(|err| {
+            CommandError::internal(format!("failed to open the Accessibility pane: {err}"))
+        })?;
         if !open_status.success() {
             return Err(CommandError::internal(format!(
                 "the Accessibility pane failed to open ({open_status})"
@@ -1419,7 +1437,7 @@ pub async fn open_url_external(
     // pane already hides the Enter hint for these, but a forged invoke
     // could still arrive (e.g. via DevTools in a debug build).
     let canonical = validate_external_open(&entry, &url)?;
-    open_external_url(&canonical)?;
+    open_external_url(canonical).await?;
     Ok(())
 }
 
@@ -1473,7 +1491,17 @@ fn validate_external_open(
 /// (or a URL whose query contains those characters) could turn a benign
 /// argument into a shell metacharacter. `ShellExecuteW` skips the shell
 /// parser entirely.
-fn open_external_url(url: &str) -> CommandResult<()> {
+///
+/// Runs on a blocking thread: `open(1)` / `xdg-open` are synchronous
+/// fork+exec+wait spawns and `ShellExecuteW` can block while it resolves a
+/// handler, so doing this inline would stall the async worker thread.
+async fn open_external_url(url: String) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || open_external_url_blocking(&url))
+        .await
+        .map_err(|err| CommandError::internal(format!("the open task did not complete: {err}")))?
+}
+
+fn open_external_url_blocking(url: &str) -> CommandResult<()> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
