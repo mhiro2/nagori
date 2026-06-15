@@ -62,7 +62,27 @@ pub fn run() {
         // in Cargo.toml) since no `tracing` subscriber is installed here. That
         // is what keeps the desktop and embedded-daemon `tracing` diagnostics
         // (capture_skipped, command_error, …) out of the void.
-        .plugin(tauri_plugin_log::Builder::default().build())
+        //
+        // Keep our own `nagori_*` crates at Debug so the capture / maintenance
+        // / command diagnostics stay captured, while dropping everything else
+        // below Info: dependency crates (wry / hyper / reqwest / …) reach `log`
+        // through the same bridge and would otherwise spill their trace/debug
+        // into the bounded log file (the builder defaults to Trace for all
+        // targets). `level_for` can't express this — fern matches module
+        // targets on `::` boundaries, so `"nagori"` would not match the
+        // underscore-named `nagori_core` / `nagori_desktop` / `nagori_daemon`
+        // targets — so a target-prefix filter does the gating. The default
+        // level stays at Debug so our crates' debug records clear the level
+        // gate before the filter runs.
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(tauri_plugin_log::log::LevelFilter::Debug)
+                .filter(|metadata| {
+                    metadata.target().starts_with("nagori")
+                        || metadata.level() <= tauri_plugin_log::log::Level::Info
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         // Per-shortcut handlers attach in `spawn_settings_subscribers`
         // (primary palette toggle and `register_secondary_hotkeys`) so
@@ -573,7 +593,21 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                         HotkeyFailureKind::Primary,
                         None,
                     );
-                    let _ = register_primary_hotkey(&app, current_hotkey.as_str());
+                    // Roll back to the accelerator that was bound before this
+                    // tick. The user-facing failure above already points at
+                    // `next`; if the rollback *also* fails the palette toggle
+                    // is now bound to nothing, so log it rather than swallow
+                    // the dead-toggle signal. The cached failure stays keyed to
+                    // `next` (the desired accelerator) so the end-of-tick
+                    // reconcile doesn't clear it.
+                    if let Err(revert_err) = register_primary_hotkey(&app, current_hotkey.as_str())
+                    {
+                        tracing::warn!(
+                            error = %revert_err,
+                            previous = %current_hotkey,
+                            "global_shortcut_revert_failed"
+                        );
+                    }
                 } else {
                     current_hotkey = next;
                     // Successful rebind — drop any cached failure so the
