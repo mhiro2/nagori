@@ -27,20 +27,6 @@ import type {
 export const searchClipboard = (request: SearchRequest): Promise<SearchResponse> =>
   invoke('search_clipboard', { request });
 
-export const listRecent = (limit: number): Promise<EntryDto[]> =>
-  invoke('list_recent_entries', { limit });
-
-export const listPinned = (): Promise<EntryDto[]> => invoke('list_pinned_entries');
-
-export const getEntry = (id: string): Promise<EntryDto | null> => invoke('get_entry', { id });
-
-export const copyEntry = (id: string): Promise<void> => invoke('copy_entry', { id });
-
-export const pasteEntry = (id: string, format?: PasteFormat): Promise<void> =>
-  invoke('paste_entry', { id, format });
-
-export const openPalette = (): Promise<void> => invoke('open_palette');
-
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
 // `forcePaste` makes the backend synthesise ⌘/Ctrl+V even when auto-paste is
@@ -77,18 +63,12 @@ export const getEntryPreview = (entryId: string, query?: string): Promise<EntryP
 export const getEntryPreviewFull = (entryId: string): Promise<EntryPreviewDto> =>
   invoke('get_entry_preview_full', { entryId });
 
-export const addEntry = (text: string): Promise<EntryDto> => invoke('add_entry', { text });
-
 export const deleteEntry = (id: string): Promise<void> => invoke('delete_entry', { id });
 
 export const deleteEntries = (ids: string[]): Promise<number> => invoke('delete_entries', { ids });
 
 export const copyEntriesCombined = (ids: string[]): Promise<void> =>
   invoke('copy_entries_combined', { ids });
-
-export const clearHistory = (): Promise<number> => invoke('clear_history');
-
-export const repasteLast = (): Promise<void> => invoke('repaste_last');
 
 export const pinEntry = (id: string, pinned: boolean): Promise<void> =>
   invoke('pin_entry', { id, pinned });
@@ -148,14 +128,12 @@ export const updateSettings = (settings: AppSettings): Promise<void> => {
   return next;
 };
 
-export const togglePalette = (): Promise<void> => invoke('toggle_palette');
-
 export const hidePalette = (): Promise<void> => invoke('hide_palette');
 
-// Show / hide the standalone Settings window. The window is declared
-// with native decorations in `tauri.conf.json`, so the OS supplies the
-// close button, title-bar drag, and Cmd+Tab / Alt+Tab membership — these
-// commands only flip its visibility.
+// Show the standalone Settings window. The window is declared with native
+// decorations in `tauri.conf.json`, so the OS supplies the close button,
+// title-bar drag, and Cmd+Tab / Alt+Tab membership — this command only flips
+// its visibility.
 //
 // `route` is an optional tab hint that surfaces an in-window navigate event
 // after the window is shown, so a caller that already knows where the user
@@ -164,8 +142,6 @@ export const hidePalette = (): Promise<void> => invoke('hide_palette');
 // launch heuristic.
 export const openSettingsWindow = (route?: string): Promise<void> =>
   route === undefined ? invoke('open_settings') : invoke('open_settings', { route });
-
-export const closeSettingsWindow = (): Promise<void> => invoke('close_settings');
 
 export const getPermissions = (): Promise<PermissionStatus[]> => invoke('get_permissions');
 

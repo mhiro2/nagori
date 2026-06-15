@@ -73,42 +73,6 @@ describe('command wrappers', () => {
       args: { request: { query: 'q', limit: 10 } },
     },
     {
-      name: 'listRecent',
-      run: () => commands.listRecent(20),
-      cmd: 'list_recent_entries',
-      args: { limit: 20 },
-    },
-    {
-      name: 'listPinned',
-      run: () => commands.listPinned(),
-      cmd: 'list_pinned_entries',
-      args: undefined,
-    },
-    {
-      name: 'getEntry',
-      run: () => commands.getEntry('id'),
-      cmd: 'get_entry',
-      args: { id: 'id' },
-    },
-    {
-      name: 'copyEntry',
-      run: () => commands.copyEntry('id'),
-      cmd: 'copy_entry',
-      args: { id: 'id' },
-    },
-    {
-      name: 'pasteEntry',
-      run: () => commands.pasteEntry('id'),
-      cmd: 'paste_entry',
-      args: { id: 'id', format: undefined },
-    },
-    {
-      name: 'openPalette',
-      run: () => commands.openPalette(),
-      cmd: 'open_palette',
-      args: undefined,
-    },
-    {
       name: 'closePalette',
       run: () => commands.closePalette(),
       cmd: 'close_palette',
@@ -157,12 +121,6 @@ describe('command wrappers', () => {
       args: { entryId: 'e' },
     },
     {
-      name: 'addEntry',
-      run: () => commands.addEntry('hello'),
-      cmd: 'add_entry',
-      args: { text: 'hello' },
-    },
-    {
       name: 'deleteEntry',
       run: () => commands.deleteEntry('id'),
       cmd: 'delete_entry',
@@ -179,18 +137,6 @@ describe('command wrappers', () => {
       run: () => commands.copyEntriesCombined(['a', 'b']),
       cmd: 'copy_entries_combined',
       args: { ids: ['a', 'b'] },
-    },
-    {
-      name: 'clearHistory',
-      run: () => commands.clearHistory(),
-      cmd: 'clear_history',
-      args: undefined,
-    },
-    {
-      name: 'repasteLast',
-      run: () => commands.repasteLast(),
-      cmd: 'repaste_last',
-      args: undefined,
     },
     {
       name: 'pinEntry',
@@ -235,12 +181,6 @@ describe('command wrappers', () => {
       args: { settings: baseSettings() },
     },
     {
-      name: 'togglePalette',
-      run: () => commands.togglePalette(),
-      cmd: 'toggle_palette',
-      args: undefined,
-    },
-    {
       name: 'hidePalette',
       run: () => commands.hidePalette(),
       cmd: 'hide_palette',
@@ -250,12 +190,6 @@ describe('command wrappers', () => {
       name: 'openSettingsWindow',
       run: () => commands.openSettingsWindow(),
       cmd: 'open_settings',
-      args: undefined,
-    },
-    {
-      name: 'closeSettingsWindow',
-      run: () => commands.closeSettingsWindow(),
-      cmd: 'close_settings',
       args: undefined,
     },
     {

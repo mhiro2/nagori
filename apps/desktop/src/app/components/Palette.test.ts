@@ -15,7 +15,6 @@ vi.mock('../lib/commands', async () => {
     closePalette: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
     requestAccessibility: vi.fn(async () => ({ kind: 'accessibility', state: 'granted' })),
-    listRecent: vi.fn(async () => []),
     previewEntry: vi.fn(async () => undefined),
   });
 });

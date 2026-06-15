@@ -6,7 +6,6 @@ vi.mock('../lib/commands', async () => {
   const { commandsMock } = await import('../test-helpers/moduleMocks');
   return commandsMock({
     listPasteOptions: vi.fn(async () => []),
-    listRecent: vi.fn(async () => []),
   });
 });
 
