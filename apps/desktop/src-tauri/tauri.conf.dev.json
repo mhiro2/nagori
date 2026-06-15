@@ -4,7 +4,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "img-src": ["'self'", "asset:", "data:", "https://asset.localhost"],
+        "img-src": ["'self'", "data:", "nagori-image:", "http://nagori-image.localhost"],
         "font-src": ["'self'", "data:"],
         "style-src": ["'self'", "'unsafe-inline'"],
         "script-src": ["'self'"],
