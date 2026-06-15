@@ -59,7 +59,20 @@ impl From<AppError> for CommandError {
         // `message` when no translation exists, so a generic safe string
         // here matches the existing frontend behaviour while protecting
         // against raw error strings hitting the UI through that fallback.
-        tracing::warn!(error = %err, "command_error");
+        //
+        // Routine, self-resolving variants log at debug so they don't drown
+        // the warn stream: `NotFound` races a retention sweep (the palette
+        // clicks a row a sweep just removed), `Conflict` is retry-by-design
+        // (the settings compare-and-swap), and `InvalidInput` is validated
+        // user input the UI already surfaces. Everything else stays at warn.
+        if matches!(
+            err,
+            AppError::NotFound | AppError::Conflict(_) | AppError::InvalidInput(_)
+        ) {
+            tracing::debug!(error = %err, "command_error");
+        } else {
+            tracing::warn!(error = %err, "command_error");
+        }
         let recoverable = !matches!(
             err,
             AppError::NotFound | AppError::Policy(_) | AppError::Configuration(_)
