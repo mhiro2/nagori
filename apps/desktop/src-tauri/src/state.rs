@@ -269,13 +269,18 @@ const CLI_IPC_DRAIN_SLACK: Duration = Duration::from_secs(4);
 
 impl AppState {
     pub fn record_last_pasted(&self, id: EntryId) {
-        if let Ok(mut slot) = self.last_pasted_id.lock() {
-            *slot = Some((id, Instant::now()));
-        }
+        let mut slot = self
+            .last_pasted_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some((id, Instant::now()));
     }
 
     pub fn last_pasted(&self) -> Option<EntryId> {
-        let mut slot = self.last_pasted_id.lock().ok()?;
+        let mut slot = self
+            .last_pasted_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (id, recorded_at) = (*slot)?;
         if recorded_at.elapsed() >= LAST_PASTED_TTL {
             // Expired entries are cleared on read so a stale id can't be
@@ -292,8 +297,11 @@ impl AppState {
     /// next "repaste last" falls through to the recency fallback rather
     /// than failing with `NotFound`.
     pub fn clear_last_pasted_if(&self, id: EntryId) {
-        if let Ok(mut slot) = self.last_pasted_id.lock()
-            && let Some((stored_id, _)) = *slot
+        let mut slot = self
+            .last_pasted_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((stored_id, _)) = *slot
             && stored_id == id
         {
             *slot = None;
@@ -303,9 +311,11 @@ impl AppState {
     /// Clear the last-pasted slot unconditionally. Used by `clear_history`
     /// and other bulk-purge paths where any tracked id is presumed gone.
     pub fn clear_last_pasted(&self) {
-        if let Ok(mut slot) = self.last_pasted_id.lock() {
-            *slot = None;
-        }
+        let mut slot = self
+            .last_pasted_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
     }
 
     /// Paste the tracked last-pasted entry, falling back to the recency
@@ -344,22 +354,26 @@ impl AppState {
     /// compositor does not expose a portable foreground-surface query.
     pub fn remember_previous_frontmost(&self) {
         let snapshot = capture_restore_target_blocking();
-        if let Ok(mut slot) = self.previous_frontmost.lock() {
-            *slot = snapshot;
-        }
+        let mut slot = self
+            .previous_frontmost
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = snapshot;
     }
 
     pub fn take_previous_frontmost(&self) -> Option<RestoreTarget> {
         self.previous_frontmost
             .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     pub fn clear_previous_frontmost(&self) {
-        if let Ok(mut slot) = self.previous_frontmost.lock() {
-            *slot = None;
-        }
+        let mut slot = self
+            .previous_frontmost
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
     }
 }
 
@@ -709,9 +723,10 @@ impl AppState {
     /// are keyed by action wire value so two simultaneously-failing
     /// secondaries don't overwrite each other.
     pub fn record_hotkey_failure(&self, record: HotkeyFailureRecord) {
-        if let Ok(mut cache) = self.last_hotkey_failure.lock() {
-            cache.record(record);
-        }
+        self.last_hotkey_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(record);
     }
 
     /// Clear the cached hotkey failure for the slot matching
@@ -727,10 +742,10 @@ impl AppState {
         kind: Option<&str>,
         action: Option<&str>,
     ) -> bool {
-        match self.last_hotkey_failure.lock() {
-            Ok(mut cache) => cache.clear_for_kind_action(kind, action),
-            Err(_) => false,
-        }
+        self.last_hotkey_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_for_kind_action(kind, action)
     }
 
     /// Read the most-relevant cached hotkey failure for hydration on a
@@ -739,8 +754,11 @@ impl AppState {
     /// primary — the palette toggle being broken is strictly more
     /// disruptive than a missing secondary action.
     pub fn current_hotkey_failure(&self) -> Option<HotkeyFailureRecord> {
-        let cache = self.last_hotkey_failure.lock().ok()?;
-        cache.most_relevant().cloned()
+        self.last_hotkey_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .most_relevant()
+            .cloned()
     }
 
     /// Snapshot the full cache (both kinds) so callers reconciling
@@ -749,8 +767,8 @@ impl AppState {
     pub fn hotkey_failure_cache_snapshot(&self) -> HotkeyFailureCache {
         self.last_hotkey_failure
             .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
