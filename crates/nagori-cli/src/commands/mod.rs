@@ -76,13 +76,19 @@ impl IpcContext {
     /// default `nagori.token` and trample the token of any default-endpoint
     /// daemon also running on this machine.
     pub fn connect(socket_path: &Path) -> Result<Self> {
-        let token_path = nagori_ipc::token_path_for_endpoint(socket_path)
-            .map_err(|err| anyhow!("failed to resolve the IPC auth token path: {err}"))?;
+        // Token resolution / read failures are classified as `Platform`
+        // (transport-class) rather than a bare anyhow so the `--auto-ipc`
+        // routing can tell "the endpoint vanished" apart from a logical
+        // command error and fall back to a local read. The exit code is
+        // unchanged for the forced `--ipc` path (Platform → internal, 8).
+        let token_path = nagori_ipc::token_path_for_endpoint(socket_path).map_err(|err| {
+            AppError::Platform(format!("failed to resolve the IPC auth token path: {err}"))
+        })?;
         let token = nagori_ipc::read_token_file(&token_path).map_err(|err| {
-            anyhow!(
+            AppError::Platform(format!(
                 "failed to read IPC auth token from {}: {err}. Is the daemon running?",
                 token_path.display()
-            )
+            ))
         })?;
         let client = IpcClient::new(
             socket_path

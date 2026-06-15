@@ -182,12 +182,19 @@ pub(crate) fn print_dto_search(response: SearchResponse, format: OutputFormat) -
     Ok(())
 }
 
-pub(crate) fn print_clear_result(deleted: usize, format: OutputFormat) {
+pub(crate) fn print_clear_result(deleted: usize, format: OutputFormat) -> Result<()> {
     match format {
+        // Route the JSON arms through the shared printer so `--json` renders
+        // the documented pretty document (not a compact line). The previous
+        // `println!(json!(…))` rendered compact under both `--json` and
+        // `--jsonl`, contradicting the single-record contract.
         OutputFormat::Json | OutputFormat::Jsonl => {
-            println!("{}", serde_json::json!({ "deleted": deleted }));
+            print_json_record(&serde_json::json!({ "deleted": deleted }), format)
         }
-        OutputFormat::Text => println!("deleted {deleted}"),
+        OutputFormat::Text => {
+            println!("deleted {deleted}");
+            Ok(())
+        }
     }
 }
 
@@ -431,11 +438,17 @@ pub(crate) fn format_json_time(value: OffsetDateTime) -> Result<String> {
     value.format(&Rfc3339).map_err(Into::into)
 }
 
-pub(crate) fn print_ack(format: OutputFormat) {
-    if format.is_json() {
-        println!("{}", serde_json::json!({ "ok": true }));
-    } else {
-        println!("ok");
+pub(crate) fn print_ack(format: OutputFormat) -> Result<()> {
+    match format {
+        // See `print_clear_result`: the JSON arms go through the shared
+        // printer so `--json` is pretty-printed like every other record.
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            print_json_record(&serde_json::json!({ "ok": true }), format)
+        }
+        OutputFormat::Text => {
+            println!("ok");
+            Ok(())
+        }
     }
 }
 
@@ -476,7 +489,10 @@ pub(crate) fn print_status(
             format,
         )?;
     } else {
-        println!("local (daemon not probed)\t{}", db_path.display());
+        // Collapse the home prefix to `~` for the human row, matching
+        // `nagori doctor`; the JSON arm above keeps the full path for
+        // automation.
+        println!("local (daemon not probed)\t{}", shorten_home(db_path));
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use nagori_core::SettingsRepository;
+use nagori_core::{AppError, SettingsRepository};
 use nagori_daemon::{CliIpcConfig, DaemonConfig, default_socket_path};
 use nagori_ipc::{IpcRequest, IpcResponse};
 use nagori_storage::SqliteStore;
@@ -41,16 +41,18 @@ pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
 
 pub async fn stop(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
-        // Open the store before bailing — the pre-split dispatcher's
-        // precedence, so a broken `--db` keeps surfacing as the open error.
-        Executor::Local(ctx) => {
-            let _store = ctx.open_store()?;
-            anyhow::bail!("daemon stop requires --ipc <socket>")
+        // `daemon stop` only acts on a running instance's IPC endpoint; there
+        // is nothing to stop on the local store. Surface the missing `--ipc`
+        // as a usage error (exit 2, like other invalid input) instead of an
+        // internal failure (exit 8), and *without* opening the store —
+        // `open_store()` would create an empty DB directory at the default
+        // path as a side effect of a command that can never succeed locally.
+        Executor::Local(_) => {
+            Err(AppError::InvalidInput("daemon stop requires --ipc <socket>".to_owned()).into())
         }
         Executor::Ipc(ctx) => {
             expect_ack(ctx.client.send(IpcRequest::Shutdown).await?)?;
-            print_ack(format);
-            Ok(())
+            print_ack(format)
         }
     }
 }

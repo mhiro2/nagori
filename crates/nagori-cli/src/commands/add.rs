@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use nagori_core::{
     AppError, EntryRepository, MAX_ENTRY_SIZE_BYTES, is_text_safe_for_default_output,
 };
@@ -63,9 +63,17 @@ fn read_text(args: AddArgs) -> Result<String> {
             ))
             .into());
         }
-        String::from_utf8(buffer).map_err(|err| anyhow!("stdin input is not valid UTF-8: {err}"))
+        // A bad-input failure, not an internal one: classify it as
+        // `InvalidInput` (exit 2) so it lines up with the oversize check above
+        // instead of falling through to the internal-error bucket (exit 8).
+        String::from_utf8(buffer).map_err(|err| {
+            AppError::InvalidInput(format!("stdin input is not valid UTF-8: {err}")).into()
+        })
     } else {
-        args.text
-            .ok_or_else(|| anyhow!("either --text or --stdin must be provided"))
+        // Same classification as the stdin errors: a missing input selector is
+        // a usage error (exit 2), not an internal failure.
+        args.text.ok_or_else(|| {
+            AppError::InvalidInput("either --text or --stdin must be provided".to_owned()).into()
+        })
     }
 }

@@ -89,7 +89,9 @@ Every read command supports both human and machine output:
 
 ### `nagori list [--limit N] [--pinned]`
 
-Show recent or pinned entries.
+Show recent or pinned entries. `--limit` (default 20, must be ≥ 1) caps the
+recent listing; with `--pinned` it has no effect — the full pinned set is
+always returned.
 
 ```sh
 nagori list --limit 5
@@ -99,6 +101,7 @@ nagori list --pinned --json
 ### `nagori search <query> [--limit N]`
 
 Run the ranker. `query` is normalised to NFKC + lowercase before matching.
+`--limit` defaults to 50 and must be ≥ 1.
 
 ```sh
 nagori search "kubectl"

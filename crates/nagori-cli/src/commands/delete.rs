@@ -25,6 +25,5 @@ pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Re
             )?;
         }
     }
-    print_ack(format);
-    Ok(())
+    print_ack(format)
 }

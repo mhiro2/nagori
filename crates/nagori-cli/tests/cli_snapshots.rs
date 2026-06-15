@@ -98,9 +98,25 @@ fn clear_all_text_snapshot() {
 
 #[test]
 fn clear_all_json_snapshot() {
+    // `--json` is the pretty single-document form (docs/cli.md); `--jsonl`
+    // below pins the compact one-line variant.
     let (_dir, db) = temp_db();
     let output = nagori(&db)
         .args(["--json", "clear", "--all"])
+        .output()
+        .expect("invoke nagori");
+    assert!(output.status.success(), "exit: {:?}", output.status);
+    insta::assert_snapshot!(&stdout_string(&output), @r#"{
+  "deleted": 0
+}
+"#);
+}
+
+#[test]
+fn clear_all_jsonl_snapshot() {
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["--jsonl", "clear", "--all"])
         .output()
         .expect("invoke nagori");
     assert!(output.status.success(), "exit: {:?}", output.status);
@@ -190,16 +206,14 @@ fn clear_invalid_older_than_days_exits_non_one() {
 }
 
 #[test]
-fn add_without_text_or_stdin_exits_internal() {
-    // `nagori add` with neither --text nor --stdin is a usage error. It
-    // currently surfaces as a bare anyhow (not a typed AppError), so it maps to
-    // exit 8 via `exit_code_for`'s default arm. Pinned here so the exit-code
-    // contract is explicit; realigning these input errors to
-    // InvalidInput/exit 2 is tracked separately.
+fn add_without_text_or_stdin_exits_with_invalid_input_code() {
+    // `nagori add` with neither --text nor --stdin is a usage error: it maps
+    // to InvalidInput / exit 2, lining up with the oversize-stdin guard rather
+    // than falling through to the internal-error bucket (exit 8).
     let (_dir, db) = temp_db();
     let output = nagori(&db).arg("add").output().expect("invoke nagori");
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(8), "missing input → exit 8");
+    assert_eq!(output.status.code(), Some(2), "missing input → exit 2");
     let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
     assert!(
         stderr.contains("--text") || stderr.contains("--stdin"),
@@ -208,13 +222,12 @@ fn add_without_text_or_stdin_exits_internal() {
 }
 
 #[test]
-fn add_with_non_utf8_stdin_exits_internal() {
+fn add_with_non_utf8_stdin_exits_with_invalid_input_code() {
     use std::io::Write;
     use std::process::Stdio;
 
-    // Non-UTF-8 stdin is rejected after the size check. Like the missing-input
-    // case it is a bare anyhow today, so it maps to exit 8. Pinned alongside
-    // the missing-input contract.
+    // Non-UTF-8 stdin is rejected after the size check, as InvalidInput /
+    // exit 2 — the same bucket as the oversize and missing-input guards.
     let (_dir, db) = temp_db();
     let mut child = nagori(&db)
         .args(["add", "--stdin"])
@@ -232,7 +245,7 @@ fn add_with_non_utf8_stdin_exits_internal() {
         .expect("write stdin");
     let output = child.wait_with_output().expect("wait for nagori");
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(8), "non-UTF-8 stdin → exit 8");
+    assert_eq!(output.status.code(), Some(2), "non-UTF-8 stdin → exit 2");
     let stderr = String::from_utf8(output.stderr).expect("stderr utf-8");
     assert!(
         stderr.contains("not valid UTF-8"),
@@ -293,12 +306,33 @@ fn add_then_list_jsonl_snapshot() {
 
 #[test]
 fn daemon_stop_without_ipc_errors_with_invalid_usage() {
+    // Missing `--ipc` is a usage error → InvalidInput / exit 2 (not the
+    // internal-error bucket), and it must not open the store: a command that
+    // can never succeed locally shouldn't leave an empty DB behind as a side
+    // effect.
     let (_dir, db) = temp_db();
     let mut cmd = nagori(&db);
     cmd.args(["daemon", "stop"]);
     cmd.assert()
-        .failure()
+        .code(2)
         .stderr(predicate::str::contains("daemon stop requires"));
+    assert!(
+        !db.exists(),
+        "daemon stop must not create the DB file as a side effect",
+    );
+}
+
+#[test]
+fn list_limit_zero_is_rejected() {
+    // `--limit 0` used to pass clap and silently print nothing. The range
+    // lower bound now rejects it at parse time (clap's usage error → exit 2).
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["list", "--limit", "0"])
+        .output()
+        .expect("invoke nagori");
+    assert!(!output.status.success(), "exit: {:?}", output.status);
+    assert_eq!(output.status.code(), Some(2), "limit 0 → exit 2");
 }
 
 #[test]

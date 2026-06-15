@@ -15,7 +15,7 @@ mod output;
 
 use commands::{Executor, IpcContext, LocalContext};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(name = "nagori")]
 #[command(about = "Local-first clipboard history CLI")]
 struct Cli {
@@ -45,7 +45,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum Command {
     List(ListArgs),
     Search(SearchArgs),
@@ -70,10 +70,15 @@ enum Command {
     Daemon(DaemonArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct ListArgs {
-    #[arg(long, default_value_t = 20)]
+    /// Maximum number of recent entries to show. Must be at least 1 — `0`
+    /// would print nothing. Has no effect together with `--pinned`, which
+    /// always returns the full pinned set.
+    #[arg(long, default_value_t = 20, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     limit: usize,
+    /// List the full set of pinned entries instead of recent ones. `--limit`
+    /// does not apply to this listing.
     #[arg(long)]
     pinned: bool,
     /// Include full text for Private/Secret entries.
@@ -81,21 +86,23 @@ struct ListArgs {
     include_sensitive: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct SearchArgs {
     query: String,
-    #[arg(long, default_value_t = 50)]
+    /// Maximum number of results to return. Must be at least 1 — `0` would
+    /// print nothing.
+    #[arg(long, default_value_t = 50, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     limit: usize,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct GetArgs {
     id: String,
     #[arg(long)]
     include_sensitive: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct AddArgs {
     #[arg(long, conflicts_with = "stdin")]
     text: Option<String>,
@@ -103,12 +110,12 @@ struct AddArgs {
     stdin: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct IdArgs {
     id: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 #[command(group = clap::ArgGroup::new("clear_scope").required(true).args(&["older_than_days", "all"]))]
 struct ClearArgs {
     #[arg(long)]
@@ -118,13 +125,13 @@ struct ClearArgs {
     all: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct QuickArgs {
     action: QuickActionId,
     id: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct AiArgs {
     action: AiActionId,
     id: String,
@@ -143,20 +150,20 @@ struct AiArgs {
     no_stream: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct DaemonArgs {
     #[command(subcommand)]
     command: DaemonCommand,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum DaemonCommand {
     Status,
     Run(DaemonRunArgs),
     Stop,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct DaemonRunArgs {
     /// Clipboard poll interval. Must be non-zero — `0` would spin the
     /// capture loop into a busy loop — and is capped at one hour so a
@@ -228,9 +235,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .to_owned()
         });
     }
-    if cli.db.is_none() && cli.auto_ipc {
-        // Reads only try IPC under explicit `--auto-ipc`, preserving the
-        // "read straight from disk" UX for casual queries.
+    // `--auto-ipc` only changes *reads* (see the flag's help): non-read
+    // commands ignore it and route exactly as they would without it. Gating
+    // the whole IPC attempt on the read predicate keeps that contract — and
+    // guarantees the fallback below only ever re-runs an idempotent read,
+    // never an action like `ai` (which may create an entry) or a control
+    // command like `daemon stop` (whose success closes the connection).
+    if cli.db.is_none() && cli.auto_ipc && can_fall_back_to_local_read(&cli.command) {
         let candidate = default_socket_path();
         if let Ok(token_path) = nagori_ipc::token_path_for_endpoint(&candidate)
             && let Ok(token) = nagori_ipc::read_token_file(&token_path)
@@ -239,20 +250,37 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 .await
                 .is_ok()
         {
-            return run_over_ipc(cli, &candidate).await;
+            // The probe succeeded, but the owner can still exit in the window
+            // between it and the command's own connection (a probe→connect
+            // TOCTOU). If that race makes the endpoint unreachable mid-flight,
+            // fall through to the local read below instead of failing the
+            // command. A *logical* error from a reachable daemon (NotFound, …)
+            // is surfaced as-is, never masked by a silent local re-run.
+            match run_over_ipc(cli.clone(), &candidate).await {
+                Ok(()) => return Ok(()),
+                Err(err) if is_ipc_transport_error(&err) => {
+                    init_tracing();
+                    tracing::warn!(
+                        socket = %candidate.display(),
+                        "ipc_fallback_to_local_db reason=owner_exited_after_probe mode=local-fallback"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            // The endpoint either had no readable token or failed the health
+            // probe. Reads fall back to opening the SQLite file directly —
+            // safe against a concurrent owner, but any cache invalidation
+            // we'd normally trigger via IPC isn't delivered. Surface the
+            // fallback at warn! (stderr) so a user debugging stale results
+            // sees the mismatch instead of having to bisect why their query
+            // lags.
+            init_tracing();
+            tracing::warn!(
+                socket = %candidate.display(),
+                "ipc_fallback_to_local_db reason=endpoint_unreachable mode=local-fallback"
+            );
         }
-        // The endpoint either had no readable token or failed the health
-        // probe. Reads fall back to opening the SQLite file directly —
-        // safe against a concurrent owner, but any cache invalidation
-        // we'd normally trigger via IPC isn't delivered. Surface the
-        // fallback at warn! (stderr) so a user debugging stale results
-        // sees the mismatch instead of having to bisect why their query
-        // lags.
-        init_tracing();
-        tracing::warn!(
-            socket = %candidate.display(),
-            "ipc_fallback_to_local_db reason=endpoint_unreachable mode=local-fallback"
-        );
     }
     // Explicit `--db` writes are gated on the same lock; a held lock means
     // a running instance owns that store and the write must not bypass it.
@@ -331,6 +359,51 @@ const fn is_write_command(cmd: &Command) -> bool {
             | Command::Paste(_)
             | Command::Clear(_)
     )
+}
+
+/// Whether a command is a pure, side-effect-free read that `--auto-ipc` may
+/// route to the daemon and, on an unreachable endpoint, re-run against the
+/// local store.
+///
+/// This gates the whole `--auto-ipc` IPC attempt, honouring the flag's
+/// contract that it "only changes reads": non-read commands ignore it and run
+/// exactly as they would without it. It also keeps the local fallback safe —
+/// `ai` may create an entry (its `Done` carries a `created_entry`) and is
+/// expensive, so a re-run could double the work while the daemon is still
+/// generating; `quick` is an action rather than a read; `daemon stop` is a
+/// control command whose very success closes the connection. The write
+/// commands never reach this path (they route by the instance lock).
+const fn can_fall_back_to_local_read(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::List(_)
+            | Command::Search(_)
+            | Command::Get(_)
+            | Command::Doctor
+            | Command::Capabilities
+            | Command::Daemon(DaemonArgs {
+                command: DaemonCommand::Status,
+            })
+    )
+}
+
+/// Whether a `run_over_ipc` failure means the endpoint became unreachable —
+/// the owner exited in the probe→connect window, or the socket/token vanished
+/// — as opposed to a logical error the daemon returned (`NotFound`, `Policy`, …).
+///
+/// Transport failures surface as [`AppError::Platform`]: the client's connect
+/// / connect-timeout / request-timeout paths raise it, and
+/// [`IpcContext::connect`](commands::IpcContext) maps a vanished token file to
+/// it too. Combined with [`can_fall_back_to_local_read`], the only commands
+/// this gates are pure reads — which never produce a daemon-side
+/// `platform_error` — so an `AppError::Platform` here always means the
+/// exchange failed at the transport, not a logical error worth surfacing.
+/// Re-running such a read locally is idempotent, so even a post-connect
+/// transport failure (a slow/wedged daemon hitting the request timeout) safely
+/// degrades to the authoritative on-disk read the `--auto-ipc` contract
+/// promises.
+fn is_ipc_transport_error(err: &anyhow::Error) -> bool {
+    matches!(err.downcast_ref::<AppError>(), Some(AppError::Platform(_)))
 }
 
 fn exit_code_for(err: &anyhow::Error) -> u8 {
@@ -431,6 +504,40 @@ fn resolve_default_db_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_is_limited_to_pure_reads() {
+        // Under `--auto-ipc`, only pure reads may re-run against the local
+        // store on an IPC transport failure. Actions (`ai` can create an
+        // entry; `quick` is a transform) and the `daemon stop` control command
+        // must surface the IPC error instead of being silently re-run — else a
+        // successful `daemon stop` whose response drops would report exit 2,
+        // and an `ai` timeout would double-execute the generation.
+        let cmd = |args: &[&str]| Cli::try_parse_from(args).expect("parse").command;
+        for read in [
+            vec!["nagori", "list"],
+            vec!["nagori", "search", "q"],
+            vec!["nagori", "get", "id"],
+            vec!["nagori", "doctor"],
+            vec!["nagori", "capabilities"],
+            vec!["nagori", "daemon", "status"],
+        ] {
+            assert!(
+                can_fall_back_to_local_read(&cmd(&read)),
+                "{read:?} should be local-fallback eligible"
+            );
+        }
+        for non_read in [
+            vec!["nagori", "ai", "summarize", "id"],
+            vec!["nagori", "quick", "format-json", "id"],
+            vec!["nagori", "daemon", "stop"],
+        ] {
+            assert!(
+                !can_fall_back_to_local_read(&cmd(&non_read)),
+                "{non_read:?} must surface the IPC error, not fall back"
+            );
+        }
+    }
     use anyhow::anyhow;
     use commands::ipc_error_to_anyhow;
 

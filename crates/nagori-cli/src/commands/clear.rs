@@ -19,12 +19,12 @@ pub async fn run(executor: &Executor, args: &ClearArgs, format: OutputFormat) ->
                 }
             };
             let deleted = store.clear_older_than(cutoff).await?;
-            print_clear_result(deleted, format);
+            print_clear_result(deleted, format)?;
         }
         Executor::Ipc(ctx) => {
             let request = clear_request_from_args(args)?;
             let resp = ctx.client.send(IpcRequest::Clear(request)).await?;
-            print_clear_result(expect_cleared(resp)?.deleted, format);
+            print_clear_result(expect_cleared(resp)?.deleted, format)?;
         }
     }
     Ok(())

@@ -29,6 +29,5 @@ pub async fn run(
             )?;
         }
     }
-    print_ack(format);
-    Ok(())
+    print_ack(format)
 }
