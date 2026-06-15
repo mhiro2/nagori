@@ -91,6 +91,46 @@ fn find_linked_cli(
         .cloned()
 }
 
+/// Whether an existing `~/.local/bin/nagori` entry is a symlink Nagori
+/// plausibly created and may therefore repoint, versus a regular file or a
+/// foreign symlink the user placed themselves (which must never be clobbered).
+/// Three shapes count as ours:
+///   * it already resolves to the current bundled CLI (a live, exact match) —
+///     the common idempotent re-run;
+///   * its target carries the macOS app-bundle shape
+///     (`…/Nagori.app/Contents/MacOS/nagori`), so a still-present copy at an
+///     older app location counts even when it no longer resolves to `source`;
+///   * it is dangling (resolves to nothing) and its final component is the
+///     bundled CLI name — an old Nagori link whose former app location is
+///     gone. A dangling link is already broken, so repointing it is a repair,
+///     not a clobber; this is what lets a prior *Linux* install (whose bundle
+///     path is not the macOS shape) be repointed instead of refused as
+///     foreign. A *live* foreign link still fails the check and is preserved.
+#[cfg(unix)]
+fn is_repointable_link(meta: &std::fs::Metadata, dest: &Path, source_canonical: &Path) -> bool {
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    if canonical_or_self(dest).as_path() == source_canonical {
+        return true;
+    }
+    let Ok(target) = std::fs::read_link(dest) else {
+        return false;
+    };
+    if target.ends_with("Nagori.app/Contents/MacOS/nagori") {
+        return true;
+    }
+    // Dangling link whose final component is the bundled CLI name. `metadata`
+    // follows the link; only a NotFound means the target is genuinely gone, so
+    // a permission (or other) error is treated as "not dangling" — an
+    // unreadable foreign link must never be repointed.
+    let dangling = matches!(
+        std::fs::metadata(dest),
+        Err(ref err) if err.kind() == std::io::ErrorKind::NotFound
+    );
+    dangling && target.file_name() == Some(std::ffi::OsStr::new(BUNDLED_CLI_NAME))
+}
+
 /// Whether the bundled binary lives somewhere stable enough to symlink
 /// against. macOS App Translocation and `.dmg`-mounted launches, and Linux
 /// `AppImage` mounts, expose the executable from an ephemeral path that
@@ -276,16 +316,7 @@ fn install_cli_blocking() -> CommandResult<CliInstallResultDto> {
     // user placed there themselves.
     match std::fs::symlink_metadata(&dest) {
         Ok(meta) => {
-            // Repoint only a link we plausibly created: one that already
-            // resolves to the current source, or whose target has the exact
-            // bundled-CLI shape (`…/Nagori.app/Contents/MacOS/nagori`) so an
-            // older app location still counts. A regular file or a foreign
-            // symlink is left untouched.
-            let ours = meta.file_type().is_symlink()
-                && (canonical_or_self(&dest) == source_canonical
-                    || std::fs::read_link(&dest)
-                        .is_ok_and(|target| target.ends_with("Nagori.app/Contents/MacOS/nagori")));
-            if !ours {
+            if !is_repointable_link(&meta, &dest, &source_canonical) {
                 return Err(CommandError::invalid_input(format!(
                     "{} already exists and was not created by Nagori. Remove it manually \
                      and retry.",
@@ -304,6 +335,12 @@ fn install_cli_blocking() -> CommandResult<CliInstallResultDto> {
             )));
         }
     }
+    // `symlink` refuses to overwrite an existing path, so if a regular file or
+    // a foreign link races into `dest` between the check above and here it
+    // errors rather than clobbering it — preserving the "never clobber what
+    // isn't ours" invariant. (An atomic rename-over-dest would replace the
+    // entry unconditionally and lose that guarantee, so we keep the
+    // remove-then-create shape.)
     std::os::unix::fs::symlink(&source, &dest).map_err(|err| {
         CommandError::internal(format!(
             "failed to link {} -> {}: {err}",
@@ -394,6 +431,60 @@ mod tests {
             path_bin.join("nagori"),
             "a link on PATH is preferred over the off-PATH ~/.local/bin link",
         );
+    }
+
+    #[test]
+    fn is_repointable_link_repoints_a_dangling_nagori_link() {
+        // A prior install's link whose former app location is gone: dangling,
+        // final component `nagori`. Linux bundle paths don't match the macOS
+        // app-bundle shape, so this branch is what lets a stale Linux link be
+        // repointed instead of refused as foreign.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("nagori");
+        symlink(tmp.path().join("gone/usr/bin/nagori"), &dest).expect("dangling symlink");
+        let meta = std::fs::symlink_metadata(&dest).expect("symlink meta");
+        let source_canonical = tmp.path().join("new/nagori");
+        assert!(is_repointable_link(&meta, &dest, &source_canonical));
+    }
+
+    #[test]
+    fn is_repointable_link_refuses_a_live_foreign_link() {
+        // A symlink the user created themselves to their own build: live
+        // (target exists), not the macOS shape. Even though its filename is
+        // `nagori`, a live foreign link must be preserved, not clobbered.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let foreign_target = tmp.path().join("custom-build").join("nagori");
+        std::fs::create_dir_all(foreign_target.parent().unwrap()).expect("mkdir");
+        std::fs::write(&foreign_target, b"#!/bin/sh\n").expect("write target");
+        let dest = tmp.path().join("nagori");
+        symlink(&foreign_target, &dest).expect("foreign symlink");
+        let meta = std::fs::symlink_metadata(&dest).expect("symlink meta");
+        let source_canonical = tmp.path().join("bundled/nagori");
+        assert!(!is_repointable_link(&meta, &dest, &source_canonical));
+    }
+
+    #[test]
+    fn is_repointable_link_repoints_a_live_link_to_the_current_source() {
+        // The common idempotent re-run: the link already resolves to the
+        // bundled CLI we're about to install.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("nagori-cli");
+        std::fs::write(&source, b"#!/bin/sh\n").expect("write source");
+        let source_canonical = canonical_or_self(&source);
+        let dest = tmp.path().join("nagori");
+        symlink(&source, &dest).expect("symlink");
+        let meta = std::fs::symlink_metadata(&dest).expect("symlink meta");
+        assert!(is_repointable_link(&meta, &dest, &source_canonical));
+    }
+
+    #[test]
+    fn is_repointable_link_refuses_a_regular_file() {
+        // A real file (not a symlink) is never ours, even if named `nagori`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("nagori");
+        std::fs::write(&dest, b"#!/bin/sh\n").expect("write file");
+        let meta = std::fs::symlink_metadata(&dest).expect("meta");
+        assert!(!is_repointable_link(&meta, &dest, &tmp.path().join("src")));
     }
 
     #[test]
