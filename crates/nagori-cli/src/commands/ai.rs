@@ -1,6 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use futures::StreamExt;
-use nagori_core::{AiActionId, AiEvent, AiRequestOptions, EntryId};
+use nagori_core::{AiActionId, AiEvent, AiRequestOptions, AppError, EntryId};
 use nagori_daemon::NagoriRuntime;
 use nagori_ipc::{AiOutputDto, IpcRequest, RunAiActionRequest};
 
@@ -103,7 +103,11 @@ async fn run_ai_streaming(
             item = events.next() => item,
         };
         let Some(item) = item else { break };
-        let event = item.map_err(|err| anyhow!("{:?}: {}", err.code, err.message))?;
+        // Map the structured stream error through `AppError` (the same
+        // conversion the daemon's IPC path uses) so the CLI derives a
+        // classified exit code instead of stringifying the error and falling
+        // through to the internal-error bucket.
+        let event = item.map_err(|err| anyhow::Error::from(AppError::from(&err)))?;
 
         if stream && format.is_json() {
             let mut handle = stdout.lock();

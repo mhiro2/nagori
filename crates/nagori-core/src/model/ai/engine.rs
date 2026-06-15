@@ -214,6 +214,30 @@ impl std::fmt::Display for AiError {
 
 impl std::error::Error for AiError {}
 
+impl From<&AiError> for crate::AppError {
+    /// Map a structured backend error onto the app-wide error taxonomy so
+    /// every surface that consumes an AI stream — the daemon's one-shot IPC
+    /// path, the CLI's in-process streaming path, the desktop — classifies
+    /// the failure identically (and the CLI derives the same exit code
+    /// regardless of which path produced the error).
+    fn from(err: &AiError) -> Self {
+        match err.code {
+            AiErrorCode::Unavailable
+            | AiErrorCode::CapabilityMismatch
+            | AiErrorCode::AssetMissing => Self::Unsupported(err.message.clone()),
+            // Both are user-actionable refusals of the *input* (too large, or
+            // its content tripped the model guardrail), not internal backend
+            // failures. Surfacing them as policy refusals lets the UI/CLI
+            // distinguish "edit your input and retry" from a genuine
+            // `BackendInternal` breakage.
+            AiErrorCode::InputTooLarge | AiErrorCode::GuardrailViolation => {
+                Self::Policy(err.message.clone())
+            }
+            _ => Self::Ai(err.message.clone()),
+        }
+    }
+}
+
 /// Coarse error classes the UI and CLI can branch on without parsing messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -499,6 +523,45 @@ mod tests {
     #[test]
     fn empty_input_is_zero_tokens() {
         assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn ai_error_maps_to_app_error_taxonomy() {
+        use crate::AppError;
+        // Backend/availability classes → Unsupported.
+        for code in [
+            AiErrorCode::Unavailable,
+            AiErrorCode::CapabilityMismatch,
+            AiErrorCode::AssetMissing,
+        ] {
+            let err = AiError::new(code, "x");
+            assert!(
+                matches!(AppError::from(&err), AppError::Unsupported(_)),
+                "{code:?} should map to Unsupported"
+            );
+        }
+        // User-actionable input refusals → Policy.
+        for code in [AiErrorCode::InputTooLarge, AiErrorCode::GuardrailViolation] {
+            let err = AiError::new(code, "x");
+            assert!(
+                matches!(AppError::from(&err), AppError::Policy(_)),
+                "{code:?} should map to Policy"
+            );
+        }
+        // Everything else (Timeout, BackendInternal, RateLimited, Unknown) →
+        // the generic Ai bucket.
+        for code in [
+            AiErrorCode::Timeout,
+            AiErrorCode::BackendInternal,
+            AiErrorCode::RateLimited,
+            AiErrorCode::Unknown,
+        ] {
+            let err = AiError::new(code, "boom");
+            assert!(
+                matches!(AppError::from(&err), AppError::Ai(_)),
+                "{code:?} should map to Ai"
+            );
+        }
     }
 
     #[test]

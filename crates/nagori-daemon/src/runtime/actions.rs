@@ -550,20 +550,12 @@ fn coalesce_non_streaming(events: nagori_ai::AiEventStream) -> nagori_ai::AiEven
 }
 
 /// Maps a structured [`AiError`] onto the daemon's [`AppError`].
+///
+/// Delegates to the shared `From<&AiError>` conversion in `nagori-core` so the
+/// daemon, the CLI's in-process streaming path, and the desktop all classify
+/// AI failures the same way.
 fn ai_error_to_app(err: &AiError) -> AppError {
-    match err.code {
-        AiErrorCode::Unavailable | AiErrorCode::CapabilityMismatch | AiErrorCode::AssetMissing => {
-            AppError::Unsupported(err.message.clone())
-        }
-        // Both are user-actionable refusals of the *input* (too large, or its
-        // content tripped the model guardrail), not internal backend failures.
-        // Surfacing them as policy refusals lets the UI/CLI distinguish "edit
-        // your input and retry" from a genuine `BackendInternal` breakage.
-        AiErrorCode::InputTooLarge | AiErrorCode::GuardrailViolation => {
-            AppError::Policy(err.message.clone())
-        }
-        _ => AppError::Ai(err.message.clone()),
-    }
+    AppError::from(err)
 }
 
 /// Availability report for hosts with no wired AI engine.
