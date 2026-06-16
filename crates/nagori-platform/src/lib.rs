@@ -10,7 +10,7 @@ pub mod window;
 
 pub use blocking::{
     BlockingError, CLIPBOARD_OP_TIMEOUT, clipboard_blocking, clipboard_write_blocking,
-    lock_clipboard_for_write, run_blocking_with_timeout,
+    lock_clipboard_for_write, lock_clipboard_recovering, run_blocking_with_timeout,
 };
 pub use capability::{
     Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,

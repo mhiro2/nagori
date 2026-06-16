@@ -100,6 +100,31 @@ where
     }
 }
 
+/// Lock a clipboard adapter's mutex for a *read*, recovering from a poisoned
+/// guard instead of erroring.
+///
+/// The mutex guards an `arboard::Clipboard` (or the in-memory fallback
+/// buffer), neither of which carries a Rust-side invariant that a panic
+/// mid-operation could leave half-updated: the next call starts a fresh
+/// `OpenClipboard` / pasteboard read. So a poison flag here only means "some
+/// earlier closure panicked while holding the lock", not "the guarded data is
+/// now unsafe to touch". Propagating it as an error instead — the old
+/// `lock_err` mapping — wedged *every* later capture / copy / paste behind one
+/// historical panic until the process restarted. We recover the guard and
+/// clear the flag so the adapter keeps working; the panic is still surfaced by
+/// whatever unwound originally.
+///
+/// Reads are unbounded (no [`CLIPBOARD_OP_TIMEOUT`]) because a late read result
+/// is simply discarded — see the module docs. Writes use
+/// [`lock_clipboard_for_write`], which adds the lock-acquisition timeout.
+pub fn lock_clipboard_recovering<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        mutex.clear_poison();
+        tracing::warn!("clipboard_mutex_poison_recovered");
+        poisoned.into_inner()
+    })
+}
+
 /// Acquire a clipboard adapter's mutex for a *write*, bounded by
 /// [`CLIPBOARD_OP_TIMEOUT`].
 ///
@@ -113,8 +138,9 @@ where
 /// stage preserves the no-timeout write contract: failing here touches
 /// nothing, and once the guard is held the OS write still runs unbounded.
 ///
-/// Poisoning is reported as an error exactly like the `lock_err` mapping the
-/// adapters used before.
+/// A poisoned guard is recovered rather than reported as an error (see
+/// [`lock_clipboard_recovering`] for why that is safe here), so a single
+/// historical panic does not wedge every later copy-back behind it.
 pub fn lock_clipboard_for_write<'a, T>(
     mutex: &'a std::sync::Mutex<T>,
     op: &'static str,
@@ -139,7 +165,13 @@ fn lock_for_write_with_limit<'a, T>(
         match mutex.try_lock() {
             Ok(guard) => return Ok(guard),
             Err(std::sync::TryLockError::Poisoned(err)) => {
-                return Err(nagori_core::AppError::Platform(err.to_string()));
+                // Recover rather than wedge every later copy-back behind one
+                // historical panic — the guarded clipboard has no Rust
+                // invariant a poison could mean is broken. Mirrors
+                // `lock_clipboard_recovering`.
+                mutex.clear_poison();
+                tracing::warn!(op, "clipboard_mutex_poison_recovered");
+                return Ok(err.into_inner());
             }
             Err(std::sync::TryLockError::WouldBlock) => {
                 if std::time::Instant::now() >= deadline {
@@ -335,5 +367,57 @@ mod tests {
         .await
         .expect_err("a panicking closure must surface as Panicked");
         assert!(matches!(err, BlockingError::Panicked { op: "boom" }));
+    }
+
+    #[test]
+    fn recovering_lock_returns_the_guard_after_a_poisoning_panic() {
+        // A panic while holding the guard poisons the mutex. The recovering
+        // read lock must hand the guard back rather than wedging every later
+        // capture behind the historical panic.
+        use std::sync::{Arc, Mutex};
+
+        let mutex = Arc::new(Mutex::new(7_u32));
+        let poison = mutex.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().expect("holder lock");
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(
+            mutex.is_poisoned(),
+            "the panic must have poisoned the mutex"
+        );
+
+        let guard = lock_clipboard_recovering(&mutex);
+        assert_eq!(*guard, 7, "the recovered guard still sees the value");
+        drop(guard);
+        assert!(
+            !mutex.is_poisoned(),
+            "recovery clears the poison so later locks succeed cleanly"
+        );
+    }
+
+    #[test]
+    fn write_lock_recovers_a_poisoned_guard() {
+        // The write-side lock acquisition must also recover from poison —
+        // otherwise a single panic wedges every copy-back until restart.
+        use std::sync::{Arc, Mutex};
+
+        let mutex = Arc::new(Mutex::new(()));
+        let poison = mutex.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().expect("holder lock");
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(
+            mutex.is_poisoned(),
+            "the panic must have poisoned the mutex"
+        );
+
+        let guard = lock_for_write_with_limit(&mutex, "test_write", Duration::from_millis(50))
+            .expect("a poisoned guard must be recovered, not errored");
+        drop(guard);
+        assert!(!mutex.is_poisoned(), "recovery clears the poison");
     }
 }
