@@ -39,12 +39,11 @@ impl PasteController for MacosPasteController {
                 pasted: true,
                 message: None,
             }),
-            Err(err) => Err(AppError::Paste {
-                reason: PasteFailureReason::AccessibilityMissing,
-                message: format!(
-                    "auto-paste failed (Accessibility permission may be missing): {err}"
-                ),
-            }),
+            // `synthesize_cmd_v` carries the reason so an enigo
+            // *initialisation* failure (an environment problem) is not
+            // misreported as a missing Accessibility grant — only the
+            // CGEvent *posts* are gated by that grant.
+            Err((reason, message)) => Err(AppError::Paste { reason, message }),
         }
     }
 
@@ -57,8 +56,27 @@ impl PasteController for MacosPasteController {
     }
 }
 
+/// Why a synthetic-paste step failed, paired with a human-readable message.
+///
+/// Splitting the reason out lets the caller tell an enigo *initialisation*
+/// failure (an environment problem — no window-server session, event tap could
+/// not open) from a `CGEvent` *post* failure (which the Accessibility grant
+/// gates). Collapsing both into `AccessibilityMissing` previously sent users
+/// to the Setup card even when the grant was present.
 #[cfg(target_os = "macos")]
-fn synthesize_cmd_v() -> std::result::Result<(), String> {
+type SynthError = (PasteFailureReason, String);
+
+/// Build the `AccessibilityMissing` error for a failed `CGEvent` key post.
+#[cfg(target_os = "macos")]
+fn key_post_error(err: &enigo::InputError) -> SynthError {
+    (
+        PasteFailureReason::AccessibilityMissing,
+        format!("auto-paste failed (Accessibility permission may be missing): {err}"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn synthesize_cmd_v() -> std::result::Result<(), SynthError> {
     // `kVK_ANSI_V` from `<HIToolbox/Events.h>` — the *physical* keycode for
     // the V key on a US ANSI keyboard. Sent via `Key::Other` so enigo skips
     // its Unicode→keycode lookup, which routes through
@@ -75,21 +93,30 @@ fn synthesize_cmd_v() -> std::result::Result<(), String> {
     // synthesised keystroke; that case currently has to fall back to
     // manual ⌘V.
     const KVK_ANSI_V: u32 = 0x09;
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|err| err.to_string())?;
+    // `Enigo::new` opens the event source. A failure here is an
+    // initialisation/environment problem, not the missing Accessibility grant
+    // (the grant gates the CGEvent posts below), so report it as `Unknown`
+    // rather than steering the user to the Accessibility Setup card.
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|err| {
+        (
+            PasteFailureReason::Unknown,
+            format!("auto-paste failed: could not initialise input synthesis: {err}"),
+        )
+    })?;
     enigo
         .key(Key::Meta, Direction::Press)
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| key_post_error(&err))?;
     if let Err(err) = enigo.key(Key::Other(KVK_ANSI_V), Direction::Click) {
         // The click failed; release Meta so the user is not left with a
         // stuck modifier. A silent drop here previously meant a single
         // failed paste could leave Cmd held until the next OS-level event.
         let _ = release_meta_with_retry(&mut enigo);
-        return Err(err.to_string());
+        return Err(key_post_error(&err));
     }
     // The success path also has to release Meta — if this fails the user is
     // just as stuck as on the click-error path, so retry once before
     // surfacing the error.
-    release_meta_with_retry(&mut enigo)
+    release_meta_with_retry(&mut enigo).map_err(|err| key_post_error(&err))
 }
 
 /// Best-effort Meta release: try once, then retry once on failure. Logs both
@@ -97,7 +124,7 @@ fn synthesize_cmd_v() -> std::result::Result<(), String> {
 /// the second attempt's result so callers on the success path can surface a
 /// release failure to the user instead of silently leaving ⌘ pressed.
 #[cfg(target_os = "macos")]
-fn release_meta_with_retry(enigo: &mut Enigo) -> std::result::Result<(), String> {
+fn release_meta_with_retry(enigo: &mut Enigo) -> std::result::Result<(), enigo::InputError> {
     let Err(first) = enigo.key(Key::Meta, Direction::Release) else {
         return Ok(());
     };
@@ -106,12 +133,13 @@ fn release_meta_with_retry(enigo: &mut Enigo) -> std::result::Result<(), String>
         error = %first,
         "Meta key release failed; retrying"
     );
-    enigo.key(Key::Meta, Direction::Release).map_err(|second| {
-        warn!(
-            target: "nagori::platform::paste",
-            error = %second,
-            "Meta key release retry failed; ⌘ may remain virtually pressed"
-        );
-        second.to_string()
-    })
+    enigo
+        .key(Key::Meta, Direction::Release)
+        .inspect_err(|second| {
+            warn!(
+                target: "nagori::platform::paste",
+                error = %second,
+                "Meta key release retry failed; ⌘ may remain virtually pressed"
+            );
+        })
 }

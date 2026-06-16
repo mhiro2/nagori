@@ -64,7 +64,36 @@ impl PermissionChecker for MacosPermissionChecker {
     }
 
     async fn request_accessibility(&self, prompt: bool) -> Result<PermissionStatus> {
-        let granted = accessibility_trusted_with_prompt(prompt);
+        // `AXIsProcessTrustedWithOptions` is a synchronous FFI call that may
+        // surface the TCC dialog on the next event-loop pass; bound it on the
+        // blocking pool so a wedged WindowServer can't pin the tokio worker.
+        // `accessibility_status` already runs its probe this way — this keeps
+        // the request path from diverging into a bare synchronous FFI call.
+        let granted = match run_blocking_with_timeout(
+            "macos_accessibility_request",
+            PROBE_TIMEOUT,
+            move || accessibility_trusted_with_prompt(prompt),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                // A timed-out request can't be read as granted or denied;
+                // surface the degraded row whose Setup card still deep-links
+                // the user into System Settings.
+                return Ok(PermissionStatus {
+                    kind: PermissionKind::Accessibility,
+                    state: PermissionState::Denied,
+                    message: Some(format!(
+                        "Accessibility request did not complete ({})",
+                        err.describe()
+                    )),
+                    reason_code: Some("probe_timed_out".to_owned()),
+                    setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+                    docs_url: None,
+                });
+            }
+        };
         Ok(if granted {
             PermissionStatus {
                 kind: PermissionKind::Accessibility,

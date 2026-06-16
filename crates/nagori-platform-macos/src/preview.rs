@@ -84,6 +84,18 @@ fn spawn_qlmanage(paths: &[PathBuf]) -> Result<Child> {
     let mut command = Command::new(QLMANAGE_PATH);
     command.arg("-p");
     for path in paths {
+        // Reject any non-absolute path before it reaches the argv. A
+        // clipboard-derived path beginning with `-` (e.g. `-h`) would
+        // otherwise be parsed by `qlmanage` as a flag rather than a file;
+        // requiring an absolute path closes that injection vector — a `-`
+        // path is never absolute — and matches the capture pipeline, which
+        // only ever lands absolute file URLs. The path itself is kept out
+        // of the error so it never lands in logs.
+        if !path.is_absolute() {
+            return Err(AppError::InvalidInput(
+                "preview requires an absolute path".to_owned(),
+            ));
+        }
         command.arg(path);
     }
     // Discard stdout/stderr — qlmanage chats to stderr ("Testing
@@ -117,6 +129,18 @@ mod tests {
         match controller.preview(&[]).await {
             Err(AppError::InvalidInput(_)) => {}
             other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flag_shaped_relative_path_is_rejected_before_spawn() {
+        // A clipboard-derived path starting with `-` must not reach the
+        // `qlmanage` argv as a flag. `is_absolute()` rejects it (and every
+        // other relative path) before the spawn.
+        let result = spawn_qlmanage(&[PathBuf::from("-no-such-flag")]);
+        match result {
+            Err(AppError::InvalidInput(_)) => {}
+            other => panic!("expected InvalidInput for a relative path, got {other:?}"),
         }
     }
 
