@@ -37,7 +37,7 @@ fn settle_classifies_by_changecount_stability() {
 #[test]
 fn resolve_capture_attempts_returns_the_first_settled() {
     let mut calls = 0;
-    let result = resolve_capture_attempts(3, || {
+    let result = resolve_capture_attempts(3, std::time::Duration::ZERO, || {
         calls += 1;
         Ok(CaptureAttempt::Settled(tagged("settled")))
     })
@@ -52,7 +52,7 @@ fn resolve_capture_attempts_returns_the_first_settled() {
 #[test]
 fn resolve_capture_attempts_retries_past_torn_until_settled() {
     let mut calls = 0;
-    let result = resolve_capture_attempts(3, || {
+    let result = resolve_capture_attempts(3, std::time::Duration::ZERO, || {
         calls += 1;
         if calls < 3 {
             Ok(CaptureAttempt::Torn(tagged("torn")))
@@ -71,7 +71,7 @@ fn resolve_capture_attempts_retries_past_torn_until_settled() {
 #[test]
 fn resolve_capture_attempts_accepts_the_last_torn_when_retries_exhaust() {
     let mut calls = 0;
-    let result = resolve_capture_attempts(3, || {
+    let result = resolve_capture_attempts(3, std::time::Duration::ZERO, || {
         calls += 1;
         Ok(CaptureAttempt::Torn(tagged(&format!("torn{calls}"))))
     })
@@ -88,7 +88,7 @@ fn resolve_capture_attempts_accepts_the_last_torn_when_retries_exhaust() {
 #[test]
 fn resolve_capture_attempts_propagates_an_attempt_error() {
     let mut calls = 0;
-    let result = resolve_capture_attempts(3, || {
+    let result = resolve_capture_attempts(3, std::time::Duration::ZERO, || {
         calls += 1;
         Err(nagori_core::AppError::Platform("probe failed".to_owned()))
     });

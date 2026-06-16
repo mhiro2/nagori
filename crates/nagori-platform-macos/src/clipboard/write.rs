@@ -505,7 +505,10 @@ fn file_url_pasteboard_item(path: &str) -> Option<Retained<NSPasteboardItem>> {
     if item.setString_forType(&value, unsafe { NSPasteboardTypeFileURL }) {
         Some(item)
     } else {
-        tracing::warn!(%path, "NSPasteboardItem rejected file URL");
+        // Log the length only, never the path itself — clipboard-derived
+        // paths can be sensitive and the "length only, never content" rule
+        // applies to file URLs the same way it does to clip bodies.
+        tracing::warn!(path_len = path.len(), "NSPasteboardItem rejected file URL");
         None
     }
 }

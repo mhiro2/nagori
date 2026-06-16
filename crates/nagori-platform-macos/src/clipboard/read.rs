@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use arboard::Clipboard;
 use async_trait::async_trait;
@@ -6,17 +7,27 @@ use nagori_core::{
     AppError, ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, Result,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, clipboard_blocking, lock_err,
-    platform_err,
+    CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, clipboard_blocking,
+    lock_clipboard_recovering, platform_err,
 };
 use time::OffsetDateTime;
 
 #[cfg(target_os = "macos")]
-use super::file_url::{oversized_payload, pasteboard_exclusion};
+use super::MAX_TEXT_REP_BYTES;
+#[cfg(target_os = "macos")]
+use super::file_url::{oversized_payload, pasteboard_exclusion, plain_text_byte_len};
 #[cfg(target_os = "macos")]
 use super::transcode::collect_macos_extras;
 use super::transcode::{finalize_captured, transcode_snapshot};
 use super::{MacosClipboard, pasteboard_sequence};
+
+/// Brief pause between torn-snapshot retries.
+///
+/// Three immediate retries during a foreign write storm burn out in a
+/// sub-millisecond window and all observe the same torn state. A short sleep
+/// (the read runs on the blocking pool, so sleeping is fine) lets the foreign
+/// writer settle, raising the odds the next attempt reads a stable changeCount.
+const TORN_RETRY_BACKOFF: Duration = Duration::from_millis(1);
 
 #[async_trait]
 impl ClipboardReader for MacosClipboard {
@@ -26,44 +37,33 @@ impl ClipboardReader for MacosClipboard {
         // them on the blocking pool so a stuck pasteboard never pins a
         // tokio worker thread (the daemon only has a handful of workers,
         // and a stuck `current_snapshot` previously starved IPC handlers).
+        //
+        // Funnel through the same `capture_attempt` machinery as the bounded
+        // path (passing `None` for "no size budget") so the unbounded read no
+        // longer drifts from it: it now gets torn-snapshot retry and the
+        // owner-exclusion check for free, instead of sampling the sequence once
+        // at the end and trusting it.
         let clipboard = self.clipboard.clone();
-        let snapshot =
-            clipboard_blocking("current_snapshot", move || -> Result<ClipboardSnapshot> {
-                // Hold the arboard mutex across `get_text` *and* the AppKit
-                // extras read so a concurrent `write_image_bytes` cannot slip
-                // its `clearContents`/`setData` pair between the two and stitch
-                // a torn snapshot (e.g. old text paired with new image, or an
-                // empty pasteboard observed mid-write).
-                let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-                let plain = match guard.get_text() {
-                    Ok(text) => Some(text),
-                    Err(arboard::Error::ContentNotAvailable) => None,
-                    Err(err) => return Err(platform_err(&err)),
-                };
-
-                let mut representations = Vec::new();
-
-                #[cfg(target_os = "macos")]
-                let _ = collect_macos_extras(&mut representations, None);
-
-                if let Some(text) = plain {
-                    representations.push(ClipboardRepresentation {
-                        mime_type: "text/plain".to_owned(),
-                        data: ClipboardData::Text(text),
-                    });
-                }
-
-                let snapshot = ClipboardSnapshot {
-                    sequence: pasteboard_sequence(),
-                    captured_at: OffsetDateTime::now_utc(),
-                    source: None,
-                    representations,
-                };
-                drop(guard);
-                Ok(snapshot)
-            })
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))??;
+        let captured = clipboard_blocking("current_snapshot", move || {
+            capture_snapshot_attempts(&clipboard)
+        })
+        .await
+        .map_err(|err| AppError::Platform(err.to_string()))??;
+        // Map the captured result back to a plain snapshot. The unbounded path
+        // has no budget, so `Oversized` cannot occur; an `Excluded` clip yields
+        // an empty snapshot — we never materialise the secret body.
+        let snapshot = match captured {
+            CapturedSnapshot::Captured(snapshot) => snapshot,
+            CapturedSnapshot::Excluded { sequence, .. } => ClipboardSnapshot {
+                sequence,
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: Vec::new(),
+            },
+            CapturedSnapshot::Oversized { .. } => {
+                unreachable!("the unbounded current_snapshot path has no size budget")
+            }
+        };
         // Normalise any captured TIFF to PNG off the read timeout — the raw
         // bytes are already captured (and torn-checked) under the lock above.
         transcode_snapshot(snapshot).await
@@ -127,8 +127,18 @@ fn capture_snapshot_with_max(
     clipboard: &Mutex<Clipboard>,
     max_bytes: usize,
 ) -> Result<CapturedSnapshot> {
-    resolve_capture_attempts(SNAPSHOT_CAPTURE_MAX_RETRIES, || {
-        capture_attempt(clipboard, max_bytes)
+    resolve_capture_attempts(SNAPSHOT_CAPTURE_MAX_RETRIES, TORN_RETRY_BACKOFF, || {
+        capture_attempt(clipboard, Some(max_bytes))
+    })
+}
+
+/// Unbounded snapshot read with the same torn-snapshot retry as
+/// [`capture_snapshot_with_max`], but without a size budget (`max_bytes =
+/// None`). Backs `current_snapshot`; the per-rep defence-in-depth ceilings
+/// ([`MAX_TEXT_REP_BYTES`] / `MAX_IMAGE_REP_BYTES`) still bound memory.
+fn capture_snapshot_attempts(clipboard: &Mutex<Clipboard>) -> Result<CapturedSnapshot> {
+    resolve_capture_attempts(SNAPSHOT_CAPTURE_MAX_RETRIES, TORN_RETRY_BACKOFF, || {
+        capture_attempt(clipboard, None)
     })
 }
 
@@ -139,6 +149,7 @@ fn capture_snapshot_with_max(
 /// instead of a live `NSPasteboard` racing a foreign writer.
 pub(super) fn resolve_capture_attempts(
     max_retries: usize,
+    backoff: Duration,
     mut attempt: impl FnMut() -> Result<CaptureAttempt>,
 ) -> Result<CapturedSnapshot> {
     for n in 1..=max_retries {
@@ -148,17 +159,58 @@ pub(super) fn resolve_capture_attempts(
                 if n == max_retries {
                     return Ok(snapshot);
                 }
-                // Foreign writer landed mid-attempt — discard and retry.
+                // Foreign writer landed mid-attempt — back off briefly so a
+                // write storm doesn't consume every retry in the same instant,
+                // then discard and retry. Tests pass `Duration::ZERO`.
+                if !backoff.is_zero() {
+                    std::thread::sleep(backoff);
+                }
             }
         }
     }
     unreachable!("the final retry returns its result unconditionally")
 }
 
-/// One probe → load → verify pass over the pasteboard.
+/// Read the plain-text (`text/plain`) representation under the arboard lock,
+/// applying the unbounded-path defence-in-depth text ceiling.
+///
+/// On the `None` (budget-less `current_snapshot`) path a probe of the
+/// pasteboard's plain-text byte length gates the read: a payload over
+/// [`MAX_TEXT_REP_BYTES`] is dropped *before* `get_text` copies it, so a
+/// hostile multi-GB string never lands in the daemon's heap. The bounded path
+/// is already covered by `oversized_payload`, so it skips the probe.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<CaptureAttempt> {
-    let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
+fn read_plain_text(guard: &mut Clipboard, max_bytes: Option<usize>) -> Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    if max_bytes.is_none() && plain_text_byte_len().is_some_and(|len| len > MAX_TEXT_REP_BYTES) {
+        tracing::warn!(
+            ceiling = MAX_TEXT_REP_BYTES,
+            "pasteboard_text_rep_exceeds_ceiling"
+        );
+        return Ok(None);
+    }
+    match guard.get_text() {
+        Ok(text) => Ok(Some(text)),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(err) => Err(platform_err(&err)),
+    }
+}
+
+/// One probe → load → verify pass over the pasteboard.
+///
+/// `max_bytes` is `Some` on the bounded `current_snapshot_with_max` path (an
+/// over-budget payload short-circuits to `Oversized`) and `None` on the
+/// unbounded `current_snapshot` path (no budget to reject against — oversized
+/// reps are instead dropped by the per-rep defence-in-depth ceilings).
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+fn capture_attempt(
+    clipboard: &Mutex<Clipboard>,
+    max_bytes: Option<usize>,
+) -> Result<CaptureAttempt> {
+    // Recover from a poisoned guard rather than failing the read: the arboard
+    // clipboard has no Rust invariant a prior panic could leave broken, and
+    // erroring here would wedge every later capture behind one historical panic.
+    let mut guard = lock_clipboard_recovering(clipboard);
     let before = pasteboard_sequence();
 
     // Owner-declared exclusion marker (nspasteboard.org Concealed / Transient)
@@ -194,7 +246,9 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
     // loop's post-load check remains authoritative for the final
     // ClipboardEntry payload.
     #[cfg(target_os = "macos")]
-    if let Some(observed) = oversized_payload(max_bytes) {
+    if let Some(max) = max_bytes
+        && let Some(observed) = oversized_payload(max)
+    {
         let after = pasteboard_sequence();
         drop(guard);
         return Ok(settle(
@@ -203,7 +257,7 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
             CapturedSnapshot::Oversized {
                 sequence: after.clone(),
                 observed_bytes: observed,
-                limit: max_bytes,
+                limit: max,
             },
         ));
     }
@@ -214,18 +268,20 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
     // of multiple reps is not bounded here at all. The capture
     // loop's post-load `payload_bytes > max_entry_size_bytes`
     // check is the authoritative limit — the first pass just spares
-    // us the worst allocations. Mirror `current_snapshot`
-    // exactly so the two entry points cannot drift.
-    let plain = match guard.get_text() {
-        Ok(text) => Some(text),
-        Err(arboard::Error::ContentNotAvailable) => None,
-        Err(err) => return Err(platform_err(&err)),
-    };
+    // us the worst allocations.
+    //
+    // On the unbounded path there is no `oversized_payload` pre-filter, so
+    // `read_plain_text` applies a defence-in-depth text ceiling before
+    // `get_text` copies the payload (the bounded path is already covered by the
+    // pre-filter above).
+    let plain = read_plain_text(&mut guard, max_bytes)?;
 
     let mut representations = Vec::new();
 
     #[cfg(target_os = "macos")]
-    if let Some(observed) = collect_macos_extras(&mut representations, Some(max_bytes)) {
+    let collected_oversize = collect_macos_extras(&mut representations, max_bytes);
+    #[cfg(target_os = "macos")]
+    if let (Some(max), Some(observed)) = (max_bytes, collected_oversize) {
         let after = pasteboard_sequence();
         drop(guard);
         return Ok(settle(
@@ -234,7 +290,7 @@ fn capture_attempt(clipboard: &Mutex<Clipboard>, max_bytes: usize) -> Result<Cap
             CapturedSnapshot::Oversized {
                 sequence: after.clone(),
                 observed_bytes: observed,
-                limit: max_bytes,
+                limit: max,
             },
         ));
     }

@@ -166,6 +166,26 @@ pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
     })
 }
 
+/// Byte length of the plain-text (`NSPasteboardTypeString`) representation, if
+/// present, without materialising it into a Rust `String`.
+///
+/// `NSString::len` reports the UTF-8 byte length directly. The unbounded
+/// `current_snapshot` path uses this to apply a defence-in-depth text ceiling
+/// before `get_text` copies the payload — the bounded path already covers this
+/// via [`oversized_payload`].
+#[cfg(target_os = "macos")]
+pub(super) fn plain_text_byte_len() -> Option<usize> {
+    objc2::rc::autoreleasepool(|_pool| {
+        // SAFETY: AppKit FFI on the shared pasteboard; we read only the byte
+        // length of the optional returned NSString, which has no side effects.
+        unsafe {
+            NSPasteboard::generalPasteboard()
+                .stringForType(NSPasteboardTypeString)
+                .map(|string| string.len())
+        }
+    })
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn oversized_file_urls(
     items: &NSArray<NSPasteboardItem>,

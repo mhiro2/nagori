@@ -81,6 +81,17 @@ fn read_pasteboard_file_url_string() -> Option<String> {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn write_entry_round_trips_image_and_text() {
+    // This test writes to the *shared* system pasteboard, so a plain
+    // `cargo test` on a dev machine would clobber whatever the developer has
+    // copied. Gate it behind an opt-in env var so the default test run leaves
+    // the clipboard untouched; CI / e2e set `NAGORI_PASTEBOARD_TESTS=1`.
+    if std::env::var_os("NAGORI_PASTEBOARD_TESTS").is_none() {
+        eprintln!(
+            "skipping write_entry_round_trips_image_and_text: \
+             set NAGORI_PASTEBOARD_TESTS=1 to run pasteboard-clobbering tests"
+        );
+        return;
+    }
     let clipboard = match MacosClipboard::new() {
         Ok(clipboard) => clipboard,
         Err(AppError::Platform(message))

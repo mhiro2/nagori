@@ -25,6 +25,19 @@ const MAX_FILE_URL_ITEMS: usize = 4096;
 #[cfg(target_os = "macos")]
 const MAX_IMAGE_REP_BYTES: usize = 256 * 1024 * 1024;
 
+/// Hard ceiling on a single pasteboard *text* representation (plain text,
+/// HTML, RTF) copied into the daemon's heap on the unbounded
+/// `current_snapshot` path.
+///
+/// The bounded `current_snapshot_with_max` path already rejects oversized text
+/// via `oversized_payload` before `get_text`, so this only guards the
+/// budget-less path. Without it a hostile pasteboard owner could land a
+/// multi-GB string in our address space. Mirrors the image ceiling
+/// [`MAX_IMAGE_REP_BYTES`] and the Linux adapter's `INTERNAL_BODY_CEILING_BYTES`
+/// — 256 MiB is far above any realistic copied document.
+#[cfg(target_os = "macos")]
+const MAX_TEXT_REP_BYTES: usize = 256 * 1024 * 1024;
+
 /// UTI mapped to `image/jpeg` for pasteboard publishing.
 ///
 /// `NSPasteboardType` is a `NSString` newtype, so MIMEs that lack a static

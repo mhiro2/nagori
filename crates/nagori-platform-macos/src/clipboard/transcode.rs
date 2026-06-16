@@ -15,9 +15,9 @@ use objc2_app_kit::{
 };
 
 #[cfg(target_os = "macos")]
-use super::MAX_IMAGE_REP_BYTES;
-#[cfg(target_os = "macos")]
 use super::file_url::{FileUrlPaths, collect_file_url_paths, ns_data_to_vec};
+#[cfg(target_os = "macos")]
+use super::{MAX_IMAGE_REP_BYTES, MAX_TEXT_REP_BYTES};
 
 #[cfg(target_os = "macos")]
 pub(super) fn collect_macos_extras(
@@ -69,14 +69,21 @@ pub(super) fn collect_macos_extras(
                 }
             }
 
-            if let Some(html) = pb.stringForType(NSPasteboardTypeHTML) {
+            // Probe the UTF-8 byte length before `to_string()` materialises a
+            // Rust `String`, so a multi-GB HTML/RTF payload on the unbounded
+            // path is dropped rather than copied (see `text_rep_within_ceiling`).
+            if let Some(html) = pb.stringForType(NSPasteboardTypeHTML)
+                && text_rep_within_ceiling("text/html", &html)
+            {
                 out.push(ClipboardRepresentation {
                     mime_type: "text/html".to_owned(),
                     data: ClipboardData::Text(html.to_string()),
                 });
             }
 
-            if let Some(rtf) = pb.stringForType(NSPasteboardTypeRTF) {
+            if let Some(rtf) = pb.stringForType(NSPasteboardTypeRTF)
+                && text_rep_within_ceiling("application/rtf", &rtf)
+            {
                 out.push(ClipboardRepresentation {
                     mime_type: "application/rtf".to_owned(),
                     data: ClipboardData::Text(rtf.to_string()),
@@ -135,6 +142,25 @@ fn image_rep_within_ceiling(mime: &str, data: &objc2_foundation::NSData) -> bool
             byte_count,
             ceiling = MAX_IMAGE_REP_BYTES,
             "pasteboard_image_rep_exceeds_ceiling"
+        );
+        return false;
+    }
+    true
+}
+
+/// Pre-copy admission check for a pasteboard *text* representation: `true`
+/// when its UTF-8 byte length fits under [`MAX_TEXT_REP_BYTES`]. The
+/// over-ceiling case is logged (length only, never content) and the
+/// representation is skipped — mirrors [`image_rep_within_ceiling`].
+#[cfg(target_os = "macos")]
+fn text_rep_within_ceiling(mime: &str, string: &objc2_foundation::NSString) -> bool {
+    let byte_count = string.len();
+    if byte_count > MAX_TEXT_REP_BYTES {
+        tracing::warn!(
+            mime,
+            byte_count,
+            ceiling = MAX_TEXT_REP_BYTES,
+            "pasteboard_text_rep_exceeds_ceiling"
         );
         return false;
     }
