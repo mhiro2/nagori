@@ -985,10 +985,13 @@ fn poll_fd_readable(fd: std::os::fd::RawFd, timeout: Duration) -> io::Result<boo
 #[cfg(target_os = "linux")]
 fn serialize_uri_list(paths: &[String]) -> Result<String> {
     let mut out = String::new();
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
+        // Identify the offending entry by index only — never echo the path,
+        // which can be sensitive ("length only, never content").
         let url = url::Url::from_file_path(path).map_err(|()| {
             AppError::Unsupported(format!(
-                "cannot publish {path:?} as a Wayland file-list entry: path must be absolute",
+                "cannot publish file-list entry at index {index} as a Wayland offer: \
+                 path must be absolute",
             ))
         })?;
         out.push_str(url.as_str());
