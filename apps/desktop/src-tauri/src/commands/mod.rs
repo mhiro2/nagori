@@ -208,9 +208,16 @@ pub async fn paste_entry(
     if let Some(target) = app.get_webview_window("main") {
         let _ = target.hide();
     }
-    if let Some(prev) = state.take_previous_frontmost() {
-        let _ = state.window.activate_restore_target(&prev).await;
-    }
+    // Capture the restore result rather than discarding it: if re-focusing the
+    // source window fails (no native handle, stale HWND, `SetForegroundWindow`
+    // denied) we must not synthesise the paste below, or the keystroke lands in
+    // whatever window currently holds focus — the self-paste accident. Mirrors
+    // `run_palette_paste`; checked at the auto-paste gate so the clipboard write
+    // still happens (the user can paste manually).
+    let restored = match state.take_previous_frontmost() {
+        Some(prev) => state.window.activate_restore_target(&prev).await,
+        None => Ok(()),
+    };
     // Give the OS a tick to re-focus the target app before we send the
     // synthesised paste. 60ms is the empirical sweet spot reported by
     // the Maccy / Paste community on macOS; on Windows the same value
@@ -267,18 +274,36 @@ pub async fn paste_entry(
         emit_paste_failed(&app, &message);
         return Err(CommandError { message, ..cmd_err });
     }
-    if settings.auto_paste_enabled
-        && let Err(err) = state.runtime.paste_frontmost().await
-    {
-        tracing::warn!(error = %err, "paste_entry_synth_failed");
-        let reason = paste_failure_reason(&err);
-        let cmd_err: CommandError = err.into();
-        let message = format!(
-            "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
-            cmd_err.message
-        );
-        emit_paste_failed_with_reason(&app, &message, &reason);
-        return Err(CommandError { message, ..cmd_err });
+    if settings.auto_paste_enabled {
+        // A restore failure means the synthesised paste would land in the
+        // wrong window, so surface it and skip synthesis. The clipboard write
+        // already succeeded, so the user can still paste manually — same
+        // "copy succeeded" framing as `run_palette_paste`.
+        if let Err(err) = restored {
+            tracing::warn!(error = %err, "paste_entry_previous_app_restore_failed");
+            let cmd_err: CommandError = err.into();
+            let message = format!(
+                "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
+                cmd_err.message
+            );
+            emit_paste_failed_with_reason(&app, &message, &PasteFailureReason::PreviousAppLost);
+            return Err(CommandError { message, ..cmd_err });
+        }
+        if let Err(err) = state.runtime.paste_frontmost().await {
+            tracing::warn!(error = %err, "paste_entry_synth_failed");
+            let reason = paste_failure_reason(&err);
+            let cmd_err: CommandError = err.into();
+            let message = format!(
+                "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
+                cmd_err.message
+            );
+            emit_paste_failed_with_reason(&app, &message, &reason);
+            return Err(CommandError { message, ..cmd_err });
+        }
+    } else if let Err(err) = restored {
+        // No synthesis step to abort; a restore failure only costs the user one
+        // manual click, so log it but do not raise a hard error.
+        tracing::warn!(error = %err, "paste_entry_previous_app_restore_failed");
     }
     state.record_last_pasted(entry_id);
     Ok(())
