@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use arboard::{Clipboard, ImageData};
 use async_trait::async_trait;
@@ -13,9 +14,30 @@ use nagori_core::{
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
     clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
-    has_publishable_representation, lock_clipboard_for_write, lock_err, platform_err,
+    has_publishable_representation, lock_clipboard_for_write, lock_clipboard_recovering,
+    platform_err,
 };
 use time::OffsetDateTime;
+
+/// Hard ceiling on a single clipboard *text* representation copied into the
+/// daemon's heap on the unbounded `current_snapshot` path.
+///
+/// The bounded `current_snapshot_with_max` path already rejects oversized text
+/// via `win::oversized_payload` before `get_text`; this guards the budget-less
+/// path so a hostile clipboard owner cannot land a multi-GB string in our
+/// address space. Mirrors the macOS adapter's `MAX_TEXT_REP_BYTES` and the
+/// Linux adapter's `INTERNAL_BODY_CEILING_BYTES` — 256 MiB is far above any
+/// realistic copied document.
+const MAX_TEXT_REP_BYTES: usize = 256 * 1024 * 1024;
+
+/// Brief pause between torn-snapshot retries.
+///
+/// Three immediate retries during a foreign write storm burn out in a
+/// sub-millisecond window and all observe the same torn state. A short sleep
+/// (the read runs on the blocking pool, so sleeping is fine) lets the foreign
+/// writer settle, raising the odds the next attempt reads a stable sequence
+/// number. Mirrors the macOS adapter's `TORN_RETRY_BACKOFF`.
+const TORN_RETRY_BACKOFF: Duration = Duration::from_millis(1);
 
 /// Windows clipboard adapter.
 ///
@@ -428,28 +450,62 @@ fn capture_snapshot(
     let mut attempt = 0;
     loop {
         attempt += 1;
+        if attempt > 1 {
+            // Back off briefly before re-reading so a foreign write storm
+            // doesn't consume every retry in the same instant; runs on the
+            // blocking pool, so sleeping is fine.
+            std::thread::sleep(TORN_RETRY_BACKOFF);
+        }
         let before = native_sequence_number();
         if let Some(limit) = max_bytes {
             #[cfg(windows)]
             if let Some(observed) = win::oversized_payload(limit) {
-                return Ok((
-                    CapturedSnapshot::Oversized {
-                        sequence: ClipboardSequence::native(i64::from(native_sequence_number())),
-                        observed_bytes: observed,
-                        limit,
-                    },
-                    None,
-                ));
+                // The size probe is a separate clipboard session from the
+                // `before` sample, so a write landing in between would anchor
+                // `last_sequence` to a *different* clip we never sized — and
+                // the capture loop, which dedupes on sequence equality, would
+                // skip that clip forever. Mirror the settled path below:
+                // accept on a stable sequence or the final retry, otherwise
+                // discard and retry rather than committing a torn observation.
+                let after = native_sequence_number();
+                if before == after || attempt >= MAX_RETRIES {
+                    return Ok((
+                        CapturedSnapshot::Oversized {
+                            sequence: ClipboardSequence::native(i64::from(after)),
+                            observed_bytes: observed,
+                            limit,
+                        },
+                        None,
+                    ));
+                }
+                continue;
             }
             #[cfg(not(windows))]
             let _ = limit;
         }
 
-        let mut guard = clipboard.lock().map_err(|err| lock_err(&err))?;
-        let plain = match guard.get_text() {
-            Ok(text) => Some(text),
-            Err(arboard::Error::ContentNotAvailable) => None,
-            Err(err) => return Err(platform_err(&err)),
+        let mut guard = lock_clipboard_recovering(clipboard);
+        // Defence-in-depth text ceiling for the unbounded path (the bounded
+        // path is already covered by `win::oversized_payload` above). Probe the
+        // `CF_UNICODETEXT` byte length before `get_text` copies it so a hostile
+        // multi-GB string never lands in our heap.
+        #[cfg(windows)]
+        let skip_oversized_text =
+            max_bytes.is_none() && win::unicode_text_over_ceiling(MAX_TEXT_REP_BYTES);
+        #[cfg(not(windows))]
+        let skip_oversized_text = false;
+        let plain = if skip_oversized_text {
+            tracing::warn!(
+                ceiling = MAX_TEXT_REP_BYTES,
+                "clipboard_text_rep_exceeds_ceiling"
+            );
+            None
+        } else {
+            match guard.get_text() {
+                Ok(text) => Some(text),
+                Err(arboard::Error::ContentNotAvailable) => None,
+                Err(err) => return Err(platform_err(&err)),
+            }
         };
         // Copy the *raw* clipboard image bytes (registered "PNG" then
         // `CF_DIBV5`, the same order arboard's `get_image` honours) out under
@@ -927,7 +983,7 @@ mod win {
             let _guard = ClipboardGuard;
             let mut observed = 0_usize;
             if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0
-                && let Some(text_bytes) = unicode_text_utf8_len()
+                && let Some(text_bytes) = unicode_text_utf8_len(max_bytes)
             {
                 observed = observed.saturating_add(text_bytes);
                 if observed > max_bytes {
@@ -966,6 +1022,29 @@ mod win {
         }
     }
 
+    /// Whether the `CF_UNICODETEXT` payload's UTF-8 byte length exceeds
+    /// `ceiling`, probed via `GlobalSize` before the text is copied out.
+    ///
+    /// Backs the unbounded `current_snapshot` path's defence-in-depth text
+    /// ceiling (the bounded path uses [`oversized_payload`]). Opens its own
+    /// clipboard session, exactly like `oversized_payload`, so it is safe to
+    /// call before arboard's `get_text` (which manages its own session).
+    pub(super) fn unicode_text_over_ceiling(ceiling: usize) -> bool {
+        // SAFETY: the `OpenClipboard` is paired with the `ClipboardGuard`
+        // drop, and the borrowed handle is only inspected while the clipboard
+        // is open.
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return false;
+            }
+            let _guard = ClipboardGuard;
+            if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) == 0 {
+                return false;
+            }
+            unicode_text_utf8_len(ceiling).is_some_and(|len| len > ceiling)
+        }
+    }
+
     /// Register the `"PNG"` clipboard format name and return its
     /// session-stable id. Registering the same name twice returns the
     /// same id, so calling this every probe is cheap. A registration
@@ -987,7 +1066,16 @@ mod win {
         (bytes > 0).then_some(bytes)
     }
 
-    unsafe fn unicode_text_utf8_len() -> Option<usize> {
+    /// UTF-8 byte length of the `CF_UNICODETEXT` payload, capped at `cap`.
+    ///
+    /// Sums UTF-8 lengths up to the first NUL, short-circuiting as soon as the
+    /// running total exceeds `cap`. Both callers only compare against a
+    /// threshold, so the exact length past `cap` is irrelevant — and stopping
+    /// early keeps a multi-GB clip without a NUL terminator from forcing a full
+    /// UTF-16 decode under the clipboard lock (and inside the read timeout).
+    /// Each non-NUL UTF-16 unit yields >= 1 UTF-8 byte, so the loop visits at
+    /// most `cap + 1` units before the threshold is crossed.
+    unsafe fn unicode_text_utf8_len(cap: usize) -> Option<usize> {
         let handle = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
         if handle.is_null() {
             return None;
@@ -1002,10 +1090,14 @@ mod win {
         }
         let units = bytes / mem::size_of::<u16>();
         let wide = unsafe { slice::from_raw_parts(locked.cast::<u16>(), units) };
-        let text_units = wide.iter().position(|unit| *unit == 0).unwrap_or(units);
-        let utf8_len = char::decode_utf16(wide[..text_units].iter().copied())
-            .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8())
-            .sum();
+        let mut utf8_len = 0_usize;
+        for decoded in char::decode_utf16(wide.iter().copied().take_while(|unit| *unit != 0)) {
+            utf8_len =
+                utf8_len.saturating_add(decoded.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8());
+            if utf8_len > cap {
+                break;
+            }
+        }
         let _ = unsafe { GlobalUnlock(handle) };
         Some(utf8_len)
     }
@@ -1482,16 +1574,20 @@ mod win {
         // inputs (paths containing interior NULs, lengths above the Win32
         // long-path cap) before touching the clipboard at all.
         let mut wide_buffer: Vec<u16> = Vec::new();
-        for path in paths {
+        for (index, path) in paths.iter().enumerate() {
             let encoded: Vec<u16> = OsString::from(path).encode_wide().collect();
+            // Identify the offending entry by index / length only — never echo
+            // the path itself, which can be sensitive ("length only, never
+            // content").
             if encoded.contains(&0) {
                 return Err(AppError::Unsupported(format!(
-                    "path {path:?} contains an interior NUL; cannot publish as CF_HDROP",
+                    "file path at index {index} contains an interior NUL; cannot publish as CF_HDROP",
                 )));
             }
             if encoded.len() >= MAX_PATH_WCHARS as usize {
                 return Err(AppError::Unsupported(format!(
-                    "path {path:?} exceeds the Win32 long-path limit",
+                    "file path at index {index} ({} wchars) exceeds the Win32 long-path limit",
+                    encoded.len(),
                 )));
             }
             wide_buffer.extend_from_slice(&encoded);

@@ -10,6 +10,16 @@
 //! place (signing is still pending — `SmartScreen` warns on first
 //! launch). There is no first-class permission UI: Windows does not
 //! gate clipboard / input synthesis behind a user-managed permission.
+//!
+//! **Rich-text capture asymmetry.** Windows *capture* deliberately does not
+//! read `CF_HTML` / `Rich Text Format` — only plain text, file lists, and
+//! images — whereas the macOS adapter captures HTML/RTF off the pasteboard.
+//! The multi-rep *publisher* above can still emit `CF_HTML` / RTF, but a clip
+//! captured on Windows never carries those representations, so its Preserve
+//! copy-back is plain-text-only where the same clip captured on macOS would
+//! round-trip rich text. `capture_text` advertises plain-text capture;
+//! there is no separate rich-text capture row to gate, so this asymmetry is
+//! documented here rather than expressed in the capability matrix.
 
 use nagori_platform::{
     Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,

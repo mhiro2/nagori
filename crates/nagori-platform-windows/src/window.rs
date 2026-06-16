@@ -89,7 +89,14 @@ impl WindowBehavior for WindowsWindowBehavior {
 
     async fn activate_restore_target(&self, target: &RestoreTarget) -> Result<()> {
         let Some(handle) = target.native_handle else {
-            return Ok(());
+            // No HWND to re-focus. Returning `Ok` here would let the caller
+            // proceed to the synthesised Ctrl+V with focus still on whatever
+            // window currently owns it — the self-paste accident. Abort the
+            // paste instead so clipboard content is never injected into an
+            // unintended window.
+            return Err(nagori_core::AppError::Platform(
+                "restore target has no native window handle; aborting paste".to_owned(),
+            ));
         };
         let snapshot_pid = target.snapshot_pid;
         let snapshot_exe = target.source.executable_path.clone();
@@ -175,7 +182,12 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
     // SAFETY: GetForegroundWindow has no parameters and returns a HWND;
     // GetWindowThreadProcessId writes the owning PID through the out
     // pointer to our stack-owned `u32`.
-    let (hwnd, pid, executable_path, window_title) = unsafe {
+    //
+    // We deliberately do *not* call `query_window_title` here: `RestoreTarget`
+    // carries no window-title field, and `GetWindowTextW` is a synchronous
+    // round-trip into the target process — pure latency on the palette-open
+    // hot path for a value we would only discard.
+    let (hwnd, pid, executable_path) = unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
             return None;
@@ -184,12 +196,7 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
         if GetWindowThreadProcessId(hwnd, &raw mut pid) == 0 {
             return None;
         }
-        (
-            hwnd,
-            pid,
-            query_process_image_path(pid),
-            query_window_title(hwnd),
-        )
+        (hwnd, pid, query_process_image_path(pid))
     };
 
     let name = app_name_from_exe(executable_path.as_deref());
@@ -200,7 +207,6 @@ fn capture_restore_target_sync() -> Option<RestoreTarget> {
     // a hostile signed cast under `clippy::ptr_as_ptr`.
     #[allow(clippy::cast_possible_truncation)] // hwnd fits in usize by definition
     let native_handle = Some(hwnd as usize as u64);
-    let _ = window_title;
 
     Some(RestoreTarget {
         source: SourceApp {
