@@ -22,12 +22,16 @@
     appDenylistPatternsText: string;
     regexDenylistText: string;
     regexDenylistErrors: UserRegexError[];
+    purgeDeletedBusy: boolean;
+    purgeDeletedStatus: string | undefined;
+    purgeDeletedStatusKind: 'info' | 'error';
     debounceNumberMs: number;
     debounceTextareaMs: number;
     scheduleSave: (delay: number) => void;
     onPasswordManagerPresetToggle: (next: boolean) => void;
     describeRegexError: (err: UserRegexError) => string;
     toggleCaptureKind: (kind: ContentKind, enabled: boolean) => void;
+    runPurgeDeletedEntries: () => Promise<void>;
   };
 
   let {
@@ -38,12 +42,16 @@
     appDenylistPatternsText = $bindable(),
     regexDenylistText = $bindable(),
     regexDenylistErrors,
+    purgeDeletedBusy,
+    purgeDeletedStatus,
+    purgeDeletedStatusKind,
     debounceNumberMs,
     debounceTextareaMs,
     scheduleSave,
     onPasswordManagerPresetToggle,
     describeRegexError,
     toggleCaptureKind,
+    runPurgeDeletedEntries,
   }: Props = $props();
 
   // True on Linux/Wayland where neither X11 nor Wayland exposes the
@@ -212,6 +220,32 @@
     />
     <span class="help">{t.settings.retention.maxTotalBytesHelp}</span>
   </label>
+  <label>
+    <input
+      type="checkbox"
+      bind:checked={settings.permanentDeleteOnDelete}
+      onchange={() => scheduleSave(0)}
+    />
+    {t.settings.privacy.permanentDeleteOnDelete}
+  </label>
+  <span class="help">{t.settings.privacy.permanentDeleteOnDeleteHelp}</span>
+  <div class="actions">
+    <button
+      type="button"
+      class="secondary compact"
+      disabled={purgeDeletedBusy}
+      onclick={runPurgeDeletedEntries}
+    >
+      {purgeDeletedBusy
+        ? t.settings.privacy.purgeDeletedRunning
+        : t.settings.privacy.purgeDeletedNow}
+    </button>
+  </div>
+  {#if purgeDeletedStatus}
+    <p class="status" class:error={purgeDeletedStatusKind === 'error'}>
+      {purgeDeletedStatus}
+    </p>
+  {/if}
 </fieldset>
 
 <style>

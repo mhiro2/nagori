@@ -67,6 +67,8 @@ export const deleteEntry = (id: string): Promise<void> => invoke('delete_entry',
 
 export const deleteEntries = (ids: string[]): Promise<number> => invoke('delete_entries', { ids });
 
+export const purgeDeletedEntries = (): Promise<number> => invoke('purge_deleted_entries');
+
 export const copyEntriesCombined = (ids: string[]): Promise<void> =>
   invoke('copy_entries_combined', { ids });
 

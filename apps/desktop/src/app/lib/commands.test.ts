@@ -44,6 +44,8 @@ const baseSettings = (): AppSettings => ({
   showPreviewPane: true,
   showInMenuBar: true,
   clearOnQuit: false,
+  permanentDeleteOnDelete: false,
+  blockSensitiveCaptures: false,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',
@@ -131,6 +133,12 @@ describe('command wrappers', () => {
       run: () => commands.deleteEntries(['a', 'b']),
       cmd: 'delete_entries',
       args: { ids: ['a', 'b'] },
+    },
+    {
+      name: 'purgeDeletedEntries',
+      run: () => commands.purgeDeletedEntries(),
+      cmd: 'purge_deleted_entries',
+      args: undefined,
     },
     {
       name: 'copyEntriesCombined',

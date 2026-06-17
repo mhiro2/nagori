@@ -8,6 +8,7 @@
     getSettings,
     installCli,
     passwordManagerPreset,
+    purgeDeletedEntries,
     updateSettings,
   } from '../lib/commands';
   import { describeError, isSettingsConflict } from '../lib/errors';
@@ -445,6 +446,9 @@
   let updateReleaseUrl: string | undefined = $state(undefined);
 
   let updateDownloadSupported = $state(true);
+  let purgeDeletedBusy = $state(false);
+  let purgeDeletedStatus: string | undefined = $state(undefined);
+  let purgeDeletedStatusKind: 'info' | 'error' = $state('info');
 
   const runUpdateCheck = async (): Promise<void> => {
     if (updateChecking) return;
@@ -474,6 +478,22 @@
       updateStatus = describeError(err);
     } finally {
       updateChecking = false;
+    }
+  };
+
+  const runPurgeDeletedEntries = async (): Promise<void> => {
+    if (purgeDeletedBusy) return;
+    purgeDeletedBusy = true;
+    purgeDeletedStatus = undefined;
+    purgeDeletedStatusKind = 'info';
+    try {
+      const count = await purgeDeletedEntries();
+      purgeDeletedStatus = t.settings.privacy.purgeDeletedDone.replace('{count}', String(count));
+    } catch (err) {
+      purgeDeletedStatusKind = 'error';
+      purgeDeletedStatus = describeError(err);
+    } finally {
+      purgeDeletedBusy = false;
     }
   };
 
@@ -1086,12 +1106,16 @@
               bind:appDenylistPatternsText
               bind:regexDenylistText
               {regexDenylistErrors}
+              {purgeDeletedBusy}
+              {purgeDeletedStatus}
+              {purgeDeletedStatusKind}
               debounceNumberMs={DEBOUNCE_NUMBER_MS}
               debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
               {scheduleSave}
               {onPasswordManagerPresetToggle}
               {describeRegexError}
               {toggleCaptureKind}
+              {runPurgeDeletedEntries}
             />
           {/if}
 

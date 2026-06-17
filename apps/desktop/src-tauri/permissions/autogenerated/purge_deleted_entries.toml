@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-deleted-entries"
+description = "Enables the purge_deleted_entries command without any pre-configured scope."
+commands.allow = ["purge_deleted_entries"]
+
+[[permission]]
+identifier = "deny-purge-deleted-entries"
+description = "Denies the purge_deleted_entries command without any pre-configured scope."
+commands.deny = ["purge_deleted_entries"]

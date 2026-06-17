@@ -84,6 +84,8 @@ const baseSettings = (onboarding: OnboardingSettings): AppSettings => ({
   showPreviewPane: true,
   showInMenuBar: true,
   clearOnQuit: false,
+  permanentDeleteOnDelete: false,
+  blockSensitiveCaptures: false,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',

@@ -57,6 +57,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   addEntry: vi.fn(),
   deleteEntry: vi.fn(),
   deleteEntries: vi.fn(),
+  purgeDeletedEntries: vi.fn(),
   copyEntriesCombined: vi.fn(),
   pinEntry: vi.fn(),
   runQuickAction: vi.fn(),

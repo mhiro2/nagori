@@ -342,6 +342,12 @@ export const zhHans: Messages = {
         '警告：选择「原文保存」会把 API 密钥、JWT、私钥等机密以明文保存在本地 SQLite 数据库。数据库未加密，任何能读取主目录的进程（备份、同步客户端、恶意软件等）都可能恢复这些机密。如未充分理解相关风险，请使用「以脱敏形式保存」。',
       storeFullConfirm:
         '确定要以明文保存机密吗？数据库未加密，磁盘和包含数据目录的备份都将能还原原文。',
+      permanentDeleteOnDelete: '删除条目后立即从磁盘清除',
+      permanentDeleteOnDeleteHelp:
+        '启用后，删除条目时会立即从磁盘清除。禁用时，删除的条目会立刻从列表中消失，但要稍后在定期清理中才从磁盘清除。Secret 条目始终立即清除。',
+      purgeDeletedNow: '立即从磁盘清除已删除条目',
+      purgeDeletedRunning: '正在清除…',
+      purgeDeletedDone: '已从磁盘清除 {count} 个已删除条目。',
       regexDenylistAutosaveHint: '修正高亮的正则表达式错误后将自动保存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',

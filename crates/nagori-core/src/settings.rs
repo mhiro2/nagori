@@ -363,6 +363,15 @@ pub struct AppSettings {
     /// Pinned entries are always preserved.
     #[serde(default)]
     pub clear_on_quit: bool,
+    /// When `true`, per-entry delete performs an immediate hard delete instead
+    /// of writing a tombstone for the maintenance loop to reclaim later.
+    #[serde(default)]
+    pub permanent_delete_on_delete: bool,
+    /// When `true`, captures classified as `Private` or `Secret` are refused
+    /// storage entirely. This is stricter than `secret_handling=block` because
+    /// it also covers the Private tier.
+    #[serde(default)]
+    pub block_sensitive_captures: bool,
     /// When `false`, the capture loop discards the very first clipboard
     /// sequence it sees on launch (skipping whatever was already on the
     /// pasteboard before Nagori started). Default `true` preserves the
@@ -935,6 +944,8 @@ impl Default for AppSettings {
             show_preview_pane: default_show_preview_pane(),
             show_in_menu_bar: default_show_in_menu_bar(),
             clear_on_quit: false,
+            permanent_delete_on_delete: false,
+            block_sensitive_captures: false,
             capture_initial_clipboard_on_launch: default_capture_initial_clipboard_on_launch(),
             auto_update_check: default_auto_update_check(),
             update_channel: UpdateChannel::default(),

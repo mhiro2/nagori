@@ -681,6 +681,37 @@ async fn purge_deleted_hard_deletes_tombstones_including_pinned() {
 }
 
 #[tokio::test]
+async fn hard_delete_entry_physically_removes_live_and_tombstoned_rows() {
+    let store = SqliteStore::open_memory().unwrap();
+    let live = insert_text(&store, "delete immediately").await;
+    let tombstoned = insert_text(&store, "delete after tombstone").await;
+    store.mark_deleted(tombstoned).await.unwrap();
+
+    store.hard_delete_entry(live).await.unwrap();
+    store.hard_delete_entry(tombstoned).await.unwrap();
+
+    assert_eq!(count_total(&store), 0);
+    let conn = store.conn().unwrap();
+    for id in [live, tombstoned] {
+        for (table, column) in [
+            ("entries", "id"),
+            ("entry_representations", "entry_id"),
+            ("search_documents", "entry_id"),
+            ("ngrams", "entry_id"),
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+            let count: i64 = conn
+                .query_row(&sql, params![id.to_string()], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "{table} rows for the hard-deleted entry must be gone"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn reinserting_after_mark_deleted_creates_new_row() {
     // The content-hash UNIQUE index is `WHERE deleted_at IS NULL`, so
     // tombstoned rows must not block re-inserts of the same text.

@@ -432,6 +432,8 @@ export type AppSettings = {
   showPreviewPane: boolean;
   showInMenuBar: boolean;
   clearOnQuit: boolean;
+  permanentDeleteOnDelete: boolean;
+  blockSensitiveCaptures: boolean;
   captureInitialClipboardOnLaunch: boolean;
   autoUpdateCheck: boolean;
   updateChannel: UpdateChannel;

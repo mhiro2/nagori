@@ -387,6 +387,12 @@
           "markdownDescription": "Enables the preview_entry command without any pre-configured scope."
         },
         {
+          "description": "Enables the purge_deleted_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-purge-deleted-entries",
+          "markdownDescription": "Enables the purge_deleted_entries command without any pre-configured scope."
+        },
+        {
           "description": "Enables the rebuild_semantic_index command without any pre-configured scope.",
           "type": "string",
           "const": "allow-rebuild-semantic-index",
@@ -655,6 +661,12 @@
           "type": "string",
           "const": "deny-preview-entry",
           "markdownDescription": "Denies the preview_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the purge_deleted_entries command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-purge-deleted-entries",
+          "markdownDescription": "Denies the purge_deleted_entries command without any pre-configured scope."
         },
         {
           "description": "Denies the rebuild_semantic_index command without any pre-configured scope.",

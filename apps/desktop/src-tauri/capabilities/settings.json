@@ -6,6 +6,7 @@
   "permissions": [
     "allow-get-settings",
     "allow-update-settings",
+    "allow-purge-deleted-entries",
     "allow-get-permissions",
     "allow-request-accessibility",
     "allow-get-capabilities",

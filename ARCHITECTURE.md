@@ -602,15 +602,19 @@ representations, blobs, embeddings, thumbnails, and search / ngram
 index in the same transaction. Retention therefore reclaims disk (a
 later `VACUUM` from the maintenance sweep then shrinks the file) rather
 than tombstoning rows that grow it forever. Per-entry deletes
-(`delete_entry`) stay soft.
+(`delete_entry`) soft-delete by default, but
+`permanent_delete_on_delete` switches that surface to the same immediate
+hard-delete primitive. Secret rows are always hard-deleted immediately, and
+`purge_deleted` / the desktop's **Purge deleted entries now** command reclaim
+any remaining tombstones.
 
 Hard-delete reclaims the rows; `secure_delete = ON` (set on every pooled
 connection) zeroes their freed pages so the content is not recoverable
 from the freelist, and the explicit purge paths (`clear_non_pinned`,
-`clear_older_than`) follow up with `wal_checkpoint(TRUNCATE)` so the
-pre-deletion bytes do not survive in historical WAL frames. This is
-residue reduction inside the file, **not** encryption — see
-[section 19](#19-security-notes).
+`clear_older_than`, `purge_deleted`, `hard_delete_entry`) follow up with
+`wal_checkpoint(TRUNCATE)` so the pre-deletion bytes do not survive in
+historical WAL frames. This is residue reduction inside the file, **not**
+encryption — see [section 19](#19-security-notes).
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**

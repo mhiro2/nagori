@@ -54,6 +54,28 @@ contract.
   is what your backup tooling needs before snapshotting the data
   directory, otherwise the copy silently loses the last-N captures
   that haven't been written through yet.
+## Delete and purge semantics
+
+Nagori separates "hide this entry from history" from "physically reclaim the
+row" so the interactive Delete path can stay responsive without pretending
+that every byte disappeared immediately:
+
+- Normal **Delete** tombstones `Public`, `Unknown`, and `Private` rows. They
+  stop appearing in list/search/copy surfaces immediately, and search rows are
+  removed, but the entry row and representation payloads remain until
+  maintenance purges tombstones.
+- `Secret` rows are always hard-deleted immediately. A tombstone would keep raw
+  or redacted secret payloads, representation blobs, thumbnails, and embeddings
+  on disk until the next maintenance sweep.
+- **Settings → Privacy → Delete entries permanently** makes normal Delete use
+  the immediate hard-delete path for every sensitivity level.
+- **Settings → Privacy → Purge deleted entries now** physically removes all
+  tombstoned rows on demand. The maintenance loop runs the same purge
+  periodically.
+- **Clear history**, clear-on-quit, retention-by-age, retention-by-count, and
+  total-byte-budget eviction are hard-delete paths. They cascade through
+  representations, FTS/ngram rows, thumbnails, and semantic embeddings and then
+  truncate the WAL when rows were removed.
 
 ## App denylist
 
@@ -312,9 +334,9 @@ sweep (count / age / size cap) and *Clear history* / clear-on-quit are
 body, blobs, and search index — in the same transaction, so the content
 is physically removed from the live database rather than tombstoned. So
 a vector persists at rest only after an *ordinary per-entry delete*; if
-you need a soft-deleted entry's bytes gone immediately, run *Clear
-history* or follow the checkpoint / `VACUUM` steps from [Secret
-redaction](#secret-redaction). Freed pages can still be recovered from
+you need a soft-deleted entry's bytes gone immediately, enable
+**Delete entries permanently** before deleting or run **Purge deleted
+entries now** after deleting. Freed pages can still be recovered from
 the raw file or a backup until reused or `VACUUM`ed — see [Data at
 rest](#data-at-rest) — which is why full-disk encryption remains the
 recommended at-rest protection.

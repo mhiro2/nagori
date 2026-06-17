@@ -696,6 +696,16 @@ pub async fn delete_entries(state: State<'_, AppState>, ids: Vec<String>) -> Com
     Ok(purged)
 }
 
+/// Physically purge rows that were previously hidden by per-entry delete.
+/// Normal delete may leave a tombstone until maintenance; this command gives
+/// the Settings window an explicit "reclaim now" control.
+#[tauri::command]
+pub async fn purge_deleted_entries(state: State<'_, AppState>) -> CommandResult<usize> {
+    let purged = state.runtime.purge_deleted_entries().await?;
+    purge_preview_temp_dir();
+    Ok(purged)
+}
+
 /// Concatenate the text of multiple entries with newline separators and
 /// write the result to the system clipboard. Image / file-list entries and
 /// any non-`Public`/`Unknown` (Private / Secret / Blocked) rows are silently

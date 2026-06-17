@@ -356,6 +356,12 @@ export const ko: Messages = {
         "경고: '원문 그대로 저장'을 선택하면 API 키, JWT, 개인 키와 같은 비밀이 로컬 SQLite DB에 평문으로 남습니다. DB는 암호화되어 있지 않으므로 홈 디렉터리에 접근할 수 있는 모든 주체(백업, 동기화 클라이언트, 악성코드 등)가 비밀을 복원할 수 있습니다. 위험을 충분히 이해하지 못했다면 '마스킹된 상태로 저장'을 권장합니다.",
       storeFullConfirm:
         '비밀을 평문으로 저장하시겠습니까? DB는 암호화되지 않으며, 데이터 디렉터리 백업을 포함해 디스크에서 원문을 복원할 수 있습니다.',
+      permanentDeleteOnDelete: '삭제한 항목을 즉시 디스크에서 지우기',
+      permanentDeleteOnDeleteHelp:
+        '활성화하면 항목을 삭제하는 즉시 디스크에서도 지웁니다. 비활성화하면 삭제한 항목이 목록에서는 바로 사라지지만, 디스크에서는 잠시 후 정기 정리 작업에서 지워집니다. Secret 항목은 설정과 관계없이 항상 즉시 지워집니다.',
+      purgeDeletedNow: '삭제된 항목 지금 디스크에서 지우기',
+      purgeDeletedRunning: '지우는 중…',
+      purgeDeletedDone: '삭제된 항목 {count}개를 디스크에서 지웠습니다.',
       regexDenylistAutosaveHint: '강조 표시된 정규식 오류를 수정하면 자동으로 저장됩니다.',
       regexErrors: {
         lineLabel: '{line}번째 줄:',

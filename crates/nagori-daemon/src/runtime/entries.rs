@@ -232,10 +232,28 @@ impl NagoriRuntime {
     }
 
     pub async fn delete_entry(&self, id: EntryId) -> Result<()> {
+        let settings = self.store.get_settings().await?;
+        if settings.permanent_delete_on_delete {
+            return self.hard_delete_entry(id).await;
+        }
         self.invalidate_search_cache();
         self.store.mark_deleted(id).await?;
         self.invalidate_search_cache();
         Ok(())
+    }
+
+    pub async fn hard_delete_entry(&self, id: EntryId) -> Result<()> {
+        self.invalidate_search_cache();
+        self.store.hard_delete_entry(id).await?;
+        self.invalidate_search_cache();
+        Ok(())
+    }
+
+    pub async fn purge_deleted_entries(&self) -> Result<usize> {
+        self.invalidate_search_cache();
+        let purged = self.store.purge_deleted().await?;
+        self.invalidate_search_cache();
+        Ok(purged)
     }
 
     /// Soft-delete every non-pinned entry. Returns the number of rows

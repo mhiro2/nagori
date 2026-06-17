@@ -119,7 +119,11 @@ Insert an entry. `--stdin` reads the full standard input as the payload.
 
 ### `nagori delete <id>` / `nagori pin <id>` / `nagori unpin <id>`
 
-Mutate metadata. `delete` is soft (sets `deleted_at`).
+Mutate metadata. `delete` soft-deletes by default (sets `deleted_at`), unless
+the desktop setting **Delete entries permanently** is enabled in the running
+owner process. Direct offline deletes always use the storage default: Secret
+rows are hard-deleted immediately, while non-Secret rows are tombstoned until
+maintenance or **Purge deleted entries now** reclaims them.
 
 ### `nagori copy <id>` / `nagori paste <id>`
 
@@ -130,8 +134,8 @@ the platform paste shortcut into the frontmost app — Cmd+V on macOS
 ### `nagori clear (--all | --older-than-days N)`
 
 Hard-delete unpinned entries (the row and its representations, blobs,
-embeddings, and search index are physically removed via cascade — unlike
-`nagori delete`, which is soft). One scope flag is required: `--all`
+embeddings, and search index are physically removed via cascade). One scope
+flag is required: `--all`
 deletes every unpinned entry, while `--older-than-days N` deletes only
 unpinned entries created before that cutoff. A bare `nagori clear` with no
 flag is rejected at parse time so the command can't wipe history by

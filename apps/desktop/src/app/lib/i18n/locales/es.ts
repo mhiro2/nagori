@@ -371,6 +371,12 @@ export const es: Messages = {
         'Aviso: «Almacenar completo» mantiene claves API, JWT y claves privadas en texto plano dentro de la base de datos SQLite local. La base de datos no está cifrada en reposo, así que cualquiera con acceso de lectura a tu carpeta personal (copias de seguridad, clientes de sincronización, malware) podría recuperar los secretos. Usa «Almacenar redactado» a menos que entiendas el riesgo.',
       storeFullConfirm:
         '¿Almacenar los secretos en texto plano? La base de datos no está cifrada; los secretos en bruto serán recuperables desde el disco y desde cualquier copia de seguridad que incluya el directorio de datos.',
+      permanentDeleteOnDelete: 'Borrar del disco las entradas eliminadas de inmediato',
+      permanentDeleteOnDeleteHelp:
+        'Si está activado, al eliminar una entrada se borra del disco de inmediato. Si está desactivado, la entrada eliminada desaparece de la lista al instante, pero se borra del disco un poco más tarde durante la limpieza periódica. Las entradas Secret se borran siempre de inmediato.',
+      purgeDeletedNow: 'Borrar del disco las entradas eliminadas ahora',
+      purgeDeletedRunning: 'Borrando…',
+      purgeDeletedDone: 'Se borraron del disco {count} entradas eliminadas.',
       regexDenylistAutosaveHint:
         'Los cambios se guardan automáticamente cuando se corrigen los errores de regex resaltados.',
       regexErrors: {

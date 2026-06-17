@@ -370,6 +370,12 @@ export const fr: Messages = {
         'Avertissement : « Enregistrer en entier » conserve les clés API, JWT et clés privées en clair dans la base SQLite locale. La base n’est pas chiffrée au repos, donc quiconque a accès en lecture à votre dossier personnel (sauvegardes, clients de synchronisation, logiciels malveillants) peut récupérer les secrets. Préférez « Enregistrer masqué » si vous ne mesurez pas le risque.',
       storeFullConfirm:
         'Enregistrer les secrets en clair ? La base n’est pas chiffrée ; les secrets bruts seront récupérables depuis le disque et depuis toute sauvegarde incluant le répertoire de données.',
+      permanentDeleteOnDelete: 'Effacer du disque les entrées supprimées immédiatement',
+      permanentDeleteOnDeleteHelp:
+        'Si activé, supprimer une entrée l’efface immédiatement du disque. Sinon, une entrée supprimée disparaît aussitôt de la liste mais n’est effacée du disque qu’un peu plus tard, lors du nettoyage périodique. Les entrées Secret sont toujours effacées immédiatement.',
+      purgeDeletedNow: 'Effacer du disque les entrées supprimées maintenant',
+      purgeDeletedRunning: 'Effacement…',
+      purgeDeletedDone: '{count} entrées supprimées effacées du disque.',
       regexDenylistAutosaveHint:
         'Les modifications sont enregistrées automatiquement une fois les erreurs regex corrigées.',
       regexErrors: {

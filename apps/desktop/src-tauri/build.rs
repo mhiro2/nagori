@@ -43,6 +43,7 @@ fn main() {
             "add_entry",
             "delete_entry",
             "delete_entries",
+            "purge_deleted_entries",
             "copy_entries_combined",
             "clear_history",
             "repaste_last",

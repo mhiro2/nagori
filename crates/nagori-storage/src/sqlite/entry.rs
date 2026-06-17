@@ -153,6 +153,27 @@ impl SqliteStore {
         })
         .await
     }
+
+    /// Physically delete a single entry, whether it is live or already
+    /// tombstoned. Cascades remove representations, search rows, thumbnails,
+    /// and embeddings; a WAL truncate follows the committed delete so payloads
+    /// do not linger in historical frames.
+    pub async fn hard_delete_entry(&self, id: EntryId) -> Result<()> {
+        self.run_blocking(move |store| {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction().map_err(storage_err)?;
+            let changed = tx
+                .execute("DELETE FROM entries WHERE id = ?1", params![id.to_string()])
+                .map_err(storage_err)?;
+            if changed == 0 {
+                return Err(AppError::NotFound);
+            }
+            tx.commit().map_err(storage_err)?;
+            checkpoint_truncate_after_purge(&conn, changed);
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[async_trait]

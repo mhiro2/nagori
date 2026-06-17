@@ -369,6 +369,12 @@ export const de: Messages = {
         'Warnung: „Vollständig speichern“ behält API-Schlüssel, JWTs und private Schlüssel im lokalen SQLite-DB. Die Datenbank ist nicht im Ruhezustand verschlüsselt – jeder mit Lesezugriff auf Ihr Home-Verzeichnis (Backups, Sync-Clients, Schadsoftware) kann die Geheimnisse wiederherstellen. Wählen Sie „Geschwärzt speichern“, sofern Sie das Risiko nicht eingeschätzt haben.',
       storeFullConfirm:
         'Geheimnisse im Klartext speichern? Die Datenbank ist unverschlüsselt; rohe Geheimnisse sind von der Festplatte und aus jedem Backup mit dem Datenverzeichnis rekonstruierbar.',
+      permanentDeleteOnDelete: 'Gelöschte Einträge sofort von der Festplatte entfernen',
+      permanentDeleteOnDeleteHelp:
+        'Wenn aktiviert, wird ein Eintrag beim Löschen sofort von der Festplatte entfernt. Andernfalls verschwindet ein gelöschter Eintrag sofort aus der Liste, wird aber erst etwas später bei der regelmäßigen Bereinigung von der Festplatte entfernt. Secret-Einträge werden immer sofort entfernt.',
+      purgeDeletedNow: 'Gelöschte Einträge jetzt von der Festplatte entfernen',
+      purgeDeletedRunning: 'Wird entfernt…',
+      purgeDeletedDone: '{count} gelöschte Einträge von der Festplatte entfernt.',
       regexDenylistAutosaveHint:
         'Sobald die markierten Regex-Fehler behoben sind, wird automatisch gespeichert.',
       regexErrors: {

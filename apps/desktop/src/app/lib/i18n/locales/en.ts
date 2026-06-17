@@ -382,6 +382,11 @@ export type Messages = {
       };
       storeFullWarning: string;
       storeFullConfirm: string;
+      permanentDeleteOnDelete: string;
+      permanentDeleteOnDeleteHelp: string;
+      purgeDeletedNow: string;
+      purgeDeletedRunning: string;
+      purgeDeletedDone: string;
       regexDenylistAutosaveHint: string;
       regexErrors: {
         lineLabel: string;
@@ -916,6 +921,12 @@ export const en: Messages = {
         "Warning: 'Store full' keeps raw API keys, JWTs, and private keys in the local SQLite DB. The DB is not encrypted at rest, so anyone with read access to your home directory (backups, sync clients, malware) can recover the secrets. Prefer 'Store redacted' unless you understand the risk.",
       storeFullConfirm:
         'Store secrets in plaintext? The DB is not encrypted; raw secrets will be recoverable from disk and from any backup that includes the data directory.',
+      permanentDeleteOnDelete: 'Delete entries permanently',
+      permanentDeleteOnDeleteHelp:
+        'When on, deleting an entry erases it from disk immediately. When off, a deleted entry disappears from the list right away but is erased from disk a little later during routine cleanup. Secret entries are always erased immediately.',
+      purgeDeletedNow: 'Purge deleted entries now',
+      purgeDeletedRunning: 'Purging…',
+      purgeDeletedDone: 'Purged {count} deleted entries.',
       regexDenylistAutosaveHint: 'Changes auto-save once the highlighted errors are fixed.',
       regexErrors: {
         lineLabel: 'Line {line}:',

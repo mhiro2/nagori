@@ -343,6 +343,12 @@ export const zhHant: Messages = {
         '警告：選擇「原文儲存」會將 API 金鑰、JWT、私密金鑰等機密以明文保存在本機 SQLite 資料庫。資料庫並未加密，任何能讀取家目錄的程序（備份、同步用戶端、惡意軟體等）都可能還原這些機密。除非您完全理解相關風險，否則建議使用「以遮蔽形式儲存」。',
       storeFullConfirm:
         '確定要以明文儲存機密嗎？資料庫並未加密，磁碟與包含資料目錄的備份都將能還原原文。',
+      permanentDeleteOnDelete: '刪除項目後立即從磁碟清除',
+      permanentDeleteOnDeleteHelp:
+        '啟用後，刪除項目時會立即從磁碟清除。停用時，刪除的項目會立刻從清單中消失，但要稍後在定期清理時才從磁碟清除。Secret 項目一律立即清除。',
+      purgeDeletedNow: '立即從磁碟清除已刪除項目',
+      purgeDeletedRunning: '正在清除…',
+      purgeDeletedDone: '已從磁碟清除 {count} 個已刪除項目。',
       regexDenylistAutosaveHint: '修正反白的正規表示式錯誤後將自動儲存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',

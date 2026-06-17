@@ -73,6 +73,8 @@ const baseSettings = (): AppSettings => ({
   showPreviewPane: true,
   showInMenuBar: true,
   clearOnQuit: false,
+  permanentDeleteOnDelete: false,
+  blockSensitiveCaptures: false,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',

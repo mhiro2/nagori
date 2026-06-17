@@ -242,6 +242,7 @@ pub fn run() {
             commands::add_entry,
             commands::delete_entry,
             commands::delete_entries,
+            commands::purge_deleted_entries,
             commands::copy_entries_combined,
             commands::clear_history,
             commands::repaste_last,
