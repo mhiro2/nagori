@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Nagori",
-  "identifier": "dev.nagori.desktop",
+  "identifier": "io.github.mhiro2.nagori",
   "build": {
     "beforeDevCommand": "pnpm --filter @nagori/desktop dev",
     "beforeBuildCommand": "pnpm --filter @nagori/desktop build:cli-sidecar && pnpm --filter @nagori/desktop build",

@@ -152,6 +152,13 @@ Full CLI reference: [`docs/cli.md`](./docs/cli.md).
 `~/Library/Application Support/nagori` (macOS), `%LOCALAPPDATA%\nagori`
 (Windows), or `$XDG_DATA_HOME/nagori` (Linux).
 
+The packaged desktop app identifier is `io.github.mhiro2.nagori`.
+Tauri and the OS may also create identifier-derived preferences, cache,
+logs, permissions, and autostart records under platform-specific locations
+(for example `~/Library/Preferences/io.github.mhiro2.nagori.plist` on
+macOS). Those files are shell/runtime state; the clipboard history DB and
+IPC socket stay in the Nagori data directory above.
+
 **Is the database encrypted?**
 No, and shipping without it is a deliberate v0.1.0 decision — encryption at
 rest is a post-1.0 feature, not a launch blocker. The DB file has restrictive

@@ -129,10 +129,11 @@ jobs:
             binary "#{appdir}/Nagori.app/Contents/MacOS/nagori"
 
             zap trash: [
-              "~/Library/Application Support/dev.nagori.desktop",
-              "~/Library/Caches/dev.nagori.desktop",
-              "~/Library/Logs/dev.nagori.desktop",
-              "~/Library/Preferences/dev.nagori.desktop.plist",
+              "~/Library/Application Support/nagori",
+              "~/Library/Application Support/io.github.mhiro2.nagori",
+              "~/Library/Caches/io.github.mhiro2.nagori",
+              "~/Library/Logs/io.github.mhiro2.nagori",
+              "~/Library/Preferences/io.github.mhiro2.nagori.plist",
             ]
           end
           EOF
