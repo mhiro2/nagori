@@ -600,7 +600,7 @@ where
 
     /// Wire a shared [`CaptureHealth`] handle so every `capture_once`
     /// outcome is reflected in the daemon's per-tick health snapshot.
-    /// Production callers (`serve.rs` for the daemon, `state.rs` for the
+    /// Production callers (`serve/lifecycle.rs` for the daemon, `state.rs` for the
     /// desktop) wire this from `runtime.capture_health()` so the
     /// `nagori doctor` capture row and the desktop tray see one source
     /// of truth; tests omit it and exercise the capture path in

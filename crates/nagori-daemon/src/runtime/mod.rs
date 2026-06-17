@@ -75,23 +75,23 @@ pub struct NagoriRuntime {
     /// any corpus mutation invalidates it via [`Self::invalidate_search_cache`].
     search_cache: SharedSearchCache,
     /// Shared health snapshot of the background maintenance loop. The
-    /// loop writes from `serve.rs` after each iteration; the IPC
+    /// loop writes from `serve/lifecycle.rs` after each iteration; the IPC
     /// `Health` and `Doctor` handlers read it.
     pub(crate) maintenance_health: MaintenanceHealth,
     /// Shared one-shot health snapshot of the capture loop's pre-poll
     /// initialisation. Recorded by whichever process hosts the capture
-    /// task (`serve.rs` for the daemon, `state.rs` for the desktop) and
+    /// task (`serve/lifecycle.rs` for the daemon, `state.rs` for the desktop) and
     /// read by `nagori doctor` plus the desktop's gated "ready"
     /// notification.
     pub(crate) startup_health: StartupHealth,
     /// Shared health snapshot of the capture loop's per-tick outcomes.
-    /// Updated from the process hosting the capture task (`serve.rs` for
+    /// Updated from the process hosting the capture task (`serve/lifecycle.rs` for
     /// the daemon, `state.rs` for the desktop); read by the IPC `Health`
     /// and `Doctor` handlers so dashboards can distinguish "retention is
     /// wedged" from "every clip is being dropped".
     pub(crate) capture_health: CaptureHealth,
     /// Shared handle for the IPC server's per-handler panic counter.
-    /// The accept loop in `serve.rs` increments it via
+    /// The accept loop in `serve/ipc.rs` increments it via
     /// `IpcServerHealth::record_panic` (through `observe_handler_outcome`);
     /// the IPC `Health` and `Doctor` handlers read it so a panicking
     /// dispatcher is visible in `nagori doctor` / `nagori health`
@@ -168,7 +168,7 @@ impl NagoriRuntime {
     }
 
     /// Shared handle to the maintenance loop's health snapshot. The
-    /// daemon's `serve.rs` calls `record_success` / `record_failure` on
+    /// daemon's `serve/lifecycle.rs` calls `record_success` / `record_failure` on
     /// each iteration so the IPC `Health` / `Doctor` handlers can report
     /// degraded retention without round-tripping through the loop.
     pub fn maintenance_health(&self) -> MaintenanceHealth {
@@ -195,7 +195,7 @@ impl NagoriRuntime {
     }
 
     /// Shared handle to the IPC server's handler-panic counter. The
-    /// daemon's `serve.rs` wires this into the accept loops so any
+    /// daemon's `serve/ipc.rs` wires this into the accept loops so any
     /// panic surfaced by `JoinSet::join_next()` increments the counter
     /// and updates the most-recent panic message.
     pub fn ipc_health(&self) -> IpcServerHealth {

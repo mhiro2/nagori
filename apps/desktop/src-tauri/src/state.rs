@@ -1048,7 +1048,7 @@ pub(crate) fn note_settings_load_outcome(
 
 /// Funnels one maintenance iteration's outcome into `MaintenanceHealth` so
 /// `nagori doctor` reflects retention failures on the desktop the same way
-/// it does on the daemon (`serve.rs`). Extracted from the spawn body so the
+/// it does on the daemon (`serve/lifecycle.rs`). Extracted from the spawn body so the
 /// "did the desktop record the outcome?" contract is pinned by a unit test
 /// instead of living inside `tauri::async_runtime::spawn`, where the prior
 /// inline version dropped maintenance results on the floor and let `nagori
@@ -1642,7 +1642,7 @@ mod tests {
         assert!(report.last_error.is_none());
     }
 
-    /// Parity with the daemon's `serve.rs` path: feeding the same
+    /// Parity with the daemon's `serve/lifecycle.rs` path: feeding the same
     /// outcome stream into either host's `MaintenanceHealth` must produce
     /// identical `MaintenanceHealthReport`s, so `nagori doctor` reads the
     /// same fields regardless of whether the desktop or the daemon hosted

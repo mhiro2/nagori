@@ -21,7 +21,7 @@ use crate::IpcHealthReport;
 /// Tunables for the IPC server.
 ///
 /// Carried separately from [`IpcServerHealth`] so a single struct can be
-/// passed through startup paths (daemon `serve.rs`, integration tests,
+/// passed through startup paths (daemon `serve/ipc.rs`, integration tests,
 /// doctor) without coupling tuning knobs to the observer counters.
 #[derive(Debug, Clone, Copy)]
 pub struct IpcServerConfig {

@@ -33,7 +33,7 @@ pub const CAPTURE_DEGRADED_THRESHOLD: u32 = 3;
 
 /// Shared health snapshot of the maintenance background loop.
 ///
-/// Updated from `serve.rs` after each iteration and read by the IPC
+/// Updated from `serve/lifecycle.rs` after each iteration and read by the IPC
 /// `Health` and `Doctor` handlers. The lock is held briefly enough that
 /// using a sync mutex over an async lock is fine (no awaits while held);
 /// the alternative — an `AtomicU32` plus a separate string slot — would
