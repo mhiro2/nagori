@@ -119,6 +119,25 @@ async fn capture_once_blocks_secret_when_handling_is_block() {
 }
 
 #[tokio::test]
+async fn capture_once_blocks_secret_when_sensitive_capture_block_is_enabled() {
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let settings = AppSettings {
+        block_sensitive_captures: true,
+        secret_handling: SecretHandling::StoreFull,
+        ..AppSettings::default()
+    };
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+    clipboard
+        .write_text("token = ghp_abcdefghijklmnopqrstuvwxyz123456")
+        .await
+        .expect("clipboard write");
+
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn capture_once_redacts_secret_by_default() {
     // The default SecretHandling::StoreRedacted has to land a row whose
     // durable body is the redacted form. An exported DB must never

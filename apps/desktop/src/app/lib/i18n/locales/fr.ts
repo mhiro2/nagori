@@ -349,12 +349,15 @@ export const fr: Messages = {
         'Un motif par ligne (ex. INTERNAL-\\d+). Toute correspondance est ignorée avant d’atteindre l’historique. Chaque motif doit faire moins de 256 octets (UTF-8) et ne pas dépasser 3 niveaux de parenthèses ( ) non échappées ; scindez les règles complexes sur plusieurs lignes plutôt que d’imbriquer des groupes.',
       secretHandling: 'Gestion des secrets',
       secretHandlingHelp:
-        'Que faire lorsqu’un clip est classé comme secret (clés API, JWT, clés privées, …).',
+        'Que faire lorsqu’une entrée est détectée comme secret (clés API, JWT, clés privées, …).',
       secretHandlingOptions: {
         block: 'Bloquer — ne pas enregistrer',
         store_redacted: 'Enregistrer masqué (par défaut)',
         store_full: 'Enregistrer en entier (l’aperçu reste masqué)',
       },
+      blockSensitiveCaptures: 'Ne jamais enregistrer les entrées privées ou secrètes',
+      blockSensitiveCapturesHelp:
+        'N’enregistre aucune entrée détectée comme Private ou Secret, par exemple les mots de passe ou les clés API. Plus strict que le mode de gestion des secrets ci-dessus, qui peut encore conserver une copie masquée.',
       captureKinds: 'Types de capture',
       captureKindsHelp: 'Les types désactivés sont ignorés avant la classification des secrets.',
       captureKindOptions: {

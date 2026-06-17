@@ -160,16 +160,19 @@ macOS). Those files are shell/runtime state; the clipboard history DB and
 IPC socket stay in the Nagori data directory above.
 
 **Is the database encrypted?**
-No, and shipping without it is a deliberate v0.1.0 decision — encryption at
-rest is a post-1.0 feature, not a launch blocker. The DB file has restrictive
-filesystem permissions (`0600` / `0700`) but the bytes on disk are plaintext,
-so anything running as your user (malware, backup agents, cloud-sync clients)
-can read your history. Use FileVault / BitLocker / LUKS for full-disk
-protection — that is the real defence — and keep the data directory off
-cleartext sync targets. Deleted rows are zeroed in place (`secure_delete`) and
-*Clear history* truncates the write-ahead log so purged content does not linger
-in the live file, but that is residue reduction, not encryption. The accepted
-threat model and the SQLCipher / OS-keystore roadmap are in
+No. Encryption at rest is not implemented yet and must be resolved before a
+1.0-quality security claim. The DB file has restrictive filesystem
+permissions (`0600` / `0700`) but the bytes on disk are plaintext, so anything
+running as your user (malware, backup agents, cloud-sync clients) can read your
+history. Use FileVault / BitLocker / LUKS for full-disk protection and keep the
+data directory off cleartext sync targets.
+
+Nagori reduces residue but does not encrypt live rows: hard-deleted rows are
+zeroed in place (`secure_delete`) and purge paths truncate the write-ahead log.
+Settings also exposes **Delete entries permanently**, **Purge deleted entries
+now**, **Clear non-pinned history on quit**, retention limits, and **Block all
+sensitive captures** for users who prefer not to persist Private/Secret clips.
+The SQLCipher / OS-keystore design work is tracked in
 [`docs/security-encryption-at-rest.md`](./docs/security-encryption-at-rest.md).
 
 **How does secret redaction work?**

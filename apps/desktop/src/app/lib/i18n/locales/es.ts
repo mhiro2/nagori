@@ -349,12 +349,15 @@ export const es: Messages = {
         'Un patrón por línea (p. ej. INTERNAL-\\d+). Las coincidencias se descartan antes de llegar al historial. Cada patrón debe tener menos de 256 bytes (UTF-8) y un máximo de 3 niveles de paréntesis ( ) sin escapar; divide las reglas complejas en varias líneas en lugar de anidar grupos.',
       secretHandling: 'Tratamiento de secretos',
       secretHandlingHelp:
-        'Qué hacer cuando un clip se clasifica como secreto (claves API, JWT, claves privadas…).',
+        'Qué hacer cuando una entrada se detecta como secreto (claves API, JWT, claves privadas…).',
       secretHandlingOptions: {
         block: 'Bloquear — no almacenar',
         store_redacted: 'Almacenar redactado (predeterminado)',
         store_full: 'Almacenar completo (la vista previa sigue redactada)',
       },
+      blockSensitiveCaptures: 'No guardar nunca entradas privadas o secretas',
+      blockSensitiveCapturesHelp:
+        'No guarda ninguna entrada detectada como Private o Secret, como contraseñas o claves API. Es más estricto que el modo de secretos anterior, que aún puede conservar una copia enmascarada.',
       captureKinds: 'Tipos de captura',
       captureKindsHelp:
         'Los tipos desactivados se descartan antes de la clasificación de secretos.',

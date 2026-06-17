@@ -348,12 +348,15 @@ export const de: Messages = {
         'Ein Muster pro Zeile (z. B. INTERNAL-\\d+). Treffer landen nicht im Verlauf. Jedes Muster sollte unter 256 Byte (UTF-8) lang sein und maximal 3 Ebenen unmaskierter ( )-Klammern enthalten – komplexe Regeln bitte auf mehrere Zeilen aufteilen, statt Gruppen zu verschachteln.',
       secretHandling: 'Umgang mit Geheimnissen',
       secretHandlingHelp:
-        'Was passieren soll, wenn ein Clip als Geheimnis erkannt wird (API-Schlüssel, JWTs, private Schlüssel …).',
+        'Was passieren soll, wenn ein Eintrag als Geheimnis erkannt wird (API-Schlüssel, JWTs, private Schlüssel …).',
       secretHandlingOptions: {
         block: 'Blockieren – nicht speichern',
         store_redacted: 'Geschwärzt speichern (Standard)',
         store_full: 'Vollständig speichern (Vorschau bleibt geschwärzt)',
       },
+      blockSensitiveCaptures: 'Private und geheime Einträge nie speichern',
+      blockSensitiveCapturesHelp:
+        'Speichert keinen Eintrag, der als Private oder Secret erkannt wird (etwa Passwörter oder API-Schlüssel). Strenger als der Geheimnis-Modus oben, der weiterhin eine maskierte Kopie behalten kann.',
       captureKinds: 'Erfassungsarten',
       captureKindsHelp: 'Deaktivierte Arten werden vor der Geheimnis-Klassifikation ausgefiltert.',
       captureKindOptions: {

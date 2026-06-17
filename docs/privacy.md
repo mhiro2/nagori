@@ -27,10 +27,11 @@ contract.
   directory is on a synced folder, exclude `nagori/` or store the
   data directory outside it. Prefer FileVault / BitLocker / LUKS
   for full-disk protection.
-- SQLCipher / OS keychain integration is on the roadmap but **not
-  implemented**. The blockers (dependency size, schema migrations
-  against an encrypted DB, and a recovery story when the key
-  store rotates) are tracked in
+- SQLCipher / OS keychain integration is **not implemented** and
+  remains a pre-1.0 security design item, not a solved guarantee.
+  The blockers (dependency size, schema migrations against an
+  encrypted DB, and a recovery story when the key store rotates) are
+  tracked in
   [`security-encryption-at-rest.md`](./security-encryption-at-rest.md).
 
 ## Secret redaction
@@ -54,6 +55,10 @@ contract.
   is what your backup tooling needs before snapshotting the data
   directory, otherwise the copy silently loses the last-N captures
   that haven't been written through yet.
+- **Block all sensitive captures** refuses storage for both
+  `Private` and `Secret` clips. This is stricter than `Store
+  redacted` because nothing is inserted at all.
+
 ## Delete and purge semantics
 
 Nagori separates "hide this entry from history" from "physically reclaim the

@@ -369,6 +369,8 @@ export type Messages = {
         store_redacted: string;
         store_full: string;
       };
+      blockSensitiveCaptures: string;
+      blockSensitiveCapturesHelp: string;
       captureKinds: string;
       captureKindsHelp: string;
       captureKindOptions: {
@@ -900,12 +902,15 @@ export const en: Messages = {
         'One pattern per line (e.g. INTERNAL-\\d+). Anything that matches is dropped before it reaches history. Keep each pattern under 256 bytes (UTF-8) and limit unescaped ( ) groups to 3 levels — split complex rules across multiple lines instead of nesting them.',
       secretHandling: 'Secret handling',
       secretHandlingHelp:
-        'What to do when a clip is classified as a secret (API keys, JWTs, private keys, …).',
+        'What to do when an entry is detected as a secret (API keys, JWTs, private keys, …).',
       secretHandlingOptions: {
         block: 'Block — refuse to store',
         store_redacted: 'Store redacted (default)',
         store_full: 'Store full (preview still redacted)',
       },
+      blockSensitiveCaptures: 'Block all sensitive captures',
+      blockSensitiveCapturesHelp:
+        'Refuse to save any entry detected as Private or Secret, such as passwords or API keys. This is stronger than the secret handling mode above, which can still keep a masked copy.',
       captureKinds: 'Capture kinds',
       captureKindsHelp: 'Disabled kinds are ignored before secret classification runs.',
       captureKindOptions: {

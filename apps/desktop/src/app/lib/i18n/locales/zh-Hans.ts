@@ -321,12 +321,15 @@ export const zhHans: Messages = {
       regexDenylistHelp:
         '每行填写一个正则（例如 INTERNAL-\\d+）。匹配到的内容不会进入历史记录。单个正则应不超过 256 字节（UTF-8），未转义的 ( ) 嵌套不超过 3 层；复杂规则请拆成多行，而不是嵌套分组。',
       secretHandling: '密钥处理',
-      secretHandlingHelp: '当一段复制内容被识别为密钥（API key、JWT、私钥等）时的处理方式。',
+      secretHandlingHelp: '当某个条目被识别为密钥（API key、JWT、私钥等）时的处理方式。',
       secretHandlingOptions: {
         block: '不保存（拒绝）',
         store_redacted: '以脱敏形式保存（默认）',
         store_full: '原文保存（预览仍脱敏）',
       },
+      blockSensitiveCaptures: '不保存私密或机密条目',
+      blockSensitiveCapturesHelp:
+        '凡是被判定为 Private 或 Secret 的条目（如密码、API 密钥）一律不保存。比上方的密钥处理模式更严格——后者仍可能保留脱敏副本，而此项什么都不保留。',
       captureKinds: '捕获类型',
       captureKindsHelp: '关闭的类型会在密钥识别前被忽略。',
       captureKindOptions: {

@@ -341,6 +341,9 @@ export const ko: Messages = {
         store_redacted: '마스킹된 상태로 저장(기본값)',
         store_full: '원문 그대로 저장(미리보기는 마스킹)',
       },
+      blockSensitiveCaptures: '비공개·기밀 항목 저장 안 함',
+      blockSensitiveCapturesHelp:
+        '비밀번호나 API 키처럼 Private 또는 Secret으로 판정된 항목을 전혀 저장하지 않습니다. 마스킹된 사본을 남길 수 있는 위의 보안 정보 처리 모드보다 강력합니다.',
       captureKinds: '캡처 대상',
       captureKindsHelp: '꺼진 종류는 보안 정보 분류 전에 제외됩니다.',
       captureKindOptions: {

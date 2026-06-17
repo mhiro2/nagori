@@ -31,6 +31,7 @@ impl NagoriRuntime {
         }
         let mut entry = EntryFactory::from_text(text);
         let secret_handling = settings.secret_handling;
+        let block_sensitive_captures = settings.block_sensitive_captures;
         let classifier = SensitivityClassifier::try_new(settings)?;
         let classification = classifier.classify(&entry);
         entry.sensitivity = classification.sensitivity;
@@ -44,6 +45,21 @@ impl NagoriRuntime {
                 .await;
             return Err(AppError::Policy(
                 "entry blocked by capture policy".to_owned(),
+            ));
+        }
+        if block_sensitive_captures
+            && matches!(
+                entry.sensitivity,
+                Sensitivity::Private | Sensitivity::Secret
+            )
+        {
+            let _ = self
+                .store
+                .record("sensitive_blocked", Some(entry.id), None)
+                .await;
+            return Err(AppError::Policy(
+                "entry classified as sensitive and refused by block_sensitive_captures=true"
+                    .to_owned(),
             ));
         }
         if matches!(

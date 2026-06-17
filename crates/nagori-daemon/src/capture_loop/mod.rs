@@ -878,6 +878,24 @@ where
             self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(Admission::Dropped);
         }
+        if settings.block_sensitive_captures
+            && matches!(
+                classification.sensitivity,
+                Sensitivity::Private | Sensitivity::Secret
+            )
+        {
+            info!(sensitivity = ?classification.sensitivity, "sensitive_blocked");
+            let _ = self
+                .audit
+                .record(
+                    "sensitive_blocked",
+                    Some(entry.id),
+                    Some(&format!("{:?}", classification.reasons)),
+                )
+                .await;
+            self.note_capture_drop(CaptureEventCategory::Policy);
+            return Ok(Admission::Dropped);
+        }
         if let Some(preview) = classification.redacted_preview {
             entry.search.preview = preview;
         }

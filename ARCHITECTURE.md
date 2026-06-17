@@ -2237,20 +2237,20 @@ under 80 ms for 100k text entries on a developer machine.
 - **Capture** — no remote network calls; the capture loop never
   leaves the process.
 - **Storage at rest** — SQLite file forced to `0600`, parent
-  directory to `0700`. The DB itself is **not** encrypted, and
-  shipping 1.0 without encryption is a documented, accepted decision
-  (see `docs/security-encryption-at-rest.md` → Release decision):
+  directory to `0700`. The DB itself is **not** encrypted; this remains
+  a pre-1.0 security design item rather than a solved guarantee (see
+  `docs/security-encryption-at-rest.md`):
   permission bits keep other local users out but do not defend
   against backups, sync clients, or code running as the same user.
   README documents the gap and recommended mitigations (avoid sync
-  targets, rely on FileVault, prefer `Store redacted`). To keep
-  *deleted* secrets from lingering in the live file, every connection
+  targets, rely on FileVault, prefer `Store redacted`, optionally block
+  all sensitive captures). To keep *deleted* secrets from lingering in the live file, every connection
   runs `secure_delete = ON` (freed pages zeroed) and the explicit
-  purge paths (`clear_non_pinned`, `clear_older_than`) issue
-  `wal_checkpoint(TRUNCATE)` so the pre-deletion content does not
-  survive in WAL frames — residue reduction, not a substitute for
-  full-disk encryption (freed disk blocks stay recoverable at the
-  filesystem layer until reused). The SQLCipher / OS-keystore
+  purge paths (`clear_non_pinned`, `clear_older_than`, `purge_deleted`,
+  `hard_delete_entry`) issue `wal_checkpoint(TRUNCATE)` so the
+  pre-deletion content does not survive in WAL frames — residue reduction,
+  not a substitute for full-disk encryption (freed disk blocks stay
+  recoverable at the filesystem layer until reused). The SQLCipher / OS-keystore
   trade-offs are captured in `docs/security-encryption-at-rest.md`.
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret

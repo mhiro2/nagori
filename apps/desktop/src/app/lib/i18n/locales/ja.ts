@@ -337,12 +337,15 @@ export const ja: Messages = {
         '1 行に 1 つパターンを記入（例: INTERNAL-\\d+）。一致した内容は履歴に保存されません。各パターンは 256 バイト（UTF-8）以内、エスケープしていない ( ) の入れ子は 3 段までに収めてください。複雑なルールは入れ子にせず、複数行に分けて書きます。',
       secretHandling: 'シークレットの扱い',
       secretHandlingHelp:
-        'API キー・JWT・秘密鍵などシークレットと判定されたクリップを保存する際の動作。',
+        'API キー・JWT・秘密鍵などシークレットと判定された項目を保存するときの動作。',
       secretHandlingOptions: {
         block: '保存しない（拒否）',
         store_redacted: 'マスク済みで保存（既定）',
         store_full: 'そのまま保存（プレビューはマスク）',
       },
+      blockSensitiveCaptures: 'プライベート・機密の項目を保存しない',
+      blockSensitiveCapturesHelp:
+        'パスワードや API キーなど、プライベートまたはシークレットと判定された内容を一切保存しません。上の「シークレットの扱い」はマスクした内容を残せますが、こちらは何も残しません。',
       captureKinds: '取り込み対象',
       captureKindsHelp: '無効にした種類はシークレット判定の前に除外されます。',
       captureKindOptions: {

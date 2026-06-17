@@ -322,12 +322,15 @@ export const zhHant: Messages = {
       regexDenylistHelp:
         '每行一個樣式（例如 INTERNAL-\\d+）。符合的內容不會進入歷史紀錄。每個樣式長度應在 256 位元組（UTF-8）以內，未跳脫的 ( ) 巢狀不超過 3 層；複雜規則請拆成多行，而不是巢狀分組。',
       secretHandling: '機密處理',
-      secretHandlingHelp: '當複製的內容被判定為機密（API 金鑰、JWT、私密金鑰等）時的處理方式。',
+      secretHandlingHelp: '當某個項目被判定為機密（API 金鑰、JWT、私密金鑰等）時的處理方式。',
       secretHandlingOptions: {
         block: '不儲存（拒絕）',
         store_redacted: '以遮蔽形式儲存（預設）',
         store_full: '原文儲存（預覽仍遮蔽）',
       },
+      blockSensitiveCaptures: '不儲存私密或機密項目',
+      blockSensitiveCapturesHelp:
+        '凡是被判定為 Private 或 Secret 的項目（例如密碼、API 金鑰）一律不儲存。比上方的機密處理模式更嚴格——後者仍可能保留遮蔽後的副本，而此項什麼都不保留。',
       captureKinds: '擷取類型',
       captureKindsHelp: '停用的類型會在機密判定之前被忽略。',
       captureKindOptions: {

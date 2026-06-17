@@ -1,7 +1,8 @@
 # Encryption at rest — investigation notes
 
 Status: **not implemented**. This memo captures the trade-offs and open
-questions so the work can be resumed without rediscovering them.
+questions for the pre-1.0 encryption-at-rest design so the work can be resumed
+without rediscovering them.
 
 The current state is documented in README → Privacy and security and in
 ARCHITECTURE.md §19: SQLite is forced to `0600` with a `0700` parent
@@ -9,12 +10,13 @@ directory, but the bytes on disk are plaintext. Permission bits keep
 other local users out; they do not defend against anything running as
 the same user (backups, sync clients, malware).
 
-## Release decision
+## Current release posture
 
-**For the canary and the v0.1.0 release, the at-rest threat model is an
-accepted, documented limitation — encryption at rest is explicitly out
-of scope for 1.0.** SQLCipher + OS keystore (the candidates below) is a
-post-1.0 feature, not a launch blocker.
+The canary line may ship without DB encryption only as an explicit,
+documented limitation. That is not a 1.0-quality privacy claim:
+encryption at rest, or an equally strong local-key design, must be resolved
+before Nagori treats at-rest protection as complete. SQLCipher + OS keystore
+is still the leading candidate below.
 
 What this means concretely — the residual risks accepted at 1.0:
 
@@ -27,13 +29,19 @@ What this means concretely — the residual risks accepted at 1.0:
 - Freed disk blocks remain recoverable at the **filesystem** layer until
   the OS reuses them, even after the in-DB mitigations below.
 
-The supported mitigations a user has at 1.0:
+The supported mitigations a user has while encryption is absent:
 
 - **Full-disk encryption** (FileVault / BitLocker / LUKS) is the real
   defence and the recommended baseline. README and ARCHITECTURE §19 say
   so.
 - **`Store redacted`** (the default `secret_handling`) keeps detected
   secrets out of the durable copy in the first place.
+- **Block all sensitive captures** refuses storage for both `Private`
+  and `Secret` clips.
+- **Delete entries permanently** makes per-entry Delete hard-delete
+  immediately; **Purge deleted entries now** reclaims tombstones on demand.
+- **Clear non-pinned history on quit** and retention limits reduce how much
+  live history remains in the DB.
 - Keep the data directory off cleartext sync targets.
 
 ### What we *do* enforce in the file
@@ -57,8 +65,7 @@ it shrinks the window where deleted secrets are recoverable from the
 live file, but it does not protect *live* (non-deleted) rows and does not
 defend against any of the same-user / backup / sync vectors above.
 Encryption at rest remains the only mitigation that holds once a third
-party has file-level read access; this section records that we are
-shipping 1.0 without it by choice.
+party has file-level read access.
 
 ## Why encryption at rest is open
 

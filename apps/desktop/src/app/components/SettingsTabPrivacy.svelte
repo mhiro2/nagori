@@ -158,6 +158,15 @@
       </p>
     {/if}
   </label>
+  <label>
+    <input
+      type="checkbox"
+      bind:checked={settings.blockSensitiveCaptures}
+      onchange={() => scheduleSave(0)}
+    />
+    {t.settings.privacy.blockSensitiveCaptures}
+  </label>
+  <span class="help">{t.settings.privacy.blockSensitiveCapturesHelp}</span>
   <div class="stack">
     <span>{t.settings.privacy.captureKinds}</span>
     <div class="checkbox-grid">
