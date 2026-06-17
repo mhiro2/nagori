@@ -196,6 +196,12 @@
         {#if selectedCount > 0}
           <span class="dot">·</span>
           <span class="multi">{t.status.selectedCount(selectedCount)}</span>
+          <!-- Bulk copy joins the selection and writes it to the clipboard, but
+               also keeps it as a new history entry. Surface that here so the
+               extra row doesn't look like a stray capture (there is no
+               self-write suppression — see copy_entries_combined). -->
+          <span class="dot">·</span>
+          <span class="combined-hint">{t.status.combinedCopyHint}</span>
         {/if}
       {/if}
     </span>
@@ -419,6 +425,11 @@
   .multi {
     color: var(--accent, #6c8dff);
     font-weight: 600;
+  }
+  /* Secondary to the count: the consequence of acting on the selection, not a
+     status of its own, so it reads muted rather than competing with `.multi`. */
+  .combined-hint {
+    color: var(--muted, rgba(255, 255, 255, 0.5));
   }
   .hints {
     display: flex;

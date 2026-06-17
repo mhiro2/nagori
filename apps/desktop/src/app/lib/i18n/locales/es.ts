@@ -136,6 +136,7 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
+    combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
     autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:
@@ -297,6 +298,8 @@ export const es: Messages = {
         'Pausa el embedding en segundo plano con batería para ahorrar energía. Desactívalo para indexar también con batería.',
       semanticIndexRebuild: 'Reconstruir índice',
       semanticIndexStatus: 'Estado del índice',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}% (${indexed.toLocaleString('es')} / ${total.toLocaleString('es')}, ${pending.toLocaleString('es')} pendientes)`,
       semanticIndexStateReady: 'Actualizado',
       semanticIndexStateIndexing: 'Indexando…',
       semanticIndexStatePaused: 'En pausa (con batería)',

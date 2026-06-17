@@ -134,6 +134,7 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
+    combinedCopyHint: 'Kombiniertes Kopieren wird als neuer Eintrag gespeichert',
     autoPasteOff: 'Auto-Einfügen aus — Accessibility nicht erteilt',
     autoPasteOffShort: '⚠ Auto-Einfügen aus',
     autoPasteOffSetupAria:
@@ -296,6 +297,8 @@ export const de: Messages = {
         'Pausiert das Embedding im Hintergrund im Akkubetrieb, um Strom zu sparen. Ausschalten, um auch im Akkubetrieb zu indizieren.',
       semanticIndexRebuild: 'Index neu aufbauen',
       semanticIndexStatus: 'Indexstatus',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent} % (${indexed.toLocaleString('de')} / ${total.toLocaleString('de')}, noch ${pending.toLocaleString('de')})`,
       semanticIndexStateReady: 'Aktuell',
       semanticIndexStateIndexing: 'Wird indiziert …',
       semanticIndexStatePaused: 'Pausiert (Akkubetrieb)',

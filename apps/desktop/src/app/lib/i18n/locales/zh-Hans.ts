@@ -127,6 +127,7 @@ export const zhHans: Messages = {
     capturePaused: '捕获已暂停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hans')} 项`,
     selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
+    combinedCopyHint: '合并复制会保存为新项目',
     autoPasteOff: '自动粘贴已关闭 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自动粘贴已关闭',
     autoPasteOffSetupAria: '自动粘贴已关闭：需要 Accessibility 权限。打开设置。',
@@ -270,6 +271,8 @@ export const zhHans: Messages = {
         '使用电池时暂停后台嵌入以省电。关闭后在电池供电时也会建立索引。',
       semanticIndexRebuild: '重建索引',
       semanticIndexStatus: '索引状态',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}%（${indexed.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')}，待处理 ${pending.toLocaleString('zh-Hans')}）`,
       semanticIndexStateReady: '已是最新',
       semanticIndexStateIndexing: '正在建立索引…',
       semanticIndexStatePaused: '已暂停（使用电池）',

@@ -127,6 +127,7 @@ export const ko: Messages = {
     capturePaused: '캡처 일시 중지',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
+    combinedCopyHint: '결합 복사는 새 항목으로 저장됩니다',
     autoPasteOff: '자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
     autoPasteOffShort: '⚠ 자동 붙여넣기 꺼짐',
     autoPasteOffSetupAria: '자동 붙여넣기 꺼짐: Accessibility 권한이 필요합니다. 설정 열기.',
@@ -284,6 +285,8 @@ export const ko: Messages = {
         '배터리 사용 중에는 백그라운드 임베딩을 일시 중지하여 전력을 아낍니다. 끄면 배터리에서도 인덱싱합니다.',
       semanticIndexRebuild: '인덱스 다시 만들기',
       semanticIndexStatus: '인덱스 상태',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}% (${indexed.toLocaleString('ko')} / ${total.toLocaleString('ko')}, ${pending.toLocaleString('ko')}개 대기 중)`,
       semanticIndexStateReady: '최신 상태',
       semanticIndexStateIndexing: '인덱싱 중…',
       semanticIndexStatePaused: '일시 중지됨(배터리 사용 중)',

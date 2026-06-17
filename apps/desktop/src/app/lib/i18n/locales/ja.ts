@@ -127,6 +127,7 @@ export const ja: Messages = {
     capturePaused: '取り込み一時停止',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
+    combinedCopyHint: '結合コピーは新しい項目として保存されます',
     autoPasteOff: '自動ペースト OFF — Accessibility 未許可',
     autoPasteOffShort: '⚠ 自動ペースト OFF',
     autoPasteOffSetupAria: '自動ペースト OFF: Accessibility の許可が必要です。セットアップを開く。',
@@ -285,6 +286,8 @@ export const ja: Messages = {
         'バッテリー駆動中はバックグラウンドの埋め込み生成を一時停止して節電します。オフにするとバッテリー駆動中も作成します。',
       semanticIndexRebuild: 'インデックスを再構築',
       semanticIndexStatus: 'インデックスの状態',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}%（${indexed.toLocaleString('ja')} / ${total.toLocaleString('ja')}、残り${pending.toLocaleString('ja')}件）`,
       semanticIndexStateReady: '最新の状態',
       semanticIndexStateIndexing: 'インデックス作成中…',
       semanticIndexStatePaused: '一時停止（バッテリー駆動中）',

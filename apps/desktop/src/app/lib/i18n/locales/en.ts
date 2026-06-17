@@ -161,6 +161,10 @@ export type Messages = {
     capturePaused: string;
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
+    // Shown beside the multi-select count: combining the selection writes the
+    // joined text to the clipboard *and* keeps it as a new history entry, so
+    // the bulk copy doesn't look like a silent extra capture.
+    combinedCopyHint: string;
     // Compact accessibility indicator surfaced in the palette StatusBar
     // when the OS permission required to drive auto-paste is missing. The
     // indicator is a single clickable chip that opens the Setup tab:
@@ -320,6 +324,15 @@ export type Messages = {
       semanticIndexAcPowerOnlyHelp: string;
       semanticIndexRebuild: string;
       semanticIndexStatus: string;
+      // Progress detail shown while the index is still building, so "Indexing…"
+      // carries a percentage and the remaining backlog rather than only a
+      // running count.
+      semanticIndexProgress: (info: {
+        percent: number;
+        indexed: number;
+        total: number;
+        pending: number;
+      }) => string;
       semanticIndexStateReady: string;
       semanticIndexStateIndexing: string;
       semanticIndexStatePaused: string;
@@ -694,6 +707,7 @@ export const en: Messages = {
     capturePaused: 'Capture paused',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
+    combinedCopyHint: 'Combined copy is saved as a new item',
     autoPasteOff: 'Auto-paste off — Accessibility not granted',
     autoPasteOffShort: '⚠ Auto-paste off',
     autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',
@@ -850,6 +864,8 @@ export const en: Messages = {
         'Pause background embedding while on battery to save power. Turn off to index on battery too.',
       semanticIndexRebuild: 'Rebuild index',
       semanticIndexStatus: 'Index status',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}% (${indexed.toLocaleString('en')} / ${total.toLocaleString('en')}, ${pending.toLocaleString('en')} pending)`,
       semanticIndexStateReady: 'Up to date',
       semanticIndexStateIndexing: 'Indexing…',
       semanticIndexStatePaused: 'Paused (on battery)',

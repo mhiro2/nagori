@@ -84,6 +84,20 @@
     }
   });
 
+  // Detail appended to the state label. While the worker is still embedding the
+  // backlog, show how far along it is (percent + remaining) so "Indexing…"
+  // carries progress, not just a running count; once it settles — or there's
+  // nothing to index — fall back to the plain indexed/total.
+  const semanticDetail = $derived.by(() => {
+    if (!semanticStatus || semanticStatus.total === 0) return undefined;
+    const { state, indexed, total, pending } = semanticStatus;
+    if (state === 'indexing') {
+      const percent = Math.floor((indexed / total) * 100);
+      return t.settings.ai.semanticIndexProgress({ percent, indexed, total, pending });
+    }
+    return `(${indexed} / ${total})`;
+  });
+
   const onProviderChange = (event: Event): void => {
     const value = (event.currentTarget as HTMLSelectElement).value as AiProviderKind;
     settings.ai.provider = value;
@@ -153,7 +167,9 @@
       {#if semanticStatus}
         <span class="status">
           {t.settings.ai.semanticIndexStatus}: {semanticStateLabel}
-          ({semanticStatus.indexed} / {semanticStatus.total})
+          {#if semanticDetail}
+            {semanticDetail}
+          {/if}
         </span>
       {/if}
     </div>

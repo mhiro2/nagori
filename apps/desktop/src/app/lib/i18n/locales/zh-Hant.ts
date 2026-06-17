@@ -127,6 +127,7 @@ export const zhHant: Messages = {
     capturePaused: '擷取已暫停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hant')} 項`,
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
+    combinedCopyHint: '合併複製會儲存為新項目',
     autoPasteOff: '自動貼上已關閉 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自動貼上已關閉',
     autoPasteOffSetupAria: '自動貼上已關閉：需要 Accessibility 權限。開啟設定。',
@@ -272,6 +273,8 @@ export const zhHant: Messages = {
         '使用電池時暫停背景嵌入以節省電力。關閉後在電池供電時也會建立索引。',
       semanticIndexRebuild: '重建索引',
       semanticIndexStatus: '索引狀態',
+      semanticIndexProgress: ({ percent, indexed, total, pending }) =>
+        `${percent}%（${indexed.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')}，待處理 ${pending.toLocaleString('zh-Hant')}）`,
       semanticIndexStateReady: '已是最新',
       semanticIndexStateIndexing: '正在建立索引…',
       semanticIndexStatePaused: '已暫停（使用電池）',
