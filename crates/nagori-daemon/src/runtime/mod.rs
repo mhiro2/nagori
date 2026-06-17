@@ -80,13 +80,13 @@ pub struct NagoriRuntime {
     pub(crate) maintenance_health: MaintenanceHealth,
     /// Shared one-shot health snapshot of the capture loop's pre-poll
     /// initialisation. Recorded by whichever process hosts the capture
-    /// task (`serve/lifecycle.rs` for the daemon, `state.rs` for the desktop) and
+    /// task (`serve/lifecycle.rs` for the daemon, `state/startup.rs` for the desktop) and
     /// read by `nagori doctor` plus the desktop's gated "ready"
     /// notification.
     pub(crate) startup_health: StartupHealth,
     /// Shared health snapshot of the capture loop's per-tick outcomes.
     /// Updated from the process hosting the capture task (`serve/lifecycle.rs` for
-    /// the daemon, `state.rs` for the desktop); read by the IPC `Health`
+    /// the daemon, `state/startup.rs` for the desktop); read by the IPC `Health`
     /// and `Doctor` handlers so dashboards can distinguish "retention is
     /// wedged" from "every clip is being dropped".
     pub(crate) capture_health: CaptureHealth,

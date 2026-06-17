@@ -126,7 +126,7 @@ search-cache handle, the settings broadcast channel
 (`tokio::sync::watch`), and the AI / clipboard / paste adapters built
 through `NagoriRuntimeBuilder`. Long-running work (capture loop,
 maintenance jobs, settings subscribers, IPC accept loop) is spawned by
-the **host** — the Tauri shell (`apps/desktop/src-tauri/src/state.rs`)
+the **host** — the Tauri shell (`apps/desktop/src-tauri/src/state/startup.rs`)
 or `run_daemon` in `nagori-daemon::serve` — onto the host's tokio
 executor, with the runtime handed in by reference. Surfaces attach to
 the same runtime instance:
@@ -1648,7 +1648,7 @@ canonical first step for support tickets.
 **Startup health.** `NagoriRuntime::startup_health()` returns a
 shared `StartupHealth` snapshot. The host loads persisted settings
 once, up front — the daemon in `run_daemon`, the desktop in a single
-settings-load coordinator (`state.rs`) — and records either
+settings-load coordinator (`state/startup.rs`) — and records either
 `record_capture_ready()` on success or `record_capture_failed(reason)`
 on the silent-abort path that used to leave the user staring at a
 "Clipboard history is ready." notification while capture quietly never

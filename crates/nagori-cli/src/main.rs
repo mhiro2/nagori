@@ -474,7 +474,7 @@ impl OutputFormat {
 /// Environment variable that overrides the default DB path resolution.
 ///
 /// Mirrors the desktop shell's startup-error recovery hint
-/// (`apps/desktop/src-tauri/src/state.rs::annotate_startup_error`): if
+/// (`apps/desktop/src-tauri/src/state/mod.rs::annotate_startup_error`): if
 /// the platform-default directory is unwritable the user can redirect
 /// nagori to a path they control. Honoured here so the CLI and desktop
 /// processes line up on the same store when both consult the variable.
