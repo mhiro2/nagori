@@ -21,5 +21,12 @@ tokio-util.workspace = true
 [target.'cfg(target_os = "macos")'.build-dependencies]
 swift-rs = { version = "1", features = ["build"] }
 
+[dev-dependencies]
+# `test-util` enables `#[tokio::test(start_paused = true)]` so the stall-guard
+# timeout test advances the virtual clock instead of sleeping out the full
+# deadline in wall-clock time. Declared here rather than leaning on workspace
+# feature unification so the crate also builds in isolation (`-p`).
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true
