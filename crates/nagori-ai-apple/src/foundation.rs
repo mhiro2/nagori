@@ -449,6 +449,7 @@ mod tests {
          and paste them quickly from a palette.";
 
     #[tokio::test]
+    #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
     async fn real_summarize_streams_to_done_when_available() {
         if let Some(text) = drive_real_action(AiActionId::Summarize, SAMPLE_TEXT).await {
             assert!(!text.trim().is_empty(), "summary should be non-empty");
@@ -456,6 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
     async fn real_rewrite_streams_to_done_when_available() {
         if let Some(text) = drive_real_action(AiActionId::Rewrite, SAMPLE_TEXT).await {
             assert!(!text.trim().is_empty(), "rewrite should be non-empty");
@@ -463,6 +465,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
     async fn real_format_markdown_streams_to_done_when_available() {
         if let Some(text) = drive_real_action(AiActionId::FormatMarkdown, SAMPLE_TEXT).await {
             assert!(!text.trim().is_empty(), "markdown should be non-empty");
@@ -473,6 +476,7 @@ mod tests {
     /// Markdown checklist. We assert it reaches `Done` cleanly; the exact tasks
     /// are model-dependent so we only require a non-empty result.
     #[tokio::test]
+    #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
     async fn real_extract_tasks_streams_to_done_when_available() {
         let input = "Remember to email the report to Sam, then book the meeting room \
                      and update the budget spreadsheet before Friday.";
@@ -482,6 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
     async fn real_explain_code_streams_to_done_when_available() {
         let input = "fn add(a: i32, b: i32) -> i32 { a + b }";
         if let Some(text) = drive_real_action(AiActionId::ExplainCode, input).await {

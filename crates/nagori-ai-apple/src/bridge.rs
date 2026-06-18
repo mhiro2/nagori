@@ -892,6 +892,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Apple Intelligence enabled; probes the live framework"]
     fn real_availability_returns_a_known_variant() {
         // On CI / un-enabled hosts this is `AppleIntelligenceNotEnabled`; the
         // point is that the FFI round-trips into a recognised enum value.
