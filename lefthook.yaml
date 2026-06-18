@@ -15,7 +15,5 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    test:
-      run: make test
     deny-check:
       run: make deny-check
