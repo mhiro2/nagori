@@ -96,6 +96,13 @@ must_use_candidate = "allow"
 # `AppSettings` legitimately bundles many feature toggles.
 struct_excessive_bools = "allow"
 
+# `cargo test` builds the whole workspace (including the heavy Tauri crate)
+# with codegen, where full debuginfo dominates compile + link time. Line
+# tables keep file/line numbers in backtraces while cutting that cost; the
+# `test` profile inherits this from `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 strip = true

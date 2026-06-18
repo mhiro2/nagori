@@ -36,10 +36,10 @@ jobs:
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
-      - name: Install cargo-llvm-cov
+      - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
       - name: Install Linux WebKit build deps
         if: matrix.os == 'ubuntu-latest'
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
@@ -52,6 +52,8 @@ jobs:
         run: make rust-lint
       - name: Run tests
         run: make rust-test-coverage
+      - name: Run doctests
+        run: make rust-test-doc
       - name: Coverage analysis
         if: matrix.os == 'macos-26'
         uses: k1LoW/octocov-action@b3b6ee60482a667950f87553abf1df63217235d9 # v1.5.1
@@ -69,6 +71,10 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
+        with:
+          tool: cargo-nextest
       - name: Run cargo check
         run: cargo check --workspace --all-targets
       - name: Run lint (Windows platform crate)
@@ -76,9 +82,9 @@ jobs:
       - name: Run lint (IPC crate, Windows-only code)
         run: cargo clippy -p nagori-ipc --all-targets -- -D warnings
       - name: Run tests (Windows platform crate)
-        run: cargo test -p nagori-platform-windows
+        run: cargo nextest run -p nagori-platform-windows
       - name: Run tests (cross-platform crates)
-        run: cargo test -p nagori-core -p nagori-search -p nagori-storage -p nagori-ipc
+        run: cargo nextest run -p nagori-core -p nagori-search -p nagori-storage -p nagori-ipc
 
   deny-check:
     runs-on: ubuntu-latest

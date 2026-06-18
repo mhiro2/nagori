@@ -20,7 +20,7 @@ help: ## Show available make targets.
 
 .PHONY: setup-tools
 setup-tools: ## Install dev tooling.
-	cargo install cargo-llvm-cov cargo-deny --locked
+	cargo install cargo-llvm-cov cargo-deny cargo-nextest --locked
 
 ## Format ##
 
@@ -99,12 +99,16 @@ desktop-typecheck: ## Type-check frontend (tsgo + svelte-check).
 test: rust-test desktop-test ## Run Rust + frontend tests.
 
 .PHONY: rust-test
-rust-test: ## Run workspace Rust tests.
-	cargo test --workspace
+rust-test: ## Run workspace Rust tests (nextest; excludes doctests).
+	cargo nextest run --workspace
+
+.PHONY: rust-test-doc
+rust-test-doc: ## Run workspace doctests (nextest does not run these).
+	cargo test --workspace --doc
 
 .PHONY: rust-test-coverage
 rust-test-coverage: ## Run workspace Rust tests with coverage and write lcov.info.
-	cargo llvm-cov test --workspace --lcov --output-path lcov.info
+	cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
 
 .PHONY: desktop-test
 desktop-test: ## Run frontend tests (vitest).
