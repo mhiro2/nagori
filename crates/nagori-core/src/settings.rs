@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use crate::ContentKind;
 use crate::errors::{AppError, Result};
-use crate::limits::MAX_ENTRY_SIZE_BYTES;
+use crate::limits::{MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, ReadBudget};
 use crate::model::{AiActionId, AiProviderKind};
 use crate::policy::compile_user_regex;
 
@@ -273,6 +273,17 @@ pub struct AppSettings {
     pub history_retention_count: usize,
     pub history_retention_days: Option<u32>,
     pub max_entry_size_bytes: usize,
+    /// Byte budget for captured image payloads, kept separate from
+    /// `max_entry_size_bytes`.
+    ///
+    /// Images never cross the IPC line inline (see [`ReadBudget`] and
+    /// [`MAX_IMAGE_ENTRY_SIZE_BYTES`]), so their budget is bounded by decode
+    /// safety and storage rather than the IPC envelope. The default (16 MiB)
+    /// comfortably covers an 8K screenshot's encoded PNG; the validator caps
+    /// it at [`MAX_IMAGE_ENTRY_SIZE_BYTES`]. `#[serde(default = ...)]` keeps
+    /// settings files written before this field existed loadable.
+    #[serde(default = "default_max_image_entry_size_bytes")]
+    pub max_image_entry_size_bytes: usize,
     #[serde(default = "default_capture_kinds")]
     pub capture_kinds: BTreeSet<ContentKind>,
     pub max_total_bytes: Option<u64>,
@@ -638,6 +649,17 @@ impl Locale {
 }
 
 impl AppSettings {
+    /// Per-content-kind read/trim budgets derived from the user's text and
+    /// image entry-size settings.
+    ///
+    /// Threaded into the platform clipboard reader and the capture loop's
+    /// `admit` / trim path so each content kind is sized against its own
+    /// budget (see [`ReadBudget`]).
+    #[must_use]
+    pub const fn read_budget(&self) -> ReadBudget {
+        ReadBudget::new(self.max_entry_size_bytes, self.max_image_entry_size_bytes)
+    }
+
     /// Validate value-range invariants that the wire format alone cannot
     /// enforce. Run on every entry point that mutates persisted settings —
     /// the storage `save_settings` path, the IPC `UpdateSettings` handler,
@@ -663,6 +685,15 @@ impl AppSettings {
         if !(1..=MAX_ENTRY_SIZE_BYTES).contains(&self.max_entry_size_bytes) {
             return Err(AppError::InvalidInput(format!(
                 "max_entry_size_bytes must be between 1 and {MAX_ENTRY_SIZE_BYTES}"
+            )));
+        }
+        // The image budget has its own, larger ceiling: image bytes never cross
+        // the IPC line inline, so they are bounded by decode/storage limits
+        // rather than `MAX_ENTRY_SIZE_BYTES`. Validated independently so a high
+        // image budget cannot be rejected just because it exceeds the text cap.
+        if !(1..=MAX_IMAGE_ENTRY_SIZE_BYTES).contains(&self.max_image_entry_size_bytes) {
+            return Err(AppError::InvalidInput(format!(
+                "max_image_entry_size_bytes must be between 1 and {MAX_IMAGE_ENTRY_SIZE_BYTES}"
             )));
         }
         if let Some(days) = self.history_retention_days
@@ -922,6 +953,7 @@ impl Default for AppSettings {
             history_retention_count: 10_000,
             history_retention_days: Some(90),
             max_entry_size_bytes: 512 * 1024,
+            max_image_entry_size_bytes: default_max_image_entry_size_bytes(),
             capture_kinds: default_capture_kinds(),
             max_total_bytes: None,
             max_thumbnail_total_bytes: default_max_thumbnail_total_bytes(),
@@ -976,6 +1008,15 @@ pub const fn default_auto_update_check() -> bool {
 
 pub const fn default_max_thumbnail_total_bytes() -> Option<u64> {
     Some(64 * 1024 * 1024)
+}
+
+/// Default image-entry byte budget (16 MiB).
+///
+/// Covers an 8K screenshot's encoded PNG (~33 MP) in practice while staying
+/// well under the high-memory ceiling [`MAX_IMAGE_ENTRY_SIZE_BYTES`] (64 MiB),
+/// where raw TIFF/DIB, decoded RGBA, and re-encoded PNG can briefly coexist.
+pub const fn default_max_image_entry_size_bytes() -> usize {
+    16 * 1024 * 1024
 }
 
 pub fn default_capture_kinds() -> BTreeSet<ContentKind> {
@@ -1083,6 +1124,51 @@ mod tests {
         AppSettings::default()
             .validate()
             .expect("default settings must validate");
+    }
+
+    #[test]
+    fn serde_default_fills_missing_max_image_entry_size_bytes() {
+        // A settings snapshot written before the field existed must still
+        // deserialize, defaulting the image budget rather than failing.
+        let json = r#"{"max_entry_size_bytes": 65536}"#;
+        let settings: AppSettings =
+            serde_json::from_str(json).expect("legacy snapshot deserializes");
+        assert_eq!(
+            settings.max_image_entry_size_bytes,
+            default_max_image_entry_size_bytes()
+        );
+        // And the read budget exposes both kinds' budgets.
+        let budget = settings.read_budget();
+        assert_eq!(budget.text_bytes, 65536);
+        assert_eq!(budget.image_bytes, default_max_image_entry_size_bytes());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_max_image_entry_size_bytes() {
+        let zero = AppSettings {
+            max_image_entry_size_bytes: 0,
+            ..AppSettings::default()
+        };
+        assert!(zero.validate().is_err());
+        let over = AppSettings {
+            max_image_entry_size_bytes: MAX_IMAGE_ENTRY_SIZE_BYTES + 1,
+            ..AppSettings::default()
+        };
+        assert!(over.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_image_budget_above_text_cap() {
+        // The image budget has its own, larger ceiling than the IPC-tied text
+        // cap, so a value above `MAX_ENTRY_SIZE_BYTES` must validate.
+        let settings = AppSettings {
+            max_image_entry_size_bytes: MAX_IMAGE_ENTRY_SIZE_BYTES,
+            ..AppSettings::default()
+        };
+        const { assert!(MAX_IMAGE_ENTRY_SIZE_BYTES > MAX_ENTRY_SIZE_BYTES) };
+        settings
+            .validate()
+            .expect("image budget above the text cap must validate");
     }
 
     #[test]

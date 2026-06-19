@@ -14,7 +14,10 @@ pub use factory::EntryFactory;
 pub use image_signature::{
     ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,
 };
-pub use limits::{MAX_DECODED_IMAGE_PIXELS, MAX_ENTRY_SIZE_BYTES, MAX_IPC_BYTES};
+pub use limits::{
+    MAX_DECODED_IMAGE_PIXELS, MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES,
+    ReadBudget,
+};
 pub use model::*;
 pub use policy::{
     MAX_USER_REGEX_LEN, MAX_USER_REGEX_NESTING, SecretAction, SensitivityClassification,

@@ -430,6 +430,8 @@ pub struct AppSettingsDto {
     pub history_retention_count: usize,
     pub history_retention_days: Option<u32>,
     pub max_entry_size_bytes: usize,
+    #[serde(default = "nagori_core::settings::default_max_image_entry_size_bytes")]
+    pub max_image_entry_size_bytes: usize,
     #[serde(default = "default_capture_kind_dtos")]
     pub capture_kinds: Vec<ContentKindDto>,
     pub max_total_bytes: Option<u64>,
@@ -545,6 +547,7 @@ impl From<AppSettings> for AppSettingsDto {
             history_retention_count: value.history_retention_count,
             history_retention_days: value.history_retention_days,
             max_entry_size_bytes: value.max_entry_size_bytes,
+            max_image_entry_size_bytes: value.max_image_entry_size_bytes,
             capture_kinds: value.capture_kinds.into_iter().map(Into::into).collect(),
             max_total_bytes: value.max_total_bytes,
             capture_enabled: value.capture_enabled,
@@ -589,6 +592,7 @@ impl From<AppSettingsDto> for AppSettings {
             history_retention_count: value.history_retention_count,
             history_retention_days: value.history_retention_days,
             max_entry_size_bytes: value.max_entry_size_bytes,
+            max_image_entry_size_bytes: value.max_image_entry_size_bytes,
             capture_kinds: value.capture_kinds.into_iter().map(Into::into).collect(),
             max_total_bytes: value.max_total_bytes,
             capture_enabled: value.capture_enabled,
@@ -650,6 +654,7 @@ mod tests {
             history_retention_count: 1234,
             history_retention_days: Some(7),
             max_entry_size_bytes: 2 * 1024 * 1024,
+            max_image_entry_size_bytes: 32 * 1024 * 1024,
             capture_kinds: [ContentKind::Text, ContentKind::Image]
                 .into_iter()
                 .collect(),
@@ -718,6 +723,10 @@ mod tests {
             original.history_retention_days
         );
         assert_eq!(restored.max_entry_size_bytes, original.max_entry_size_bytes);
+        assert_eq!(
+            restored.max_image_entry_size_bytes,
+            original.max_image_entry_size_bytes
+        );
         assert_eq!(restored.capture_kinds, original.capture_kinds);
         assert_eq!(restored.max_total_bytes, original.max_total_bytes);
         assert_eq!(restored.capture_enabled, original.capture_enabled);
