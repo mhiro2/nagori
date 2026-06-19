@@ -26,6 +26,20 @@ push to `main`), and Linux Wayland runs on a nightly schedule. The
 desktop shell's palette UI flow is not yet exercised by an automated
 WebView test — that work is tracked separately for tauri-driver.
 
+Owner "do not record" exclusion markers are honoured on every platform
+(always on, no setting), each via the host convention:
+
+| Platform       | Markers honoured                                                              |
+| -------------- | ---------------------------------------------------------------------------- |
+| macOS          | `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType`           |
+| Windows        | `Clipboard Viewer Ignore`, `ExcludeClipboardContentFromMonitorProcessing`    |
+| Linux Wayland  | `x-kde-passwordManagerHint` (KDE)                                            |
+
+A marked clip is skipped without its body being read. The Windows /
+Linux conventions are presence-only secret markers (no transient
+analogue), so they map to the same `Concealed` skip path; see
+[`docs/privacy.md`](./privacy.md#owner-exclusion-markers-all-platforms-always-on).
+
 macOS-only capabilities: secure-input detection, sleep/wake
 `changeCount` resynchronisation, and Quick Look preview (Cmd+Y in
 the palette, dispatched through `/usr/bin/qlmanage -p`; restricted to

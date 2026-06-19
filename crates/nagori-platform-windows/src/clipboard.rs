@@ -91,9 +91,15 @@ impl ClipboardReader for WindowsClipboard {
         match finalize_capture(captured, image, None).await? {
             CapturedSnapshot::Captured(snapshot) => Ok(snapshot),
             CapturedSnapshot::Oversized { .. } => unreachable!("unbounded capture cannot skip"),
-            CapturedSnapshot::Excluded { .. } => {
-                unreachable!("windows capture does not detect owner exclusion markers")
-            }
+            // The unbounded path has no `CapturedSnapshot` to return, so an
+            // owner-excluded clip yields an empty snapshot — we never
+            // materialise the secret body (mirroring the macOS adapter).
+            CapturedSnapshot::Excluded { sequence, .. } => Ok(ClipboardSnapshot {
+                sequence,
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: Vec::new(),
+            }),
         }
     }
 
@@ -442,6 +448,78 @@ fn png_pixel_count_from_ihdr(bytes: &[u8]) -> Option<u64> {
 /// expansion and the deflate-heavy PNG encode are what made a large-but-valid
 /// screenshot trip the 3s read timeout permanently and pinned the detached
 /// thread's mutex against later writes.
+/// Outcome of the per-attempt owner-exclusion probe in [`capture_snapshot`].
+#[cfg(windows)]
+enum OwnerExclusionProbe {
+    /// No marker present — proceed to the body read.
+    Absent,
+    /// Marker present and the sequence settled (stable or final retry):
+    /// return this `Excluded` snapshot.
+    Settled(CapturedSnapshot),
+    /// Marker present but the sequence drifted with retries left — discard
+    /// and re-read rather than anchoring a torn observation.
+    Retry,
+}
+
+/// Probe for an owner exclusion marker at one point of a capture attempt
+/// (used both before and after the body read).
+///
+/// Applies the same settle-or-retry decision the oversized path uses: the
+/// presence probe runs in its own clipboard session, so a marker found on a
+/// sequence that drifted from `before` is retried (up to
+/// [`SNAPSHOT_CAPTURE_MAX_RETRIES`]) with the final attempt accepted. An
+/// `Unavailable` probe (the clipboard was momentarily locked, e.g. while an
+/// owner publishes a marked secret) is inconclusive, so it too retries rather
+/// than falling through to a body read; only once retries are exhausted does it
+/// give up and let the read proceed. The marker is detected without reading any
+/// handle's bytes, so a marked secret never enters our address space.
+#[cfg(windows)]
+fn owner_exclusion_probe(before: u32, attempt: usize) -> OwnerExclusionProbe {
+    match win::owner_exclusion() {
+        win::MarkerProbe::Present(kind) => {
+            let after = native_sequence_number();
+            if before == after || attempt >= SNAPSHOT_CAPTURE_MAX_RETRIES {
+                OwnerExclusionProbe::Settled(CapturedSnapshot::Excluded {
+                    sequence: ClipboardSequence::native(i64::from(after)),
+                    kind,
+                })
+            } else {
+                OwnerExclusionProbe::Retry
+            }
+        }
+        win::MarkerProbe::Unavailable if attempt < SNAPSHOT_CAPTURE_MAX_RETRIES => {
+            OwnerExclusionProbe::Retry
+        }
+        win::MarkerProbe::Unavailable | win::MarkerProbe::Absent => OwnerExclusionProbe::Absent,
+    }
+}
+
+/// Build the file-list and text representations for a capture attempt and
+/// return them together with the index the image rep should occupy (after any
+/// file list, before text — the order `capture_snapshot` documents).
+///
+/// Split out of [`capture_snapshot`] so the retry loop stays readable; the
+/// `CF_HDROP` read is Windows-only, so the non-Windows build assembles just the
+/// text rep (the daemon never runs there, but the crate still compiles).
+fn assemble_text_and_files(plain: Option<String>) -> (Vec<ClipboardRepresentation>, usize) {
+    let mut representations = Vec::new();
+    #[cfg(windows)]
+    if let Some(files) = win::read_file_list() {
+        representations.push(ClipboardRepresentation {
+            mime_type: "text/uri-list".to_owned(),
+            data: ClipboardData::FilePaths(files),
+        });
+    }
+    let image_index = representations.len();
+    if let Some(text) = plain {
+        representations.push(ClipboardRepresentation {
+            mime_type: "text/plain".to_owned(),
+            data: ClipboardData::Text(text),
+        });
+    }
+    (representations, image_index)
+}
+
 fn capture_snapshot(
     clipboard: &Mutex<Clipboard>,
     max_bytes: Option<usize>,
@@ -457,6 +535,16 @@ fn capture_snapshot(
             std::thread::sleep(TORN_RETRY_BACKOFF);
         }
         let before = native_sequence_number();
+        // Owner-declared exclusion marker takes precedence over everything
+        // else, exactly like the macOS adapter: a marked secret is skipped
+        // before `get_text` reads it, so the body never enters our address
+        // space. `owner_exclusion_probe` owns the settle/retry handling.
+        #[cfg(windows)]
+        match owner_exclusion_probe(before, attempt) {
+            OwnerExclusionProbe::Settled(snapshot) => return Ok((snapshot, None)),
+            OwnerExclusionProbe::Retry => continue,
+            OwnerExclusionProbe::Absent => {}
+        }
         if let Some(limit) = max_bytes {
             #[cfg(windows)]
             if let Some(observed) = win::oversized_payload(limit) {
@@ -543,29 +631,24 @@ fn capture_snapshot(
         // check is what protects us against a write landing in between.
         drop(guard);
 
-        let mut representations = Vec::new();
+        // Assemble the file-list and text reps and record where the image rep
+        // belongs (after the file list, before text) so the deferred decode can
+        // splice the PNG back at the same position, preserving representation
+        // order and the dedup `representation_set_hash`.
+        let (representations, image_index) = assemble_text_and_files(plain);
 
+        // Re-probe the exclusion marker after the body read: a marker can race
+        // in within a single clear-then-write publish that the pre-read probe
+        // missed (or could not open the clipboard to see). Mirrors the macOS
+        // post-read re-check — the just-read `representations`, including any
+        // secret body, are dropped unreturned. Reusing `owner_exclusion_probe`
+        // gives the same settle/retry handling, so an inconclusive probe retries
+        // rather than committing a body it could not screen.
         #[cfg(windows)]
-        if let Some(files) = win::read_file_list() {
-            representations.push(ClipboardRepresentation {
-                mime_type: "text/uri-list".to_owned(),
-                data: ClipboardData::FilePaths(files),
-            });
-        }
-
-        // The image rep goes here — after the file list, before text. Record
-        // the index so the deferred decode+encode can splice the PNG back in
-        // at the same position, preserving the captured representation order
-        // (and the dedup `representation_set_hash`). The raw image bytes are
-        // returned to the caller for off-timeout decoding rather than decoded
-        // here.
-        let image_index = representations.len();
-
-        if let Some(text) = plain {
-            representations.push(ClipboardRepresentation {
-                mime_type: "text/plain".to_owned(),
-                data: ClipboardData::Text(text),
-            });
+        match owner_exclusion_probe(before, attempt) {
+            OwnerExclusionProbe::Settled(snapshot) => return Ok((snapshot, None)),
+            OwnerExclusionProbe::Retry => continue,
+            OwnerExclusionProbe::Absent => {}
         }
 
         let after = native_sequence_number();
@@ -830,6 +913,7 @@ mod win {
         AppError, MAX_DECODED_IMAGE_PIXELS, RepresentationDataRef, Result,
         StoredClipboardRepresentation,
     };
+    use nagori_platform::ClipboardExclusionKind;
 
     /// Sentinel value documented for `DragQueryFileW`: when `iFile == 0xFFFFFFFF`,
     /// the function returns the file count instead of writing a path.
@@ -1055,6 +1139,83 @@ mod win {
         const PNG_NAME: [u16; 4] = [b'P' as u16, b'N' as u16, b'G' as u16, 0];
         let id = unsafe { RegisterClipboardFormatW(PNG_NAME.as_ptr()) };
         (id != 0).then_some(id)
+    }
+
+    /// Well-known Windows clipboard format *names* a clipboard owner sets to
+    /// declare "do not record this in history" — the cross-platform analogue
+    /// of the macOS nspasteboard.org markers.
+    ///
+    /// - `Clipboard Viewer Ignore` is the long-standing de-facto convention
+    ///   honoured by clipboard managers; password managers (`KeePass`, …) set
+    ///   it when copying a credential.
+    /// - `ExcludeClipboardContentFromMonitorProcessing` is Microsoft's
+    ///   documented format for excluding content from clipboard monitoring /
+    ///   history, set by modern password managers and security-conscious apps.
+    ///
+    /// Both are *presence-only* secret markers: only the format's availability
+    /// matters, never its data, so we never pull the (possibly secret) payload
+    /// into our address space — mirroring the macOS adapter's
+    /// `availableTypeFromArray` presence test. Neither has a transient
+    /// analogue, so both surface as [`ClipboardExclusionKind::Concealed`].
+    const EXCLUSION_FORMAT_NAMES: &[&str] = &[
+        "Clipboard Viewer Ignore",
+        "ExcludeClipboardContentFromMonitorProcessing",
+    ];
+
+    /// Register a clipboard format *name* and return its session-stable id.
+    ///
+    /// Generalises [`png_format_id`] to an arbitrary UTF-8 name by widening it
+    /// to a NUL-terminated UTF-16 buffer. A registration failure (out of
+    /// clipboard-format slots) is treated as "format absent" so the caller
+    /// falls through rather than reporting a spurious match.
+    unsafe fn register_clipboard_format(name: &str) -> Option<u32> {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let id = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+        (id != 0).then_some(id)
+    }
+
+    /// Outcome of an owner-exclusion presence probe.
+    ///
+    /// `Unavailable` is kept distinct from `Absent` because the probe opens its
+    /// own clipboard session: a momentarily-locked clipboard (another app
+    /// mid-publish) returns `Unavailable`, which the caller must treat as
+    /// inconclusive — *not* "no marker" — so a marked secret published behind a
+    /// transient lock is never read as if it were unmarked.
+    pub(super) enum MarkerProbe {
+        Present(ClipboardExclusionKind),
+        Absent,
+        Unavailable,
+    }
+
+    /// Probe the clipboard for an owner-declared exclusion marker, reporting
+    /// `Present` when one of the [`EXCLUSION_FORMAT_NAMES`] is offered.
+    ///
+    /// Opens its own short clipboard session (like [`oversized_payload`] /
+    /// [`unicode_text_over_ceiling`]) and only calls `IsClipboardFormatAvailable`
+    /// — it never reads any handle's bytes, so a marked secret is skipped before
+    /// `get_text` ever copies it. A failed `OpenClipboard` is `Unavailable`
+    /// (inconclusive), not `Absent`, so the caller retries rather than reading
+    /// a body it could not screen. Runs before *and after* the body read in
+    /// [`capture_snapshot`], matching the macOS adapter's pre/post exclusion
+    /// checks.
+    pub(super) fn owner_exclusion() -> MarkerProbe {
+        // SAFETY: the `OpenClipboard` is paired with the `ClipboardGuard`
+        // drop, and we only call `IsClipboardFormatAvailable` (a pure
+        // presence query) while the clipboard is open — no handle is locked.
+        unsafe {
+            if OpenClipboard(std::ptr::null_mut()) == 0 {
+                return MarkerProbe::Unavailable;
+            }
+            let _guard = ClipboardGuard;
+            for name in EXCLUSION_FORMAT_NAMES {
+                if let Some(id) = register_clipboard_format(name)
+                    && IsClipboardFormatAvailable(id) != 0
+                {
+                    return MarkerProbe::Present(ClipboardExclusionKind::Concealed);
+                }
+            }
+            MarkerProbe::Absent
+        }
     }
 
     unsafe fn global_data_size(format: u32) -> Option<usize> {

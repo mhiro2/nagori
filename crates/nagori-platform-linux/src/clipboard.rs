@@ -5,11 +5,11 @@ use nagori_core::{
 };
 #[cfg(target_os = "linux")]
 use nagori_core::{ClipboardData, ClipboardRepresentation, RepresentationDataRef};
-#[cfg(target_os = "linux")]
-use nagori_platform::SNAPSHOT_CAPTURE_MAX_RETRIES;
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, has_publishable_representation,
 };
+#[cfg(target_os = "linux")]
+use nagori_platform::{ClipboardExclusionKind, SNAPSHOT_CAPTURE_MAX_RETRIES};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
@@ -108,6 +108,21 @@ const TEXT_MIME_HINTS: &[&str] = &[
     "TEXT",
 ];
 
+/// KDE's owner-declared "do not record this in history" offer — the
+/// cross-platform analogue of the macOS nspasteboard.org markers and the
+/// Windows `Clipboard Viewer Ignore` format. Password managers (`KeePassXC`,
+/// `KWallet`, …) advertise this MIME on the selection when copying a credential
+/// so cooperating clipboard managers skip it.
+///
+/// We treat the offer's *presence* as the contract and never read its body:
+/// the value is conventionally the literal `secret`, but reading it would mean
+/// pulling owner-declared bytes into our address space for no benefit — the
+/// marker exists precisely so a manager can skip the clip sight-unseen, exactly
+/// as the macOS adapter only presence-tests `availableTypeFromArray`. Surfaces
+/// as [`ClipboardExclusionKind::Concealed`] (there is no transient analogue).
+#[cfg(target_os = "linux")]
+const KDE_PASSWORD_MANAGER_HINT_MIME: &str = "x-kde-passwordManagerHint";
+
 /// Linux (Wayland) clipboard adapter.
 ///
 /// Talks directly to `wl-clipboard-rs` over the Wayland
@@ -178,7 +193,15 @@ impl ClipboardReader for LinuxClipboard {
         #[cfg(target_os = "linux")]
         {
             let pass = pipe_read_multi_pass(Some(INTERNAL_BODY_CEILING_BYTES)).await?;
-            let representations = pass.representations.unwrap_or_default();
+            // The unbounded path returns a plain snapshot, so an
+            // owner-excluded clip yields an empty snapshot — its body was
+            // never read (mirroring the macOS adapter). The `excluded:<kind>`
+            // sentinel still anchors dedup.
+            let representations = if pass.exclusion.is_some() {
+                Vec::new()
+            } else {
+                pass.representations.unwrap_or_default()
+            };
             Ok(ClipboardSnapshot {
                 sequence: ClipboardSequence::content_hash(pass.sequence),
                 captured_at: OffsetDateTime::now_utc(),
@@ -247,6 +270,12 @@ impl ClipboardReader for LinuxClipboard {
         {
             let pass = pipe_read_multi_pass(Some(max_bytes)).await?;
             let sequence = ClipboardSequence::content_hash(pass.sequence);
+            // Owner exclusion takes precedence over the size verdict: a marked
+            // clip was skipped before any body read, so it can be neither
+            // `Captured` nor `Oversized`.
+            if let Some(kind) = pass.exclusion {
+                return Ok(CapturedSnapshot::Excluded { sequence, kind });
+            }
             match pass.representations {
                 Some(representations) => Ok(CapturedSnapshot::Captured(ClipboardSnapshot {
                     sequence,
@@ -578,11 +607,19 @@ fn guess_image_mime(bytes: &[u8]) -> Result<&'static str> {
 /// read ceiling is crossed mid-stream we instead emit
 /// `oversized-over:<ceiling>:<prefix-hash>` so two distinct oversized
 /// clips with different prefixes still produce different sequences.
+///
+/// `exclusion` is `Some(kind)` when the offer set carried an owner-declared
+/// exclusion marker (KDE's password-manager hint). In that case no body was
+/// read, `representations` is `None`, and `sequence` is the deterministic
+/// `excluded:<kind>` sentinel so both the snapshot and sequence-only paths
+/// agree on the same key and the capture loop anchors dedup without
+/// re-probing the marked clip every tick.
 #[cfg(target_os = "linux")]
 struct MultiPipePass {
     representations: Option<Vec<ClipboardRepresentation>>,
     observed_total: usize,
     sequence: String,
+    exclusion: Option<ClipboardExclusionKind>,
 }
 
 #[cfg(target_os = "linux")]
@@ -712,6 +749,7 @@ fn multi_pass_attempt(
                     representations: buffer_cap.map(|_| Vec::new()),
                     observed_total: 0,
                     sequence: hex::encode(Sha256::new().finalize()),
+                    exclusion: None,
                 },
                 torn: false,
             });
@@ -722,6 +760,27 @@ fn multi_pass_attempt(
             )));
         }
     };
+
+    // Owner-declared exclusion marker (KDE's password-manager hint) takes
+    // precedence over reading any body, mirroring the macOS adapter: a marked
+    // secret is skipped before any `get_contents`, so its body never enters our
+    // address space. The deterministic `excluded:<kind>` sentinel keeps the
+    // snapshot and sequence-only paths in agreement so the capture loop anchors
+    // dedup without re-probing the marked clip every tick. Reported `torn:
+    // false` — we read nothing, so there is no stitched body to discard, and a
+    // marker that vanishes before the next poll self-corrects (the offer set no
+    // longer matches and the body-hash sequence diverges from the sentinel).
+    if let Some(kind) = offer_exclusion(&available) {
+        return Ok(MultiPassAttempt {
+            pass: MultiPipePass {
+                representations: None,
+                observed_total: 0,
+                sequence: excluded_sequence(kind),
+                exclusion: Some(kind),
+            },
+            torn: false,
+        });
+    }
 
     let mut state = MultiReadState::new(buffer_cap, sequence_ceiling, read_ceiling);
     let mut representations: Vec<ClipboardRepresentation> = Vec::new();
@@ -780,33 +839,134 @@ fn multi_pass_attempt(
         }
     }
 
+    Ok(finalize_multi_pass(
+        &available,
+        representations,
+        state,
+        detect_torn,
+    ))
+}
+
+/// Assemble the [`MultiPassAttempt`] from a completed read, applying the
+/// post-read owner-exclusion re-check and torn-snapshot drift detection.
+///
+/// Split out of [`multi_pass_attempt`] so the read body stays readable. The
+/// post-read re-enumeration runs only on the snapshot/buffering path
+/// (`detect_torn == true`): the sequence-only path never stores, so a marker
+/// racing into it is harmless — the change it triggers re-reads through this
+/// path, which then screens it. When the marker appeared since the pre-read
+/// check, the just-read body is dropped and Excluded is surfaced with the same
+/// `excluded:<kind>` sentinel the pre-read path uses, so dedup converges
+/// instead of re-probing.
+#[cfg(target_os = "linux")]
+fn finalize_multi_pass(
+    available: &HashSet<String>,
+    representations: Vec<ClipboardRepresentation>,
+    state: MultiReadState,
+    detect_torn: bool,
+) -> MultiPassAttempt {
     let observed_total = state.observed_total;
     let dropped = state.buffer_overflow || state.ceiling_hit;
     let sequence = state.finalize_sequence();
 
-    Ok(MultiPassAttempt {
+    let torn = if detect_torn {
+        let recheck = recheck_offers(available);
+        if let Some(kind) = recheck.exclusion {
+            return MultiPassAttempt {
+                pass: MultiPipePass {
+                    representations: None,
+                    observed_total: 0,
+                    sequence: excluded_sequence(kind),
+                    exclusion: Some(kind),
+                },
+                torn: false,
+            };
+        }
+        recheck.drifted
+    } else {
+        false
+    };
+
+    MultiPassAttempt {
         pass: MultiPipePass {
             representations: if dropped { None } else { Some(representations) },
             observed_total,
             sequence,
+            exclusion: None,
         },
-        torn: detect_torn && offers_drifted(&available),
-    })
+        torn,
+    }
 }
 
-/// Re-enumerate the current offer set and compare it with the one the
-/// attempt started from. `ClipboardEmpty` / `NoSeats` after a non-empty
-/// initial set count as drift — the owner went away mid-read. An enumeration
-/// *error* is inconclusive and treated as settled rather than failing the
-/// snapshot or churning retries against a flaky compositor.
+/// Detect an owner-declared exclusion marker in the offer set.
+///
+/// Presence of the KDE password-manager hint is the contract; the offer's body
+/// is never read (see [`KDE_PASSWORD_MANAGER_HINT_MIME`]). Returns the
+/// [`ClipboardExclusionKind`] to skip on, or `None` for an ordinary clip.
 #[cfg(target_os = "linux")]
-fn offers_drifted(initial: &HashSet<String>) -> bool {
+fn offer_exclusion(available: &HashSet<String>) -> Option<ClipboardExclusionKind> {
+    available
+        .contains(KDE_PASSWORD_MANAGER_HINT_MIME)
+        .then_some(ClipboardExclusionKind::Concealed)
+}
+
+/// Deterministic sentinel sequence for an owner-excluded clip.
+///
+/// Distinct from any real content hash (64 hex chars) and from the
+/// `oversized-over:` sentinel, so a transition to or from an excluded clip is
+/// always observed as a change while two successive excluded clips collapse to
+/// the same key (both are skipped, so the capture loop need not distinguish
+/// them).
+#[cfg(target_os = "linux")]
+fn excluded_sequence(kind: ClipboardExclusionKind) -> String {
+    let tag = match kind {
+        ClipboardExclusionKind::Concealed => "concealed",
+        ClipboardExclusionKind::Transient => "transient",
+    };
+    format!("excluded:{tag}")
+}
+
+/// Outcome of the post-read offer re-enumeration on the buffering snapshot
+/// path.
+///
+/// `exclusion` is `Some(kind)` when an owner-declared exclusion marker has
+/// appeared since the pre-read `offer_exclusion` check — a marker that raced in
+/// within a clear-then-write publish. `drifted` is the torn-snapshot signal:
+/// the offer set changed (or the owner went away), so the just-read
+/// representations may stitch two clips.
+#[cfg(target_os = "linux")]
+struct OfferRecheck {
+    drifted: bool,
+    exclusion: Option<ClipboardExclusionKind>,
+}
+
+/// Re-enumerate the current offer set after the body read and compare it with
+/// the one the attempt started from.
+///
+/// Folds two post-read checks into one Wayland roundtrip: torn-snapshot drift
+/// detection and a re-probe for an owner exclusion marker that raced in after
+/// the pre-read check (mirroring the macOS post-read re-check). `ClipboardEmpty`
+/// / `NoSeats` after a non-empty initial set count as drift — the owner went
+/// away mid-read. An enumeration *error* is inconclusive and treated as settled
+/// (no drift, no marker) rather than failing the snapshot or churning retries
+/// against a flaky compositor.
+#[cfg(target_os = "linux")]
+fn recheck_offers(initial: &HashSet<String>) -> OfferRecheck {
     match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
-        Ok(now) => now != *initial,
-        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => true,
+        Ok(now) => OfferRecheck {
+            drifted: now != *initial,
+            exclusion: offer_exclusion(&now),
+        },
+        Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats) => OfferRecheck {
+            drifted: true,
+            exclusion: None,
+        },
         Err(err) => {
             tracing::debug!(error = %err, "clipboard_offer_recheck_inconclusive");
-            false
+            OfferRecheck {
+                drifted: false,
+                exclusion: None,
+            }
         }
     }
 }
@@ -1235,9 +1395,14 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
+    use std::collections::HashSet;
+
+    use nagori_platform::ClipboardExclusionKind;
+
     use super::{
-        IMAGE_MIME_PRIORITY, MultiReadState, PIPE_CHUNK, SEQUENCE_FINGERPRINT_CEILING,
-        TimeoutPipeReader, oversized_sequence, parse_uri_list, pick_image_mime, serialize_uri_list,
+        IMAGE_MIME_PRIORITY, KDE_PASSWORD_MANAGER_HINT_MIME, MultiReadState, PIPE_CHUNK,
+        SEQUENCE_FINGERPRINT_CEILING, TimeoutPipeReader, excluded_sequence, offer_exclusion,
+        oversized_sequence, parse_uri_list, pick_image_mime, serialize_uri_list,
     };
 
     /// `Read` impl that always returns `TimedOut` — lets us exercise
@@ -1573,5 +1738,44 @@ mod tests {
             matches!(err, nagori_core::AppError::Unsupported(_)),
             "expected Unsupported, got {err:?}",
         );
+    }
+
+    #[test]
+    fn offer_exclusion_detects_kde_password_manager_hint() {
+        // A password manager advertises the hint alongside the secret text;
+        // the marker's presence is enough to skip the clip.
+        let offers: HashSet<String> = [
+            "text/plain;charset=utf-8".to_owned(),
+            KDE_PASSWORD_MANAGER_HINT_MIME.to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            offer_exclusion(&offers),
+            Some(ClipboardExclusionKind::Concealed),
+        );
+    }
+
+    #[test]
+    fn offer_exclusion_ignores_ordinary_offer() {
+        let offers: HashSet<String> = ["text/plain".to_owned(), "image/png".to_owned()]
+            .into_iter()
+            .collect();
+        assert_eq!(offer_exclusion(&offers), None);
+    }
+
+    #[test]
+    fn excluded_sequence_is_stable_and_distinct_from_content_hashes() {
+        // Both reader paths derive the sentinel from the same helper, so it
+        // must be deterministic for a given kind...
+        assert_eq!(
+            excluded_sequence(ClipboardExclusionKind::Concealed),
+            excluded_sequence(ClipboardExclusionKind::Concealed),
+        );
+        // ...and distinct from a 64-hex-char content hash so a transition to
+        // or from an excluded clip always reads as a change.
+        let sentinel = excluded_sequence(ClipboardExclusionKind::Concealed);
+        assert!(sentinel.starts_with("excluded:"));
+        assert_ne!(sentinel.len(), hex::encode(Sha256::new().finalize()).len());
     }
 }

@@ -224,10 +224,11 @@ ClipboardReader.current_sequence_with_max()
                                             touching the body)
   → ClipboardReader.current_snapshot_with_max()
                                             (pre-read size guard where
-                                             platform supports it; macOS
-                                             also detects an owner exclusion
-                                             marker here → Excluded → audit
-                                             + drop without reading the body)
+                                             platform supports it; every
+                                             adapter also detects an owner
+                                             exclusion marker here → Excluded
+                                             → audit + drop without reading
+                                             the body)
   → EntryFactory.from_snapshot()           (decode → ClipboardEntry +
                                             SHA-256 content hash +
                                             search document +
@@ -309,10 +310,20 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   markers are present. The behaviour is always on (no setting): the marker
   is the clipboard owner's explicit "do not record" contract, mirroring how
   the AX secure-field guard is unconditionally honoured. The kind is named
-  `ClipboardExclusionKind` (not `PasteboardMarker`) so the same skip path
-  can later carry the Windows (`Clipboard Viewer Ignore`) / Linux
-  (`x-kde-passwordManagerHint`) analogues once each is verified to mean the
-  same thing.
+  `ClipboardExclusionKind` (not `PasteboardMarker`) because every desktop
+  adapter carries an analogue onto the same skip path:
+  - **Windows** probes the `Clipboard Viewer Ignore` and
+    `ExcludeClipboardContentFromMonitorProcessing` formats with
+    `IsClipboardFormatAvailable` before `get_text` (each its own short
+    clipboard session, no handle ever locked).
+  - **Linux (Wayland)** treats KDE's `x-kde-passwordManagerHint` offer in
+    the enumerated MIME set as the marker, short-circuiting before any
+    `get_contents`.
+
+  Both non-macOS conventions are presence-only secret markers with no
+  transient analogue, so they surface as `Concealed`; like macOS they are
+  detected without reading the marked body, and the daemon-side skip /
+  audit / dedup-anchor path is identical across platforms.
 - `EntryRepository::insert` upserts `entries`, `search_documents`, and
   `ngrams` in one SQLite transaction, so search is consistent the
   moment the row commits — there is no separate

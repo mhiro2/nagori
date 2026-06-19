@@ -18,10 +18,12 @@
 - Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
   PEM blocks, credit-card numbers, and OTPs before they hit disk.
 - User regex denylist for project-specific patterns.
-- Honours the macOS "do not record" pasteboard markers password managers and
-  apps set (`org.nspasteboard.ConcealedType` / `org.nspasteboard.TransientType`):
-  a marked clip is skipped without ever being stored — normally before its body
-  is even read.
+- Honours the "do not record" clipboard markers password managers and apps set,
+  on every platform: macOS nspasteboard.org types (`org.nspasteboard.ConcealedType`
+  / `org.nspasteboard.TransientType`), Windows' `Clipboard Viewer Ignore` /
+  `ExcludeClipboardContentFromMonitorProcessing` formats, and Linux/Wayland's
+  KDE `x-kde-passwordManagerHint` offer. A marked clip is skipped without ever
+  being stored — normally before its body is even read.
 - Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
 - Paste a copied item as a specific representation: for a file that also
   carries a rendered image and a text label, **Cmd/Ctrl+Shift+Enter** offers a

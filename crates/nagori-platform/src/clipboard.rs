@@ -25,10 +25,13 @@ pub const SNAPSHOT_CAPTURE_MAX_RETRIES: usize = 3;
 /// secrets, set by password managers) and `org.nspasteboard.TransientType`
 /// (content not meant to outlive the current paste). The kind is named
 /// platform-neutrally rather than `PasteboardMarker` because the same
-/// "owner-declared exclusion" contract has analogues on other platforms
-/// (Windows' `Clipboard Viewer Ignore`, Linux's `x-kde-passwordManagerHint`)
-/// that can map onto the same skip path once each is verified to mean
-/// "refuse third-party history storage".
+/// "owner-declared exclusion" contract has analogues every desktop adapter
+/// now honours: the Windows adapter maps the `Clipboard Viewer Ignore` and
+/// `ExcludeClipboardContentFromMonitorProcessing` formats, and the Linux
+/// (Wayland) adapter maps KDE's `x-kde-passwordManagerHint` offer, onto this
+/// same skip path — each meaning "refuse third-party history storage". Both
+/// non-macOS conventions are presence-only secret markers with no transient
+/// analogue, so they surface as [`Self::Concealed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardExclusionKind {
     /// Concealed secret (e.g. a password). The strongest signal — when an
