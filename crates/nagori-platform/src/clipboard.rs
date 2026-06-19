@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nagori_core::{
     AppError, ClipboardData, ClipboardEntry, ClipboardRepresentation, ClipboardSequence,
-    ClipboardSnapshot, ContentHash, RepresentationDataRef, Result, StoredClipboardRepresentation,
+    ClipboardSnapshot, ContentHash, ReadBudget, RepresentationDataRef, Result,
+    StoredClipboardRepresentation,
 };
 use time::OffsetDateTime;
 
@@ -45,9 +46,10 @@ pub enum ClipboardExclusionKind {
 ///
 /// `Oversized` carries the change-count `sequence` so the capture loop can
 /// still anchor `last_sequence` and avoid re-reading the same oversized clip
-/// every poll, plus `observed_bytes` for audit logging. The variant is
-/// intentionally separate from [`AppError`] because hitting the configured
-/// `max_entry_size_bytes` is a benign skip, not a platform-level failure.
+/// every poll, plus `observed_bytes` / `limit` for the overflowing content
+/// kind for audit logging. The variant is intentionally separate from
+/// [`AppError`] because exceeding the configured per-kind budget (text or
+/// image, see [`ReadBudget`]) is a benign skip, not a platform-level failure.
 ///
 /// `Excluded` is the same shape for an owner-declared exclusion marker (see
 /// [`ClipboardExclusionKind`]): the adapter detects the marker and skips the
@@ -74,27 +76,28 @@ pub trait ClipboardReader: Send + Sync {
     async fn current_sequence(&self) -> Result<ClipboardSequence>;
 
     /// Like [`Self::current_sequence`], but allows platforms that must read
-    /// clipboard bytes to use the same pre-read ceiling as
+    /// clipboard bytes to use the same per-kind pre-read budget as
     /// [`Self::current_snapshot_with_max`].
-    async fn current_sequence_with_max(&self, _max_bytes: usize) -> Result<ClipboardSequence> {
+    async fn current_sequence_with_max(&self, _budget: ReadBudget) -> Result<ClipboardSequence> {
         self.current_sequence().await
     }
 
-    /// Like [`Self::current_snapshot`] but rejects payloads larger than
-    /// `max_bytes` *before* materialising them into a Rust `Vec<u8>` /
-    /// `String` whenever the platform exposes a cheap byte-length probe.
+    /// Like [`Self::current_snapshot`] but rejects payloads that exceed the
+    /// per-content-kind [`ReadBudget`] *before* materialising them into a Rust
+    /// `Vec<u8>` / `String` whenever the platform exposes a cheap byte-length
+    /// probe — image bytes against `budget.image_bytes`, everything else
+    /// against `budget.text_bytes`.
     ///
     /// The default implementation falls back to the unbounded snapshot and
     /// inspects sizes after the fact; platform impls should override it to
     /// avoid loading huge clipboards into the daemon's address space at all.
-    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
+    async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
         let snapshot = self.current_snapshot().await?;
-        let observed = total_payload_bytes(&snapshot);
-        if observed > max_bytes {
+        if let Some((observed, limit)) = oversized_kind(&snapshot, budget) {
             Ok(CapturedSnapshot::Oversized {
                 sequence: snapshot.sequence,
                 observed_bytes: observed,
-                limit: max_bytes,
+                limit,
             })
         } else {
             Ok(CapturedSnapshot::Captured(snapshot))
@@ -102,16 +105,46 @@ pub trait ClipboardReader: Send + Sync {
     }
 }
 
-fn total_payload_bytes(snapshot: &ClipboardSnapshot) -> usize {
-    snapshot
-        .representations
-        .iter()
-        .map(|rep| match &rep.data {
-            ClipboardData::Text(text) => text.len(),
-            ClipboardData::Bytes(bytes) => bytes.len(),
-            ClipboardData::FilePaths(paths) => paths.iter().map(String::len).sum(),
-        })
-        .sum()
+/// Per-kind byte total of a snapshot representation.
+fn snapshot_rep_bytes(rep: &ClipboardRepresentation) -> usize {
+    match &rep.data {
+        ClipboardData::Text(text) => text.len(),
+        ClipboardData::Bytes(bytes) => bytes.len(),
+        ClipboardData::FilePaths(paths) => paths.iter().map(String::len).sum(),
+    }
+}
+
+/// Whether a snapshot representation carries image bytes (mime `image/*` or a
+/// raw byte payload), so it answers to the image budget rather than the text
+/// budget.
+fn is_image_snapshot_rep(rep: &ClipboardRepresentation) -> bool {
+    rep.mime_type.starts_with("image/") || matches!(rep.data, ClipboardData::Bytes(_))
+}
+
+/// Sum a snapshot's payload per content kind and report the first kind whose
+/// total exceeds its budget, as `(observed_total_for_kind, limit)`.
+///
+/// Image bytes are summed against `budget.image_bytes`, text / file-list bytes
+/// against `budget.text_bytes`. Keeping the two separate is what lets a
+/// screenshot survive a text budget far smaller than its encoded size.
+fn oversized_kind(snapshot: &ClipboardSnapshot, budget: ReadBudget) -> Option<(usize, usize)> {
+    let mut image_total = 0usize;
+    let mut text_total = 0usize;
+    for rep in &snapshot.representations {
+        let bytes = snapshot_rep_bytes(rep);
+        if is_image_snapshot_rep(rep) {
+            image_total = image_total.saturating_add(bytes);
+        } else {
+            text_total = text_total.saturating_add(bytes);
+        }
+    }
+    if image_total > budget.image_bytes {
+        Some((image_total, budget.image_bytes))
+    } else if text_total > budget.text_bytes {
+        Some((text_total, budget.text_bytes))
+    } else {
+        None
+    }
 }
 
 #[async_trait]
@@ -175,12 +208,12 @@ impl<T: ClipboardReader + ?Sized> ClipboardReader for Arc<T> {
         (**self).current_sequence().await
     }
 
-    async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
-        (**self).current_sequence_with_max(max_bytes).await
+    async fn current_sequence_with_max(&self, budget: ReadBudget) -> Result<ClipboardSequence> {
+        (**self).current_sequence_with_max(budget).await
     }
 
-    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
-        (**self).current_snapshot_with_max(max_bytes).await
+    async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
+        (**self).current_snapshot_with_max(budget).await
     }
 }
 

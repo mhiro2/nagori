@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot, Result,
-    StoredClipboardRepresentation,
+    AppError, ClipboardContent, ClipboardEntry, ClipboardSequence, ClipboardSnapshot, ReadBudget,
+    Result, StoredClipboardRepresentation,
 };
 #[cfg(target_os = "linux")]
 use nagori_core::{ClipboardData, ClipboardRepresentation, RepresentationDataRef};
@@ -76,6 +76,24 @@ const SEQUENCE_FINGERPRINT_CEILING: usize = 1024 * 1024;
 // the same-prefix false negative cannot occur without the user raising the cap.
 #[cfg(target_os = "linux")]
 const _: () = assert!(SEQUENCE_FINGERPRINT_CEILING >= 512 * 1024);
+
+/// Cumulative read backstop for one buffered snapshot pass, derived from the
+/// per-kind [`ReadBudget`].
+///
+/// A Wayland clip offers at most three capturable representations: one image,
+/// one `text/uri-list`, and one `text/*`. Each is gated individually against
+/// its own kind budget while reading (see `MultiReadState::read_pipe`), so the
+/// most an all-within-budget clip can total is one image budget plus two text
+/// budgets. Using that sum as the cumulative ceiling keeps the buffered memory
+/// bounded without ever rejecting a clip whose every representation is within
+/// its own budget — the per-kind sums are then enforced authoritatively by the
+/// capture loop's `admit` / `trim_alternatives_to_budget`.
+#[cfg(target_os = "linux")]
+const fn snapshot_read_ceiling(budget: ReadBudget) -> usize {
+    budget
+        .image_bytes
+        .saturating_add(budget.text_bytes.saturating_mul(2))
+}
 
 /// Image MIME types we will capture, in priority order. Mirrors the
 /// `nagori-core` factory's `is_allowlisted_image_mime` allowlist
@@ -192,7 +210,11 @@ impl ClipboardReader for LinuxClipboard {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass(Some(INTERNAL_BODY_CEILING_BYTES)).await?;
+            let pass = pipe_read_multi_pass(ReadBudget::new(
+                INTERNAL_BODY_CEILING_BYTES,
+                INTERNAL_BODY_CEILING_BYTES,
+            ))
+            .await?;
             // The unbounded path returns a plain snapshot, so an
             // owner-excluded clip yields an empty snapshot — its body was
             // never read (mirroring the macOS adapter). The `excluded:<kind>`
@@ -239,17 +261,18 @@ impl ClipboardReader for LinuxClipboard {
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    async fn current_sequence_with_max(&self, max_bytes: usize) -> Result<ClipboardSequence> {
-        // Use the smaller of the caller's `max_bytes` and the
-        // sequence-fingerprint ceiling — the caller's cap still wins
-        // when they want a tighter budget than the ceiling, but a
-        // 256 MiB `max_entry_size_bytes` does not turn every poll into a
-        // multi-megabyte SHA-256 stream. When `max_bytes <= ceiling` the
-        // capturable clip is hashed in full, so the fingerprint is exact.
+    async fn current_sequence_with_max(&self, budget: ReadBudget) -> Result<ClipboardSequence> {
+        // Use the smaller of the snapshot read budget and the
+        // sequence-fingerprint ceiling so the fingerprint matches the snapshot
+        // path for the same clip (both derive their hash extent from
+        // `snapshot_read_ceiling(budget)`), while a generous budget does not
+        // turn every poll into a multi-megabyte SHA-256 stream.
         #[cfg(target_os = "linux")]
         {
-            let pass =
-                pipe_read_multi_pass_no_buffer(SEQUENCE_FINGERPRINT_CEILING.min(max_bytes)).await?;
+            let pass = pipe_read_multi_pass_no_buffer(
+                SEQUENCE_FINGERPRINT_CEILING.min(snapshot_read_ceiling(budget)),
+            )
+            .await?;
             Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
@@ -259,16 +282,16 @@ impl ClipboardReader for LinuxClipboard {
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
-        // The capture loop's hot path. The pipe-read pass buffers up
-        // to `max_bytes` so a malicious or runaway source app cannot
-        // make the daemon allocate gigabytes. Once the stream crosses
-        // the configured cap, we close the read end and return an
-        // Oversized variant instead of draining the owner-controlled
-        // pipe to EOF.
+    async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
+        // The capture loop's hot path. Each representation is gated against its
+        // own kind budget while streaming, so a multi-megabyte screenshot is
+        // captured under the image budget while a runaway text/file payload
+        // still answers to the text budget. A representation that crosses its
+        // budget closes the read end and returns an Oversized variant instead
+        // of draining the owner-controlled pipe to EOF.
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass(Some(max_bytes)).await?;
+            let pass = pipe_read_multi_pass(budget).await?;
             let sequence = ClipboardSequence::content_hash(pass.sequence);
             // Owner exclusion takes precedence over the size verdict: a marked
             // clip was skipped before any body read, so it can be neither
@@ -286,7 +309,14 @@ impl ClipboardReader for LinuxClipboard {
                 None => Ok(CapturedSnapshot::Oversized {
                     sequence,
                     observed_bytes: pass.observed_total,
-                    limit: max_bytes,
+                    // The budget of the kind whose representation tripped the
+                    // ceiling; falls back to the larger budget if the cumulative
+                    // backstop fired instead.
+                    limit: if pass.overflow_limit > 0 {
+                        pass.overflow_limit
+                    } else {
+                        budget.max()
+                    },
                 }),
             }
         }
@@ -620,6 +650,10 @@ struct MultiPipePass {
     observed_total: usize,
     sequence: String,
     exclusion: Option<ClipboardExclusionKind>,
+    /// Budget breached when the pass was dropped for size, surfaced so the
+    /// caller's `Oversized` verdict reports the limit the overflowing content
+    /// kind actually hit. `0` when the pass was not dropped for size.
+    overflow_limit: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -636,29 +670,45 @@ const PIPE_CHUNK: usize = 8 * 1024;
 const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_multi_pass(buffer_cap: Option<usize>) -> Result<MultiPipePass> {
-    // When the caller asks for buffering, the buffer cap also doubles as
-    // the read ceiling — there is no benefit to streaming past the cap
-    // since we cannot surface those bytes anyway, and reading them only
-    // gives a malicious publisher more time to occupy the blocking worker.
-    let read_ceiling = buffer_cap.unwrap_or(INTERNAL_BODY_CEILING_BYTES);
+async fn pipe_read_multi_pass(budget: ReadBudget) -> Result<MultiPipePass> {
+    // Each representation is gated against its own kind budget while reading;
+    // the cumulative ceiling is the sum that an all-within-budget clip can
+    // reach (see `snapshot_read_ceiling`), which doubles as the soft buffer
+    // cap — there is no benefit to streaming past it.
+    let read_ceiling = snapshot_read_ceiling(budget);
     // Cap the sequence hash at the smaller of `SEQUENCE_FINGERPRINT_CEILING`
-    // and the actual read budget so the fingerprint matches the
-    // sequence-only path even when the snapshot keeps buffering past the
-    // ceiling toward `max_entry_size_bytes`. The `.min` guard covers the
-    // rare test/embedded case where `buffer_cap < SEQUENCE_FINGERPRINT_CEILING`.
+    // and the cumulative read ceiling so the fingerprint matches the
+    // sequence-only path (which derives its ceiling the same way) for the same
+    // clip. The `.min` guard covers the rare test/embedded case where the
+    // budgets are smaller than `SEQUENCE_FINGERPRINT_CEILING`.
     let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
-    pipe_read_multi_pass_internal(buffer_cap, sequence_ceiling, read_ceiling).await
+    pipe_read_multi_pass_internal(
+        Some(read_ceiling),
+        sequence_ceiling,
+        read_ceiling,
+        budget.image_bytes,
+        budget.text_bytes,
+    )
+    .await
 }
 
 #[cfg(target_os = "linux")]
 async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipePass> {
     // No-buffer paths always run from `current_sequence*`, which already
-    // chose `SEQUENCE_FINGERPRINT_CEILING` (or a smaller `max_bytes`) as the
-    // read ceiling. Re-cap here so a future caller passing a larger
-    // `read_ceiling` still gets the canonical fingerprint extent.
+    // chose `SEQUENCE_FINGERPRINT_CEILING` (or a smaller budget-derived value)
+    // as the read ceiling. Re-cap here so a future caller passing a larger
+    // `read_ceiling` still gets the canonical fingerprint extent. The
+    // fingerprint never distinguishes content kinds, so both per-rep budgets
+    // are the cumulative ceiling — the cumulative check bounds the poll cost.
     let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
-    pipe_read_multi_pass_internal(None, sequence_ceiling, read_ceiling).await
+    pipe_read_multi_pass_internal(
+        None,
+        sequence_ceiling,
+        read_ceiling,
+        read_ceiling,
+        read_ceiling,
+    )
+    .await
 }
 
 /// Outcome of one multi-MIME read attempt: the assembled pass plus whether
@@ -685,6 +735,8 @@ async fn pipe_read_multi_pass_internal(
     buffer_cap: Option<usize>,
     sequence_ceiling: usize,
     read_ceiling: usize,
+    image_budget: usize,
+    text_budget: usize,
 ) -> Result<MultiPipePass> {
     // Torn detection is only worth paying for when the pass *buffers*
     // representations destined for the history (`buffer_cap.is_some()`):
@@ -710,8 +762,14 @@ async fn pipe_read_multi_pass_internal(
         // mirroring the other adapters' torn-snapshot semantics.
         let started = Instant::now();
         for attempt in 1..=SNAPSHOT_CAPTURE_MAX_RETRIES {
-            let outcome =
-                multi_pass_attempt(buffer_cap, sequence_ceiling, read_ceiling, detect_torn)?;
+            let outcome = multi_pass_attempt(
+                buffer_cap,
+                sequence_ceiling,
+                read_ceiling,
+                image_budget,
+                text_budget,
+                detect_torn,
+            )?;
             let out_of_retries =
                 attempt == SNAPSHOT_CAPTURE_MAX_RETRIES || started.elapsed() >= TORN_RETRY_BUDGET;
             if !outcome.torn || out_of_retries {
@@ -736,6 +794,8 @@ fn multi_pass_attempt(
     buffer_cap: Option<usize>,
     sequence_ceiling: usize,
     read_ceiling: usize,
+    image_budget: usize,
+    text_budget: usize,
     detect_torn: bool,
 ) -> Result<MultiPassAttempt> {
     let available = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
@@ -750,6 +810,7 @@ fn multi_pass_attempt(
                     observed_total: 0,
                     sequence: hex::encode(Sha256::new().finalize()),
                     exclusion: None,
+                    overflow_limit: 0,
                 },
                 torn: false,
             });
@@ -777,6 +838,7 @@ fn multi_pass_attempt(
                 observed_total: 0,
                 sequence: excluded_sequence(kind),
                 exclusion: Some(kind),
+                overflow_limit: 0,
             },
             torn: false,
         });
@@ -787,7 +849,7 @@ fn multi_pass_attempt(
 
     if let Some(image_mime) = pick_image_mime(&available)
         && !state.aborted()
-        && let Some(body) = read_specific_mime(&image_mime, &mut state)?
+        && let Some(body) = read_specific_mime(&image_mime, &mut state, image_budget)?
     {
         representations.push(ClipboardRepresentation {
             mime_type: image_mime,
@@ -797,7 +859,7 @@ fn multi_pass_attempt(
 
     if available.contains("text/uri-list")
         && !state.aborted()
-        && let Some(body) = read_specific_mime("text/uri-list", &mut state)?
+        && let Some(body) = read_specific_mime("text/uri-list", &mut state, text_budget)?
         && let Some(paths) = parse_uri_list(&body)
     {
         representations.push(ClipboardRepresentation {
@@ -810,7 +872,7 @@ fn multi_pass_attempt(
         .iter()
         .any(|m| TEXT_MIME_HINTS.contains(&m.as_str()))
         && !state.aborted()
-        && let Some(body) = read_text(&mut state)?
+        && let Some(body) = read_text(&mut state, text_budget)?
     {
         // A `text/*` MIME promised UTF-8 but a publisher can still hand
         // us malformed bytes (truncated transfers, a broken X11 bridge,
@@ -867,6 +929,7 @@ fn finalize_multi_pass(
 ) -> MultiPassAttempt {
     let observed_total = state.observed_total;
     let dropped = state.buffer_overflow || state.ceiling_hit;
+    let overflow_limit = state.overflow_limit;
     let sequence = state.finalize_sequence();
 
     let torn = if detect_torn {
@@ -878,6 +941,7 @@ fn finalize_multi_pass(
                     observed_total: 0,
                     sequence: excluded_sequence(kind),
                     exclusion: Some(kind),
+                    overflow_limit: 0,
                 },
                 torn: false,
             };
@@ -893,6 +957,7 @@ fn finalize_multi_pass(
             observed_total,
             sequence,
             exclusion: None,
+            overflow_limit,
         },
         torn,
     }
@@ -980,7 +1045,11 @@ fn pick_image_mime(available: &HashSet<String>) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_specific_mime(mime: &str, state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
+fn read_specific_mime(
+    mime: &str,
+    state: &mut MultiReadState,
+    rep_budget: usize,
+) -> Result<Option<Vec<u8>>> {
     match paste::get_contents(
         ClipboardType::Regular,
         Seat::Unspecified,
@@ -989,7 +1058,7 @@ fn read_specific_mime(mime: &str, state: &mut MultiReadState) -> Result<Option<V
         Ok((mut pipe, _mime)) => {
             state.begin_rep(mime);
             let mut timed = TimeoutPipeReader::new(&mut pipe, PIPE_READ_TIMEOUT);
-            state.read_pipe(&mut timed)
+            state.read_pipe(&mut timed, rep_budget)
         }
         // `NoMimeType` races with a publisher that retracted between the
         // initial enumeration and the specific request — treat as absent.
@@ -1003,7 +1072,7 @@ fn read_specific_mime(mime: &str, state: &mut MultiReadState) -> Result<Option<V
 }
 
 #[cfg(target_os = "linux")]
-fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
+fn read_text(state: &mut MultiReadState, rep_budget: usize) -> Result<Option<Vec<u8>>> {
     // `MimeType::Text` cycles through the documented text MIME variants
     // so we do not have to second-guess which one a given source app
     // chose. If none match the offer (rare but possible: STRING-only X11
@@ -1016,7 +1085,7 @@ fn read_text(state: &mut MultiReadState) -> Result<Option<Vec<u8>>> {
         Ok((mut pipe, _mime)) => {
             state.begin_rep("text/plain");
             let mut timed = TimeoutPipeReader::new(&mut pipe, PIPE_READ_TIMEOUT);
-            state.read_pipe(&mut timed)
+            state.read_pipe(&mut timed, rep_budget)
         }
         Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType) => {
             Ok(None)
@@ -1228,6 +1297,11 @@ struct MultiReadState {
     /// is locked to the oversized sentinel so the next changed clip
     /// still bumps it.
     read_timeout: bool,
+    /// Budget of the representation (or the cumulative ceiling) that tripped
+    /// `ceiling_hit`, surfaced so the `Oversized` verdict can report the limit
+    /// the overflowing content kind actually breached. `0` until something
+    /// trips.
+    overflow_limit: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -1247,6 +1321,7 @@ impl MultiReadState {
             sequence_overflow: false,
             ceiling_hit: false,
             read_timeout: false,
+            overflow_limit: 0,
         }
     }
 
@@ -1275,8 +1350,19 @@ impl MultiReadState {
         self.hasher.update(b"\0");
     }
 
-    fn read_pipe(&mut self, pipe: &mut impl Read) -> Result<Option<Vec<u8>>> {
-        // If we already crossed the ceiling for an earlier rep, do not
+    /// Stream one representation from `pipe`, gating it against `rep_budget`
+    /// (the byte budget for *this* representation's content kind).
+    ///
+    /// A representation larger than its own budget aborts the whole snapshot
+    /// (mirroring the macOS / Windows pre-read probe, which rejects a clip when
+    /// a single representation exceeds its kind's budget); the capture loop's
+    /// `admit` / `trim_alternatives_to_budget` then re-applies the per-kind
+    /// budgets — including the per-kind *sums* — authoritatively. The cumulative
+    /// `read_ceiling` and `sequence_ceiling` still apply on top: the former is
+    /// the sequence-only path's poll-cost bound, the latter the fingerprint
+    /// extent.
+    fn read_pipe(&mut self, pipe: &mut impl Read, rep_budget: usize) -> Result<Option<Vec<u8>>> {
+        // If we already crossed a ceiling for an earlier rep, do not
         // open this one — the sequence is already locked to the oversized
         // sentinel and additional bytes would be wasted work.
         if self.ceiling_hit {
@@ -1289,6 +1375,8 @@ impl MultiReadState {
         } else {
             self.buffer_cap.map(|_| Vec::new())
         };
+        // Bytes read for *this* representation, gated against its kind budget.
+        let mut rep_observed: usize = 0;
         let mut chunk = [0u8; PIPE_CHUNK];
         loop {
             let n = match pipe.read(&mut chunk) {
@@ -1320,13 +1408,12 @@ impl MultiReadState {
             }
             let previous = self.observed_total;
             self.observed_total = self.observed_total.saturating_add(n);
+            rep_observed = rep_observed.saturating_add(n);
 
             // Sequence-fingerprint cap: hash the prefix that still fits
             // and mark the sticky overflow. We do NOT stop reading here
             // — the snapshot path still needs the remaining bytes to
-            // buffer the full body. The sequence-only path crosses this
-            // and `read_ceiling` simultaneously (both the fingerprint
-            // ceiling), so the hard read-abort below fires on the same tick.
+            // buffer the full body.
             if !self.sequence_overflow {
                 if self.observed_total > self.sequence_ceiling {
                     let prefix_remaining = self.sequence_ceiling.saturating_sub(previous).min(n);
@@ -1339,11 +1426,21 @@ impl MultiReadState {
                 }
             }
 
-            // Read ceiling: hard pipe-close so a malicious or runaway
-            // publisher cannot keep a blocking worker occupied past the
-            // configured budget.
+            // Per-kind budget: a single representation larger than its kind's
+            // budget aborts the whole snapshot, mirroring the other adapters'
+            // pre-read probe. Close the pipe so a runaway publisher cannot keep
+            // a blocking worker occupied past the budget.
+            if rep_observed > rep_budget {
+                self.ceiling_hit = true;
+                self.overflow_limit = rep_budget;
+                return Ok(None);
+            }
+
+            // Cumulative read ceiling: the sequence-only path's poll-cost bound
+            // and a backstop for the buffered path. Hard pipe-close.
             if self.observed_total > self.read_ceiling {
                 self.ceiling_hit = true;
+                self.overflow_limit = self.read_ceiling;
                 return Ok(None);
             }
 
@@ -1449,7 +1546,7 @@ mod tests {
     fn read_pipe_closes_at_configured_ceiling() {
         let mut reader = CountingChunks::new(PIPE_CHUNK, 8);
         let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
-        let body = state.read_pipe(&mut reader).unwrap();
+        let body = state.read_pipe(&mut reader, PIPE_CHUNK).unwrap();
 
         assert_eq!(reader.reads, 2);
         assert!(body.is_none());
@@ -1467,7 +1564,7 @@ mod tests {
     fn read_pipe_buffers_within_ceiling() {
         let mut reader = io::Cursor::new(b"clipboard".to_vec());
         let mut state = MultiReadState::new(Some(64), 64, 64);
-        let body = state.read_pipe(&mut reader).unwrap();
+        let body = state.read_pipe(&mut reader, 64).unwrap();
 
         assert_eq!(body.as_deref(), Some(&b"clipboard"[..]));
         assert_eq!(state.observed_total, b"clipboard".len());
@@ -1480,9 +1577,9 @@ mod tests {
         let mut second_reader = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
 
         let mut s1 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
-        let _ = s1.read_pipe(&mut first_reader).unwrap();
+        let _ = s1.read_pipe(&mut first_reader, PIPE_CHUNK).unwrap();
         let mut s2 = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
-        let _ = s2.read_pipe(&mut second_reader).unwrap();
+        let _ = s2.read_pipe(&mut second_reader, PIPE_CHUNK).unwrap();
 
         assert_ne!(s1.finalize_sequence(), s2.finalize_sequence());
     }
@@ -1496,7 +1593,7 @@ mod tests {
         let mut second = io::Cursor::new([b'b'; PIPE_CHUNK + 1]);
 
         let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK * 8, PIPE_CHUNK * 8);
-        let first_body = state.read_pipe(&mut first).unwrap();
+        let first_body = state.read_pipe(&mut first, PIPE_CHUNK * 8).unwrap();
         // First rep exceeds the cap → its buffer dropped.
         assert!(first_body.is_none());
         assert!(state.buffer_overflow);
@@ -1504,7 +1601,7 @@ mod tests {
 
         // Second rep is still hashed even though buffer is sticky-off.
         let prior = state.observed_total;
-        let second_body = state.read_pipe(&mut second).unwrap();
+        let second_body = state.read_pipe(&mut second, PIPE_CHUNK * 8).unwrap();
         assert!(second_body.is_none());
         assert!(state.observed_total > prior);
     }
@@ -1525,13 +1622,15 @@ mod tests {
         // fingerprint cap.
         let mut snapshot = MultiReadState::new(Some(body.len()), PIPE_CHUNK, body.len());
         let _ = snapshot
-            .read_pipe(&mut io::Cursor::new(body.clone()))
+            .read_pipe(&mut io::Cursor::new(body.clone()), body.len())
             .unwrap();
 
         // Sequence-only: matches `current_sequence_with_max` shape — no
         // buffer, read_ceiling = sequence_ceiling.
         let mut seq_only = MultiReadState::new(None, PIPE_CHUNK, PIPE_CHUNK);
-        let _ = seq_only.read_pipe(&mut io::Cursor::new(body)).unwrap();
+        let _ = seq_only
+            .read_pipe(&mut io::Cursor::new(body), PIPE_CHUNK)
+            .unwrap();
 
         assert_eq!(snapshot.finalize_sequence(), seq_only.finalize_sequence());
     }
@@ -1555,13 +1654,17 @@ mod tests {
             SEQUENCE_FINGERPRINT_CEILING,
             SEQUENCE_FINGERPRINT_CEILING,
         );
-        let _ = s1.read_pipe(&mut io::Cursor::new(first)).unwrap();
+        let _ = s1
+            .read_pipe(&mut io::Cursor::new(first), SEQUENCE_FINGERPRINT_CEILING)
+            .unwrap();
         let mut s2 = MultiReadState::new(
             None,
             SEQUENCE_FINGERPRINT_CEILING,
             SEQUENCE_FINGERPRINT_CEILING,
         );
-        let _ = s2.read_pipe(&mut io::Cursor::new(second)).unwrap();
+        let _ = s2
+            .read_pipe(&mut io::Cursor::new(second), SEQUENCE_FINGERPRINT_CEILING)
+            .unwrap();
 
         let seq1 = s1.finalize_sequence();
         let seq2 = s2.finalize_sequence();
@@ -1579,10 +1682,12 @@ mod tests {
         let body = b"under the cap".to_vec();
         let mut snapshot = MultiReadState::new(Some(1024), 1024, 1024);
         let _ = snapshot
-            .read_pipe(&mut io::Cursor::new(body.clone()))
+            .read_pipe(&mut io::Cursor::new(body.clone()), 1024)
             .unwrap();
         let mut seq_only = MultiReadState::new(None, PIPE_CHUNK, PIPE_CHUNK);
-        let _ = seq_only.read_pipe(&mut io::Cursor::new(body)).unwrap();
+        let _ = seq_only
+            .read_pipe(&mut io::Cursor::new(body), PIPE_CHUNK)
+            .unwrap();
         let snapshot_seq = snapshot.finalize_sequence();
         assert_eq!(snapshot_seq, seq_only.finalize_sequence());
         // Small clip: neither path should land in the sentinel form.
@@ -1597,7 +1702,7 @@ mod tests {
         // sentinel locked) so the snapshot is dropped rather than left
         // pinning a blocking worker.
         let mut state = MultiReadState::new(Some(PIPE_CHUNK), PIPE_CHUNK, PIPE_CHUNK);
-        let body = state.read_pipe(&mut AlwaysTimesOut).unwrap();
+        let body = state.read_pipe(&mut AlwaysTimesOut, PIPE_CHUNK).unwrap();
 
         assert!(body.is_none());
         assert!(state.read_timeout, "read_timeout flag must latch");
@@ -1609,7 +1714,7 @@ mod tests {
         // Subsequent reads must short-circuit so the loop cannot keep
         // touching the wedged pipe across MIME types.
         let mut subsequent = io::Cursor::new(b"ignored".to_vec());
-        let after = state.read_pipe(&mut subsequent).unwrap();
+        let after = state.read_pipe(&mut subsequent, PIPE_CHUNK).unwrap();
         assert!(after.is_none());
     }
 
@@ -1640,17 +1745,17 @@ mod tests {
         let mut s_two = MultiReadState::new(Some(64), 64, 64);
         s_two.begin_rep("image/png");
         let _ = s_two
-            .read_pipe(&mut io::Cursor::new(b"AB".to_vec()))
+            .read_pipe(&mut io::Cursor::new(b"AB".to_vec()), 64)
             .unwrap();
         s_two.begin_rep("text/plain");
         let _ = s_two
-            .read_pipe(&mut io::Cursor::new(b"CD".to_vec()))
+            .read_pipe(&mut io::Cursor::new(b"CD".to_vec()), 64)
             .unwrap();
 
         let mut s_one = MultiReadState::new(Some(64), 64, 64);
         s_one.begin_rep("text/plain");
         let _ = s_one
-            .read_pipe(&mut io::Cursor::new(b"ABCD".to_vec()))
+            .read_pipe(&mut io::Cursor::new(b"ABCD".to_vec()), 64)
             .unwrap();
 
         assert_ne!(s_two.finalize_sequence(), s_one.finalize_sequence());

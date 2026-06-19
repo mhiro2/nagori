@@ -719,6 +719,46 @@ mod tests {
         assert_eq!(parsed.last_error.as_deref(), Some("settings load failed"));
     }
 
+    /// An image entry whose payload dwarfs the IPC line cap must still
+    /// serialise to a DTO well under [`MAX_IPC_BYTES`]: image bytes never ride
+    /// inline (the DTO carries only a `representation_summary` of mime +
+    /// `byte_count`), so the wire size is independent of the image's size.
+    /// This is the invariant that lets the image budget exceed the IPC ceiling.
+    #[test]
+    fn image_entry_dto_stays_under_ipc_ceiling() {
+        use nagori_core::{
+            ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+            ContentHash, EntryFactory, MAX_IPC_BYTES,
+        };
+
+        // A 4 MiB image (valid PNG magic + padding so it survives signature
+        // validation) — four times the IPC line cap.
+        let mut bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+        bytes.resize(4 * 1024 * 1024, 0);
+        let snapshot = ClipboardSnapshot {
+            sequence: ClipboardSequence::content_hash(ContentHash::sha256(&bytes).value),
+            captured_at: OffsetDateTime::UNIX_EPOCH,
+            source: None,
+            representations: vec![ClipboardRepresentation {
+                mime_type: "image/png".to_owned(),
+                data: ClipboardData::Bytes(bytes),
+            }],
+        };
+        let entry = EntryFactory::from_snapshot(snapshot).expect("image snapshot yields an entry");
+        let summary = RepresentationSummary {
+            role: RepresentationRole::Primary,
+            mime_type: "image/png".to_owned(),
+            byte_count: 4 * 1024 * 1024,
+        };
+        let dto = EntryDto::from_entry(entry, true).with_representation_summaries(&[summary]);
+        let encoded = serde_json::to_vec(&dto).expect("EntryDto serialises");
+        assert!(
+            encoded.len() < MAX_IPC_BYTES,
+            "image EntryDto must not inline the payload (got {} bytes)",
+            encoded.len()
+        );
+    }
+
     /// The envelope's reserved `version` field must be additive: a
     /// pre-versioning client (which omits it) deserialises as `0` rather than
     /// failing the parse, and a current client stamps [`IPC_PROTOCOL_VERSION`].

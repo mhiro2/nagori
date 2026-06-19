@@ -198,7 +198,7 @@ async fn assert_owner_marker_skipped(kind: ClipboardExclusionKind, expected_reas
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use nagori_core::ClipboardSnapshot;
+    use nagori_core::{ClipboardSnapshot, ReadBudget};
 
     // Reader whose bounded read reports an owner-marked clip without ever
     // producing a body — mirroring the macOS adapter detecting the marker
@@ -225,7 +225,7 @@ async fn assert_owner_marker_skipped(kind: ClipboardExclusionKind, expected_reas
         async fn current_sequence(&self) -> Result<ClipboardSequence> {
             Ok(self.sequence.clone())
         }
-        async fn current_snapshot_with_max(&self, _max: usize) -> Result<CapturedSnapshot> {
+        async fn current_snapshot_with_max(&self, _budget: ReadBudget) -> Result<CapturedSnapshot> {
             *self.snapshot_reads.lock().unwrap() += 1;
             Ok(CapturedSnapshot::Excluded {
                 sequence: self.sequence.clone(),

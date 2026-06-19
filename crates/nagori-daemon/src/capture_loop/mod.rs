@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
-    AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, EntryFactory, EntryId,
-    EntryRepository, MAX_ENTRY_SIZE_BYTES, Result, SecretAction, Sensitivity,
-    SensitivityClassifier, StoredClipboardRepresentation, factory::compute_representation_set_hash,
+    AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, ContentKind,
+    EntryFactory, EntryId, EntryRepository, MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES,
+    ReadBudget, Result, SecretAction, Sensitivity, SensitivityClassifier,
+    StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
 use nagori_ipc::CaptureEventCategory;
 use nagori_platform::{CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, WindowBehavior};
@@ -673,26 +674,27 @@ where
     /// Reads through the bounded path rather than the unbounded
     /// `current_snapshot`, so a huge pre-launch text/image isn't fully
     /// materialised just to seed the dedup state and blow up startup
-    /// latency / memory. Bound it by the internal hard limit
-    /// (`MAX_ENTRY_SIZE_BYTES`), *not* the live `max_entry_size_bytes`:
-    /// since the setting is validated to never exceed the hard limit, any
-    /// clip that could ever become capturable (even after the user later
-    /// raises the setting) is within this read and gets its dedup hash
-    /// anchored here. Without that, a baseline left unhashed because it
-    /// was over the *current* setting would be re-captured on a post-raise
-    /// wake-resync instead of being recognised as the pre-launch clip.
-    /// `current_snapshot_with_max` also enforces the internal
-    /// decoded-pixel cap, so a forged-dimension image can't OOM the probe.
+    /// latency / memory. Bound each kind by its internal hard limit
+    /// (`MAX_ENTRY_SIZE_BYTES` for text, `MAX_IMAGE_ENTRY_SIZE_BYTES` for
+    /// images), *not* the live user settings: since both settings are
+    /// validated to never exceed their hard limits, any clip that could ever
+    /// become capturable (even after the user later raises a setting) is
+    /// within this read and gets its dedup hash anchored here. Without that,
+    /// a baseline left unhashed because it was over the *current* setting
+    /// would be re-captured on a post-raise wake-resync instead of being
+    /// recognised as the pre-launch clip. Using the image hard cap here also
+    /// means a large pre-launch screenshot is hashed (up to 64 MiB read)
+    /// rather than skipped. `current_snapshot_with_max` also enforces the
+    /// internal decoded-pixel cap, so a forged-dimension image can't OOM the
+    /// probe.
     ///
     /// `pristine` flips only after the snapshot read succeeds — a transient
     /// platform error propagates first, keeping us in the pristine state so
     /// the next tick retries instead of stranding the loop with no baseline.
     async fn seed_pristine_baseline(&mut self) -> Result<()> {
-        match self
-            .reader
-            .current_snapshot_with_max(MAX_ENTRY_SIZE_BYTES)
-            .await?
-        {
+        // Per-kind hard ceilings, independent of the user's live budgets.
+        let budget = ReadBudget::new(MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES);
+        match self.reader.current_snapshot_with_max(budget).await? {
             CapturedSnapshot::Captured(snapshot) => {
                 self.dedup.last_sequence = Some(snapshot.sequence.clone());
                 if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
@@ -827,26 +829,17 @@ where
             self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(Admission::Dropped);
         }
-        // Size each entry by the bytes that will actually land in storage,
-        // not the plain-text projection. RichText's primary is HTML/RTF
-        // markup, so a large markup body with short plain text used to slip
-        // past this guard and write an oversized primary representation
-        // row. Image entries don't carry plain text either, so size them by
-        // the captured byte payload. Synthesised entries that never built a
-        // representation set (CLI `add_text`, post-secret-clear rows) keep
-        // the legacy plain-text length so existing oversize semantics hold.
-        let payload_bytes = match &entry.content {
-            ClipboardContent::Image(img) => img.byte_count,
-            _ => entry.pending_representations.first().map_or_else(
-                || entry.plain_text().map_or(0, str::len),
-                StoredClipboardRepresentation::byte_count,
-            ),
-        };
+        let payload_bytes = primary_payload_bytes(&entry);
         if payload_bytes == 0 {
             return Ok(Admission::Dropped);
         }
-        if payload_bytes > settings.max_entry_size_bytes {
-            warn!(bytes = payload_bytes, "capture_skipped reason=oversized");
+        let size_limit = primary_size_limit(entry.content_kind(), settings);
+        if payload_bytes > size_limit {
+            warn!(
+                bytes = payload_bytes,
+                limit = size_limit,
+                "capture_skipped reason=oversized"
+            );
             let _ = self
                 .audit
                 .record("capture_skipped", Some(entry.id), Some("oversized"))
@@ -921,13 +914,14 @@ where
         // so the source's HTML / RTF / plain alternatives can no longer leak
         // the raw secret here. Non-secret entries keep their alternatives.
 
-        // Enforce the user's `max_entry_size_bytes` budget across the full
-        // representation set, not just the primary. The pre-classify guard
-        // above already rejected entries whose primary exceeds the cap, so
-        // here we only have to trim alternatives; when anything is dropped
-        // the set hash has to be recomputed so dedupe matches what storage
-        // actually wrote.
-        if entry.trim_alternatives_to_budget(settings.max_entry_size_bytes) {
+        // Enforce the per-kind size budgets across the full representation
+        // set, not just the primary. The pre-classify guard above already
+        // rejected entries whose primary exceeds its budget, so here we only
+        // have to trim alternatives — image alternatives against the image
+        // budget, text/rich/file ones against the text budget; when anything
+        // is dropped the set hash has to be recomputed so dedupe matches what
+        // storage actually wrote.
+        if entry.trim_alternatives_to_budget(settings.read_budget()) {
             let new_hash = compute_representation_set_hash(&entry.pending_representations);
             entry.metadata.representation_set_hash = Some(new_hash);
         }
@@ -985,7 +979,7 @@ where
         // ⌘C → ⌘Tab → paste flows.
         let sequence = self
             .reader
-            .current_sequence_with_max(settings.max_entry_size_bytes)
+            .current_sequence_with_max(settings.read_budget())
             .await?;
         // Peek without consuming. We only clear `force_content_check` after
         // the body read succeeds — otherwise a transient `current_snapshot`
@@ -1034,7 +1028,7 @@ where
 
         let mut snapshot = match self
             .reader
-            .current_snapshot_with_max(settings.max_entry_size_bytes)
+            .current_snapshot_with_max(settings.read_budget())
             .await?
         {
             CapturedSnapshot::Captured(snapshot) => snapshot,
@@ -1258,6 +1252,39 @@ fn build_classifier(settings: &AppSettings) -> std::result::Result<SensitivityCl
 /// not the post-policy projection. The persisted dedupe key in storage
 /// may therefore differ for Secret / over-budget entries; the storage
 /// layer's own dedupe handles the persisted side.
+/// Bytes that will actually land in storage for `entry`'s primary, used to
+/// gate it against the per-kind size budget.
+///
+/// Sized by the stored payload, not the plain-text projection. `RichText`'s
+/// primary is HTML/RTF markup, so a large markup body with short plain text
+/// used to slip past this guard and write an oversized primary representation
+/// row. Image entries don't carry plain text either, so size them by the
+/// captured byte payload. Synthesised entries that never built a representation
+/// set (CLI `add_text`, post-secret-clear rows) keep the legacy plain-text
+/// length so existing oversize semantics hold.
+fn primary_payload_bytes(entry: &nagori_core::ClipboardEntry) -> usize {
+    match &entry.content {
+        ClipboardContent::Image(img) => img.byte_count,
+        _ => entry.pending_representations.first().map_or_else(
+            || entry.plain_text().map_or(0, str::len),
+            StoredClipboardRepresentation::byte_count,
+        ),
+    }
+}
+
+/// Byte budget gating an entry's primary payload, chosen by content kind.
+///
+/// Image primaries answer to the larger `max_image_entry_size_bytes` because
+/// their bytes never cross the IPC line inline (the desktop streams them via a
+/// custom scheme; copy-back reads the BLOB in-process). Everything else stays
+/// bounded by the IPC-tied `max_entry_size_bytes`.
+const fn primary_size_limit(kind: ContentKind, settings: &AppSettings) -> usize {
+    match kind {
+        ContentKind::Image => settings.max_image_entry_size_bytes,
+        _ => settings.max_entry_size_bytes,
+    }
+}
+
 fn effective_dedupe_hash(entry: &nagori_core::ClipboardEntry) -> String {
     entry.metadata.representation_set_hash.as_ref().map_or_else(
         || entry.metadata.content_hash.value.clone(),

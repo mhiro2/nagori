@@ -746,7 +746,7 @@ async fn trim_alternatives_drops_oversized_alts_before_insert() {
     // recomputed `representation_set_hash` keeps dedupe honest about
     // what storage actually wrote.
     use nagori_core::{
-        ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+        ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, ReadBudget,
         factory::compute_representation_set_hash,
     };
 
@@ -771,7 +771,7 @@ async fn trim_alternatives_drops_oversized_alts_before_insert() {
         ],
     };
     let mut entry = EntryFactory::from_snapshot(snapshot).expect("snapshot should yield entry");
-    let trimmed = entry.trim_alternatives_to_budget(64);
+    let trimmed = entry.trim_alternatives_to_budget(ReadBudget::new(64, 64));
     assert!(trimmed, "RTF alternative should be trimmed");
     entry.metadata.representation_set_hash = Some(compute_representation_set_hash(
         &entry.pending_representations,

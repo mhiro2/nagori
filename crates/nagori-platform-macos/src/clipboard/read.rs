@@ -4,7 +4,8 @@ use std::time::Duration;
 use arboard::Clipboard;
 use async_trait::async_trait;
 use nagori_core::{
-    AppError, ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, Result,
+    AppError, ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot,
+    ReadBudget, Result,
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, clipboard_blocking,
@@ -79,17 +80,17 @@ impl ClipboardReader for MacosClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))
     }
 
-    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
+    async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
         let captured = clipboard_blocking("current_snapshot_with_max", move || {
-            capture_snapshot_with_max(&clipboard, max_bytes)
+            capture_snapshot_with_max(&clipboard, budget)
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))??;
         // Normalise any captured TIFF to PNG off the read timeout, then
-        // re-apply the size budget to the transcoded image (see
+        // re-apply the image budget to the transcoded image (see
         // `finalize_captured`).
-        finalize_captured(captured, max_bytes).await
+        finalize_captured(captured, budget).await
     }
 }
 
@@ -125,10 +126,10 @@ pub(super) enum CaptureAttempt {
 /// attempt accepts whatever it observed.
 fn capture_snapshot_with_max(
     clipboard: &Mutex<Clipboard>,
-    max_bytes: usize,
+    budget: ReadBudget,
 ) -> Result<CapturedSnapshot> {
     resolve_capture_attempts(SNAPSHOT_CAPTURE_MAX_RETRIES, TORN_RETRY_BACKOFF, || {
-        capture_attempt(clipboard, Some(max_bytes))
+        capture_attempt(clipboard, Some(budget))
     })
 }
 
@@ -180,9 +181,9 @@ pub(super) fn resolve_capture_attempts(
 /// hostile multi-GB string never lands in the daemon's heap. The bounded path
 /// is already covered by `oversized_payload`, so it skips the probe.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-fn read_plain_text(guard: &mut Clipboard, max_bytes: Option<usize>) -> Result<Option<String>> {
+fn read_plain_text(guard: &mut Clipboard, budget: Option<ReadBudget>) -> Result<Option<String>> {
     #[cfg(target_os = "macos")]
-    if max_bytes.is_none() && plain_text_byte_len().is_some_and(|len| len > MAX_TEXT_REP_BYTES) {
+    if budget.is_none() && plain_text_byte_len().is_some_and(|len| len > MAX_TEXT_REP_BYTES) {
         tracing::warn!(
             ceiling = MAX_TEXT_REP_BYTES,
             "pasteboard_text_rep_exceeds_ceiling"
@@ -198,14 +199,16 @@ fn read_plain_text(guard: &mut Clipboard, max_bytes: Option<usize>) -> Result<Op
 
 /// One probe → load → verify pass over the pasteboard.
 ///
-/// `max_bytes` is `Some` on the bounded `current_snapshot_with_max` path (an
-/// over-budget payload short-circuits to `Oversized`) and `None` on the
-/// unbounded `current_snapshot` path (no budget to reject against — oversized
-/// reps are instead dropped by the per-rep defence-in-depth ceilings).
+/// `budget` is `Some` on the bounded `current_snapshot_with_max` path (an
+/// over-budget payload short-circuits to `Oversized`, sizing image bytes
+/// against `budget.image_bytes` and everything else against
+/// `budget.text_bytes`) and `None` on the unbounded `current_snapshot` path
+/// (no budget to reject against — oversized reps are instead dropped by the
+/// per-rep defence-in-depth ceilings).
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn capture_attempt(
     clipboard: &Mutex<Clipboard>,
-    max_bytes: Option<usize>,
+    budget: Option<ReadBudget>,
 ) -> Result<CaptureAttempt> {
     // Recover from a poisoned guard rather than failing the read: the arboard
     // clipboard has no Rust invariant a prior panic could leave broken, and
@@ -246,8 +249,8 @@ fn capture_attempt(
     // loop's post-load check remains authoritative for the final
     // ClipboardEntry payload.
     #[cfg(target_os = "macos")]
-    if let Some(max) = max_bytes
-        && let Some(observed) = oversized_payload(max)
+    if let Some(budget) = budget
+        && let Some((observed, limit)) = oversized_payload(budget)
     {
         let after = pasteboard_sequence();
         drop(guard);
@@ -257,7 +260,7 @@ fn capture_attempt(
             CapturedSnapshot::Oversized {
                 sequence: after.clone(),
                 observed_bytes: observed,
-                limit: max,
+                limit,
             },
         ));
     }
@@ -274,14 +277,18 @@ fn capture_attempt(
     // `read_plain_text` applies a defence-in-depth text ceiling before
     // `get_text` copies the payload (the bounded path is already covered by the
     // pre-filter above).
-    let plain = read_plain_text(&mut guard, max_bytes)?;
+    let plain = read_plain_text(&mut guard, budget)?;
 
     let mut representations = Vec::new();
 
+    // File URLs are text-kind, so they answer to the text budget; image reps
+    // collected here are bounded by the defence-in-depth `MAX_IMAGE_REP_BYTES`
+    // ceiling and re-checked against the image budget in `finalize_captured`.
     #[cfg(target_os = "macos")]
-    let collected_oversize = collect_macos_extras(&mut representations, max_bytes);
+    let collected_oversize =
+        collect_macos_extras(&mut representations, budget.map(|b| b.text_bytes));
     #[cfg(target_os = "macos")]
-    if let (Some(max), Some(observed)) = (max_bytes, collected_oversize) {
+    if let (Some(budget), Some(observed)) = (budget, collected_oversize) {
         let after = pasteboard_sequence();
         drop(guard);
         return Ok(settle(
@@ -290,7 +297,7 @@ fn capture_attempt(
             CapturedSnapshot::Oversized {
                 sequence: after.clone(),
                 observed_bytes: observed,
-                limit: max,
+                limit: budget.text_bytes,
             },
         ));
     }

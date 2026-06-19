@@ -4,7 +4,7 @@ use image::{ImageEncoder, codecs::png::PngEncoder};
 use nagori_core::MAX_DECODED_IMAGE_PIXELS;
 #[cfg(target_os = "macos")]
 use nagori_core::{AppError, ClipboardData, ClipboardRepresentation};
-use nagori_core::{ClipboardSnapshot, Result};
+use nagori_core::{ClipboardSnapshot, ReadBudget, Result};
 use nagori_platform::CapturedSnapshot;
 #[cfg(target_os = "macos")]
 use nagori_platform::{DecodeRgbaError, decode_rgba_with_pixel_cap};
@@ -288,16 +288,17 @@ pub(super) async fn transcode_snapshot(snapshot: ClipboardSnapshot) -> Result<Cl
 }
 
 /// Normalise a bounded capture after the timed read returns, then re-apply
-/// the entry-size budget to the transcoded image.
+/// the image budget to the transcoded image.
 ///
 /// The raw pasteboard probe (`oversized_payload`) never sizes TIFF — only
 /// PNG / HTML / RTF / text / file URLs — so the normalised image size is
-/// first known here. Surfacing it as `Oversized` keeps the pre-read drop
-/// semantics the in-timed transcode used to enforce.
+/// first known here. The transcoded bytes are an image (`image/png`), so they
+/// answer to `budget.image_bytes`; surfacing an oversize as `Oversized` keeps
+/// the pre-read drop semantics the in-timed transcode used to enforce.
 #[cfg(target_os = "macos")]
 pub(super) async fn finalize_captured(
     captured: CapturedSnapshot,
-    max_bytes: usize,
+    budget: ReadBudget,
 ) -> Result<CapturedSnapshot> {
     let CapturedSnapshot::Captured(mut snapshot) = captured else {
         // `Oversized` was already decided on raw pasteboard sizes, and
@@ -310,14 +311,14 @@ pub(super) async fn finalize_captured(
         .representations
         .iter()
         .find_map(|rep| match &rep.data {
-            ClipboardData::Bytes(bytes) if bytes.len() > max_bytes => Some(bytes.len()),
+            ClipboardData::Bytes(bytes) if bytes.len() > budget.image_bytes => Some(bytes.len()),
             _ => None,
         })
     {
         return Ok(CapturedSnapshot::Oversized {
             sequence: snapshot.sequence,
             observed_bytes: observed,
-            limit: max_bytes,
+            limit: budget.image_bytes,
         });
     }
     Ok(CapturedSnapshot::Captured(snapshot))
@@ -327,7 +328,7 @@ pub(super) async fn finalize_captured(
 #[allow(clippy::unused_async)]
 pub(super) async fn finalize_captured(
     captured: CapturedSnapshot,
-    _max_bytes: usize,
+    _budget: ReadBudget,
 ) -> Result<CapturedSnapshot> {
     Ok(captured)
 }

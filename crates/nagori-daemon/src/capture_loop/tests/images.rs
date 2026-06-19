@@ -174,8 +174,9 @@ async fn capture_once_records_image_dimensions_from_header() {
 #[tokio::test]
 async fn capture_once_skips_oversized_image_payloads() {
     // The size guard must be denominated in image byte_count for image
-    // snapshots — pre-fix, the guard saw `text.len() == 0` and let any
-    // image through regardless of payload size.
+    // snapshots, and measured against the *image* budget
+    // (`max_image_entry_size_bytes`) rather than the text budget — an image
+    // over its own budget is still dropped.
     use std::sync::Mutex;
 
     use async_trait::async_trait;
@@ -214,20 +215,93 @@ async fn capture_once_skips_oversized_image_payloads() {
         }
     }
 
-    let bytes = vec![0u8; 256];
+    // Valid PNG magic so the snapshot survives magic-number validation and
+    // the oversize verdict is the *size* guard, not a bad-signature drop.
+    let mut bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+    bytes.resize(256, 0);
     let reader = ImageReader {
         bytes: bytes.clone(),
         seq_called: Mutex::new(false),
     };
     let store = SqliteStore::open_memory().expect("memory store");
     let settings = AppSettings {
-        max_entry_size_bytes: 64,
+        max_image_entry_size_bytes: 64,
         ..AppSettings::default()
     };
     let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
 
     assert!(loop_.capture_once().await.unwrap().is_none());
     assert!(store.list_recent(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capture_once_admits_image_over_text_budget_but_within_image_budget() {
+    // The motivating fix: a screenshot that exceeds the (small, IPC-tied)
+    // text budget must still be captured as long as it fits the separate,
+    // larger image budget. Pre-fix the single `max_entry_size_bytes` budget
+    // dropped every Retina screenshot as `oversized`.
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use nagori_core::{
+        ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, ContentHash,
+    };
+    use nagori_platform::ClipboardReader;
+    use time::OffsetDateTime;
+
+    struct ImageReader {
+        bytes: Vec<u8>,
+        seq_called: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl ClipboardReader for ImageReader {
+        async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+            Ok(ClipboardSnapshot {
+                sequence: ClipboardSequence::content_hash(ContentHash::sha256(&self.bytes).value),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: vec![ClipboardRepresentation {
+                    mime_type: "image/png".to_owned(),
+                    data: ClipboardData::Bytes(self.bytes.clone()),
+                }],
+            })
+        }
+
+        async fn current_sequence(&self) -> Result<ClipboardSequence> {
+            *self.seq_called.lock().unwrap() = true;
+            Ok(ClipboardSequence::content_hash(
+                ContentHash::sha256(&self.bytes).value,
+            ))
+        }
+    }
+
+    // 4 KiB image (valid PNG magic + padding), over a 1 KiB text budget but
+    // under a 1 MiB image budget.
+    let mut bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+    bytes.resize(4096, 0);
+    let reader = ImageReader {
+        bytes: bytes.clone(),
+        seq_called: Mutex::new(false),
+    };
+    let store = SqliteStore::open_memory().expect("memory store");
+    let settings = AppSettings {
+        max_entry_size_bytes: 1024,
+        max_image_entry_size_bytes: 1024 * 1024,
+        ..AppSettings::default()
+    };
+    let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
+
+    let id = loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("image over the text budget must still be captured under the image budget");
+    let stored = store.get(id).await.unwrap().expect("row");
+    match &stored.content {
+        ClipboardContent::Image(img) => assert_eq!(img.byte_count, bytes.len()),
+        other => panic!("expected Image content, got {other:?}"),
+    }
 }
 
 #[tokio::test]

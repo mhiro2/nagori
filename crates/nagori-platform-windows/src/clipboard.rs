@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use image::ImageFormat;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
-    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, Result,
+    ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, ReadBudget, Result,
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
@@ -114,16 +114,16 @@ impl ClipboardReader for WindowsClipboard {
         .map_err(|err| AppError::Platform(err.to_string()))
     }
 
-    async fn current_snapshot_with_max(&self, max_bytes: usize) -> Result<CapturedSnapshot> {
+    async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
         let (captured, image) = clipboard_blocking("current_snapshot_with_max", move || {
-            capture_snapshot(&clipboard, Some(max_bytes))
+            capture_snapshot(&clipboard, Some(budget))
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))??;
         // Encode any captured image to PNG off the read timeout, then apply
-        // the entry-size budget to the full payload (see `finalize_capture`).
-        finalize_capture(captured, image, Some(max_bytes)).await
+        // the per-kind budget to the full payload (see `finalize_capture`).
+        finalize_capture(captured, image, Some(budget)).await
     }
 }
 
@@ -522,7 +522,7 @@ fn assemble_text_and_files(plain: Option<String>) -> (Vec<ClipboardRepresentatio
 
 fn capture_snapshot(
     clipboard: &Mutex<Clipboard>,
-    max_bytes: Option<usize>,
+    budget: Option<ReadBudget>,
 ) -> Result<(CapturedSnapshot, Option<(usize, RawImage)>)> {
     const MAX_RETRIES: usize = SNAPSHOT_CAPTURE_MAX_RETRIES;
     let mut attempt = 0;
@@ -545,9 +545,9 @@ fn capture_snapshot(
             OwnerExclusionProbe::Retry => continue,
             OwnerExclusionProbe::Absent => {}
         }
-        if let Some(limit) = max_bytes {
+        if let Some(budget) = budget {
             #[cfg(windows)]
-            if let Some(observed) = win::oversized_payload(limit) {
+            if let Some((observed, limit)) = win::oversized_payload(budget) {
                 // The size probe is a separate clipboard session from the
                 // `before` sample, so a write landing in between would anchor
                 // `last_sequence` to a *different* clip we never sized — and
@@ -569,7 +569,7 @@ fn capture_snapshot(
                 continue;
             }
             #[cfg(not(windows))]
-            let _ = limit;
+            let _ = budget;
         }
 
         let mut guard = lock_clipboard_recovering(clipboard);
@@ -579,7 +579,7 @@ fn capture_snapshot(
         // multi-GB string never lands in our heap.
         #[cfg(windows)]
         let skip_oversized_text =
-            max_bytes.is_none() && win::unicode_text_over_ceiling(MAX_TEXT_REP_BYTES);
+            budget.is_none() && win::unicode_text_over_ceiling(MAX_TEXT_REP_BYTES);
         #[cfg(not(windows))]
         let skip_oversized_text = false;
         let plain = if skip_oversized_text {
@@ -679,12 +679,12 @@ fn capture_snapshot(
 /// decodes off the timed section. `win::oversized_payload` deliberately never
 /// sizes raw `CF_DIBV5` (it is uncompressed and routinely several MiB for
 /// ordinary screenshots), so the normalised image size is first known here;
-/// surfacing it as `Oversized` preserves the gate the in-timed
-/// `total_payload_bytes` check used to apply.
+/// surfacing it as `Oversized` preserves the gate the in-timed per-kind size
+/// check used to apply.
 async fn finalize_capture(
     captured: CapturedSnapshot,
     image: Option<(usize, RawImage)>,
-    max_bytes: Option<usize>,
+    budget: Option<ReadBudget>,
 ) -> Result<CapturedSnapshot> {
     let CapturedSnapshot::Captured(snapshot) = captured else {
         // `Oversized` was already decided on raw clipboard sizes.
@@ -703,7 +703,7 @@ async fn finalize_capture(
     } else {
         None
     };
-    Ok(assemble_capture(snapshot, encoded, max_bytes))
+    Ok(assemble_capture(snapshot, encoded, budget))
 }
 
 /// Raw clipboard image bytes copied out under the clipboard lock but not yet
@@ -818,7 +818,7 @@ fn maybe_tweak_dibv5_header(bytes: &mut [u8]) {
 fn assemble_capture(
     mut snapshot: ClipboardSnapshot,
     image: Option<(usize, Vec<u8>)>,
-    max_bytes: Option<usize>,
+    budget: Option<ReadBudget>,
 ) -> CapturedSnapshot {
     if let Some((index, png)) = image {
         let index = index.min(snapshot.representations.len());
@@ -830,29 +830,47 @@ fn assemble_capture(
             },
         );
     }
-    if let Some(limit) = max_bytes {
-        let observed_bytes = total_payload_bytes(&snapshot);
-        if observed_bytes > limit {
-            return CapturedSnapshot::Oversized {
-                sequence: snapshot.sequence,
-                observed_bytes,
-                limit,
-            };
-        }
+    if let Some(budget) = budget
+        && let Some((observed_bytes, limit)) = oversized_kind(&snapshot, budget)
+    {
+        return CapturedSnapshot::Oversized {
+            sequence: snapshot.sequence,
+            observed_bytes,
+            limit,
+        };
     }
     CapturedSnapshot::Captured(snapshot)
 }
 
-fn total_payload_bytes(snapshot: &ClipboardSnapshot) -> usize {
-    snapshot
-        .representations
-        .iter()
-        .map(|rep| match &rep.data {
+/// Sum a snapshot's payload per content kind and report the first kind whose
+/// total exceeds its budget, as `(observed_total_for_kind, limit)`.
+///
+/// Image bytes (mime `image/*` or a raw byte payload) are summed against
+/// `budget.image_bytes`, text / file-list bytes against `budget.text_bytes`,
+/// so the encoded screenshot is sized against the larger image budget while
+/// any text riding the same snapshot stays bounded by the text cap.
+fn oversized_kind(snapshot: &ClipboardSnapshot, budget: ReadBudget) -> Option<(usize, usize)> {
+    let mut image_total = 0_usize;
+    let mut text_total = 0_usize;
+    for rep in &snapshot.representations {
+        let bytes = match &rep.data {
             ClipboardData::Text(text) => text.len(),
             ClipboardData::Bytes(bytes) => bytes.len(),
             ClipboardData::FilePaths(paths) => paths.iter().map(String::len).sum(),
-        })
-        .sum()
+        };
+        if rep.mime_type.starts_with("image/") || matches!(rep.data, ClipboardData::Bytes(_)) {
+            image_total = image_total.saturating_add(bytes);
+        } else {
+            text_total = text_total.saturating_add(bytes);
+        }
+    }
+    if image_total > budget.image_bytes {
+        Some((image_total, budget.image_bytes))
+    } else if text_total > budget.text_bytes {
+        Some((text_total, budget.text_bytes))
+    } else {
+        None
+    }
 }
 
 fn encode_rgba_to_png(img: ImageData<'_>) -> Option<Vec<u8>> {
@@ -896,6 +914,8 @@ mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::{char, mem, slice};
+
+    use nagori_core::ReadBudget;
 
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, TRUE};
     use windows_sys::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER, LCS_GM_IMAGES};
@@ -1055,7 +1075,7 @@ mod win {
         super::dib_pixel_count_from_header(&prefix)
     }
 
-    pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
+    pub(super) fn oversized_payload(budget: ReadBudget) -> Option<(usize, usize)> {
         // SAFETY: every successful `OpenClipboard` is paired with the
         // `ClipboardGuard` drop path. `GetClipboardData` handles are borrowed
         // from the OS-owned clipboard and are only inspected while the
@@ -1065,29 +1085,35 @@ mod win {
                 return None;
             }
             let _guard = ClipboardGuard;
-            let mut observed = 0_usize;
+            // Text and file-list bytes share the text budget; the registered
+            // "PNG" format answers to the image budget. Tracked separately so a
+            // large screenshot is not rejected against the (smaller) text cap,
+            // and an over-budget text/file payload is not masked by image
+            // headroom. Returns `(observed_for_kind, limit)` for whichever kind
+            // overflows first.
+            let mut text_observed = 0_usize;
             if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0
-                && let Some(text_bytes) = unicode_text_utf8_len(max_bytes)
+                && let Some(text_bytes) = unicode_text_utf8_len(budget.text_bytes)
             {
-                observed = observed.saturating_add(text_bytes);
-                if observed > max_bytes {
-                    return Some(observed);
+                text_observed = text_observed.saturating_add(text_bytes);
+                if text_observed > budget.text_bytes {
+                    return Some((text_observed, budget.text_bytes));
                 }
             }
             if IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
                 && let Some(file_list_bytes) = global_data_size(u32::from(CF_HDROP))
             {
-                observed = observed.saturating_add(file_list_bytes);
-                if observed > max_bytes {
-                    return Some(observed);
+                text_observed = text_observed.saturating_add(file_list_bytes);
+                if text_observed > budget.text_bytes {
+                    return Some((text_observed, budget.text_bytes));
                 }
             }
             // Skip CF_DIB / CF_DIBV5 here. Raw DIB is uncompressed
             // (~width*height*4 bytes) and routinely several MiB for
-            // ordinary screenshots that fit comfortably under the entry
-            // cap once we RGBA -> PNG encode in `capture_snapshot`. The
-            // post-encode `total_payload_bytes` check is the authoritative
-            // limit, and `image_pixel_overflow` still rejects pathological
+            // ordinary screenshots that fit comfortably under the image
+            // budget once we RGBA -> PNG encode in `capture_snapshot`. The
+            // post-encode `oversized_kind` check is the authoritative limit,
+            // and `image_pixel_overflow` still rejects pathological
             // dimensions before the RGBA allocation. The registered "PNG"
             // format, however, is *already* encoded, so its raw size is a
             // truthful preview of what will land in storage — keep that
@@ -1096,11 +1122,9 @@ mod win {
             if let Some(png_id) = png_format_id()
                 && IsClipboardFormatAvailable(png_id) != 0
                 && let Some(png_bytes) = global_data_size(png_id)
+                && png_bytes > budget.image_bytes
             {
-                observed = observed.saturating_add(png_bytes);
-                if observed > max_bytes {
-                    return Some(observed);
-                }
+                return Some((png_bytes, budget.image_bytes));
             }
             None
         }
@@ -2271,30 +2295,46 @@ mod tests {
     }
 
     #[test]
-    fn total_payload_bytes_sums_text_image_and_file_paths() {
-        // The byte-budget check in `capture_snapshot` leans on this sum
-        // counting every representation: UTF-8 text length, raw image
-        // bytes, and the concatenated path lengths.
+    fn oversized_kind_sizes_image_and_text_against_separate_budgets() {
+        // Image bytes answer to the image budget; text + file-list bytes share
+        // the text budget. A snapshot whose image fits the image budget but
+        // whose text rides under the text budget is accepted...
         let snapshot = snapshot_with(vec![
             ClipboardRepresentation {
                 mime_type: "text/plain".to_owned(),
-                data: ClipboardData::Text("hello".to_owned()), // 5
+                data: ClipboardData::Text("hello".to_owned()), // 5 (text)
             },
             ClipboardRepresentation {
                 mime_type: "image/png".to_owned(),
-                data: ClipboardData::Bytes(vec![0u8; 10]), // 10
+                data: ClipboardData::Bytes(vec![0u8; 10]), // 10 (image)
             },
             ClipboardRepresentation {
                 mime_type: "text/uri-list".to_owned(),
-                data: ClipboardData::FilePaths(vec!["abc".to_owned(), "de".to_owned()]), // 3 + 2
+                data: ClipboardData::FilePaths(vec!["abc".to_owned(), "de".to_owned()]), // 3+2 (text)
             },
         ]);
-        assert_eq!(total_payload_bytes(&snapshot), 5 + 10 + 3 + 2);
+        // text_total = 5 + 5 = 10, image_total = 10. Both within budget.
+        assert_eq!(oversized_kind(&snapshot, ReadBudget::new(10, 10)), None);
+        // Image over its budget is reported against the image limit, even
+        // though text is comfortably within its own budget.
+        assert_eq!(
+            oversized_kind(&snapshot, ReadBudget::new(10, 9)),
+            Some((10, 9))
+        );
+        // Text over its budget is reported against the text limit while the
+        // image still fits — proving the two budgets are independent.
+        assert_eq!(
+            oversized_kind(&snapshot, ReadBudget::new(9, 10)),
+            Some((10, 9))
+        );
     }
 
     #[test]
-    fn total_payload_bytes_is_zero_for_an_empty_snapshot() {
-        assert_eq!(total_payload_bytes(&snapshot_with(Vec::new())), 0);
+    fn oversized_kind_is_none_for_an_empty_snapshot() {
+        assert_eq!(
+            oversized_kind(&snapshot_with(Vec::new()), ReadBudget::new(1, 1)),
+            None
+        );
     }
 
     #[test]
@@ -2417,7 +2457,11 @@ mod tests {
             ),
             rep("text/plain", ClipboardData::Text("body".to_owned())),
         ]);
-        let assembled = assemble_capture(snapshot, Some((1, vec![1, 2, 3, 4])), Some(1024));
+        let assembled = assemble_capture(
+            snapshot,
+            Some((1, vec![1, 2, 3, 4])),
+            Some(ReadBudget::new(1024, 1024)),
+        );
         let CapturedSnapshot::Captured(out) = assembled else {
             panic!("expected captured");
         };
@@ -2438,7 +2482,13 @@ mod tests {
             "text/plain",
             ClipboardData::Text("hi".to_owned()),
         )]);
-        let assembled = assemble_capture(snapshot, Some((0, vec![0u8; 64])), Some(32));
+        // The spliced PNG (64 bytes) is image-kind, so it is sized against the
+        // image budget (32); the 2-byte text stays under the text budget.
+        let assembled = assemble_capture(
+            snapshot,
+            Some((0, vec![0u8; 64])),
+            Some(ReadBudget::new(32, 32)),
+        );
         match assembled {
             CapturedSnapshot::Oversized {
                 observed_bytes,

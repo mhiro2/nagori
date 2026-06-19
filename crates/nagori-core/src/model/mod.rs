@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::limits::ReadBudget;
+
 mod ai;
 pub mod code_language;
 mod content;
@@ -116,36 +118,75 @@ impl ClipboardEntry {
         self.content.plain_text()
     }
 
-    /// Trim `pending_representations` from the tail until total
-    /// `byte_count` fits inside `max_total_bytes`.
+    /// Trim `pending_representations` from the tail until each content kind's
+    /// representations fit inside that kind's budget.
+    ///
+    /// Image-shaped representations (mime `image/*`, stored as a database blob)
+    /// are measured against `budget.image_bytes`; everything else (plain /
+    /// html / rtf / file-list) against `budget.text_bytes`. Splitting the two
+    /// is what lets a multi-megabyte screenshot keep its primary image while
+    /// any text alternatives still answer to the smaller text budget — and
+    /// stops a large image alternative from being forced out under the text
+    /// budget.
     ///
     /// The primary representation is never trimmed — callers gate "primary
     /// alone is oversized" upstream (see capture\_loop's `payload_bytes`
     /// check) and drop the whole entry instead. Returns whether any
     /// representation was removed; when something was trimmed the caller is
     /// responsible for recomputing `metadata.representation_set_hash`.
-    pub fn trim_alternatives_to_budget(&mut self, max_total_bytes: usize) -> bool {
+    pub fn trim_alternatives_to_budget(&mut self, budget: ReadBudget) -> bool {
         if self.pending_representations.is_empty() {
             return false;
         }
-        let mut total: usize = 0;
+        let mut image_total: usize = 0;
+        let mut text_total: usize = 0;
         for rep in &self.pending_representations {
-            total = total.saturating_add(rep.byte_count());
+            if is_image_representation(rep) {
+                image_total = image_total.saturating_add(rep.byte_count());
+            } else {
+                text_total = text_total.saturating_add(rep.byte_count());
+            }
         }
-        if total <= max_total_bytes {
+        if image_total <= budget.image_bytes && text_total <= budget.text_bytes {
             return false;
         }
         let original_len = self.pending_representations.len();
-        // Walk from the tail; alternatives carry the largest ordinals so
-        // dropping them first preserves the role ordering established by
-        // the factory. Primary always sits at ordinal 0, so the loop guard
-        // stops before removing it.
-        while self.pending_representations.len() > 1 && total > max_total_bytes {
-            let dropped = self
+        // Drop the tail-most alternative belonging to a kind that is still over
+        // its budget, leaving the primary and the other kind untouched.
+        // Alternatives carry the largest ordinals, so trimming from the tail
+        // preserves the role ordering the factory established. The `Primary`
+        // role is skipped explicitly: dropping it is never correct here (an
+        // oversized primary is rejected as a whole entry upstream).
+        while self.pending_representations.len() > 1
+            && (image_total > budget.image_bytes || text_total > budget.text_bytes)
+        {
+            let Some(idx) = self
                 .pending_representations
-                .pop()
-                .expect("len > 1 above guarantees Some");
-            total = total.saturating_sub(dropped.byte_count());
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, rep)| {
+                    if rep.role == RepresentationRole::Primary {
+                        return None;
+                    }
+                    let over_budget = if is_image_representation(rep) {
+                        image_total > budget.image_bytes
+                    } else {
+                        text_total > budget.text_bytes
+                    };
+                    over_budget.then_some(idx)
+                })
+            else {
+                // The only over-budget kind has nothing left to drop but the
+                // primary — stop rather than spin.
+                break;
+            };
+            let dropped = self.pending_representations.remove(idx);
+            if is_image_representation(&dropped) {
+                image_total = image_total.saturating_sub(dropped.byte_count());
+            } else {
+                text_total = text_total.saturating_sub(dropped.byte_count());
+            }
             tracing::debug!(
                 role = dropped.role.as_str(),
                 mime_type = %dropped.mime_type,
@@ -156,6 +197,17 @@ impl ClipboardEntry {
         }
         self.pending_representations.len() != original_len
     }
+}
+
+/// Whether a stored representation holds an image payload, and so answers to
+/// the image byte budget rather than the text budget.
+///
+/// Keyed on the `image/*` mime prefix, with the database-blob payload variant
+/// as a backstop — the two always agree today (image bytes are the only blobs)
+/// but the explicit check keeps the classification robust if that changes.
+fn is_image_representation(rep: &StoredClipboardRepresentation) -> bool {
+    rep.mime_type.starts_with("image/")
+        || matches!(rep.data, RepresentationDataRef::DatabaseBlob(_))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -595,9 +647,9 @@ mod tests {
                 data: RepresentationDataRef::InlineText("b".repeat(50)),
             },
         ];
-        // 7 + 100 + 50 = 157. Budget 60 → drop tail (50) → still 107 →
-        // drop next (100) → 7 ≤ 60, stop. Primary always survives.
-        let changed = entry.trim_alternatives_to_budget(60);
+        // 7 + 100 + 50 = 157 text bytes. Text budget 60 → drop tail (50) →
+        // still 107 → drop next (100) → 7 ≤ 60, stop. Primary always survives.
+        let changed = entry.trim_alternatives_to_budget(ReadBudget::new(60, 60));
         assert!(changed);
         assert_eq!(entry.pending_representations.len(), 1);
         assert_eq!(
@@ -615,7 +667,7 @@ mod tests {
             ordinal: 0,
             data: RepresentationDataRef::InlineText("primary".to_owned()),
         }];
-        assert!(!entry.trim_alternatives_to_budget(1_000_000));
+        assert!(!entry.trim_alternatives_to_budget(ReadBudget::new(1_000_000, 1_000_000)));
         assert_eq!(entry.pending_representations.len(), 1);
     }
 
@@ -631,8 +683,61 @@ mod tests {
             ordinal: 0,
             data: RepresentationDataRef::InlineText("a".repeat(1000)),
         }];
-        let _ = entry.trim_alternatives_to_budget(10);
+        let _ = entry.trim_alternatives_to_budget(ReadBudget::new(10, 10));
         assert_eq!(entry.pending_representations.len(), 1);
+    }
+
+    #[test]
+    fn trim_keeps_image_primary_and_trims_oversized_text_alternative() {
+        // A screenshot with a bulky text alternative: the image primary fits
+        // the (large) image budget, but the text alternative blows the (small)
+        // text budget — only the text alternative should be dropped.
+        let mut entry = crate::EntryFactory::from_text("primary");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "image/png".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 2000]),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText("x".repeat(2000)),
+            },
+        ];
+        // image_total = 2000 ≤ 10_000; text_total = 2000 > 100 → drop the text alt.
+        let changed = entry.trim_alternatives_to_budget(ReadBudget::new(100, 10_000));
+        assert!(changed);
+        assert_eq!(entry.pending_representations.len(), 1);
+        assert_eq!(entry.pending_representations[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn trim_keeps_text_primary_and_trims_oversized_image_alternative() {
+        // The mirror case: a text primary within the text budget keeps an
+        // over-the-image-budget image alternative from forcing the text out.
+        let mut entry = crate::EntryFactory::from_text("primary");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("hello".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "image/png".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 5000]),
+            },
+        ];
+        // text_total = 5 ≤ 10_000; image_total = 5000 > 100 → drop the image alt.
+        let changed = entry.trim_alternatives_to_budget(ReadBudget::new(10_000, 100));
+        assert!(changed);
+        assert_eq!(entry.pending_representations.len(), 1);
+        assert_eq!(entry.pending_representations[0].mime_type, "text/plain");
     }
 
     #[test]

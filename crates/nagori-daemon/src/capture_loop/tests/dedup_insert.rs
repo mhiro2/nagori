@@ -204,7 +204,7 @@ async fn capture_once_retries_after_insert_failure_on_same_changecount() {
     // persists the same clip.
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use nagori_core::{ClipboardData, ClipboardRepresentation, ClipboardSnapshot};
+    use nagori_core::{ClipboardData, ClipboardRepresentation, ClipboardSnapshot, ReadBudget};
 
     struct EmptyThenContentReader {
         // One stable changeCount for both the empty read and the content
@@ -235,7 +235,7 @@ async fn capture_once_retries_after_insert_failure_on_same_changecount() {
         async fn current_sequence(&self) -> Result<ClipboardSequence> {
             Ok(self.sequence.clone())
         }
-        async fn current_snapshot_with_max(&self, _max_bytes: usize) -> Result<CapturedSnapshot> {
+        async fn current_snapshot_with_max(&self, _budget: ReadBudget) -> Result<CapturedSnapshot> {
             // First read: empty (mid-write). Subsequent reads: the content
             // that landed at the same changeCount.
             if self.snapshot_reads.fetch_add(1, Ordering::SeqCst) == 0 {

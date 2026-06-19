@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+use nagori_core::ReadBudget;
+#[cfg(target_os = "macos")]
 use nagori_platform::ClipboardExclusionKind;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
@@ -117,14 +119,19 @@ pub(super) fn exclusion_for(pb: &NSPasteboard) -> Option<ClipboardExclusionKind>
 }
 
 /// Probe `NSPasteboard` for any single representation whose byte length
-/// exceeds `max_bytes`, returning the observed length on first hit.
+/// exceeds its content kind's budget, returning `(observed_length, limit)` on
+/// first hit.
 ///
+/// PNG image data answers to `budget.image_bytes`; file URLs and the
+/// HTML / RTF / plain text representations answer to `budget.text_bytes`.
 /// `NSData::length` is constant-time and avoids the `to_vec()` copy that
 /// `ns_data_to_vec` would otherwise perform. `NSString::len` reports exact
 /// UTF-8 byte length without materialising a Rust `String`, so text and file
-/// URL probes can be compared directly against `max_bytes`.
+/// URL probes can be compared directly against the budget.
 #[cfg(target_os = "macos")]
-pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
+pub(super) fn oversized_payload(budget: ReadBudget) -> Option<(usize, usize)> {
+    let text_limit = budget.text_bytes;
+    let image_limit = budget.image_bytes;
     // Same rationale as `collect_macos_extras`: drain the AppKit
     // autoreleased temporaries on every call so the blocking-pool thread
     // does not retain pasteboard data past return.
@@ -137,29 +144,29 @@ pub(super) fn oversized_payload(max_bytes: usize) -> Option<usize> {
             let pb = NSPasteboard::generalPasteboard();
 
             if let Some(items) = pb.pasteboardItems()
-                && let Some(observed) = oversized_file_urls(&items, max_bytes)
+                && let Some(observed) = oversized_file_urls(&items, text_limit)
             {
-                return Some(observed);
+                return Some((observed, text_limit));
             }
             if let Some(data) = pb.dataForType(NSPasteboardTypePNG)
-                && data.length() > max_bytes
+                && data.length() > image_limit
             {
-                return Some(data.length());
+                return Some((data.length(), image_limit));
             }
             if let Some(string) = pb.stringForType(NSPasteboardTypeHTML)
-                && string.len() > max_bytes
+                && string.len() > text_limit
             {
-                return Some(string.len());
+                return Some((string.len(), text_limit));
             }
             if let Some(string) = pb.stringForType(NSPasteboardTypeRTF)
-                && string.len() > max_bytes
+                && string.len() > text_limit
             {
-                return Some(string.len());
+                return Some((string.len(), text_limit));
             }
             if let Some(string) = pb.stringForType(NSPasteboardTypeString)
-                && string.len() > max_bytes
+                && string.len() > text_limit
             {
-                return Some(string.len());
+                return Some((string.len(), text_limit));
             }
         }
         None
