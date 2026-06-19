@@ -322,6 +322,9 @@ export const ko: Messages = {
       maxTotalBytesPlaceholder: '0 = 무제한',
       maxTotalBytesHelp: '고정된 항목은 제한을 초과해도 보호됩니다.',
       maxBytes: '항목당 최대 바이트',
+      maxImageBytes: '이미지당 최대 바이트',
+      maxImageBytesHelp:
+        '이미지는 텍스트 한도와 별도로 보관되어 큰 스크린샷도 기록됩니다. 값이 클수록 캡처 시 메모리를 더 사용합니다.',
       pasteDelayMs: '붙여넣기 지연(ms)',
     },
     privacy: {

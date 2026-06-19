@@ -335,6 +335,9 @@ export const fr: Messages = {
       maxTotalBytesPlaceholder: '0 = illimité',
       maxTotalBytesHelp: 'Les entrées épinglées sont protégées même si elles dépassent la limite.',
       maxBytes: 'Octets max. par entrée',
+      maxImageBytes: 'Octets max. par image',
+      maxImageBytesHelp:
+        "Les images sont conservées séparément de la limite de texte, donc les grandes captures d'écran sont enregistrées. Des valeurs plus élevées utilisent plus de mémoire lors de la capture.",
       pasteDelayMs: 'Délai de collage (ms)',
     },
     privacy: {

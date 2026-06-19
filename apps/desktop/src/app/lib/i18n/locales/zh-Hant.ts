@@ -309,6 +309,9 @@ export const zhHant: Messages = {
       maxTotalBytesPlaceholder: '0 = 不限',
       maxTotalBytesHelp: '釘選的項目即使超過上限也會保留。',
       maxBytes: '每項最大位元組數',
+      maxImageBytes: '每張圖片最大位元組數',
+      maxImageBytesHelp:
+        '圖片與文字上限分開保存，因此較大的截圖也會被記錄。數值越大，擷取時佔用的記憶體越多。',
       pasteDelayMs: '貼上延遲（ms）',
     },
     privacy: {

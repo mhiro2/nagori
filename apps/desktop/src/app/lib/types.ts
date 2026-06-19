@@ -411,6 +411,7 @@ export type AppSettings = {
   historyRetentionCount: number;
   historyRetentionDays: number | null;
   maxEntrySizeBytes: number;
+  maxImageEntrySizeBytes: number;
   captureKinds: ContentKind[];
   maxTotalBytes: number | null;
   captureEnabled: boolean;

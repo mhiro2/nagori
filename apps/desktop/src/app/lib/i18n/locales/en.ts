@@ -364,6 +364,8 @@ export type Messages = {
       maxTotalBytesPlaceholder: string;
       maxTotalBytesHelp: string;
       maxBytes: string;
+      maxImageBytes: string;
+      maxImageBytesHelp: string;
       pasteDelayMs: string;
     };
     privacy: {
@@ -901,6 +903,9 @@ export const en: Messages = {
       maxTotalBytesPlaceholder: '0 = unlimited',
       maxTotalBytesHelp: 'Pinned entries are protected even if they exceed this limit.',
       maxBytes: 'Max bytes per entry',
+      maxImageBytes: 'Max bytes per image',
+      maxImageBytesHelp:
+        'Images are kept separately from the text limit, so large screenshots are still recorded. Higher values use more memory while capturing.',
       pasteDelayMs: 'Paste delay (ms)',
     },
     privacy: {

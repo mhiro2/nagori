@@ -323,6 +323,9 @@ export const ja: Messages = {
       maxTotalBytesPlaceholder: '0 で無制限',
       maxTotalBytesHelp: 'ピン留めした項目は上限超過時も削除されません。',
       maxBytes: '1 件あたりの最大バイト数',
+      maxImageBytes: '画像 1 件あたりの最大バイト数',
+      maxImageBytesHelp:
+        '画像はテキストの上限とは別に保持されるため、大きなスクリーンショットも記録されます。値を大きくすると取り込み時のメモリ使用量が増えます。',
       pasteDelayMs: 'ペースト遅延（ms）',
     },
     privacy: {

@@ -334,6 +334,9 @@ export const de: Messages = {
       maxTotalBytesPlaceholder: '0 = unbegrenzt',
       maxTotalBytesHelp: 'Angeheftete Einträge bleiben auch über dem Limit geschützt.',
       maxBytes: 'Max. Bytes pro Eintrag',
+      maxImageBytes: 'Max. Bytes pro Bild',
+      maxImageBytesHelp:
+        'Bilder werden getrennt vom Textlimit gespeichert, sodass auch große Screenshots erfasst werden. Höhere Werte benötigen beim Erfassen mehr Speicher.',
       pasteDelayMs: 'Einfügeverzögerung (ms)',
     },
     privacy: {

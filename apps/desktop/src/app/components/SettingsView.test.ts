@@ -38,6 +38,7 @@ const baseSettings = (): AppSettings => ({
   historyRetentionCount: 1000,
   historyRetentionDays: null,
   maxEntrySizeBytes: 1024 * 1024,
+  maxImageEntrySizeBytes: 16 * 1024 * 1024,
   captureKinds: ['text', 'url', 'code', 'image', 'fileList', 'richText', 'unknown'],
   maxTotalBytes: null,
   captureEnabled: true,

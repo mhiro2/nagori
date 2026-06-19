@@ -62,6 +62,17 @@
     />
   </label>
   <label>
+    {t.settings.retention.maxImageBytes}
+    <input
+      type="number"
+      min="0"
+      step="1048576"
+      bind:value={settings.maxImageEntrySizeBytes}
+      oninput={() => scheduleSave(debounceNumberMs)}
+    />
+    <span class="help">{t.settings.retention.maxImageBytesHelp}</span>
+  </label>
+  <label>
     {t.settings.retention.pasteDelayMs}
     <input
       type="number"

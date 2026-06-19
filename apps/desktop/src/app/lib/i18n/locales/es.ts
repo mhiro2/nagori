@@ -335,6 +335,9 @@ export const es: Messages = {
       maxTotalBytesPlaceholder: '0 = ilimitado',
       maxTotalBytesHelp: 'Las entradas fijadas se protegen aunque superen el límite.',
       maxBytes: 'Bytes máx. por entrada',
+      maxImageBytes: 'Bytes máx. por imagen',
+      maxImageBytesHelp:
+        'Las imágenes se guardan aparte del límite de texto, por lo que también se registran las capturas grandes. Los valores más altos usan más memoria al capturar.',
       pasteDelayMs: 'Retardo de pegado (ms)',
     },
     privacy: {

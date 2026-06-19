@@ -308,6 +308,9 @@ export const zhHans: Messages = {
       maxTotalBytesPlaceholder: '0 = 无限制',
       maxTotalBytesHelp: '固定条目即使超过上限也会保留。',
       maxBytes: '每条最大字节数',
+      maxImageBytes: '每张图片最大字节数',
+      maxImageBytesHelp:
+        '图片与文本上限分开保存，因此较大的截图也会被记录。数值越大，捕获时占用的内存越多。',
       pasteDelayMs: '粘贴延迟（ms）',
     },
     privacy: {
