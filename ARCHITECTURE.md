@@ -235,7 +235,9 @@ ClipboardReader.current_sequence_with_max()
                                             pending_representations for
                                             every validated rep)
   → kind guard  (settings.capture_kinds)
-  → primary-size guard (settings.max_entry_size_bytes)
+  → primary-size guard (per content kind:
+                        settings.max_image_entry_size_bytes for images,
+                        settings.max_entry_size_bytes otherwise)
   → SensitivityClassifier.classify()       (built-in detectors +
                                             app_denylist + user regexes)
         ├─ Blocked → audit + drop
@@ -248,9 +250,11 @@ ClipboardReader.current_sequence_with_max()
                                              raw secret — drop them and
                                              reset representation_set_hash
                                              to mirror content_hash)
-  → trim_alternatives_to_budget             (enforce
-                                             max_entry_size_bytes over the
-                                             full rep set; recompute
+  → trim_alternatives_to_budget             (enforce per-kind budgets over
+                                             the full rep set — image reps
+                                             against max_image_entry_size_bytes,
+                                             text/rich/file reps against
+                                             max_entry_size_bytes; recompute
                                              representation_set_hash)
   → search-cache invalidate (pre)
   → EntryRepository.insert()               (single SQLite tx writes
@@ -353,11 +357,12 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   unbounded `current_snapshot`, so a huge pre-launch text/image is bounded
   (and the internal decoded-pixel cap applies) rather than fully
   materialised just to seed the dedup state. It is bounded by the internal
-  hard limit (`MAX_ENTRY_SIZE_BYTES`), not the live `max_entry_size_bytes`:
-  since the setting can never exceed that hard limit, any clip that could
-  ever become capturable — even after the user later raises the setting —
-  is within this read and gets its dedup hash anchored, so a post-raise
-  wake-resync still recognises it. A clip over the hard limit can never be
+  hard limits per content kind (`MAX_ENTRY_SIZE_BYTES` for text,
+  `MAX_IMAGE_ENTRY_SIZE_BYTES` for images), not the live settings: since each
+  setting can never exceed its hard limit, any clip that could ever become
+  capturable — even after the user later raises a setting — is within this
+  read and gets its dedup hash anchored, so a post-raise wake-resync still
+  recognises it. A clip over the hard limit can never be
   captured under any setting, so it anchors only the sequence and is
   skipped. A pre-launch clip carrying an owner exclusion marker is handled
   the same way: the baseline read surfaces `Excluded`, anchors only the
@@ -452,10 +457,12 @@ round-trip (the persisted rows are the source of truth). Each entry
 records a `role` (`Primary` / `PlainFallback` / `Alternative`), a
 canonical `mime_type`, an `ordinal`, and a typed `data` (`InlineText`,
 `DatabaseBlob`, or `FilePaths`). The capture pipeline runs
-`ClipboardEntry::trim_alternatives_to_budget` so the user's
-`max_entry_size_bytes` covers the full set; the primary is preserved
-even if oversized — that case is rejected upstream by the
-`payload_bytes` guard before classification.
+`ClipboardEntry::trim_alternatives_to_budget` so each content kind's
+representations fit its own budget — image reps against
+`max_image_entry_size_bytes`, text/rich/file reps against
+`max_entry_size_bytes` — over the full set; the primary is preserved even
+if oversized — that case is rejected upstream by the `payload_bytes` guard
+before classification.
 
 **`SearchDocument`** — title, preview, `normalized_text`, tokens,
 language. Indexed by both FTS5 and the ngram table.
@@ -2305,6 +2312,28 @@ under 80 ms for 100k text entries on a developer machine.
   and surfaces `AppError::Unsupported` so the daemon refuses to decode
   an attacker-controlled canvas. The cap is intentionally not
   user-tunable.
+- **Separate image entry-size budget** — clipboard entries are sized by
+  two independent budgets, threaded through the platform reader and the
+  capture loop as a `ReadBudget { text_bytes, image_bytes }`. Text-shaped
+  payloads (plain / HTML / RTF / file lists) answer to
+  `max_entry_size_bytes`, whose ceiling (`MAX_ENTRY_SIZE_BYTES`, ~768 KiB)
+  is tied to the `MAX_IPC_BYTES` line cap because text crosses the IPC
+  boundary inline as `EntryDto.text`. Image payloads answer to the larger
+  `max_image_entry_size_bytes` (default 16 MiB, hard ceiling
+  `MAX_IMAGE_ENTRY_SIZE_BYTES` = 64 MiB) because image bytes never ride the
+  IPC line: the desktop streams them through the `nagori-image://` custom
+  scheme, copy-back reads the SQLite BLOB in-process, and the image
+  `EntryDto` carries only a `representation_summary` (mime + byte_count).
+  Decoupling the two is what lets a Retina screenshot — which easily
+  exceeds the IPC-tied text cap — be recorded at all, while a large text
+  clip stays bounded by what the IPC surfaces can actually load back. The
+  decoded-pixel cap above still bounds the worst-case RGBA allocation
+  independently, so a high image budget cannot turn into an OOM. The macOS
+  and Windows adapters apply the matching budget per representation at the
+  raw-read probe; the Linux/Wayland adapter gates each streamed
+  representation against its kind's budget while reading. Raising the image
+  budget toward its 64 MiB ceiling is a high-memory expert choice (raw
+  TIFF/DIB, decoded RGBA, and re-encoded PNG can briefly coexist).
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.

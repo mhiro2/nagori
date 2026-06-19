@@ -182,6 +182,15 @@ The default mode stores matched secrets as `[REDACTED]` and re-derives hashes
 and search tokens from the scrubbed form. Switch to `Store full` only if you
 need the raw bytes — details in [`docs/privacy.md`](./docs/privacy.md).
 
+**Why does my big screenshot get captured but a huge text clip doesn't?**
+Images and text have separate size budgets. Text is bounded by **Max bytes per
+entry** (default 512 KiB, ceiling ~768 KiB) because text crosses the internal
+IPC channel inline. Images use the separate **Max bytes per image**
+(Settings → Advanced; default 16 MiB) because image bytes are streamed
+straight to the preview and never ride that channel — so Retina screenshots
+are recorded instead of silently dropped. Raise **Max bytes per image** (up to
+64 MiB) to keep larger images; higher values use more memory while capturing.
+
 **Do the AI features send my clipboard to the cloud?**
 No. The macOS-only AI actions and semantic search are opt-in (off by default)
 and run Apple's on-device models locally — no clipboard text is sent to a
