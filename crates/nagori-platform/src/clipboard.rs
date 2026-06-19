@@ -121,30 +121,25 @@ fn is_image_snapshot_rep(rep: &ClipboardRepresentation) -> bool {
     rep.mime_type.starts_with("image/") || matches!(rep.data, ClipboardData::Bytes(_))
 }
 
-/// Sum a snapshot's payload per content kind and report the first kind whose
-/// total exceeds its budget, as `(observed_total_for_kind, limit)`.
+/// Report the first representation that overflows its content kind's budget,
+/// as `(observed_bytes, limit)`.
 ///
-/// Image bytes are summed against `budget.image_bytes`, text / file-list bytes
-/// against `budget.text_bytes`. Keeping the two separate is what lets a
-/// screenshot survive a text budget far smaller than its encoded size.
+/// Each representation is sized individually — image bytes against
+/// `budget.image_bytes`, text / file-list bytes against `budget.text_bytes`.
+/// Keeping the two budgets separate is what lets a screenshot survive a text
+/// budget far smaller than its encoded size; sizing per representation (rather
+/// than per-kind sum) leaves aggregate trimming to the capture loop's
+/// `trim_alternatives_to_budget`, matching the per-platform adapters.
 fn oversized_kind(snapshot: &ClipboardSnapshot, budget: ReadBudget) -> Option<(usize, usize)> {
-    let mut image_total = 0usize;
-    let mut text_total = 0usize;
-    for rep in &snapshot.representations {
+    snapshot.representations.iter().find_map(|rep| {
         let bytes = snapshot_rep_bytes(rep);
-        if is_image_snapshot_rep(rep) {
-            image_total = image_total.saturating_add(bytes);
+        let limit = if is_image_snapshot_rep(rep) {
+            budget.image_bytes
         } else {
-            text_total = text_total.saturating_add(bytes);
-        }
-    }
-    if image_total > budget.image_bytes {
-        Some((image_total, budget.image_bytes))
-    } else if text_total > budget.text_bytes {
-        Some((text_total, budget.text_bytes))
-    } else {
-        None
-    }
+            budget.text_bytes
+        };
+        (bytes > limit).then_some((bytes, limit))
+    })
 }
 
 #[async_trait]

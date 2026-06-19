@@ -251,7 +251,13 @@ impl ClipboardReader for LinuxClipboard {
         // blocking worker occupied by streaming forever.
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass_no_buffer(SEQUENCE_FINGERPRINT_CEILING).await?;
+            // Mirror the unbounded `current_snapshot` budget so the two paths
+            // agree on the fingerprint for the same clip.
+            let pass = pipe_read_multi_pass_no_buffer(ReadBudget::new(
+                INTERNAL_BODY_CEILING_BYTES,
+                INTERNAL_BODY_CEILING_BYTES,
+            ))
+            .await?;
             Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
@@ -262,17 +268,17 @@ impl ClipboardReader for LinuxClipboard {
 
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     async fn current_sequence_with_max(&self, budget: ReadBudget) -> Result<ClipboardSequence> {
-        // Use the smaller of the snapshot read budget and the
-        // sequence-fingerprint ceiling so the fingerprint matches the snapshot
-        // path for the same clip (both derive their hash extent from
-        // `snapshot_read_ceiling(budget)`), while a generous budget does not
-        // turn every poll into a multi-megabyte SHA-256 stream.
+        // Apply the *same* per-kind budgets as the snapshot path so a clip over
+        // one kind's budget but under the fingerprint ceiling (e.g. a 600 KiB
+        // text clip under the default 512 KiB text budget) finalises to the
+        // same `oversized-over:` sentinel both paths produce — otherwise the
+        // snapshot path would drop it while this path returns an ordinary hash,
+        // and the capture loop would re-probe it every tick. The cumulative
+        // read ceiling stays at the fingerprint extent so a generous budget
+        // does not turn every poll into a multi-megabyte SHA-256 stream.
         #[cfg(target_os = "linux")]
         {
-            let pass = pipe_read_multi_pass_no_buffer(
-                SEQUENCE_FINGERPRINT_CEILING.min(snapshot_read_ceiling(budget)),
-            )
-            .await?;
+            let pass = pipe_read_multi_pass_no_buffer(budget).await?;
             Ok(ClipboardSequence::content_hash(pass.sequence))
         }
         #[cfg(not(target_os = "linux"))]
@@ -693,20 +699,23 @@ async fn pipe_read_multi_pass(budget: ReadBudget) -> Result<MultiPipePass> {
 }
 
 #[cfg(target_os = "linux")]
-async fn pipe_read_multi_pass_no_buffer(read_ceiling: usize) -> Result<MultiPipePass> {
-    // No-buffer paths always run from `current_sequence*`, which already
-    // chose `SEQUENCE_FINGERPRINT_CEILING` (or a smaller budget-derived value)
-    // as the read ceiling. Re-cap here so a future caller passing a larger
-    // `read_ceiling` still gets the canonical fingerprint extent. The
-    // fingerprint never distinguishes content kinds, so both per-rep budgets
-    // are the cumulative ceiling — the cumulative check bounds the poll cost.
-    let sequence_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(read_ceiling);
+async fn pipe_read_multi_pass_no_buffer(budget: ReadBudget) -> Result<MultiPipePass> {
+    // The cumulative read ceiling caps the per-poll read at the fingerprint
+    // extent so a generous budget does not stream multi-megabyte payloads every
+    // tick. The *per-kind* budgets, however, are the real `budget` values — the
+    // same ones the snapshot path applies — so a clip over one kind's budget
+    // (but under the fingerprint ceiling) trips `rep_observed > rep_budget` here
+    // exactly as it does on the snapshot path, and both finalise to the same
+    // `oversized-over:` sentinel. Without that the snapshot path would drop such
+    // a clip while this path returned an ordinary hash, and the capture loop
+    // would re-probe it every tick.
+    let read_ceiling = SEQUENCE_FINGERPRINT_CEILING.min(snapshot_read_ceiling(budget));
     pipe_read_multi_pass_internal(
         None,
-        sequence_ceiling,
         read_ceiling,
         read_ceiling,
-        read_ceiling,
+        budget.image_bytes,
+        budget.text_bytes,
     )
     .await
 }
@@ -1465,9 +1474,13 @@ impl MultiReadState {
         // so the snapshot path (which may keep reading past
         // `sequence_ceiling` toward `read_ceiling`) finalises to the same
         // string the sequence-only path produces for the same clip. A
-        // `ceiling_hit` without `sequence_overflow` only happens on
-        // pipe-read timeout, where the partial-hash result is still
-        // captured under the same sentinel form.
+        // `ceiling_hit` without `sequence_overflow` happens when a per-kind
+        // budget (or the cumulative read ceiling) trips before the fingerprint
+        // ceiling — e.g. a clip over the text budget but under the 1 MiB
+        // fingerprint extent — and on a pipe-read timeout; in every such case
+        // the partial-hash result is still captured under the same sentinel
+        // form, and both the snapshot and sequence-only paths apply the same
+        // per-kind budgets so they agree on it.
         if self.sequence_overflow || self.ceiling_hit {
             oversized_sequence(self.sequence_ceiling, &hex::encode(self.hasher.finalize()))
         } else {
@@ -1633,6 +1646,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.finalize_sequence(), seq_only.finalize_sequence());
+    }
+
+    #[test]
+    fn snapshot_and_sequence_paths_agree_when_clip_is_over_a_kind_budget() {
+        // Regression: a clip *over a per-kind budget* but *under* the
+        // fingerprint ceiling. The snapshot path trips its per-rep budget and
+        // finalises to the oversized sentinel; the sequence-only path must
+        // apply the same per-rep budget so it finalises to the same sentinel —
+        // otherwise it returns an ordinary hash and the capture loop re-probes
+        // the clip every tick. Per-rep budget = 4 chunks, fingerprint ceiling =
+        // 8 chunks, body = 6 chunks (over the budget, under the ceiling).
+        let rep_budget = 4 * PIPE_CHUNK;
+        let sequence_ceiling = 8 * PIPE_CHUNK;
+        let body = vec![b'q'; 6 * PIPE_CHUNK];
+
+        // Snapshot path: buffers, large cumulative ceiling, small per-rep budget.
+        let mut snapshot =
+            MultiReadState::new(Some(100 * PIPE_CHUNK), sequence_ceiling, 100 * PIPE_CHUNK);
+        let _ = snapshot
+            .read_pipe(&mut io::Cursor::new(body.clone()), rep_budget)
+            .unwrap();
+
+        // Sequence-only path: no buffer, cumulative ceiling == fingerprint
+        // ceiling, *same* per-rep budget.
+        let mut seq_only = MultiReadState::new(None, sequence_ceiling, sequence_ceiling);
+        let _ = seq_only
+            .read_pipe(&mut io::Cursor::new(body), rep_budget)
+            .unwrap();
+
+        let snapshot_seq = snapshot.finalize_sequence();
+        assert_eq!(snapshot_seq, seq_only.finalize_sequence());
+        // Both must land in the sentinel form (the clip is over a kind budget).
+        assert!(snapshot_seq.starts_with("oversized-over:"));
     }
 
     #[test]

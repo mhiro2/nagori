@@ -842,35 +842,32 @@ fn assemble_capture(
     CapturedSnapshot::Captured(snapshot)
 }
 
-/// Sum a snapshot's payload per content kind and report the first kind whose
-/// total exceeds its budget, as `(observed_total_for_kind, limit)`.
+/// Report the first representation that overflows its content kind's budget,
+/// as `(observed_bytes, limit)`.
 ///
-/// Image bytes (mime `image/*` or a raw byte payload) are summed against
-/// `budget.image_bytes`, text / file-list bytes against `budget.text_bytes`,
-/// so the encoded screenshot is sized against the larger image budget while
-/// any text riding the same snapshot stays bounded by the text cap.
+/// Each representation is sized individually — image bytes (mime `image/*` or a
+/// raw byte payload) against `budget.image_bytes`, text / file-list bytes
+/// against `budget.text_bytes`. The per-kind *sum* is deliberately not enforced
+/// here: a primary that fits plus an alternative that fits must reach the
+/// capture loop, where `trim_alternatives_to_budget` drops the alternative and
+/// keeps the primary (matching the macOS / Linux adapters). This is the
+/// authoritative post-encode size check — the registered "PNG" format is sized
+/// pre-read, but a DIB only becomes a PNG of known size here.
 fn oversized_kind(snapshot: &ClipboardSnapshot, budget: ReadBudget) -> Option<(usize, usize)> {
-    let mut image_total = 0_usize;
-    let mut text_total = 0_usize;
-    for rep in &snapshot.representations {
+    snapshot.representations.iter().find_map(|rep| {
         let bytes = match &rep.data {
             ClipboardData::Text(text) => text.len(),
             ClipboardData::Bytes(bytes) => bytes.len(),
             ClipboardData::FilePaths(paths) => paths.iter().map(String::len).sum(),
         };
-        if rep.mime_type.starts_with("image/") || matches!(rep.data, ClipboardData::Bytes(_)) {
-            image_total = image_total.saturating_add(bytes);
-        } else {
-            text_total = text_total.saturating_add(bytes);
-        }
-    }
-    if image_total > budget.image_bytes {
-        Some((image_total, budget.image_bytes))
-    } else if text_total > budget.text_bytes {
-        Some((text_total, budget.text_bytes))
-    } else {
-        None
-    }
+        let limit =
+            if rep.mime_type.starts_with("image/") || matches!(rep.data, ClipboardData::Bytes(_)) {
+                budget.image_bytes
+            } else {
+                budget.text_bytes
+            };
+        (bytes > limit).then_some((bytes, limit))
+    })
 }
 
 fn encode_rgba_to_png(img: ImageData<'_>) -> Option<Vec<u8>> {
@@ -1085,28 +1082,26 @@ mod win {
                 return None;
             }
             let _guard = ClipboardGuard;
-            // Text and file-list bytes share the text budget; the registered
-            // "PNG" format answers to the image budget. Tracked separately so a
-            // large screenshot is not rejected against the (smaller) text cap,
-            // and an over-budget text/file payload is not masked by image
-            // headroom. Returns `(observed_for_kind, limit)` for whichever kind
-            // overflows first.
-            let mut text_observed = 0_usize;
+            // Reject any *single* representation that overflows its kind's
+            // budget: the text and file-list payloads each answer to the text
+            // budget, the registered "PNG" format to the image budget. The two
+            // text-kind representations are checked individually rather than
+            // summed — a primary that fits plus an alternative that fits must
+            // reach the capture loop, where `trim_alternatives_to_budget` drops
+            // the alternative and keeps the primary; summing here would drop the
+            // whole clip and diverge from the macOS / Linux adapters. Returns
+            // `(observed, limit)` for the first representation that overflows.
             if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0
                 && let Some(text_bytes) = unicode_text_utf8_len(budget.text_bytes)
+                && text_bytes > budget.text_bytes
             {
-                text_observed = text_observed.saturating_add(text_bytes);
-                if text_observed > budget.text_bytes {
-                    return Some((text_observed, budget.text_bytes));
-                }
+                return Some((text_bytes, budget.text_bytes));
             }
             if IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
                 && let Some(file_list_bytes) = global_data_size(u32::from(CF_HDROP))
+                && file_list_bytes > budget.text_bytes
             {
-                text_observed = text_observed.saturating_add(file_list_bytes);
-                if text_observed > budget.text_bytes {
-                    return Some((text_observed, budget.text_bytes));
-                }
+                return Some((file_list_bytes, budget.text_bytes));
             }
             // Skip CF_DIB / CF_DIBV5 here. Raw DIB is uncompressed
             // (~width*height*4 bytes) and routinely several MiB for
@@ -2295,10 +2290,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_kind_sizes_image_and_text_against_separate_budgets() {
-        // Image bytes answer to the image budget; text + file-list bytes share
-        // the text budget. A snapshot whose image fits the image budget but
-        // whose text rides under the text budget is accepted...
+    fn oversized_kind_sizes_each_representation_against_its_own_budget() {
+        // Image bytes answer to the image budget; text and file-list bytes each
+        // answer to the text budget *individually* — the per-kind sum is left to
+        // the capture loop's trim so a primary + alternative that each fit are
+        // not dropped wholesale here.
         let snapshot = snapshot_with(vec![
             ClipboardRepresentation {
                 mime_type: "text/plain".to_owned(),
@@ -2310,23 +2306,24 @@ mod tests {
             },
             ClipboardRepresentation {
                 mime_type: "text/uri-list".to_owned(),
-                data: ClipboardData::FilePaths(vec!["abc".to_owned(), "de".to_owned()]), // 3+2 (text)
+                data: ClipboardData::FilePaths(vec!["abc".to_owned(), "de".to_owned()]), // 5 (text)
             },
         ]);
-        // text_total = 5 + 5 = 10, image_total = 10. Both within budget.
+        // Every representation fits its own budget.
         assert_eq!(oversized_kind(&snapshot, ReadBudget::new(10, 10)), None);
-        // Image over its budget is reported against the image limit, even
-        // though text is comfortably within its own budget.
+        // The image overflows the image budget, even though text fits.
         assert_eq!(
             oversized_kind(&snapshot, ReadBudget::new(10, 9)),
             Some((10, 9))
         );
-        // Text over its budget is reported against the text limit while the
-        // image still fits — proving the two budgets are independent.
+        // A single text representation over the text budget is reported.
         assert_eq!(
-            oversized_kind(&snapshot, ReadBudget::new(9, 10)),
-            Some((10, 9))
+            oversized_kind(&snapshot, ReadBudget::new(4, 10)),
+            Some((5, 4))
         );
+        // The two text-kind reps sum to 10, but each (5) is under a budget of 9,
+        // so the clip is *not* rejected — trim handles the aggregate downstream.
+        assert_eq!(oversized_kind(&snapshot, ReadBudget::new(9, 10)), None);
     }
 
     #[test]
