@@ -55,6 +55,11 @@ import App from './App.svelte';
 import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
 import type { AppSettings, PermissionStatus } from './lib/types';
+import {
+  closeEntryContextMenu,
+  entryContextMenuState,
+  openEntryContextMenu,
+} from './stores/entryContextMenu.svelte';
 import { dismissHotkeyFailure, hotkeyFailureState } from './stores/hotkeyFailure.svelte';
 import { clearPasteDiagnostics, pasteDiagnosticsState } from './stores/pasteDiagnostics.svelte';
 import { refreshCurrent } from './stores/searchQuery.svelte';
@@ -208,6 +213,41 @@ describe('App shell', () => {
     render(App);
     await fireEvent.blur(window);
     expect(hidePalette).not.toHaveBeenCalled();
+  });
+
+  it('closes an open context menu on Escape and leaves the palette up', async () => {
+    // The menu normally swallows Escape itself once focused; this covers the
+    // pre-focus frame where Escape reaches the window handler, which must close
+    // only the menu rather than hide the whole palette.
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(App);
+    openEntryContextMenu({
+      x: 10,
+      y: 10,
+      targetIds: ['r1'],
+      primaryPinned: false,
+      offersFormatChoice: false,
+    });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(entryContextMenuState.open).toBe(false);
+    expect(hidePalette).not.toHaveBeenCalled();
+    closeEntryContextMenu();
+  });
+
+  it('closes an open context menu on blur (alongside hiding the palette)', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(App);
+    openEntryContextMenu({
+      x: 10,
+      y: 10,
+      targetIds: ['r1'],
+      primaryPinned: false,
+      offersFormatChoice: false,
+    });
+    await fireEvent.blur(window);
+    expect(entryContextMenuState.open).toBe(false);
+    expect(hidePalette).toHaveBeenCalled();
+    closeEntryContextMenu();
   });
 
   it('detaches its window listeners on unmount', async () => {

@@ -215,6 +215,16 @@ export const es: Messages = {
       richText: 'Texto enriquecido',
     },
   },
+  contextMenu: {
+    label: 'Acciones del elemento',
+    paste: 'Pegar',
+    copy: 'Copiar',
+    pasteAs: 'Pegar como…',
+    pin: 'Fijar',
+    unpin: 'Desfijar',
+    actions: 'Acciones…',
+    delete: 'Eliminar',
+  },
   setup: {
     title: 'Configurar Nagori',
     intro:

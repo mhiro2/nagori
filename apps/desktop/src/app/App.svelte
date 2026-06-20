@@ -11,6 +11,7 @@
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
   import { capabilitiesState } from './stores/capabilities.svelte';
+  import { closeEntryContextMenu, entryContextMenuState } from './stores/entryContextMenu.svelte';
   import {
     dismissHotkeyFailure,
     hotkeyFailureState,
@@ -49,6 +50,19 @@
     // Escape while an IME conversion is open cancels the 変換 — it must reach
     // the input, not hide the whole palette.
     if (isImeComposing(event)) return;
+    // A right-click context menu owns Escape while open: close just the menu
+    // and leave the palette up. The menu normally swallows Escape itself once
+    // focused (so this handler never fires); this covers the frame before its
+    // focus lands, where Escape would otherwise hide the whole palette. Fully
+    // consume the event — `stopImmediatePropagation` keeps the palette's own
+    // window keydown listener (registered after this one) from also acting on
+    // Escape and closing the palette right after we've closed the menu.
+    if (entryContextMenuState.open) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeEntryContextMenu();
+      return;
+    }
     if (viewState.current === 'settings') {
       showPalette();
       return;
@@ -69,9 +83,10 @@
     // visible because the user explicitly navigated there.
     if (viewState.current !== 'palette') return;
     cancelPendingQuery();
-    // Don't leave a paste-format picker open behind a hidden palette — it would
-    // reappear (against a stale target) on the next show.
+    // Don't leave a paste-format picker or context menu open behind a hidden
+    // palette — either would reappear (against a stale target) on the next show.
     closePasteFormatPicker();
+    closeEntryContextMenu();
     void hidePalette();
   };
 

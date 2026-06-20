@@ -10,12 +10,14 @@
     resolveAction,
   } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
+  import { offersPasteFormatChoice } from '../lib/representations';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
     capabilitiesState,
     quickLookAvailable,
     refreshCapabilities,
   } from '../stores/capabilities.svelte';
+  import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
@@ -54,6 +56,7 @@
   import { refreshSettings, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
   import ActionInspector from './ActionInspector.svelte';
+  import EntryContextMenu from './EntryContextMenu.svelte';
   import FilterChips from './FilterChips.svelte';
   import PasteFormatPicker from './PasteFormatPicker.svelte';
   import PreviewPane from './PreviewPane.svelte';
@@ -200,6 +203,52 @@
     void togglePinAt(index);
   };
 
+  // Right-click on a result row docks the per-entry context menu. We always
+  // suppress the native webview menu on a row; whether we then open ours
+  // depends on the same gate the rest of the row interactions use.
+  const handleContextMenu = (index: number, event: MouseEvent): void => {
+    event.preventDefault();
+    // While the inspector owns the column the list is a read-only reference
+    // surface (frozen hover/click); a right-click must not open a menu that
+    // could re-target the inspector or mutate an in-flight run.
+    if (actionsOpen) return;
+    const row = searchState.results[index];
+    if (!row) return;
+    // Filer-style target: when the right-clicked row is part of the active
+    // multi-selection act on the whole selection (in result order); otherwise
+    // act on that single row without disturbing the selection. The ids are
+    // captured here and the menu acts on them directly, so a background refresh
+    // landing before a menu click cannot redirect the action.
+    const ids =
+      multiSelectState.selected.size > 0 && multiSelectState.selected.has(row.id)
+        ? resultIds.filter((id) => multiSelectState.selected.has(id))
+        : [row.id];
+    openEntryContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      targetIds: ids,
+      primaryPinned: row.pinned,
+      // Drives the menu's "paste as…" row: only offered when the entry has a
+      // real multi-format choice (matching the ⇧⌘⏎ chord's gate). `Blocked`
+      // entries are excluded — the daemon's `list_paste_options` always returns
+      // an empty set for them, so the row would otherwise open a choiceless
+      // "keep original"-only picker.
+      offersFormatChoice:
+        row.sensitivity !== 'Blocked' && offersPasteFormatChoice(row.representationSummary),
+    });
+  };
+
+  // The context menu's "Actions…" row. Re-anchor the selection to the captured
+  // entry by id (it may have shifted slots since the menu opened) so the
+  // inspector docks against the right row, then open it. Bail if the entry has
+  // dropped out of the list.
+  const openActionsForEntry = (id: string): void => {
+    const index = searchState.results.findIndex((r) => r.id === id);
+    if (index < 0) return;
+    selectByIndex(index);
+    openActions();
+  };
+
   const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
@@ -265,6 +314,10 @@
     // its own keydowns), so stand down here too — a key that slips through
     // before the picker takes focus must not move the selection or paste.
     if (pasteFormatPickerState.open) return;
+    // The context menu likewise owns the keyboard and swallows its own keydowns
+    // once focused; this stands the window handler down for any key that slips
+    // through in the frame before its focus lands.
+    if (entryContextMenuState.open) return;
     const action = resolveAction(event, paletteBindings);
     if (!action) return;
     event.preventDefault();
@@ -385,6 +438,7 @@
         onSelect={handleSelect}
         onConfirm={handleConfirm}
         onTogglePin={handleTogglePin}
+        onContextMenu={handleContextMenu}
       />
     {/if}
     <!-- Right column. The inspector wins the slot whenever it is open; the
@@ -416,6 +470,9 @@
   </div>
   {#if pasteFormatPickerState.open}
     <PasteFormatPicker />
+  {/if}
+  {#if entryContextMenuState.open}
+    <EntryContextMenu onOpenActions={openActionsForEntry} />
   {/if}
   <StatusBar
     entryCount={searchState.results.length}

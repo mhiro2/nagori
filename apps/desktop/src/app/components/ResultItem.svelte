@@ -51,6 +51,10 @@
     // `| undefined` is explicit so ResultList can forward its own optional
     // prop straight through under `exactOptionalPropertyTypes`.
     onTogglePin?: ((index: number) => void) | undefined;
+    // Right-click on the row. The palette decides whether to open the context
+    // menu (and calls `preventDefault` itself), so this just forwards the row
+    // index and the raw event for the cursor coordinates.
+    onContextMenu?: ((index: number, event: MouseEvent) => void) | undefined;
     // Reference mode: the action inspector is open, so the selected row lifts
     // and the rest recede. Visual only — `onSelect` still fires on hover; the
     // palette decides whether to honour it.
@@ -66,6 +70,7 @@
     onSelect,
     onConfirm,
     onTogglePin = () => {},
+    onContextMenu = () => {},
     locked = false,
   }: Props = $props();
 
@@ -138,7 +143,19 @@
   });
 </script>
 
-<div class="result-row" class:selected class:locked>
+<!-- The context-menu handler lives on the row wrapper, not the inner buttons:
+     while the action inspector is open those buttons are `pointer-events: none`,
+     so a right-click would fall through to this element. Keeping the handler
+     here means the palette always sees it (and can `preventDefault` to suppress
+     the native menu) regardless of `locked`. The row is a presentational
+     container; its interactive children carry the real roles. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="result-row"
+  class:selected
+  class:locked
+  oncontextmenu={(event) => onContextMenu(index, event)}
+>
   <button
     type="button"
     class="result-item"

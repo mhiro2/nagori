@@ -62,3 +62,37 @@ export const hasAccompanyingImage = (
 ): boolean =>
   summary?.some((rep) => rep.role !== 'primary' && THUMBNAILABLE_IMAGE_MIMES.has(rep.mimeType)) ??
   false;
+
+// MIME types Nagori can re-publish to the clipboard — mirrors the daemon's
+// per-adapter publishable allowlist (see ARCHITECTURE.md `ClipboardWriter`).
+// Kept here so the desktop can decide *synchronously*, from the row's
+// representation summary, whether an entry offers a real "paste as <format>"
+// choice without an IPC round-trip.
+const PUBLISHABLE_MIMES = new Set([
+  'text/plain',
+  'text/html',
+  'application/rtf',
+  'image/png',
+  'image/tiff',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'text/uri-list',
+]);
+
+// Whether the entry can be pasted in more than one distinct format — i.e. the
+// "paste as" picker would offer a genuine choice (≥2 publishable MIMEs). The
+// right-click menu uses this to show its *Paste as…* row only when it does
+// something the plain *Paste* row doesn't, mirroring the ⇧⌘⏎ chord's own
+// ≥2-formats gate. `list_paste_options` remains the authority at paste time;
+// this is the cheap, summary-derived approximation for the menu affordance.
+export const offersPasteFormatChoice = (
+  summary: readonly RepresentationSummary[] | undefined,
+): boolean => {
+  if (!summary) return false;
+  const mimes = new Set<string>();
+  for (const rep of summary) {
+    if (PUBLISHABLE_MIMES.has(rep.mimeType)) mimes.add(rep.mimeType);
+  }
+  return mimes.size >= 2;
+};

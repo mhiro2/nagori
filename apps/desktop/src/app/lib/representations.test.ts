@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { additionalClipboardCategories, hasAccompanyingImage } from './representations';
+import {
+  additionalClipboardCategories,
+  hasAccompanyingImage,
+  offersPasteFormatChoice,
+} from './representations';
 import type { RepresentationSummary } from './types';
 
 const rep = (mimeType: string, role: RepresentationSummary['role']): RepresentationSummary => ({
@@ -62,5 +66,37 @@ describe('additionalClipboardCategories', () => {
         rep('image/jpeg', 'alternative'),
       ]),
     ).toEqual([]);
+  });
+});
+
+describe('offersPasteFormatChoice', () => {
+  it('is true when the entry carries two distinct publishable formats', () => {
+    expect(
+      offersPasteFormatChoice([rep('text/html', 'primary'), rep('text/plain', 'plainFallback')]),
+    ).toBe(true);
+  });
+
+  it('is false for a single-format entry (e.g. a plain image) — no real choice to paste as', () => {
+    expect(offersPasteFormatChoice([rep('image/png', 'primary')])).toBe(false);
+  });
+
+  it('counts distinct MIMEs, not representation rows', () => {
+    // Two rows of the same MIME still offer only one way to paste.
+    expect(
+      offersPasteFormatChoice([rep('image/png', 'primary'), rep('image/png', 'alternative')]),
+    ).toBe(false);
+  });
+
+  it('ignores non-publishable MIMEs', () => {
+    // image/svg+xml is not in the publishable allowlist, so it does not count
+    // as a second pasteable format alongside the plain text.
+    expect(
+      offersPasteFormatChoice([rep('text/plain', 'primary'), rep('image/svg+xml', 'alternative')]),
+    ).toBe(false);
+  });
+
+  it('is false for missing or empty summaries', () => {
+    expect(offersPasteFormatChoice(undefined)).toBe(false);
+    expect(offersPasteFormatChoice([])).toBe(false);
   });
 });

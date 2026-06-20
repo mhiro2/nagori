@@ -214,6 +214,16 @@ export const de: Messages = {
       richText: 'Formatierter Text',
     },
   },
+  contextMenu: {
+    label: 'Eintragsaktionen',
+    paste: 'Einfügen',
+    copy: 'Kopieren',
+    pasteAs: 'Einfügen als…',
+    pin: 'Anheften',
+    unpin: 'Lösen',
+    actions: 'Aktionen…',
+    delete: 'Löschen',
+  },
   setup: {
     title: 'Nagori einrichten',
     intro:

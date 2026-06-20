@@ -198,6 +198,16 @@ export const zhHans: Messages = {
       richText: '富文本',
     },
   },
+  contextMenu: {
+    label: '项目操作',
+    paste: '粘贴',
+    copy: '复制',
+    pasteAs: '选择格式粘贴…',
+    pin: '固定',
+    unpin: '取消固定',
+    actions: '操作…',
+    delete: '删除',
+  },
   setup: {
     title: '设置 Nagori',
     intro: '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。',

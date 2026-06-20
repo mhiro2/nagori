@@ -198,6 +198,16 @@ export const zhHant: Messages = {
       richText: '格式化文字',
     },
   },
+  contextMenu: {
+    label: '項目操作',
+    paste: '貼上',
+    copy: '複製',
+    pasteAs: '選擇格式貼上…',
+    pin: '釘選',
+    unpin: '取消釘選',
+    actions: '動作…',
+    delete: '刪除',
+  },
   setup: {
     title: '設定 Nagori',
     intro: '授予 Nagori 向其他應用程式貼上所需的權限。您稍後可在系統設定中變更。',

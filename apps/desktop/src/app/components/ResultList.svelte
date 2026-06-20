@@ -15,6 +15,7 @@
     onSelect: (index: number) => void;
     onConfirm: (index: number, event?: MouseEvent) => void;
     onTogglePin?: (index: number) => void;
+    onContextMenu?: (index: number, event: MouseEvent) => void;
     multiSelected?: ReadonlySet<string>;
     emptyMessage?: string;
     // The action inspector owns the right column: the list becomes a reference
@@ -30,6 +31,7 @@
     onSelect,
     onConfirm,
     onTogglePin,
+    onContextMenu,
     multiSelected,
     emptyMessage,
     locked = false,
@@ -85,6 +87,7 @@
         {onSelect}
         {onConfirm}
         {onTogglePin}
+        {onContextMenu}
       />
     {/each}
   {/if}

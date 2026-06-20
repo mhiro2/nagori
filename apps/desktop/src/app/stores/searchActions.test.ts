@@ -29,12 +29,19 @@ import {
   confirmPasteFormat,
   confirmSelection,
   confirmSelectionWithAlternateFormat,
+  copyEntriesByIds,
+  copyEntryById,
   copyMultiSelection,
   copySelection,
+  deleteEntriesByIds,
+  deleteEntryById,
   deleteMultiSelection,
   deleteSelection,
+  openPasteFormatPickerFor,
+  pasteEntryById,
   previewSelection,
   togglePinAt,
+  togglePinEntry,
   togglePinSelection,
 } from './searchActions';
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
@@ -367,5 +374,95 @@ describe('multi-select bulk actions', () => {
     });
     await copyMultiSelection();
     expect(searchState.errorMessage).toBeUndefined();
+  });
+});
+
+describe('explicit-target context-menu wrappers', () => {
+  it('copyEntryById copies the given id, ignoring the live selection', async () => {
+    // The selection points at a different row; the wrapper must still copy 'r1'
+    // because the right-click captured that id when the menu opened.
+    searchState.results = [result({ id: 'other' })];
+    searchState.selectedIndex = 0;
+    await copyEntryById('r1');
+    expect(copyEntryFromPalette).toHaveBeenCalledWith('r1');
+  });
+
+  it('pasteEntryById pastes the given id honouring auto-paste (no forced synthesis)', async () => {
+    vi.mocked(pasteEntryFromPalette).mockResolvedValue();
+    await pasteEntryById('r1');
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, false);
+  });
+
+  it('openPasteFormatPickerFor opens the picker against the given id', async () => {
+    vi.mocked(listPasteOptions).mockResolvedValue([
+      pasteOption('text/html', 'html'),
+      pasteOption('text/plain', 'plainText'),
+    ]);
+    await openPasteFormatPickerFor('r1');
+    expect(pasteFormatPickerState.open).toBe(true);
+    expect(pasteFormatPickerState.targetId).toBe('r1');
+    expect(pasteFormatPickerState.options).toHaveLength(2);
+  });
+
+  it('openPasteFormatPickerFor never falls back to an opposite-format paste (the image bug)', async () => {
+    // An image carries a single pasteable format; the old chord-reuse pasted it
+    // as the opposite format (plain text) and surfaced a stray error. The menu
+    // path must just open the picker — no paste, no error.
+    vi.mocked(listPasteOptions).mockResolvedValue([pasteOption('image/png', 'image')]);
+    await openPasteFormatPickerFor('r1');
+    expect(pasteFormatPickerState.open).toBe(true);
+    expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+    expect(searchState.errorMessage).toBeUndefined();
+  });
+
+  it('openPasteFormatPickerFor still opens the picker when listing the options fails', async () => {
+    vi.mocked(listPasteOptions).mockRejectedValue(new Error('entry vanished'));
+    await openPasteFormatPickerFor('r1');
+    expect(pasteFormatPickerState.open).toBe(true);
+    expect(pasteFormatPickerState.options).toHaveLength(0);
+    expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+  });
+
+  it('deleteEntryById deletes the given id', async () => {
+    vi.mocked(deleteEntry).mockResolvedValue();
+    await deleteEntryById('r1');
+    expect(deleteEntry).toHaveBeenCalledWith('r1');
+  });
+
+  it('deleteEntryById records an errorMessage when the delete rejects', async () => {
+    vi.mocked(deleteEntry).mockRejectedValue(new Error('locked'));
+    await deleteEntryById('r1');
+    expect(searchState.errorMessage).toBe('locked');
+  });
+
+  it('togglePinEntry flips the pin from the captured pinned state', async () => {
+    vi.mocked(pinEntry).mockResolvedValue();
+    await togglePinEntry({ id: 'r1', pinned: false });
+    expect(pinEntry).toHaveBeenCalledWith('r1', true);
+  });
+
+  it('copyEntriesByIds joins exactly the given ids, ignoring the live multi-selection', async () => {
+    // A different row is multi-selected; the bulk-by-id wrapper must act on the
+    // ids it was passed (captured when the menu opened), not on multiSelectState
+    // — which a background refresh could have reconciled to a smaller set.
+    searchState.results = [result({ id: 'x' }), result({ id: 'y' })];
+    toggleMultiSelect('x');
+    vi.mocked(copyEntriesCombined).mockResolvedValue();
+    await copyEntriesByIds(['a', 'b']);
+    expect(copyEntriesCombined).toHaveBeenCalledWith(['a', 'b']);
+  });
+
+  it('deleteEntriesByIds bulk-deletes the given ids and clears the multi-selection', async () => {
+    searchState.results = [result({ id: 'a' })];
+    toggleMultiSelect('a');
+    vi.mocked(deleteEntries).mockResolvedValue(2);
+    await deleteEntriesByIds(['a', 'b']);
+    expect(deleteEntries).toHaveBeenCalledWith(['a', 'b']);
+    expect(multiSelectState.selected.size).toBe(0);
+  });
+
+  it('a bulk-by-id action is a no-op for an empty id list', async () => {
+    await copyEntriesByIds([]);
+    expect(copyEntriesCombined).not.toHaveBeenCalled();
   });
 });

@@ -543,4 +543,43 @@ describe('ResultItem', () => {
     expect(container.querySelector('.preview.file')).toBeNull();
     expect(container.querySelector('.preview')?.textContent).toContain('/tmp/a.txt');
   });
+
+  it('forwards onContextMenu with the row index on a right-click', async () => {
+    const onContextMenu = vi.fn();
+    const { getByRole } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 5,
+        selected: false,
+        onSelect: () => {},
+        onConfirm: () => {},
+        onContextMenu,
+      },
+    });
+    await fireEvent.contextMenu(getByRole('option'));
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+    expect(onContextMenu.mock.calls[0]?.[0]).toBe(5);
+    expect(onContextMenu.mock.calls[0]?.[1]).toBeInstanceOf(MouseEvent);
+  });
+
+  it('also forwards onContextMenu from the pin column so the whole row is covered', async () => {
+    // The handler sits on the row wrapper, so a right-click anywhere on the row
+    // — including the trailing pin column (its own sibling button) — bubbles up
+    // and forwards the index.
+    const onContextMenu = vi.fn();
+    const { container } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 6,
+        selected: true,
+        onSelect: () => {},
+        onConfirm: () => {},
+        onContextMenu,
+      },
+    });
+    const toggle = container.querySelector('.pin-toggle');
+    expect(toggle).toBeTruthy();
+    await fireEvent.contextMenu(toggle as Element);
+    expect(onContextMenu).toHaveBeenCalledWith(6, expect.any(MouseEvent));
+  });
 });

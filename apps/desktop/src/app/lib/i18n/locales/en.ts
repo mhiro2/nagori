@@ -258,6 +258,21 @@ export type Messages = {
       richText: string;
     };
   };
+  // Per-row right-click context menu.
+  contextMenu: {
+    // Accessible name for the menu itself.
+    label: string;
+    paste: string;
+    copy: string;
+    // "Paste as" — opens the representation picker (≥2 formats) or pastes in
+    // the alternate format; same flow as the alternate-format chord.
+    pasteAs: string;
+    pin: string;
+    unpin: string;
+    // Opens the action inspector (quick / AI transforms) for the entry.
+    actions: string;
+    delete: string;
+  };
   setup: {
     title: string;
     intro: string;
@@ -787,6 +802,16 @@ export const en: Messages = {
       html: 'HTML',
       richText: 'Rich text',
     },
+  },
+  contextMenu: {
+    label: 'Entry actions',
+    paste: 'Paste',
+    copy: 'Copy',
+    pasteAs: 'Paste as…',
+    pin: 'Pin',
+    unpin: 'Unpin',
+    actions: 'Actions…',
+    delete: 'Delete',
   },
   setup: {
     title: 'Set up Nagori',

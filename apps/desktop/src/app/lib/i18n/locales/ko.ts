@@ -204,6 +204,16 @@ export const ko: Messages = {
       richText: '서식 있는 텍스트',
     },
   },
+  contextMenu: {
+    label: '항목 동작',
+    paste: '붙여넣기',
+    copy: '복사',
+    pasteAs: '형식 선택하여 붙여넣기…',
+    pin: '고정',
+    unpin: '고정 해제',
+    actions: '동작…',
+    delete: '삭제',
+  },
   setup: {
     title: 'Nagori 설정',
     intro:

@@ -205,6 +205,16 @@ export const ja: Messages = {
       richText: 'リッチテキスト',
     },
   },
+  contextMenu: {
+    label: '項目の操作',
+    paste: 'ペースト',
+    copy: 'コピー',
+    pasteAs: '形式を選んでペースト…',
+    pin: 'ピン留め',
+    unpin: 'ピン解除',
+    actions: 'アクション…',
+    delete: '削除',
+  },
   setup: {
     title: 'Nagori をセットアップ',
     intro:

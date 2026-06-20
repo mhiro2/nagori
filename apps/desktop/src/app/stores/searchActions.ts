@@ -64,6 +64,37 @@ export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   await pasteEntryId(target.id, format);
 };
 
+// Offer the representation picker for an explicit entry id, or fall back to a
+// plain alternate-format paste when the entry has no real choice. The picker
+// opens only when the entry genuinely offers ≥2 distinct pasteable formats
+// (e.g. a copied file that also carries an image and a text label); otherwise
+// the lightweight alternate-format paste keeps the common "paste as plain text"
+// a single step. `listPasteOptions` is the authority on what is pasteable; a
+// failure (the entry vanished mid-keystroke) falls back to the plain alternate
+// paste. Shared by the keyboard chord and the right-click menu so both honour
+// the same ≥2-options gate against the same captured id.
+const offerAlternateFormat = async (id: string): Promise<void> => {
+  // Capture the dismiss generation before the query so a palette hide
+  // (blur / Escape) landing while it is in flight bails this opener instead of
+  // popping the picker open on a hidden window against a now-stale entry.
+  const generation = pasteFormatPickerGeneration();
+  let options: PasteOption[] = [];
+  try {
+    options = await listPasteOptions(id);
+  } catch {
+    options = [];
+  }
+  if (pasteFormatPickerGeneration() !== generation) return;
+  if (options.length >= 2) {
+    openPasteFormatPicker(id, options);
+  } else {
+    // No real choice — paste the *captured* entry in the alternate format.
+    // This is a deliberate paste, so force synthesis regardless of the
+    // auto-paste setting (consistent with selecting a format in the picker).
+    await pasteEntryId(id, oppositeFormat(), true);
+  }
+};
+
 export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
   if (!isTauri()) return;
   // As in `confirmSelection`: act on the freshest query results, not a row the
@@ -71,33 +102,7 @@ export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
   if (!(await flushPendingQuery())) return;
   const target = currentSelection();
   if (!target) return;
-  // Open a representation picker only when the entry genuinely offers a choice
-  // (≥2 distinct pasteable formats, e.g. a copied file that also carries an
-  // image and a text label). Otherwise keep the lightweight alternate-format
-  // paste so the common "paste as plain text" stays a single keystroke.
-  // `listPasteOptions` is the authority on what is pasteable; a failure (the
-  // entry vanished mid-keystroke) just falls back to the plain alternate paste.
-  // Capture the dismiss generation before the query so a palette hide
-  // (blur / Escape) landing while it is in flight bails this opener instead of
-  // popping the picker open on a hidden window against a now-stale entry.
-  const generation = pasteFormatPickerGeneration();
-  let options: PasteOption[] = [];
-  try {
-    options = await listPasteOptions(target.id);
-  } catch {
-    options = [];
-  }
-  if (pasteFormatPickerGeneration() !== generation) return;
-  if (options.length >= 2) {
-    openPasteFormatPicker(target.id, options);
-  } else {
-    // No real choice — paste the *captured* entry in the alternate format.
-    // Using `target.id` (not a fresh `currentSelection()`) keeps a selection
-    // change during the options query from redirecting the paste. This chord is
-    // a deliberate paste, so force synthesis regardless of the auto-paste
-    // setting (consistent with selecting a format in the picker).
-    await pasteEntryId(target.id, oppositeFormat(), true);
-  }
+  await offerAlternateFormat(target.id);
 };
 
 // Apply a choice from the representation picker. `undefined` is the "keep
@@ -274,3 +279,101 @@ const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Prom
 export const copyMultiSelection = (): Promise<void> => runBulkAction(copyEntriesCombinedCmd);
 
 export const deleteMultiSelection = (): Promise<void> => runBulkAction(deleteEntriesCmd);
+
+// --- Explicit-target variants for the right-click context menu ---
+// Each acts on the id captured when the menu opened and never reads the live
+// selection, so a background refresh (clipboard capture / runQuery) landing
+// between opening the menu and clicking an item cannot redirect the action onto
+// a different entry. Multi-target copy/delete reuse the bulk path
+// (`copyMultiSelection` / `deleteMultiSelection`) — its target is the user's
+// own multi-selection set, which a background refresh does not mutate.
+
+export const copyEntryById = async (id: string): Promise<void> => {
+  if (!isTauri()) return;
+  // Same hide-on-return contract as `copySelection` — cancel the debounce
+  // before the IPC so it can't fire a query post-hide.
+  cancelPendingQuery();
+  try {
+    await copyEntryCmd(id);
+  } catch (err) {
+    searchState.errorMessage = describeError(err);
+  }
+};
+
+export const pasteEntryById = async (id: string): Promise<void> => {
+  if (!isTauri()) return;
+  // Honour the auto-paste setting, exactly like a plain Enter / row click.
+  await pasteEntryId(id);
+};
+
+// The right-click menu's "paste as…" entry. Unlike the keyboard chord, this
+// *always* opens the representation picker and never falls back to an
+// opposite-format paste — that fallback would try to paste, say, an image as
+// plain text and fail with a stray status-bar error. The menu only shows this
+// entry when there is a real choice (see `offersPasteFormatChoice`), so the
+// picker reliably presents ≥2 formats; a listing failure still opens the picker
+// on its "keep original" row rather than erroring, keeping the action
+// predictable. `listPasteOptions` stays the authority on what is pasteable.
+export const openPasteFormatPickerFor = async (id: string): Promise<void> => {
+  if (!isTauri()) return;
+  // Bail if a palette hide bumps the dismiss generation while the options query
+  // is in flight, matching `offerAlternateFormat`.
+  const generation = pasteFormatPickerGeneration();
+  let options: PasteOption[] = [];
+  try {
+    options = await listPasteOptions(id);
+  } catch {
+    options = [];
+  }
+  if (pasteFormatPickerGeneration() !== generation) return;
+  openPasteFormatPicker(id, options);
+};
+
+export const deleteEntryById = async (id: string): Promise<void> => {
+  if (!isTauri()) return;
+  // Drop any debounced keystroke before the IPC: we already hold the id, so a
+  // late query firing against the refreshed list would only clobber it.
+  cancelPendingQuery();
+  try {
+    await deleteEntryCmd(id);
+  } catch (err) {
+    searchState.errorMessage = describeError(err);
+    return;
+  }
+  await runQuery(searchState.query);
+};
+
+export const togglePinEntry = async (target: { id: string; pinned: boolean }): Promise<void> => {
+  if (!isTauri()) return;
+  await applyPinToggle(target);
+};
+
+// Bulk variant of the explicit-target path. Unlike `runBulkAction`, this acts on
+// the ids passed in (captured when the menu opened) rather than re-reading
+// `multiSelectState` / `searchState.results` — a background refresh reconciles
+// the live selection, so reading it at click time could shrink or reorder the
+// target set out from under the user. Otherwise it shares the bulk contract:
+// clear the multi-selection on success and re-run the active query, restoring
+// the action's error afterwards only if the query hasn't moved on.
+const runBulkActionOnIds = async (
+  ids: string[],
+  perform: (ids: string[]) => Promise<unknown>,
+): Promise<void> => {
+  if (!isTauri() || ids.length === 0) return;
+  cancelPendingQuery();
+  const queryBeforeAction = searchState.query;
+  let actionError: string | undefined;
+  try {
+    await perform(ids);
+  } catch (err) {
+    actionError = describeError(err);
+  }
+  if (actionError === undefined) clearMultiSelect();
+  await refreshPreservingError(actionError, queryBeforeAction);
+};
+
+export const copyEntriesByIds = (ids: string[]): Promise<void> =>
+  runBulkActionOnIds(ids, copyEntriesCombinedCmd);
+
+export const deleteEntriesByIds = (ids: string[]): Promise<void> =>
+  runBulkActionOnIds(ids, deleteEntriesCmd);
