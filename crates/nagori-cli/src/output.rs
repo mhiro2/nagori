@@ -342,6 +342,12 @@ pub(crate) fn print_doctor_report(report: &DoctorReport, format: OutputFormat) -
                 "ipc\tpanic_count={}\tpanics_last_5m={}\tmax_connections={max_conns}{ipc_suffix}",
                 ipc.handler_panic_count, ipc.panics_last_5m,
             );
+            // The data directory sitting inside a cloud-sync folder would
+            // copy the plaintext history off-device. Only printed when set
+            // (the daemon arm leaves it `None`; the local arm fills it).
+            if let Some(warning) = &report.data_dir_sync_warning {
+                println!("data_dir_sync_warning\t{warning}");
+            }
         }
     }
     Ok(())

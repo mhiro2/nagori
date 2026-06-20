@@ -373,6 +373,10 @@ export const ja: Messages = {
       purgeDeletedNow: '削除済みの項目を今すぐディスクから消去',
       purgeDeletedRunning: '消去中…',
       purgeDeletedDone: '削除済みの項目を {count} 件ディスクから消去しました。',
+      cloudSyncTitle: 'データフォルダがクラウド同期フォルダ内にあります',
+      cloudSyncBody: (provider) =>
+        `クリップボード履歴は ${provider} 内に暗号化されずに保存されているため、同期クライアントが履歴全体をクラウドへアップロードする可能性があります。データフォルダを同期対象の外へ移動する（または同期から除外する）こと、およびディスク全体の暗号化を有効にすることを推奨します。`,
+      cloudSyncPath: '場所',
       regexDenylistAutosaveHint: '強調表示された正規表現エラーを修正すると自動保存されます。',
       regexErrors: {
         lineLabel: '{line} 行目:',

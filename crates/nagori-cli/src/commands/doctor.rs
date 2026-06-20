@@ -73,6 +73,7 @@ async fn print_local_doctor(
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let statuses: Vec<nagori_platform::PermissionStatus> = Vec::new();
     let thumbnail_total_bytes = store.total_thumbnail_bytes().await.ok();
+    let data_dir_sync_warning = data_dir_sync_warning(db_path);
 
     if format.is_json() {
         // Build a real `DoctorReport` so the local arm's JSON is the same
@@ -110,6 +111,7 @@ async fn print_local_doctor(
             latest_version: None,
             thumbnail_total_bytes,
             thumbnail_budget_bytes: settings.max_thumbnail_total_bytes,
+            data_dir_sync_warning,
         };
         return print_doctor_report(&report, format);
     }
@@ -139,5 +141,17 @@ async fn print_local_doctor(
         .max_thumbnail_total_bytes
         .map_or_else(|| "disabled".to_owned(), |b| b.to_string());
     println!("thumbnails\tused={thumb_used}\tcap={thumb_cap}");
+    if let Some(warning) = &data_dir_sync_warning {
+        println!("data_dir_sync_warning\t{warning}");
+    }
     Ok(())
+}
+
+/// Warn when the data directory lives inside a cloud-sync folder, which
+/// would copy the plaintext clipboard history off-device. Computed from
+/// the DB file's parent directory; `None` when it is not under a known
+/// sync root (see `nagori_core::storage_location`).
+fn data_dir_sync_warning(db_path: &Path) -> Option<String> {
+    let data_dir = db_path.parent().unwrap_or(db_path);
+    nagori_core::detect_cloud_sync(data_dir).map(|m| m.describe())
 }

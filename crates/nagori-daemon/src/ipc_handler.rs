@@ -327,6 +327,12 @@ impl NagoriRuntime {
             latest_version,
             thumbnail_total_bytes,
             thumbnail_budget_bytes: settings.max_thumbnail_total_bytes,
+            // The daemon does not echo its local data-directory layout over
+            // IPC — same reason `db_path` stays empty above. The cloud-sync
+            // warning is computed where the real path is known: the local
+            // `nagori doctor` arm (from its `--db` / default path) and the
+            // desktop Privacy panel (from its own data dir).
+            data_dir_sync_warning: None,
         })
     }
 }

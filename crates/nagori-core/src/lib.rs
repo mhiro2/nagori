@@ -7,6 +7,7 @@ pub mod policy;
 pub mod repositories;
 pub mod services;
 pub mod settings;
+pub mod storage_location;
 pub mod text;
 
 pub use errors::{AppError, PasteFailureReason, Result};
@@ -35,4 +36,5 @@ pub use settings::{
     RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
     password_manager_preset_rules, validate_hotkey,
 };
+pub use storage_location::{CloudSyncMatch, CloudSyncProvider, detect_cloud_sync};
 pub use text::{has_cjk, normalize_text};

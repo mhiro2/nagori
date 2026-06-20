@@ -384,6 +384,10 @@ export const de: Messages = {
       purgeDeletedNow: 'Gelöschte Einträge jetzt von der Festplatte entfernen',
       purgeDeletedRunning: 'Wird entfernt…',
       purgeDeletedDone: '{count} gelöschte Einträge von der Festplatte entfernt.',
+      cloudSyncTitle: 'Datenordner liegt in einem synchronisierten Ordner',
+      cloudSyncBody: (provider) =>
+        `Dein Zwischenablageverlauf wird unverschlüsselt in ${provider} gespeichert, daher kann der Sync-Client deinen gesamten Verlauf in die Cloud hochladen. Verschiebe den Datenordner aus dem synchronisierten Ordner (oder schließe ihn von der Synchronisierung aus) und aktiviere die Festplattenverschlüsselung.`,
+      cloudSyncPath: 'Speicherort',
       regexDenylistAutosaveHint:
         'Sobald die markierten Regex-Fehler behoben sind, wird automatisch gespeichert.',
       regexErrors: {

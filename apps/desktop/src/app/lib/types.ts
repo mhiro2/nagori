@@ -501,6 +501,15 @@ export type PermissionStatus = {
   docsUrl?: string;
 };
 
+// Mirrors `DataDirSyncWarningDto`: set when the data directory sits inside
+// a cloud-sync folder (iCloud Drive, Dropbox, OneDrive, …), which would
+// copy the plaintext clipboard history off-device. `provider` is a
+// human-readable vendor name, `path` the detected sync root.
+export type DataDirSyncWarning = {
+  provider: string;
+  path: string;
+};
+
 // Mirrors the `nagori://hotkey_register_failed` emit envelope and the
 // `last_hotkey_failure` query response. `kind` is absent for the primary
 // palette shortcut and `"secondary"` for repaste-last / clear-history

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-data-dir-sync-warning"
+description = "Enables the data_dir_sync_warning command without any pre-configured scope."
+commands.allow = ["data_dir_sync_warning"]
+
+[[permission]]
+identifier = "deny-data-dir-sync-warning"
+description = "Denies the data_dir_sync_warning command without any pre-configured scope."
+commands.deny = ["data_dir_sync_warning"]

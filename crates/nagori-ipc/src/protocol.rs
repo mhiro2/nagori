@@ -294,6 +294,14 @@ pub struct DoctorReport {
     /// active budget in bytes.
     #[serde(default)]
     pub thumbnail_budget_bytes: Option<u64>,
+    /// Set when the data directory appears to live inside a cloud-sync
+    /// folder (iCloud Drive, Dropbox, `OneDrive`, …), which would copy the
+    /// plaintext clipboard history off-device. A human-readable summary
+    /// (`"Dropbox (/Users/x/Dropbox)"`); `None` when the directory is not
+    /// under a recognised sync root. Best-effort lexical detection — see
+    /// `nagori_core::storage_location`.
+    #[serde(default)]
+    pub data_dir_sync_warning: Option<String>,
 }
 
 const fn default_auto_update_check_report() -> bool {

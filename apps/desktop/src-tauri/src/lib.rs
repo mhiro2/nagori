@@ -256,6 +256,7 @@ pub fn run() {
             commands::ai_commands::save_ai_result,
             commands::settings_commands::get_settings,
             commands::settings_commands::password_manager_preset,
+            commands::settings_commands::data_dir_sync_warning,
             commands::settings_commands::update_settings,
             commands::settings_commands::set_capture_enabled,
             commands::settings_commands::get_permissions,

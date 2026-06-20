@@ -57,6 +57,7 @@ fn main() {
             "save_ai_result",
             "get_settings",
             "password_manager_preset",
+            "data_dir_sync_warning",
             "update_settings",
             "set_capture_enabled",
             "get_permissions",

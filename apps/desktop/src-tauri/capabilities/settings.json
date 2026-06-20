@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings-commands",
-  "description": "App commands the settings (`settings`) webview is allowed to invoke: persisting settings, the password-manager preset, the AI availability / semantic-index controls, the Accessibility prompt, the updater check, the CLI installer, and the shared read-only stores (settings / permissions / capabilities / last hotkey failure). It deliberately omits every palette action command (search, paste/copy/delete/pin, preview, the AI action inspector) so a compromised settings webview cannot drive clipboard side effects.",
+  "description": "App commands the settings (`settings`) webview is allowed to invoke: persisting settings, the password-manager preset, the cloud-sync data-directory warning, the AI availability / semantic-index controls, the Accessibility prompt, the updater check, the CLI installer, and the shared read-only stores (settings / permissions / capabilities / last hotkey failure). It deliberately omits every palette action command (search, paste/copy/delete/pin, preview, the AI action inspector) so a compromised settings webview cannot drive clipboard side effects.",
   "windows": ["settings"],
   "permissions": [
     "allow-get-settings",
@@ -12,6 +12,7 @@
     "allow-get-capabilities",
     "allow-last-hotkey-failure",
     "allow-password-manager-preset",
+    "allow-data-dir-sync-warning",
     "allow-get-ai-availability",
     "allow-get-semantic-index-status",
     "allow-rebuild-semantic-index",

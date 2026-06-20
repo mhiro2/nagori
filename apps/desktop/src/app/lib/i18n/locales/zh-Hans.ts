@@ -357,6 +357,10 @@ export const zhHans: Messages = {
       purgeDeletedNow: '立即从磁盘清除已删除条目',
       purgeDeletedRunning: '正在清除…',
       purgeDeletedDone: '已从磁盘清除 {count} 个已删除条目。',
+      cloudSyncTitle: '数据文件夹位于同步文件夹内',
+      cloudSyncBody: (provider) =>
+        `剪贴板历史以未加密的形式存储在 ${provider} 中，同步客户端可能会将你的全部历史上传到云端。请将数据文件夹移出同步文件夹（或将其排除在同步之外），并启用全盘加密。`,
+      cloudSyncPath: '位置',
       regexDenylistAutosaveHint: '修正高亮的正则表达式错误后将自动保存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',

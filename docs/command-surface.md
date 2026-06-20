@@ -41,6 +41,7 @@ deleted; nothing leaves the machine.
 | `get_entry_preview_full` | palette | Expanded preview, `Public` entries only. |
 | `get_settings` | palette + settings | Settings snapshot with a revision token. |
 | `password_manager_preset` | settings | Canonical password-manager block-list. |
+| `data_dir_sync_warning` | settings | Warns if the data directory is inside a cloud-sync folder. |
 | `get_permissions` | palette + settings | OS permission status. |
 | `get_capabilities` | palette + settings | Per-OS capability matrix. |
 | `last_hotkey_failure` | palette + settings | Cached hotkey-registration failure. |

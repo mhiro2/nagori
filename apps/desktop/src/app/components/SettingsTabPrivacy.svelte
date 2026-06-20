@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
+  import { getDataDirSyncWarning } from '../lib/commands';
   import type { Messages } from '../lib/i18n/locales/en';
   import type { UserRegexError } from '../lib/policyValidation';
   import {
@@ -6,6 +9,7 @@
     type AppSettings,
     type Capability,
     type ContentKind,
+    type DataDirSyncWarning,
     type SecretHandling,
   } from '../lib/types';
 
@@ -60,10 +64,32 @@
   // Mirror this state in the UI by disabling the controls and showing
   // a banner so the user knows why the section is inert.
   const denylistDisabled = $derived(frontmostAppCapability?.status === 'unsupported');
+
+  // Warn when the data directory is inside a cloud-sync folder (iCloud
+  // Drive / Dropbox / OneDrive / …): the history is plaintext on disk, so
+  // the sync client would copy it off-device. Read-only, fetched once on
+  // mount; a failure leaves the banner hidden rather than breaking the tab.
+  let dataDirSyncWarning = $state<DataDirSyncWarning | null>(null);
+  onMount(async () => {
+    try {
+      dataDirSyncWarning = await getDataDirSyncWarning();
+    } catch {
+      dataDirSyncWarning = null;
+    }
+  });
 </script>
 
 <fieldset>
   <legend>{t.settings.privacy.legend}</legend>
+  {#if dataDirSyncWarning}
+    <div class="status warning" role="status">
+      <strong>{t.settings.privacy.cloudSyncTitle}</strong>
+      <p>{t.settings.privacy.cloudSyncBody(dataDirSyncWarning.provider)}</p>
+      <p class="help">
+        {t.settings.privacy.cloudSyncPath}: <code>{dataDirSyncWarning.path}</code>
+      </p>
+    </div>
+  {/if}
   {#if denylistDisabled}
     <p class="status warning" role="status">
       {t.settings.privacy.appDenylistUnsupported}

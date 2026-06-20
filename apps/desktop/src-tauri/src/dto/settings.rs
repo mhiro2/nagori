@@ -11,6 +11,20 @@ use time::OffsetDateTime;
 
 use super::{ContentKindDto, default_capture_kind_dtos};
 
+/// Warning surfaced when the data directory lives inside a cloud-sync
+/// folder (iCloud Drive, Dropbox, `OneDrive`, …), which would copy the
+/// plaintext clipboard history off-device. The command returns `None`
+/// (serialized as `null`) when the directory is not under a recognised
+/// sync root — see `nagori_core::storage_location`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirSyncWarningDto {
+    /// Human-readable provider name ("Dropbox", "iCloud Drive", …).
+    pub provider: String,
+    /// The sync root the data directory was found under.
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AiProviderKindDto {

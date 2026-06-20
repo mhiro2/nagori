@@ -10,6 +10,7 @@ import type {
   AppSettings,
   CliInstallResult,
   CliInstallStatus,
+  DataDirSyncWarning,
   EntryDto,
   EntryPreviewDto,
   HotkeyFailure,
@@ -148,6 +149,11 @@ export const openSettingsWindow = (route?: string): Promise<void> =>
 export const getPermissions = (): Promise<PermissionStatus[]> => invoke('get_permissions');
 
 export const getCapabilities = (): Promise<PlatformCapabilities> => invoke('get_capabilities');
+
+// Returns a warning when the data directory is inside a cloud-sync folder
+// (the plaintext history would be copied off-device), or `null` otherwise.
+export const getDataDirSyncWarning = (): Promise<DataDirSyncWarning | null> =>
+  invoke('data_dir_sync_warning');
 
 export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
   invoke('set_capture_enabled', { enabled });

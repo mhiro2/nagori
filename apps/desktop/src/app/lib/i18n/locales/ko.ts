@@ -371,6 +371,10 @@ export const ko: Messages = {
       purgeDeletedNow: '삭제된 항목 지금 디스크에서 지우기',
       purgeDeletedRunning: '지우는 중…',
       purgeDeletedDone: '삭제된 항목 {count}개를 디스크에서 지웠습니다.',
+      cloudSyncTitle: '데이터 폴더가 동기화 폴더 안에 있습니다',
+      cloudSyncBody: (provider) =>
+        `클립보드 기록이 암호화되지 않은 채 ${provider} 안에 저장되어 있어, 동기화 클라이언트가 전체 기록을 클라우드에 업로드할 수 있습니다. 데이터 폴더를 동기화 폴더 밖으로 옮기거나 동기화에서 제외하고, 디스크 전체 암호화를 켜는 것을 권장합니다.`,
+      cloudSyncPath: '위치',
       regexDenylistAutosaveHint: '강조 표시된 정규식 오류를 수정하면 자동으로 저장됩니다.',
       regexErrors: {
         lineLabel: '{line}번째 줄:',

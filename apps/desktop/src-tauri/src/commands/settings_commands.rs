@@ -5,7 +5,8 @@ use nagori_core::{AppError, Sensitivity};
 use tauri::State;
 
 use crate::dto::{
-    AppDenyRuleDto, AppSettingsDto, HotkeyFailureDto, PermissionStatusDto, PlatformCapabilitiesDto,
+    AppDenyRuleDto, AppSettingsDto, DataDirSyncWarningDto, HotkeyFailureDto, PermissionStatusDto,
+    PlatformCapabilitiesDto,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
@@ -38,6 +39,22 @@ pub fn password_manager_preset() -> Vec<AppDenyRuleDto> {
         .into_iter()
         .map(Into::into)
         .collect()
+}
+
+/// Warn when the data directory lives inside a cloud-sync folder
+/// (iCloud Drive, Dropbox, `OneDrive`, …): the clipboard history is
+/// plaintext on disk, so the sync client would copy the full history
+/// off-device. Computed from the same `default_db_path()` the app opens
+/// its store at; `None` when the directory is not under a recognised
+/// sync root. Pure read; never touches state.
+#[tauri::command]
+pub fn data_dir_sync_warning() -> Option<DataDirSyncWarningDto> {
+    let db_path = crate::state::default_db_path();
+    let data_dir = db_path.parent().unwrap_or(db_path.as_path());
+    nagori_core::detect_cloud_sync(data_dir).map(|m| DataDirSyncWarningDto {
+        provider: m.provider.display_name().to_owned(),
+        path: m.matched_root.display().to_string(),
+    })
 }
 
 #[tauri::command]

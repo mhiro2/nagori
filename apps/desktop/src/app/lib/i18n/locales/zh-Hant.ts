@@ -358,6 +358,10 @@ export const zhHant: Messages = {
       purgeDeletedNow: '立即從磁碟清除已刪除項目',
       purgeDeletedRunning: '正在清除…',
       purgeDeletedDone: '已從磁碟清除 {count} 個已刪除項目。',
+      cloudSyncTitle: '資料夾位於同步資料夾內',
+      cloudSyncBody: (provider) =>
+        `剪貼簿歷史以未加密的形式儲存在 ${provider} 中，同步用戶端可能會將你的全部歷史上傳到雲端。請將資料夾移出同步資料夾（或將其排除在同步之外），並啟用全磁碟加密。`,
+      cloudSyncPath: '位置',
       regexDenylistAutosaveHint: '修正反白的正規表示式錯誤後將自動儲存。',
       regexErrors: {
         lineLabel: '第 {line} 行：',

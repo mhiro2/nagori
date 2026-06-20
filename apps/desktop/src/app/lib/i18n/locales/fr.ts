@@ -385,6 +385,10 @@ export const fr: Messages = {
       purgeDeletedNow: 'Effacer du disque les entrées supprimées maintenant',
       purgeDeletedRunning: 'Effacement…',
       purgeDeletedDone: '{count} entrées supprimées effacées du disque.',
+      cloudSyncTitle: 'Le dossier de données se trouve dans un dossier synchronisé',
+      cloudSyncBody: (provider) =>
+        `Votre historique du presse-papiers est stocké dans ${provider} sans chiffrement ; le client de synchronisation peut donc téléverser tout votre historique vers le cloud. Déplacez le dossier de données hors du dossier synchronisé (ou excluez-le de la synchronisation) et activez le chiffrement du disque.`,
+      cloudSyncPath: 'Emplacement',
       regexDenylistAutosaveHint:
         'Les modifications sont enregistrées automatiquement une fois les erreurs regex corrigées.',
       regexErrors: {

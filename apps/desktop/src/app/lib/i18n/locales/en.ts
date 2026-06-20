@@ -404,6 +404,9 @@ export type Messages = {
       purgeDeletedNow: string;
       purgeDeletedRunning: string;
       purgeDeletedDone: string;
+      cloudSyncTitle: string;
+      cloudSyncBody: (provider: string) => string;
+      cloudSyncPath: string;
       regexDenylistAutosaveHint: string;
       regexErrors: {
         lineLabel: string;
@@ -953,6 +956,10 @@ export const en: Messages = {
       purgeDeletedNow: 'Purge deleted entries now',
       purgeDeletedRunning: 'Purging…',
       purgeDeletedDone: 'Purged {count} deleted entries.',
+      cloudSyncTitle: 'Data folder is inside a synced folder',
+      cloudSyncBody: (provider) =>
+        `Your clipboard history is stored inside ${provider} and is not encrypted, so the sync client may upload your full history to the cloud. Move the data folder out of the synced folder (or exclude it from syncing), and turn on full-disk encryption.`,
+      cloudSyncPath: 'Location',
       regexDenylistAutosaveHint: 'Changes auto-save once the highlighted errors are fixed.',
       regexErrors: {
         lineLabel: 'Line {line}:',

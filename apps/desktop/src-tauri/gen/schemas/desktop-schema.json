@@ -237,6 +237,12 @@
           "markdownDescription": "Enables the copy_entry_from_palette command without any pre-configured scope."
         },
         {
+          "description": "Enables the data_dir_sync_warning command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-data-dir-sync-warning",
+          "markdownDescription": "Enables the data_dir_sync_warning command without any pre-configured scope."
+        },
+        {
           "description": "Enables the delete_entries command without any pre-configured scope.",
           "type": "string",
           "const": "allow-delete-entries",
@@ -511,6 +517,12 @@
           "type": "string",
           "const": "deny-copy-entry-from-palette",
           "markdownDescription": "Denies the copy_entry_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the data_dir_sync_warning command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-data-dir-sync-warning",
+          "markdownDescription": "Denies the data_dir_sync_warning command without any pre-configured scope."
         },
         {
           "description": "Denies the delete_entries command without any pre-configured scope.",

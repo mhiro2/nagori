@@ -386,6 +386,10 @@ export const es: Messages = {
       purgeDeletedNow: 'Borrar del disco las entradas eliminadas ahora',
       purgeDeletedRunning: 'Borrando…',
       purgeDeletedDone: 'Se borraron del disco {count} entradas eliminadas.',
+      cloudSyncTitle: 'La carpeta de datos está dentro de una carpeta sincronizada',
+      cloudSyncBody: (provider) =>
+        `Tu historial del portapapeles se guarda dentro de ${provider} sin cifrar, por lo que el cliente de sincronización podría subir todo tu historial a la nube. Mueve la carpeta de datos fuera de la carpeta sincronizada (o exclúyela de la sincronización) y activa el cifrado de disco completo.`,
+      cloudSyncPath: 'Ubicación',
       regexDenylistAutosaveHint:
         'Los cambios se guardan automáticamente cuando se corrigen los errores de regex resaltados.',
       regexErrors: {
