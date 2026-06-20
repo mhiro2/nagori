@@ -2023,8 +2023,11 @@ change.
 
 - **Tray (`tauri::tray::TrayIcon`)** — system tray icon (macOS menu
   bar, Windows notification area, Linux StatusNotifierItem /
-  `libayatana-appindicator`) with *Show Palette*, *Pause Capture* /
-  *Resume Capture* (label tracks `capture_enabled`), *Settings…*,
+  `libayatana-appindicator`) with *Show Palette*, *Capture Clipboard*
+  (a `CheckMenuItem` whose checkmark tracks `capture_enabled`; the tray
+  glyph also dims to a paused variant — the same icon with its alpha
+  scaled down — while capture is off, so the state reads at a glance
+  without opening the menu), *Settings…*,
   *Clear History* (hard-deletes every non-pinned entry — pinned rows are
   kept — then emits `CLIPBOARD_CHANGED_EVENT` so an open palette refreshes
   and confirms via a notification, mirroring the `ClearHistory` secondary

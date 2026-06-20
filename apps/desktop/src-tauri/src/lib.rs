@@ -166,7 +166,7 @@ pub fn run() {
             // Tray icon is installed on every platform. macOS exposes it in
             // the menu bar, Windows in the system notification area, and
             // Linux through StatusNotifierItem / `libayatana-appindicator`.
-            // The menu items themselves (Show Palette / Pause Capture /
+            // The menu items themselves (Show Palette / Capture Clipboard /
             // Settings / Quit) are platform-agnostic. If creation fails
             // (e.g. Linux session without StatusNotifierItem support) we
             // log and continue so the rest of the app stays usable.
@@ -632,6 +632,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                     .title("Nagori")
                     .body(body)
                     .show();
+                // Refresh the tray only when capture actually flipped. The
+                // refresh now also swaps the menu-bar glyph (a synchronous
+                // main-thread dispatch, plus a temp-PNG rewrite on Linux), so
+                // running it every tick would charge that cost to unrelated
+                // settings edits (theme, hotkeys, …). Runs on every OS so the
+                // Windows / Linux trays stay in sync with the persisted flag.
+                tray::refresh(&app, current_capture);
             }
 
             if snapshot.ai.enabled && !current_ai_enabled {
@@ -674,12 +681,6 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
             // bound successfully under a different action. Without
             // this, the toast/banner outlives both resolution paths.
             reconcile_cached_hotkey_failures(&app, &snapshot, &current_secondary);
-
-            // Refresh the tray menu so the "Pause Capture" / "Resume
-            // Capture" label tracks the current state. Runs on every OS so
-            // Windows / Linux trays stay in sync with the persisted
-            // capture flag.
-            tray::refresh(&app, current_capture);
         }
     });
 }

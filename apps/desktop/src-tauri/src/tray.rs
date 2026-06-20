@@ -1,9 +1,10 @@
 //! System tray icon for the desktop shell.
 //!
 //! The tray exposes the same actions a power user would otherwise reach
-//! through the global hotkey or a CLI invocation: show the palette, pause
-//! or resume capture, open settings, and quit. We rebuild the menu when
-//! capture state changes so the toggle label tracks reality.
+//! through the global hotkey or a CLI invocation: show the palette, toggle
+//! clipboard capture, open settings, and quit. Capture is a checkable menu
+//! item, and the tray icon dims while capture is paused, so its on/off
+//! state is legible both in the open menu and at a glance in the menu bar.
 //!
 //! The same module powers the macOS menu bar item, the Windows system
 //! notification area icon, and the Linux `StatusNotifierItem` /
@@ -16,7 +17,7 @@
 use std::io::Cursor;
 use std::sync::Mutex;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
@@ -94,6 +95,31 @@ fn decode_icon_rgba(png_bytes: &[u8]) -> (Vec<u8>, u32, u32) {
     (rgba, info.width, info.height)
 }
 
+// Alpha multiplier applied to the active icon to render the "capture
+// paused" variant. macOS treats `tray.png` as a template image and tints
+// it with the menu-bar colour modulated by this alpha, so scaling every
+// pixel's alpha down renders a fainter, visibly inactive glyph; on the
+// Windows / Linux notification surfaces (no template tinting) it simply
+// fades the monochrome glyph. 40% is faint enough to read as "off" yet
+// still recognisably the same icon.
+const PAUSED_ICON_ALPHA_NUMERATOR: u16 = 2;
+const PAUSED_ICON_ALPHA_DENOMINATOR: u16 = 5;
+
+/// Derive the "capture paused" icon from the active RGBA buffer by
+/// scaling every pixel's alpha channel. Pure pixel math so it can be
+/// unit-tested without a Tauri runtime.
+fn dim_rgba_alpha(rgba: &[u8]) -> Vec<u8> {
+    let mut out = rgba.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        // Always ≤ 255 * 2 / 5 = 102, so it fits a u8; `try_from` keeps
+        // the cast checked (clippy rejects a bare `as u8`) without an
+        // allow attribute, and the saturating fallback can never fire.
+        let scaled = u16::from(px[3]) * PAUSED_ICON_ALPHA_NUMERATOR / PAUSED_ICON_ALPHA_DENOMINATOR;
+        px[3] = u8::try_from(scaled).unwrap_or(u8::MAX);
+    }
+    out
+}
+
 pub(crate) const TRAY_ID: &str = "nagori-main";
 const ID_TOGGLE_PALETTE: &str = "tray.toggle_palette";
 const ID_TOGGLE_CAPTURE: &str = "tray.toggle_capture";
@@ -101,28 +127,33 @@ const ID_OPEN_SETTINGS: &str = "tray.open_settings";
 const ID_CLEAR_HISTORY: &str = "tray.clear_history";
 const ID_QUIT: &str = "tray.quit";
 
-/// Cache of the menu items we need to rebuild labels on. Stored in
-/// app state so `refresh()` can find them without re-walking the menu.
+/// Cached tray state needed to reflect capture on/off after install:
+/// the checkable capture item (whose checkmark we toggle) and the two
+/// pre-computed icon variants (active and dimmed-paused) we swap the
+/// menu-bar glyph between. Stored in app state so `refresh()` can reach
+/// them without re-walking the menu or re-decoding the PNG.
 struct TrayHandles {
-    capture_item: MenuItem<Wry>,
-}
-
-impl TrayHandles {
-    fn set_capture_label(&self, capture_enabled: bool) {
-        let label = if capture_enabled {
-            "Pause Capture"
-        } else {
-            "Resume Capture"
-        };
-        let _ = self.capture_item.set_text(label);
-    }
+    capture_item: CheckMenuItem<Wry>,
+    icon_width: u32,
+    icon_height: u32,
+    active_rgba: Vec<u8>,
+    paused_rgba: Vec<u8>,
 }
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let toggle_palette_item =
         MenuItem::with_id(app, ID_TOGGLE_PALETTE, "Show Palette", true, None::<&str>)?;
-    let toggle_capture_item =
-        MenuItem::with_id(app, ID_TOGGLE_CAPTURE, "Pause Capture", true, None::<&str>)?;
+    // Checkable: the checkmark shows whether capture is currently on.
+    // Starts checked and is corrected to the persisted value by the
+    // async `refresh()` at the end of `install()`.
+    let toggle_capture_item = CheckMenuItem::with_id(
+        app,
+        ID_TOGGLE_CAPTURE,
+        "Capture Clipboard",
+        true,
+        true,
+        None::<&str>,
+    )?;
     let settings_item = MenuItem::with_id(app, ID_OPEN_SETTINGS, "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let clear_history_item =
@@ -149,8 +180,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // Windows / Linux notification surfaces are pixel-tight enough that
     // detail in a full-colour icon is lost — so we use a dedicated
     // monochrome asset here.
-    let (rgba, width, height) = decode_tray_icon();
-    let icon = Image::new_owned(rgba, width, height);
+    let (active_rgba, width, height) = decode_tray_icon();
+    let paused_rgba = dim_rgba_alpha(&active_rgba);
+    // Hand a clone to the builder and keep the originals in `TrayHandles`
+    // so `refresh()` can swap between the active and paused variants
+    // without re-decoding the PNG on every capture toggle.
+    let icon = Image::new_owned(active_rgba.clone(), width, height);
     let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         // No-op on Windows / Linux; on macOS this flags the image as a
@@ -171,6 +206,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     app.manage(Mutex::new(TrayHandles {
         capture_item: toggle_capture_item,
+        icon_width: width,
+        icon_height: height,
+        active_rgba,
+        paused_rgba,
     }));
 
     // Sync the initial label asynchronously so it reflects the persisted
@@ -200,7 +239,27 @@ pub fn refresh(app: &AppHandle, capture_enabled: bool) {
     let Ok(handles) = handles.lock() else {
         return;
     };
-    handles.set_capture_label(capture_enabled);
+    // Tick the checkmark so the open menu shows capture on/off directly.
+    let _ = handles.capture_item.set_checked(capture_enabled);
+
+    // Swap the menu-bar glyph so the state is legible without opening the
+    // menu: the active icon while capturing, the dimmed variant while
+    // paused. `set_icon_with_as_template` re-asserts the macOS template
+    // flag atomically (a bare `set_icon` would drop it, rendering the
+    // swapped glyph as an untinted image), and falls back to `set_icon`
+    // on Windows / Linux.
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let rgba = if capture_enabled {
+        &handles.active_rgba
+    } else {
+        &handles.paused_rgba
+    };
+    let icon = Image::new(rgba, handles.icon_width, handles.icon_height);
+    if let Err(err) = tray.set_icon_with_as_template(Some(icon), true) {
+        tracing::warn!(error = %err, "tray_set_icon_failed");
+    }
 }
 
 /// Refresh the tray tooltip from the live health snapshots.
@@ -281,15 +340,25 @@ fn toggle_capture(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let runtime = handle.state::<AppState>().runtime.clone();
+        // The native `CheckMenuItem` flips its checkmark on click *before*
+        // this handler runs (true on macOS / Windows / GTK alike). On any
+        // failure path below the persisted `capture_enabled` is unchanged,
+        // so we re-assert the tray from the last known-good value to undo
+        // that optimistic flip — otherwise the checkmark (and the glyph)
+        // would lie about whether capture is on. A successful toggle is
+        // reconciled by the settings-watch loop instead, which also swaps
+        // the icon to match.
         let current = match runtime.get_settings().await {
             Ok(s) => s.capture_enabled,
             Err(err) => {
                 tracing::warn!(error = %err, "tray_toggle_capture_load_failed");
+                refresh(&handle, runtime.current_settings().capture_enabled);
                 return;
             }
         };
         if let Err(err) = runtime.set_capture_enabled(!current).await {
             tracing::warn!(error = %err, "tray_toggle_capture_save_failed");
+            refresh(&handle, current);
         }
     });
 }
@@ -340,7 +409,7 @@ fn open_settings(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_tray_tooltip, decode_icon_rgba, decode_tray_icon};
+    use super::{build_tray_tooltip, decode_icon_rgba, decode_tray_icon, dim_rgba_alpha};
 
     #[test]
     fn embedded_tray_icon_decodes_to_rgba() {
@@ -376,6 +445,33 @@ mod tests {
         let (rgba, width, height) = decode_icon_rgba(&bytes);
         assert_eq!((width, height), (2, 1));
         assert_eq!(rgba, vec![0, 0, 0, 0, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn dim_rgba_alpha_scales_only_alpha() {
+        // Colour channels are preserved and only alpha is scaled by the
+        // paused ratio (40%), rounding toward zero so the menu-bar glyph
+        // only ever reads *fainter*, never brighter.
+        let src = vec![255, 255, 255, 255, 10, 20, 30, 100];
+        let dimmed = dim_rgba_alpha(&src);
+        assert_eq!(dimmed.len(), src.len());
+        assert_eq!(&dimmed[0..3], &[255, 255, 255]);
+        assert_eq!(dimmed[3], 102); // 255 * 2 / 5
+        assert_eq!(&dimmed[4..7], &[10, 20, 30]);
+        assert_eq!(dimmed[7], 40); // 100 * 2 / 5
+    }
+
+    #[test]
+    fn paused_icon_preserves_dimensions_and_fades_alpha() {
+        // The runtime swap reuses the decoded buffer, so the paused
+        // variant must keep the exact width*height*4 shape and be
+        // strictly fainter overall (otherwise "paused" would not read).
+        let (active, width, height) = decode_tray_icon();
+        let paused = dim_rgba_alpha(&active);
+        assert_eq!(paused.len(), active.len());
+        assert_eq!(paused.len(), (width * height * 4) as usize);
+        let total_alpha = |b: &[u8]| b.chunks_exact(4).map(|px| u32::from(px[3])).sum::<u32>();
+        assert!(total_alpha(&paused) < total_alpha(&active));
     }
 
     #[test]
