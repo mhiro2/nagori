@@ -741,7 +741,8 @@ describe('SettingsView', () => {
     await fireEvent.click(advanced);
 
     const numberInputs = container.querySelectorAll('input[type="number"]');
-    const [maxBytes, pasteDelay] = Array.from(numberInputs);
+    // Inputs order: max bytes / max image bytes / paste delay.
+    const [maxBytes, , pasteDelay] = Array.from(numberInputs);
     if (maxBytes) await fireEvent.input(maxBytes, { target: { value: '4096' } });
     if (pasteDelay) await fireEvent.input(pasteDelay, { target: { value: '120' } });
 
