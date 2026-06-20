@@ -124,6 +124,9 @@ compatibility matrix and troubleshooting.
    navigate, **Enter** to paste the highlighted entry back into the previous
    window. **Cmd/Ctrl+Shift+Enter** pastes in an alternate format — and opens a
    picker when the entry can be pasted as more than one (files / image / text).
+   **Right-click** a row for a context menu — paste, copy, paste as…, pin, an
+   *Actions…* entry that opens the quick / AI action panel, and delete — so the
+   same actions are reachable by mouse without the keyboard shortcuts.
 3. Use **Settings** for privacy and hotkey configuration. Run
    `nagori doctor` if something feels off; the desktop app surfaces the
    same capability matrix under **Settings → Advanced → Capabilities**.

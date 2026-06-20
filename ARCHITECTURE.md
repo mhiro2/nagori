@@ -1110,9 +1110,14 @@ re-pasted as just one of them. `NagoriRuntime::list_paste_options` reads
 the stored set and returns the distinct pasteable MIMEs (deduped, in
 canonical role/ordinal order) via the shared `model::paste_option` helper,
 and the desktop surfaces them from the alternate-format chord
-(`Cmd/Ctrl+Shift+Enter`) as a small picker — shown only when there is a
-real choice (≥2 distinct formats), otherwise the chord keeps its plain
-alternate-format paste. Choosing one runs `copy_entry_representation`,
+(`Cmd/Ctrl+Shift+Enter`) as a small picker, shown only when there is a real
+choice (≥2 distinct formats), otherwise the chord keeps its plain
+alternate-format paste. The result-row right-click menu
+(`EntryContextMenu.svelte`) exposes the same picker through its *Paste as…* row,
+gated the same way (the row appears only for ≥2 formats, via
+`offersPasteFormatChoice`) but **always** opening the picker rather than the
+chord's opposite-format fallback — so it can never try to paste a single-format
+entry (an image, say) as plain text. Choosing one runs `copy_entry_representation`,
 which re-reads the representation set (so a concurrent eviction can't make
 the picker's snapshot stale), resolves the MIME to its single canonical row,
 and publishes it through `write_representation_exact`. The whole chord
@@ -1544,6 +1549,30 @@ not duplicate runtime logic.
   `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
   Clearing the whole history is not offered here — that global, destructive
   action lives on the tray menu and the `clear-history` hotkey.
+- `EntryContextMenu.svelte` — a right-click context menu on a result row that
+  surfaces the per-entry actions for mouse-driven use: *Paste*, *Copy*, *Paste
+  as…*, *Pin* / *Unpin*, *Actions…* (opens `ActionInspector.svelte` anchored to
+  that row by id), and *Delete*. The *Paste as…* row appears only when the entry
+  has ≥2 distinct pasteable formats (`offersPasteFormatChoice`, derived
+  synchronously from the row's `representationSummary` so the menu opens without
+  an IPC) and, unlike the ⇧⌘⏎ chord, **always** opens the representation picker
+  — it never falls back to the chord's opposite-format paste, which would try to
+  paste e.g. an image as plain text and surface a stray status-bar error. The target id(s) are captured when the menu opens (in an
+  `entryContextMenu` store) and every item acts on them directly, never on the
+  live selection, so a background `refreshCurrent` / `runQuery` landing between
+  opening the menu and clicking an item can't redirect the action. Right-clicking
+  a row that is part of the multi-selection acts on the whole selection (combined
+  copy / bulk delete); otherwise it acts on that single row without disturbing the
+  selection. It is a plain DOM popover, not a native menu: the palette hides on
+  `window` blur (`App.svelte`), and a native popup would steal key focus and fire
+  that blur, tearing the palette down the instant the menu opened. It clamps into
+  the window, focuses itself and swallows its own keydowns (so Escape closes only
+  the menu rather than leaking to the window handler that hides the palette — with
+  a matching guard in `App.svelte` as belt-and-suspenders), and dismisses on
+  outside click / Escape / blur through document-capture listeners (capture so an
+  outside right-click can immediately re-open the menu on another row). While the
+  action inspector owns the column the list is a read-only reference surface, so a
+  right-click there is suppressed entirely (mirrors the frozen hover / click).
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
   the `preview_entry` Tauri command, which is gated to the desktop
   process because the daemon does not host an AppKit event loop. The
