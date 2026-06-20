@@ -162,20 +162,24 @@ macOS). Those files are shell/runtime state; the clipboard history DB and
 IPC socket stay in the Nagori data directory above.
 
 **Is the database encrypted?**
-No. Encryption at rest is not implemented yet and must be resolved before a
-1.0-quality security claim. The DB file has restrictive filesystem
-permissions (`0600` / `0700`) but the bytes on disk are plaintext, so anything
-running as your user (malware, backup agents, cloud-sync clients) can read your
-history. Use FileVault / BitLocker / LUKS for full-disk protection and keep the
-data directory off cleartext sync targets.
+No, and app-level encryption is intentionally deferred — **full-disk
+encryption (FileVault / BitLocker / LUKS) is the at-rest baseline**. The DB
+file has restrictive filesystem permissions (`0600` / `0700`) but the bytes on
+disk are plaintext, so anything running as your user (malware, backup agents,
+cloud-sync clients) can read your history. Turn on full-disk encryption and
+keep the data directory off cleartext sync targets — the desktop's
+Settings → Privacy panel warns you if the data directory is inside a synced
+folder (iCloud Drive / Dropbox / OneDrive / …), and `nagori doctor` reports it
+(`data_dir_sync_warning`) when it inspects the database directly.
 
 Nagori reduces residue but does not encrypt live rows: hard-deleted rows are
 zeroed in place (`secure_delete`) and purge paths truncate the write-ahead log.
 Settings also exposes **Delete entries permanently**, **Purge deleted entries
 now**, **Clear non-pinned history on quit**, retention limits, and **Block all
 sensitive captures** for users who prefer not to persist Private/Secret clips.
-The SQLCipher / OS-keystore design work is tracked in
-[`docs/security-encryption-at-rest.md`](./docs/security-encryption-at-rest.md).
+The full at-rest posture — why app-level encryption is deferred and what would
+reopen it — is in [`docs/privacy.md`](./docs/privacy.md) and
+[`ARCHITECTURE.md` §19](./ARCHITECTURE.md#19-security-notes).
 
 **How does secret redaction work?**
 The default mode stores matched secrets as `[REDACTED]` and re-derives hashes

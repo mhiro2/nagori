@@ -258,8 +258,8 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // full-disk encryption — freed disk blocks remain recoverable at the
     // filesystem layer until reused — and the explicit purge paths follow
     // up with `wal_checkpoint(TRUNCATE)` to drop the historical WAL frames
-    // that still hold the pre-deletion content; see
-    // `docs/security-encryption-at-rest.md`.
+    // that still hold the pre-deletion content; see ARCHITECTURE.md §19
+    // for the at-rest posture and why app-level encryption is deferred.
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA recursive_triggers = ON;

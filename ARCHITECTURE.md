@@ -636,7 +636,19 @@ encryption — see [section 19](#19-security-notes).
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**
-encrypted — see [section 19](#19-security-notes).
+encrypted — full-disk encryption is the at-rest baseline and app-level DB
+encryption is intentionally deferred (see [section 19](#19-security-notes)
+for the decision and its rationale). Encryption-at-rest migration is
+therefore unscoped; if it is ever revisited, an export/import path is
+preferred over an in-place plaintext→encrypted flip, which would have to
+fold the WAL/SHM sidecars back into the main file before re-keying.
+`MIGRATIONS` stays plaintext schema-only regardless — encryption would
+live below the schema in `SqliteStore::open`, not in a migration.
+`detect_cloud_sync` (`nagori-core::storage_location`) flags the one
+at-rest leak a user can trip into without disk encryption — the data
+directory sitting inside a cloud-sync folder — surfaced by the desktop
+Privacy panel and `nagori doctor`'s local-DB arm (see
+[section 19](#19-security-notes)).
 
 ---
 
@@ -2258,21 +2270,63 @@ under 80 ms for 100k text entries on a developer machine.
 - **Capture** — no remote network calls; the capture loop never
   leaves the process.
 - **Storage at rest** — SQLite file forced to `0600`, parent
-  directory to `0700`. The DB itself is **not** encrypted; this remains
-  a pre-1.0 security design item rather than a solved guarantee (see
-  `docs/security-encryption-at-rest.md`):
-  permission bits keep other local users out but do not defend
-  against backups, sync clients, or code running as the same user.
-  README documents the gap and recommended mitigations (avoid sync
-  targets, rely on FileVault, prefer `Store redacted`, optionally block
-  all sensitive captures). To keep *deleted* secrets from lingering in the live file, every connection
-  runs `secure_delete = ON` (freed pages zeroed) and the explicit
-  purge paths (`clear_non_pinned`, `clear_older_than`, `purge_deleted`,
-  `hard_delete_entry`) issue `wal_checkpoint(TRUNCATE)` so the
-  pre-deletion content does not survive in WAL frames — residue reduction,
-  not a substitute for full-disk encryption (freed disk blocks stay
-  recoverable at the filesystem layer until reused). The SQLCipher / OS-keystore
-  trade-offs are captured in `docs/security-encryption-at-rest.md`.
+  directory to `0700` (on Windows the path inherits the restrictive
+  `%LOCALAPPDATA%` ACL). The DB itself is **not** encrypted. Permission
+  bits keep *other* local users out but do not defend against backups,
+  sync clients, or code running as the same user.
+
+  **Full-disk encryption (FileVault / BitLocker / LUKS) is the at-rest
+  baseline**, and application-level DB encryption is **intentionally
+  deferred** — it is not a pre-1.0 blocker. The reasoning:
+  - SQLCipher cannot be a clean default-off feature: `rusqlite`/
+    `libsqlite3-sys` treat `bundled` and `bundled-sqlcipher` as mutually
+    exclusive and Cargo unifies features across the build graph, so a
+    shipping build that offers runtime opt-in must link SQLCipher (and
+    its OpenSSL/crypto backend) for **every** user — a binary-size and
+    build cost imposed on everyone, against the lean-dependency stance.
+  - An OS-keystore-held key defends a powered-off stolen disk without
+    FDE, a plaintext backup, and a cleartext sync copy, but **not** a
+    same-user attacker: the keystore unlocks for the logged-in user, and
+    a running Nagori already exposes the decrypted DB, IPC, process
+    memory, and search API. A passphrase would harden that but is
+    incompatible with an always-on clipboard daemon's UX.
+  - Encryption is not a checkbox — it needs key management, three-OS
+    keystores (macOS Keychain / Windows DPAPI / Linux Secret Service)
+    with fail-closed behaviour, a non-destructive migration, a recovery
+    story, the search-index leakage question, and cross-platform
+    benchmarks. App-layer AEAD on payload columns is **not** an
+    acceptable shortcut: FTS5, the ngram table, previews, titles, and
+    `normalized_text` would still hold plaintext vocabulary, giving false
+    assurance.
+
+  Re-evaluate this decision when: a `nagori export` / `import` path
+  exists (the migration vehicle), the three keystore backends can be
+  built and verified, macOS **and** Windows search benchmarks confirm the
+  ≤100 ms budget holds under SQLCipher, SQLCipher + `sqlite-vec`
+  coexistence is proven, and the always-on distribution cost is
+  explicitly accepted.
+
+  Residue reduction is enforced regardless of encryption: every
+  connection runs `secure_delete = ON` (freed pages zeroed) and the
+  explicit purge paths (`clear_non_pinned`, `clear_older_than`,
+  `purge_deleted`, `hard_delete_entry`) issue `wal_checkpoint(TRUNCATE)`
+  so pre-deletion content does not survive in WAL frames. This shrinks
+  the window where *deleted* secrets are recoverable from the file; it is
+  **not** encryption and does not protect live rows (freed disk blocks
+  also stay recoverable at the filesystem layer until reused). The
+  supported mitigations while encryption is absent are FDE, `Store
+  redacted` (the default), **Block all sensitive captures**, **Delete
+  entries permanently** / **Purge deleted entries now**, clear-on-quit /
+  retention limits, and keeping the data directory off cleartext sync
+  targets. The last one is detected: `nagori-core::storage_location::detect_cloud_sync`
+  flags a data directory sitting inside a known sync folder (iCloud Drive
+  / Dropbox / OneDrive / Google Drive / …). The desktop Privacy panel always
+  surfaces the warning (it computes it from `default_db_path`), and
+  `nagori doctor` reports it in its local/direct-DB arm — the
+  daemon-over-IPC arm leaves `data_dir_sync_warning` unset, matching the
+  empty-`db_path` convention of not echoing local filesystem layout over IPC.
+  Detection is lexical and best-effort (it cannot see a drive-letter / FUSE
+  mount outside the home directory or a symlinked sync root).
 - **Image streaming** — the `nagori-image://` Tauri scheme handler
   returns 403 for `Sensitivity::Private | Secret | Blocked` so secret
   imagery never reaches the WebView. The `/thumb/<id>` branch

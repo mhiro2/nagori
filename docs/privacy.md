@@ -21,18 +21,26 @@ contract.
   to `0700` on macOS / Linux; on Windows the path inherits the
   default NTFS DACL from `%LOCALAPPDATA%`, which already restricts
   read access to your account.
-- **The DB is not encrypted at rest.** Permission bits keep other
-  local users out, but they do not defend against anything running
-  as your user (backups, cloud-sync clients, malware). If your home
-  directory is on a synced folder, exclude `nagori/` or store the
-  data directory outside it. Prefer FileVault / BitLocker / LUKS
-  for full-disk protection.
-- SQLCipher / OS keychain integration is **not implemented** and
-  remains a pre-1.0 security design item, not a solved guarantee.
-  The blockers (dependency size, schema migrations against an
-  encrypted DB, and a recovery story when the key store rotates) are
-  tracked in
-  [`security-encryption-at-rest.md`](./security-encryption-at-rest.md).
+- **The DB is not encrypted at rest, and app-level encryption is
+  intentionally deferred.** Permission bits keep other local users out,
+  but they do not defend against anything running as your user (backups,
+  cloud-sync clients, malware). **Full-disk encryption (FileVault /
+  BitLocker / LUKS) is the recommended at-rest baseline.**
+- If your data directory is inside a synced folder, the plaintext history
+  is copied to the cloud. Move it out (or exclude `nagori/` from syncing).
+  Nagori detects the common sync folders (iCloud Drive, Dropbox, OneDrive,
+  Google Drive, …) and warns you in **Settings → Privacy**; `nagori doctor`
+  also reports it (`data_dir_sync_warning`) when it inspects the database
+  directly (the local / `--db` arm).
+- SQLCipher / OS-keystore encryption is **not implemented and is deferred
+  past 1.0 by design**, not a checkbox left unticked. An OS-keystore key
+  would protect a stolen powered-off disk, a plaintext backup, or a sync
+  copy — but not a same-user attacker (the key unlocks for your login and
+  a running Nagori already exposes the decrypted data), so it adds little
+  over full-disk encryption. Encrypting only some columns is worse: the
+  search index would still hold your text in the clear. The full rationale
+  and the conditions that would reopen the decision are in
+  [`ARCHITECTURE.md` §19](../ARCHITECTURE.md#19-security-notes).
 
 ## Secret redaction
 
