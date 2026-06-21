@@ -2,145 +2,118 @@
   <img src="./assets/hero.jpg" alt="Nagori — Local-first clipboard history and memory" width="100%" />
 </p>
 
-## Features
+<p align="center">
+  <b>Local-first clipboard history for keyboard-driven people.</b><br/>
+  Hit a hotkey, find anything you've copied, paste it back — nothing leaves your machine.
+</p>
 
-- Persistent clipboard history (text, images, file lists) stored locally in SQLite.
-- Full-text search and pinning from a desktop palette or the `nagori` CLI.
-- Japanese / CJK partial-match search: kana-insensitive (a Katakana clip is
-  found by a Hiragana query and vice versa) with single-kanji recall, on top of
-  full-text and ASCII fuzzy matching.
-- Recall-oriented result rows: a language badge on code (JSON / SQL / Rust /
-  …, detected on-device with the same canonical id the preview highlighter
-  uses), a strong-brand badge on known URLs (GitHub / YouTube / …, from the
-  hostname alone — no network), and pixel dimensions, file size, and a
-  *Screenshot* hint on image rows so "the screenshot I just took" is
-  scannable in the list.
-- Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
-  PEM blocks, credit-card numbers, and OTPs before they hit disk.
-- User regex denylist for project-specific patterns.
-- Honours the "do not record" clipboard markers password managers and apps set,
-  on every platform: macOS nspasteboard.org types (`org.nspasteboard.ConcealedType`
-  / `org.nspasteboard.TransientType`), Windows' `Clipboard Viewer Ignore` /
-  `ExcludeClipboardContentFromMonitorProcessing` formats, and Linux/Wayland's
-  KDE `x-kde-passwordManagerHint` offer. A marked clip is skipped without ever
-  being stored — normally before its body is even read.
-- Auto-paste back into the previously focused window (Cmd/Ctrl+V synthesis).
-- Paste a copied item as a specific representation: for a file that also
-  carries a rendered image and a text label, **Cmd/Ctrl+Shift+Enter** offers a
-  picker to paste it as *Files*, *Image*, or *Plain text* instead of the
-  default re-offer-everything paste.
-- Quick actions on a selected entry: summarise, format JSON, extract tasks,
-  redact secrets — all computed locally without any network calls.
-- macOS on-device AI actions (opt-in, off by default): summarise, rewrite,
-  reformat Markdown, extract tasks, explain code, and translate — backed by
-  Apple's on-device frameworks (Foundation Models for text generation, the
-  Translation framework for translate). Inference runs entirely on-device:
-  no clipboard text leaves the machine and the Private Cloud Compute path is
-  not used.
-- Optional on-device semantic search (opt-in, macOS): matches entries by
-  meaning using Apple's `NLContextualEmbedding`, indexed locally with
-  `sqlite-vec`.
-- URL preview shows host on its own row with a punycode badge when the
-  displayed Unicode host differs from its ASCII form; press **Enter** in
-  the expanded preview to open the URL in the default browser after a
-  confirm dialog (Public entries only, `https` / `http` only).
-- Image preview uses a daemon-cached 512px thumbnail on row navigation so
-  the palette stays responsive on multi-megabyte screenshots, with a
-  `dimensions · format · size` summary chip. **⌘/Ctrl E** opens the
-  full-width expanded preview, which switches to the original payload and
-  zooms toward the pointer — pinch the trackpad (or **⌘/Ctrl** + scroll),
-  double-click to toggle fit ↔ 2×, or use the keyboard (**⌘/Ctrl** with
-  **+** / **−** / **0**); a zoomed image pans with the scrollbar / trackpad.
-  When a copied file also carried an image render (e.g. a presentation
-  copied from Finder), the file preview pane shows it as a small
-  supplementary thumbnail.
-- Long-text preview shows head and tail with a middle-elided marker so
-  the end of large logs / pastes stays visible; when the active search
-  hit lands inside the elided range the preview flags it so you can
-  expand to the 1 MiB full view (Public entries only).
-- Quick Look preview on macOS — Cmd+Y in the palette opens the
-  highlighted entry in the system Quick Look overlay (Public entries
-  only). Windows and Linux Wayland surface the capability as
-  Unsupported because neither OS ships a comparable system overlay.
-- Bundled per-OS release artefacts with an in-app update-availability probe.
+<p align="center">
+  <img src="./assets/demo-flow.gif" alt="Copy → ⌘⇧V → search → ↩ pastes it back" width="720" />
+</p>
+<p align="center"><sub>Copy anywhere → <kbd>⌘⇧V</kbd> → search → <kbd>↩</kbd> pastes it back into the app you were in.</sub></p>
+
+## What you can do
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="./assets/feature-search.png" alt="Instant partial-match search" /><br/>
+      <b>Instant partial-match search</b><br/>
+      Type part of a word and the clip surfaces at once — fast even on huge
+      histories. Japanese / CJK matches kana-insensitively too — search
+      ひらがな and find カタカナ — with single-kanji recall.
+    </td>
+    <td width="50%">
+      <img src="./assets/feature-privacy.gif" alt="Secrets scrubbed before they touch disk" /><br/>
+      <b>Secrets scrubbed before they touch disk</b><br/>
+      API keys, tokens, cards and OTPs are redacted on capture, and clips your
+      password manager marks "do not record" are skipped entirely. Everything
+      stays in a local SQLite file — no cloud.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="./assets/feature-recall.png" alt="Built to be scanned" /><br/>
+      <b>Built to be scanned</b><br/>
+      Language badges on code, brand badges on known URLs, and dimensions + a
+      Screenshot hint on images — the clip you want jumps out of the list.
+    </td>
+    <td width="50%">
+      <img src="./assets/feature-ai.gif" alt="On-device AI actions (macOS)" /><br/>
+      <b>On-device AI actions (macOS)</b><br/>
+      Summarize, translate, rewrite, explain code — backed by Apple's on-device
+      models. Opt-in, off by default, and nothing leaves your Mac.
+    </td>
+  </tr>
+</table>
+
+> [!TIP]
+> **Power users:** drive all of this from the `nagori` CLI with JSON output —
+> handy for scripts and AI agents. See [Usage](#usage).
 
 ## Install
 
-> **Canary / pre-1.0.** The `0.0.x` line is a dogfooding canary. Bundles
-> are published as GitHub pre-releases and the in-app updater only
-> probes for new versions — it does not auto-install. Expect rough
-> edges; see [Known limitations](#known-limitations) before installing.
+Download bundles from [GitHub Releases](https://github.com/mhiro2/nagori/releases).
+The `nagori` CLI ships inside the desktop bundle — there is one app to
+install and update.
 
-| Platform                  | Bundle                                                       |
-| ------------------------- | ------------------------------------------------------------ |
-| macOS 26+ (arm64 / x86_64) | Unsigned `.app` / `.dmg` from [GitHub Releases](https://github.com/mhiro2/nagori/releases) (Gatekeeper warns on first launch) |
-| Windows 10 1809+ / 11 (x86_64) | Unsigned NSIS installer (SmartScreen warns on first launch) |
-| Linux Wayland (x86_64)    | `.deb` and `AppImage`                                        |
+### macOS 26+ (Apple Silicon / Intel)
 
-macOS bundles declare `LSMinimumSystemVersion = 26.0` and the installer
-refuses to launch on earlier releases — the 0.0.x line is validated
-only against Tahoe. Linux additionally requires the `wtype` binary on
-`$PATH` for auto-paste and a Wayland compositor that exposes
-`wlr_data_control` or `ext_data_control` (sway, Hyprland, KDE Plasma
-5.27+, …). See [`docs/platforms.md`](./docs/platforms.md) for the full
-compatibility matrix and troubleshooting.
+```sh
+brew install --cask mhiro2/tap/nagori
+```
 
-### Known limitations
+The Homebrew cask also links the bundled `nagori` CLI onto your PATH. For a
+direct `.dmg` install instead, drag **Nagori.app** to `/Applications`, then
+clear the quarantine flag (the bundle is unsigned, so Gatekeeper warns on
+first launch):
 
-- **macOS `.app` / `.dmg` are unsigned.** Gatekeeper warns on first
-  launch; right-click → **Open** (or `xattr -d com.apple.quarantine`)
-  to proceed.
-- **Windows NSIS bundle is unsigned.** SmartScreen warns on first
-  launch until an Authenticode EV certificate is in place; choose
-  **More info → Run anyway** to proceed.
-- **Linux GNOME Wayland is not supported.** GNOME exposes neither
-  `wlr_data_control` nor `ext_data_control`, so the clipboard cannot
-  be captured. X11 sessions are also out of scope.
-- **Linux global hotkeys do not register on pure Wayland.**
-  `tauri-plugin-global-shortcut` is X11-only upstream — toggle the
-  palette from the tray icon instead.
-- **In-app updater is read-only.** The desktop shell probes
-  `latest.json` and surfaces "View release" / "Download manually"
-  copy, but does not call `download_and_install`. Upgrade by
-  downloading the bundle from the GitHub release page.
-- **Auto-paste fallback is manual.** When the synthesised Cmd/Ctrl+V
-  fails (restore-target lost, target app refused the paste, …), the
-  entry is still copied to the clipboard and a `paste_failed` toast
-  prompts you to paste manually — there is no automatic retry. The
-  failure is classified (Accessibility missing, paste tool missing,
-  timeout, source-app lost, …) and the palette's status bar keeps a
-  persistent diagnostic chip whose tooltip names the fix (e.g. "install
-  `wtype`"); it clears on the next successful paste or by clicking it.
-  The missing-Accessibility case folds into the dedicated Accessibility
-  warning chip, which carries a *Setup* shortcut.
+```sh
+xattr -d com.apple.quarantine /Applications/Nagori.app
+```
+
+### Windows 10 1809+ / 11 (x86_64)
+
+Run the NSIS installer (`.exe`) from Releases. It is not yet
+Authenticode-signed, so SmartScreen warns on first launch — choose
+More info → Run anyway.
+
+### Linux (Wayland, x86_64)
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./nagori_*_amd64.deb wtype
+
+# or run the AppImage directly
+chmod +x Nagori_*_amd64.AppImage && ./Nagori_*_amd64.AppImage
+```
+
+Auto-paste needs the `wtype` binary on `$PATH` (`pacman -S wtype` on Arch) and
+a Wayland compositor that exposes `wlr_data_control` or `ext_data_control`
+(sway, Hyprland, KDE Plasma 5.27+, river, …). **GNOME Wayland and X11 are not
+supported.** Global hotkeys do not register on pure Wayland (toggle the palette
+from the tray icon). See [`docs/platforms.md`](./docs/platforms.md) for the
+full compatibility matrix and troubleshooting.
 
 ## Usage
 
 1. Launch the desktop app — it starts the background daemon and registers a
-   global hotkey (default `Ctrl+Shift+V`, `Cmd+Shift+V` on macOS). On Linux
-   Wayland the upstream global-shortcut plugin is X11-only, so the registration
-   fails and you toggle the palette from the tray icon instead.
+   global hotkey (default `Cmd+Shift+V` on macOS, `Ctrl+Shift+V` on Windows/Linux). On
+   Linux Wayland the registration fails and you toggle the palette from the
+   tray icon instead.
 2. Press the hotkey to open the palette, type to search, arrow keys to
    navigate, **Enter** to paste the highlighted entry back into the previous
    window. **Cmd/Ctrl+Shift+Enter** pastes in an alternate format — and opens a
    picker when the entry can be pasted as more than one (files / image / text).
-   **Right-click** a row for a context menu — paste, copy, paste as…, pin, an
-   *Actions…* entry that opens the quick / AI action panel, and delete — so the
-   same actions are reachable by mouse without the keyboard shortcuts.
-3. Use **Settings** for privacy and hotkey configuration. Run
-   `nagori doctor` if something feels off; the desktop app surfaces the
-   same capability matrix under **Settings → Advanced → Capabilities**.
+   **Right-click** a row for a context menu with the same actions (paste, copy,
+   paste as…, pin, *Actions…*, delete) so they are reachable by mouse.
+3. Use **Settings** for privacy and hotkey configuration. Run `nagori doctor`
+   if something feels off; the desktop app mirrors the same capability matrix
+   under **Settings → Advanced → Platform capabilities**.
 
-The `nagori` CLI ships inside the desktop app bundle. Homebrew cask installs
-link it onto your PATH automatically; for direct `.dmg` installs, open
-**Settings → CLI → Command-line tool → Install nagori CLI** to symlink it into
-`~/.local/bin`. See [`docs/cli.md`](./docs/cli.md#installation) for details.
-The CLI talks to the running desktop app directly — write commands such as
-`nagori add` or `nagori paste` go over the same IPC endpoint a headless
-daemon would serve, and the palette reflects them immediately (toggle under
+The CLI talks to the running app, so writes such as `nagori add` or
+`nagori paste` show up in the palette immediately (toggle under
 **Settings → CLI**).
-
-CLI quick reference:
 
 ```sh
 nagori list --limit 10            # recent clips
@@ -155,75 +128,68 @@ Full CLI reference: [`docs/cli.md`](./docs/cli.md).
 
 **Where is my data stored?**
 `~/Library/Application Support/nagori` (macOS), `%LOCALAPPDATA%\nagori`
-(Windows), or `$XDG_DATA_HOME/nagori` (Linux).
-
-The packaged desktop app identifier is `io.github.mhiro2.nagori`.
-Tauri and the OS may also create identifier-derived preferences, cache,
-logs, permissions, and autostart records under platform-specific locations
-(for example `~/Library/Preferences/io.github.mhiro2.nagori.plist` on
-macOS). Those files are shell/runtime state; the clipboard history DB and
-IPC socket stay in the Nagori data directory above.
+(Windows), or `$XDG_DATA_HOME/nagori` (Linux). The OS may also keep app
+preferences, caches, and logs in its own platform-specific locations, but your
+clipboard history stays in the data directory above.
 
 **Is the database encrypted?**
-No, and app-level encryption is intentionally deferred — **full-disk
-encryption (FileVault / BitLocker / LUKS) is the at-rest baseline**. The DB
-file has restrictive filesystem permissions (`0600` / `0700`) but the bytes on
-disk are plaintext, so anything running as your user (malware, backup agents,
-cloud-sync clients) can read your history. Turn on full-disk encryption and
-keep the data directory off cleartext sync targets — the desktop's
-Settings → Privacy panel warns you if the data directory is inside a synced
-folder (iCloud Drive / Dropbox / OneDrive / …), and `nagori doctor` reports it
-(`data_dir_sync_warning`) when it inspects the database directly.
-
-Nagori reduces residue but does not encrypt live rows: hard-deleted rows are
-zeroed in place (`secure_delete`) and purge paths truncate the write-ahead log.
-Settings also exposes **Delete entries permanently**, **Purge deleted entries
-now**, **Clear non-pinned history on quit**, retention limits, and **Block all
-sensitive captures** for users who prefer not to persist Private/Secret clips.
-The full at-rest posture — why app-level encryption is deferred and what would
-reopen it — is in [`docs/privacy.md`](./docs/privacy.md) and
+No, and app-level encryption is intentionally deferred — **full-disk encryption
+(FileVault / BitLocker / LUKS) is the at-rest baseline.** The DB has restrictive
+permissions (`0600` / `0700`) but the bytes on disk are plaintext, so anything
+running as your user can read your history. Keep the data directory off
+cleartext sync targets — Settings → Privacy and `nagori doctor` both warn if it
+sits inside iCloud Drive / Dropbox / OneDrive. Settings also offers **Delete
+entries permanently**, **Purge deleted entries now**, **Clear non-pinned
+history on quit**, retention limits, and **Block all sensitive captures**. The
+full posture is in [`docs/privacy.md`](./docs/privacy.md) and
 [`ARCHITECTURE.md` §19](./ARCHITECTURE.md#19-security-notes).
-
-**How does secret redaction work?**
-The default mode stores matched secrets as `[REDACTED]` and re-derives hashes
-and search tokens from the scrubbed form. Switch to `Store full` only if you
-need the raw bytes — details in [`docs/privacy.md`](./docs/privacy.md).
-
-**Why does my big screenshot get captured but a huge text clip doesn't?**
-Images and text have separate size budgets. Text is bounded by **Max bytes per
-entry** (default 512 KiB, ceiling ~768 KiB) because text crosses the internal
-IPC channel inline. Images use the separate **Max bytes per image**
-(Settings → Advanced; default 16 MiB) because image bytes are streamed
-straight to the preview and never ride that channel — so Retina screenshots
-are recorded instead of silently dropped. Raise **Max bytes per image** (up to
-64 MiB) to keep larger images; higher values use more memory while capturing.
 
 **Do the AI features send my clipboard to the cloud?**
 No. The macOS-only AI actions and semantic search are opt-in (off by default)
-and run Apple's on-device models locally — no clipboard text is sent to a
-remote API, and the Private Cloud Compute path is not used. The models and
-language packs themselves are downloaded and managed by macOS. They need
-macOS 26+; the text-generation actions additionally require Apple Silicon
-with Apple Intelligence enabled, while Translate and semantic search depend
-on their own OS-downloaded language packs and embedding assets. See
+and run Apple's on-device models locally — no clipboard text is sent to a remote
+API and the Private Cloud Compute path is not used. They need macOS 26+; the
+text-generation actions additionally require Apple Silicon with Apple
+Intelligence enabled, while Translate and semantic search depend on
+OS-downloaded language packs / embedding assets. See
 [`docs/privacy.md`](./docs/privacy.md) and
-[`docs/platforms.md`](./docs/platforms.md) for the full contract and
-requirements.
+[`docs/platforms.md`](./docs/platforms.md).
 
-**Windows SmartScreen warns me on first launch.**
-The NSIS installer is not yet Authenticode-signed, so every fresh download
-trips the warning until the certificate is in place. Choose
-**More info → Run anyway** to proceed.
+<details>
+<summary><b>Full feature list</b></summary>
 
-**Auto-paste does not work on Linux.**
-Install `wtype` and confirm the compositor exposes
-`zwp_virtual_keyboard_manager_v1` (run `wtype test` while a text field has
-focus). Troubleshooting steps live in [`docs/platforms.md`](./docs/platforms.md).
+- Persistent clipboard history (text, images, file lists) stored locally in
+  SQLite, searchable from a desktop palette or the `nagori` CLI.
+- Japanese / CJK partial-match search: kana-insensitive (a Katakana clip is
+  found by a Hiragana query and vice versa) with single-kanji recall, on top of
+  full-text and ASCII fuzzy matching.
+- Recall-oriented result rows: a language badge on code (JSON / SQL / Rust / …,
+  detected on-device), a strong-brand badge on known URLs (GitHub / YouTube /
+  …, from the hostname alone — no network), and pixel dimensions, file size,
+  and a *Screenshot* hint on image rows.
+- Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
+  PEM blocks, credit-card numbers, and OTPs before they are written to disk,
+  plus a user regex denylist for project-specific patterns.
+- Honors the "do not record" clipboard markers password managers and apps set
+  on every platform (macOS, Windows, and KDE on Linux) — a marked clip is
+  skipped without being stored. The exact markers are in
+  [`docs/privacy.md`](./docs/privacy.md).
+- Auto-paste back into the previously focused window, with a *paste as…* picker
+  (**Cmd/Ctrl+Shift+Enter**) to paste a file as *Files*, *Image*, or
+  *Plain text*.
+- Quick actions on a selected entry, computed locally with no network calls:
+  summarize, format JSON, extract tasks, redact secrets.
+- macOS on-device AI actions (opt-in, off by default): summarize, rewrite,
+  reformat Markdown, extract tasks, explain code, and translate — backed by
+  Apple's on-device models, running entirely on your Mac.
+- Optional on-device semantic search (opt-in, macOS): matches entries by
+  meaning using Apple's on-device embeddings, indexed locally.
+- Rich previews: image thumbnails with an expanded zoom / pan view
+  (**⌘/Ctrl E**), a head / tail view for long text, safe URL display with a
+  confirm-gated open, and Quick Look on macOS (**Cmd+Y**).
+- Per-OS installers, with an in-app check for new releases that links you to
+  the download (it does not auto-install).
 
-**The global hotkey does not register on Linux.**
-`tauri-plugin-global-shortcut` is X11-only upstream. On pure Wayland sessions
-the registration fails and the Settings page prompts for a different binding —
-use the tray icon to toggle the palette until upstream support lands.
+</details>
 
 ## Documentation
 
