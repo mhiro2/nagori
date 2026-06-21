@@ -1901,7 +1901,12 @@ actually applied rather than documented and ignored, and no limit is re-derived
 are enforced daemon-side before the backend runs; the output-token cap is
 *forwarded* (output length is only knowable mid-generation), so a backend caps
 on it where it supports a max-output control — the on-device Apple generator
-does not yet, so that value is carried but not honoured there.
+does not yet, so that value is carried but not honoured there. The timeout is
+*also* forwarded to the Apple bridge's per-call wedge watchdog: the text
+generator and translator each derive their Swift-side backstop from the
+request's remaining deadline (plus slack, clamped to the settings ceiling)
+rather than a fixed cap, so a call the user's `request_timeout_ms` allows is no
+longer silently cancelled by the bridge before the consumer deadline.
 
 **Streaming + cancellation.** `NagoriRuntime::start_ai_action` gates on the
 `ai.enabled` master toggle, the allow-list, and the selected provider; shapes

@@ -53,6 +53,7 @@ unsafe extern "C" {
         text_ptr: *const c_char,
         source_ptr: *const c_char,
         target_ptr: *const c_char,
+        timeout_ms: u64,
         ctx: *mut c_void,
         on_complete: extern "C" fn(*mut c_void, i32, *const u8, usize, *const u8, usize),
     );
@@ -75,6 +76,7 @@ unsafe extern "C" {
     fn nagori_apple_embed_c(
         lang_ptr: *const c_char,
         text_ptr: *const c_char,
+        timeout_ms: u64,
         ctx: *mut c_void,
         on_complete: extern "C" fn(*mut c_void, i32, *const f32, usize),
     );
@@ -363,12 +365,32 @@ pub(crate) struct GenerateOptions {
     pub timeout_ms: Option<u64>,
 }
 
-/// Watchdog used when the caller supplies no deadline, matching the translate
-/// / embed timeouts.
-const DEFAULT_GENERATE_TIMEOUT_MS: u64 = 20_000;
+/// Watchdog used when a bridge call supplies no deadline. Every one-shot /
+/// streaming export shares this backstop so a missing deadline behaves the same
+/// across generate / translate / embed.
+const DEFAULT_BRIDGE_TIMEOUT_MS: u64 = 20_000;
 /// Slack added on top of the consumer deadline so the Swift watchdog only
 /// fires once the consumer has certainly given up.
-const GENERATE_TIMEOUT_SLACK_MS: u64 = 5_000;
+const BRIDGE_TIMEOUT_SLACK_MS: u64 = 5_000;
+
+/// Derives the Swift-side wedge-protection watchdog (ms) from a consumer
+/// deadline, shared by every bridge export so the watchdog tracks the request's
+/// `request_timeout_ms` instead of a fixed literal that silently cancels any
+/// longer call.
+///
+/// `None` (no deadline supplied) falls back to [`DEFAULT_BRIDGE_TIMEOUT_MS`].
+/// `Some(d)` becomes `d + slack`, clamped between `floor_ms` and the settings
+/// ceiling plus slack so a corrupt deadline cannot park a wedged task for hours.
+/// `floor_ms` lets a streamed generation keep a 20 s minimum (the model needs
+/// time to start producing) while a fast one-shot inference can fire sooner.
+fn swift_watchdog_ms(timeout_ms: Option<u64>, floor_ms: u64) -> u64 {
+    timeout_ms.map_or(DEFAULT_BRIDGE_TIMEOUT_MS, |t| {
+        t.saturating_add(BRIDGE_TIMEOUT_SLACK_MS).clamp(
+            floor_ms,
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + BRIDGE_TIMEOUT_SLACK_MS,
+        )
+    })
+}
 
 /// Converts [`GenerateOptions`] into the three values forwarded across the C
 /// ABI: `(max_output_tokens, temperature, swift_timeout_ms)`.
@@ -380,12 +402,7 @@ const GENERATE_TIMEOUT_SLACK_MS: u64 = 5_000;
 /// 20 s and capped at the settings ceiling plus slack so a corrupt deadline
 /// cannot park a wedged task for hours.
 fn generate_ffi_sentinels(options: &GenerateOptions) -> (i64, f64, u64) {
-    let swift_timeout_ms = options.timeout_ms.map_or(DEFAULT_GENERATE_TIMEOUT_MS, |t| {
-        t.saturating_add(GENERATE_TIMEOUT_SLACK_MS).clamp(
-            DEFAULT_GENERATE_TIMEOUT_MS,
-            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + GENERATE_TIMEOUT_SLACK_MS,
-        )
-    });
+    let swift_timeout_ms = swift_watchdog_ms(options.timeout_ms, DEFAULT_BRIDGE_TIMEOUT_MS);
     let max_output_tokens = options
         .max_output_tokens
         .map_or(0, |tokens| i64::from(tokens.max(1)));
@@ -556,6 +573,12 @@ pub(crate) fn translation_pair_status(source: Option<&str>, target: &str) -> i32
 /// Translates `input` into `target` (auto-detecting the source when `source` is
 /// `None`) via the Apple Translation framework.
 ///
+/// `timeout_ms` is the consumer-side deadline (`AiRequestOptions::timeout_ms`,
+/// already clamped by the daemon's `EffectiveAiPolicy`); the Swift wedge
+/// watchdog is derived from it ([`swift_watchdog_ms`]) so a translation the
+/// user's `request_timeout_ms` allows is no longer silently cut off by a fixed
+/// 20 s. `None` falls back to the default backstop.
+///
 /// Cancellation is not polled here: the single async `translate` has no polling
 /// point, so the engine's stream wrapper handles user cancellation by dropping
 /// this future (which drops the receiver; the Swift side then sends into a
@@ -567,6 +590,7 @@ pub(crate) async fn translate(
     input: &str,
     source: Option<&str>,
     target: &str,
+    timeout_ms: Option<u64>,
 ) -> Result<TranslationOutput, AiError> {
     let (tx, rx) = oneshot::channel::<Result<TranslationOutput, AiError>>();
     let ctx = Box::new(TranslateCtx { tx });
@@ -576,6 +600,10 @@ pub(crate) async fn translate(
     let c_text = CString::new(input.replace('\0', " ")).unwrap_or_default();
     let c_source = CString::new(source.unwrap_or_default().replace('\0', " ")).unwrap_or_default();
     let c_target = CString::new(target.replace('\0', " ")).unwrap_or_default();
+    // Translation can legitimately run several seconds; keep the 20 s floor so a
+    // short deadline still leaves a sane wedge backstop (the consumer-side guard
+    // enforces the actual deadline regardless).
+    let swift_timeout_ms = swift_watchdog_ms(timeout_ms, DEFAULT_BRIDGE_TIMEOUT_MS);
 
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box outlives
     // the call (reclaimed in `translate_on_complete`), and `on_complete` is a
@@ -585,6 +613,7 @@ pub(crate) async fn translate(
             c_text.as_ptr(),
             c_source.as_ptr(),
             c_target.as_ptr(),
+            swift_timeout_ms,
             ctx_ptr,
             translate_on_complete,
         );
@@ -855,17 +884,36 @@ fn embed_terminal(code: i32) -> AiError {
 
 /// Embeds `text` with the contextual-embedding model for `language`, returning
 /// one mean-pooled, L2-normalised document vector.
-pub(crate) async fn embed_text(language: &str, text: &str) -> Result<Vec<f32>, AiError> {
+///
+/// `timeout_ms` is the consumer-side deadline (the daemon's per-query embed
+/// budget for a search, or `None` for background indexing); the Swift wedge
+/// watchdog is derived from it ([`swift_watchdog_ms`]). Unlike generate /
+/// translate there is no 20 s floor: embedding inference is a single fast
+/// forward pass, so the watchdog can fire as soon as the consumer deadline
+/// (plus slack) elapses rather than always waiting the legacy 20 s. The asset
+/// *download* path keeps its own much longer timeout in Swift.
+pub(crate) async fn embed_text(
+    language: &str,
+    text: &str,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<f32>, AiError> {
     let (tx, rx) = oneshot::channel::<Result<Vec<f32>, AiError>>();
     let ctx = Box::new(EmbedCtx { tx });
     let ctx_ptr = Box::into_raw(ctx).cast::<c_void>();
     let c_lang = CString::new(language.replace('\0', " ")).unwrap_or_default();
     let c_text = CString::new(text.replace('\0', " ")).unwrap_or_default();
+    let swift_timeout_ms = swift_watchdog_ms(timeout_ms, 0);
     // SAFETY: the signature matches the `@_cdecl` export; the ctx box is
     // reclaimed in `embed_on_complete`, which Swift's `OnceFlag` fires exactly
     // once (success, error, or the timeout sentinel).
     unsafe {
-        nagori_apple_embed_c(c_lang.as_ptr(), c_text.as_ptr(), ctx_ptr, embed_on_complete);
+        nagori_apple_embed_c(
+            c_lang.as_ptr(),
+            c_text.as_ptr(),
+            swift_timeout_ms,
+            ctx_ptr,
+            embed_on_complete,
+        );
     }
     rx.await.unwrap_or_else(|_| {
         Err(AiError::new(
@@ -1153,7 +1201,7 @@ mod tests {
         // sentinels Swift looks for; the timeout falls back to the legacy 20 s.
         assert_eq!(tokens, 0);
         assert!(temperature < 0.0);
-        assert_eq!(timeout, super::DEFAULT_GENERATE_TIMEOUT_MS);
+        assert_eq!(timeout, super::DEFAULT_BRIDGE_TIMEOUT_MS);
     }
 
     #[test]
@@ -1172,7 +1220,7 @@ mod tests {
         );
         assert_eq!(
             tiny.2,
-            super::DEFAULT_GENERATE_TIMEOUT_MS,
+            super::DEFAULT_BRIDGE_TIMEOUT_MS,
             "a tiny deadline still gets the 20 s watchdog floor"
         );
 
@@ -1185,7 +1233,7 @@ mod tests {
         assert_eq!(normal.0, 256);
         assert_eq!(
             normal.2,
-            60_000 + super::GENERATE_TIMEOUT_SLACK_MS,
+            60_000 + super::BRIDGE_TIMEOUT_SLACK_MS,
             "watchdog is deadline + slack"
         );
 
@@ -1197,8 +1245,43 @@ mod tests {
         });
         assert_eq!(
             huge.2,
-            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + super::GENERATE_TIMEOUT_SLACK_MS,
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + super::BRIDGE_TIMEOUT_SLACK_MS,
             "a corrupt deadline is capped at the ceiling + slack"
+        );
+    }
+
+    #[test]
+    fn swift_watchdog_falls_back_to_the_default_without_a_deadline() {
+        // No consumer deadline → the shared backstop, regardless of floor.
+        assert_eq!(
+            super::swift_watchdog_ms(None, super::DEFAULT_BRIDGE_TIMEOUT_MS),
+            super::DEFAULT_BRIDGE_TIMEOUT_MS
+        );
+        assert_eq!(
+            super::swift_watchdog_ms(None, 0),
+            super::DEFAULT_BRIDGE_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn swift_watchdog_floor_only_applies_when_set() {
+        // generate / translate keep a 20 s floor so a tiny deadline still leaves
+        // a sane wedge backstop.
+        assert_eq!(
+            super::swift_watchdog_ms(Some(1), super::DEFAULT_BRIDGE_TIMEOUT_MS),
+            super::DEFAULT_BRIDGE_TIMEOUT_MS
+        );
+        // embed (floor 0) lets a fast inference fire as soon as the consumer
+        // deadline + slack elapses instead of always waiting the legacy 20 s.
+        assert_eq!(
+            super::swift_watchdog_ms(Some(10_000), 0),
+            10_000 + super::BRIDGE_TIMEOUT_SLACK_MS
+        );
+        // Both share the ceiling-plus-slack cap so a corrupt deadline can't park
+        // a wedged task for hours.
+        assert_eq!(
+            super::swift_watchdog_ms(Some(u64::MAX), 0),
+            nagori_core::settings::MAX_AI_REQUEST_TIMEOUT_MS + super::BRIDGE_TIMEOUT_SLACK_MS
         );
     }
 

@@ -62,6 +62,7 @@ impl Translator for AppleTranslateBackend {
             &req.input,
             req.source_language.as_deref(),
             &req.target_language,
+            req.timeout_ms,
         )
         .await
     }
@@ -128,6 +129,7 @@ mod tests {
             input: "Good morning.".to_owned(),
             source_language: Some("en".to_owned()),
             target_language: "ja".to_owned(),
+            timeout_ms: None,
         };
         match backend.translate(req, CancellationToken::new()).await {
             Ok(out) => assert!(

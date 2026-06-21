@@ -289,6 +289,9 @@ impl Embedder for MockEmbedder {
         &self,
         inputs: Vec<EmbeddingInput>,
         cancel: CancellationToken,
+        // The mock has no native work to bound, so the consumer deadline is
+        // irrelevant here.
+        _timeout_ms: Option<u64>,
     ) -> Result<Vec<EmbeddingVector>, nagori_core::AiError> {
         if let BackendAvailability::Unavailable(reason) = self.availability {
             return Err(reason.into_error());
@@ -479,6 +482,7 @@ mod tests {
             input: input.to_owned(),
             source_language: None,
             target_language: target.to_owned(),
+            timeout_ms: None,
         }
     }
 
@@ -534,7 +538,7 @@ mod tests {
             },
         ];
         let out = backend
-            .embed_batch(inputs, CancellationToken::new())
+            .embed_batch(inputs, CancellationToken::new(), None)
             .await
             .unwrap();
         assert_eq!(out.len(), 2);

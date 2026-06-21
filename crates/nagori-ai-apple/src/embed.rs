@@ -98,6 +98,7 @@ impl AppleEmbedderBackend {
         text: &str,
         max_tokens: usize,
         cancel: &CancellationToken,
+        timeout_ms: Option<u64>,
     ) -> Result<Vec<f32>, AiError> {
         let chunks = chunk_estimated_tokens(text, max_tokens, MAX_EMBED_CHARS);
         match chunks.as_slice() {
@@ -105,11 +106,11 @@ impl AppleEmbedderBackend {
                 AiErrorCode::BackendInternal,
                 "there was nothing to embed",
             )),
-            [single] => self.embed_chunk(single, cancel).await,
+            [single] => self.embed_chunk(single, cancel, timeout_ms).await,
             many => {
                 let mut vectors = Vec::with_capacity(many.len());
                 for chunk in many {
-                    vectors.push(self.embed_chunk(chunk, cancel).await?);
+                    vectors.push(self.embed_chunk(chunk, cancel, timeout_ms).await?);
                 }
                 mean_pool(&vectors).ok_or_else(|| {
                     AiError::new(
@@ -123,14 +124,16 @@ impl AppleEmbedderBackend {
 
     /// Embeds one chunk, racing the Swift call against `cancel` so a shutdown is
     /// observed mid-call. The abandoned Swift task still reclaims its context via
-    /// its own timeout, so dropping the future here is safe.
+    /// its own timeout (derived from `timeout_ms`), so dropping the future here
+    /// is safe.
     async fn embed_chunk(
         &self,
         chunk: &str,
         cancel: &CancellationToken,
+        timeout_ms: Option<u64>,
     ) -> Result<Vec<f32>, AiError> {
         tokio::select! {
-            result = bridge::embed_text(&self.language, chunk) => result,
+            result = bridge::embed_text(&self.language, chunk, timeout_ms) => result,
             () = cancel.cancelled() => {
                 Err(AiError::new(AiErrorCode::Unknown, "embedding cancelled"))
             }
@@ -157,6 +160,7 @@ impl Embedder for AppleEmbedderBackend {
         &self,
         inputs: Vec<EmbeddingInput>,
         cancel: CancellationToken,
+        timeout_ms: Option<u64>,
     ) -> Result<Vec<EmbeddingVector>, AiError> {
         // `max_sequence_length` is a *token* cap (the model silently truncates
         // past it), so chunking treats it as one and estimates tokens per
@@ -169,7 +173,9 @@ impl Embedder for AppleEmbedderBackend {
             if cancel.is_cancelled() {
                 return Err(AiError::new(AiErrorCode::Unknown, "embedding cancelled"));
             }
-            let vector = self.embed_pooled(&input.text, max_tokens, &cancel).await?;
+            let vector = self
+                .embed_pooled(&input.text, max_tokens, &cancel, timeout_ms)
+                .await?;
             out.push(EmbeddingVector {
                 id: input.id,
                 vector,
@@ -334,6 +340,7 @@ mod tests {
                     text: "hello semantic world".to_owned(),
                 }],
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("embed");

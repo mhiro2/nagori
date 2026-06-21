@@ -293,6 +293,9 @@ impl AiActionEngine for AiEngine {
                     input: req.input,
                     source_language: req.options.source_language,
                     target_language,
+                    // Carry the consumer deadline so the backend's wedge
+                    // watchdog tracks it instead of a fixed cap.
+                    timeout_ms: req.options.timeout_ms,
                 };
                 let events = translation_stream(backend, tr_req, cancel);
                 Ok(AiActionRun { request_id, events })

@@ -313,12 +313,14 @@ private final class OnceFlag: @unchecked Sendable {
     }
 }
 
-/// Hard cap on how long a single translation may run before the bridge gives up
-/// and reports a timeout. The `Translation` framework can wedge indefinitely
+/// Fallback cap on how long a single translation may run before the bridge
+/// gives up and reports a timeout, used when the caller supplies no deadline
+/// (`timeoutMs == 0`). The `Translation` framework can wedge indefinitely
 /// outside an app bundle, so this bounds the FFI lifetime — `ctx` is always
-/// reclaimed and the waiting Rust future always resolves — independently of any
-/// consumer-side deadline. Kept just under the daemon's default request timeout
-/// so the bridge usually reports first.
+/// reclaimed and the waiting Rust future always resolves. A caller-supplied
+/// deadline (derived on the Rust side from the request's consumer-side timeout
+/// plus slack) replaces it so a translation the user's `request_timeout_ms`
+/// allows is not silently cut off at a fixed 20 s.
 private let translateTimeoutNanoseconds: UInt64 = 20_000_000_000
 
 /// Translate `textPtr` from `sourcePtr` (empty = auto-detect via
@@ -336,16 +338,18 @@ private let translateTimeoutNanoseconds: UInt64 = 20_000_000_000
 ///   copies them out immediately.
 ///
 /// A timeout task races the translation: whichever finishes first calls
-/// `onComplete` (the loser is a no-op via [`TranslateOnce`]), so the callback
-/// always fires within `translateTimeoutNanoseconds` even if the framework
-/// never returns. The timeout cancels the translation task; if the framework
-/// honours cancellation the native work also stops, otherwise it is abandoned
-/// but `ctx` has already been reclaimed.
+/// `onComplete` (the loser is a no-op via [`OnceFlag`]), so the callback
+/// always fires within the watchdog even if the framework never returns. The
+/// watchdog is `timeoutMs` (the Rust-derived consumer deadline; `0` falls back
+/// to `translateTimeoutNanoseconds`). The timeout cancels the translation task;
+/// if the framework honours cancellation the native work also stops, otherwise
+/// it is abandoned but `ctx` has already been reclaimed.
 @_cdecl("nagori_apple_translate_c")
 public func nagoriAppleTranslateC(
     textPtr: UnsafePointer<CChar>,
     sourcePtr: UnsafePointer<CChar>,
     targetPtr: UnsafePointer<CChar>,
+    timeoutMs: UInt64,
     ctx: UnsafeMutableRawPointer?,
     onComplete: @convention(c) (
         UnsafeMutableRawPointer?, Int32, UnsafePointer<UInt8>?, Int, UnsafePointer<UInt8>?, Int
@@ -354,6 +358,12 @@ public func nagoriAppleTranslateC(
     let text = String(cString: textPtr)
     let sourceArg = String(cString: sourcePtr)
     let target = String(cString: targetPtr)
+    // The Rust side already clamps the deadline to the settings ceiling; the
+    // hour cap here only guards against a corrupt value crossing the ABI.
+    let timeoutNanoseconds =
+        timeoutMs == 0
+        ? translateTimeoutNanoseconds
+        : min(timeoutMs, 3_600_000) * 1_000_000
 
     let ctxCopy = ctx
     let onCompleteCopy = onComplete
@@ -412,7 +422,7 @@ public func nagoriAppleTranslateC(
     }
 
     Task.detached(priority: .utility) {
-        try? await Task.sleep(nanoseconds: translateTimeoutNanoseconds)
+        try? await Task.sleep(nanoseconds: timeoutNanoseconds)
         // Ask the framework to abort; if it honours cancellation the native work
         // stops, otherwise it is abandoned. Either way the callback fires now.
         work.cancel()
@@ -509,9 +519,13 @@ private final class EmbeddingCache: @unchecked Sendable {
     }
 }
 
-/// Hard cap on a single embedding *inference* call, mirroring the translation
-/// bridge's timeout so the FFI lifetime is bounded and `ctx` is always
-/// reclaimed even if the framework wedges.
+/// Fallback cap on a single embedding *inference* call, used when the caller
+/// supplies no deadline (`timeoutMs == 0`), so the FFI lifetime is bounded and
+/// `ctx` is always reclaimed even if the framework wedges. A caller-supplied
+/// deadline (the daemon's per-query embed budget, derived on the Rust side)
+/// replaces it so the watchdog tracks the consumer deadline instead of a fixed
+/// 20 s. This is the *inference* cap; the asset *download* path keeps its own
+/// much longer `embedAssetTimeoutNanoseconds`.
 private let embedTimeoutNanoseconds: UInt64 = 20_000_000_000
 
 /// Hard cap on an asset *download* request. Far longer than the inference cap
@@ -611,17 +625,25 @@ public func nagoriAppleEmbedRequestAssetsC(
 /// - 1 = assets missing / no model, 4 = nothing to embed, 5 = framework error,
 ///   6 = timed out.
 ///
-/// A timeout task races the work so the callback always fires within
-/// `embedTimeoutNanoseconds`, keeping the FFI lifetime bounded.
+/// A timeout task races the work so the callback always fires within the
+/// watchdog, keeping the FFI lifetime bounded. The watchdog is `timeoutMs` (the
+/// Rust-derived consumer deadline; `0` falls back to `embedTimeoutNanoseconds`).
 @_cdecl("nagori_apple_embed_c")
 public func nagoriAppleEmbedC(
     langPtr: UnsafePointer<CChar>,
     textPtr: UnsafePointer<CChar>,
+    timeoutMs: UInt64,
     ctx: UnsafeMutableRawPointer?,
     onComplete: @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<Float>?, Int) -> Void
 ) {
     let language = String(cString: langPtr)
     let text = String(cString: textPtr)
+    // The Rust side already clamps the deadline to the settings ceiling; the
+    // hour cap here only guards against a corrupt value crossing the ABI.
+    let timeoutNanoseconds =
+        timeoutMs == 0
+        ? embedTimeoutNanoseconds
+        : min(timeoutMs, 3_600_000) * 1_000_000
     let ctxCopy = ctx
     let onCompleteCopy = onComplete
     let once = OnceFlag()
@@ -680,7 +702,7 @@ public func nagoriAppleEmbedC(
     }
 
     Task.detached(priority: .utility) {
-        try? await Task.sleep(nanoseconds: embedTimeoutNanoseconds)
+        try? await Task.sleep(nanoseconds: timeoutNanoseconds)
         work.cancel()
         deliver(6, vector: nil)
     }

@@ -47,6 +47,11 @@ pub struct TranslationRequest {
     pub input: String,
     pub source_language: Option<String>,
     pub target_language: String,
+    /// Consumer-side deadline (`AiRequestOptions::timeout_ms`, already clamped
+    /// by the daemon's policy). A backend with its own wedge watchdog derives
+    /// it from this so a translation the user's `request_timeout_ms` allows is
+    /// not silently cut off at a fixed cap. `None` leaves the backend default.
+    pub timeout_ms: Option<u64>,
 }
 
 /// Result of a (non-streaming) translation.
@@ -221,9 +226,17 @@ pub trait Embedder: Send + Sync {
     async fn dimension(&self) -> Result<usize, AiError> {
         Ok(self.metadata().await?.dimension)
     }
+    /// Embeds a batch. `timeout_ms` is the consumer-side per-inference deadline
+    /// (the daemon's per-query embed budget for a search, or `None` for
+    /// background indexing): a backend with its own wedge watchdog derives it
+    /// from this so the watchdog tracks the consumer deadline instead of a fixed
+    /// cap. The caller still enforces the deadline consumer-side (it wraps this
+    /// call and cancels `cancel` on expiry); `timeout_ms` only stops the backend
+    /// wasting work past the point the consumer gave up.
     async fn embed_batch(
         &self,
         inputs: Vec<EmbeddingInput>,
         cancel: CancellationToken,
+        timeout_ms: Option<u64>,
     ) -> Result<Vec<EmbeddingVector>, AiError>;
 }

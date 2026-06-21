@@ -61,7 +61,8 @@ const QUERY_EMBED_PERMIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// embedding model's own internal timeout — which the Apple bridge applies
 /// per item but may not always fire. Generous relative to a sub-second
 /// on-device embed, tight enough that a stall surfaces as a clear error.
-const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(10);
+const QUERY_EMBED_TIMEOUT_MS: u64 = 10_000;
+const QUERY_EMBED_TIMEOUT: Duration = Duration::from_millis(QUERY_EMBED_TIMEOUT_MS);
 
 /// Backoff schedule applied after a rate-limited / timed-out batch before the
 /// next attempt, capped so a wedged model never spins.
@@ -246,6 +247,10 @@ impl NagoriRuntime {
                     text: normalized,
                 }],
                 cancel.clone(),
+                // Match the backend's wedge watchdog to this query's consumer
+                // budget so it stops wasting work once this `timeout` gives up
+                // and cancels, instead of running to a fixed cap.
+                Some(QUERY_EMBED_TIMEOUT_MS),
             ),
         )
         .await
@@ -562,7 +567,10 @@ impl NagoriRuntime {
             }
         };
         let vectors = embedder
-            .embed_batch(inputs, cancel.clone())
+            // Background indexing has no interactive deadline; leave the
+            // backend's default per-item wedge backstop. A shutdown still
+            // interrupts the batch promptly through `cancel`.
+            .embed_batch(inputs, cancel.clone(), None)
             .await
             .map_err(EmbedBatchError::from_ai)?;
 
@@ -837,6 +845,7 @@ mod tests {
                     text: "hello semantic world".to_owned(),
                 }],
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -940,6 +949,7 @@ mod tests {
             &self,
             inputs: Vec<EmbeddingInput>,
             _cancel: CancellationToken,
+            _timeout_ms: Option<u64>,
         ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
             // A distinct vector per id (first byte = a hash of the id) so a
             // mis-paired result would be observable, then reverse the order.
@@ -993,6 +1003,7 @@ mod tests {
             &self,
             _inputs: Vec<EmbeddingInput>,
             cancel: CancellationToken,
+            _timeout_ms: Option<u64>,
         ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
             // The batch is now in flight; let the test cancel mid-call.
             let _ = self.started.send(());
@@ -1034,6 +1045,7 @@ mod tests {
             &self,
             inputs: Vec<EmbeddingInput>,
             _cancel: CancellationToken,
+            _timeout_ms: Option<u64>,
         ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
             Ok(inputs
                 .into_iter()
