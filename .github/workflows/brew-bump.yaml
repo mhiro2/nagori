@@ -1,9 +1,13 @@
 name: Bump Homebrew tap
 
-# Fires after a `v*` GitHub release is published. release.yaml flips the
-# draft to published as its final step, so this workflow runs once the
-# bundles are ready and the release is final. workflow_dispatch is kept for
-# re-running against an existing release if the tap secret is rotated.
+# Bumps the Homebrew cask after a `v*` release. The release.yaml publish job
+# dispatches this via workflow_dispatch once the bundles are attached and the
+# draft is flipped to published — that explicit dispatch is the real trigger,
+# because a release published with the default GITHUB_TOKEN does not emit a
+# `release: published` event that can start another workflow. The `release`
+# trigger below stays as a fallback for releases published by a human or a PAT,
+# and workflow_dispatch also lets you re-run against an existing release (e.g.
+# after the tap token is rotated).
 
 on:
   release:
@@ -81,7 +85,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: mhiro2/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           path: tap
       - name: Render Casks/nagori.rb
         if: steps.meta.outputs.skip != 'true'

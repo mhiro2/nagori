@@ -276,8 +276,24 @@ jobs:
     needs: updater
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # `actions: write` lets the final step dispatch brew-bump. The job-level
+    # block replaces the workflow-level `contents: write`, so both scopes are
+    # listed here.
+    permissions:
+      contents: write
+      actions: write
     steps:
       - name: Publish draft release
         run: gh release edit "${GITHUB_REF_NAME}" --draft=false --repo "${GITHUB_REPOSITORY}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger Homebrew tap bump
+        # Flipping the draft to published with the default GITHUB_TOKEN does
+        # NOT emit a `release: published` event that starts other workflows
+        # (GitHub blocks that to avoid recursive runs). So dispatch brew-bump
+        # explicitly here — workflow_dispatch is one of the two events the
+        # GITHUB_TOKEN is allowed to trigger.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh workflow run brew-bump.yaml --repo "${GITHUB_REPOSITORY}" -f tag="${TAG}"
