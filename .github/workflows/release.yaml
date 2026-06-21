@@ -35,22 +35,11 @@ jobs:
     outputs:
       releaseId: ${{ steps.draft.outputs.releaseId }}
     steps:
-      - name: Decide pre-release flag
-        # `0.0.x` is the dogfooding canary line — mark the GitHub release as a
-        # pre-release so tooling that follows "latest stable" doesn't pick it
-        # up. Anything `>=0.1.0` is treated as a regular release.
-        id: prerelease
-        run: |
-          case "${GITHUB_REF_NAME#v}" in
-            0.0.*) echo "value=true" >> "${GITHUB_OUTPUT}" ;;
-            *)     echo "value=false" >> "${GITHUB_OUTPUT}" ;;
-          esac
       - name: Get or create draft release
         id: draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ steps.prerelease.outputs.value }}
         run: |
           # A draft release can't be fetched by tag via the API, so list
           # releases and match on tag_name (mirrors tauri-action). Reusing an
@@ -64,7 +53,6 @@ jobs:
               -f "name=${TAG}" \
               -f "target_commitish=${GITHUB_SHA}" \
               -F draft=true \
-              -F "prerelease=${PRERELEASE}" \
               --jq '.id')"
           else
             echo "Reusing existing release ${release_id} for ${TAG}."

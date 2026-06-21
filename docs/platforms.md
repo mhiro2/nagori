@@ -171,7 +171,7 @@ Supported environment:
 - macOS 26 (Tahoe) or later on Apple Silicon and Intel. The bundle
   declares `LSMinimumSystemVersion = 26.0` via
   `bundle.macOS.minimumSystemVersion` in `tauri.conf.json`, so the
-  installer refuses to launch on earlier releases. The 0.0.x line is
+  installer refuses to launch on earlier releases. Releases are
   validated only against Tahoe — auto-paste in particular routes its
   ⌘V synthesis around `TSMGetInputSourceProperty`, which trips
   `dispatch_assert_queue(main)` and aborts from non-main threads on
@@ -205,10 +205,9 @@ Known limitations:
 
 The model-backed AI actions (Summarize, Translate, Rewrite, Format
 Markdown, Extract tasks, Explain code) and semantic search are
-macOS-only and off by default. They are opt-in and experimental on the
-`0.0.x` canary line, and split across three Apple frameworks with
-**independent availability** — one being unavailable does not disable
-the others:
+macOS-only and off by default. They are opt-in and experimental, and
+split across three Apple frameworks with **independent availability** —
+one being unavailable does not disable the others:
 
 - **Text generation** (Summarize, Rewrite, Format Markdown, Extract
   tasks, Explain code) runs on Foundation Models / Apple Intelligence.
