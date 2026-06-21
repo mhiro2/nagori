@@ -33,6 +33,22 @@ impl NagoriRuntime {
     /// Once generation completes,
     /// [`nagori_storage::SqliteStore::enforce_thumbnail_budget`] is invoked
     /// to apply the LRU sweep if the operator configured one.
+    ///
+    /// # Shutdown
+    ///
+    /// The spawned task is intentionally *not* tracked by the daemon's
+    /// graceful-shutdown drain (unlike the supervised capture / maintenance /
+    /// semantic workers, it carries no `ShutdownHandle` or drain guard). That
+    /// is sound because thumbnails are a regenerable derived cache, not
+    /// load-bearing state: the task moves a `store.clone()` (an `Arc` over the
+    /// connection pool), so the store — and the connection `put_thumbnail`
+    /// writes through — stays open for the task's whole lifetime even after
+    /// the runtime's other clones drop, so the write never races the store
+    /// being torn down. If the process exits mid-write, `SQLite`'s WAL commit is
+    /// atomic, so the row is either fully written or absent — never corrupt —
+    /// and a missing thumbnail is simply regenerated on the next fetch. The
+    /// global decode permit bounds the number of these detached tasks, so an
+    /// untracked burst cannot pile up unboundedly during shutdown.
     pub fn kick_thumbnail_generation(&self, id: EntryId) {
         let Some(guard) = self.thumbnail_gate.try_acquire(id) else {
             // Another request is already generating this thumbnail; the
