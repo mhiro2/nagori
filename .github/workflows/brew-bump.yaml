@@ -150,10 +150,10 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- Casks/nagori.rb; then
+          git add Casks/nagori.rb
+          if git diff --cached --quiet -- Casks/nagori.rb; then
             echo "Casks/nagori.rb already up to date for v${VERSION}"
             exit 0
           fi
-          git add Casks/nagori.rb
           git commit -m "nagori: bump to ${VERSION}"
           git push origin HEAD:main
