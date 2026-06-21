@@ -308,9 +308,27 @@ impl NagoriRuntime {
                 None
             }
         };
+        // Echo the database path the daemon opened so an operator probing over
+        // IPC can tell which store an instance launched with `--db` /
+        // `NAGORI_DB_PATH` is holding, and derive the cloud-sync warning from
+        // that same path (the IPC `Doctor` arm has no other place to compute
+        // it). Both stay empty/`None` for hosts that don't thread a path — the
+        // desktop leaves it unset and surfaces its own sync warning in the
+        // Privacy panel — and the text doctor then omits the `db` row exactly
+        // as before.
+        let configured_db_path = self.db_path.as_path();
+        let (db_path, data_dir_sync_warning) = if configured_db_path.as_os_str().is_empty() {
+            (String::new(), None)
+        } else {
+            let data_dir = configured_db_path.parent().unwrap_or(configured_db_path);
+            (
+                configured_db_path.display().to_string(),
+                nagori_core::detect_cloud_sync(data_dir).map(|m| m.describe()),
+            )
+        };
         Ok(DoctorReport {
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            db_path: String::new(),
+            db_path,
             socket_path: self.socket_path.display().to_string(),
             capture_enabled: settings.capture_enabled,
             auto_paste_enabled: settings.auto_paste_enabled,
@@ -327,12 +345,7 @@ impl NagoriRuntime {
             latest_version,
             thumbnail_total_bytes,
             thumbnail_budget_bytes: settings.max_thumbnail_total_bytes,
-            // The daemon does not echo its local data-directory layout over
-            // IPC — same reason `db_path` stays empty above. The cloud-sync
-            // warning is computed where the real path is known: the local
-            // `nagori doctor` arm (from its `--db` / default path) and the
-            // desktop Privacy panel (from its own data dir).
-            data_dir_sync_warning: None,
+            data_dir_sync_warning,
         })
     }
 }

@@ -65,6 +65,45 @@ async fn doctor_report_marks_ready_once_capture_records_success() {
     assert!(report.startup.last_error.is_none());
 }
 
+#[tokio::test]
+async fn doctor_report_echoes_the_configured_db_path() {
+    // An operator probing over IPC has to be able to tell which store a daemon
+    // launched with `--db` / `NAGORI_DB_PATH` is holding. Without the path
+    // threaded into the runtime the IPC `Doctor` report's `db` row stayed
+    // empty, so the local and IPC doctor arms disagreed about the same daemon.
+    let store = nagori_storage::SqliteStore::open_memory().expect("memory store should open");
+    let runtime = NagoriRuntime::builder(store)
+        .clipboard(Arc::new(MemoryClipboard::new()))
+        .db_path(std::path::PathBuf::from(
+            "/tmp/nagori-doctor-test/history.db",
+        ))
+        .build_for_test();
+
+    let report = runtime
+        .build_doctor_report()
+        .await
+        .expect("doctor report builds with a configured db path");
+
+    assert_eq!(report.db_path, "/tmp/nagori-doctor-test/history.db");
+}
+
+#[tokio::test]
+async fn doctor_report_leaves_db_path_empty_when_unset() {
+    // Hosts that don't thread a path (the desktop, tests, in-process callers)
+    // must keep the `db` row omitted exactly as before — the text doctor gates
+    // it on a non-empty string — and the cloud-sync warning is left to the
+    // host that knows its own data dir.
+    let (runtime, _) = runtime_with_memory_clipboard();
+
+    let report = runtime
+        .build_doctor_report()
+        .await
+        .expect("doctor report builds without a configured db path");
+
+    assert!(report.db_path.is_empty());
+    assert!(report.data_dir_sync_warning.is_none());
+}
+
 #[test]
 fn builder_build_errors_when_clipboard_missing() {
     // `build()` is the production entry point: a missing clipboard

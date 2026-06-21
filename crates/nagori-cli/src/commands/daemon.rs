@@ -150,6 +150,7 @@ pub async fn run_server(
             store,
             NativeRuntimeOptions {
                 socket_path: Some(config.ipc.socket_path.clone()),
+                db_path: Some(db_path.clone()),
                 ai_engine: None,
             },
         )?;

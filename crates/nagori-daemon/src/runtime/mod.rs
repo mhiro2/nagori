@@ -70,6 +70,14 @@ pub struct NagoriRuntime {
     /// default. `Arc`ed so every runtime clone observes the same seed state.
     settings_seeded: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) socket_path: Arc<std::path::PathBuf>,
+    /// On-disk path of the database this runtime opened, surfaced by the IPC
+    /// `Doctor` report so an operator can tell *which* store an IPC-connected
+    /// daemon is holding — the daemon can be launched with `--db` /
+    /// `NAGORI_DB_PATH` against a non-default store. Empty for hosts that don't
+    /// thread a path (in-process callers, tests, the desktop, which surfaces
+    /// its own data dir through the Privacy panel); the doctor report then
+    /// leaves the `db` row out exactly as before.
+    pub(crate) db_path: Arc<std::path::PathBuf>,
     /// Front-of-store LRU for recent search results. Hits skip the `SQLite`
     /// round-trip on the empty-query (`Recent`) and short-prefix paths;
     /// any corpus mutation invalidates it via [`Self::invalidate_search_cache`].
@@ -151,6 +159,7 @@ impl NagoriRuntime {
             ai_engine: None,
             permissions: None,
             socket_path: None,
+            db_path: None,
             capabilities: None,
             power_probe: None,
         }
@@ -302,6 +311,7 @@ pub struct NagoriRuntimeBuilder {
     ai_engine: Option<Arc<dyn AiActionEngine>>,
     permissions: Option<Arc<dyn PermissionChecker>>,
     socket_path: Option<std::path::PathBuf>,
+    db_path: Option<std::path::PathBuf>,
     capabilities: Option<PlatformCapabilities>,
     power_probe: Option<crate::semantic_index::PowerProbe>,
 }
@@ -336,6 +346,16 @@ impl NagoriRuntimeBuilder {
     #[must_use]
     pub fn socket_path(mut self, path: std::path::PathBuf) -> Self {
         self.socket_path = Some(path);
+        self
+    }
+
+    /// Record the on-disk database path so the IPC `Doctor` report can echo
+    /// which store the daemon is holding. Daemon callers pass the resolved
+    /// `--db` / default path; library callers (desktop, tests) leave it unset
+    /// and the report omits the `db` row as before.
+    #[must_use]
+    pub fn db_path(mut self, path: std::path::PathBuf) -> Self {
+        self.db_path = Some(path);
         self
     }
 
@@ -454,6 +474,7 @@ impl NagoriRuntimeBuilder {
             settings_rx,
             settings_seeded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             socket_path: Arc::new(self.socket_path.unwrap_or_default()),
+            db_path: Arc::new(self.db_path.unwrap_or_default()),
             search_cache: new_shared_cache(),
             maintenance_health: MaintenanceHealth::new(),
             startup_health: StartupHealth::new(),
