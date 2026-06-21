@@ -18,7 +18,8 @@ pub use capability::{
 };
 pub use clipboard::{
     CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, ClipboardWriter, MemoryClipboard,
-    SNAPSHOT_CAPTURE_MAX_RETRIES, has_publishable_representation, lock_err, platform_err,
+    SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracker, has_publishable_representation, lock_err,
+    platform_err,
 };
 pub use hotkey::{Hotkey, HotkeyManager, HotkeyModifier};
 pub use image_decode::{DecodeRgbaError, decode_rgba_with_pixel_cap};

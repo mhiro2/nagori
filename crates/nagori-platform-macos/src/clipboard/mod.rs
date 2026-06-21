@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use arboard::Clipboard;
 use nagori_core::{ClipboardSequence, Result};
-use nagori_platform::platform_err;
+use nagori_platform::{SelfWriteTracker, platform_err};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSPasteboard;
 
@@ -74,6 +74,12 @@ const MARKER_TRANSIENT: &str = "org.nspasteboard.TransientType";
 /// a torn snapshot.
 pub struct MacosClipboard {
     clipboard: Arc<Mutex<Clipboard>>,
+    /// Sequence of the app's most recent own write, so the capture loop can
+    /// skip re-capturing a copy-back of an existing entry. Shared with the
+    /// reader side because `nagori-platform-native` hands the same
+    /// `MacosClipboard` instance to both the runtime writer and the capture
+    /// loop reader.
+    self_write: SelfWriteTracker,
 }
 
 impl MacosClipboard {
@@ -82,6 +88,7 @@ impl MacosClipboard {
             clipboard: Arc::new(Mutex::new(
                 Clipboard::new().map_err(|err| platform_err(&err))?,
             )),
+            self_write: SelfWriteTracker::default(),
         })
     }
 }

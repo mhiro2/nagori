@@ -84,6 +84,191 @@ async fn capture_once_dedupes_repeated_clipboard_text() {
 }
 
 #[tokio::test]
+async fn capture_once_skips_self_write() {
+    // Selecting a history entry to paste writes it back to the clipboard. The
+    // capture loop must NOT re-capture that write as new content — doing so
+    // re-enters the entry (bumping its `created_at`, hoisting it to the top of
+    // the recency list, or duplicating it outright when the round-tripped
+    // representation set hashes differently). The fix anchors the dedup
+    // baseline and skips when the adapter reports the clip as its own write.
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use nagori_core::{ClipboardData, ClipboardRepresentation, ClipboardSnapshot, ReadBudget};
+
+    // A reader whose clipboard holds one text clip at a monotonic sequence the
+    // test can advance. `matches_self_write` reports true only for
+    // `self_write_seq`, modelling the adapter having just written that exact
+    // clip itself.
+    struct SelfWriteReader {
+        sequence: Arc<AtomicI64>,
+        self_write_seq: i64,
+    }
+
+    impl SelfWriteReader {
+        fn snapshot(&self) -> ClipboardSnapshot {
+            ClipboardSnapshot {
+                sequence: ClipboardSequence::native(self.sequence.load(Ordering::SeqCst)),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: vec![ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text("copied back".to_owned()),
+                }],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClipboardReader for SelfWriteReader {
+        async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+            Ok(self.snapshot())
+        }
+        async fn current_sequence(&self) -> Result<ClipboardSequence> {
+            Ok(ClipboardSequence::native(
+                self.sequence.load(Ordering::SeqCst),
+            ))
+        }
+        async fn current_snapshot_with_max(&self, _budget: ReadBudget) -> Result<CapturedSnapshot> {
+            Ok(CapturedSnapshot::Captured(self.snapshot()))
+        }
+        fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+            *sequence == ClipboardSequence::native(self.self_write_seq)
+        }
+    }
+
+    let store = SqliteStore::open_memory().expect("memory store");
+    let sequence = Arc::new(AtomicI64::new(5));
+    let reader = SelfWriteReader {
+        sequence: sequence.clone(),
+        self_write_seq: 5,
+    };
+    // Skip the pristine pre-launch seed so the first tick reads the snapshot
+    // directly.
+    let settings = AppSettings {
+        capture_initial_clipboard_on_launch: true,
+        ..AppSettings::default()
+    };
+    let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
+
+    // The clipboard holds the app's own copy-back at sequence 5 → skipped,
+    // nothing inserted.
+    assert!(
+        loop_.capture_once().await.unwrap().is_none(),
+        "a self-write must not be captured",
+    );
+    assert_eq!(
+        store.list_recent(10).await.unwrap().len(),
+        0,
+        "re-using an entry must not add a new (or duplicate) history row",
+    );
+
+    // A foreign app then copies, advancing the sequence past the self-write
+    // marker → captured normally, proving the suppression is scoped to our own
+    // write and does not wedge later captures.
+    sequence.store(6, Ordering::SeqCst);
+    let id = loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("a foreign copy after a self-write must still be captured");
+    let entries = store.list_recent(10).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, id);
+}
+
+#[tokio::test]
+async fn self_write_suppression_yields_to_wake_gap_resync() {
+    // A wake-gap resync must distrust the sequence: a macOS `changeCount` can
+    // lap across sleep, so a post-wake foreign clip whose sequence collides
+    // with our last self-write has to be hash-checked from the body, not
+    // dropped as ours. The self-write skip is therefore gated on
+    // `!force_content_check`; without that gate the colliding foreign clip is
+    // silently lost.
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use nagori_core::{ClipboardData, ClipboardRepresentation, ClipboardSnapshot, ReadBudget};
+
+    // One fixed sequence stands in for the lapped-changeCount collision: both
+    // the pre-sleep capture and the post-wake foreign clip report it, and it is
+    // also flagged as our last self-write once `self_write_active` flips.
+    struct CollidingReader {
+        sequence: ClipboardSequence,
+        text: Arc<StdMutex<String>>,
+        self_write_active: Arc<AtomicBool>,
+    }
+
+    impl CollidingReader {
+        fn snapshot(&self) -> ClipboardSnapshot {
+            ClipboardSnapshot {
+                sequence: self.sequence.clone(),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations: vec![ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text(self.text.lock().unwrap().clone()),
+                }],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClipboardReader for CollidingReader {
+        async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+            Ok(self.snapshot())
+        }
+        async fn current_sequence(&self) -> Result<ClipboardSequence> {
+            Ok(self.sequence.clone())
+        }
+        async fn current_snapshot_with_max(&self, _budget: ReadBudget) -> Result<CapturedSnapshot> {
+            Ok(CapturedSnapshot::Captured(self.snapshot()))
+        }
+        fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+            self.self_write_active.load(Ordering::SeqCst) && *sequence == self.sequence
+        }
+    }
+
+    let store = SqliteStore::open_memory().expect("memory store");
+    let text = Arc::new(StdMutex::new("first clip".to_owned()));
+    let self_write_active = Arc::new(AtomicBool::new(false));
+    let reader = CollidingReader {
+        sequence: ClipboardSequence::native(5),
+        text: text.clone(),
+        self_write_active: self_write_active.clone(),
+    };
+    let settings = AppSettings {
+        capture_initial_clipboard_on_launch: true,
+        ..AppSettings::default()
+    };
+    let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), settings);
+
+    let t0 = SystemTime::now();
+    // Tick 1: an ordinary foreign capture at sequence 5.
+    loop_
+        .capture_once_at(t0)
+        .await
+        .unwrap()
+        .expect("first clip captured");
+
+    // The clipboard now holds different content at the *same* lapped sequence,
+    // and that sequence is also flagged as our last self-write.
+    *text.lock().unwrap() = "post-wake foreign clip".to_owned();
+    self_write_active.store(true, Ordering::SeqCst);
+
+    // Tick 2 after a >30s gap arms the wake-gap resync, which must override the
+    // self-write marker and capture the colliding foreign clip from its body.
+    let captured = loop_
+        .capture_once_at(t0 + Duration::from_secs(31))
+        .await
+        .unwrap();
+    assert!(
+        captured.is_some(),
+        "a wake-gap resync must not let the self-write marker drop a colliding foreign clip",
+    );
+    assert_eq!(store.list_recent(10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn capture_once_notifies_after_successful_insert() {
     use std::sync::Mutex;
 

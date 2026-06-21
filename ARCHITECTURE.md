@@ -218,6 +218,9 @@ stay identical regardless of entry point.
 ClipboardReader.current_sequence_with_max()
                                             (cheap pre-check; byte-read
                                              adapters receive the entry cap)
+  → ClipboardReader.matches_self_write()   (the app's own copy-back of an
+                                            existing entry → anchor + drop
+                                            without reading the body)
   → frontmost_app() snapshot               (before reading the body)
   → frontmost_focused_is_secure()          (AX kAXSecureTextField guard;
                                             true → audit + drop without
@@ -272,6 +275,30 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
 
 - The sequence pre-check short-circuits before the body is read, so
   duplicate captures cost a single pasteboard round-trip.
+- **Self-write suppression.** The only writes that reach a `ClipboardWriter`
+  are the app's own copy-backs — selecting a history entry to paste; content
+  other apps copy never touches the writer, it only shows up on the next read.
+  Each adapter records the sequence its write produced (`SelfWriteTracker`,
+  shared with the reader side because `nagori-platform-native` hands the same
+  adapter instance to both the runtime writer and the capture-loop reader),
+  and the capture loop drops a clip whose sequence
+  `ClipboardReader::matches_self_write` recognises — anchoring the dedup
+  baseline like the other skip paths but without reading the body. Without it,
+  re-using an entry re-enters it as a "new" clipboard event: storage's
+  `representation_set_hash` dedupe refreshes the existing row's `created_at`
+  and hoists it to the top of the recency list, or — when the round-tripped
+  representation set hashes differently from the stored one — inserts an
+  outright duplicate row. The use-count bump that ranks re-used entries still
+  happens on the copy path; the capture loop adds nothing. The check is a
+  non-consuming peek, gated (like the cheap sequence dedup) on
+  `!force_content_check`: a wake-gap resync distrusts the sequence and re-reads
+  the body, so a post-sleep foreign clip whose lapped macOS `changeCount`
+  collides with our last self-write is hash-checked rather than dropped (the
+  benign cost is an unchanged copy-back still on the clipboard across a sleep
+  being re-captured on wake). Safe for adapters whose sequence is a monotonic
+  native counter (macOS `changeCount`, Windows `GetClipboardSequenceNumber`);
+  the Wayland adapter's content-hash sequence is not wired and keeps the
+  default (no suppression).
 - Frontmost app metadata is captured **before** the clipboard body so
   `Cmd+C → Cmd+Tab → paste` flows still attribute the source correctly
   to the password manager / denylisted app.

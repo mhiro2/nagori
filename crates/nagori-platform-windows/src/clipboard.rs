@@ -13,7 +13,7 @@ use nagori_core::{
 };
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
-    clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
+    SelfWriteTracker, clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
     has_publishable_representation, lock_clipboard_for_write, lock_clipboard_recovering,
     platform_err,
 };
@@ -49,6 +49,12 @@ const TORN_RETRY_BACKOFF: Duration = Duration::from_millis(1);
 /// `GetClipboardSequenceNumber` probe and produce a torn snapshot.
 pub struct WindowsClipboard {
     clipboard: Arc<Mutex<Clipboard>>,
+    /// Sequence of the app's most recent own write, so the capture loop can
+    /// skip re-capturing a copy-back of an existing entry. Shared with the
+    /// reader side because `nagori-platform-native` hands the same
+    /// `WindowsClipboard` instance to both the runtime writer and the capture
+    /// loop reader.
+    self_write: SelfWriteTracker,
 }
 
 impl WindowsClipboard {
@@ -57,6 +63,7 @@ impl WindowsClipboard {
             clipboard: Arc::new(Mutex::new(
                 Clipboard::new().map_err(|err| platform_err(&err))?,
             )),
+            self_write: SelfWriteTracker::default(),
         })
     }
 }
@@ -125,6 +132,10 @@ impl ClipboardReader for WindowsClipboard {
         // the per-kind budget to the full payload (see `finalize_capture`).
         finalize_capture(captured, image, Some(budget)).await
     }
+
+    fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+        self.self_write.matches(sequence)
+    }
 }
 
 #[async_trait]
@@ -160,14 +171,20 @@ impl ClipboardWriter for WindowsClipboard {
 
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         let owned = text.to_owned();
         clipboard_write_blocking("write_text", move || -> Result<()> {
             // Bounded lock acquisition (no OS side effect yet) so a guard
             // leaked by a timed-out read cannot park this write forever;
             // the `set_text` itself still runs to completion unbounded.
-            lock_clipboard_for_write(&clipboard, "write_text")?
-                .set_text(owned)
-                .map_err(|err| platform_err(&err))
+            let mut guard = lock_clipboard_for_write(&clipboard, "write_text")?;
+            guard.set_text(owned).map_err(|err| platform_err(&err))?;
+            // Record the sequence number this write produced so the capture
+            // loop's self-write suppression can skip re-capturing it. The
+            // residual write→record window is the bounded race documented on
+            // `SelfWriteTracker`.
+            record_self_write(&self_write);
+            Ok(())
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
@@ -208,6 +225,7 @@ impl ClipboardWriter for WindowsClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))??;
 
             let clipboard = self.clipboard.clone();
+            let self_write = self.self_write.clone();
             clipboard_write_blocking("write_representations", move || -> Result<()> {
                 // Hold the arboard mutex across the entire OpenClipboard +
                 // EmptyClipboard + N × SetClipboardData batch so a concurrent
@@ -218,7 +236,9 @@ impl ClipboardWriter for WindowsClipboard {
                 // Acquisition is bounded so a guard leaked by a timed-out
                 // read cannot park the write.
                 let _guard = lock_clipboard_for_write(&clipboard, "write_representations")?;
-                win::write_multi_rep(&reps, &dibv5)
+                win::write_multi_rep(&reps, &dibv5)?;
+                record_self_write(&self_write);
+                Ok(())
             })
             .await
             .map_err(|err| AppError::Platform(err.to_string()))?
@@ -261,9 +281,12 @@ impl ClipboardWriter for WindowsClipboard {
             .map_err(|err| AppError::Platform(err.to_string()))??;
 
             let clipboard = self.clipboard.clone();
+            let self_write = self.self_write.clone();
             clipboard_write_blocking("write_representation_exact", move || -> Result<()> {
                 let _guard = lock_clipboard_for_write(&clipboard, "write_representation_exact")?;
-                win::write_multi_rep(&reps, &dibv5)
+                win::write_multi_rep(&reps, &dibv5)?;
+                record_self_write(&self_write);
+                Ok(())
             })
             .await
             .map_err(|err| AppError::Platform(err.to_string()))?
@@ -285,6 +308,7 @@ impl WindowsClipboard {
             ));
         }
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         clipboard_write_blocking("write_files", move || -> Result<()> {
             // Hold the arboard mutex across the whole `OpenClipboard +
             // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
@@ -295,11 +319,13 @@ impl WindowsClipboard {
             let _guard = lock_clipboard_for_write(&clipboard, "write_files")?;
             #[cfg(windows)]
             {
-                win::write_file_list(&paths)
+                win::write_file_list(&paths)?;
+                record_self_write(&self_write);
+                Ok(())
             }
             #[cfg(not(windows))]
             {
-                let _ = paths;
+                let _ = (paths, &self_write);
                 Err(AppError::Unsupported(
                     "Windows file-list writes are Windows-only".to_owned(),
                 ))
@@ -347,12 +373,16 @@ impl WindowsClipboard {
         // to completion without a timeout: a timed-out `set_image` cannot be
         // cancelled and would clobber newer clipboard content on late return.
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         clipboard_write_blocking("write_image_bytes", move || -> Result<()> {
             // Bounded lock acquisition; the `set_image` itself still runs
             // to completion unbounded (see the decode rationale above).
-            lock_clipboard_for_write(&clipboard, "write_image_bytes")?
+            let mut guard = lock_clipboard_for_write(&clipboard, "write_image_bytes")?;
+            guard
                 .set_image(image_data)
-                .map_err(|err| platform_err(&err))
+                .map_err(|err| platform_err(&err))?;
+            record_self_write(&self_write);
+            Ok(())
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
@@ -904,6 +934,16 @@ const fn native_sequence_number() -> u32 {
     // circuits cleanly and the loop terminates on the first attempt;
     // the daemon never actually runs on non-Windows hosts.
     0
+}
+
+/// Record the sequence number a just-completed clipboard write produced into
+/// `tracker`, so the capture loop's self-write suppression can skip
+/// re-capturing the app's own copy-back. Sampled right after the write while
+/// the caller still holds the arboard lock.
+fn record_self_write(tracker: &SelfWriteTracker) {
+    tracker.record(ClipboardSequence::native(i64::from(
+        native_sequence_number(),
+    )));
 }
 
 #[cfg(windows)]

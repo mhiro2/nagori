@@ -92,6 +92,10 @@ impl ClipboardReader for MacosClipboard {
         // `finalize_captured`).
         finalize_captured(captured, budget).await
     }
+
+    fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+        self.self_write.matches(sequence)
+    }
 }
 
 /// What one bounded capture attempt observed.

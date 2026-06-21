@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-#[cfg(target_os = "macos")]
-use nagori_core::RepresentationDataRef;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardEntry, Result, StoredClipboardRepresentation,
 };
+#[cfg(target_os = "macos")]
+use nagori_core::{ClipboardSequence, RepresentationDataRef};
 use nagori_platform::{
     ClipboardWriter, clipboard_write_blocking, has_publishable_representation,
     lock_clipboard_for_write, platform_err,
@@ -21,7 +21,7 @@ use objc2_app_kit::{
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSData, NSString};
 
-use super::MacosClipboard;
+use super::{MacosClipboard, pasteboard_sequence};
 #[cfg(target_os = "macos")]
 use super::{UTI_GIF, UTI_JPEG, UTI_WEBP};
 
@@ -66,14 +66,21 @@ impl ClipboardWriter for MacosClipboard {
 
     async fn write_text(&self, text: &str) -> Result<()> {
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         let owned = text.to_owned();
         clipboard_write_blocking("write_text", move || -> Result<()> {
             // Bounded lock acquisition (no OS side effect yet) so a guard
             // leaked by a timed-out read cannot park this write forever;
             // the `set_text` itself still runs to completion unbounded.
-            lock_clipboard_for_write(&clipboard, "write_text")?
-                .set_text(owned)
-                .map_err(|err| platform_err(&err))
+            let mut guard = lock_clipboard_for_write(&clipboard, "write_text")?;
+            guard.set_text(owned).map_err(|err| platform_err(&err))?;
+            // Record the changeCount this write produced so the capture loop's
+            // self-write suppression can skip re-capturing it. Sampled right
+            // after the write while the arboard lock is still held — the
+            // tightest the platform allows; the residual write→record window
+            // is the bounded race documented on `SelfWriteTracker`.
+            self_write.record(pasteboard_sequence());
+            Ok(())
         })
         .await
         .map_err(|err| AppError::Platform(err.to_string()))?
@@ -122,6 +129,7 @@ impl MacosClipboard {
     async fn write_image_bytes(&self, bytes: Vec<u8>, mime: &str) -> Result<()> {
         let mime_owned = mime.to_owned();
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         clipboard_write_blocking("write_image_bytes", move || -> Result<()> {
             // Take the same arboard mutex `current_snapshot` and the text
             // path use so a concurrent reader/writer cannot race the
@@ -189,6 +197,10 @@ impl MacosClipboard {
                             "NSPasteboard::setData failed for image type".to_owned(),
                         ));
                     }
+                    // Mark the resulting changeCount as our own so the capture
+                    // loop skips re-capturing this copy-back. `changeCount` is
+                    // `NSInteger`; cast as `pasteboard_sequence` does.
+                    self_write.record(ClipboardSequence::native(pb.changeCount() as i64));
                     Ok(())
                 }
             })
@@ -219,6 +231,7 @@ impl MacosClipboard {
             ));
         }
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         clipboard_write_blocking("write_files", move || -> Result<()> {
             // Hold the arboard mutex across `clearContents` + `writeObjects`
             // so a concurrent reader cannot observe the cleared-but-not-yet-
@@ -243,6 +256,7 @@ impl MacosClipboard {
                 let pb = NSPasteboard::generalPasteboard();
                 pb.clearContents();
                 if write_pasteboard_items(&pb, items) {
+                    self_write.record(ClipboardSequence::native(pb.changeCount() as i64));
                     Ok(())
                 } else {
                     Err(AppError::Platform(
@@ -270,6 +284,7 @@ impl MacosClipboard {
         representations: Vec<StoredClipboardRepresentation>,
     ) -> Result<()> {
         let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
         clipboard_write_blocking("publish_representations", move || -> Result<()> {
             // Hold the arboard mutex across the whole clearContents +
             // writeObjects batch so a concurrent reader cannot observe a
@@ -301,6 +316,7 @@ impl MacosClipboard {
                 let pb = NSPasteboard::generalPasteboard();
                 pb.clearContents();
                 if write_pasteboard_items(&pb, items) {
+                    self_write.record(ClipboardSequence::native(pb.changeCount() as i64));
                     Ok(())
                 } else {
                     Err(AppError::Platform(

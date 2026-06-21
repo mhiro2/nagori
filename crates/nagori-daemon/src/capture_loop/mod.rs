@@ -988,8 +988,41 @@ where
         // colliding sequence again. Re-trying with the flag still set is
         // safe because the body-read path is idempotent.
         let force_content_check = self.dedup.force_content_check;
-        if !force_content_check && self.dedup.last_sequence.as_ref() == Some(&sequence) {
-            return Ok(None);
+        // Sequence-only fast paths. Both are gated on `!force_content_check`:
+        // when a wake-gap resync armed the flag we deliberately distrust the
+        // sequence (a lapped macOS `changeCount` can collide with a stale
+        // value) and fall through to the body read + content-hash cross-check.
+        if !force_content_check {
+            // Cheap dedup: the clip hasn't changed since the last tick.
+            if self.dedup.last_sequence.as_ref() == Some(&sequence) {
+                return Ok(None);
+            }
+            // Self-write suppression: this exact clip was just written by the
+            // app itself (a copy-back of an existing history entry on the paste
+            // path), not copied from another app. Re-capturing it would
+            // re-enter the entry as new content — bumping its `created_at` and
+            // so hoisting it to the top of the recency list, or, when the
+            // round-tripped representation set hashes differently from the
+            // stored one, inserting an outright duplicate row. Anchor the dedup
+            // baseline like the other skip paths (so the next poll
+            // short-circuits on sequence equality) and drop the clip without
+            // reading its body. The use-count bump that ranks re-used entries
+            // already happened on the copy path; the capture loop adds nothing.
+            // The probe is non-consuming, so an identical clip the user later
+            // copies from another app lands at a fresh sequence and is
+            // captured. Deliberately *not* run under `force_content_check`: a
+            // post-wake external clip whose lapped sequence collides with our
+            // last self-write must reach the body+hash check below rather than
+            // be dropped here as ours. The narrow cost is that an unchanged
+            // copy-back still on the clipboard across a sleep is re-captured
+            // (and re-hoisted) on wake — benign, and far rarer than a lost
+            // foreign clip.
+            if self.reader.matches_self_write(&sequence) {
+                info!("capture_skipped reason=self_write");
+                self.dedup.pristine = false;
+                self.dedup.last_sequence = Some(sequence);
+                return Ok(None);
+            }
         }
         // Honour the "skip whatever was on the clipboard before launch" flag
         // by anchoring `last_sequence` (and `last_content_hash`, so a future

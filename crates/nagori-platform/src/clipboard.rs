@@ -70,10 +70,86 @@ pub enum CapturedSnapshot {
     },
 }
 
+/// Tracks the clipboard sequence an adapter most recently *wrote itself*.
+///
+/// In production the only writes that flow through a [`ClipboardWriter`] are
+/// the app's own copy-backs (selecting a history entry to paste); content
+/// other apps copy never touches the writer, it only shows up on the next
+/// read. So every adapter write records the resulting sequence here, and the
+/// capture loop consults it via [`ClipboardReader::matches_self_write`] to
+/// skip re-capturing that write — otherwise re-using an entry re-enters it as
+/// a brand-new clipboard event, moving it to the top of (or duplicating it
+/// in) the history.
+///
+/// The check is a non-consuming peek: it stays valid until the next write
+/// overwrites it. This is correct for adapters whose sequence is a monotonic
+/// native counter (macOS `changeCount`, Windows `GetClipboardSequenceNumber`),
+/// where a later sequence can never collide with an earlier self-write — with
+/// one deliberate exception the capture loop owns: a macOS `changeCount` can
+/// *lap* across a sleep/wake cycle, so the loop ignores this marker while its
+/// wake-gap resync flag is armed and re-reads the body instead, rather than
+/// risk dropping a post-wake foreign clip whose lapped sequence collides with
+/// our last self-write. Adapters whose "sequence" is a content hash (the
+/// Wayland fallback) would need to clear the marker once the clipboard moves
+/// on, to avoid suppressing an identical clip the user later copies from
+/// another app; they are not wired yet and keep the default.
+///
+/// `record` samples the sequence the OS reports *after* the write; no OS
+/// exposes an atomic write-and-return-sequence, so the marker is set a few
+/// instructions after the clip lands. Two benign, sub-millisecond races live
+/// in that window: a foreign writer landing in it can have its sequence
+/// recorded as ours (suppressing that one foreign clip), and the capture
+/// loop's own sequence probe — `current_sequence`, which does not take the
+/// adapter lock — can read the post-write sequence before `record` runs, so it
+/// fails to recognise the copy-back as ours and re-captures it. Adapters keep
+/// the window as small as the platform allows — macOS reads `changeCount`
+/// immediately after the write while still holding the arboard lock; on Windows
+/// the OS clipboard lock is released by the write op before
+/// `GetClipboardSequenceNumber`, so the window is a few instructions wider. The
+/// race needs another write inside that window of a user-initiated copy-back,
+/// so it is vanishingly rare and at worst re-hoists / re-captures a single
+/// clip — never loses data.
+#[derive(Debug, Default, Clone)]
+pub struct SelfWriteTracker {
+    last: Arc<Mutex<Option<ClipboardSequence>>>,
+}
+
+impl SelfWriteTracker {
+    /// Record the sequence a just-completed write produced.
+    pub fn record(&self, sequence: ClipboardSequence) {
+        if let Ok(mut guard) = self.last.lock() {
+            *guard = Some(sequence);
+        }
+    }
+
+    /// Whether `sequence` is the most recent write this tracker recorded.
+    #[must_use]
+    pub fn matches(&self, sequence: &ClipboardSequence) -> bool {
+        self.last
+            .lock()
+            .is_ok_and(|guard| guard.as_ref() == Some(sequence))
+    }
+}
+
 #[async_trait]
 pub trait ClipboardReader: Send + Sync {
     async fn current_snapshot(&self) -> Result<ClipboardSnapshot>;
     async fn current_sequence(&self) -> Result<ClipboardSequence>;
+
+    /// Whether `sequence` identifies a clip this adapter wrote itself (a
+    /// copy-back of an existing history entry on the paste path).
+    ///
+    /// The capture loop calls this after observing a sequence change so it can
+    /// anchor the dedup baseline and skip re-capturing the app's own write.
+    /// Without it, selecting an entry to paste re-enters that entry as a "new"
+    /// clipboard event, moving it to the top of (or duplicating it in) the
+    /// history even though the user only re-used an existing item. Defaults to
+    /// `false` for adapters that do not track their own writes (see
+    /// [`SelfWriteTracker`]).
+    fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+        let _ = sequence;
+        false
+    }
 
     /// Like [`Self::current_sequence`], but allows platforms that must read
     /// clipboard bytes to use the same per-kind pre-read budget as
@@ -201,6 +277,10 @@ impl<T: ClipboardReader + ?Sized> ClipboardReader for Arc<T> {
 
     async fn current_sequence(&self) -> Result<ClipboardSequence> {
         (**self).current_sequence().await
+    }
+
+    fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
+        (**self).matches_self_write(sequence)
     }
 
     async fn current_sequence_with_max(&self, budget: ReadBudget) -> Result<ClipboardSequence> {
