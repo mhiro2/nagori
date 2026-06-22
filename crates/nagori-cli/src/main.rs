@@ -89,9 +89,10 @@ struct ListArgs {
 #[derive(Debug, Clone, Args)]
 struct SearchArgs {
     query: String,
-    /// Maximum number of results to return. Must be at least 1 — `0` would
-    /// print nothing.
-    #[arg(long, default_value_t = 50, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    /// Maximum number of results to return. Must be between 1 and 200 — `0`
+    /// would print nothing, and the search service caps results at 200, so a
+    /// larger value is rejected here rather than silently clamped.
+    #[arg(long, default_value_t = 50, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=nagori_core::MAX_RESULT_LIMIT as u64))]
     limit: usize,
 }
 

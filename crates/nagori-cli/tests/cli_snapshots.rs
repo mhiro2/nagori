@@ -336,6 +336,21 @@ fn list_limit_zero_is_rejected() {
 }
 
 #[test]
+fn search_limit_above_max_is_rejected() {
+    // The search service caps results at 200. `--limit 500` used to pass clap
+    // and get silently clamped, breaking the output contract. The range upper
+    // bound now rejects it at parse time (clap's usage error → exit 2) so the
+    // user sees the limit instead of an unexplained short result set.
+    let (_dir, db) = temp_db();
+    let output = nagori(&db)
+        .args(["search", "anything", "--limit", "500"])
+        .output()
+        .expect("invoke nagori");
+    assert!(!output.status.success(), "exit: {:?}", output.status);
+    assert_eq!(output.status.code(), Some(2), "limit 500 → exit 2");
+}
+
+#[test]
 fn write_with_db_is_refused_while_an_instance_owns_the_store() {
     // Holding the single-instance lock stands in for a running desktop app
     // or daemon. A direct write underneath the owner would land in SQLite

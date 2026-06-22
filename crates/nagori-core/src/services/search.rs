@@ -12,7 +12,13 @@ use crate::{
 
 /// Maximum number of `SearchResult`s returned regardless of caller-requested
 /// `limit`. Mirrors the previous `SqliteStore::search` clamp.
-const MAX_RESULT_LIMIT: usize = 200;
+///
+/// The clamp below stays as defense-in-depth for callers that cannot validate
+/// up front — chiefly the IPC boundary, where a wire `limit` of `usize::MAX`
+/// must not drive an unbounded fetch. Callers that *can* reject out-of-range
+/// input early (the CLI) should bound their argument to this value so the user
+/// sees a clear error instead of a silent truncation.
+pub const MAX_RESULT_LIMIT: usize = 200;
 
 /// Multiplier applied to the requested `limit` when fetching candidates from
 /// the provider so the ranker has enough headroom to pick winners after

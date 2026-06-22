@@ -101,7 +101,9 @@ nagori list --pinned --json
 ### `nagori search <query> [--limit N]`
 
 Run the ranker. `query` is normalised to NFKC + lowercase before matching.
-`--limit` defaults to 50 and must be ≥ 1.
+`--limit` defaults to 50 and must be between 1 and 200 (the search service
+caps results at 200, so a larger value is rejected rather than silently
+clamped).
 
 ```sh
 nagori search "kubectl"
