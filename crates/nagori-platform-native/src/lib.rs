@@ -50,6 +50,12 @@ pub struct NativeRuntimeOptions {
     /// `Health` reports can echo it back. Daemon callers pass the
     /// resolved endpoint; library callers (desktop) leave it unset.
     pub socket_path: Option<PathBuf>,
+    /// Database path threaded into the runtime so the IPC `Doctor` report can
+    /// echo which store the daemon is holding (it may be a non-default `--db`
+    /// / `NAGORI_DB_PATH` store). Daemon callers pass the resolved path;
+    /// library callers (desktop) leave it unset and the report omits the
+    /// `db` row.
+    pub db_path: Option<PathBuf>,
     /// Override the AI engine. When `None`, the host default is wired: an
     /// Apple Foundation Models engine on macOS, and no engine elsewhere
     /// (AI actions are refused while quick actions stay available).
@@ -240,6 +246,9 @@ where
     }
     if let Some(socket_path) = options.socket_path {
         builder = builder.socket_path(socket_path);
+    }
+    if let Some(db_path) = options.db_path {
+        builder = builder.db_path(db_path);
     }
     builder.build()
 }

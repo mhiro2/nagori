@@ -327,10 +327,18 @@ pub(super) fn spawn_ipc_server(
 /// as-is would leave a socket inode with no listener behind. A host that
 /// maps the error to a backoff retry (or whose user then disables the
 /// toggle) must not strand a dead socket for clients to trip over. The
-/// unlink is safe because we just created the inode and still hold the
-/// data-directory lock — no peer can own this path. The listener is
-/// passed through (and dropped on the failure path before the unlink) so
-/// the socket is never removed out from under a live accept loop.
+/// unlink is safe because the caller (`spawn_ipc_server`) holds the
+/// endpoint-ownership lock and we just bound this very inode moments ago,
+/// before any accept loop was spawned. The *endpoint* lock — not the
+/// data-directory lock, which lives elsewhere for a custom `--db` /
+/// `NAGORI_DB_PATH` — is what proves no other daemon can have rebound this
+/// path, so an unconditional removal can only touch the socket we just
+/// created. That is also why this skips the fingerprint check `stage_socket`
+/// performs at shutdown: that path runs much later, when a successor could
+/// have re-claimed the endpoint, whereas here no successor can have bound
+/// yet. The listener is passed through (and dropped on the failure path
+/// before the unlink) so the socket is never removed out from under a live
+/// accept loop.
 #[cfg(unix)]
 fn mint_token_unlinking_socket_on_failure(
     config: &CliIpcConfig,

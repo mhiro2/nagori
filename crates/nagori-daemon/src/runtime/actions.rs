@@ -93,7 +93,33 @@ impl NagoriRuntime {
         action: AiActionId,
         options: AiRequestOptions,
     ) -> Result<AiActionRun> {
+        // Wrap the body so *every* exit leaves a trace at the action layer —
+        // the policy / allow-list refusals, the unsupported-provider and
+        // missing-engine rejections, the missing entry, the pre-stream
+        // timeout, and the cancelled-while-queued teardown, not just the
+        // start. `run_quick_action` already logs all of its exits; before this
+        // an AI failure left only the IPC dispatch line to investigate.
+        // `action.slug()` and the provider enum are fixed identifiers and
+        // `result_code` collapses to a static label, so the log never carries
+        // the entry text, prompt, or output.
         let started = Instant::now();
+        let result = self.start_ai_action_inner(id, action, options).await;
+        tracing::debug!(
+            action = action.slug(),
+            provider = ?self.ai_engine.as_ref().map(|engine| engine.provider()),
+            result_code = result_code(&result),
+            elapsed_ms = elapsed_ms(started),
+            "ai_action",
+        );
+        result
+    }
+
+    async fn start_ai_action_inner(
+        &self,
+        id: EntryId,
+        action: AiActionId,
+        options: AiRequestOptions,
+    ) -> Result<AiActionRun> {
         let settings = self.store.get_settings().await?;
         if !settings.ai.enabled {
             return Err(AppError::Policy(
@@ -243,15 +269,6 @@ impl NagoriRuntime {
             request_id,
             cancel,
         };
-        // Record that a model-backed action started, with its provider, so the
-        // AI path is observable end-to-end. `action.slug()` and the provider
-        // enum are fixed identifiers — no prompt, input, or output text.
-        tracing::debug!(
-            action = action.slug(),
-            provider = ?engine.provider(),
-            elapsed_ms = elapsed_ms(started),
-            "ai_action_started"
-        );
         // Enforce the streaming decision server-side: when streaming is not
         // allowed, drop intermediate snapshots so only the terminal result is
         // surfaced (the consumer still gets the full text from `Done`).

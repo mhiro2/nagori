@@ -241,6 +241,7 @@ impl SqliteStore {
                     // Everything evictable is gone; the remainder is pinned.
                     break;
                 }
+                let mut removed_this_round = 0usize;
                 for (id, bytes) in candidates {
                     if total <= max_total_bytes {
                         break 'evict;
@@ -257,8 +258,23 @@ impl SqliteStore {
                         .map_err(storage_err)?;
                     if changed > 0 {
                         deleted += changed;
+                        removed_this_round += changed;
                         total = total.saturating_sub(bytes);
                     }
+                }
+                // A non-empty candidate round that removes no rows cannot shrink
+                // the live set, so re-selecting would spin on the same rows.
+                // The candidate DELETE matches every selected (live, unpinned)
+                // row in this same transaction, so this is normally unreachable;
+                // the guard removes the loop's dependence on that invariant
+                // rather than trusting it implicitly. It keys on *rows removed*,
+                // not bytes freed: oldest-first eviction legitimately passes
+                // through zero-byte rows (an entry with no retained
+                // representation payload) before reaching the heavier rows that
+                // actually free the budget, so a "no bytes freed this round"
+                // guard would stop eviction prematurely.
+                if removed_this_round == 0 {
+                    break;
                 }
             }
             tx.commit().map_err(storage_err)?;
