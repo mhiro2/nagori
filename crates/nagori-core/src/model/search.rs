@@ -17,7 +17,7 @@ pub struct SearchDocument {
 impl SearchDocument {
     pub fn new(entry_id: EntryId, content: &ClipboardContent, normalized_text: String) -> Self {
         let plain = content.plain_text().unwrap_or_default();
-        let preview = make_preview(plain, 180);
+        let preview = make_preview(plain, PREVIEW_MAX_CHARS);
         let title = match content {
             ClipboardContent::Url(value) => value.domain.clone(),
             ClipboardContent::Code(value) => value.language_hint.clone(),
@@ -77,6 +77,15 @@ pub(crate) fn keyword_followed_by_whitespace(text: &str, keyword: &str) -> bool 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
+
+/// Maximum length, in Unicode scalar values, of a stored entry preview.
+///
+/// Shared by the search-document builder and the policy layer's redacted
+/// previews so the two can never produce different-length previews for the
+/// same entry. Keeping a redacted preview the same length as a normal one also
+/// avoids leaking "this row is a secret" through a preview that is visibly
+/// shorter or longer than its neighbours.
+pub const PREVIEW_MAX_CHARS: usize = 180;
 
 /// Build a whitespace-compacted preview of `text`, capped at `max_chars`.
 ///

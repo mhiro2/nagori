@@ -48,7 +48,10 @@ pub(crate) fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         entry_id: id,
         title: row.get("title").unwrap_or(None),
         preview: row.get("preview").unwrap_or_else(|_| {
-            nagori_core::make_preview(content.plain_text().unwrap_or_default(), 180)
+            nagori_core::make_preview(
+                content.plain_text().unwrap_or_default(),
+                nagori_core::PREVIEW_MAX_CHARS,
+            )
         }),
         normalized_text: row
             .get("normalized_text")
@@ -106,7 +109,7 @@ pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidat
     };
     let preview = match row.get::<_, Option<String>>("preview")? {
         Some(preview) => preview,
-        None => nagori_core::make_preview(fallback_text(), 180),
+        None => nagori_core::make_preview(fallback_text(), nagori_core::PREVIEW_MAX_CHARS),
     };
     let (image_width, image_height) = match &content {
         Some(ClipboardContent::Image(image)) => (image.width, image.height),
