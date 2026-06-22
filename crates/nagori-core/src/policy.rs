@@ -615,14 +615,28 @@ fn redact_credit_cards(text: &str) -> String {
     credit_card_candidate_regex()
         .replace_all(text, |caps: &regex::Captures<'_>| {
             let matched = &caps[0];
-            let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
-            if (13..=19).contains(&digits.len()) && luhn_valid(&digits) {
+            if is_luhn_pan(matched) {
                 "[REDACTED]".to_owned()
             } else {
                 matched.to_owned()
             }
         })
         .into_owned()
+}
+
+/// True when `matched` — a digit run from `credit_card_candidate_regex`,
+/// possibly carrying single space/dash separators — is a 13–19 digit
+/// Luhn-valid PAN.
+///
+/// Shared by detection (`contains_credit_card`) and redaction
+/// (`redact_credit_cards`) so the two can never drift: a candidate the
+/// detector flags as a card is always one the redactor scrubs. Keeping the
+/// digit-length range and Luhn check in one place removes the risk of editing
+/// one side (e.g. the `13..=19` bound) and silently leaving a detected card in
+/// plaintext.
+fn is_luhn_pan(matched: &str) -> bool {
+    let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
+    (13..=19).contains(&digits.len()) && luhn_valid(&digits)
 }
 
 fn redact_full_body(text: &str) -> String {
@@ -656,10 +670,9 @@ fn contains_credit_card(text: &str) -> bool {
     // CVV digits still classifies as Secret. Earlier whole-string Luhn made
     // `4111 1111 1111 1111 exp 12/30 cvv 123` come out Public — the raw
     // PAN then bypassed `apply_secret_handling` and landed on disk.
-    credit_card_candidate_regex().find_iter(text).any(|m| {
-        let digits: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
-        (13..=19).contains(&digits.len()) && luhn_valid(&digits)
-    })
+    credit_card_candidate_regex()
+        .find_iter(text)
+        .any(|m| is_luhn_pan(m.as_str()))
 }
 
 fn luhn_valid(digits: &str) -> bool {
