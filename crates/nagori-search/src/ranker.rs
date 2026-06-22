@@ -83,7 +83,7 @@ impl Ranker for DefaultRanker {
             score += 25.0;
             reasons.push(RankReason::Pinned);
         }
-        if matches!(candidate.content_kind, ContentKind::Code) && query.len() > 1 {
+        if matches!(candidate.content_kind, ContentKind::Code) && query.chars().count() > 1 {
             score += 3.0;
             // Nagori leans developer-oriented: a code snippet copied from an
             // editor / terminal / IDE is a stronger recall target than the
@@ -405,6 +405,52 @@ mod tests {
         assert!(
             (term.score - none.score).abs() < f32::EPSILON,
             "source app must not affect non-code ranking",
+        );
+    }
+
+    #[test]
+    fn single_char_cjk_query_does_not_trigger_code_boost() {
+        // The code boost gates on the query *character* count, not its byte
+        // length. `検` is a single character but three UTF-8 bytes, so a
+        // byte-length check would wrongly fire the boost on a single-character
+        // CJK query — exactly the kind of query the gate is meant to exclude.
+        let body = "検索エンジン";
+        let mut code = entry(body);
+        code.content_kind = ContentKind::Code;
+        let mut text = entry(body);
+        text.content_kind = ContentKind::Text;
+
+        let code_score = rank("検", code, 0.0, 0.0, now(), RecentOrder::ByRecency)
+            .expect("substring match")
+            .score;
+        let text_score = rank("検", text, 0.0, 0.0, now(), RecentOrder::ByRecency)
+            .expect("substring match")
+            .score;
+        assert!(
+            (code_score - text_score).abs() < f32::EPSILON,
+            "single-char CJK query must not boost Code: code={code_score} text={text_score}",
+        );
+    }
+
+    #[test]
+    fn multi_char_cjk_query_still_boosts_code() {
+        // A genuine multi-character CJK query keeps the code bump so the gate
+        // only suppresses single-character noise, not real CJK matches.
+        let body = "検索エンジン";
+        let mut code = entry(body);
+        code.content_kind = ContentKind::Code;
+        let mut text = entry(body);
+        text.content_kind = ContentKind::Text;
+
+        let code_score = rank("検索", code, 0.0, 0.0, now(), RecentOrder::ByRecency)
+            .expect("substring match")
+            .score;
+        let text_score = rank("検索", text, 0.0, 0.0, now(), RecentOrder::ByRecency)
+            .expect("substring match")
+            .score;
+        assert!(
+            code_score > text_score,
+            "multi-char CJK query should still boost Code: code={code_score} text={text_score}",
         );
     }
 
