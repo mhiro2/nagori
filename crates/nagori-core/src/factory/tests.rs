@@ -376,6 +376,32 @@ fn strip_html_decodes_common_entities() {
 }
 
 #[test]
+fn strip_html_drops_control_and_bidi_numeric_references() {
+    // A numeric character reference must not be able to inject a control or
+    // bidirectional / zero-width character into the preview or search
+    // document. `&#0;` (NUL) and the Trojan-Source override `&#x202E;` decode
+    // to invisible/reordering characters that corrupt display and spoof logs.
+    let stripped = super::strip_html("a&#0;b&#x202E;c");
+    assert_eq!(stripped, "abc");
+    // The decode itself still works for safe references, so this is not a
+    // blanket "drop all numeric refs".
+    assert_eq!(super::strip_html("&#65;&#66;&#67;"), "ABC");
+}
+
+#[test]
+fn strip_html_drops_literal_control_and_bidi_chars() {
+    // The same characters copied verbatim into the markup body (not via an
+    // entity) must be stripped too — `strip_html` is the single chokepoint
+    // feeding the preview and search document.
+    let stripped = super::strip_html("a\u{202E}b\u{0}c\u{200B}d");
+    assert_eq!(stripped, "abcd");
+    // The Arabic letter mark (U+061C) and the deprecated format controls
+    // (U+206A..=U+206F) are bidi / invisible characters outside the common
+    // 200B-202E / 2066-2069 ranges and must be stripped too.
+    assert_eq!(super::strip_html("x\u{061C}y\u{206C}z"), "xyz");
+}
+
+#[test]
 fn snapshot_file_paths_yields_file_list_content() {
     let snapshot = ClipboardSnapshot {
         sequence: crate::ClipboardSequence::content_hash("fl-1"),
