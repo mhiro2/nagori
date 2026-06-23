@@ -205,6 +205,11 @@ daemon, each entry is gated by the limits enforced in
   literal brackets are fine.
 - **256 KiB** compiled NFA budget and **1 MiB** lazy-DFA cache per
   pattern (`size_limit` / `dfa_size_limit` on `RegexBuilder`).
+- **128 patterns** in total (`MAX_USER_REGEX_COUNT`) — each pattern
+  runs against every capture, so the count is capped both when
+  settings are saved and again when the classifier is built, so no
+  list that bypassed validation can defeat the per-pattern limits in
+  aggregate.
 
 If a rule trips a limit, the Settings UI surfaces the offending
 line with a fix hint ("split across multiple lines", "flatten the

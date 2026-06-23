@@ -571,7 +571,49 @@ fn strip_html(html: &str) -> String {
         }
     }
     let decoded = decode_html_entities(&out);
-    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Drop control and bidirectional / zero-width format characters before
+    // compacting whitespace. A decoded numeric reference (`&#0;` → NUL,
+    // `&#x202E;` → RLO) or a literal one copied straight from the source
+    // markup would otherwise reach the preview and search document, where it
+    // can corrupt display, visually reorder text (Trojan-Source style), or
+    // spoof a log line. Whitespace controls are kept so the
+    // `split_whitespace` pass still sees word boundaries.
+    decoded
+        .chars()
+        .filter(|&c| !is_unsafe_text_char(c))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// True for characters that must never reach a preview or search document:
+/// control characters (other than whitespace, which the caller relies on for
+/// word boundaries) and the bidirectional / zero-width format characters
+/// covered by [`is_bidi_or_invisible_format`].
+fn is_unsafe_text_char(c: char) -> bool {
+    if c.is_whitespace() {
+        return false;
+    }
+    c.is_control() || is_bidi_or_invisible_format(c)
+}
+
+/// Bidirectional and zero-width / invisible format characters. Covers the
+/// LRM/RLM marks, the bidi embedding/override/isolate controls (the
+/// Trojan-Source family), the zero-width space/joiner family, the word joiner
+/// and invisible operators, and the BOM / zero-width no-break space. None of
+/// these are `char::is_control`, so they are listed explicitly.
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'                    // ALM (Arabic letter mark)
+            | '\u{200B}'..='\u{200F}' // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+            | '\u{206A}'..='\u{206F}' // deprecated bidi / format controls
+            | '\u{FEFF}'              // BOM / zero-width no-break space
+    )
 }
 
 /// Scan from `from` (the index just after a `<`) to the index just past the

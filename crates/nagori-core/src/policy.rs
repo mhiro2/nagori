@@ -3,9 +3,10 @@ use std::sync::OnceLock;
 use regex::{Regex, RegexBuilder};
 
 use crate::{
-    AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, RepresentationDataRef,
-    Result, Sensitivity, SensitivityReason, SourceApp, make_preview, normalize_text,
-    settings::{AppDenyRule, SecretHandling, SourceAppIdKind},
+    AppError, AppSettings, ClipboardContent, ClipboardEntry, ContentHash, PREVIEW_MAX_CHARS,
+    RepresentationDataRef, Result, Sensitivity, SensitivityReason, SourceApp, make_preview,
+    normalize_text,
+    settings::{AppDenyRule, MAX_USER_REGEX_COUNT, SecretHandling, SourceAppIdKind},
 };
 
 /// Hard upper bound on the source byte length of a single user-provided
@@ -90,6 +91,17 @@ impl SensitivityClassifier {
         // patterns are test-covered, so this only ever fires after an edit
         // breaks one.
         sensitive_regexes();
+        // Re-check the rule count here, not just in `AppSettings::validate`.
+        // Each pattern runs against every capture, so an unbounded denylist
+        // defeats the per-pattern DoS limits in aggregate. `validate` already
+        // caps the count before persistence, but this is the last line of
+        // defence for any path that bypasses validation (a migrated DB row, a
+        // hand-built fixture) before the classifier compiles the whole list.
+        if settings.regex_denylist.len() > MAX_USER_REGEX_COUNT {
+            return Err(AppError::Policy(format!(
+                "regex_denylist must have at most {MAX_USER_REGEX_COUNT} patterns",
+            )));
+        }
         let mut user_regexes = Vec::with_capacity(settings.regex_denylist.len());
         for pattern in &settings.regex_denylist {
             let compiled = compile_user_regex(pattern)?;
@@ -230,7 +242,7 @@ impl SensitivityClassifier {
         SensitivityClassification {
             sensitivity,
             redacted_preview: matches!(sensitivity, Sensitivity::Private | Sensitivity::Secret)
-                .then(|| make_preview(&self.redact(text), 180)),
+                .then(|| make_preview(&self.redact(text), PREVIEW_MAX_CHARS)),
             reasons,
         }
     }
@@ -320,7 +332,7 @@ impl SensitivityClassifier {
                 // gating the body behind `include_text` — never surfaces the
                 // raw secret.
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
-                entry.search.preview = make_preview(&self.redact(&raw), 180);
+                entry.search.preview = make_preview(&self.redact(&raw), PREVIEW_MAX_CHARS);
             }
             SecretHandling::StoreRedacted => {
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
@@ -332,7 +344,7 @@ impl SensitivityClassifier {
                 // keeps the standalone API self-contained either way. Match the
                 // preview cap used by `classify`'s `redacted_preview` so this
                 // yields the same scrubbed preview the daemon path produces.
-                entry.search.preview = make_preview(&redacted, 180);
+                entry.search.preview = make_preview(&redacted, PREVIEW_MAX_CHARS);
                 entry.search.tokens = redacted_normalized
                     .split_whitespace()
                     .map(ToOwned::to_owned)
@@ -615,14 +627,28 @@ fn redact_credit_cards(text: &str) -> String {
     credit_card_candidate_regex()
         .replace_all(text, |caps: &regex::Captures<'_>| {
             let matched = &caps[0];
-            let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
-            if (13..=19).contains(&digits.len()) && luhn_valid(&digits) {
+            if is_luhn_pan(matched) {
                 "[REDACTED]".to_owned()
             } else {
                 matched.to_owned()
             }
         })
         .into_owned()
+}
+
+/// True when `matched` — a digit run from `credit_card_candidate_regex`,
+/// possibly carrying single space/dash separators — is a 13–19 digit
+/// Luhn-valid PAN.
+///
+/// Shared by detection (`contains_credit_card`) and redaction
+/// (`redact_credit_cards`) so the two can never drift: a candidate the
+/// detector flags as a card is always one the redactor scrubs. Keeping the
+/// digit-length range and Luhn check in one place removes the risk of editing
+/// one side (e.g. the `13..=19` bound) and silently leaving a detected card in
+/// plaintext.
+fn is_luhn_pan(matched: &str) -> bool {
+    let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
+    (13..=19).contains(&digits.len()) && luhn_valid(&digits)
 }
 
 fn redact_full_body(text: &str) -> String {
@@ -656,10 +682,9 @@ fn contains_credit_card(text: &str) -> bool {
     // CVV digits still classifies as Secret. Earlier whole-string Luhn made
     // `4111 1111 1111 1111 exp 12/30 cvv 123` come out Public — the raw
     // PAN then bypassed `apply_secret_handling` and landed on disk.
-    credit_card_candidate_regex().find_iter(text).any(|m| {
-        let digits: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
-        (13..=19).contains(&digits.len()) && luhn_valid(&digits)
-    })
+    credit_card_candidate_regex()
+        .find_iter(text)
+        .any(|m| is_luhn_pan(m.as_str()))
 }
 
 fn luhn_valid(digits: &str) -> bool {

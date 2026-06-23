@@ -1,4 +1,5 @@
 use crate::EntryFactory;
+use crate::settings::MAX_USER_REGEX_COUNT;
 
 use super::super::*;
 
@@ -43,6 +44,36 @@ fn user_regex_compile_error_does_not_echo_pattern_body() {
         msg.contains("12 bytes"),
         "compile error should report the byte length: {msg}"
     );
+}
+
+#[test]
+fn user_regex_over_count_limit_rejected_by_classifier() {
+    // `AppSettings::validate` caps the rule count before persistence, but the
+    // classifier must enforce the same ceiling itself: a migrated DB row or a
+    // hand-built fixture can reach `try_new` without ever passing validation,
+    // and each pattern runs against every capture. The count guard is the last
+    // line of defence against an unbounded list defeating the per-pattern DoS
+    // limits in aggregate.
+    let settings = AppSettings {
+        regex_denylist: vec!["a".to_owned(); MAX_USER_REGEX_COUNT + 1],
+        ..AppSettings::default()
+    };
+    let err = SensitivityClassifier::try_new(settings).unwrap_err();
+    assert!(
+        matches!(err, AppError::Policy(ref msg) if msg.contains("at most")),
+        "expected count-limit Policy error, got {err:?}",
+    );
+}
+
+#[test]
+fn user_regex_at_count_limit_builds() {
+    // Exactly at the cap must still build — the guard rejects "more than", not
+    // "at" the limit.
+    let settings = AppSettings {
+        regex_denylist: vec!["a".to_owned(); MAX_USER_REGEX_COUNT],
+        ..AppSettings::default()
+    };
+    SensitivityClassifier::try_new(settings).expect("count at the limit builds");
 }
 
 #[test]
