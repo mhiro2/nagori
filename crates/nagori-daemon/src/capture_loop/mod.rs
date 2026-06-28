@@ -459,6 +459,49 @@ enum Admission {
     Dropped,
 }
 
+/// Outcome of [`CaptureLoop::resolve_secure_focus`].
+///
+/// The two skip variants differ in *why* we skip, which decides whether the
+/// skipped clip can be recovered once visibility returns:
+///
+/// * `Secure` — we positively know the focus is a secure field (AX reported
+///   `AXSecureTextField`) or the frontmost is a system password UI on the
+///   bundle-override list. The clip is deliberately kept out of history even
+///   after focus leaves the field, so the caller anchors `last_sequence` and
+///   never reconsiders it. This is the password-protection contract.
+/// * `VisibilityLost` — we *cannot tell* whether the focus is secure because
+///   AX has been erroring past the fail-closed threshold. Skipping is the safe
+///   default while blind, but a foreign clip the user copied during the outage
+///   is otherwise stranded — still on the OS clipboard, never in history. So
+///   the caller arms `force_content_check` (and does *not* anchor
+///   `last_sequence`) instead, mirroring the wake-gap resync: the first sighted
+///   tick re-reads the body and content-hash-checks it, recovering a genuinely
+///   new clip while still suppressing a duplicate of the last captured one.
+enum SecureOutcome {
+    Open,
+    Secure,
+    VisibilityLost,
+}
+
+/// The clip skipped on the most recent fail-closed
+/// ([`SecureOutcome::VisibilityLost`]) tick, kept so the recovery tick can
+/// attribute it to the app that was frontmost when it was *copied* rather than
+/// whatever is frontmost once AX answers again.
+///
+/// Without this, a clip copied from a password-manager (denylisted) source
+/// during an AX outage would be recovered and classified against the
+/// recovery-tick frontmost — silently bypassing the source denylist. The
+/// source is sampled via `frontmost_app` (`NSWorkspace`), which does not depend
+/// on Accessibility, so it stays reliable even while the secure-field AX probe
+/// is the thing erroring. Keyed by sequence so it is only applied to a clip at
+/// the same sequence; it is read non-consumingly (the recovery body read may
+/// abort to a retry and re-read at the same sequence) and dropped on the next
+/// non-forced tick, once the clip it described is decided or superseded.
+struct SecureRecovery {
+    sequence: ClipboardSequence,
+    source: Option<nagori_core::SourceApp>,
+}
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
@@ -489,6 +532,9 @@ pub struct CaptureLoop<R, E, A> {
     /// outage can't silently let password keystrokes through. Reset on
     /// the next successful AX query.
     consecutive_secure_ax_failures: u32,
+    /// Clip skipped on the most recent fail-closed tick, awaiting recovery once
+    /// AX answers again — see [`SecureRecovery`]. `None` outside an AX outage.
+    secure_recovery: Option<SecureRecovery>,
     search_cache: Option<SharedSearchCache>,
     /// Wall-clock anchor for the previous `capture_once` invocation. Used to
     /// spot host-paused gaps (sleep / suspend) and resync the dedup baseline.
@@ -539,6 +585,7 @@ where
             window: None,
             failures: CaptureFailurePolicy::new(),
             consecutive_secure_ax_failures: 0,
+            secure_recovery: None,
             search_cache: None,
             last_tick_at: None,
             secure_focus_fail_closed_enabled: true,
@@ -739,9 +786,9 @@ where
     /// forces secure regardless of the AX result, so we don't depend on AX
     /// accurately reporting on windows whose entire purpose is to defeat
     /// keyloggers.
-    async fn resolve_secure_focus(&mut self) -> (Option<nagori_core::SourceApp>, bool) {
+    async fn resolve_secure_focus(&mut self) -> (Option<nagori_core::SourceApp>, SecureOutcome) {
         let Some(window) = &self.window else {
-            return (None, false);
+            return (None, SecureOutcome::Open);
         };
         let (front_res, secure_res) =
             tokio::join!(window.frontmost_app(), window.frontmost_focused_is_secure(),);
@@ -750,30 +797,156 @@ where
             .as_ref()
             .and_then(|src| src.bundle_id.as_deref())
             .is_some_and(|bid| SECURE_FOCUS_BUNDLE_OVERRIDES.contains(&bid));
-        let secure_focus = match secure_res {
+        let outcome = match secure_res {
             Ok(value) => {
                 self.consecutive_secure_ax_failures = 0;
-                value || bundle_override
+                if value || bundle_override {
+                    SecureOutcome::Secure
+                } else {
+                    SecureOutcome::Open
+                }
             }
             Err(err) => {
                 self.consecutive_secure_ax_failures =
                     self.consecutive_secure_ax_failures.saturating_add(1);
-                let ax_threshold_tripped = self.secure_focus_fail_closed_enabled
-                    && self.consecutive_secure_ax_failures >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD;
-                if ax_threshold_tripped || bundle_override {
+                if bundle_override {
+                    // A frontmost on the override list is a *positively
+                    // identified* system password UI, so honour it as a
+                    // genuine secure skip even while AX is blind — its secret
+                    // must never be recovered later.
                     warn!(
                         error = %err,
                         consecutive_failures = self.consecutive_secure_ax_failures,
                         bundle_override,
                         "secure_focus_fail_closed",
                     );
-                    true
+                    SecureOutcome::Secure
+                } else if self.secure_focus_fail_closed_enabled
+                    && self.consecutive_secure_ax_failures >= SECURE_FOCUS_FAIL_CLOSED_THRESHOLD
+                {
+                    // Sustained AX outage: skip while blind, but recoverable —
+                    // we can't tell this clip is actually secret. The warn +
+                    // audit are emitted once per skipped clip in
+                    // `skip_for_secure_focus`, not here: this branch runs every
+                    // tick while blind (the recovery path arms
+                    // `force_content_check`, which bypasses the cheap dedup), so
+                    // logging here would flood at the poll cadence.
+                    SecureOutcome::VisibilityLost
                 } else {
-                    false
+                    SecureOutcome::Open
                 }
             }
         };
-        (source, secure_focus)
+        (source, outcome)
+    }
+
+    /// Apply a [`SecureOutcome`] to the dedup state, returning `true` when the
+    /// clip must be skipped (the caller then returns `Ok(None)`).
+    ///
+    /// The two skip variants take deliberately different dedup actions — see
+    /// [`SecureOutcome`]: a positively-secure clip is anchored and gone for
+    /// good, while a fail-closed (visibility-lost) clip arms
+    /// `force_content_check` so it is re-examined and recoverable once AX
+    /// answers again. `frontmost_source` is the app frontmost *now* — for a
+    /// visibility-lost skip we stash it so a later recovery attributes the clip
+    /// to where it was copied, not to wherever focus has since moved.
+    async fn skip_for_secure_focus(
+        &mut self,
+        outcome: SecureOutcome,
+        sequence: &ClipboardSequence,
+        frontmost_source: Option<&nagori_core::SourceApp>,
+    ) -> bool {
+        match outcome {
+            SecureOutcome::Open => false,
+            SecureOutcome::Secure => {
+                // Positively secure (AX reported `AXSecureTextField`, or the
+                // frontmost is a system password UI). Anchor `last_sequence`
+                // so a steady-state focus on the same field doesn't loop the
+                // AX query every poll for the same clip, and so the clip stays
+                // out of history even after focus leaves the field. Clear
+                // `force_content_check` (and drop any pending fail-closed
+                // recovery): a positively-secure clip must never be re-read
+                // and recovered, so we must not let a still-armed wake-gap /
+                // fail-closed one-shot reintroduce it once focus leaves the
+                // field. The narrow cost is that a wake-gap resync coinciding
+                // with a secure field loses its content-hash recheck for the
+                // *next* clip — astronomically rarer than leaking a password.
+                info!("capture_skipped reason=secure_field");
+                let _ = self
+                    .audit
+                    .record("capture_skipped", None, Some("secure_field"))
+                    .await;
+                self.dedup.last_sequence = Some(sequence.clone());
+                self.dedup.force_content_check = false;
+                self.dedup.pristine = false;
+                self.secure_recovery = None;
+                true
+            }
+            SecureOutcome::VisibilityLost => {
+                // AX has been erroring past the fail-closed threshold, so we
+                // skip while blind — but we cannot tell this clip is actually
+                // secret. Arm the one-shot body re-read instead of anchoring
+                // `last_sequence` (the wake-gap pattern), so the first tick
+                // after AX recovers re-examines whatever is still on the
+                // clipboard and captures a foreign clip the user copied during
+                // the outage — otherwise stranded: present on the OS clipboard,
+                // never in history. The content-hash cross-check on the
+                // recovery tick still suppresses a genuine duplicate of the
+                // last captured clip.
+                //
+                // Remember this clip's source + sequence on its first blind
+                // sighting so the recovery tick attributes it to where it was
+                // copied (keeping it subject to the source denylist) rather
+                // than to the recovery-tick frontmost. The same first-sighting
+                // guard coalesces the warn + audit: this branch runs every poll
+                // while blind (force_content_check bypasses the cheap dedup),
+                // so logging unconditionally would flood the log and
+                // `audit_events` at the poll cadence.
+                let first_sighting = self
+                    .secure_recovery
+                    .as_ref()
+                    .is_none_or(|rec| &rec.sequence != sequence);
+                if first_sighting {
+                    warn!(
+                        consecutive_failures = self.consecutive_secure_ax_failures,
+                        "capture_skipped reason=secure_field_fail_closed"
+                    );
+                    let _ = self
+                        .audit
+                        .record("capture_skipped", None, Some("secure_field_fail_closed"))
+                        .await;
+                    self.secure_recovery = Some(SecureRecovery {
+                        sequence: sequence.clone(),
+                        source: frontmost_source.cloned(),
+                    });
+                }
+                self.dedup.force_content_check = true;
+                self.dedup.pristine = false;
+                true
+            }
+        }
+    }
+
+    /// The source to attribute a freshly-read clip to.
+    ///
+    /// Prefers the source remembered when this clip was first skipped during an
+    /// AX outage (see [`SecureRecovery`]) so a clip the user copied while blind
+    /// is attributed to — and denylist-checked against — where it was copied,
+    /// not the recovery-tick frontmost. Read non-consumingly: the body read may
+    /// still abort to a retry (empty snapshot mid-write, or a dedup rollback)
+    /// and the re-read at the same sequence must see the same source; a stale
+    /// entry (different sequence) is dropped on the next non-forced tick. A
+    /// `Some(None)` — remembered-but-unknown source — stays unknown rather than
+    /// falling back to the recovery-tick frontmost.
+    fn recovered_capture_source(
+        &self,
+        snapshot_sequence: &ClipboardSequence,
+        frontmost_source: Option<nagori_core::SourceApp>,
+    ) -> Option<nagori_core::SourceApp> {
+        self.secure_recovery
+            .as_ref()
+            .filter(|rec| &rec.sequence == snapshot_sequence)
+            .map_or(frontmost_source, |rec| rec.source.clone())
     }
 
     /// Honour an owner-declared exclusion marker (nspasteboard.org Concealed /
@@ -962,7 +1135,28 @@ where
         // so this is cheap to do every poll.
         let settings = Arc::clone(&self.settings);
 
+        // Whether a retry was already armed *before* `detect_wake_gap` can set
+        // `force_content_check` for an unrelated reason (a sleep/wake resync).
+        // This — not the post-wake-gap flag — is what tells the stale
+        // `secure_recovery` cleanup below whether the previous clip was decided
+        // (clear) or is mid-retry (keep): a wake-gap tick landing right after a
+        // decided fail-closed recovery must still drop the now-stale source, or
+        // a lapped `changeCount` could re-apply it to a different clip.
+        let retry_armed_at_tick_start = self.dedup.force_content_check;
+
         self.detect_wake_gap(now).await;
+
+        // Drop a stale fail-closed recovery source once the clip it described is
+        // decided. A retry that must preserve it (empty snapshot mid-write,
+        // dedup rollback) leaves the flag armed *before* this tick, so we gate on
+        // the tick-start value rather than the post-`detect_wake_gap` one.
+        // Placed before the `capture_enabled` check and the sequence read so an
+        // early return there can't strand a stale source into the next tick,
+        // where a lapped `changeCount` could re-apply it to a different clip (a
+        // denylist bypass) — see [`SecureRecovery`].
+        if !retry_armed_at_tick_start {
+            self.secure_recovery = None;
+        }
 
         if !settings.capture_enabled {
             return Ok(None);
@@ -1037,25 +1231,11 @@ where
             self.seed_pristine_baseline().await?;
             return Ok(None);
         }
-        let (frontmost_source, secure_focus) = self.resolve_secure_focus().await;
-
-        // Anchor `last_sequence` so a steady-state focus on the same
-        // field doesn't loop the AX query every poll for the same
-        // clip. We deliberately do *not* clear `force_content_check`
-        // here: the wake-gap one-shot was armed to defend against a
-        // lapped pasteboard `changeCount`, which only matters for the
-        // next *captured* clip. Leaving the flag set means that when
-        // the user moves out of the secure field, the very next tick
-        // still does the content-hash cross-check before trusting the
-        // dedup.
-        if secure_focus {
-            info!("capture_skipped reason=secure_field");
-            let _ = self
-                .audit
-                .record("capture_skipped", None, Some("secure_field"))
-                .await;
-            self.dedup.last_sequence = Some(sequence);
-            self.dedup.pristine = false;
+        let (frontmost_source, secure_outcome) = self.resolve_secure_focus().await;
+        if self
+            .skip_for_secure_focus(secure_outcome, &sequence, frontmost_source.as_ref())
+            .await
+        {
             return Ok(None);
         }
 
@@ -1110,7 +1290,7 @@ where
             .dedup
             .begin_clip(snapshot.sequence.clone(), force_content_check);
         if snapshot.source.is_none() {
-            snapshot.source = frontmost_source;
+            snapshot.source = self.recovered_capture_source(&snapshot.sequence, frontmost_source);
         }
 
         let Some(entry) = EntryFactory::from_snapshot(snapshot) else {

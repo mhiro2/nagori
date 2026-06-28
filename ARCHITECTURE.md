@@ -396,16 +396,24 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   sequence, and never hashes the body.
 - After frontmost is captured, the loop asks the platform whether the
   frontmost app's currently-focused element is a secure text field
-  (`kAXSecureTextField` role/subrole). When true, the clip is dropped
-  before the body is even read so password-input keystrokes never reach
-  storage. A single AX error fails open (treated as "not secure") so a
-  transient FFI hiccup doesn't stall capture; sustained errors past
-  `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` flip to fail-closed (assume
-  secure, skip capture) on the assumption that a permanent outage means
-  Accessibility was revoked or the AX subsystem is wedged. A
-  `SECURE_FOCUS_BUNDLE_OVERRIDES` list also forces fail-closed when the
-  frontmost is a known system password UI (e.g. `com.apple.SecurityAgent`)
-  whose AX state is deliberately scrubbed. The
+  (`kAXSecureTextField` role/subrole). A *positively* secure result — AX
+  reports the field, or the frontmost is on the
+  `SECURE_FOCUS_BUNDLE_OVERRIDES` list of system password UIs (e.g.
+  `com.apple.SecurityAgent`) whose AX state is deliberately scrubbed —
+  drops the clip before the body is even read and anchors the sequence, so
+  password input stays out of history even after focus leaves the field. A
+  single AX error fails open (treated as "not secure") so a transient FFI
+  hiccup doesn't stall capture. Sustained errors past
+  `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` mean visibility is *lost*, not that
+  the clip is known to be secret: the loop still skips while blind, but
+  instead of anchoring the sequence it arms the same content re-read the
+  sleep/wake resync uses, so once AX answers again the clip still on the
+  clipboard is re-examined and captured rather than silently stranded
+  (present on the OS clipboard, missing from history). A clip recovered this
+  way is attributed to the app that was frontmost when it was first skipped
+  — sampled via `frontmost_app`, which needs no Accessibility and so stays
+  reliable while the secure-field probe is the thing erroring — so a
+  password-manager source stays subject to the denylist on recovery. The
   `SensitivityClassifier` secret detector and password-manager bundle
   denylist still run as the second line of defence. The macOS impl
   bounds the per-element AX trip via `AXUIElementSetMessagingTimeout`
