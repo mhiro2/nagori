@@ -22,7 +22,7 @@ catalogs:
     vitest: 4.1.8
   tooling:
     "@types/node": 24.13.2
-    "@typescript/native-preview": 7.0.0-dev.20260611.2
+    "@typescript/native-preview": 7.0.0-dev.20260628.1
     esbuild: 0.28.0
     oxfmt: 0.56.0
     oxlint: 1.71.0
