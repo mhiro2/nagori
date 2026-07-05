@@ -15,7 +15,7 @@ catalogs:
     "@tauri-apps/cli": 2.11.4
   testing:
     "@testing-library/jest-dom": 6.9.1
-    "@testing-library/svelte": 5.3.1
+    "@testing-library/svelte": 5.4.2
     "@testing-library/user-event": 14.6.1
     "@vitest/coverage-v8": 4.1.8
     jsdom: 29.1.1
