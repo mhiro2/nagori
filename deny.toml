@@ -48,6 +48,12 @@ ignore = [
   { id = "RUSTSEC-2025-0081", reason = "transitive via tauri-utils -> urlpattern 0.3.0; upstream fixed in urlpattern 0.6" },
   { id = "RUSTSEC-2025-0098", reason = "transitive via tauri-utils -> urlpattern 0.3.0; upstream fixed in urlpattern 0.6" },
   { id = "RUSTSEC-2025-0100", reason = "transitive via tauri-utils -> urlpattern 0.3.0; upstream fixed in urlpattern 0.6" },
+
+  # quick-xml (DoS / quadratic run time)
+  # Path: quick-xml 0.37.5 and 0.39.4 pulled transitively via the Tauri 2 stack (tao/muda/tauri-utils).
+  # Upstream fix is quick-xml >= 0.41.0, but the Tauri dependency chain still pins 0.37/0.39.
+  { id = "RUSTSEC-2026-0194", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
+  { id = "RUSTSEC-2026-0195", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
 ]
 
 [bans]

@@ -111,8 +111,7 @@
       rows="4"
       bind:value={appDenylistPatternsText}
       disabled={denylistDisabled || undefined}
-      oninput={() => scheduleSave(debounceTextareaMs)}
-    ></textarea>
+      oninput={() => scheduleSave(debounceTextareaMs)}></textarea>
     <span class="help">{t.settings.privacy.appDenylistPatternsHelp}</span>
   </label>
   <label class="stack">
@@ -124,8 +123,7 @@
       aria-invalid={regexDenylistErrors.length > 0 || undefined}
       aria-describedby={regexDenylistErrors.length > 0
         ? 'regex-denylist-help regex-denylist-errors regex-denylist-autosave'
-        : 'regex-denylist-help regex-denylist-autosave'}
-    ></textarea>
+        : 'regex-denylist-help regex-denylist-autosave'}></textarea>
     <span class="help" id="regex-denylist-help">
       {t.settings.privacy.regexDenylistHelp}
     </span>
