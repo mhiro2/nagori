@@ -17,6 +17,11 @@ import {
 import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
 import { capabilitiesState } from '../stores/capabilities.svelte';
 import {
+  captureSkippedState,
+  clearCaptureSkip,
+  recordCaptureSkip,
+} from '../stores/captureSkipped.svelte';
+import {
   clearPasteDiagnostics,
   pasteDiagnosticsState,
   recordPasteFailure,
@@ -106,6 +111,7 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   clearOnQuit: false,
   permanentDeleteOnDelete: false,
   blockSensitiveCaptures: false,
+  otpDetection: true,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',
@@ -127,6 +133,7 @@ beforeEach(() => {
   capabilitiesState.capabilities = undefined;
   capabilitiesState.loaded = false;
   clearPasteDiagnostics();
+  clearCaptureSkip();
 });
 
 afterEach(cleanup);
@@ -426,5 +433,44 @@ describe('StatusBar paste diagnostic', () => {
     const { queryByTestId, getByRole } = render(StatusBar, { props });
     expect(queryByTestId('paste-diagnostic-chip')).toBeNull();
     expect(getByRole('button', { name: /Accessibility permission required/ })).toBeTruthy();
+  });
+});
+
+describe('StatusBar capture-skip notice', () => {
+  const props = { entryCount: 5, elapsedMs: undefined, loading: false, errorMessage: undefined };
+
+  it('shows the OTP-specific hint when the reasons include a one-time-code match', () => {
+    recordCaptureSkip({
+      kind: 'secret_redacted_dropped',
+      reasons: ['one_time_password_pattern'],
+    });
+    const { getByTestId } = render(StatusBar, { props });
+    const chip = getByTestId('capture-skip-chip');
+    expect(chip.getAttribute('data-kind')).toBe('secret_redacted_dropped');
+    expect(chip.getAttribute('title')).toMatch(/one-time code/);
+  });
+
+  it('shows the generic secret hint for a blocked capture', () => {
+    recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
+    const { getByTestId } = render(StatusBar, { props });
+    const chip = getByTestId('capture-skip-chip');
+    expect(chip.getAttribute('data-kind')).toBe('secret_blocked');
+    expect(chip.getAttribute('title')).toMatch(/classified as a secret/);
+  });
+
+  it('dismisses the notice when the chip is clicked', async () => {
+    recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
+    const { getByTestId, queryByTestId } = render(StatusBar, { props });
+    await fireEvent.click(getByTestId('capture-skip-chip'));
+    expect(captureSkippedState.notice).toBeNull();
+    expect(queryByTestId('capture-skip-chip')).toBeNull();
+  });
+
+  it('defers to a genuine paste-failure chip (privacy notice is lower priority)', () => {
+    recordPasteFailure({ reason: 'timeout', message: 'timed out' });
+    recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
+    const { getByTestId, queryByTestId } = render(StatusBar, { props });
+    expect(getByTestId('paste-diagnostic-chip')).toBeTruthy();
+    expect(queryByTestId('capture-skip-chip')).toBeNull();
   });
 });

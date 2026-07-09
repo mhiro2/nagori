@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use nagori_core::{AppSettings, EntryId, Result};
 use nagori_daemon::{
-    CaptureLoop, CliIpcConfig, MaintenanceHealth, MaintenanceReport, MaintenanceService,
-    NagoriRuntime, ShutdownHandle, StartupHealth, WorkerRestart, spawn_cli_ipc_supervisor,
-    supervise_worker,
+    CaptureLoop, CaptureSkipNotice, CliIpcConfig, MaintenanceHealth, MaintenanceReport,
+    MaintenanceService, NagoriRuntime, ShutdownHandle, StartupHealth, WorkerRestart,
+    spawn_cli_ipc_supervisor, supervise_worker,
 };
 use nagori_platform::{ClipboardReader, WindowBehavior};
 
@@ -327,12 +327,25 @@ fn spawn_capture_supervisor(
                         // / unsupported).
                         runtime_for_notify.notify_semantic_capture();
                     });
+                    let app_for_skip_event = app.clone();
+                    let capture_skip_notifier = Arc::new(move |notice: CaptureSkipNotice| {
+                        use tauri::Emitter;
+
+                        let _ = app_for_skip_event.emit(
+                            crate::CAPTURE_SKIPPED_EVENT,
+                            serde_json::json!({
+                                "kind": notice.kind.token(),
+                                "reasons": notice.reasons,
+                            }),
+                        );
+                    });
                     let mut capture =
                         CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                             .with_window(window)
                             .with_search_cache(search_cache)
                             .with_capture_health(capture_health)
-                            .with_capture_notifier(capture_notifier);
+                            .with_capture_notifier(capture_notifier)
+                            .with_capture_skip_notifier(capture_skip_notifier);
                     let shutdown_signal = async move { worker_shutdown.cancelled().await };
                     if let Err(err) = capture
                         .run_polling_with_settings(

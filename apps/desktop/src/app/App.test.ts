@@ -11,6 +11,7 @@ vi.mock('./lib/tauri', () => ({
   TAURI_EVENTS: {
     navigate: 'nagori://navigate',
     pasteFailed: 'nagori://paste_failed',
+    captureSkipped: 'nagori://capture_skipped',
     hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
     hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
     settingsChanged: 'nagori://settings_changed',
@@ -55,6 +56,7 @@ import App from './App.svelte';
 import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
 import type { AppSettings, PermissionStatus } from './lib/types';
+import { captureSkippedState, clearCaptureSkip } from './stores/captureSkipped.svelte';
 import {
   closeEntryContextMenu,
   entryContextMenuState,
@@ -80,6 +82,7 @@ beforeEach(() => {
   settingsState.loaded = false;
   dismissHotkeyFailure();
   clearPasteDiagnostics();
+  clearCaptureSkip();
   showPalette();
 });
 
@@ -157,6 +160,26 @@ const captureSettingsChangedHandler = (): { fire: (payload: AppSettings) => void
   return {
     fire: (payload) => {
       if (!slot.handler) throw new Error('settings_changed handler not registered');
+      slot.handler(payload);
+    },
+  };
+};
+
+// Capture the `nagori://capture_skipped` handler so a test can fire a
+// dropped-capture notice into App's palette-window listener.
+type CaptureSkippedPayload = { kind?: string; reasons?: string[] };
+const captureCaptureSkippedHandler = (): { fire: (payload: CaptureSkippedPayload) => void } => {
+  const slot: { handler?: (payload: CaptureSkippedPayload) => void } = {};
+  vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
+    if (event === 'nagori://capture_skipped') {
+      slot.handler = handler as (payload: CaptureSkippedPayload) => void;
+    }
+    onReady?.();
+    return () => {};
+  });
+  return {
+    fire: (payload) => {
+      if (!slot.handler) throw new Error('capture_skipped handler not registered');
       slot.handler(payload);
     },
   };
@@ -606,6 +629,29 @@ describe('App auto-paste toast rules', () => {
     const { findByText } = render(App);
     fire({ error: 'paste rejected after revoke' });
     await findByText('paste rejected after revoke');
+  });
+});
+
+describe('App capture_skipped propagation', () => {
+  it('records a dropped-capture notice into the store', async () => {
+    const { fire } = captureCaptureSkippedHandler();
+    render(App);
+    fire({ kind: 'secret_redacted_dropped', reasons: ['one_time_password_pattern'] });
+    await waitFor(() => {
+      expect(captureSkippedState.notice).toEqual({
+        kind: 'secret_redacted_dropped',
+        reasons: ['one_time_password_pattern'],
+      });
+    });
+  });
+
+  it('records an unknown kind from a newer daemon as a generic notice', async () => {
+    const { fire } = captureCaptureSkippedHandler();
+    render(App);
+    fire({ kind: 'something_new', reasons: [] });
+    await waitFor(() => {
+      expect(captureSkippedState.notice).toEqual({ kind: 'something_new', reasons: [] });
+    });
   });
 });
 

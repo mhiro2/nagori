@@ -159,6 +159,11 @@ export const fr: Messages = {
         unknown: 'Échec du collage automatique. Copié — collez manuellement.',
       },
     },
+    captureSkipped: {
+      label: '⚠ Copie non enregistrée',
+      otp: "La dernière copie ressemblait à un code à usage unique et n'a pas été enregistrée.",
+      secret: "La dernière copie a été classée comme confidentielle et n'a pas été enregistrée.",
+    },
   },
   actionMenu: {
     title: 'Actions rapides',
@@ -374,6 +379,9 @@ export const fr: Messages = {
       blockSensitiveCaptures: 'Ne jamais enregistrer les entrées privées ou secrètes',
       blockSensitiveCapturesHelp:
         'N’enregistre aucune entrée détectée comme Private ou Secret, par exemple les mots de passe ou les clés API. Plus strict que le mode de gestion des secrets ci-dessus, qui peut encore conserver une copie masquée.',
+      otpDetection: 'Détecter les codes à usage unique',
+      otpDetectionHelp:
+        'Traite une entrée composée uniquement d’un nombre de 6 à 8 chiffres comme un code à usage unique et la masque ou la bloque comme les autres secrets.',
       captureKinds: 'Types de capture',
       captureKindsHelp: 'Les types désactivés sont ignorés avant la classification des secrets.',
       captureKindOptions: {

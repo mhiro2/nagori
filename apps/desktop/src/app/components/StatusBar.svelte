@@ -6,6 +6,7 @@
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
+  import { captureSkippedState, clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { clearPasteDiagnostics, pasteDiagnosticsState } from '../stores/pasteDiagnostics.svelte';
   import { accessibilityState, captureEnabled, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
@@ -140,6 +141,27 @@
     }
   });
 
+  // Privacy notice: the daemon *dropped* the most recent copy because the
+  // built-in secret policy refused to store it (an OTP / fully-redacted body
+  // under `store_redacted`, or `secret_handling = block`). App.svelte records
+  // it; we leave a dismissible chip so the user knows the copy was NOT saved,
+  // and it clears itself on the next real capture. Lower priority than the
+  // genuine failure/accessibility chips below — those describe something the
+  // user must act on, while this is an informational "the last copy is not in
+  // history" note, so it only shows when neither of those is present.
+  const captureSkip = $derived(captureSkippedState.notice);
+  const showCaptureSkip = $derived(
+    captureSkip !== null && !showPasteDiagnostic && !showAccessibilityWarning,
+  );
+  // OTP-shaped copies get a copy-specific line; every other secret (and the
+  // `secret_blocked` kind) uses the generic message.
+  const captureSkipHint = $derived.by((): string => {
+    if (!captureSkip) return '';
+    return captureSkip.reasons.includes('one_time_password_pattern')
+      ? t.status.captureSkipped.otp
+      : t.status.captureSkipped.secret;
+  });
+
   const openSetup = (): void => {
     // Standalone Settings window under Tauri (own decorations, no
     // always-on-top). The `'setup'` route hint asks SettingsView to land
@@ -230,6 +252,22 @@
       >
         {t.status.autoPasteOffShort}
       </button>
+    {:else if showCaptureSkip}
+      <!-- Lowest-priority left-column chip: a privacy notice that the most
+           recent copy was dropped by the secret policy. Click dismisses it;
+           the localized (OTP-specific or generic) explanation rides in the
+           title, and the chip clears itself on the next real capture. -->
+      <button
+        type="button"
+        class="chip warning-chip"
+        data-testid="capture-skip-chip"
+        data-kind={captureSkip?.kind}
+        title={captureSkipHint}
+        aria-label={`${t.status.captureSkipped.label}: ${captureSkipHint}`}
+        onclick={clearCaptureSkip}
+      >
+        {t.status.captureSkipped.label}
+      </button>
     {/if}
   </span>
   <span class="right">
@@ -246,10 +284,11 @@
       {capture ? t.status.captureOn : t.status.capturePaused}
     </button>
     <!-- Keyboard hints are the lowest-priority row content: drop them while
-         a left-column warning chip (paste diagnostic or accessibility) is
-         present so the bar never wraps on a narrow palette
-         (priority: warning > capture > summary > hints). -->
-    {#if !showAccessibilityWarning && !showPasteDiagnostic}
+         a left-column warning chip (paste diagnostic, accessibility, or the
+         capture-skip privacy notice) is present so the bar never wraps on a
+         narrow palette
+         (priority: paste/accessibility warning > capture-skip notice > capture > summary > hints). -->
+    {#if !showAccessibilityWarning && !showPasteDiagnostic && !showCaptureSkip}
       <span class="hints">
         <kbd>↑↓</kbd>{t.palette.hints.navigate}
         <kbd>Enter</kbd>{t.palette.hints.paste}

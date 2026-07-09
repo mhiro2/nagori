@@ -102,6 +102,7 @@ import { closePalette, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
 import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../lib/types';
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
+import { captureSkippedState, recordCaptureSkip } from '../stores/captureSkipped.svelte';
 import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
@@ -225,6 +226,24 @@ describe('Palette', () => {
     handler?.({ entryId: 'entry-id' });
 
     expect(refreshCurrent).toHaveBeenCalled();
+  });
+
+  it('clears a capture-skip notice when a new capture stores an entry', () => {
+    recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
+    expect(captureSkippedState.notice).not.toBeNull();
+
+    let handler: ((payload: { entryId: string }) => void) | undefined;
+    vi.mocked(subscribe).mockImplementation((event, next) => {
+      if (event === TAURI_EVENTS.clipboardChanged) {
+        handler = next as (payload: { entryId: string }) => void;
+      }
+      return () => undefined;
+    });
+
+    render(Palette);
+    handler?.({ entryId: 'entry-id' });
+
+    expect(captureSkippedState.notice).toBeNull();
   });
 
   it('backfills via onReady so emits during attach are not lost', () => {

@@ -87,6 +87,7 @@ const baseSettings = (onboarding: OnboardingSettings): AppSettings => ({
   clearOnQuit: false,
   permanentDeleteOnDelete: false,
   blockSensitiveCaptures: false,
+  otpDetection: true,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',

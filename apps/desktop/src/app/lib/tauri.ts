@@ -88,6 +88,13 @@ export const TAURI_EVENTS = {
   // Emitted after the capture loop inserts a new clipboard entry. Payload:
   // `{ entryId: string }`.
   clipboardChanged: 'nagori://clipboard_changed',
+  // Emitted when the capture loop drops a copy the built-in secret policy
+  // refuses to store (OTP-shaped / fully-redacted under the default
+  // `store_redacted`, or `secret_handling = block`). The StatusBar leaves a
+  // dismissible chip so the user knows the copy was NOT saved. Payload:
+  // `{ kind: 'secret_redacted_dropped' | 'secret_blocked', reasons: string[] }`.
+  // Keep in lockstep with `CAPTURE_SKIPPED_EVENT` in `src-tauri/src/lib.rs`.
+  captureSkipped: 'nagori://capture_skipped',
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
   // Emitted after a previously failed global-shortcut binds successfully

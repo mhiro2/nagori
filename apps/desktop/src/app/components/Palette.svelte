@@ -17,6 +17,7 @@
     quickLookAvailable,
     refreshCapabilities,
   } from '../stores/capabilities.svelte';
+  import { clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
@@ -82,6 +83,12 @@
     const offClipboardChanged = subscribe<{ entryId: string }>(
       TAURI_EVENTS.clipboardChanged,
       () => {
+        // A capture (or IPC mutation) landed, so the "your last copy was not
+        // saved" chip no longer describes the most recent activity — drop it.
+        // Both event variants (a real entry capture and the IPC-mutation
+        // refresh) flow through here; clearing on either is acceptable since
+        // any of them means fresher, stored activity than the skipped copy.
+        clearCaptureSkip();
         void refreshCurrent();
       },
       // Backfill any capture that landed between palette mount and

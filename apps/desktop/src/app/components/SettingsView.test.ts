@@ -76,6 +76,7 @@ const baseSettings = (): AppSettings => ({
   clearOnQuit: false,
   permanentDeleteOnDelete: false,
   blockSensitiveCaptures: false,
+  otpDetection: true,
   captureInitialClipboardOnLaunch: true,
   autoUpdateCheck: true,
   updateChannel: 'stable',
@@ -702,6 +703,23 @@ describe('SettingsView', () => {
     const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
     expect(sent?.secretHandling).toBe('store_full');
     confirmSpy.mockRestore();
+  });
+
+  it('saves the OTP detection toggle from the Privacy tab', async () => {
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { findByRole, getByLabelText } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    await fireEvent.click(privacyTab);
+
+    const otpCheckbox = getByLabelText('Detect one-time codes') as HTMLInputElement;
+    expect(otpCheckbox.checked).toBe(true);
+    await fireEvent.click(otpCheckbox);
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalled();
+    });
+    const sent = vi.mocked(updateSettings).mock.calls[0]?.[0];
+    expect(sent?.otpDetection).toBe(false);
   });
 
   it('renders the tauriRequired hint outside the runtime', () => {

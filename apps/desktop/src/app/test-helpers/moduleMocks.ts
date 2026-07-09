@@ -16,6 +16,7 @@ import { vi } from 'vitest';
 export const TAURI_EVENTS = {
   navigate: 'nagori://navigate',
   clipboardChanged: 'nagori://clipboard_changed',
+  captureSkipped: 'nagori://capture_skipped',
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
   hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',

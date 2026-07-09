@@ -11,6 +11,7 @@
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
   import { capabilitiesState } from './stores/capabilities.svelte';
+  import { recordCaptureSkip } from './stores/captureSkipped.svelte';
   import { closeEntryContextMenu, entryContextMenuState } from './stores/entryContextMenu.svelte';
   import {
     dismissHotkeyFailure,
@@ -158,6 +159,16 @@
         pasteFailureMessage = message;
       },
     );
+    // A copy the built-in secret policy refused to store never reaches the
+    // history, so the palette would otherwise show nothing changed. Record the
+    // classified notice so the StatusBar can leave a chip explaining the copy
+    // was not saved; it clears on the next real capture (see Palette.svelte).
+    const offCaptureSkipped = subscribe<{ kind?: string; reasons?: string[] }>(
+      TAURI_EVENTS.captureSkipped,
+      (payload) => {
+        recordCaptureSkip(payload);
+      },
+    );
     // Settings lives in its own webview, so a change made there reaches this
     // palette webview only through the broadcast `settingsChanged` event.
     // Without re-applying here the palette kept its startup configuration until
@@ -191,6 +202,7 @@
       window.removeEventListener('focus', handleFocus);
       offNavigate();
       offPasteFailed();
+      offCaptureSkipped();
       offSettings();
       offHotkeyFailure();
     };

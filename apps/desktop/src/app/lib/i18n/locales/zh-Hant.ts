@@ -144,6 +144,11 @@ export const zhHant: Messages = {
         unknown: '自動貼上失敗。已複製 — 請手動貼上。',
       },
     },
+    captureSkipped: {
+      label: '⚠ 複製內容未儲存',
+      otp: '最近一次複製被判定為一次性驗證碼，因此未儲存。',
+      secret: '最近一次複製被判定為機密資訊，因此未儲存。',
+    },
   },
   actionMenu: {
     title: '快速動作',
@@ -347,6 +352,9 @@ export const zhHant: Messages = {
       blockSensitiveCaptures: '不儲存私密或機密項目',
       blockSensitiveCapturesHelp:
         '凡是被判定為 Private 或 Secret 的項目（例如密碼、API 金鑰）一律不儲存。比上方的機密處理模式更嚴格——後者仍可能保留遮蔽後的副本，而此項什麼都不保留。',
+      otpDetection: '偵測一次性驗證碼',
+      otpDetectionHelp:
+        '將僅由 6～8 位數字組成的項目視為一次性驗證碼，像其他機密資訊一樣加以遮蔽或阻擋儲存。',
       captureKinds: '擷取類型',
       captureKindsHelp: '停用的類型會在機密判定之前被忽略。',
       captureKindOptions: {

@@ -28,6 +28,16 @@ pub(crate) const PASTE_FAILED_EVENT: &str = "nagori://paste_failed";
 /// user-driven query/filter change before showing the newest row.
 pub(crate) const CLIPBOARD_CHANGED_EVENT: &str = "nagori://clipboard_changed";
 
+/// Event emitted when the capture loop *drops* a copy the built-in secret
+/// policy refuses to store (an OTP-shaped / fully-redacted body under the
+/// default `store_redacted`, or `secret_handling = block`). The palette
+/// subscribes via `TAURI_EVENTS.captureSkipped` and leaves a dismissible
+/// `StatusBar` chip so the user learns their copy was NOT saved. Payload:
+/// `{ kind: "secret_redacted_dropped" | "secret_blocked", reasons: string[] }`
+/// where `reasons` are `SensitivityReason::token()` values. Keep the literal
+/// in lockstep with `TAURI_EVENTS.captureSkipped` in `lib/tauri.ts`.
+pub(crate) const CAPTURE_SKIPPED_EVENT: &str = "nagori://capture_skipped";
+
 /// Event name emitted after every persisted settings change. The payload
 /// is the full `AppSettingsDto`. The Settings view subscribes via
 /// `TAURI_EVENTS.settingsChanged` so an external mutation (the tray's
