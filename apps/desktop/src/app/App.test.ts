@@ -99,14 +99,9 @@ const captureHotkeyFailureHandler = (): {
   const resolvedSlot: { handler?: (payload: { kind?: string; action?: string }) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
     if (event === 'nagori://hotkey_register_failed') {
-      failedSlot.handler = handler as (payload: {
-        hotkey: string;
-        error: string;
-        kind?: string;
-        action?: string;
-      }) => void;
+      failedSlot.handler = handler;
     } else if (event === 'nagori://hotkey_register_resolved') {
-      resolvedSlot.handler = handler as (payload: { kind?: string; action?: string }) => void;
+      resolvedSlot.handler = handler;
     }
     onReady?.();
     return () => {};
@@ -130,7 +125,7 @@ const capturePasteFailedHandler = (): { fire: (payload: PasteFailedPayload) => v
   const slot: { handler?: (payload: PasteFailedPayload) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
     if (event === 'nagori://paste_failed') {
-      slot.handler = handler as (payload: PasteFailedPayload) => void;
+      slot.handler = handler;
     }
     onReady?.();
     return () => {};
@@ -149,7 +144,7 @@ const captureSettingsChangedHandler = (): { fire: (payload: AppSettings) => void
   const slot: { handler?: (payload: AppSettings) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
     if (event === 'nagori://settings_changed') {
-      slot.handler = handler as (payload: AppSettings) => void;
+      slot.handler = handler;
     }
     onReady?.();
     return () => {};

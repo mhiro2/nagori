@@ -6,7 +6,7 @@ vi.mock('./tauri', () => ({
 
 import * as commands from './commands';
 import { invoke } from './tauri';
-import type { AppSettings, SearchRequest } from './types';
+import type { AppSettings } from './types';
 
 const baseSettings = (): AppSettings => ({
   globalHotkey: 'Cmd+Shift+V',
@@ -71,7 +71,7 @@ describe('command wrappers', () => {
   const cases: Array<{ name: string; run: () => Promise<unknown>; cmd: string; args?: unknown }> = [
     {
       name: 'searchClipboard',
-      run: () => commands.searchClipboard({ query: 'q', limit: 10 } as SearchRequest),
+      run: () => commands.searchClipboard({ query: 'q', limit: 10 }),
       cmd: 'search_clipboard',
       args: { request: { query: 'q', limit: 10 } },
     },

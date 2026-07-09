@@ -8,15 +8,12 @@ const hasStringField = <K extends string>(value: object, key: K): value is Recor
 // reloading the authoritative settings baseline and retrying rather than
 // treating it as a hard failure.
 export const isSettingsConflict = (err: unknown): boolean =>
-  err !== null &&
-  typeof err === 'object' &&
-  'code' in err &&
-  (err as { code: unknown }).code === 'settings_conflict';
+  err !== null && typeof err === 'object' && 'code' in err && err.code === 'settings_conflict';
 
 export const describeError = (err: unknown): string => {
   const t = messages().errors;
   if (err && typeof err === 'object' && 'code' in err) {
-    const code = (err as { code: unknown }).code;
+    const code = err.code;
     const fallback = hasStringField(err, 'message') ? err.message : t.unknown;
     switch (code) {
       case 'storage_error':

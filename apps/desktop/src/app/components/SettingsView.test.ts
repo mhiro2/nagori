@@ -226,7 +226,7 @@ const captureSettingsChangedHandler = (): {
   const slot: { handler?: (payload: AppSettings) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler) => {
     if (event === 'nagori://settings_changed') {
-      slot.handler = handler as (payload: AppSettings) => void;
+      slot.handler = handler;
     }
     return () => {};
   });
