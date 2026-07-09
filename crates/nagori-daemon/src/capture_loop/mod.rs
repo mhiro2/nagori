@@ -4,8 +4,8 @@ use std::time::{Duration, Instant, SystemTime};
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, ContentKind,
     EntryFactory, EntryId, EntryRepository, MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES,
-    ReadBudget, Result, SecretAction, Sensitivity, SensitivityClassifier,
-    StoredClipboardRepresentation, factory::compute_representation_set_hash,
+    ReadBudget, Result, SecretAction, SecretDropReason, Sensitivity, SensitivityClassifier,
+    SensitivityReason, StoredClipboardRepresentation, factory::compute_representation_set_hash,
 };
 use nagori_ipc::CaptureEventCategory;
 use nagori_platform::{CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, WindowBehavior};
@@ -502,6 +502,51 @@ struct SecureRecovery {
     source: Option<nagori_core::SourceApp>,
 }
 
+/// Why a capture was silently dropped by the built-in secret policy.
+///
+/// Deliberately covers ONLY drops the user did not explicitly configure
+/// per-rule (built-in Secret classification): `entry_blocked` /
+/// `sensitive_blocked` stem from the user's own denylist/regex/opt-in
+/// settings and are not notified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSkipKind {
+    /// `StoreRedacted` reduced the body to `[REDACTED]` markers only; the
+    /// entry was dropped instead of persisting a zero-information row.
+    SecretRedactedDropped,
+    /// `SecretHandling::Block` refused the Secret entry.
+    SecretBlocked,
+}
+
+impl CaptureSkipKind {
+    /// Stable `snake_case` wire token for this skip kind. Mirrors the audit
+    /// `event_kind` recorded for the same drop, so a UI shell and the audit
+    /// log agree on the identifier.
+    #[must_use]
+    pub const fn token(&self) -> &'static str {
+        match self {
+            Self::SecretRedactedDropped => "secret_redacted_dropped",
+            Self::SecretBlocked => "secret_blocked",
+        }
+    }
+}
+
+/// Payload handed to the capture-skip notifier so a UI shell can tell the
+/// user their copy was NOT stored (and why) without exposing the content.
+#[derive(Debug, Clone)]
+pub struct CaptureSkipNotice {
+    pub kind: CaptureSkipKind,
+    /// `SensitivityReason::token()` values that led to the Secret verdict.
+    pub reasons: Vec<&'static str>,
+}
+
+/// Map classification reasons to their stable `snake_case` wire tokens.
+///
+/// These tokens — not the `Debug` formatting — are the contract shared by
+/// audit-event messages and the capture-skip notice payload.
+fn reason_tokens(reasons: &[SensitivityReason]) -> Vec<&'static str> {
+    reasons.iter().map(SensitivityReason::token).collect()
+}
+
 pub struct CaptureLoop<R, E, A> {
     reader: R,
     entries: E,
@@ -565,6 +610,11 @@ pub struct CaptureLoop<R, E, A> {
     /// Desktop uses this to wake the palette without coupling the daemon
     /// crate to Tauri; CLI/server callers leave it unset.
     capture_notifier: Option<Arc<dyn Fn(EntryId) + Send + Sync>>,
+    /// Optional hook invoked when a capture is silently dropped by the
+    /// built-in secret policy (redacted-away or `SecretHandling::Block`).
+    /// Desktop uses this to surface a "not stored" toast without coupling
+    /// the daemon crate to Tauri; CLI/server callers leave it unset.
+    capture_skip_notifier: Option<Arc<dyn Fn(CaptureSkipNotice) + Send + Sync>>,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -591,6 +641,7 @@ where
             secure_focus_fail_closed_enabled: true,
             capture_health: None,
             capture_notifier: None,
+            capture_skip_notifier: None,
         }
     }
 
@@ -630,6 +681,50 @@ where
         }
     }
 
+    /// Audit and notify a built-in secret-policy drop, then account it as a
+    /// policy drop in the capture-health snapshot. Shared by the redacted-away
+    /// (`FullyRedacted`) and refused (`BlockedBySetting`) cases so the audit
+    /// `event_kind`, the tracing event, the skip-notice kind, and the token
+    /// list stay in lockstep.
+    async fn record_secret_drop(
+        &self,
+        entry_id: EntryId,
+        reason: SecretDropReason,
+        reasons: &[SensitivityReason],
+    ) {
+        let tokens = reason_tokens(reasons);
+        let skip_kind = match reason {
+            SecretDropReason::BlockedBySetting => CaptureSkipKind::SecretBlocked,
+            SecretDropReason::FullyRedacted => CaptureSkipKind::SecretRedactedDropped,
+        };
+        let audit_kind = skip_kind.token();
+        info!(?reasons, "{audit_kind}");
+        let _ = self
+            .audit
+            .record(audit_kind, Some(entry_id), Some(&tokens.join(",")))
+            .await;
+        self.note_capture_drop(CaptureEventCategory::Policy);
+        self.note_capture_skip(CaptureSkipNotice {
+            kind: skip_kind,
+            reasons: tokens,
+        });
+    }
+
+    /// Fan out a capture-skip notice to the optional UI hook. Like the
+    /// post-insert `capture_notifier`, a panic in the desktop-side hook is
+    /// contained here — the drop is already decided and notification is
+    /// auxiliary.
+    fn note_capture_skip(&self, notice: CaptureSkipNotice) {
+        if let Some(notifier) = &self.capture_skip_notifier {
+            let notifier = Arc::clone(notifier);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || notifier(notice)))
+                .is_err()
+            {
+                tracing::warn!("capture_skip_notifier_panicked");
+            }
+        }
+    }
+
     #[must_use]
     pub fn with_window(mut self, window: Arc<dyn WindowBehavior>) -> Self {
         self.window = Some(window);
@@ -663,6 +758,18 @@ where
     #[must_use]
     pub fn with_capture_notifier(mut self, notifier: Arc<dyn Fn(EntryId) + Send + Sync>) -> Self {
         self.capture_notifier = Some(notifier);
+        self
+    }
+
+    /// Wire a callback that runs whenever a capture is silently dropped by
+    /// the built-in secret policy. See [`CaptureSkipNotice`] for the payload
+    /// and [`CaptureSkipKind`] for the covered drops.
+    #[must_use]
+    pub fn with_capture_skip_notifier(
+        mut self,
+        notifier: Arc<dyn Fn(CaptureSkipNotice) + Send + Sync>,
+    ) -> Self {
+        self.capture_skip_notifier = Some(notifier);
         self
     }
 
@@ -1038,7 +1145,7 @@ where
                 .record(
                     "entry_blocked",
                     Some(entry.id),
-                    Some(&format!("{:?}", classification.reasons)),
+                    Some(&reason_tokens(&classification.reasons).join(",")),
                 )
                 .await;
             self.note_capture_drop(CaptureEventCategory::Policy);
@@ -1056,7 +1163,7 @@ where
                 .record(
                     "sensitive_blocked",
                     Some(entry.id),
-                    Some(&format!("{:?}", classification.reasons)),
+                    Some(&reason_tokens(&classification.reasons).join(",")),
                 )
                 .await;
             self.note_capture_drop(CaptureEventCategory::Policy);
@@ -1065,20 +1172,11 @@ where
         if let Some(preview) = classification.redacted_preview {
             entry.search.preview = preview;
         }
-        if matches!(
-            classifier.apply_secret_handling(&mut entry, settings.secret_handling),
-            SecretAction::Drop,
-        ) {
-            info!(reasons = ?classification.reasons, "secret_blocked");
-            let _ = self
-                .audit
-                .record(
-                    "secret_blocked",
-                    Some(entry.id),
-                    Some(&format!("{:?}", classification.reasons)),
-                )
+        if let SecretAction::Drop(reason) =
+            classifier.apply_secret_handling(&mut entry, settings.secret_handling)
+        {
+            self.record_secret_drop(entry.id, reason, &classification.reasons)
                 .await;
-            self.note_capture_drop(CaptureEventCategory::Policy);
             return Ok(Admission::Dropped);
         }
 

@@ -4,8 +4,9 @@ use std::time::Instant;
 
 use nagori_core::{
     AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
-    PasteFormat, PasteOption, Result, SecretAction, Sensitivity, SensitivityClassifier,
-    SettingsRepository, build_paste_options, select_representation,
+    PasteFormat, PasteOption, Result, SecretAction, SecretDropReason, Sensitivity,
+    SensitivityClassifier, SensitivityReason, SettingsRepository, build_paste_options,
+    select_representation,
 };
 
 use crate::ipc_handler::result_code;
@@ -38,10 +39,19 @@ impl NagoriRuntime {
         if let Some(preview) = classification.redacted_preview {
             entry.search.preview = preview;
         }
+        // Stable `SensitivityReason::token()` CSV for every policy-drop audit
+        // row below, matching the capture loop's format so the two ingest
+        // paths stay greppable by the same tokens.
+        let joined = classification
+            .reasons
+            .iter()
+            .map(SensitivityReason::token)
+            .collect::<Vec<_>>()
+            .join(",");
         if matches!(entry.sensitivity, Sensitivity::Blocked) {
             let _ = self
                 .store
-                .record("entry_blocked", Some(entry.id), None)
+                .record("entry_blocked", Some(entry.id), Some(&joined))
                 .await;
             return Err(AppError::Policy(
                 "entry blocked by capture policy".to_owned(),
@@ -55,24 +65,39 @@ impl NagoriRuntime {
         {
             let _ = self
                 .store
-                .record("sensitive_blocked", Some(entry.id), None)
+                .record("sensitive_blocked", Some(entry.id), Some(&joined))
                 .await;
             return Err(AppError::Policy(
                 "entry classified as sensitive and refused by block_sensitive_captures=true"
                     .to_owned(),
             ));
         }
-        if matches!(
-            classifier.apply_secret_handling(&mut entry, secret_handling),
-            SecretAction::Drop,
-        ) {
-            let _ = self
-                .store
-                .record("secret_blocked", Some(entry.id), None)
-                .await;
-            return Err(AppError::Policy(
-                "entry classified as secret and refused by secret_handling=block".to_owned(),
-            ));
+        if let SecretAction::Drop(reason) =
+            classifier.apply_secret_handling(&mut entry, secret_handling)
+        {
+            match reason {
+                SecretDropReason::BlockedBySetting => {
+                    let _ = self
+                        .store
+                        .record("secret_blocked", Some(entry.id), Some(&joined))
+                        .await;
+                    return Err(AppError::Policy(
+                        "entry classified as secret and refused by secret_handling=block"
+                            .to_owned(),
+                    ));
+                }
+                SecretDropReason::FullyRedacted => {
+                    let _ = self
+                        .store
+                        .record("secret_redacted_dropped", Some(entry.id), Some(&joined))
+                        .await;
+                    return Err(AppError::Policy(
+                        "entry was classified as secret and its entire body was redacted; \
+                         nothing was stored"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         // Invalidate before *and* after: the pre-call closes the window
         // where a concurrent `search` could still serve a pre-insert hit

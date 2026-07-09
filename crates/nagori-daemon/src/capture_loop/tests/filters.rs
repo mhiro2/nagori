@@ -108,7 +108,12 @@ async fn capture_once_blocks_secret_when_handling_is_block() {
         secret_handling: SecretHandling::Block,
         ..AppSettings::default()
     };
-    let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+    let notices = Arc::new(std::sync::Mutex::new(Vec::<CaptureSkipNotice>::new()));
+    let sink = Arc::clone(&notices);
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings)
+        .with_capture_skip_notifier(Arc::new(move |notice| {
+            sink.lock().unwrap().push(notice);
+        }));
     clipboard
         .write_text("token = ghp_abcdefghijklmnopqrstuvwxyz123456")
         .await
@@ -116,6 +121,10 @@ async fn capture_once_blocks_secret_when_handling_is_block() {
 
     assert!(loop_.capture_once().await.unwrap().is_none());
     assert!(store.list_recent(10).await.unwrap().is_empty());
+    let notices = notices.lock().unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].kind, CaptureSkipKind::SecretBlocked);
+    assert!(notices[0].reasons.contains(&"api_key_pattern"));
 }
 
 #[tokio::test]
@@ -145,8 +154,11 @@ async fn capture_once_redacts_secret_by_default() {
     let clipboard = Arc::new(MemoryClipboard::new());
     let store = SqliteStore::open_memory().expect("memory store");
     let mut loop_ = loop_for(clipboard.clone(), store.clone(), AppSettings::default());
+    // Wrap the token in residual prose so redaction leaves surrounding text:
+    // the entry stays information-bearing and exercises the redact-AND-persist
+    // path (a token-only body now fully redacts and is dropped instead).
     clipboard
-        .write_text("token = ghp_abcdefghijklmnopqrstuvwxyz123456")
+        .write_text("deploy with token = ghp_abcdefghijklmnopqrstuvwxyz123456 then restart")
         .await
         .expect("clipboard write");
 
@@ -163,6 +175,9 @@ async fn capture_once_redacts_secret_by_default() {
         "default secret_handling must not store the raw token: {body:?}",
     );
     assert!(body.contains("[REDACTED]"));
+    // The residual prose around the secret must survive the scrub.
+    assert!(body.contains("deploy with"), "residue lost: {body:?}");
+    assert!(body.contains("then restart"), "residue lost: {body:?}");
 }
 
 #[tokio::test]
@@ -188,4 +203,65 @@ async fn capture_once_keeps_secret_full_when_opted_in() {
     // Even with the raw body retained, the search preview must still be
     // the redacted form so UI surfaces never leak the secret.
     assert!(stored.search.preview.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn capture_once_drops_fully_redacted_secret_and_notifies() {
+    // An OTP-shaped body redacts to nothing but `[REDACTED]`, so under the
+    // default `StoreRedacted` it is refused persistence entirely. The drop
+    // must audit `secret_redacted_dropped` and fire the capture-skip notifier
+    // so a UI shell can tell the user their copy was not stored.
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let notices = Arc::new(std::sync::Mutex::new(Vec::<CaptureSkipNotice>::new()));
+    let sink = Arc::clone(&notices);
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), AppSettings::default())
+        .with_capture_skip_notifier(Arc::new(move |notice| {
+            sink.lock().unwrap().push(notice);
+        }));
+    clipboard
+        .write_text("482915")
+        .await
+        .expect("clipboard write");
+
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .audit_event_count("secret_redacted_dropped")
+            .await
+            .unwrap(),
+        1,
+    );
+    let notices = notices.lock().unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].kind, CaptureSkipKind::SecretRedactedDropped);
+    assert_eq!(notices[0].reasons, vec!["one_time_password_pattern"]);
+}
+
+#[tokio::test]
+async fn capture_once_persists_otp_body_as_public_when_otp_detection_off() {
+    // With `otp_detection` disabled the digit-only heuristic is skipped, so a
+    // 6-digit body classifies Public and persists with its raw body — the gate
+    // must hold end-to-end through the real capture pipeline.
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let settings = AppSettings {
+        otp_detection: false,
+        ..AppSettings::default()
+    };
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+    clipboard
+        .write_text("482915")
+        .await
+        .expect("clipboard write");
+
+    let id = loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("otp body persists when detection is off");
+    let stored = store.get(id).await.unwrap().expect("stored row");
+    assert_eq!(stored.sensitivity, Sensitivity::Public);
+    assert_eq!(stored.plain_text(), Some("482915"));
 }

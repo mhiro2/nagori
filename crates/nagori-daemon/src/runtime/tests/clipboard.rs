@@ -8,6 +8,31 @@ use super::super::*;
 use super::{CountingPaste, runtime_with_memory_clipboard, runtime_with_paste};
 
 #[tokio::test]
+async fn add_text_rejects_fully_redacted_secret_and_audits() {
+    // A bare OTP body redacts to nothing but `[REDACTED]` under the default
+    // `StoreRedacted`, so `add_text` must refuse it (nothing information-bearing
+    // to store) with a self-contained Policy error and audit the drop as
+    // `secret_redacted_dropped`.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let err = runtime
+        .add_text("482915".to_owned())
+        .await
+        .expect_err("fully-redacted secret must be refused");
+    assert!(
+        matches!(err, nagori_core::AppError::Policy(_)),
+        "expected Policy error, got {err:?}",
+    );
+    assert_eq!(
+        runtime
+            .store()
+            .audit_event_count("secret_redacted_dropped")
+            .await
+            .unwrap(),
+        1,
+    );
+}
+
+#[tokio::test]
 async fn paste_entry_skips_keystroke_when_auto_paste_disabled() {
     let paste = Arc::new(CountingPaste::default());
     let (runtime, clipboard) = runtime_with_paste(paste.clone());
@@ -318,17 +343,19 @@ async fn blocked_entry_offers_and_pastes_no_representation() {
 
 #[tokio::test]
 async fn sensitive_entries_hide_text_until_sensitive_output_is_requested() {
-    // OTP-shaped clips classify as Secret and get persisted as
-    // `[REDACTED]` under the default `StoreRedacted`. The IPC gate
-    // still applies on top of that: without `include_sensitive` the
-    // body is suppressed entirely; with it the caller sees the
-    // redacted form (the raw OTP never reached SQLite, so there is
-    // nothing else to reveal).
+    // A secret wrapped in prose classifies Secret and gets persisted with a
+    // partially-redacted body under the default `StoreRedacted` (a token-only
+    // body would fully redact and be dropped instead). The IPC gate still
+    // applies on top of that: without `include_sensitive` the body is
+    // suppressed entirely; with it the caller sees the redacted form (the raw
+    // token never reached SQLite, so there is nothing else to reveal).
     let (runtime, _) = runtime_with_memory_clipboard();
     let id = runtime
-        .add_text("123456".to_owned())
+        .add_text(
+            "deploy with token = ghp_abcdefghijklmnopqrstuvwxyz123456 then restart".to_owned(),
+        )
         .await
-        .expect("OTP should be stored as redacted Secret");
+        .expect("secret should be stored as redacted Secret");
 
     let hidden = runtime
         .handle_ipc(IpcRequest::GetEntry(GetEntryRequest {
@@ -350,7 +377,12 @@ async fn sensitive_entries_hide_text_until_sensitive_output_is_requested() {
     let IpcResponse::Entry(visible) = visible else {
         panic!("expected visible entry");
     };
-    assert_eq!(visible.text.as_deref(), Some("[REDACTED]"));
+    let body = visible.text.as_deref().expect("redacted body");
+    assert!(
+        !body.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
+        "raw token must not be revealed: {body:?}",
+    );
+    assert!(body.contains("[REDACTED]"), "body: {body:?}");
 }
 
 #[tokio::test]
@@ -359,18 +391,20 @@ async fn list_pinned_honours_include_sensitive_flag() {
     // of sensitivity, so even Public pins lost their body and any
     // sensitive pin couldn't be opted-in to. Now the response mirrors
     // ListRecent: Public bodies are always emitted; sensitive bodies
-    // require `include_sensitive: true`. The OTP body is redacted on
-    // insert (StoreRedacted), so the include_sensitive=true response
-    // surfaces `[REDACTED]` rather than the raw 6-digit code.
+    // require `include_sensitive: true`. The secret body is partially
+    // redacted on insert (StoreRedacted), so the include_sensitive=true
+    // response surfaces `[REDACTED]` rather than the raw token.
     let (runtime, _) = runtime_with_memory_clipboard();
     let public_id = runtime
         .add_text("public clipboard text".to_owned())
         .await
         .expect("public entry");
     let secret_id = runtime
-        .add_text("123456".to_owned())
+        .add_text(
+            "deploy with token = ghp_abcdefghijklmnopqrstuvwxyz123456 then restart".to_owned(),
+        )
         .await
-        .expect("OTP entry");
+        .expect("secret entry");
     runtime
         .store()
         .set_pinned(public_id, true)
@@ -411,7 +445,12 @@ async fn list_pinned_honours_include_sensitive_flag() {
         panic!("expected entries response");
     };
     let secret = visible.iter().find(|dto| dto.id == secret_id).unwrap();
-    assert_eq!(secret.text.as_deref(), Some("[REDACTED]"));
+    let body = secret.text.as_deref().expect("redacted body");
+    assert!(
+        !body.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
+        "raw token must not be revealed: {body:?}",
+    );
+    assert!(body.contains("[REDACTED]"), "body: {body:?}");
 }
 
 #[tokio::test]

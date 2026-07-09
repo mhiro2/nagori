@@ -383,6 +383,16 @@ pub struct AppSettings {
     /// it also covers the Private tier.
     #[serde(default)]
     pub block_sensitive_captures: bool,
+    /// Gates the digit-only 6–8 character OTP heuristic in the classifier.
+    /// When `true` (the default), a clip whose entire trimmed body is a run of
+    /// 6–8 ASCII digits is flagged `OneTimePasswordPattern` → `Secret`; when
+    /// `false`, that heuristic is skipped so such bodies classify on their
+    /// other signals only. A dedicated `default_otp_detection` fn keeps the
+    /// default `true` so upgrading an install whose persisted JSON predates
+    /// this key does not silently disable OTP detection (serde defaults are the
+    /// entire migration story for the single settings blob).
+    #[serde(default = "default_otp_detection")]
+    pub otp_detection: bool,
     /// When `false`, the capture loop discards the very first clipboard
     /// sequence it sees on launch (skipping whatever was already on the
     /// pasteboard before Nagori started). Default `true` preserves the
@@ -978,6 +988,7 @@ impl Default for AppSettings {
             clear_on_quit: false,
             permanent_delete_on_delete: false,
             block_sensitive_captures: false,
+            otp_detection: default_otp_detection(),
             capture_initial_clipboard_on_launch: default_capture_initial_clipboard_on_launch(),
             auto_update_check: default_auto_update_check(),
             update_channel: UpdateChannel::default(),
@@ -999,6 +1010,16 @@ pub const fn default_show_in_menu_bar() -> bool {
 }
 
 pub const fn default_capture_initial_clipboard_on_launch() -> bool {
+    true
+}
+
+/// Default for `AppSettings::otp_detection`.
+///
+/// `true` preserves the prior always-on behaviour of the digit-only 6–8
+/// character OTP heuristic. It must stay a named fn (not a bare
+/// `#[serde(default)]`) so an existing install whose persisted settings JSON
+/// lacks the key deserializes with OTP detection enabled rather than off.
+pub const fn default_otp_detection() -> bool {
     true
 }
 
@@ -1141,6 +1162,18 @@ mod tests {
         let budget = settings.read_budget();
         assert_eq!(budget.text_bytes, 65536);
         assert_eq!(budget.image_bytes, default_max_image_entry_size_bytes());
+    }
+
+    #[test]
+    fn serde_default_fills_missing_otp_detection() {
+        // A settings snapshot written before `otp_detection` existed must still
+        // deserialize with OTP detection enabled — the named default keeps the
+        // prior always-on behaviour rather than silently disabling it on
+        // upgrade.
+        let json = r#"{"max_entry_size_bytes": 65536}"#;
+        let settings: AppSettings =
+            serde_json::from_str(json).expect("legacy snapshot deserializes");
+        assert!(settings.otp_detection);
     }
 
     #[test]

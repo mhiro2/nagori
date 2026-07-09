@@ -483,6 +483,8 @@ pub struct AppSettingsDto {
     pub permanent_delete_on_delete: bool,
     #[serde(default)]
     pub block_sensitive_captures: bool,
+    #[serde(default = "nagori_core::settings::default_otp_detection")]
+    pub otp_detection: bool,
     #[serde(default = "nagori_core::settings::default_capture_initial_clipboard_on_launch")]
     pub capture_initial_clipboard_on_launch: bool,
     #[serde(default = "nagori_core::settings::default_auto_update_check")]
@@ -585,6 +587,7 @@ impl From<AppSettings> for AppSettingsDto {
             clear_on_quit: value.clear_on_quit,
             permanent_delete_on_delete: value.permanent_delete_on_delete,
             block_sensitive_captures: value.block_sensitive_captures,
+            otp_detection: value.otp_detection,
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
@@ -630,6 +633,7 @@ impl From<AppSettingsDto> for AppSettings {
             clear_on_quit: value.clear_on_quit,
             permanent_delete_on_delete: value.permanent_delete_on_delete,
             block_sensitive_captures: value.block_sensitive_captures,
+            otp_detection: value.otp_detection,
             capture_initial_clipboard_on_launch: value.capture_initial_clipboard_on_launch,
             auto_update_check: value.auto_update_check,
             update_channel: value.update_channel.into(),
@@ -714,6 +718,7 @@ mod tests {
             clear_on_quit: true,
             permanent_delete_on_delete: true,
             block_sensitive_captures: true,
+            otp_detection: false,
             capture_initial_clipboard_on_launch: false,
             auto_update_check: false,
             update_channel: UpdateChannel::Stable,
@@ -767,6 +772,7 @@ mod tests {
         assert!(restored.clear_on_quit);
         assert!(restored.permanent_delete_on_delete);
         assert!(restored.block_sensitive_captures);
+        assert!(!restored.otp_detection);
         assert!(!restored.capture_initial_clipboard_on_launch);
         assert!(!restored.auto_update_check);
         assert!(matches!(restored.update_channel, UpdateChannel::Stable));

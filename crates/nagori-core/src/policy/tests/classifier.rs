@@ -121,6 +121,26 @@ fn classifies_otp_as_secret() {
 }
 
 #[test]
+fn otp_detection_off_leaves_digit_body_public() {
+    // With `otp_detection` disabled, the digit-only heuristic is skipped, so
+    // a 6–8 digit body classifies on its other signals only — here none, so
+    // it stays Public with no reasons.
+    let entry = EntryFactory::from_text("123456");
+    let settings = AppSettings {
+        otp_detection: false,
+        ..AppSettings::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+    let result = classifier.classify(&entry);
+    assert_eq!(result.sensitivity, Sensitivity::Public);
+    assert!(
+        result.reasons.is_empty(),
+        "no reasons expected with OTP detection off: {:?}",
+        result.reasons,
+    );
+}
+
+#[test]
 fn classifies_password_manager_source_as_blocked() {
     // The default preset (`password_manager_preset_rules`) carries
     // the canonical 1Password bundle ID, so an entry tagged with
