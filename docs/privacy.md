@@ -48,12 +48,27 @@ contract.
   blocks (BEGIN-only is enough), AWS access keys, GitHub tokens,
   Luhn-checked credit-card runs, OTP-style 6–8 digit bodies, and
   the source app's bundle id against the password-manager list.
+- **Settings → Privacy → Detect one-time codes** (default: on) controls the
+  OTP check: when on, a clip whose entire trimmed body is a 6–8 digit run is
+  flagged as a one-time code and handled like any other secret; when off,
+  that check is skipped and such a clip is classified on its other signals
+  only — typically `Public`, stored as-is. Turning it off does not affect
+  the other detectors above.
 - The default **secret handling** is `Store redacted`: matched
   clips land in SQLite with the secret replaced by `[REDACTED]`,
   and the content hash, normalized text, and search tokens are all
   recomputed from the scrubbed form. Switching to `Store full`
   requires an explicit in-app confirmation because the durable
   copy then keeps the raw bytes.
+- Under `Store redacted`, if redaction would leave nothing but
+  `[REDACTED]` markers — a one-time code, a bare credit-card number, a
+  `token = …` line fully consumed by the detector — the clip is **not**
+  stored at all rather than saved as a zero-information row. (Image and
+  file-list clips are exempt and always persist as before.) The palette
+  shows a dismissible notice that the copy was not saved; `nagori add`
+  returns an error instead. Either way the drop is recorded in the audit
+  log, so the 90-day audit trail still shows that *something* was copied
+  and refused, even though nothing is left to inspect.
 - `Store redacted` rewrites *new* captures only. Pre-existing
   rows, the SQLite freelist, and any backup still carry the
   original bytes — delete the affected rows, run

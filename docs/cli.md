@@ -118,6 +118,11 @@ Print one entry. By default the full text is suppressed for `Private` and
 ### `nagori add [--text <s> | --stdin]`
 
 Insert an entry. `--stdin` reads the full standard input as the payload.
+If the built-in secret classifier flags the whole body as a secret and the
+default `Store redacted` handling would reduce it to nothing but
+`[REDACTED]` markers (e.g. a bare one-time code), `add` fails with an error
+instead of inserting an empty row; see
+[`docs/privacy.md`](privacy.md#secret-redaction).
 
 ### `nagori delete <id>` / `nagori pin <id>` / `nagori unpin <id>`
 

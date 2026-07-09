@@ -834,7 +834,12 @@ keys, GitHub tokens, Luhn-checked credit-card runs, OTP-like 6–8 digit
 short codes, source-app denylist matches (typed identifiers from the
 bundled password-manager preset plus free-text patterns — see
 [`docs/privacy.md`](./docs/privacy.md#app-denylist)), and user-defined
-regex.
+regex. The OTP detector is gated by `AppSettings::otp_detection`
+(default `true`, named-fn serde default so an upgraded install without the
+key keeps the prior always-on behaviour): when `false`, `classify` skips the
+6–8 digit heuristic and such bodies are scored on their other signals only.
+The toggle only affects `classify`; it does not reach the standalone
+`redact_text` (below).
 
 **Classification output:**
 
@@ -857,7 +862,11 @@ scrubber and must keep parity with the detector list. In particular:
   are not touched.
 - OTP redaction only fires when the **whole** trimmed body is a 6–8
   digit ASCII run, mirroring the classifier; arbitrary 6–8 digit
-  substrings in prose are left intact.
+  substrings in prose are left intact. Unlike classification, this scrub is
+  **not** gated by `otp_detection` — `redact_text` stays settings-independent
+  and always scrubs an OTP-shaped body, so any caller redacting text before
+  it crosses the trust boundary can't leak one just because the setting is
+  off.
 
 **Settings-aware redaction.** `SensitivityClassifier::redact` wraps
 `redact_text` and additionally applies the user's `regex_denylist`. Any
@@ -874,6 +883,21 @@ the bare `redact_text` or the AI crate's `Redactor`.
   only**. Pre-existing rows, the SQLite freelist, and any backup still
   carry the raw bytes. Operators who need a clean DB should delete the
   affected rows and `VACUUM`; no in-place migration is provided.
+  `apply_secret_handling` bails out *before* that rewrite —
+  `SecretAction::Drop(SecretDropReason::FullyRedacted)` — when the redacted
+  body would be nothing but `[REDACTED]` markers (an OTP-shaped body, a bare
+  credit-card number, a `token = …` line the detector fully consumes):
+  persisting it would store a zero-information row, and since the content
+  hash is re-keyed off the redacted bytes, every such row would otherwise
+  dedup into one confusing `[REDACTED]` entry. Image and file-list entries
+  are exempt (a FileList keeps its list structure; an Image's empty plain
+  projection can't match). The drop is audited as `secret_redacted_dropped`
+  (reason tokens, e.g. `one_time_password_pattern`, in the message) — a
+  sibling of the `Block` arm's `secret_blocked` below — and the capture loop
+  fans it out through the same `capture_skip_notifier` hook used for other
+  capture-skip notices, which the desktop wires to a dismissible status-bar
+  message; `add_text` (CLI/IPC) instead returns an `AppError::Policy` so the
+  caller sees the rejection synchronously.
 - `Block` drops sensitive captures entirely (audited as
   `secret_blocked`).
 
@@ -2288,7 +2312,7 @@ the hot paths (one event per outcome, carrying enum/static fields plus
 
 ```
 capture:  entry_inserted · capture_skipped · entry_blocked ·
-          secret_blocked · capture_failed
+          secret_blocked · secret_redacted_dropped · capture_failed
 search:   runtime_search          (mode · cache_hit · row_count)
 paste:    paste_entry · paste_frontmost      (result_code)
 actions:  quick_action · ai_action_started   (action slug · provider)
@@ -2306,9 +2330,9 @@ are intentionally not localized to keep grep recipes portable.
 
 `audit_events` rows reuse the same machine-readable `event_kind`
 tokens where the two overlap (`capture_skipped` / `entry_blocked` /
-`secret_blocked`; retention sweeps add `retention_count` /
-`retention_age` / `retention_size`), so the desktop UI and operators
-see one vocabulary.
+`secret_blocked` / `secret_redacted_dropped`; retention sweeps add
+`retention_count` / `retention_age` / `retention_size`), so the desktop UI
+and operators see one vocabulary.
 
 ---
 

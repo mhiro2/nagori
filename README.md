@@ -26,7 +26,9 @@
     <td width="50%">
       <img src="./assets/feature-privacy.gif" alt="Secrets scrubbed before they touch disk" /><br/>
       <b>Secrets scrubbed before they touch disk</b><br/>
-      API keys, tokens, cards and OTPs are redacted on capture, and clips your
+      API keys, tokens, cards and OTPs (one-time codes; detection can be
+      turned off in Settings → Privacy) are redacted on capture — a clip that
+      is nothing but the secret is dropped instead of stored — and clips your
       password manager marks "do not record" are skipped entirely. Everything
       stays in a local SQLite file — no cloud.
     </td>
@@ -167,8 +169,10 @@ OS-downloaded language packs / embedding assets. See
   …, from the hostname alone — no network), and pixel dimensions, file size,
   and a *Screenshot* hint on image rows.
 - Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
-  PEM blocks, credit-card numbers, and OTPs before they are written to disk,
-  plus a user regex denylist for project-specific patterns.
+  PEM blocks, credit-card numbers, and OTPs (one-time codes; the OTP check
+  can be disabled in Settings → Privacy) before they are written to disk —
+  a clip that redacts down to nothing but the secret is dropped rather than
+  stored — plus a user regex denylist for project-specific patterns.
 - Honors the "do not record" clipboard markers password managers and apps set
   on every platform (macOS, Windows, and KDE on Linux) — a marked clip is
   skipped without being stored. The exact markers are in
