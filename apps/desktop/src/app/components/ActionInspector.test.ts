@@ -4,33 +4,55 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AiActionId, AiAvailability } from '../lib/types';
 
+type ReadyState = {
+  auto: boolean;
+  fail: boolean;
+  pending: Array<() => void>;
+  flushReady: () => void;
+};
+
+type AiEvents = {
+  aiStarted: string;
+  aiDelta: string;
+  aiReplace: string;
+  aiDone: string;
+  aiError: string;
+  aiCancelled: string;
+};
+
 // `vi.mock` is hoisted above module-level consts, so the shared mock state has
 // to be defined via `vi.hoisted` to be reachable from the factory.
-const { handlers, readyState, AI_EVENTS } = vi.hoisted(() => ({
-  // Captured `nagori://ai/*` handlers so tests can drive the streaming flow.
-  handlers: {} as Record<string, (payload: unknown) => void>,
-  // Listener-attach control. `auto` (default) fires each `onReady` synchronously
-  // like the real wrapper; a test can set `auto = false` to defer attach and
-  // drive the start gate manually via `flushReady()`, or set `fail = true` to
-  // simulate every `listen()` rejecting (fires `onError` instead).
-  readyState: {
-    auto: true,
-    fail: false,
-    pending: [] as (() => void)[],
-    flushReady(): void {
-      const callbacks = readyState.pending.splice(0);
-      for (const cb of callbacks) cb();
+const { handlers, readyState, AI_EVENTS } = vi.hoisted(
+  (): {
+    handlers: Record<string, (payload: unknown) => void>;
+    readyState: ReadyState;
+    AI_EVENTS: AiEvents;
+  } => ({
+    // Captured `nagori://ai/*` handlers so tests can drive the streaming flow.
+    handlers: {},
+    // Listener-attach control. `auto` (default) fires each `onReady` synchronously
+    // like the real wrapper; a test can set `auto = false` to defer attach and
+    // drive the start gate manually via `flushReady()`, or set `fail = true` to
+    // simulate every `listen()` rejecting (fires `onError` instead).
+    readyState: {
+      auto: true,
+      fail: false,
+      pending: [] as (() => void)[],
+      flushReady(): void {
+        const callbacks = readyState.pending.splice(0);
+        for (const cb of callbacks) cb();
+      },
     },
-  },
-  AI_EVENTS: {
-    aiStarted: 'nagori://ai/started',
-    aiDelta: 'nagori://ai/delta',
-    aiReplace: 'nagori://ai/replace',
-    aiDone: 'nagori://ai/done',
-    aiError: 'nagori://ai/error',
-    aiCancelled: 'nagori://ai/cancelled',
-  },
-}));
+    AI_EVENTS: {
+      aiStarted: 'nagori://ai/started',
+      aiDelta: 'nagori://ai/delta',
+      aiReplace: 'nagori://ai/replace',
+      aiDone: 'nagori://ai/done',
+      aiError: 'nagori://ai/error',
+      aiCancelled: 'nagori://ai/cancelled',
+    },
+  }),
+);
 
 vi.mock('../lib/tauri', () => ({
   isTauri: vi.fn(() => true),

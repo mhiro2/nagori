@@ -20,18 +20,17 @@ afterEach(cleanup);
 // (`(scroll + pointer) * ratio - pointer`) produces concrete, assertable
 // offsets. jsdom does persist scrollLeft/scrollTop assignments.
 function stubFrameGeometry(frame: HTMLElement, size = 200): void {
-  frame.getBoundingClientRect = () =>
-    ({
-      left: 0,
-      top: 0,
-      right: size,
-      bottom: size,
-      width: size,
-      height: size,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    }) as DOMRect;
+  frame.getBoundingClientRect = () => ({
+    left: 0,
+    top: 0,
+    right: size,
+    bottom: size,
+    width: size,
+    height: size,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
   frame.scrollLeft = 0;
   frame.scrollTop = 0;
 }
