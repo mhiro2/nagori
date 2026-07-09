@@ -17,9 +17,9 @@ catalogs:
     "@testing-library/jest-dom": 6.9.1
     "@testing-library/svelte": 5.4.2
     "@testing-library/user-event": 14.6.1
-    "@vitest/coverage-v8": 4.1.8
+    "@vitest/coverage-v8": 4.1.9
     jsdom: 29.1.1
-    vitest: 4.1.8
+    vitest: 4.1.9
   tooling:
     "@types/node": 24.13.2
     "@typescript/native-preview": 7.0.0-dev.20260702.3
