@@ -2248,7 +2248,7 @@ change.
   so no manifest needs to be edited per release. The bundle config sets
   `createUpdaterArtifacts: true` so the matching `.sig` sidecars land
   next to each bundle. The `bundle` matrix runs in parallel with
-  `includeUpdaterJson: false` on `tauri-action@v0.6.2`, because that
+  `uploadUpdaterJson: false` on `tauri-action@v1.0.0`, because that
   action's `latest.json` step does an unlocked read-modify-write on a
   single shared release asset and parallel rows would race it; instead
   the downstream `updater` job assembles the manifest once from the

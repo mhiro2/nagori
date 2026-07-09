@@ -76,11 +76,11 @@ jobs:
     # the NSIS bundle triggers a SmartScreen warning on first launch.
     strategy:
       fail-fast: false
-      # Every row builds in parallel with `includeUpdaterJson: false`, so no
+      # Every row builds in parallel with `uploadUpdaterJson: false`, so no
       # row writes `latest.json` and the per-row asset uploads never race on
       # it (each platform's bundles/signatures have distinct names). The
-      # `tauri-action` `uploadVersionJSON` step is the only part gated by
-      # `includeUpdaterJson`; the signed updater artifacts (`.sig`) are
+      # `tauri-action` updater JSON upload is the only part gated by
+      # `uploadUpdaterJson`; the signed updater artifacts (`.sig`) are
       # uploaded unconditionally. The consolidated manifest is assembled once
       # afterwards by the `updater` job from those attached artifacts.
       matrix:
@@ -186,12 +186,11 @@ jobs:
           # tauri-action's get-or-create path, so parallel rows can't each
           # create a duplicate draft for a fresh tag.
           releaseId: ${{ needs.prepare.outputs.releaseId }}
-          includeRelease: true
           # `latest.json` is built once by the `updater` job (see the matrix
           # strategy note) to avoid parallel rows racing on the same asset.
           # Setting this false only skips manifest generation here — the
           # signed updater artifacts (`.sig`) are still uploaded.
-          includeUpdaterJson: false
+          uploadUpdaterJson: false
 
   updater:
     name: Generate updater manifest
@@ -204,7 +203,7 @@ jobs:
         # release's `latest.json` (read existing → merge this row's platform →
         # delete → re-upload) with no locking, so running it per matrix row in
         # parallel races and only the last writer's platforms survive. The
-        # bundle matrix therefore skips it (`includeUpdaterJson: false`) and we
+        # bundle matrix therefore skips it (`uploadUpdaterJson: false`) and we
         # assemble the full manifest here, once, from the signed updater
         # artifacts already attached to the draft release. Mapping (platform
         # key -> updater artifact) mirrors what `tauri-action` would emit; keep
