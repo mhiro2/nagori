@@ -158,6 +158,11 @@ export const es: Messages = {
         unknown: 'Falló el pegado automático. Copiado — pega manualmente.',
       },
     },
+    captureSkipped: {
+      label: '⚠ Copia no guardada',
+      otp: 'La última copia parecía un código de un solo uso y no se guardó.',
+      secret: 'La última copia se clasificó como información confidencial y no se guardó.',
+    },
   },
   actionMenu: {
     title: 'Acciones rápidas',
@@ -374,6 +379,9 @@ export const es: Messages = {
       blockSensitiveCaptures: 'No guardar nunca entradas privadas o secretas',
       blockSensitiveCapturesHelp:
         'No guarda ninguna entrada detectada como Private o Secret, como contraseñas o claves API. Es más estricto que el modo de secretos anterior, que aún puede conservar una copia enmascarada.',
+      otpDetection: 'Detectar códigos de un solo uso',
+      otpDetectionHelp:
+        'Trata una entrada compuesta únicamente por un número de 6 a 8 dígitos como un código de un solo uso y la redacta o bloquea como a otros secretos.',
       captureKinds: 'Tipos de captura',
       captureKindsHelp:
         'Los tipos desactivados se descartan antes de la clasificación de secretos.',

@@ -148,6 +148,11 @@ export const ko: Messages = {
         unknown: '자동 붙여넣기 실패. 복사됨 — 수동으로 붙여넣으세요.',
       },
     },
+    captureSkipped: {
+      label: '⚠ 복사가 저장되지 않음',
+      otp: '마지막 복사가 일회용 코드로 판단되어 저장되지 않았습니다.',
+      secret: '마지막 복사가 기밀 정보로 분류되어 저장되지 않았습니다.',
+    },
   },
   actionMenu: {
     title: '빠른 동작',
@@ -360,6 +365,9 @@ export const ko: Messages = {
       blockSensitiveCaptures: '비공개·기밀 항목 저장 안 함',
       blockSensitiveCapturesHelp:
         '비밀번호나 API 키처럼 Private 또는 Secret으로 판정된 항목을 전혀 저장하지 않습니다. 마스킹된 사본을 남길 수 있는 위의 보안 정보 처리 모드보다 강력합니다.',
+      otpDetection: '일회용 코드 감지',
+      otpDetectionHelp:
+        '6~8자리 숫자로만 이루어진 항목을 일회용 코드로 간주하여 다른 보안 정보와 마찬가지로 마스킹하거나 저장하지 않습니다.',
       captureKinds: '캡처 대상',
       captureKindsHelp: '꺼진 종류는 보안 정보 분류 전에 제외됩니다.',
       captureKindOptions: {

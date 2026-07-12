@@ -156,6 +156,11 @@ export const de: Messages = {
         unknown: 'Auto-Einfügen fehlgeschlagen. Kopiert — manuell einfügen.',
       },
     },
+    captureSkipped: {
+      label: '⚠ Kopie nicht gespeichert',
+      otp: 'Die letzte Kopie sah wie ein Einmalcode aus und wurde nicht gespeichert.',
+      secret: 'Die letzte Kopie wurde als vertraulich eingestuft und nicht gespeichert.',
+    },
   },
   actionMenu: {
     title: 'Schnellaktionen',
@@ -373,6 +378,9 @@ export const de: Messages = {
       blockSensitiveCaptures: 'Private und geheime Einträge nie speichern',
       blockSensitiveCapturesHelp:
         'Speichert keinen Eintrag, der als Private oder Secret erkannt wird (etwa Passwörter oder API-Schlüssel). Strenger als der Geheimnis-Modus oben, der weiterhin eine maskierte Kopie behalten kann.',
+      otpDetection: 'Einmalcodes erkennen',
+      otpDetectionHelp:
+        'Behandelt einen Eintrag, der nur aus einer 6- bis 8-stelligen Zahl besteht, als Einmalcode und schwärzt oder blockiert ihn wie andere Geheimnisse.',
       captureKinds: 'Erfassungsarten',
       captureKindsHelp: 'Deaktivierte Arten werden vor der Geheimnis-Klassifikation ausgefiltert.',
       captureKindOptions: {

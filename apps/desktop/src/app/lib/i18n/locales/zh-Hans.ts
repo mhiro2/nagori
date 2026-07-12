@@ -144,6 +144,11 @@ export const zhHans: Messages = {
         unknown: '自动粘贴失败。已复制 — 请手动粘贴。',
       },
     },
+    captureSkipped: {
+      label: '⚠ 复制内容未保存',
+      otp: '最近一次复制被判定为一次性验证码，因此未保存。',
+      secret: '最近一次复制被判定为机密信息，因此未保存。',
+    },
   },
   actionMenu: {
     title: '快捷操作',
@@ -346,6 +351,9 @@ export const zhHans: Messages = {
       blockSensitiveCaptures: '不保存私密或机密条目',
       blockSensitiveCapturesHelp:
         '凡是被判定为 Private 或 Secret 的条目（如密码、API 密钥）一律不保存。比上方的密钥处理模式更严格——后者仍可能保留脱敏副本，而此项什么都不保留。',
+      otpDetection: '检测一次性验证码',
+      otpDetectionHelp:
+        '将仅由 6～8 位数字组成的条目视为一次性验证码，像其他机密信息一样进行脱敏或阻止保存。',
       captureKinds: '捕获类型',
       captureKindsHelp: '关闭的类型会在密钥识别前被忽略。',
       captureKindOptions: {

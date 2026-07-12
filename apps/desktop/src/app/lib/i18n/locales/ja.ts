@@ -148,6 +148,11 @@ export const ja: Messages = {
         unknown: '自動ペースト失敗。コピー済み — 手動で貼り付けてください。',
       },
     },
+    captureSkipped: {
+      label: '⚠ コピーは保存されませんでした',
+      otp: '直近のコピーはワンタイムコードと判定されたため保存されませんでした。',
+      secret: '直近のコピーは機密情報と判定されたため保存されませんでした。',
+    },
   },
   actionMenu: {
     title: 'クイックアクション',
@@ -362,6 +367,9 @@ export const ja: Messages = {
       blockSensitiveCaptures: 'プライベート・機密の項目を保存しない',
       blockSensitiveCapturesHelp:
         'パスワードや API キーなど、プライベートまたはシークレットと判定された内容を一切保存しません。上の「シークレットの扱い」はマスクした内容を残せますが、こちらは何も残しません。',
+      otpDetection: 'ワンタイムコードの検出',
+      otpDetectionHelp:
+        '6〜8桁の数字だけの項目をワンタイムコードとみなし、他の機密情報と同じように保存しない扱いにします。',
       captureKinds: '取り込み対象',
       captureKindsHelp: '無効にした種類はシークレット判定の前に除外されます。',
       captureKindOptions: {

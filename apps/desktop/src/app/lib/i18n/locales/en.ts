@@ -196,6 +196,16 @@ export type Messages = {
         unknown: string;
       };
     };
+    // Privacy notice shown when the built-in secret policy dropped the most
+    // recent copy so it was never stored (OTP-shaped / fully-redacted body, or
+    // `secret_handling = block`). `label` is the chip text; `otp` and `secret`
+    // are the explanations surfaced in the chip `title` — `otp` for a
+    // one-time-code match, `secret` for every other secret classification.
+    captureSkipped: {
+      label: string;
+      otp: string;
+      secret: string;
+    };
   };
   actionMenu: {
     title: string;
@@ -401,6 +411,8 @@ export type Messages = {
       };
       blockSensitiveCaptures: string;
       blockSensitiveCapturesHelp: string;
+      otpDetection: string;
+      otpDetectionHelp: string;
       captureKinds: string;
       captureKindsHelp: string;
       captureKindOptions: {
@@ -747,6 +759,11 @@ export const en: Messages = {
         unknown: 'Auto-paste failed. Copied — paste manually.',
       },
     },
+    captureSkipped: {
+      label: '⚠ Copy not saved',
+      otp: 'The last copy looked like a one-time code and was not saved.',
+      secret: 'The last copy was classified as a secret and was not saved.',
+    },
   },
   actionMenu: {
     title: 'Quick actions',
@@ -960,6 +977,9 @@ export const en: Messages = {
       blockSensitiveCaptures: 'Block all sensitive captures',
       blockSensitiveCapturesHelp:
         'Refuse to save any entry detected as Private or Secret, such as passwords or API keys. This is stronger than the secret handling mode above, which can still keep a masked copy.',
+      otpDetection: 'Detect one-time codes',
+      otpDetectionHelp:
+        'Treat an item that is only a 6–8 digit number as a one-time code and redact or block it like other secrets.',
       captureKinds: 'Capture kinds',
       captureKindsHelp: 'Disabled kinds are ignored before secret classification runs.',
       captureKindOptions: {

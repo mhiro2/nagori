@@ -9,7 +9,7 @@ pub mod semantic_index;
 pub mod serve;
 pub mod thumbnails;
 
-pub use capture_loop::CaptureLoop;
+pub use capture_loop::{CaptureLoop, CaptureSkipKind, CaptureSkipNotice};
 pub use health::{
     CAPTURE_DEGRADED_THRESHOLD, CaptureHealth, MAINTENANCE_DEGRADED_THRESHOLD, MaintenanceHealth,
     StartupHealth,

@@ -155,7 +155,10 @@ fn apply_secret_handling_block_returns_drop() {
     assert_eq!(entry.sensitivity, Sensitivity::Secret);
 
     let action = classifier.apply_secret_handling(&mut entry, SecretHandling::Block);
-    assert_eq!(action, SecretAction::Drop);
+    assert_eq!(
+        action,
+        SecretAction::Drop(SecretDropReason::BlockedBySetting)
+    );
     // Block must not mutate the entry — caller is responsible for
     // throwing it away. Asserting the body stayed put guards against a
     // future refactor that accidentally redacts before the drop.
@@ -167,7 +170,10 @@ fn apply_secret_handling_block_returns_drop() {
 
 #[test]
 fn apply_secret_handling_store_redacted_rewrites_body() {
-    let raw = "token = ghp_abcdefghijklmnopqrstuvwxyz123456";
+    // Wrap the secret in residual prose so redaction leaves surrounding text:
+    // the entry is still information-bearing after scrubbing, so it persists
+    // (rather than dropping as a fully-redacted body).
+    let raw = "here is my token = ghp_abcdefghijklmnopqrstuvwxyz123456 for the repo";
     let mut entry = EntryFactory::from_text(raw);
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
     entry.sensitivity = classifier.classify(&entry).sensitivity;
@@ -255,7 +261,11 @@ fn apply_secret_handling_store_redacted_scrubs_alternative_representations() {
     // doesn't go through the daemon capture loop still can't leak.
     use crate::{RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation};
 
-    let secret = "token = ghp_abcdefghijklmnopqrstuvwxyz123456";
+    // Residual prose around the secret keeps the redacted primary
+    // information-bearing, so the entry persists and the alternative-drop
+    // path is actually exercised (a fully-redacted primary would short-circuit
+    // to Drop before touching the alternatives).
+    let secret = "here is my token = ghp_abcdefghijklmnopqrstuvwxyz123456 thanks";
     let mut entry = EntryFactory::from_text(secret);
     entry.pending_representations = vec![
         StoredClipboardRepresentation {
@@ -585,9 +595,12 @@ fn store_redacted_round_trip_credit_card_strips_pan() {
     // survives in either the durable body or the normalized search
     // text — a `!body.contains("4111")` style check would miss a
     // partial leak that only kept some digits.
+    // Wrap the PAN in prose so the redacted body keeps residual text and
+    // persists (a bare PAN body redacts to nothing and is dropped — covered
+    // by `store_redacted_drops_bare_credit_card_body`).
     let pan = "4111 1111 1111 1111";
     let stripped = pan.replace([' ', '-'], "");
-    let mut entry = EntryFactory::from_text(pan);
+    let mut entry = EntryFactory::from_text(format!("card {pan} on file"));
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
     entry.sensitivity = classifier.classify(&entry).sensitivity;
     assert_eq!(entry.sensitivity, Sensitivity::Secret);
@@ -620,8 +633,10 @@ fn store_redacted_round_trip_credit_card_strips_pan() {
 #[test]
 fn store_redacted_round_trip_private_key_strips_pem() {
     // Mirror of the credit-card case: `StoreRedacted` rewrites the
-    // body and the PEM block is gone after the round trip.
-    let mut entry = EntryFactory::from_text(SAMPLE_PRIVATE_KEY);
+    // body and the PEM block is gone after the round trip. Surround the PEM
+    // with prose so the redacted body persists (a bare PEM redacts to nothing
+    // and is dropped instead).
+    let mut entry = EntryFactory::from_text(format!("here it is\n{SAMPLE_PRIVATE_KEY}\ndone"));
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
     entry.sensitivity = classifier.classify(&entry).sensitivity;
     assert_eq!(entry.sensitivity, Sensitivity::Secret);
@@ -714,24 +729,82 @@ fn store_redacted_does_not_mutate_private_or_public_entries() {
 }
 
 #[test]
-fn store_redacted_strips_otp_from_persisted_body() {
-    // OTPs now flow through `apply_secret_handling`. The default
-    // `StoreRedacted` must rewrite the durable body to `[REDACTED]`
-    // (with surrounding whitespace preserved) so the raw 6–8 digit
-    // code never lands on disk.
-    let mut entry = EntryFactory::from_text("482915");
+fn store_redacted_drops_otp_only_body_without_mutation() {
+    // An OTP-only body redacts to nothing but `[REDACTED]`, so under the
+    // default `StoreRedacted` it is refused persistence entirely — storing it
+    // would keep a zero-information row, and every such row would dedup into
+    // one since the hash re-keys off the redacted bytes. The drop must leave
+    // the entry completely unmutated (mirroring the Block arm) so the caller
+    // discards it as-is.
+    let raw = "482915";
+    let mut entry = EntryFactory::from_text(raw);
+    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+    entry.sensitivity = classifier.classify(&entry).sensitivity;
+    assert_eq!(entry.sensitivity, Sensitivity::Secret);
+    let hash_before = entry.metadata.content_hash.value.clone();
+    let preview_before = entry.search.preview.clone();
+    let pending_before = entry.pending_representations.clone();
+
+    let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+    assert_eq!(action, SecretAction::Drop(SecretDropReason::FullyRedacted));
+    // Nothing about the entry may change on the drop path.
+    assert_eq!(entry.plain_text(), Some(raw), "body must stay raw on drop");
+    assert_eq!(entry.metadata.content_hash.value, hash_before);
+    assert_eq!(entry.search.preview, preview_before);
+    assert_eq!(entry.pending_representations, pending_before);
+}
+
+#[test]
+fn store_redacted_drops_bare_credit_card_body() {
+    // A bare Luhn-valid PAN redacts to `[REDACTED]` with no surrounding
+    // text, so like the OTP-only case it is refused persistence rather than
+    // stored as a zero-information row.
+    let raw = "4111 1111 1111 1111";
+    let mut entry = EntryFactory::from_text(raw);
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
     entry.sensitivity = classifier.classify(&entry).sensitivity;
     assert_eq!(entry.sensitivity, Sensitivity::Secret);
 
     let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
-    assert_eq!(action, SecretAction::Persist);
-    let body = entry.plain_text().expect("redacted body").to_owned();
+    assert_eq!(action, SecretAction::Drop(SecretDropReason::FullyRedacted));
+    assert_eq!(entry.plain_text(), Some(raw), "body must stay raw on drop");
+}
+
+#[test]
+fn store_redacted_drops_bare_password_pattern_body() {
+    // A body the built-in `password:`-style pattern consumes in full leaves
+    // only `[REDACTED]`, so it is dropped too. If the pattern ever leaves a
+    // residue this assertion pins that the drop only fires when the whole
+    // body is consumed.
+    let raw = "password: hunter2secret";
+    let redacted = redact_text(raw);
     assert!(
-        !body.contains("482915"),
-        "OTP digits leaked into stored entry: {body:?}",
+        is_fully_redacted(&redacted),
+        "expected the password pattern to consume the whole body, got: {redacted:?}",
     );
-    assert!(body.contains("[REDACTED]"));
+    let mut entry = EntryFactory::from_text(raw);
+    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+    entry.sensitivity = classifier.classify(&entry).sensitivity;
+    assert_eq!(entry.sensitivity, Sensitivity::Secret);
+
+    let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+    assert_eq!(action, SecretAction::Drop(SecretDropReason::FullyRedacted));
+    assert_eq!(entry.plain_text(), Some(raw), "body must stay raw on drop");
+}
+
+#[test]
+fn is_fully_redacted_edge_cases() {
+    // Empty / no-marker bodies never count as fully redacted (an image's
+    // empty plain projection must not trip the drop).
+    assert!(!is_fully_redacted(""));
+    assert!(!is_fully_redacted("no markers here"));
+    // Marker plus only-whitespace surroundings is fully redacted.
+    assert!(is_fully_redacted("[REDACTED]"));
+    assert!(is_fully_redacted(" [REDACTED]\n"));
+    assert!(is_fully_redacted("[REDACTED]\n[REDACTED]"));
+    // Residual non-whitespace structure (text or punctuation) keeps it.
+    assert!(!is_fully_redacted("token = [REDACTED]"));
+    assert!(!is_fully_redacted("[REDACTED], [REDACTED]"));
 }
 
 #[test]
@@ -756,7 +829,10 @@ fn block_drops_credit_card_secret_without_mutating_body() {
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
     entry.sensitivity = classifier.classify(&entry).sensitivity;
     let action = classifier.apply_secret_handling(&mut entry, SecretHandling::Block);
-    assert_eq!(action, SecretAction::Drop);
+    assert_eq!(
+        action,
+        SecretAction::Drop(SecretDropReason::BlockedBySetting)
+    );
     // Block returns Drop so the caller throws the entry away; body
     // must not be touched on the way out.
     assert_eq!(entry.plain_text(), Some(pan));

@@ -57,13 +57,24 @@ pub struct SensitivityClassification {
 /// Outcome of applying `SecretHandling` to a classified `Secret` entry.
 ///
 /// `Persist` means the entry is now safe to insert (either redacted in place
-/// or kept full according to the user setting). `Drop` means the user opted
-/// to refuse storage entirely (`SecretHandling::Block`); the caller should
-/// audit and skip insertion.
+/// or kept full according to the user setting). `Drop` carries the reason the
+/// entry was refused persistence; the caller should audit and skip insertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretAction {
     Persist,
-    Drop,
+    Drop(SecretDropReason),
+}
+
+/// Why a Secret entry was refused persistence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretDropReason {
+    /// `SecretHandling::Block` — the user opted to refuse storage of secrets.
+    BlockedBySetting,
+    /// `StoreRedacted` reduced the body to nothing but `[REDACTED]` markers;
+    /// persisting it would store a zero-information row (and all such rows
+    /// dedup into one, since the content hash is re-keyed off the redacted
+    /// bytes).
+    FullyRedacted,
 }
 
 #[derive(Debug, Clone)]
@@ -266,7 +277,7 @@ impl SensitivityClassifier {
         if contains_credit_card(text) {
             push_once(SensitivityReason::CreditCardPattern, reasons);
         }
-        if is_probable_otp(text) {
+        if self.settings.otp_detection && is_probable_otp(text) {
             push_once(SensitivityReason::OneTimePasswordPattern, reasons);
         }
         if self.user_regexes.iter().any(|regex| regex.is_match(text)) {
@@ -325,7 +336,10 @@ impl SensitivityClassifier {
             return SecretAction::Persist;
         }
         match handling {
-            SecretHandling::Block => return SecretAction::Drop,
+            SecretHandling::Block => {
+                // Leave the entry untouched; the caller discards it.
+                return SecretAction::Drop(SecretDropReason::BlockedBySetting);
+            }
             SecretHandling::StoreFull => {
                 // Keep the raw body (the user opted in) but scrub the preview
                 // so the default DTO path — which shows the preview while
@@ -337,6 +351,24 @@ impl SensitivityClassifier {
             SecretHandling::StoreRedacted => {
                 let raw = entry.plain_text().unwrap_or_default().to_owned();
                 let redacted = self.redact(&raw);
+                // Bail out *before* any mutation for the text-shaped primary
+                // case whose entire body redacts away to `[REDACTED]` markers.
+                // Persisting it would store a zero-information row, and because
+                // the hash is re-keyed off the redacted bytes all such rows
+                // dedup into one. Only the text fall-through is affected: an
+                // Image's empty plain projection would trip `is_fully_redacted`
+                // (guarded by its `contains` requirement) and a FileList keeps
+                // list structure, so both are checked out here explicitly.
+                // Mirror the Block arm — the entry is left completely unchanged
+                // (no preview / search / content / hash edits) so the caller
+                // can drop it as-is.
+                if !matches!(
+                    entry.content,
+                    ClipboardContent::Image(_) | ClipboardContent::FileList(_)
+                ) && is_fully_redacted(&redacted)
+                {
+                    return SecretAction::Drop(SecretDropReason::FullyRedacted);
+                }
                 let redacted_normalized = normalize_text(&redacted);
                 // Scrub every text-shaped search surface so the index can never
                 // carry the raw secret. For an image these derive from an empty
@@ -367,6 +399,13 @@ impl SensitivityClassifier {
                     // an empty Text entry, and re-key the hash off the redacted
                     // display text (matching how `EntryFactory` hashes a file
                     // list). Alternatives are still dropped by the fall-through.
+                    //
+                    // FileList is deliberately exempt from the fully-redacted
+                    // drop above: a redacted path list retains its list
+                    // structure and item count, so it is not zero-information
+                    // even when every path redacts away, and a single fully
+                    // redacted path is rare enough that dropping file lists
+                    // would risk false drops of legitimately captured paths.
                     ClipboardContent::FileList(list) => {
                         for path in &mut list.paths {
                             *path = self.redact(path);
@@ -557,6 +596,25 @@ fn max_paren_nesting(pattern: &str) -> usize {
     max_depth
 }
 
+/// Whether a redacted body carries no information beyond `[REDACTED]` markers.
+///
+/// True iff `redacted` contains at least one `[REDACTED]` marker AND removing
+/// every `[REDACTED]` occurrence leaves only whitespace. The `contains`
+/// requirement guards the empty-string case: an image's empty plain projection
+/// redacts to `""`, which must NOT count as fully redacted (there was no
+/// secret text to begin with).
+///
+/// Fully redacted (drop): `"[REDACTED]"`, `" [REDACTED]\n"`,
+/// `"[REDACTED]\n[REDACTED]"`.
+/// Not fully redacted (keep): `"token = [REDACTED]"` and
+/// `"[REDACTED], [REDACTED]"` — residual non-whitespace structure
+/// (surrounding text or punctuation) persists conservatively so we never drop
+/// an entry that still carries context around the redacted span.
+fn is_fully_redacted(redacted: &str) -> bool {
+    const MARKER: &str = "[REDACTED]";
+    redacted.contains(MARKER) && redacted.replace(MARKER, "").trim().is_empty()
+}
+
 pub fn redact_text(text: &str) -> String {
     // Strip the multi-line PEM block first so the inner base64 body can't
     // collide with the API-key heuristics below (which would otherwise leave
@@ -569,7 +627,12 @@ pub fn redact_text(text: &str) -> String {
     // OTP is recognised when the *whole* trimmed body is a 6–8 digit run, so
     // redaction mirrors the classifier: only kicks in when the entry itself
     // is the OTP, never against arbitrary 6–8 digit runs in prose (which
-    // would maul timestamps, page counts, etc.).
+    // would maul timestamps, page counts, etc.). Note: *classification* of a
+    // digit-only body as OTP is gated by `AppSettings::otp_detection`, but this
+    // standalone redactor deliberately keeps scrubbing OTP-shaped bodies
+    // regardless — it is settings-independent and stays conservative so any
+    // caller redacting a body before it leaves the trust boundary never leaks
+    // an OTP just because the classifier's heuristic was disabled.
     if is_probable_otp(&redacted) {
         redacted = redact_full_body(&redacted);
     }

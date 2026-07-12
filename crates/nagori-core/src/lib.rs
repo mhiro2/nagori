@@ -21,8 +21,8 @@ pub use limits::{
 };
 pub use model::*;
 pub use policy::{
-    MAX_USER_REGEX_LEN, MAX_USER_REGEX_NESTING, SecretAction, SensitivityClassification,
-    SensitivityClassifier, compile_user_regex,
+    MAX_USER_REGEX_LEN, MAX_USER_REGEX_NESTING, SecretAction, SecretDropReason,
+    SensitivityClassification, SensitivityClassifier, compile_user_regex,
 };
 pub use repositories::{AuditLog, EntryRepository, SearchRepository, SettingsRepository};
 pub use services::{

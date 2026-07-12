@@ -191,6 +191,11 @@
     {t.settings.privacy.blockSensitiveCaptures}
   </label>
   <span class="help">{t.settings.privacy.blockSensitiveCapturesHelp}</span>
+  <label>
+    <input type="checkbox" bind:checked={settings.otpDetection} onchange={() => scheduleSave(0)} />
+    {t.settings.privacy.otpDetection}
+  </label>
+  <span class="help">{t.settings.privacy.otpDetectionHelp}</span>
   <div class="stack">
     <span>{t.settings.privacy.captureKinds}</span>
     <div class="checkbox-grid">

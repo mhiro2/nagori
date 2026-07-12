@@ -353,6 +353,29 @@ pub enum SensitivityReason {
     Oversized,
 }
 
+impl SensitivityReason {
+    /// Stable `snake_case` wire token for this reason.
+    ///
+    /// Used in audit-event messages and UI event payloads (the frontend maps
+    /// each token to a localized string), so these strings are a wire contract:
+    /// renaming one silently breaks any consumer keyed off it. The `Debug`
+    /// formatting is NOT a stable contract — prefer this method wherever the
+    /// reason crosses an API/audit boundary.
+    #[must_use]
+    pub const fn token(&self) -> &'static str {
+        match self {
+            Self::PasswordManagerSource => "password_manager_source",
+            Self::ApiKeyPattern => "api_key_pattern",
+            Self::CreditCardPattern => "credit_card_pattern",
+            Self::PrivateKeyPattern => "private_key_pattern",
+            Self::OneTimePasswordPattern => "one_time_password_pattern",
+            Self::UserRegex => "user_regex",
+            Self::SourceAppDenylist => "source_app_denylist",
+            Self::Oversized => "oversized",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

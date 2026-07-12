@@ -435,6 +435,7 @@ export type AppSettings = {
   clearOnQuit: boolean;
   permanentDeleteOnDelete: boolean;
   blockSensitiveCaptures: boolean;
+  otpDetection: boolean;
   captureInitialClipboardOnLaunch: boolean;
   autoUpdateCheck: boolean;
   updateChannel: UpdateChannel;
