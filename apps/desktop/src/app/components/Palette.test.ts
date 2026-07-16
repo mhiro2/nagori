@@ -235,7 +235,7 @@ describe('Palette', () => {
     let handler: ((payload: { entryId: string }) => void) | undefined;
     vi.mocked(subscribe).mockImplementation((event, next) => {
       if (event === TAURI_EVENTS.clipboardChanged) {
-        handler = next as (payload: { entryId: string }) => void;
+        handler = next;
       }
       return () => undefined;
     });
