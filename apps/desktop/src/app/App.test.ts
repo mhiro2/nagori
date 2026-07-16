@@ -167,7 +167,7 @@ const captureCaptureSkippedHandler = (): { fire: (payload: CaptureSkippedPayload
   const slot: { handler?: (payload: CaptureSkippedPayload) => void } = {};
   vi.mocked(subscribe).mockImplementation((event, handler, onReady) => {
     if (event === 'nagori://capture_skipped') {
-      slot.handler = handler as (payload: CaptureSkippedPayload) => void;
+      slot.handler = handler;
     }
     onReady?.();
     return () => {};
