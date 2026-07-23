@@ -153,35 +153,20 @@ impl SensitivityClassifier {
             reasons.push(SensitivityReason::Oversized);
         }
 
-        if let Some(source) = &entry.metadata.source {
-            let source_text = [
-                source.name.as_deref(),
-                source.bundle_id.as_deref(),
-                source.executable_path.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-            if self
-                .settings
-                .app_denylist
-                .iter()
-                .any(|rule| rule_matches_source(rule, source, &source_text))
-            {
-                reasons.push(SensitivityReason::SourceAppDenylist);
-            }
-            // The legacy hardcoded substring heuristic ("1password" /
-            // "bitwarden" / "keepass" / "password" in `source_text`)
-            // used to push `PasswordManagerSource` unconditionally.
-            // It now lives on the user-controllable `app_denylist`
-            // preset (`password_manager_preset_rules`) instead, so
-            // toggling "Block password managers" off in Settings
-            // actually disables the block. Without this change the
-            // toggle would be cosmetic — apps named "PasswordSafe"
-            // etc. would still be blocked by the broad substring
-            // even after the user cleared every rule.
+        // The legacy hardcoded substring heuristic ("1password" /
+        // "bitwarden" / "keepass" / "password" in the source text)
+        // used to push `PasswordManagerSource` unconditionally.
+        // It now lives on the user-controllable `app_denylist`
+        // preset (`password_manager_preset_rules`) instead, so
+        // toggling "Block password managers" off in Settings
+        // actually disables the block. Without this change the
+        // toggle would be cosmetic — apps named "PasswordSafe"
+        // etc. would still be blocked by the broad substring
+        // even after the user cleared every rule.
+        if let Some(source) = &entry.metadata.source
+            && self.source_denylisted(source)
+        {
+            reasons.push(SensitivityReason::SourceAppDenylist);
         }
 
         // Scan every text-shaped representation, not just the primary's
@@ -214,41 +199,7 @@ impl SensitivityClassifier {
             }
         }
 
-        let sensitivity = if reasons.iter().any(|reason| {
-            matches!(
-                reason,
-                SensitivityReason::SourceAppDenylist
-                    | SensitivityReason::Oversized
-                    | SensitivityReason::UserRegex
-            )
-        }) {
-            // UserRegex matches drop the entry entirely — the privacy UI
-            // promises "Captures matching any pattern are dropped", so a
-            // user who configures `regex_denylist` must never see that
-            // text persisted to SQLite (even as a redacted body).
-            Sensitivity::Blocked
-        } else if reasons.iter().any(|reason| {
-            matches!(
-                reason,
-                SensitivityReason::PrivateKeyPattern
-                    | SensitivityReason::ApiKeyPattern
-                    | SensitivityReason::CreditCardPattern
-                    | SensitivityReason::OneTimePasswordPattern
-            )
-        }) {
-            // OTP joins the Secret bucket (rather than Private) so the
-            // durable body goes through `apply_secret_handling` and lands
-            // as `[REDACTED]` under the default `StoreRedacted`. Without
-            // this, an OTP-shaped clip leaked the raw 6–8 digit code into
-            // SQLite even though the preview was scrubbed — a regression
-            // the README's "OTPs are redacted or blocked entirely" claim
-            // would otherwise overstate.
-            Sensitivity::Secret
-        } else if !reasons.is_empty() {
-            Sensitivity::Private
-        } else {
-            Sensitivity::Public
-        };
+        let sensitivity = sensitivity_from_reasons(&reasons);
 
         SensitivityClassification {
             sensitivity,
@@ -256,6 +207,54 @@ impl SensitivityClassifier {
                 .then(|| make_preview(&self.redact(text), PREVIEW_MAX_CHARS)),
             reasons,
         }
+    }
+
+    /// Re-assess a stored text body against the *current* policy, for the
+    /// semantic indexer.
+    ///
+    /// Capture-time classification is frozen into the row's `sensitivity`
+    /// column, so an entry captured as `Public` stays `Public` even after the
+    /// user adds a `regex_denylist` rule (or an app-denylist rule, or turns
+    /// OTP detection on) that would match it today. The indexer must not
+    /// trust that stale verdict when deciding what may reach the embedding
+    /// model — it calls this with the entry's stored text (and source app, if
+    /// recorded) and combines the result with the stored sensitivity, taking
+    /// whichever is more restrictive.
+    ///
+    /// This sees only the persisted text projection, not the original
+    /// capture's markup alternatives — which is exactly what would be
+    /// embedded, so it is the right surface to gate on.
+    #[must_use]
+    pub fn assess_semantic_text(&self, text: &str, source: Option<&SourceApp>) -> Sensitivity {
+        let mut reasons = Vec::new();
+        if text.len() > self.settings.max_entry_size_bytes {
+            reasons.push(SensitivityReason::Oversized);
+        }
+        if let Some(source) = source
+            && self.source_denylisted(source)
+        {
+            reasons.push(SensitivityReason::SourceAppDenylist);
+        }
+        self.scan_text_for_patterns(text, &mut reasons);
+        sensitivity_from_reasons(&reasons)
+    }
+
+    /// Whether `source` matches any configured `app_denylist` rule.
+    fn source_denylisted(&self, source: &SourceApp) -> bool {
+        let source_text = [
+            source.name.as_deref(),
+            source.bundle_id.as_deref(),
+            source.executable_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+        self.settings
+            .app_denylist
+            .iter()
+            .any(|rule| rule_matches_source(rule, source, &source_text))
     }
 
     /// Run every built-in detector and the compiled user regex set against
@@ -432,6 +431,47 @@ impl SensitivityClassifier {
         entry.pending_representations.clear();
         entry.metadata.representation_set_hash = Some(entry.metadata.content_hash.clone());
         SecretAction::Persist
+    }
+}
+
+/// Fold matched reasons into the final sensitivity verdict. Shared by
+/// capture-time `classify` and the indexer's `assess_semantic_text` so the
+/// two can never drift on how a reason maps to a severity.
+fn sensitivity_from_reasons(reasons: &[SensitivityReason]) -> Sensitivity {
+    if reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            SensitivityReason::SourceAppDenylist
+                | SensitivityReason::Oversized
+                | SensitivityReason::UserRegex
+        )
+    }) {
+        // UserRegex matches drop the entry entirely — the privacy UI
+        // promises "Captures matching any pattern are dropped", so a
+        // user who configures `regex_denylist` must never see that
+        // text persisted to SQLite (even as a redacted body).
+        Sensitivity::Blocked
+    } else if reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            SensitivityReason::PrivateKeyPattern
+                | SensitivityReason::ApiKeyPattern
+                | SensitivityReason::CreditCardPattern
+                | SensitivityReason::OneTimePasswordPattern
+        )
+    }) {
+        // OTP joins the Secret bucket (rather than Private) so the
+        // durable body goes through `apply_secret_handling` and lands
+        // as `[REDACTED]` under the default `StoreRedacted`. Without
+        // this, an OTP-shaped clip leaked the raw 6–8 digit code into
+        // SQLite even though the preview was scrubbed — a regression
+        // the README's "OTPs are redacted or blocked entirely" claim
+        // would otherwise overstate.
+        Sensitivity::Secret
+    } else if !reasons.is_empty() {
+        Sensitivity::Private
+    } else {
+        Sensitivity::Public
     }
 }
 

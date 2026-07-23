@@ -26,6 +26,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (102, ADD_SETTINGS_REVISION),
     (103, DROP_REDUNDANT_NGRAM_GRAM_INDEX),
     (104, SCOPE_FTS_UPDATE_TRIGGER),
+    (105, ADD_SEMANTIC_POLICY_TRACKING),
 ];
 
 /// Highest schema version supported by this binary. A DB whose
@@ -501,4 +502,50 @@ BEGIN
     INSERT INTO search_fts(rowid, title, preview, normalized_text)
     VALUES (NEW.doc_id, NEW.title, NEW.preview, NEW.normalized_text);
 END;
+";
+
+/// Track the privacy policy the semantic index was built under.
+///
+/// `semantic_index_meta.policy_hash` records the fingerprint of the settings
+/// that decide what content may reach the embedding model (`regex_denylist`,
+/// `app_denylist`, OTP detection, entry-size ceiling —
+/// `AppSettings::semantic_policy_hash`). The indexer compares it against the
+/// live settings and purges the stored vectors on a mismatch, so a policy
+/// edit can never leave vectors embedding content the new policy forbids.
+///
+/// The meta table is recreated (not altered in place) and the stored vectors are
+/// deleted in the same migration: pre-existing vectors were embedded under a
+/// policy this build can no longer reconstruct a fingerprint for, so the only
+/// safe posture is to drop them here — unconditionally, before any daemon
+/// guard (index toggle, model availability) gets a say — and let the indexer
+/// re-embed under the tracked policy. The DROP + CREATE + DELETE shape also
+/// keeps the migration idempotent, unlike `ALTER TABLE ADD COLUMN`.
+///
+/// `semantic_exclusions` records entries the indexer *refused* to embed
+/// because the current policy re-assessed their stored text as Secret or
+/// Blocked (the capture-time `sensitivity` column is frozen, so a later
+/// policy edit cannot flip it). Without the tombstone, a refused entry would
+/// reappear in every `semantic_pending` batch and the backfill would never
+/// drain. Keyed by `content_hash` like `entry_embeddings`, so a rewritten
+/// entry is re-assessed; cleared wholesale with the vectors on rebuild.
+const ADD_SEMANTIC_POLICY_TRACKING: &str = r"
+DROP TABLE IF EXISTS semantic_index_meta;
+CREATE TABLE semantic_index_meta (
+    id INTEGER PRIMARY KEY
+        CHECK (id = 1),
+    model_identifier TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    dimension INTEGER NOT NULL,
+    max_sequence_length INTEGER NOT NULL,
+    languages TEXT NOT NULL,
+    index_version INTEGER NOT NULL,
+    policy_hash TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+DELETE FROM entry_embeddings;
+CREATE TABLE IF NOT EXISTS semantic_exclusions (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 ";

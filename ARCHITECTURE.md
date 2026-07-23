@@ -590,7 +590,8 @@ are forward-only; downgrades are not supported.
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
 | `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and *Clear history* / clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. |
-| `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) the stored vectors were produced with, so a model change clears the index and triggers a rebuild instead of mixing incompatible spaces. |
+| `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) and the privacy-policy fingerprint (`policy_hash`, from `AppSettings::semantic_policy_hash`) the stored vectors were produced with, so a model *or policy* change clears the index and triggers a rebuild instead of mixing incompatible spaces or serving vectors the current policy forbids. |
+| `semantic_exclusions` | Tombstones for entries the semantic indexer refused to embed because the *current* policy re-assesses their stored text as `Secret` / `Blocked` (the capture-time `sensitivity` is frozen, so a later rule can't flip it). Keyed by `entry_id` (FK, `ON DELETE CASCADE`) with the refusing `content_hash`, so a rewritten entry is re-assessed; cleared together with the vectors on every rebuild. Keeps refused rows out of the pending backlog so backfill drains. |
 | `settings` | Key/value persistence for `AppSettings`. |
 | `audit_events` | Capture / policy events (block, redact, etc.). Never stores raw clipboard content. |
 
@@ -1912,10 +1913,25 @@ embedding concurrency permit, and rate-limit backoff; the settings UI exposes a
 `StoreFull` secret's raw body never reaches the embedding model), and the worker
 runs every `Private` body through the settings-aware redactor
 (`SensitivityClassifier::redact`) before embedding so private content is never
-sent verbatim; `Public` / `Unknown` bodies embed as-is. This shaping is recorded
-in `INDEX_VERSION` — bumping it (it was raised when this gate landed) is treated
-like a model change, so the worker clears any vectors built under the old shaping
-and rebuilds. At query time `SearchMode::Semantic`
+sent verbatim; `Public` / `Unknown` bodies embed as-is. The capture-time
+verdict is only a floor, not the gate: before embedding, the worker re-assesses
+each entry's stored text (both the raw body and the normalized projection —
+normalization folds case, so a case-sensitive rule would otherwise miss it)
+against the *current* policy via
+`SensitivityClassifier::assess_semantic_text`, so a `regex_denylist` /
+app-denylist rule added after capture still applies to rows frozen as `Public`.
+A re-assessment of `Secret` / `Blocked` refuses the entry: a tombstone in
+`semantic_exclusions` (keyed by `content_hash`, like the vectors) drops any
+leftover vector and keeps the row out of the pending backlog until its content
+or the policy changes. Policy edits themselves are tracked by a fingerprint
+(`AppSettings::semantic_policy_hash` over the denylists, OTP detection, and the
+entry-size ceiling) stored in `semantic_index_meta.policy_hash`: a mismatch is
+a privacy migration, so the worker purges the stored vectors *before* the
+enabled / availability / battery guards — even with the index toggled off or no
+embedder on the host — and rebuilds under the new policy once indexing is
+possible. Code-revision changes to the shaping are recorded in
+`INDEX_VERSION` — bumping it (it was raised when the Secret/Private gate
+landed) is treated the same way. At query time `SearchMode::Semantic`
 embeds the query and ranks the stored vectors; the embedder is macOS-only, so on
 other platforms (or when the model is unavailable) semantic search reports
 `Unsupported` and the text plans keep working.

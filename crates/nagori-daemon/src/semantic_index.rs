@@ -36,6 +36,12 @@ pub type PowerProbe = std::sync::Arc<dyn Fn() -> Option<bool> + Send + Sync>;
 /// `2`: `Secret` entries are no longer embedded and `Private` bodies are
 /// redacted before embedding. Vectors produced under `1` may carry raw
 /// secret / private content, so the bump forces a clear + rebuild.
+///
+/// This covers *code*-revision changes to the shaping; *settings*-driven
+/// changes (an edited `regex_denylist`, app denylist, OTP toggle, size
+/// ceiling) are tracked separately via the policy fingerprint stored in
+/// [`SemanticIndexMeta::policy_hash`], so a policy edit purges and rebuilds
+/// the index without a release.
 const INDEX_VERSION: u32 = 2;
 
 /// Entries embedded per `embed_batch` call. Small so each batch stays
@@ -177,13 +183,23 @@ impl NagoriRuntime {
         // `AppSettings::default()`, so fall back to a store read until it does
         // (a handful of times at most) rather than reporting "disabled" off the
         // compile-time default.
-        let semantic_enabled = if self.settings_watch_seeded() {
-            self.with_settings(|settings| settings.ai.semantic_index_enabled)
+        // The policy fingerprint rides along so the compatibility gate below
+        // also rejects an index built under a stale privacy policy; deriving
+        // it is a small hash over the denylist rules, nowhere near
+        // `get_settings()`'s per-call regex recompilation.
+        let (semantic_enabled, policy_hash) = if self.settings_watch_seeded() {
+            self.with_settings(|settings| {
+                (
+                    settings.ai.semantic_index_enabled,
+                    settings.semantic_policy_hash(),
+                )
+            })
         } else {
-            self.refresh_settings_from_store()
-                .await?
-                .ai
-                .semantic_index_enabled
+            let settings = self.refresh_settings_from_store().await?;
+            (
+                settings.ai.semantic_index_enabled,
+                settings.semantic_policy_hash(),
+            )
         };
         if !semantic_enabled {
             return Err(AppError::Unsupported(
@@ -201,13 +217,17 @@ impl NagoriRuntime {
             )));
         }
 
-        // Only rank against vectors the *current* model produced. If the stored
-        // index metadata is incompatible (model / revision / dimension changed,
-        // or the worker has not rebuilt yet after a battery pause / restart),
-        // comparing a current-model query vector against old vectors of the same
-        // dimension would silently mix embedding spaces. Return no results until
-        // the background worker rebuilds, rather than ranking garbage.
-        let current_meta = self.current_semantic_meta(embedder.as_ref()).await?;
+        // Only rank against vectors the *current* model produced under the
+        // *current* privacy policy. If the stored index metadata is
+        // incompatible (model / revision / dimension / policy changed, or the
+        // worker has not rebuilt yet after a battery pause / restart),
+        // comparing a current-model query vector against old vectors of the
+        // same dimension would silently mix embedding spaces — or rank
+        // content the new policy forbids. Return no results until the
+        // background worker rebuilds, rather than ranking garbage.
+        let current_meta = self
+            .current_semantic_meta(embedder.as_ref(), policy_hash)
+            .await?;
         let stored_meta = self.store.semantic_meta().await?;
         if stored_meta.is_none_or(|stored| !stored.is_compatible_with(&current_meta)) {
             return Ok(Vec::new());
@@ -279,17 +299,25 @@ impl NagoriRuntime {
     pub async fn run_semantic_indexer(self, mut shutdown: ShutdownHandle) {
         let Some(embedder) = self.embedder() else {
             // No indexing on this host, but a macOS-origin DB opened on
-            // Windows/Linux may still carry v1 vectors that the privacy
-            // migration must erase. Retry until the index is clean (or
-            // shutdown) rather than giving up after one attempt — the purge is
-            // the only thing protecting that at-rest content here.
+            // Windows/Linux may still carry vectors that the privacy purge
+            // must erase — either built under an old `INDEX_VERSION` or under
+            // a privacy policy the user has since tightened. Keep watching
+            // (rather than exiting once clean) so a `regex_denylist` edit made
+            // *on this host* still erases stored vectors that the new rule
+            // forbids; the purge is the only thing protecting that at-rest
+            // content here, and once the index is empty each pass is a single
+            // singleton-row read.
             self.semantic.set_state(SemanticIndexState::Unsupported);
+            let mut settings_rx = self.settings_subscribe();
             loop {
-                if self.purge_incompatible_index_version().await {
-                    return;
-                }
+                let _ = self.purge_incompatible_index().await;
                 tokio::select! {
                     () = shutdown.cancelled() => return,
+                    changed = settings_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                     () = tokio::time::sleep(IDLE_TICK) => {}
                 }
             }
@@ -318,13 +346,18 @@ impl NagoriRuntime {
         }
         let mut settings_rx = self.settings_subscribe();
         loop {
-            // Privacy migration *before* the per-pass guards, retried on every
+            // Privacy purge *before* the per-pass guards, retried on every
             // wake until it succeeds — so a transient failure is not stranded
             // until the next restart even while the index stays disabled or the
-            // model is unavailable. Idempotent and cheap: once the incompatible
-            // vectors are gone (or the stored version already matches) it is a
-            // single singleton-row read.
-            let _ = self.purge_incompatible_index_version().await;
+            // model is unavailable. This covers both an `INDEX_VERSION` bump
+            // and a privacy-policy edit (`semantic_policy_hash` mismatch):
+            // either way the stored vectors may embed content the current
+            // policy forbids, and they must be erased even when the enabled /
+            // availability guards would keep the rebuild from running.
+            // Idempotent and cheap: once the incompatible vectors are gone (or
+            // the stored meta already matches) it is a single singleton-row
+            // read.
+            let _ = self.purge_incompatible_index().await;
             let settings = settings_rx.borrow().clone();
             if settings.ai.semantic_index_enabled {
                 self.semantic_index_pass(embedder.as_ref(), &settings, &settings_rx, &cancel)
@@ -377,7 +410,10 @@ impl NagoriRuntime {
                 return;
             }
         };
-        if let Err(err) = self.reconcile_semantic_metadata(embedder).await {
+        if let Err(err) = self
+            .reconcile_semantic_metadata(embedder, settings.semantic_policy_hash())
+            .await
+        {
             tracing::warn!(error = %err, "semantic_metadata_reconcile_failed");
             self.semantic.set_state(SemanticIndexState::Unavailable);
             return;
@@ -449,49 +485,85 @@ impl NagoriRuntime {
         self.semantic.set_state(SemanticIndexState::Ready);
     }
 
-    /// Unconditionally drop stored vectors whose `index_version` no longer
-    /// matches [`INDEX_VERSION`]. Runs *before* the enabled / availability /
-    /// battery guards, because an `INDEX_VERSION` bump is a privacy migration
-    /// (e.g. the Secret/Private shaping change): vectors built under the old
-    /// shaping may carry content that the new policy forbids embedding, so they
-    /// must be erased even if the index is currently disabled or the model is
-    /// unreachable. A model-identity change is handled separately by
+    /// Unconditionally drop stored vectors that are incompatible with this
+    /// build's [`INDEX_VERSION`] or with the *current* privacy policy
+    /// ([`nagori_core::AppSettings::semantic_policy_hash`]). Runs *before* the
+    /// enabled / availability / battery guards, because both mismatches are
+    /// privacy migrations: vectors built under the old shaping — or before a
+    /// `regex_denylist` / app-denylist / OTP-detection edit — may carry
+    /// content that the new policy forbids embedding, so they must be erased
+    /// even if the index is currently disabled or the model is unreachable.
+    /// A model-identity change is handled separately by
     /// `reconcile_semantic_metadata`, which needs the live embedder metadata
     /// this path deliberately avoids fetching.
     ///
-    /// Returns whether the index is now free of incompatible-version vectors:
-    /// `true` when there was nothing to purge or the purge succeeded, `false`
-    /// when the probe or clear failed (so incompatible vectors may remain and
-    /// the caller should retry). Idempotent — once cleared, the stored meta is
+    /// Returns whether the index is now free of incompatible vectors: `true`
+    /// when there was nothing to purge or the purge succeeded, `false` when
+    /// the probe or clear failed (so incompatible vectors may remain and the
+    /// caller should retry). Idempotent — once cleared, the stored meta is
     /// gone and a later call is a single singleton-row read.
-    async fn purge_incompatible_index_version(&self) -> bool {
-        match self.store.semantic_meta().await {
-            Ok(Some(meta)) if meta.index_version != INDEX_VERSION => {
-                match self.store.semantic_clear().await {
-                    Ok(()) => {
-                        tracing::info!(
-                            stored = meta.index_version,
-                            current = INDEX_VERSION,
-                            "semantic_index_version_purged",
-                        );
-                        true
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "semantic_index_version_purge_failed");
-                        false
-                    }
+    async fn purge_incompatible_index(&self) -> bool {
+        let meta = match self.store.semantic_meta().await {
+            Ok(Some(meta)) => meta,
+            Ok(None) => return true,
+            Err(err) => {
+                tracing::warn!(error = %err, "semantic_index_purge_probe_failed");
+                return false;
+            }
+        };
+        let reason = if meta.index_version == INDEX_VERSION {
+            match self.current_semantic_policy_hash().await {
+                Ok(current) if meta.policy_hash == current => return true,
+                Ok(_) => "policy_hash",
+                Err(err) => {
+                    tracing::warn!(error = %err, "semantic_index_policy_probe_failed");
+                    return false;
                 }
             }
-            Ok(_) => true,
+        } else {
+            "index_version"
+        };
+        match self.store.semantic_clear().await {
+            Ok(()) => {
+                tracing::info!(
+                    reason,
+                    stored_index_version = meta.index_version,
+                    current_index_version = INDEX_VERSION,
+                    "semantic_index_purged",
+                );
+                true
+            }
             Err(err) => {
-                tracing::warn!(error = %err, "semantic_index_version_probe_failed");
+                tracing::warn!(error = %err, reason, "semantic_index_purge_failed");
                 false
             }
         }
     }
 
-    /// The current embedder's metadata as a [`SemanticIndexMeta`].
-    async fn current_semantic_meta(&self, embedder: &dyn Embedder) -> Result<SemanticIndexMeta> {
+    /// The live privacy-policy fingerprint, read from the settings watch when
+    /// it has been seeded from the store, else from the store directly — the
+    /// watch holds `AppSettings::default()` until the startup refresh lands,
+    /// and fingerprinting the compile-time default against an index built
+    /// under the user's real settings would purge (and force a full rebuild
+    /// of) a perfectly valid index on every boot.
+    async fn current_semantic_policy_hash(&self) -> Result<String> {
+        if self.settings_watch_seeded() {
+            Ok(self.with_settings(AppSettings::semantic_policy_hash))
+        } else {
+            Ok(self
+                .refresh_settings_from_store()
+                .await?
+                .semantic_policy_hash())
+        }
+    }
+
+    /// The current embedder's metadata as a [`SemanticIndexMeta`], stamped
+    /// with the policy fingerprint the caller is embedding under.
+    async fn current_semantic_meta(
+        &self,
+        embedder: &dyn Embedder,
+        policy_hash: String,
+    ) -> Result<SemanticIndexMeta> {
         let meta = embedder
             .metadata()
             .await
@@ -503,14 +575,20 @@ impl NagoriRuntime {
             max_sequence_length: u32::try_from(meta.max_sequence_length).unwrap_or(0),
             languages: meta.languages,
             index_version: INDEX_VERSION,
+            policy_hash,
         })
     }
 
-    /// Compares the live embedder's metadata against the persisted index
+    /// Compares the live embedder's metadata — and the privacy policy the
+    /// vectors would be embedded under — against the persisted index
     /// metadata; on a mismatch (or an explicit rebuild request) clears the
     /// stored vectors and records the new metadata so the pass rebuilds.
-    async fn reconcile_semantic_metadata(&self, embedder: &dyn Embedder) -> Result<()> {
-        let current = self.current_semantic_meta(embedder).await?;
+    async fn reconcile_semantic_metadata(
+        &self,
+        embedder: &dyn Embedder,
+        policy_hash: String,
+    ) -> Result<()> {
+        let current = self.current_semantic_meta(embedder, policy_hash).await?;
         // Read (don't yet clear) the rebuild flag: if the clear / set below
         // fails, the flag must stay set so the next pass retries instead of
         // silently dropping the user's rebuild request.
@@ -533,6 +611,14 @@ impl NagoriRuntime {
     }
 
     /// Embeds one batch of pending entries and stores the vectors.
+    ///
+    /// Every entry is re-assessed against the *current* policy first: the
+    /// stored `sensitivity` was frozen at capture time, so a `regex_denylist`
+    /// rule (or app-denylist rule, or OTP toggle) added afterwards would
+    /// otherwise never apply — a manual Rebuild would re-embed the same
+    /// forbidden text verbatim. The stored verdict acts as a floor (a rule
+    /// *removal* never downgrades an already-Private row), the re-assessment
+    /// as a gate on top.
     async fn embed_and_store(
         &self,
         embedder: &dyn Embedder,
@@ -540,21 +626,22 @@ impl NagoriRuntime {
         pending: &[nagori_storage::PendingEmbedding],
         cancel: &CancellationToken,
     ) -> std::result::Result<(), EmbedBatchError> {
-        let inputs: Vec<EmbeddingInput> = pending
-            .iter()
-            .map(|entry| EmbeddingInput {
-                id: entry.entry_id.to_string(),
-                // `Private` bodies are scrubbed before they reach the model so
-                // private content is never embedded verbatim; `Public` /
-                // `Unknown` bodies embed as-is, and `Secret` never reaches here
-                // (excluded by `semantic_pending`).
-                text: if entry.sensitivity == Sensitivity::Private {
-                    classifier.redact(&entry.text)
-                } else {
-                    entry.text.clone()
-                },
-            })
-            .collect();
+        let (accepted, inputs, refused) = partition_by_current_policy(classifier, pending);
+        if !refused.is_empty() {
+            let count = refused.len();
+            self.store
+                .semantic_exclude_batch(refused)
+                .await
+                .map_err(|err| EmbedBatchError {
+                    detail: err.to_string(),
+                    is_transient: false,
+                })?;
+            tracing::debug!(count, "semantic_entries_refused_by_current_policy");
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let pending = accepted;
         // Race the permit wait against cancellation so shutdown is not blocked
         // behind an in-flight embedding holding the single permit.
         let _permit = tokio::select! {
@@ -603,7 +690,7 @@ impl NagoriRuntime {
         }
         let by_id: HashMap<EntryId, &nagori_storage::PendingEmbedding> = pending
             .iter()
-            .map(|entry| (entry.entry_id, entry))
+            .map(|entry| (entry.entry_id, *entry))
             .collect();
         let mut seen = HashSet::with_capacity(pending.len());
         let mut batch = Vec::with_capacity(pending.len());
@@ -645,7 +732,85 @@ impl NagoriRuntime {
     }
 }
 
+/// Split a pending batch by what the *current* policy allows to reach the
+/// embedding model: entries to embed (with their shaped input text) and
+/// entries to refuse (with the content hash to tombstone).
+///
+/// Each entry's stored verdict is combined with a live re-assessment of both
+/// its normalized projection (what would be embedded) *and* its raw body
+/// (what the capture-time classifier saw): normalization folds case and
+/// width, so a case-sensitive rule or detector that matches the raw text can
+/// miss the normalized form — and lowercased denylisted content is still
+/// denylisted content. `Private` bodies are scrubbed through the classifier's
+/// redactor so private content is never embedded verbatim; `Public` /
+/// `Unknown` bodies embed as-is; `Secret` / `Blocked` verdicts refuse the
+/// entry so a policy added after capture keeps its content out of the model.
+fn partition_by_current_policy<'p>(
+    classifier: &SensitivityClassifier,
+    pending: &'p [nagori_storage::PendingEmbedding],
+) -> (
+    Vec<&'p nagori_storage::PendingEmbedding>,
+    Vec<EmbeddingInput>,
+    Vec<(EntryId, String)>,
+) {
+    let mut accepted = Vec::with_capacity(pending.len());
+    let mut inputs = Vec::with_capacity(pending.len());
+    let mut refused = Vec::new();
+    for entry in pending {
+        let mut reassessed = classifier.assess_semantic_text(&entry.text, entry.source.as_ref());
+        if let Some(raw) = &entry.raw_text {
+            reassessed = most_restrictive(
+                reassessed,
+                classifier.assess_semantic_text(raw, entry.source.as_ref()),
+            );
+        }
+        match most_restrictive(entry.sensitivity, reassessed) {
+            // Tombstoning also drops any leftover stale-hash vector, and keeps
+            // the refused row out of the backlog until its content or the
+            // policy changes (an index rebuild re-assesses everything).
+            Sensitivity::Secret | Sensitivity::Blocked => {
+                refused.push((entry.entry_id, entry.content_hash.clone()));
+            }
+            Sensitivity::Private => {
+                accepted.push(entry);
+                inputs.push(EmbeddingInput {
+                    id: entry.entry_id.to_string(),
+                    text: classifier.redact(&entry.text),
+                });
+            }
+            Sensitivity::Public | Sensitivity::Unknown => {
+                accepted.push(entry);
+                inputs.push(EmbeddingInput {
+                    id: entry.entry_id.to_string(),
+                    text: entry.text.clone(),
+                });
+            }
+        }
+    }
+    (accepted, inputs, refused)
+}
+
+/// The more restrictive of two sensitivity verdicts, by embedding impact:
+/// `Blocked` > `Secret` > `Private` > `Public` > `Unknown`. Used to combine
+/// the capture-time verdict frozen in the row with the indexer's live
+/// re-assessment — either side may know about a restriction the other
+/// cannot see (a since-removed rule vs. a since-added one), so the gate
+/// takes the worst of both.
+const fn most_restrictive(a: Sensitivity, b: Sensitivity) -> Sensitivity {
+    const fn rank(sensitivity: Sensitivity) -> u8 {
+        match sensitivity {
+            Sensitivity::Unknown => 0,
+            Sensitivity::Public => 1,
+            Sensitivity::Private => 2,
+            Sensitivity::Secret => 3,
+            Sensitivity::Blocked => 4,
+        }
+    }
+    if rank(b) > rank(a) { b } else { a }
+}
+
 /// A failed embedding batch, tagged with whether retrying is worthwhile.
+#[derive(Debug)]
 struct EmbedBatchError {
     detail: String,
     is_transient: bool,
@@ -721,7 +886,9 @@ mod tests {
 
     fn compatible_meta() -> SemanticIndexMeta {
         // Matches `MockEmbedder`'s reported metadata (id/revision/dimension)
-        // plus this module's `INDEX_VERSION`.
+        // plus this module's `INDEX_VERSION` and the default settings' policy
+        // fingerprint (the tests below only flip `ai.*` toggles, which do not
+        // participate in the fingerprint).
         SemanticIndexMeta {
             model_identifier: "mock-embedder".to_owned(),
             revision: 1,
@@ -729,6 +896,7 @@ mod tests {
             max_sequence_length: 256,
             languages: vec!["en".to_owned(), "ja".to_owned()],
             index_version: INDEX_VERSION,
+            policy_hash: AppSettings::default().semantic_policy_hash(),
         }
     }
 
@@ -807,6 +975,7 @@ mod tests {
                 max_sequence_length: 256,
                 languages: Vec::new(),
                 index_version: INDEX_VERSION,
+                policy_hash: AppSettings::default().semantic_policy_hash(),
             })
             .await
             .unwrap();
@@ -903,7 +1072,7 @@ mod tests {
             .build_for_test();
 
         assert!(
-            runtime.purge_incompatible_index_version().await,
+            runtime.purge_incompatible_index().await,
             "purge must report the index is now clean"
         );
 
@@ -916,6 +1085,278 @@ mod tests {
             0,
             "incompatible-version vectors must be purged from disk"
         );
+    }
+
+    /// A privacy-policy edit (here: a new `regex_denylist` rule) must purge
+    /// vectors embedded under the previous policy even when no embedding
+    /// model is available — the purge is the only thing protecting at-rest
+    /// vectors that may embed content the new rule forbids (the review's
+    /// "policy change with the model unavailable" case).
+    #[tokio::test]
+    async fn purge_clears_vectors_after_a_policy_change_without_a_model() {
+        use nagori_core::{EntryFactory, EntryRepository, SettingsRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store
+            .insert(EntryFactory::from_text("ticket ACME-1234 details"))
+            .await
+            .unwrap();
+
+        // Embedded under the old policy (no denylist rule yet): meta carries
+        // that policy's fingerprint, and the vector is current for the entry.
+        let old_policy = AppSettings::default();
+        let mut meta = compatible_meta();
+        meta.policy_hash = old_policy.semantic_policy_hash();
+        store.semantic_set_meta(meta).await.unwrap();
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store.semantic_upsert(id, hash, vec![1.0; 8]).await.unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        // The user now adds a rule matching the already-embedded text.
+        let new_policy = AppSettings {
+            regex_denylist: vec!["ACME-\\d+".to_owned()],
+            ..Default::default()
+        };
+        store.save_settings(new_policy).await.unwrap();
+
+        // No `ai_engine`: this host has no embedder at all.
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .build_for_test();
+
+        assert!(
+            runtime.purge_incompatible_index().await,
+            "purge must report the index is now clean"
+        );
+        assert!(
+            store.semantic_meta().await.unwrap().is_none(),
+            "stale-policy meta must be cleared"
+        );
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "vectors embedded under the old policy must be erased"
+        );
+    }
+
+    /// With the stored policy fingerprint matching the live settings, the
+    /// purge must leave the index alone — otherwise every wake would wipe a
+    /// valid index and the backfill would loop forever.
+    #[tokio::test]
+    async fn purge_keeps_vectors_whose_policy_matches() {
+        use nagori_core::{EntryFactory, EntryRepository, SettingsRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let id = store
+            .insert(EntryFactory::from_text("plain note"))
+            .await
+            .unwrap();
+        store.save_settings(AppSettings::default()).await.unwrap();
+        store.semantic_set_meta(compatible_meta()).await.unwrap();
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store.semantic_upsert(id, hash, vec![1.0; 8]).await.unwrap();
+
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .build_for_test();
+
+        assert!(runtime.purge_incompatible_index().await);
+        assert!(
+            store.semantic_meta().await.unwrap().is_some(),
+            "a policy-matching index must survive the purge"
+        );
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+    }
+
+    /// An embedder that records every input text it is handed, so a test can
+    /// assert exactly what reached the model.
+    struct RecordingEmbedder {
+        dimension: usize,
+        inputs: Mutex<Vec<String>>,
+    }
+
+    impl RecordingEmbedder {
+        fn new(dimension: usize) -> Self {
+            Self {
+                dimension,
+                inputs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded(&self) -> Vec<String> {
+            self.inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for RecordingEmbedder {
+        async fn availability(&self) -> nagori_ai::BackendAvailability {
+            nagori_ai::BackendAvailability::Available
+        }
+
+        async fn metadata(
+            &self,
+        ) -> std::result::Result<nagori_ai::EmbeddingModelMetadata, nagori_core::AiError> {
+            Ok(nagori_ai::EmbeddingModelMetadata {
+                model_identifier: "recording".to_owned(),
+                revision: 1,
+                dimension: self.dimension,
+                max_sequence_length: 256,
+                languages: vec!["en".to_owned()],
+            })
+        }
+
+        async fn embed_batch(
+            &self,
+            inputs: Vec<EmbeddingInput>,
+            _cancel: CancellationToken,
+            _timeout_ms: Option<u64>,
+        ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
+            let mut recorded = self
+                .inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Ok(inputs
+                .into_iter()
+                .map(|input| {
+                    recorded.push(input.text);
+                    nagori_ai::EmbeddingVector {
+                        id: input.id,
+                        vector: vec![1.0; self.dimension],
+                    }
+                })
+                .collect())
+        }
+    }
+
+    /// The indexer must re-assess each pending entry against the *current*
+    /// policy rather than trusting the capture-time verdict: a row captured
+    /// as Public whose text now matches a `regex_denylist` rule must never
+    /// reach the embedding model — including through a manual Rebuild, which
+    /// walks this same path (the review's "Rebuild re-embeds the raw text"
+    /// case). The refused row is tombstoned so the backfill drains.
+    #[tokio::test]
+    async fn embed_and_store_refuses_text_the_current_policy_forbids() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("ticket ACME-1234 details"))
+            .await
+            .unwrap();
+        let clean = store
+            .insert(EntryFactory::from_text("harmless meeting note"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let settings = AppSettings {
+            regex_denylist: vec!["ACME-\\d+".to_owned()],
+            ..Default::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        let embedder = RecordingEmbedder::new(8);
+        runtime
+            .embed_and_store(&embedder, &classifier, &pending, &CancellationToken::new())
+            .await
+            .expect("a batch with refused entries must still store the rest");
+
+        // Only the clean text reached the model.
+        let recorded = embedder.recorded();
+        assert_eq!(recorded, vec!["harmless meeting note".to_owned()]);
+        assert!(
+            recorded.iter().all(|text| !text.contains("ACME-1234")),
+            "denylisted text must never reach the embedder"
+        );
+
+        // The clean entry is indexed; the refused one is tombstoned (not
+        // pending, not counted) so the backfill can drain.
+        let counts = store.semantic_counts().await.unwrap();
+        assert_eq!(counts.indexed, 1);
+        assert_eq!(counts.total, 1);
+        assert!(store.semantic_pending(10).await.unwrap().is_empty());
+        let hits = store
+            .semantic_search(vec![1.0; 8], nagori_core::SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry_id, clean);
+    }
+
+    /// A batch whose every entry is refused by the current policy must
+    /// tombstone them and succeed without calling the embedder at all.
+    #[tokio::test]
+    async fn embed_and_store_skips_the_model_when_everything_is_refused() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("ticket ACME-1 body"))
+            .await
+            .unwrap();
+        store
+            .insert(EntryFactory::from_text("ticket ACME-2 body"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let settings = AppSettings {
+            regex_denylist: vec!["ACME-\\d+".to_owned()],
+            ..Default::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        let embedder = RecordingEmbedder::new(8);
+        runtime
+            .embed_and_store(&embedder, &classifier, &pending, &CancellationToken::new())
+            .await
+            .expect("an all-refused batch is a success, not an error");
+
+        assert!(
+            embedder.recorded().is_empty(),
+            "no text may reach the embedder"
+        );
+        assert!(
+            store.semantic_pending(10).await.unwrap().is_empty(),
+            "refused entries must be tombstoned so the backfill drains"
+        );
+        assert_eq!(store.semantic_counts().await.unwrap().total, 0);
     }
 
     /// An embedder that returns the batch results in reverse input order,

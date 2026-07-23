@@ -16,7 +16,7 @@ use std::sync::Once;
 
 use nagori_core::{
     AppError, EntryId, RankReason, Result, SearchFilters, SearchResult, SemanticIndexMeta,
-    Sensitivity,
+    Sensitivity, SourceApp,
 };
 use rusqlite::{OptionalExtension, ToSql, params};
 use time::OffsetDateTime;
@@ -39,13 +39,27 @@ pub struct SemanticIndexCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingEmbedding {
     pub entry_id: EntryId,
+    /// The normalized search text — what would actually be embedded.
     pub text: String,
+    /// The entry's raw plain-text body, when the stored content parses to a
+    /// text-shaped payload. The indexer re-assesses *both* projections
+    /// against the current policy: normalization folds case and width, so a
+    /// case-sensitive `regex_denylist` rule or built-in detector (`AKIA…`)
+    /// that matched the capture would silently miss the normalized form.
+    pub raw_text: Option<String>,
     pub content_hash: String,
-    /// Classification of the source entry. The indexer redacts `Private`
-    /// bodies before embedding so private content never reaches the model
-    /// verbatim; `Secret` rows are excluded from `semantic_pending` entirely,
-    /// so this never reports `Secret` / `Blocked`.
+    /// Capture-time classification of the source entry. The indexer treats
+    /// this as a *floor*, not the verdict: it re-assesses the text against
+    /// the current policy before embedding (a rule added after capture must
+    /// still apply) and redacts `Private` bodies so private content never
+    /// reaches the model verbatim. `Secret` rows are excluded from
+    /// `semantic_pending` entirely, so this never reports `Secret` /
+    /// `Blocked`.
     pub sensitivity: Sensitivity,
+    /// The entry's recorded source application, when captured, so the
+    /// indexer's re-assessment can apply `app_denylist` rules added after
+    /// the entry was stored.
+    pub source: Option<SourceApp>,
 }
 
 /// The entry-point signature `rusqlite`'s `sqlite3_auto_extension` expects.
@@ -95,7 +109,7 @@ impl SqliteStore {
             let row = conn
                 .query_row(
                     "SELECT model_identifier, revision, dimension, max_sequence_length, \
-                     languages, index_version
+                     languages, index_version, policy_hash
                      FROM semantic_index_meta WHERE id = 1",
                     [],
                     |row| {
@@ -107,13 +121,22 @@ impl SqliteStore {
                             row.get::<_, i64>(3)?,
                             languages,
                             row.get::<_, i64>(5)?,
+                            row.get::<_, String>(6)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(storage_err)?;
             Ok(row.map(
-                |(model_identifier, revision, dimension, max_seq, languages, index_version)| {
+                |(
+                    model_identifier,
+                    revision,
+                    dimension,
+                    max_seq,
+                    languages,
+                    index_version,
+                    policy_hash,
+                )| {
                     let languages: Vec<String> =
                         serde_json::from_str(&languages).unwrap_or_default();
                     SemanticIndexMeta {
@@ -123,6 +146,7 @@ impl SqliteStore {
                         max_sequence_length: u32::try_from(max_seq).unwrap_or(0),
                         languages,
                         index_version: u32::try_from(index_version).unwrap_or(0),
+                        policy_hash,
                     }
                 },
             ))
@@ -139,8 +163,8 @@ impl SqliteStore {
             conn.execute(
                 "INSERT INTO semantic_index_meta
                     (id, model_identifier, revision, dimension, max_sequence_length,
-                     languages, index_version, updated_at)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     languages, index_version, policy_hash, updated_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                     model_identifier = excluded.model_identifier,
                     revision = excluded.revision,
@@ -148,6 +172,7 @@ impl SqliteStore {
                     max_sequence_length = excluded.max_sequence_length,
                     languages = excluded.languages,
                     index_version = excluded.index_version,
+                    policy_hash = excluded.policy_hash,
                     updated_at = excluded.updated_at",
                 params![
                     meta.model_identifier,
@@ -156,6 +181,7 @@ impl SqliteStore {
                     i64::from(meta.max_sequence_length),
                     languages,
                     i64::from(meta.index_version),
+                    meta.policy_hash,
                     now,
                 ],
             )
@@ -165,16 +191,67 @@ impl SqliteStore {
         .await
     }
 
-    /// Drops every stored vector and the metadata row. Used when the live
-    /// embedder's model is incompatible with the persisted one.
+    /// Drops every stored vector, the policy-exclusion tombstones, and the
+    /// metadata row. Used when the live embedder's model — or the privacy
+    /// policy the vectors were embedded under — is incompatible with the
+    /// persisted one. Exclusions go with the vectors so the rebuild
+    /// re-assesses every entry under the *current* policy rather than
+    /// trusting refusals recorded under the old one.
     pub async fn semantic_clear(&self) -> Result<()> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(storage_err)?;
             tx.execute("DELETE FROM entry_embeddings", [])
                 .map_err(storage_err)?;
+            tx.execute("DELETE FROM semantic_exclusions", [])
+                .map_err(storage_err)?;
             tx.execute("DELETE FROM semantic_index_meta", [])
                 .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Records that the indexer refused to embed these entries under the
+    /// current policy (their stored text re-assessed as Secret / Blocked),
+    /// and drops any vector they still hold, in one transaction.
+    ///
+    /// Each item is `(entry_id, content_hash)`. The tombstone keeps the
+    /// entry out of `semantic_pending` until its content hash changes (a
+    /// rewritten body is re-assessed) or the index is cleared for a rebuild
+    /// (a policy change re-assesses everything). Deleting the leftover
+    /// vector in the same transaction guarantees a refused entry can never
+    /// remain ranked on content the current policy forbids.
+    pub async fn semantic_exclude_batch(&self, items: Vec<(EntryId, String)>) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let now = format_time(OffsetDateTime::now_utc())?;
+        self.run_blocking(move |store| {
+            let mut conn = store.conn()?;
+            let tx = conn.transaction().map_err(storage_err)?;
+            {
+                let mut upsert = tx
+                    .prepare_cached(
+                        "INSERT INTO semantic_exclusions (entry_id, content_hash, created_at)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(entry_id) DO UPDATE SET
+                            content_hash = excluded.content_hash,
+                            created_at = excluded.created_at",
+                    )
+                    .map_err(storage_err)?;
+                let mut drop_vector = tx
+                    .prepare_cached("DELETE FROM entry_embeddings WHERE entry_id = ?1")
+                    .map_err(storage_err)?;
+                for (entry_id, content_hash) in &items {
+                    let id = entry_id.to_string();
+                    upsert
+                        .execute(params![id, content_hash, now])
+                        .map_err(storage_err)?;
+                    drop_vector.execute(params![id]).map_err(storage_err)?;
+                }
+            }
             tx.commit().map_err(storage_err)?;
             Ok(())
         })
@@ -268,13 +345,16 @@ impl SqliteStore {
             let total: i64 = conn
                 .query_row(
                     // Mirror `semantic_pending`'s embeddable predicate (Secret is
-                    // never indexed) so progress never shows perpetual pending.
+                    // never indexed, and a policy-excluded entry is refused, not
+                    // outstanding) so progress never shows perpetual pending.
                     "SELECT COUNT(*)
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
+                     LEFT JOIN semantic_exclusions ex ON ex.entry_id = e.id
                      WHERE e.deleted_at IS NULL
                        AND e.sensitivity NOT IN ('blocked', 'secret')
-                       AND length(d.normalized_text) > 0",
+                       AND length(d.normalized_text) > 0
+                       AND (ex.entry_id IS NULL OR ex.content_hash != e.content_hash)",
                     [],
                     |row| row.get(0),
                 )
@@ -285,15 +365,18 @@ impl SqliteStore {
                     // entry: a stale vector (entry re-captured under a new hash)
                     // is pending re-embedding, not indexed, so progress reports
                     // it as outstanding rather than done. Mirrors the
-                    // `semantic_pending` predicate.
+                    // `semantic_pending` predicate, including the exclusion
+                    // filter, so `indexed` can never exceed `total`.
                     "SELECT COUNT(*)
                      FROM entry_embeddings em
                      JOIN entries e ON e.id = em.entry_id
                      JOIN search_documents d ON d.entry_id = e.id
+                     LEFT JOIN semantic_exclusions ex ON ex.entry_id = e.id
                      WHERE e.deleted_at IS NULL
                        AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0
-                       AND em.content_hash = e.content_hash",
+                       AND em.content_hash = e.content_hash
+                       AND (ex.entry_id IS NULL OR ex.content_hash != e.content_hash)",
                     [],
                     |row| row.get(0),
                 )
@@ -332,14 +415,25 @@ impl SqliteStore {
                     // capture alone never mutates an existing entry's hash, but
                     // the predicate guarantees the invariant regardless of how a
                     // row's content changed.
-                    "SELECT e.id, e.content_hash, d.normalized_text, e.sensitivity
+                    //
+                    // A `semantic_exclusions` tombstone with a matching hash
+                    // means the indexer already re-assessed this exact content
+                    // under the current policy and refused to embed it — skip
+                    // it so the backfill drains instead of re-offering the same
+                    // refused rows forever. A stale tombstone (content changed)
+                    // re-pends the entry for a fresh assessment.
+                    "SELECT e.id, e.content_hash, d.normalized_text, e.sensitivity,
+                            e.source_app_name, e.source_bundle_id, e.source_executable_path,
+                            e.content_json
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      LEFT JOIN entry_embeddings em ON em.entry_id = e.id
+                     LEFT JOIN semantic_exclusions ex ON ex.entry_id = e.id
                      WHERE e.deleted_at IS NULL
                        AND e.sensitivity NOT IN ('blocked', 'secret')
                        AND length(d.normalized_text) > 0
                        AND (em.entry_id IS NULL OR em.content_hash != e.content_hash)
+                       AND (ex.entry_id IS NULL OR ex.content_hash != e.content_hash)
                      ORDER BY e.created_at DESC
                      LIMIT ?1",
                 )
@@ -347,25 +441,49 @@ impl SqliteStore {
             let rows = stmt
                 .query_map(params![limit], |row| {
                     let sensitivity = parse_sensitivity_strict(&row.get::<_, String>(3)?)?;
+                    let name: Option<String> = row.get(4)?;
+                    let bundle_id: Option<String> = row.get(5)?;
+                    let executable_path: Option<String> = row.get(6)?;
+                    let source =
+                        (name.is_some() || bundle_id.is_some() || executable_path.is_some())
+                            .then_some(SourceApp {
+                                bundle_id,
+                                name,
+                                executable_path,
+                            });
+                    // Best-effort raw projection for the policy re-assessment:
+                    // an unparseable payload only loses the raw-side scan (the
+                    // normalized text is still assessed), it never blocks the
+                    // row.
+                    let raw_text = serde_json::from_str::<nagori_core::ClipboardContent>(
+                        &row.get::<_, String>(7)?,
+                    )
+                    .ok()
+                    .and_then(|content| content.plain_text().map(ToOwned::to_owned));
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         sensitivity,
+                        source,
+                        raw_text,
                     ))
                 })
                 .map_err(storage_err)?;
             let mut pending = Vec::new();
             for row in rows {
-                let (id, content_hash, text, sensitivity) = row.map_err(storage_err)?;
+                let (id, content_hash, text, sensitivity, source, raw_text) =
+                    row.map_err(storage_err)?;
                 let Ok(entry_id) = id.parse::<EntryId>() else {
                     continue;
                 };
                 pending.push(PendingEmbedding {
                     entry_id,
                     text,
+                    raw_text,
                     content_hash,
                     sensitivity,
+                    source,
                 });
             }
             Ok(pending)
@@ -477,6 +595,7 @@ mod tests {
             max_sequence_length: 256,
             languages: vec!["en".to_owned()],
             index_version: 1,
+            policy_hash: "policy-hash-a".to_owned(),
         }
     }
 
@@ -568,6 +687,127 @@ mod tests {
             .unwrap();
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
         assert!(store.semantic_pending(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn excluded_entry_leaves_pending_and_counts_until_content_changes() {
+        let store = SqliteStore::open_memory().unwrap();
+        let refused = insert_text(&store, "matches a denylist rule now").await;
+        let normal = insert_text(&store, "plain note").await;
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        let hash = pending
+            .iter()
+            .find(|p| p.entry_id == refused)
+            .unwrap()
+            .content_hash
+            .clone();
+
+        store
+            .semantic_exclude_batch(vec![(refused, hash.clone())])
+            .await
+            .unwrap();
+
+        // The refused entry no longer counts as embeddable or pending, so the
+        // backfill can drain and progress reaches "ready".
+        let counts = store.semantic_counts().await.unwrap();
+        assert_eq!(counts.total, 1);
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entry_id, normal);
+
+        // A stale tombstone (the entry's content hash moved on) re-pends the
+        // entry for a fresh assessment under the current policy.
+        store
+            .semantic_exclude_batch(vec![(refused, "old-content-hash".to_owned())])
+            .await
+            .unwrap();
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 2, "a stale exclusion must not stick");
+        assert_eq!(store.semantic_counts().await.unwrap().total, 2);
+    }
+
+    #[tokio::test]
+    async fn exclude_batch_drops_any_leftover_vector() {
+        // Excluding an entry must also remove its stored vector in the same
+        // transaction: the exclusion means the current policy forbids ranking
+        // this content, so a leftover vector (e.g. one embedded under a stale
+        // hash) can never survive it.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "previously embedded").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store
+            .semantic_upsert(id, hash.clone(), vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        store
+            .semantic_exclude_batch(vec![(id, hash)])
+            .await
+            .unwrap();
+
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+        let hits = store
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .await
+            .unwrap();
+        assert!(hits.is_empty(), "an excluded entry must not stay ranked");
+    }
+
+    #[tokio::test]
+    async fn clear_wipes_exclusions_for_a_fresh_policy_assessment() {
+        // A rebuild (policy or model change) must re-assess every entry under
+        // the current policy: refusals recorded under the old policy go with
+        // the vectors.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "refused under the old policy").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store.semantic_set_meta(meta(1, 4)).await.unwrap();
+        store
+            .semantic_exclude_batch(vec![(id, hash)])
+            .await
+            .unwrap();
+        assert!(store.semantic_pending(10).await.unwrap().is_empty());
+
+        store.semantic_clear().await.unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "cleared exclusions must re-pend the entry"
+        );
+        assert_eq!(pending[0].entry_id, id);
+    }
+
+    #[tokio::test]
+    async fn pending_carries_the_source_app_for_reassessment() {
+        use nagori_core::SourceApp;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let mut entry = EntryFactory::from_text("copied from a vault");
+        entry.metadata.source = Some(SourceApp {
+            bundle_id: Some("com.example.vault".to_owned()),
+            name: Some("Example Vault".to_owned()),
+            executable_path: None,
+        });
+        let with_source = store.insert(entry).await.unwrap();
+        let plain = insert_text(&store, "no source recorded").await;
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        let sourced = pending.iter().find(|p| p.entry_id == with_source).unwrap();
+        assert_eq!(
+            sourced.source.as_ref().and_then(|s| s.bundle_id.as_deref()),
+            Some("com.example.vault")
+        );
+        let unsourced = pending.iter().find(|p| p.entry_id == plain).unwrap();
+        assert!(unsourced.source.is_none());
     }
 
     #[tokio::test]
