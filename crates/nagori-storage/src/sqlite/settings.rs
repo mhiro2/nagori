@@ -92,21 +92,7 @@ fn invalidate_semantic_index_on_policy_change(
     tx: &rusqlite::Transaction<'_>,
     new_settings: &AppSettings,
 ) -> Result<usize> {
-    let old_value: Option<String> = tx
-        .query_row("SELECT value FROM settings WHERE key = 'app'", [], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(storage_err)?;
-    let old_hash = match old_value {
-        Some(value) => match serde_json::from_str::<AppSettings>(&value) {
-            Ok(old) => Some(old.semantic_policy_hash()),
-            // Unreadable stored settings: the policy the index was built
-            // under cannot be reconstructed, so treat it as changed.
-            Err(_) => None,
-        },
-        None => Some(AppSettings::default().semantic_policy_hash()),
-    };
+    let old_hash = stored_settings_policy_hash(tx)?;
     if old_hash.as_deref() == Some(&new_settings.semantic_policy_hash()) {
         return Ok(0);
     }
@@ -118,6 +104,29 @@ fn invalidate_semantic_index_on_policy_change(
     tx.execute("DELETE FROM semantic_index_meta", [])
         .map_err(storage_err)?;
     Ok(purged)
+}
+
+/// The semantic policy fingerprint of the settings row as committed, read
+/// inside the caller's transaction so it describes the same snapshot as any
+/// writes the caller is about to make.
+///
+/// A missing row fingerprints as the compile-time default (the state an index
+/// built before the first explicit save ran under); `None` means the stored
+/// row no longer deserializes — the policy it encodes cannot be
+/// reconstructed, so callers must fail closed.
+pub(super) fn stored_settings_policy_hash(conn: &rusqlite::Connection) -> Result<Option<String>> {
+    let value: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'app'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(storage_err)?;
+    Ok(match value {
+        Some(value) => serde_json::from_str::<AppSettings>(&value)
+            .ok()
+            .map(|old| old.semantic_policy_hash()),
+        None => Some(AppSettings::default().semantic_policy_hash()),
+    })
 }
 
 impl SqliteStore {

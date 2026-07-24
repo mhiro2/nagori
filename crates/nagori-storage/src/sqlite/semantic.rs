@@ -101,6 +101,32 @@ pub(super) fn register_vec_extension() {
     });
 }
 
+/// The write-transaction policy guard shared by the guarded upsert /
+/// exclusion paths: when `expected` is given, the batch may only commit while
+/// `semantic_index_meta.policy_hash` still equals it. A policy-changing
+/// settings save erases the metadata row in its own transaction, so a batch
+/// shaped under the previous policy fails here with [`AppError::Conflict`]
+/// instead of committing.
+fn check_policy_guard(tx: &rusqlite::Transaction<'_>, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT policy_hash FROM semantic_index_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_err)?;
+    if stored.as_deref() != Some(expected) {
+        return Err(AppError::Conflict(
+            "semantic index policy changed while the batch was in flight".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Recover one pending entry's non-normalized text projections — the raw
 /// body and rich-text markup from `content_json`, plus the text-shaped rows
 /// of `entry_representations` — for the indexer's policy re-assessment.
@@ -279,6 +305,79 @@ impl SqliteStore {
         .await
     }
 
+    /// Atomically restart the index for a rebuild: erase the stored vectors,
+    /// exclusion tombstones, and metadata row, then record `meta` as the new
+    /// index identity — all in one write transaction, validated against the
+    /// *committed* settings.
+    ///
+    /// The validation is what makes the worker's rebuild safe against a
+    /// racing policy edit: `meta.policy_hash` must equal the fingerprint of
+    /// the settings row as it exists inside this same transaction, or the
+    /// call aborts with [`AppError::Conflict`]. Without it, a rebuild pass
+    /// still running under the previous settings could re-create the metadata
+    /// row *after* a policy-changing save erased it — resurrecting the old
+    /// fingerprint that the guarded upsert and the query-side pin trust.
+    /// Separate `semantic_clear` + `semantic_set_meta` calls have exactly
+    /// that hole, which is why the worker uses this instead.
+    ///
+    /// An unreadable settings row fails closed (`Conflict`): a policy that
+    /// cannot be reconstructed cannot be certified as current.
+    pub async fn semantic_rebuild_index_meta(&self, meta: SemanticIndexMeta) -> Result<()> {
+        let languages = serde_json::to_string(&meta.languages).unwrap_or_else(|_| "[]".to_owned());
+        let now = format_time(OffsetDateTime::now_utc())?;
+        self.run_blocking(move |store| {
+            let mut conn = store.conn()?;
+            // IMMEDIATE for the same snapshot-upgrade reason as the guarded
+            // batch paths: the settings read below must belong to the same
+            // writer snapshot as the deletes and the meta insert.
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            let committed = super::settings::stored_settings_policy_hash(&tx)?;
+            if committed.as_deref() != Some(meta.policy_hash.as_str()) {
+                return Err(AppError::Conflict(
+                    "semantic index policy changed while the rebuild was being prepared".to_owned(),
+                ));
+            }
+            let deleted = tx
+                .execute("DELETE FROM entry_embeddings", [])
+                .map_err(storage_err)?;
+            tx.execute("DELETE FROM semantic_exclusions", [])
+                .map_err(storage_err)?;
+            tx.execute("DELETE FROM semantic_index_meta", [])
+                .map_err(storage_err)?;
+            tx.execute(
+                "INSERT INTO semantic_index_meta
+                    (id, model_identifier, revision, dimension, max_sequence_length,
+                     languages, index_version, policy_hash, updated_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    meta.model_identifier,
+                    i64::from(meta.revision),
+                    i64::from(meta.dimension),
+                    i64::from(meta.max_sequence_length),
+                    languages,
+                    i64::from(meta.index_version),
+                    meta.policy_hash,
+                    now,
+                ],
+            )
+            .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            // The erased vectors may have been embedded under a policy the
+            // rebuild replaces — scrub the WAL like the other purge paths.
+            super::maintenance::checkpoint_truncate_after_purge(&conn, deleted);
+            Ok(())
+        })
+        .await
+    }
+
+    /// [`Self::semantic_exclude_batch_guarded`] without the policy guard, for
+    /// callers that manage index consistency themselves.
+    pub async fn semantic_exclude_batch(&self, items: Vec<(EntryId, String)>) -> Result<()> {
+        self.semantic_exclude_batch_guarded(items, None).await
+    }
+
     /// Records that the indexer refused to embed these entries under the
     /// current policy (their stored text re-assessed as Secret / Blocked),
     /// and drops any vector they still hold, in one transaction.
@@ -289,7 +388,17 @@ impl SqliteStore {
     /// (a policy change re-assesses everything). Deleting the leftover
     /// vector in the same transaction guarantees a refused entry can never
     /// remain ranked on content the current policy forbids.
-    pub async fn semantic_exclude_batch(&self, items: Vec<(EntryId, String)>) -> Result<()> {
+    ///
+    /// `expected_policy_hash` carries the same write-transaction guard as
+    /// [`Self::semantic_upsert_batch_guarded`]: a refusal decided under the
+    /// previous policy must not re-insert its tombstones after a
+    /// policy-changing settings save erased them — a stale tombstone would
+    /// hide a now-permitted entry from the backlog until the next rebuild.
+    pub async fn semantic_exclude_batch_guarded(
+        &self,
+        items: Vec<(EntryId, String)>,
+        expected_policy_hash: Option<String>,
+    ) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
@@ -297,7 +406,14 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let mut dropped = 0_usize;
-            let tx = conn.transaction().map_err(storage_err)?;
+            // IMMEDIATE: take the writer lock before the guard's read so the
+            // read and the writes below see one snapshot; a DEFERRED
+            // read-then-write upgrade could fail with `SQLITE_BUSY_SNAPSHOT`
+            // whenever another connection commits in between.
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            check_policy_guard(&tx, expected_policy_hash.as_deref())?;
             {
                 let mut upsert = tx
                     .prepare_cached(
@@ -383,22 +499,12 @@ impl SqliteStore {
         let now = format_time(OffsetDateTime::now_utc())?;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
-            if let Some(expected) = &expected_policy_hash {
-                let stored: Option<String> = tx
-                    .query_row(
-                        "SELECT policy_hash FROM semantic_index_meta WHERE id = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(storage_err)?;
-                if stored.as_deref() != Some(expected.as_str()) {
-                    return Err(AppError::Conflict(
-                        "semantic index policy changed while the batch was in flight".to_owned(),
-                    ));
-                }
-            }
+            // IMMEDIATE for the same snapshot-upgrade reason as the guarded
+            // exclusion path.
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            check_policy_guard(&tx, expected_policy_hash.as_deref())?;
             {
                 let mut stmt = tx
                     .prepare_cached(
@@ -1139,6 +1245,88 @@ mod tests {
             .expect_err("a mismatching policy hash must abort a guarded batch");
         assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_meta_is_atomic_and_pinned_to_the_committed_policy() {
+        use nagori_core::SettingsRepository;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let base = nagori_core::AppSettings::default();
+        store.save_settings(base.clone()).await.unwrap();
+        let id = insert_text(&store, "previously embedded").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store
+            .semantic_upsert(id, hash, vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        // A rebuild whose policy fingerprint matches the committed settings
+        // restarts the index: old vectors gone, new meta recorded, in one step.
+        let mut current = meta(1, 3);
+        current.policy_hash = base.semantic_policy_hash();
+        store
+            .semantic_rebuild_index_meta(current.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_meta().await.unwrap(), Some(current));
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+
+        // A policy-changing save lands; a rebuild still carrying the previous
+        // fingerprint must abort instead of resurrecting it — otherwise the
+        // guarded upsert and the query-side pin would trust a stale policy.
+        let mut stricter = base;
+        stricter.regex_denylist = vec!["ACME-\\d+".to_owned()];
+        store.save_settings(stricter).await.unwrap();
+        let mut stale = meta(1, 3);
+        stale.policy_hash = nagori_core::AppSettings::default().semantic_policy_hash();
+        let err = store
+            .semantic_rebuild_index_meta(stale)
+            .await
+            .expect_err("a stale-policy rebuild must not re-create the metadata row");
+        assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
+        assert!(
+            store.semantic_meta().await.unwrap().is_none(),
+            "the erased metadata row must stay erased"
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_exclusions_abort_when_the_policy_meta_no_longer_matches() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "refused under the old policy").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+
+        // With matching meta the guarded exclusion lands.
+        store.semantic_set_meta(meta(1, 3)).await.unwrap();
+        store
+            .semantic_exclude_batch_guarded(
+                vec![(id, hash.clone())],
+                Some("policy-hash-a".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert!(store.semantic_pending(10).await.unwrap().is_empty());
+
+        // A policy-changing save erased the index (tombstones included): a
+        // refusal decided under the old policy must not re-insert its
+        // tombstone, or a now-permitted entry would stay hidden from the
+        // backlog.
+        store.semantic_clear().await.unwrap();
+        let err = store
+            .semantic_exclude_batch_guarded(vec![(id, hash)], Some("policy-hash-a".to_owned()))
+            .await
+            .expect_err("a stale-policy exclusion must abort");
+        assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
+        assert_eq!(
+            store.semantic_pending(10).await.unwrap().len(),
+            1,
+            "the entry must stay in the backlog for the fresh-policy pass"
+        );
     }
 
     #[tokio::test]

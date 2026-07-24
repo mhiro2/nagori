@@ -415,13 +415,21 @@ impl NagoriRuntime {
                 return;
             }
         };
-        if let Err(err) = self
+        match self
             .reconcile_semantic_metadata(embedder, settings.semantic_policy_hash())
             .await
         {
-            tracing::warn!(error = %err, "semantic_metadata_reconcile_failed");
-            self.semantic.set_state(SemanticIndexState::Unavailable);
-            return;
+            Ok(()) => {}
+            // The settings changed while the rebuild was being prepared: not
+            // a fault, just a stale pass. Return to the outer loop, which
+            // re-reads the fresh settings (the change that tripped the guard
+            // also woke `settings_rx`) and reconciles again.
+            Err(AppError::Conflict(_)) => return,
+            Err(err) => {
+                tracing::warn!(error = %err, "semantic_metadata_reconcile_failed");
+                self.semantic.set_state(SemanticIndexState::Unavailable);
+                return;
+            }
         }
 
         self.semantic.set_state(SemanticIndexState::Indexing);
@@ -599,15 +607,25 @@ impl NagoriRuntime {
 
     /// Compares the live embedder's metadata — and the privacy policy the
     /// vectors would be embedded under — against the persisted index
-    /// metadata; on a mismatch (or an explicit rebuild request) clears the
-    /// stored vectors and records the new metadata so the pass rebuilds.
+    /// metadata; on a mismatch (or an explicit rebuild request) atomically
+    /// clears the stored vectors and records the new metadata so the pass
+    /// rebuilds.
+    ///
+    /// The clear + record goes through `semantic_rebuild_index_meta`, which
+    /// validates `policy_hash` against the *committed* settings inside its
+    /// own write transaction. Separate clear / set calls would let a pass
+    /// still running under the previous settings resurrect the old policy
+    /// fingerprint after a policy-changing save erased it — quietly
+    /// re-arming the guarded upsert and the query-side pin for the old
+    /// policy. A `Conflict` from that guard aborts this pass; the settings
+    /// change that caused it wakes the loop with fresh settings.
     async fn reconcile_semantic_metadata(
         &self,
         embedder: &dyn Embedder,
         policy_hash: String,
     ) -> Result<()> {
         let current = self.current_semantic_meta(embedder, policy_hash).await?;
-        // Read (don't yet clear) the rebuild flag: if the clear / set below
+        // Read (don't yet clear) the rebuild flag: if the rebuild below
         // fails, the flag must stay set so the next pass retries instead of
         // silently dropping the user's rebuild request.
         let rebuild = self.semantic.rebuild_requested.load(Ordering::SeqCst);
@@ -616,8 +634,7 @@ impl NagoriRuntime {
             .as_ref()
             .is_none_or(|s| !s.is_compatible_with(&current));
         if rebuild || incompatible {
-            self.store.semantic_clear().await?;
-            self.store.semantic_set_meta(current).await?;
+            self.store.semantic_rebuild_index_meta(current).await?;
         }
         // Only now that the rebuild has actually happened do we clear the flag.
         if rebuild {
@@ -630,22 +647,30 @@ impl NagoriRuntime {
 
     /// Tombstone entries the current policy refused to embed (also dropping
     /// any leftover vector) so the backfill drains instead of re-offering the
-    /// same refused rows every batch.
+    /// same refused rows every batch. Guarded like the vector upsert: a
+    /// refusal decided under the previous policy must not re-insert its
+    /// tombstones after a policy-changing save erased them, or a
+    /// now-permitted entry would stay hidden from the backlog until the next
+    /// rebuild.
     async fn record_policy_refusals(
         &self,
         refused: Vec<(EntryId, String)>,
+        policy_hash: Option<String>,
     ) -> std::result::Result<(), EmbedBatchError> {
         if refused.is_empty() {
             return Ok(());
         }
         let count = refused.len();
         self.store
-            .semantic_exclude_batch(refused)
+            .semantic_exclude_batch_guarded(refused, policy_hash)
             .await
-            .map_err(|err| EmbedBatchError {
-                detail: err.to_string(),
-                is_transient: false,
-                policy_stale: false,
+            .map_err(|err| match err {
+                AppError::Conflict(_) => EmbedBatchError::stale_policy(),
+                err => EmbedBatchError {
+                    detail: err.to_string(),
+                    is_transient: false,
+                    policy_stale: false,
+                },
             })?;
         tracing::debug!(count, "semantic_entries_refused_by_current_policy");
         Ok(())
@@ -684,7 +709,8 @@ impl NagoriRuntime {
         cancel: &CancellationToken,
     ) -> std::result::Result<(), EmbedBatchError> {
         let (accepted, inputs, refused) = partition_by_current_policy(classifier, pending);
-        self.record_policy_refusals(refused).await?;
+        self.record_policy_refusals(refused, policy_hash.clone())
+            .await?;
         if inputs.is_empty() {
             return Ok(());
         }
@@ -1568,6 +1594,58 @@ mod tests {
         assert!(inputs.is_empty());
         assert_eq!(refused.len(), 1);
         assert_eq!(refused[0].0, entry.entry_id);
+    }
+
+    /// A reconcile still carrying the previous policy fingerprint must abort
+    /// (and leave the erased metadata erased) once a policy-changing settings
+    /// save has committed — resurrecting the old fingerprint would re-arm the
+    /// guarded upsert and the query-side pin for the old policy.
+    #[tokio::test]
+    async fn reconcile_aborts_instead_of_resurrecting_a_stale_policy() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, SettingsRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        // The committed settings already carry the *new* policy…
+        let new_policy = AppSettings {
+            regex_denylist: vec!["ACME-\\d+".to_owned()],
+            ..Default::default()
+        };
+        store.save_settings(new_policy.clone()).await.unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        // …but this pass was shaped before the save and still holds the old
+        // fingerprint.
+        let stale_hash = AppSettings::default().semantic_policy_hash();
+        let embedder = MockEmbedder::with_dimension(8);
+        let err = runtime
+            .reconcile_semantic_metadata(&embedder, stale_hash)
+            .await
+            .expect_err("a stale-policy reconcile must abort");
+        assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
+        assert!(
+            store.semantic_meta().await.unwrap().is_none(),
+            "the stale fingerprint must not be resurrected"
+        );
+
+        // The fresh-policy pass reconciles normally.
+        runtime
+            .reconcile_semantic_metadata(&embedder, new_policy.semantic_policy_hash())
+            .await
+            .expect("the fresh-policy reconcile must succeed");
+        assert_eq!(
+            store.semantic_meta().await.unwrap().map(|m| m.policy_hash),
+            Some(new_policy.semantic_policy_hash())
+        );
     }
 
     /// An embedder that reports the batch has started, then waits until the
