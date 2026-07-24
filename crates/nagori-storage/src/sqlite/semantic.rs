@@ -101,6 +101,56 @@ pub(super) fn register_vec_extension() {
     });
 }
 
+/// Recover one pending entry's non-normalized text projections — the raw
+/// body and rich-text markup from `content_json`, plus the text-shaped rows
+/// of `entry_representations` — for the indexer's policy re-assessment.
+///
+/// Returns `(raw_texts, content_unparseable)`; the flag is set (and surfaced
+/// to the indexer so it can fail closed) when `content_json` no longer
+/// deserializes: a body that cannot be re-checked against the current policy
+/// must not be embedded on the normalized projection alone.
+fn recover_raw_texts(
+    reps_stmt: &mut rusqlite::CachedStatement<'_>,
+    entry_id: &str,
+    content_json: &str,
+) -> Result<(Vec<String>, bool)> {
+    let mut raw_texts = Vec::new();
+    let mut content_unparseable = false;
+    match serde_json::from_str::<nagori_core::ClipboardContent>(content_json) {
+        Ok(content) => {
+            if let Some(raw) = content.plain_text() {
+                raw_texts.push(raw.to_owned());
+            }
+            if let nagori_core::ClipboardContent::RichText(rich) = &content
+                && let Some(markup) = rich.markup.as_deref()
+            {
+                raw_texts.push(markup.to_owned());
+            }
+        }
+        Err(_) => content_unparseable = true,
+    }
+    let reps = reps_stmt
+        .query_map(params![entry_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage_err)?;
+    for rep in reps {
+        let (mime, text) = rep.map_err(storage_err)?;
+        // `text/uri-list` rows store a JSON-encoded path list; the
+        // capture-time classifier scanned those paths joined with newlines,
+        // so decode back to the same shape — a JSON blob would defeat
+        // anchored or quote-sensitive rules that matched at capture.
+        // `decode_file_paths` cannot fail (a non-JSON legacy row falls back
+        // to its newline form).
+        if mime.eq_ignore_ascii_case("text/uri-list") {
+            raw_texts.push(nagori_core::decode_file_paths(&text).join("\n"));
+        } else {
+            raw_texts.push(text);
+        }
+    }
+    Ok((raw_texts, content_unparseable))
+}
+
 /// Serialises a vector to the little-endian float32 BLOB `sqlite-vec` reads.
 fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(vector.len() * 4);
@@ -287,8 +337,17 @@ impl SqliteStore {
         content_hash: String,
         vector: Vec<f32>,
     ) -> Result<()> {
-        self.semantic_upsert_batch(vec![(entry_id, content_hash, vector)])
+        self.semantic_upsert_batch_guarded(vec![(entry_id, content_hash, vector)], None)
             .await
+    }
+
+    /// [`Self::semantic_upsert_batch_guarded`] without the policy guard, for
+    /// callers that manage index consistency themselves.
+    pub async fn semantic_upsert_batch(
+        &self,
+        items: Vec<(EntryId, String, Vec<f32>)>,
+    ) -> Result<()> {
+        self.semantic_upsert_batch_guarded(items, None).await
     }
 
     /// Stores (or replaces) the embeddings for a batch of entries in one
@@ -298,9 +357,20 @@ impl SqliteStore {
     /// before calling, then relies on the single transaction here so a batch is
     /// applied all-or-nothing: a crash mid-write never leaves the index with
     /// some vectors persisted and their siblings dropped.
-    pub async fn semantic_upsert_batch(
+    ///
+    /// `expected_policy_hash`, when given, is re-checked against
+    /// `semantic_index_meta.policy_hash` *inside the write transaction*: a
+    /// settings write whose policy fingerprint changed erases the metadata row
+    /// in its own transaction (see the settings repository), so a batch that
+    /// was shaped under the old policy fails this check and aborts with
+    /// [`AppError::Conflict`] instead of committing forbidden vectors. This is
+    /// the write-side half of the policy/index atomicity contract; the
+    /// indexer's watch-based pre-checks only narrow the window, this guard
+    /// closes it.
+    pub async fn semantic_upsert_batch_guarded(
         &self,
         items: Vec<(EntryId, String, Vec<f32>)>,
+        expected_policy_hash: Option<String>,
     ) -> Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -314,6 +384,21 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(storage_err)?;
+            if let Some(expected) = &expected_policy_hash {
+                let stored: Option<String> = tx
+                    .query_row(
+                        "SELECT policy_hash FROM semantic_index_meta WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(storage_err)?;
+                if stored.as_deref() != Some(expected.as_str()) {
+                    return Err(AppError::Conflict(
+                        "semantic index policy changed while the batch was in flight".to_owned(),
+                    ));
+                }
+            }
             {
                 let mut stmt = tx
                     .prepare_cached(
@@ -496,7 +581,7 @@ impl SqliteStore {
             // content the plain projection does not).
             let mut reps_stmt = conn
                 .prepare_cached(
-                    "SELECT text_content FROM entry_representations
+                    "SELECT mime_type, text_content FROM entry_representations
                      WHERE entry_id = ?1 AND text_content IS NOT NULL
                      ORDER BY ordinal",
                 )
@@ -506,30 +591,8 @@ impl SqliteStore {
                 let Ok(entry_id) = id.parse::<EntryId>() else {
                     continue;
                 };
-                let mut raw_texts = Vec::new();
-                let mut content_unparseable = false;
-                match serde_json::from_str::<nagori_core::ClipboardContent>(&content_json) {
-                    Ok(content) => {
-                        if let Some(raw) = content.plain_text() {
-                            raw_texts.push(raw.to_owned());
-                        }
-                        if let nagori_core::ClipboardContent::RichText(rich) = &content
-                            && let Some(markup) = rich.markup.as_deref()
-                        {
-                            raw_texts.push(markup.to_owned());
-                        }
-                    }
-                    // Surfaced to the indexer so it can fail closed: a body
-                    // that cannot be re-checked against the current policy
-                    // must not be embedded on the normalized projection alone.
-                    Err(_) => content_unparseable = true,
-                }
-                let reps = reps_stmt
-                    .query_map(params![id], |row| row.get::<_, String>(0))
-                    .map_err(storage_err)?;
-                for rep in reps {
-                    raw_texts.push(rep.map_err(storage_err)?);
-                }
+                let (raw_texts, content_unparseable) =
+                    recover_raw_texts(&mut reps_stmt, &id, &content_json)?;
                 pending.push(PendingEmbedding {
                     entry_id,
                     text,
@@ -949,6 +1012,179 @@ mod tests {
             hits(Some("some-newer-policy")).await,
             0,
             "a mismatching pin must return nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_changing_settings_save_erases_the_index_in_the_same_transaction() {
+        use nagori_core::SettingsRepository;
+
+        // The settings write is the atomicity anchor: once a save whose
+        // embedding policy fingerprint differs commits, no snapshot can see
+        // old-policy vectors any more — the erase rides in the same
+        // transaction rather than waiting for the background worker.
+        let store = SqliteStore::open_memory().unwrap();
+        let base = nagori_core::AppSettings::default();
+        store.save_settings(base.clone()).await.unwrap();
+
+        let id = insert_text(&store, "ticket ACME-1234 details").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        let mut current_meta = meta(1, 3);
+        current_meta.policy_hash = base.semantic_policy_hash();
+        store.semantic_set_meta(current_meta.clone()).await.unwrap();
+        store
+            .semantic_upsert(id, hash, vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        // An unrelated settings change must NOT invalidate the index.
+        let mut unrelated = base.clone();
+        unrelated.paste_delay_ms += 10;
+        store.save_settings(unrelated.clone()).await.unwrap();
+        assert!(store.semantic_meta().await.unwrap().is_some());
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        // A policy change (new denylist rule) erases vectors + meta with the
+        // save itself.
+        let mut stricter = unrelated;
+        stricter.regex_denylist = vec!["ACME-\\d+".to_owned()];
+        store.save_settings(stricter).await.unwrap();
+        assert!(
+            store.semantic_meta().await.unwrap().is_none(),
+            "the policy-changing save must erase the index metadata"
+        );
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "the policy-changing save must erase the stored vectors"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_changing_checked_save_also_erases_the_index() {
+        use nagori_core::SettingsRepository;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let base = nagori_core::AppSettings::default();
+        store.save_settings(base.clone()).await.unwrap();
+        let (_, revision) = store.get_settings_with_revision().await.unwrap();
+
+        let id = insert_text(&store, "some document").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        let mut current_meta = meta(1, 3);
+        current_meta.policy_hash = base.semantic_policy_hash();
+        store.semantic_set_meta(current_meta).await.unwrap();
+        store
+            .semantic_upsert(id, hash, vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        let mut stricter = base;
+        stricter.otp_detection = !stricter.otp_detection;
+        store
+            .save_settings_checked(stricter, revision)
+            .await
+            .unwrap();
+        assert!(store.semantic_meta().await.unwrap().is_none());
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+    }
+
+    #[tokio::test]
+    async fn guarded_upsert_aborts_when_the_policy_meta_no_longer_matches() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "a document").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+
+        // Matching guard: the batch commits.
+        store.semantic_set_meta(meta(1, 3)).await.unwrap();
+        store
+            .semantic_upsert_batch_guarded(
+                vec![(id, hash.clone(), vec![1.0, 0.0, 0.0])],
+                Some("policy-hash-a".to_owned()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 1);
+
+        // A policy-changing save erased the meta row: the guard must abort
+        // the write instead of re-inserting old-policy vectors.
+        store.semantic_clear().await.unwrap();
+        let err = store
+            .semantic_upsert_batch_guarded(
+                vec![(id, hash.clone(), vec![1.0, 0.0, 0.0])],
+                Some("policy-hash-a".to_owned()),
+            )
+            .await
+            .expect_err("a missing meta row must abort a guarded batch");
+        assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+
+        // Same for a meta row rebuilt under a different policy.
+        let mut other = meta(1, 3);
+        other.policy_hash = "some-newer-policy".to_owned();
+        store.semantic_set_meta(other).await.unwrap();
+        let err = store
+            .semantic_upsert_batch_guarded(
+                vec![(id, hash, vec![1.0, 0.0, 0.0])],
+                Some("policy-hash-a".to_owned()),
+            )
+            .await
+            .expect_err("a mismatching policy hash must abort a guarded batch");
+        assert!(matches!(err, AppError::Conflict(_)), "got: {err:?}");
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_decodes_file_path_representations_to_the_capture_shape() {
+        use nagori_core::{
+            RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+        };
+
+        // FilePaths representations are persisted as a JSON array, but the
+        // capture-time classifier scanned the newline-joined paths — the
+        // re-assessment must see that same shape or anchored / quote-sensitive
+        // rules that matched at capture would miss.
+        let store = SqliteStore::open_memory().unwrap();
+        let mut entry = EntryFactory::from_text("some note");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("some note".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/uri-list".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::FilePaths(vec![
+                    "/Users/private/secret-plan.txt".to_owned(),
+                    "/tmp/other.txt".to_owned(),
+                ]),
+            },
+        ];
+        store.insert(entry).await.unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .raw_texts
+                .contains(&"/Users/private/secret-plan.txt\n/tmp/other.txt".to_owned()),
+            "file paths must be re-assessed newline-joined, as at capture: {:?}",
+            pending[0].raw_texts
+        );
+        assert!(
+            !pending[0].raw_texts.iter().any(|t| t.starts_with('[')),
+            "the JSON-encoded storage form must not be what gets scanned: {:?}",
+            pending[0].raw_texts
         );
     }
 

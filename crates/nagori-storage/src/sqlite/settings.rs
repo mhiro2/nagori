@@ -42,13 +42,17 @@ impl SettingsRepository for SqliteStore {
         self.run_blocking(move |store| {
             let value = serde_json::to_string_pretty(&settings).map_err(json_err)?;
             let now = format_time(OffsetDateTime::now_utc())?;
-            let conn = store.conn()?;
+            let mut conn = store.conn()?;
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            let purged = invalidate_semantic_index_on_policy_change(&tx, &settings)?;
             // Every persisted write advances `revision` (the optimistic-
             // concurrency token): 1 on the first insert, +1 on each update.
             // `save_settings_checked` reads the token to reject a stale
             // full-blob overwrite, and the watch-channel broadcast carries the
             // post-write value so clients can refresh their baseline.
-            conn.execute(
+            tx.execute(
                 "INSERT INTO settings (key, value, updated_at, revision) VALUES ('app', ?1, ?2, 1)
                  ON CONFLICT(key) DO UPDATE SET
                      value = excluded.value,
@@ -57,10 +61,63 @@ impl SettingsRepository for SqliteStore {
                 params![value, now],
             )
             .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            super::maintenance::checkpoint_truncate_after_purge(&conn, purged);
             Ok(())
         })
         .await
     }
+}
+
+/// Erase the semantic index — vectors, exclusion tombstones, and the metadata
+/// row — in the *same transaction* as a settings write whose embedding policy
+/// fingerprint differs from the stored one.
+///
+/// This is what makes a policy edit atomic against the semantic index. The
+/// background worker also purges on a fingerprint mismatch, but it acts
+/// *after* the settings commit: without this, an indexing batch shaped by the
+/// old policy could commit its vectors after the settings landed, and a
+/// semantic query could rank old-policy vectors after validating against the
+/// not-yet-updated metadata. Deleting the index here means any snapshot is
+/// consistent — it either predates the settings write (old policy fully in
+/// force) or sees no vectors at all — and `semantic_upsert_batch`'s
+/// policy-hash guard makes a racing batch abort instead of re-inserting.
+///
+/// Returns the number of vectors erased so the caller can apply the
+/// hard-delete WAL-scrub contract after commit. A missing settings row
+/// fingerprints as the compile-time default (the state an index built before
+/// the first explicit save ran under); an unreadable one fails closed and
+/// purges.
+fn invalidate_semantic_index_on_policy_change(
+    tx: &rusqlite::Transaction<'_>,
+    new_settings: &AppSettings,
+) -> Result<usize> {
+    let old_value: Option<String> = tx
+        .query_row("SELECT value FROM settings WHERE key = 'app'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(storage_err)?;
+    let old_hash = match old_value {
+        Some(value) => match serde_json::from_str::<AppSettings>(&value) {
+            Ok(old) => Some(old.semantic_policy_hash()),
+            // Unreadable stored settings: the policy the index was built
+            // under cannot be reconstructed, so treat it as changed.
+            Err(_) => None,
+        },
+        None => Some(AppSettings::default().semantic_policy_hash()),
+    };
+    if old_hash.as_deref() == Some(&new_settings.semantic_policy_hash()) {
+        return Ok(0);
+    }
+    let purged = tx
+        .execute("DELETE FROM entry_embeddings", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM semantic_exclusions", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM semantic_index_meta", [])
+        .map_err(storage_err)?;
+    Ok(purged)
 }
 
 impl SqliteStore {
@@ -130,6 +187,7 @@ impl SqliteStore {
                     "settings changed concurrently (expected revision {expected_revision}, found {current})"
                 )));
             }
+            let purged = invalidate_semantic_index_on_policy_change(&tx, &settings)?;
             let next = current.saturating_add(1);
             let next_i64 = i64::try_from(next).map_err(|err| {
                 AppError::storage(format!("settings revision overflowed i64: {err}"))
@@ -144,6 +202,7 @@ impl SqliteStore {
             )
             .map_err(storage_err)?;
             tx.commit().map_err(storage_err)?;
+            super::maintenance::checkpoint_truncate_after_purge(&conn, purged);
             Ok(next)
         })
         .await

@@ -457,7 +457,14 @@ impl NagoriRuntime {
                 break;
             }
             match self
-                .embed_and_store(embedder, &classifier, &pending, Some(settings_rx), cancel)
+                .embed_and_store(
+                    embedder,
+                    &classifier,
+                    &pending,
+                    Some(settings_rx),
+                    Some(settings.semantic_policy_hash()),
+                    cancel,
+                )
                 .await
             {
                 Ok(()) => backoff = 0,
@@ -621,6 +628,29 @@ impl NagoriRuntime {
         Ok(())
     }
 
+    /// Tombstone entries the current policy refused to embed (also dropping
+    /// any leftover vector) so the backfill drains instead of re-offering the
+    /// same refused rows every batch.
+    async fn record_policy_refusals(
+        &self,
+        refused: Vec<(EntryId, String)>,
+    ) -> std::result::Result<(), EmbedBatchError> {
+        if refused.is_empty() {
+            return Ok(());
+        }
+        let count = refused.len();
+        self.store
+            .semantic_exclude_batch(refused)
+            .await
+            .map_err(|err| EmbedBatchError {
+                detail: err.to_string(),
+                is_transient: false,
+                policy_stale: false,
+            })?;
+        tracing::debug!(count, "semantic_entries_refused_by_current_policy");
+        Ok(())
+    }
+
     /// Embeds one batch of pending entries and stores the vectors.
     ///
     /// Every entry is re-assessed against the *current* policy first: the
@@ -635,37 +665,26 @@ impl NagoriRuntime {
     /// it is in flight: the shaping above came from the pass's classifier, so
     /// once the watch reports a change this batch's inputs — and any vectors
     /// the model already produced for them — may no longer be permitted.
-    /// Checked right before the model call and again before persisting;
-    /// either hit drops the whole batch with a `policy_stale` error and
-    /// nothing is stored. The check cannot make the model call itself atomic
-    /// with the settings read — a change can still land mid-embed — so the
-    /// authoritative cleanup remains the policy-hash purge the outer loop
-    /// runs on its next wake; this guard just keeps the common case from
-    /// persisting stale vectors at all.
+    /// Checked right before the model call (so stale inputs stop reaching the
+    /// model) and again before persisting; either hit drops the whole batch
+    /// with a `policy_stale` error and nothing is stored. The *authoritative*
+    /// write barrier is `policy_hash`: the guarded upsert re-checks it against
+    /// `semantic_index_meta` inside the write transaction, and a policy-
+    /// changing settings save erases that metadata row in its own transaction
+    /// — so a batch racing the save either commits before it (and the save's
+    /// erase covers its vectors) or aborts on the guard. No interleaving
+    /// leaves old-policy vectors persisted past the settings commit.
     async fn embed_and_store(
         &self,
         embedder: &dyn Embedder,
         classifier: &SensitivityClassifier,
         pending: &[nagori_storage::PendingEmbedding],
         settings_rx: Option<&tokio::sync::watch::Receiver<AppSettings>>,
+        policy_hash: Option<String>,
         cancel: &CancellationToken,
     ) -> std::result::Result<(), EmbedBatchError> {
-        let policy_stale = |rx: Option<&tokio::sync::watch::Receiver<AppSettings>>| -> bool {
-            rx.is_some_and(|rx| rx.has_changed().unwrap_or(true))
-        };
         let (accepted, inputs, refused) = partition_by_current_policy(classifier, pending);
-        if !refused.is_empty() {
-            let count = refused.len();
-            self.store
-                .semantic_exclude_batch(refused)
-                .await
-                .map_err(|err| EmbedBatchError {
-                    detail: err.to_string(),
-                    is_transient: false,
-                    policy_stale: false,
-                })?;
-            tracing::debug!(count, "semantic_entries_refused_by_current_policy");
-        }
+        self.record_policy_refusals(refused).await?;
         if inputs.is_empty() {
             return Ok(());
         }
@@ -683,7 +702,7 @@ impl NagoriRuntime {
             }
         };
         // Last look before any input reaches the model.
-        if policy_stale(settings_rx) {
+        if settings_watch_stale(settings_rx) {
             return Err(EmbedBatchError::stale_policy());
         }
         let vectors = embedder
@@ -752,24 +771,40 @@ impl NagoriRuntime {
             }
             batch.push((entry_id, entry.content_hash.clone(), vector.vector));
         }
-        // Last look before the vectors become durable: a settings change that
-        // landed while the model was embedding means this batch was shaped by
-        // the previous policy — drop it rather than persist it.
-        if policy_stale(settings_rx) {
+        // Cheap early exit before the write: a settings change that landed
+        // while the model was embedding means this batch was shaped by the
+        // previous policy. Not authoritative on its own — the guarded upsert
+        // below re-checks the policy hash inside the write transaction.
+        if settings_watch_stale(settings_rx) {
             return Err(EmbedBatchError::stale_policy());
         }
         // Count matched, every id was requested, and none repeated ⇒ the
         // returned set equals the requested set, so no pending entry is skipped.
         self.store
-            .semantic_upsert_batch(batch)
+            .semantic_upsert_batch_guarded(batch, policy_hash)
             .await
-            .map_err(|err| EmbedBatchError {
-                detail: err.to_string(),
-                is_transient: false,
-                policy_stale: false,
+            .map_err(|err| match err {
+                // The policy-hash guard tripped inside the write transaction:
+                // a policy-changing settings save erased the index metadata
+                // after this batch was shaped. Same handling as the watch
+                // check — the batch is dropped, nothing was persisted.
+                AppError::Conflict(_) => EmbedBatchError::stale_policy(),
+                err => EmbedBatchError {
+                    detail: err.to_string(),
+                    is_transient: false,
+                    policy_stale: false,
+                },
             })?;
         Ok(())
     }
+}
+
+/// Whether the settings watch has published a change since the pass last
+/// observed it — meaning any batch shaped by the pass's classifier is stale.
+/// `has_changed` errors only once every sender is dropped (shutdown); treat
+/// that as stale too.
+fn settings_watch_stale(rx: Option<&tokio::sync::watch::Receiver<AppSettings>>) -> bool {
+    rx.is_some_and(|rx| rx.has_changed().unwrap_or(true))
 }
 
 /// Split a pending batch by what the *current* policy allows to reach the
@@ -1350,6 +1385,7 @@ mod tests {
                 &classifier,
                 &pending,
                 None,
+                None,
                 &CancellationToken::new(),
             )
             .await
@@ -1424,6 +1460,7 @@ mod tests {
                 &classifier,
                 &pending,
                 None,
+                None,
                 &CancellationToken::new(),
             )
             .await
@@ -1496,6 +1533,7 @@ mod tests {
                 &embedder,
                 &classifier,
                 &pending,
+                None,
                 None,
                 &CancellationToken::new(),
             )
@@ -1619,6 +1657,7 @@ mod tests {
             &classifier,
             &pending,
             Some(&settings_rx),
+            None,
             &cancel,
         );
         tokio::pin!(store_fut);
@@ -1827,6 +1866,7 @@ mod tests {
                 &classifier,
                 &pending,
                 None,
+                None,
                 &CancellationToken::new(),
             )
             .await;
@@ -1874,7 +1914,8 @@ mod tests {
         };
         let cancel = CancellationToken::new();
 
-        let store_fut = runtime.embed_and_store(&embedder, &classifier, &pending, None, &cancel);
+        let store_fut =
+            runtime.embed_and_store(&embedder, &classifier, &pending, None, None, &cancel);
         tokio::pin!(store_fut);
 
         // Drive `embed_and_store` until the embedder reports the batch is in
@@ -1939,6 +1980,7 @@ mod tests {
                 &ReversingEmbedder { dimension: 8 },
                 &classifier,
                 &pending,
+                None,
                 None,
                 &CancellationToken::new(),
             )

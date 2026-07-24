@@ -1924,7 +1924,13 @@ never reached the plain projection) — against the *current* policy via
 app-denylist rule added after capture still applies to rows frozen as
 `Public`; a body that fails to parse back for re-checking is refused (fail
 closed), and a settings change observed while a batch is in flight drops the
-batch before its vectors persist.
+batch before its vectors persist. The atomicity anchor is the settings write
+itself: a save whose policy fingerprint differs erases the vectors, tombstones,
+and metadata row *in the same transaction* (`invalidate_semantic_index_on_
+policy_change`), and the indexer's guarded upsert re-checks the fingerprint
+against `semantic_index_meta` inside its own write transaction — so a batch
+racing the save either commits before it (and the save's erase covers it) or
+aborts, and no interleaving leaves old-policy vectors past the settings commit.
 A re-assessment of `Secret` / `Blocked` refuses the entry: a tombstone in
 `semantic_exclusions` (keyed by `content_hash`, like the vectors) drops any
 leftover vector and keeps the row out of the pending backlog until its content
