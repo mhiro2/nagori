@@ -114,8 +114,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
+          # Keep the cache-busting `version` in step with ci.yaml: a stale
+          # cached package set against an updated runner image drops
+          # transitive dev deps (glib-2.0 via libgtk-3-dev).
           packages: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-          version: 1
+          version: 2
       - name: Verify Cargo version matches release tag
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"

@@ -435,3 +435,59 @@ fn classifier_otp_preview_does_not_leak_digits() {
         "OTP digits leaked into preview: {preview:?}",
     );
 }
+
+#[test]
+fn assess_semantic_text_reflects_current_policy_not_stored_verdict() {
+    // The semantic indexer re-assesses stored text against the *current*
+    // policy before embedding: a body captured as Public must come back
+    // Blocked once a matching `regex_denylist` rule exists.
+    let settings = AppSettings {
+        regex_denylist: vec!["ACME-\\d+".to_owned()],
+        ..Default::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    assert_eq!(
+        classifier.assess_semantic_text("ticket ACME-1234 details", None),
+        Sensitivity::Blocked
+    );
+    assert_eq!(
+        classifier.assess_semantic_text("unrelated note", None),
+        Sensitivity::Public
+    );
+    // Built-in secret detectors apply too.
+    assert_eq!(
+        classifier.assess_semantic_text("token = ghp_abcdefghijklmnopqrstuvwxyz123456", None),
+        Sensitivity::Secret
+    );
+}
+
+#[test]
+fn assess_semantic_text_honours_app_denylist_and_size_ceiling() {
+    use crate::SourceApp;
+    use crate::settings::AppDenyRule;
+
+    let mut settings = AppSettings::default();
+    settings.app_denylist.push(AppDenyRule::Pattern {
+        value: "example-vault".to_owned(),
+    });
+    settings.max_entry_size_bytes = 16;
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    let vault = SourceApp {
+        bundle_id: Some("com.example-vault.app".to_owned()),
+        name: Some("Example Vault".to_owned()),
+        executable_path: None,
+    };
+    assert_eq!(
+        classifier.assess_semantic_text("short note", Some(&vault)),
+        Sensitivity::Blocked,
+        "an app-denylist match must block embedding"
+    );
+
+    assert_eq!(
+        classifier.assess_semantic_text("this body exceeds the tiny ceiling", None),
+        Sensitivity::Blocked,
+        "an oversized body must block embedding"
+    );
+}

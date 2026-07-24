@@ -31,6 +31,17 @@ pub struct SemanticIndexMeta {
     /// Bumped by the indexing pipeline when its content shaping changes in a
     /// way that invalidates previously-stored vectors for the *same* model.
     pub index_version: u32,
+    /// Fingerprint of the privacy policy the stored vectors were embedded
+    /// under ([`crate::AppSettings::semantic_policy_hash`]). A mismatch with
+    /// the live settings means some stored vector may embed content the
+    /// current policy forbids (e.g. a `regex_denylist` rule added after the
+    /// entry was embedded), so the index must be purged and rebuilt.
+    ///
+    /// Defaults to `""` when absent (rows written before the field existed);
+    /// the empty value never matches a live fingerprint, so pre-existing
+    /// indexes are rebuilt once under the tracked policy.
+    #[serde(default)]
+    pub policy_hash: String,
 }
 
 impl SemanticIndexMeta {
@@ -40,12 +51,16 @@ impl SemanticIndexMeta {
     ///
     /// `max_sequence_length` and `languages` are descriptive, not part of the
     /// embedding-space identity, so they do not gate compatibility.
+    /// `policy_hash` *does* gate it: vectors embedded under an older privacy
+    /// policy may carry content the current policy forbids, so they must not
+    /// be served (or kept) once the policy changes.
     #[must_use]
     pub fn is_compatible_with(&self, other: &Self) -> bool {
         self.model_identifier == other.model_identifier
             && self.revision == other.revision
             && self.dimension == other.dimension
             && self.index_version == other.index_version
+            && self.policy_hash == other.policy_hash
     }
 }
 
@@ -123,6 +138,7 @@ mod tests {
             max_sequence_length: 256,
             languages: vec!["en".to_owned(), "ja".to_owned()],
             index_version,
+            policy_hash: "policy-a".to_owned(),
         }
     }
 
@@ -140,6 +156,23 @@ mod tests {
         assert!(!base.is_compatible_with(&meta("model-a", 2, 512, 1)));
         assert!(!base.is_compatible_with(&meta("model-a", 1, 384, 1)));
         assert!(!base.is_compatible_with(&meta("model-a", 1, 512, 2)));
+    }
+
+    #[test]
+    fn policy_hash_change_is_incompatible() {
+        // A privacy-policy edit (regex_denylist, app_denylist, OTP detection,
+        // size ceiling) must invalidate the stored vectors even when the model
+        // itself is unchanged: they may embed content the new policy forbids.
+        let base = meta("model-a", 1, 512, 1);
+        let mut other_policy = meta("model-a", 1, 512, 1);
+        other_policy.policy_hash = "policy-b".to_owned();
+        assert!(!base.is_compatible_with(&other_policy));
+
+        // Rows persisted before the field existed deserialize to `""`, which
+        // never matches a live fingerprint — the old index rebuilds once.
+        let mut legacy = meta("model-a", 1, 512, 1);
+        legacy.policy_hash = String::new();
+        assert!(!legacy.is_compatible_with(&base));
     }
 
     #[test]
