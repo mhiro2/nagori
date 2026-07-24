@@ -1915,11 +1915,16 @@ runs every `Private` body through the settings-aware redactor
 (`SensitivityClassifier::redact`) before embedding so private content is never
 sent verbatim; `Public` / `Unknown` bodies embed as-is. The capture-time
 verdict is only a floor, not the gate: before embedding, the worker re-assesses
-each entry's stored text (both the raw body and the normalized projection —
-normalization folds case, so a case-sensitive rule would otherwise miss it)
-against the *current* policy via
-`SensitivityClassifier::assess_semantic_text`, so a `regex_denylist` /
-app-denylist rule added after capture still applies to rows frozen as `Public`.
+every persisted text projection of each entry — the normalized search text,
+the raw body, the rich-text markup, and the stored text-shaped
+representations (normalization folds case, so a case-sensitive rule would
+otherwise miss it; a rule can also match a markup / alternative payload that
+never reached the plain projection) — against the *current* policy via
+`SensitivityClassifier::assess_semantic_texts`, so a `regex_denylist` /
+app-denylist rule added after capture still applies to rows frozen as
+`Public`; a body that fails to parse back for re-checking is refused (fail
+closed), and a settings change observed while a batch is in flight drops the
+batch before its vectors persist.
 A re-assessment of `Secret` / `Blocked` refuses the entry: a tombstone in
 `semantic_exclusions` (keyed by `content_hash`, like the vectors) drops any
 leftover vector and keeps the row out of the pending backlog until its content
@@ -1932,7 +1937,10 @@ embedder on the host — and rebuilds under the new policy once indexing is
 possible. Code-revision changes to the shaping are recorded in
 `INDEX_VERSION` — bumping it (it was raised when the Secret/Private gate
 landed) is treated the same way. At query time `SearchMode::Semantic`
-embeds the query and ranks the stored vectors; the embedder is macOS-only, so on
+embeds the query and ranks the stored vectors, pinning the ranking SQL to the
+policy fingerprint it validated (re-checked inside the query's own snapshot,
+so a policy edit racing the query yields no rows instead of forbidden
+vectors); the embedder is macOS-only, so on
 other platforms (or when the model is unavailable) semantic search reports
 `Unsupported` and the text plans keep working.
 

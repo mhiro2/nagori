@@ -41,12 +41,21 @@ pub struct PendingEmbedding {
     pub entry_id: EntryId,
     /// The normalized search text — what would actually be embedded.
     pub text: String,
-    /// The entry's raw plain-text body, when the stored content parses to a
-    /// text-shaped payload. The indexer re-assesses *both* projections
-    /// against the current policy: normalization folds case and width, so a
-    /// case-sensitive `regex_denylist` rule or built-in detector (`AKIA…`)
-    /// that matched the capture would silently miss the normalized form.
-    pub raw_text: Option<String>,
+    /// Every other persisted text projection of the entry: the raw
+    /// plain-text body, the rich-text markup, and the text-shaped rows in
+    /// `entry_representations`. The indexer re-assesses *all* of them against
+    /// the current policy alongside `text`, mirroring what the capture-time
+    /// classifier saw: normalization folds case and width (so a
+    /// case-sensitive `regex_denylist` rule or built-in detector — `AKIA…` —
+    /// that matched the capture would silently miss the normalized form
+    /// alone), and a rule can match a markup / alternative payload that never
+    /// reached the plain projection.
+    pub raw_texts: Vec<String>,
+    /// Set when the stored `content_json` failed to deserialize, so the raw
+    /// body could not be recovered for re-assessment. The indexer fails
+    /// closed on this (refuses to embed) rather than embedding content it
+    /// could not re-check.
+    pub content_unparseable: bool,
     pub content_hash: String,
     /// Capture-time classification of the source entry. The indexer treats
     /// this as a *floor*, not the verdict: it re-assesses the text against
@@ -201,13 +210,20 @@ impl SqliteStore {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(storage_err)?;
-            tx.execute("DELETE FROM entry_embeddings", [])
+            let deleted = tx
+                .execute("DELETE FROM entry_embeddings", [])
                 .map_err(storage_err)?;
             tx.execute("DELETE FROM semantic_exclusions", [])
                 .map_err(storage_err)?;
             tx.execute("DELETE FROM semantic_index_meta", [])
                 .map_err(storage_err)?;
             tx.commit().map_err(storage_err)?;
+            // A clear driven by a policy change is a privacy erase, so follow
+            // the same WAL-scrub contract as the hard-delete paths:
+            // `secure_delete` zeroes the freed pages in the main DB, and the
+            // best-effort truncate checkpoint drops the historical WAL frames
+            // that still carry the old vectors.
+            super::maintenance::checkpoint_truncate_after_purge(&conn, deleted);
             Ok(())
         })
         .await
@@ -230,6 +246,7 @@ impl SqliteStore {
         let now = format_time(OffsetDateTime::now_utc())?;
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
+            let mut dropped = 0_usize;
             let tx = conn.transaction().map_err(storage_err)?;
             {
                 let mut upsert = tx
@@ -249,10 +266,15 @@ impl SqliteStore {
                     upsert
                         .execute(params![id, content_hash, now])
                         .map_err(storage_err)?;
-                    drop_vector.execute(params![id]).map_err(storage_err)?;
+                    dropped += drop_vector.execute(params![id]).map_err(storage_err)?;
                 }
             }
             tx.commit().map_err(storage_err)?;
+            // A dropped vector held content the current policy forbids, so
+            // scrub the WAL frames that still carry it, matching the
+            // hard-delete contract. No-op when nothing was deleted (the
+            // common case: refused entries usually never had a vector).
+            super::maintenance::checkpoint_truncate_after_purge(&conn, dropped);
             Ok(())
         })
         .await
@@ -451,36 +473,68 @@ impl SqliteStore {
                                 name,
                                 executable_path,
                             });
-                    // Best-effort raw projection for the policy re-assessment:
-                    // an unparseable payload only loses the raw-side scan (the
-                    // normalized text is still assessed), it never blocks the
-                    // row.
-                    let raw_text = serde_json::from_str::<nagori_core::ClipboardContent>(
-                        &row.get::<_, String>(7)?,
-                    )
-                    .ok()
-                    .and_then(|content| content.plain_text().map(ToOwned::to_owned));
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         sensitivity,
                         source,
-                        raw_text,
+                        row.get::<_, String>(7)?,
                     ))
                 })
                 .map_err(storage_err)?;
+            let base: Vec<_> = rows
+                .collect::<std::result::Result<_, _>>()
+                .map_err(storage_err)?;
+            drop(stmt);
+
+            // Recover every other persisted text projection so the indexer's
+            // policy re-assessment sees what the capture-time classifier saw:
+            // the raw body and rich-text markup from `content_json`, plus the
+            // text-shaped representation rows (HTML / RTF / plain fallbacks
+            // are persisted verbatim for non-Secret entries and can carry
+            // content the plain projection does not).
+            let mut reps_stmt = conn
+                .prepare_cached(
+                    "SELECT text_content FROM entry_representations
+                     WHERE entry_id = ?1 AND text_content IS NOT NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(storage_err)?;
             let mut pending = Vec::new();
-            for row in rows {
-                let (id, content_hash, text, sensitivity, source, raw_text) =
-                    row.map_err(storage_err)?;
+            for (id, content_hash, text, sensitivity, source, content_json) in base {
                 let Ok(entry_id) = id.parse::<EntryId>() else {
                     continue;
                 };
+                let mut raw_texts = Vec::new();
+                let mut content_unparseable = false;
+                match serde_json::from_str::<nagori_core::ClipboardContent>(&content_json) {
+                    Ok(content) => {
+                        if let Some(raw) = content.plain_text() {
+                            raw_texts.push(raw.to_owned());
+                        }
+                        if let nagori_core::ClipboardContent::RichText(rich) = &content
+                            && let Some(markup) = rich.markup.as_deref()
+                        {
+                            raw_texts.push(markup.to_owned());
+                        }
+                    }
+                    // Surfaced to the indexer so it can fail closed: a body
+                    // that cannot be re-checked against the current policy
+                    // must not be embedded on the normalized projection alone.
+                    Err(_) => content_unparseable = true,
+                }
+                let reps = reps_stmt
+                    .query_map(params![id], |row| row.get::<_, String>(0))
+                    .map_err(storage_err)?;
+                for rep in reps {
+                    raw_texts.push(rep.map_err(storage_err)?);
+                }
                 pending.push(PendingEmbedding {
                     entry_id,
                     text,
-                    raw_text,
+                    raw_texts,
+                    content_unparseable,
                     content_hash,
                     sensitivity,
                     source,
@@ -493,11 +547,19 @@ impl SqliteStore {
 
     /// Ranks the stored vectors against `query` by cosine distance, returning
     /// the closest live, non-blocked entries as [`SearchResult`]s.
+    ///
+    /// `policy_hash`, when given, pins the ranking to an index built under
+    /// that exact privacy policy *inside the query's own snapshot*: the SQL
+    /// re-checks `semantic_index_meta.policy_hash` in the same statement that
+    /// reads the vectors, so a policy edit racing this query (checked by the
+    /// caller moments earlier, purged by the worker moments later) yields no
+    /// rows instead of ranking vectors the new policy forbids.
     pub async fn semantic_search(
         &self,
         query: Vec<f32>,
         filters: SearchFilters,
         limit: usize,
+        policy_hash: Option<String>,
     ) -> Result<Vec<SearchResult>> {
         if query.is_empty() {
             return Ok(Vec::new());
@@ -517,16 +579,31 @@ impl SqliteStore {
             // whose document changed under the same id is awaiting re-embedding
             // (see `semantic_pending`), so ranking against its old vector would
             // surface a result scored on content the entry no longer holds.
+            //
+            // The `semantic_exclusions` anti-join is defence in depth: an
+            // excluded entry's vector is deleted in the same transaction that
+            // records the tombstone, so in steady state the join filters
+            // nothing — but it guarantees a refused entry can never rank even
+            // if a vector slips back in through some future write path.
+            let policy_guard = if policy_hash.is_some() {
+                "AND EXISTS (SELECT 1 FROM semantic_index_meta m
+                             WHERE m.id = 1 AND m.policy_hash = ?)"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT e.*, d.title, d.preview, d.normalized_text, d.language,
                         vec_distance_cosine(em.vector, ?) AS dist
                  FROM entry_embeddings em
                  JOIN entries e ON e.id = em.entry_id
                  JOIN search_documents d ON d.entry_id = e.id
+                 LEFT JOIN semantic_exclusions ex ON ex.entry_id = e.id
                  WHERE e.deleted_at IS NULL
                    AND e.sensitivity NOT IN ('blocked', 'secret')
                    AND em.dimension = ?
                    AND em.content_hash = e.content_hash
+                   AND (ex.entry_id IS NULL OR ex.content_hash != e.content_hash)
+                   {policy_guard}
                    {extra}
                  ORDER BY dist ASC
                  LIMIT ?",
@@ -534,6 +611,9 @@ impl SqliteStore {
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = vec![&blob, &dimension];
+            if let Some(hash) = &policy_hash {
+                bound.push(hash);
+            }
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit);
             let rows = stmt
@@ -752,7 +832,7 @@ mod tests {
 
         assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
         let hits = store
-            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert!(hits.is_empty(), "an excluded entry must not stay ranked");
@@ -784,6 +864,92 @@ mod tests {
             "cleared exclusions must re-pend the entry"
         );
         assert_eq!(pending[0].entry_id, id);
+    }
+
+    #[tokio::test]
+    async fn pending_recovers_representation_texts_for_reassessment() {
+        use nagori_core::{
+            RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+        };
+
+        // The policy re-assessment must see the same payloads the capture-time
+        // classifier saw: HTML / RTF alternatives are persisted verbatim for
+        // non-Secret entries and can carry content the plain projection does
+        // not, so `semantic_pending` recovers them alongside the raw body.
+        let store = SqliteStore::open_memory().unwrap();
+        let mut entry = EntryFactory::from_text("plain body");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("plain body".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(
+                    "<p>ticket ACME-1234 hides here</p>".to_owned(),
+                ),
+            },
+        ];
+        store.insert(entry).await.unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].content_unparseable);
+        assert!(
+            pending[0].raw_texts.iter().any(|t| t == "plain body"),
+            "raw body must be recovered: {:?}",
+            pending[0].raw_texts
+        );
+        assert!(
+            pending[0].raw_texts.iter().any(|t| t.contains("ACME-1234")),
+            "alternative-representation text must be recovered: {:?}",
+            pending[0].raw_texts
+        );
+    }
+
+    #[tokio::test]
+    async fn search_policy_hash_pin_gates_results_in_the_same_snapshot() {
+        // The query path pins the ranking to an index built under the exact
+        // policy it validated moments earlier: the pin is re-checked inside
+        // the search SQL itself, so a policy edit racing the query yields no
+        // rows instead of vectors the new policy forbids.
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "rankable document").await;
+        let hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        store.semantic_set_meta(meta(1, 3)).await.unwrap();
+        store
+            .semantic_upsert(id, hash, vec![1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        let hits = |policy: Option<&str>| {
+            let store = store.clone();
+            let policy = policy.map(ToOwned::to_owned);
+            async move {
+                store
+                    .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, policy)
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        assert_eq!(hits(None).await, 1, "unpinned search ranks normally");
+        assert_eq!(
+            hits(Some("policy-hash-a")).await,
+            1,
+            "a matching pin ranks normally"
+        );
+        assert_eq!(
+            hits(Some("some-newer-policy")).await,
+            0,
+            "a mismatching pin must return nothing"
+        );
     }
 
     #[tokio::test]
@@ -893,7 +1059,7 @@ mod tests {
             .unwrap();
 
         let results = store
-            .semantic_search(vec![0.9, 0.1, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![0.9, 0.1, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -916,7 +1082,7 @@ mod tests {
             .await
             .unwrap();
         let hits = store
-            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -928,7 +1094,7 @@ mod tests {
             .await
             .unwrap();
         let hits = store
-            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert!(hits.is_empty());
@@ -945,7 +1111,7 @@ mod tests {
 
         // A 4-dim query must not match the stored 3-dim vector.
         let results = store
-            .semantic_search(vec![1.0, 0.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -998,7 +1164,7 @@ mod tests {
 
         // Both are searchable and counted while live.
         let hits = store
-            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 2);
@@ -1010,7 +1176,7 @@ mod tests {
         // The soft-deleted entry is gone from every read path even though its
         // vector row has not been purged yet.
         let hits = store
-            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10)
+            .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);

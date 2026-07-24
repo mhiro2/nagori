@@ -209,25 +209,46 @@ impl SensitivityClassifier {
         }
     }
 
-    /// Re-assess a stored text body against the *current* policy, for the
-    /// semantic indexer.
+    /// Re-assess a single stored text body against the *current* policy.
+    /// Convenience wrapper over [`Self::assess_semantic_texts`].
+    #[must_use]
+    pub fn assess_semantic_text(&self, text: &str, source: Option<&SourceApp>) -> Sensitivity {
+        self.assess_semantic_texts(&[text], source)
+    }
+
+    /// Re-assess an entry's stored text payloads against the *current*
+    /// policy, for the semantic indexer.
     ///
     /// Capture-time classification is frozen into the row's `sensitivity`
     /// column, so an entry captured as `Public` stays `Public` even after the
     /// user adds a `regex_denylist` rule (or an app-denylist rule, or turns
     /// OTP detection on) that would match it today. The indexer must not
     /// trust that stale verdict when deciding what may reach the embedding
-    /// model — it calls this with the entry's stored text (and source app, if
-    /// recorded) and combines the result with the stored sensitivity, taking
-    /// whichever is more restrictive.
+    /// model — it calls this with every persisted text projection of the
+    /// entry (normalized search text, raw body, rich-text markup, stored
+    /// text-shaped representations) and combines the result with the stored
+    /// sensitivity, taking whichever is more restrictive.
     ///
-    /// This sees only the persisted text projection, not the original
-    /// capture's markup alternatives — which is exactly what would be
-    /// embedded, so it is the right surface to gate on.
+    /// Mirrors `classify`'s shape on the same inputs: payloads are deduped by
+    /// value, the size ceiling applies to their combined length, and every
+    /// payload is scanned with the built-in detectors plus the user rules.
+    /// The combined-length check can over-count relative to capture (the
+    /// normalized projection is a near-copy of the raw body rather than an
+    /// independent payload), which errs toward refusing to embed — the safe
+    /// direction for a privacy gate.
     #[must_use]
-    pub fn assess_semantic_text(&self, text: &str, source: Option<&SourceApp>) -> Sensitivity {
+    pub fn assess_semantic_texts(
+        &self,
+        payloads: &[&str],
+        source: Option<&SourceApp>,
+    ) -> Sensitivity {
+        let mut deduped: Vec<&str> = payloads.to_vec();
+        deduped.sort_unstable();
+        deduped.dedup();
+
         let mut reasons = Vec::new();
-        if text.len() > self.settings.max_entry_size_bytes {
+        let combined_len: usize = deduped.iter().map(|s| s.len()).sum();
+        if combined_len > self.settings.max_entry_size_bytes {
             reasons.push(SensitivityReason::Oversized);
         }
         if let Some(source) = source
@@ -235,7 +256,9 @@ impl SensitivityClassifier {
         {
             reasons.push(SensitivityReason::SourceAppDenylist);
         }
-        self.scan_text_for_patterns(text, &mut reasons);
+        for payload in deduped {
+            self.scan_text_for_patterns(payload, &mut reasons);
+        }
         sensitivity_from_reasons(&reasons)
     }
 

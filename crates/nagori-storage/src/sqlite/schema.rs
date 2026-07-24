@@ -75,6 +75,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
     } else {
         current
     };
+    let mut applied_any = false;
     for (version, sql) in MIGRATIONS {
         if *version <= current {
             continue;
@@ -130,6 +131,18 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
         tx.execute_batch(&stamped).map_err(storage_err)?;
         tx.commit().map_err(storage_err)?;
         last_applied = *version;
+        applied_any = true;
+    }
+    if applied_any {
+        // A migration can delete privacy-sensitive rows (105 erases the
+        // pre-tracking semantic vectors), and `secure_delete` only zeroes the
+        // freed pages in the main DB — historical WAL frames still carry the
+        // old bytes. Follow the hard-delete contract with a best-effort
+        // truncate checkpoint; a busy checkpoint (a concurrent reader) must
+        // not fail the migration itself.
+        if let Err(err) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+            tracing::warn!(error = %err, "wal_checkpoint_truncate_after_migration_failed");
+        }
     }
     Ok(())
 }

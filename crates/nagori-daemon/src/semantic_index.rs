@@ -226,7 +226,7 @@ impl NagoriRuntime {
         // content the new policy forbids. Return no results until the
         // background worker rebuilds, rather than ranking garbage.
         let current_meta = self
-            .current_semantic_meta(embedder.as_ref(), policy_hash)
+            .current_semantic_meta(embedder.as_ref(), policy_hash.clone())
             .await?;
         let stored_meta = self.store.semantic_meta().await?;
         if stored_meta.is_none_or(|stored| !stored.is_compatible_with(&current_meta)) {
@@ -287,7 +287,12 @@ impl NagoriRuntime {
             return Ok(Vec::new());
         };
         self.store
-            .semantic_search(query_vector.vector, query.filters, query.limit)
+            .semantic_search(
+                query_vector.vector,
+                query.filters,
+                query.limit,
+                Some(policy_hash),
+            )
             .await
     }
 
@@ -452,10 +457,16 @@ impl NagoriRuntime {
                 break;
             }
             match self
-                .embed_and_store(embedder, &classifier, &pending, cancel)
+                .embed_and_store(embedder, &classifier, &pending, Some(settings_rx), cancel)
                 .await
             {
                 Ok(()) => backoff = 0,
+                // A settings change slipped in while the batch was in flight:
+                // the batch was shaped by the previous policy, so nothing was
+                // persisted. Bail to the outer loop, which re-reads the fresh
+                // settings, purges on a policy mismatch, and rebuilds the
+                // classifier — same handling as the pre-batch check above.
+                Err(err) if err.policy_stale => return,
                 Err(err) if err.is_transient => {
                     let wait = BACKOFF_STEPS_MS[backoff.min(BACKOFF_STEPS_MS.len() - 1)];
                     backoff += 1;
@@ -619,13 +630,29 @@ impl NagoriRuntime {
     /// forbidden text verbatim. The stored verdict acts as a floor (a rule
     /// *removal* never downgrades an already-Private row), the re-assessment
     /// as a gate on top.
+    ///
+    /// `settings_rx` guards the batch against a settings change landing while
+    /// it is in flight: the shaping above came from the pass's classifier, so
+    /// once the watch reports a change this batch's inputs — and any vectors
+    /// the model already produced for them — may no longer be permitted.
+    /// Checked right before the model call and again before persisting;
+    /// either hit drops the whole batch with a `policy_stale` error and
+    /// nothing is stored. The check cannot make the model call itself atomic
+    /// with the settings read — a change can still land mid-embed — so the
+    /// authoritative cleanup remains the policy-hash purge the outer loop
+    /// runs on its next wake; this guard just keeps the common case from
+    /// persisting stale vectors at all.
     async fn embed_and_store(
         &self,
         embedder: &dyn Embedder,
         classifier: &SensitivityClassifier,
         pending: &[nagori_storage::PendingEmbedding],
+        settings_rx: Option<&tokio::sync::watch::Receiver<AppSettings>>,
         cancel: &CancellationToken,
     ) -> std::result::Result<(), EmbedBatchError> {
+        let policy_stale = |rx: Option<&tokio::sync::watch::Receiver<AppSettings>>| -> bool {
+            rx.is_some_and(|rx| rx.has_changed().unwrap_or(true))
+        };
         let (accepted, inputs, refused) = partition_by_current_policy(classifier, pending);
         if !refused.is_empty() {
             let count = refused.len();
@@ -635,6 +662,7 @@ impl NagoriRuntime {
                 .map_err(|err| EmbedBatchError {
                     detail: err.to_string(),
                     is_transient: false,
+                    policy_stale: false,
                 })?;
             tracing::debug!(count, "semantic_entries_refused_by_current_policy");
         }
@@ -650,9 +678,14 @@ impl NagoriRuntime {
                 return Err(EmbedBatchError {
                     detail: "cancelled".to_owned(),
                     is_transient: false,
+                    policy_stale: false,
                 });
             }
         };
+        // Last look before any input reaches the model.
+        if policy_stale(settings_rx) {
+            return Err(EmbedBatchError::stale_policy());
+        }
         let vectors = embedder
             // Background indexing has no interactive deadline; leave the
             // backend's default per-item wedge backstop. A shutdown still
@@ -719,6 +752,12 @@ impl NagoriRuntime {
             }
             batch.push((entry_id, entry.content_hash.clone(), vector.vector));
         }
+        // Last look before the vectors become durable: a settings change that
+        // landed while the model was embedding means this batch was shaped by
+        // the previous policy — drop it rather than persist it.
+        if policy_stale(settings_rx) {
+            return Err(EmbedBatchError::stale_policy());
+        }
         // Count matched, every id was requested, and none repeated ⇒ the
         // returned set equals the requested set, so no pending entry is skipped.
         self.store
@@ -727,6 +766,7 @@ impl NagoriRuntime {
             .map_err(|err| EmbedBatchError {
                 detail: err.to_string(),
                 is_transient: false,
+                policy_stale: false,
             })?;
         Ok(())
     }
@@ -736,15 +776,19 @@ impl NagoriRuntime {
 /// embedding model: entries to embed (with their shaped input text) and
 /// entries to refuse (with the content hash to tombstone).
 ///
-/// Each entry's stored verdict is combined with a live re-assessment of both
-/// its normalized projection (what would be embedded) *and* its raw body
-/// (what the capture-time classifier saw): normalization folds case and
+/// Each entry's stored verdict is combined with a live re-assessment of every
+/// persisted text projection — the normalized text (what would be embedded),
+/// the raw body and rich-text markup, and the stored text representations
+/// (what the capture-time classifier saw). Normalization folds case and
 /// width, so a case-sensitive rule or detector that matches the raw text can
 /// miss the normalized form — and lowercased denylisted content is still
-/// denylisted content. `Private` bodies are scrubbed through the classifier's
-/// redactor so private content is never embedded verbatim; `Public` /
-/// `Unknown` bodies embed as-is; `Secret` / `Blocked` verdicts refuse the
-/// entry so a policy added after capture keeps its content out of the model.
+/// denylisted content; likewise a rule can match a markup / alternative
+/// payload that never reached the plain projection. `Private` bodies are
+/// scrubbed through the classifier's redactor so private content is never
+/// embedded verbatim; `Public` / `Unknown` bodies embed as-is; `Secret` /
+/// `Blocked` verdicts (and bodies that failed to parse back for re-checking)
+/// refuse the entry so a policy added after capture keeps its content out of
+/// the model.
 fn partition_by_current_policy<'p>(
     classifier: &SensitivityClassifier,
     pending: &'p [nagori_storage::PendingEmbedding],
@@ -757,13 +801,17 @@ fn partition_by_current_policy<'p>(
     let mut inputs = Vec::with_capacity(pending.len());
     let mut refused = Vec::new();
     for entry in pending {
-        let mut reassessed = classifier.assess_semantic_text(&entry.text, entry.source.as_ref());
-        if let Some(raw) = &entry.raw_text {
-            reassessed = most_restrictive(
-                reassessed,
-                classifier.assess_semantic_text(raw, entry.source.as_ref()),
-            );
+        // A body that could not be recovered from storage cannot be
+        // re-checked against the current policy — fail closed rather than
+        // embedding on the normalized projection alone.
+        if entry.content_unparseable {
+            refused.push((entry.entry_id, entry.content_hash.clone()));
+            continue;
         }
+        let mut payloads: Vec<&str> = Vec::with_capacity(1 + entry.raw_texts.len());
+        payloads.push(entry.text.as_str());
+        payloads.extend(entry.raw_texts.iter().map(String::as_str));
+        let reassessed = classifier.assess_semantic_texts(&payloads, entry.source.as_ref());
         match most_restrictive(entry.sensitivity, reassessed) {
             // Tombstoning also drops any leftover stale-hash vector, and keeps
             // the refused row out of the backlog until its content or the
@@ -814,6 +862,11 @@ const fn most_restrictive(a: Sensitivity, b: Sensitivity) -> Sensitivity {
 struct EmbedBatchError {
     detail: String,
     is_transient: bool,
+    /// The batch was dropped because a settings change landed while it was
+    /// in flight — its inputs were shaped by the previous policy. Not a
+    /// failure of the batch itself: the pass returns to the outer loop,
+    /// which re-reads the fresh settings and rebuilds.
+    policy_stale: bool,
 }
 
 impl EmbedBatchError {
@@ -825,6 +878,16 @@ impl EmbedBatchError {
         Self {
             detail,
             is_transient: false,
+            policy_stale: false,
+        }
+    }
+
+    /// A batch dropped because the settings changed while it was in flight.
+    fn stale_policy() -> Self {
+        Self {
+            detail: "settings changed mid-batch; dropping the batch".to_owned(),
+            is_transient: false,
+            policy_stale: true,
         }
     }
 
@@ -837,6 +900,7 @@ impl EmbedBatchError {
         Self {
             detail: err.message,
             is_transient,
+            policy_stale: false,
         }
     }
 }
@@ -1281,7 +1345,13 @@ mod tests {
         assert_eq!(pending.len(), 2);
         let embedder = RecordingEmbedder::new(8);
         runtime
-            .embed_and_store(&embedder, &classifier, &pending, &CancellationToken::new())
+            .embed_and_store(
+                &embedder,
+                &classifier,
+                &pending,
+                None,
+                &CancellationToken::new(),
+            )
             .await
             .expect("a batch with refused entries must still store the rest");
 
@@ -1300,7 +1370,12 @@ mod tests {
         assert_eq!(counts.total, 1);
         assert!(store.semantic_pending(10).await.unwrap().is_empty());
         let hits = store
-            .semantic_search(vec![1.0; 8], nagori_core::SearchFilters::default(), 10)
+            .semantic_search(
+                vec![1.0; 8],
+                nagori_core::SearchFilters::default(),
+                10,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -1344,7 +1419,13 @@ mod tests {
         assert_eq!(pending.len(), 2);
         let embedder = RecordingEmbedder::new(8);
         runtime
-            .embed_and_store(&embedder, &classifier, &pending, &CancellationToken::new())
+            .embed_and_store(
+                &embedder,
+                &classifier,
+                &pending,
+                None,
+                &CancellationToken::new(),
+            )
             .await
             .expect("an all-refused batch is a success, not an error");
 
@@ -1357,6 +1438,219 @@ mod tests {
             "refused entries must be tombstoned so the backfill drains"
         );
         assert_eq!(store.semantic_counts().await.unwrap().total, 0);
+    }
+
+    /// A rule that only matches an HTML / RTF alternative representation —
+    /// content that never reached the plain projection — must still refuse
+    /// the entry: the capture-time classifier would have blocked it, and the
+    /// re-assessment mirrors that surface.
+    #[tokio::test]
+    async fn embed_and_store_refuses_content_hiding_in_an_alternative_representation() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{
+            AiProviderKind, EntryFactory, EntryRepository, RepresentationDataRef,
+            RepresentationRole, StoredClipboardRepresentation,
+        };
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        let mut entry = EntryFactory::from_text("harmless plain projection");
+        entry.pending_representations = vec![
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Primary,
+                mime_type: "text/plain".to_owned(),
+                ordinal: 0,
+                data: RepresentationDataRef::InlineText("harmless plain projection".to_owned()),
+            },
+            StoredClipboardRepresentation {
+                role: RepresentationRole::Alternative,
+                mime_type: "text/html".to_owned(),
+                ordinal: 1,
+                data: RepresentationDataRef::InlineText(
+                    "<p>ticket ACME-1234 hides here</p>".to_owned(),
+                ),
+            },
+        ];
+        store.insert(entry).await.unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let settings = AppSettings {
+            regex_denylist: vec!["ACME-\\d+".to_owned()],
+            ..Default::default()
+        };
+        let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        let embedder = RecordingEmbedder::new(8);
+        runtime
+            .embed_and_store(
+                &embedder,
+                &classifier,
+                &pending,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an all-refused batch is a success");
+
+        assert!(
+            embedder.recorded().is_empty(),
+            "the entry must be refused before any text reaches the embedder"
+        );
+        assert!(store.semantic_pending(10).await.unwrap().is_empty());
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+    }
+
+    /// A stored body that cannot be parsed back cannot be re-checked against
+    /// the current policy — the partition must fail closed and refuse it.
+    #[test]
+    fn partition_fails_closed_on_an_unparseable_body() {
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        let entry = nagori_storage::PendingEmbedding {
+            entry_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            text: "innocuous normalized text".to_owned(),
+            raw_texts: Vec::new(),
+            content_unparseable: true,
+            content_hash: "hash".to_owned(),
+            sensitivity: Sensitivity::Public,
+            source: None,
+        };
+        let (accepted, inputs, refused) =
+            partition_by_current_policy(&classifier, std::slice::from_ref(&entry));
+        assert!(accepted.is_empty(), "an unparseable body must not embed");
+        assert!(inputs.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].0, entry.entry_id);
+    }
+
+    /// An embedder that reports the batch has started, then waits until the
+    /// test releases it — so a settings change can land genuinely mid-embed.
+    struct GatedEmbedder {
+        dimension: usize,
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for GatedEmbedder {
+        async fn availability(&self) -> nagori_ai::BackendAvailability {
+            nagori_ai::BackendAvailability::Available
+        }
+
+        async fn metadata(
+            &self,
+        ) -> std::result::Result<nagori_ai::EmbeddingModelMetadata, nagori_core::AiError> {
+            Ok(nagori_ai::EmbeddingModelMetadata {
+                model_identifier: "gated".to_owned(),
+                revision: 1,
+                dimension: self.dimension,
+                max_sequence_length: 256,
+                languages: vec!["en".to_owned()],
+            })
+        }
+
+        async fn embed_batch(
+            &self,
+            inputs: Vec<EmbeddingInput>,
+            _cancel: CancellationToken,
+            _timeout_ms: Option<u64>,
+        ) -> std::result::Result<Vec<nagori_ai::EmbeddingVector>, nagori_core::AiError> {
+            let _ = self.started.send(());
+            self.release.notified().await;
+            Ok(inputs
+                .into_iter()
+                .map(|input| nagori_ai::EmbeddingVector {
+                    id: input.id,
+                    vector: vec![1.0; self.dimension],
+                })
+                .collect())
+        }
+    }
+
+    /// A settings change landing while a batch is mid-embed must drop the
+    /// whole batch (its inputs were shaped by the previous policy) instead of
+    /// persisting the vectors the model returns.
+    #[tokio::test]
+    async fn embed_and_store_drops_the_batch_when_settings_change_mid_flight() {
+        use nagori_ai::{AiEngine, MockEmbedder};
+        use nagori_core::{AiProviderKind, EntryFactory, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+        use nagori_storage::SqliteStore;
+
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .insert(EntryFactory::from_text("a document"))
+            .await
+            .unwrap();
+
+        let engine = AiEngine::builder(AiProviderKind::AppleNative)
+            .embedder(Arc::new(MockEmbedder::with_dimension(8)))
+            .build();
+        let runtime = NagoriRuntime::builder(store.clone())
+            .clipboard(Arc::new(MemoryClipboard::new()))
+            .ai_engine(Arc::new(engine))
+            .build_for_test();
+
+        let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+        let pending = store.semantic_pending(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let (settings_tx, settings_rx) = tokio::sync::watch::channel(AppSettings::default());
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let embedder = GatedEmbedder {
+            dimension: 8,
+            started: started_tx,
+            release: release.clone(),
+        };
+
+        let cancel = CancellationToken::new();
+        let store_fut = runtime.embed_and_store(
+            &embedder,
+            &classifier,
+            &pending,
+            Some(&settings_rx),
+            &cancel,
+        );
+        tokio::pin!(store_fut);
+
+        // Drive until the embed call is in flight.
+        tokio::select! {
+            _ = &mut store_fut => panic!("embed_and_store returned before the batch started"),
+            started = started_rx.recv() => assert!(started.is_some()),
+        }
+
+        // The user edits settings while the model is embedding, then the
+        // model returns its (now stale-policy) vectors.
+        settings_tx
+            .send(AppSettings {
+                regex_denylist: vec!["ACME-\\d+".to_owned()],
+                ..Default::default()
+            })
+            .unwrap();
+        release.notify_one();
+
+        let err = store_fut
+            .await
+            .expect_err("a mid-flight settings change must drop the batch");
+        assert!(
+            err.policy_stale,
+            "the drop must be reported as a stale-policy bail, got: {err:?}"
+        );
+        assert_eq!(
+            store.semantic_counts().await.unwrap().indexed,
+            0,
+            "vectors embedded under the previous policy must not persist"
+        );
     }
 
     /// An embedder that returns the batch results in reverse input order,
@@ -1532,6 +1826,7 @@ mod tests {
                 },
                 &classifier,
                 &pending,
+                None,
                 &CancellationToken::new(),
             )
             .await;
@@ -1579,7 +1874,7 @@ mod tests {
         };
         let cancel = CancellationToken::new();
 
-        let store_fut = runtime.embed_and_store(&embedder, &classifier, &pending, &cancel);
+        let store_fut = runtime.embed_and_store(&embedder, &classifier, &pending, None, &cancel);
         tokio::pin!(store_fut);
 
         // Drive `embed_and_store` until the embedder reports the batch is in
@@ -1644,6 +1939,7 @@ mod tests {
                 &ReversingEmbedder { dimension: 8 },
                 &classifier,
                 &pending,
+                None,
                 &CancellationToken::new(),
             )
             .await;
