@@ -28,7 +28,11 @@ version = "0.1.1"
 anyhow = "1"
 arboard = "3"
 async-trait = "0.1"
-base64 = "0.22"
+# `simd-unsafe` (on by default since 0.23) adds runtime-dispatched AVX2/NEON
+# engines. The only use is encoding a one-shot `data:` URL for the fallback
+# window, so the scalar engine is plenty and this keeps the unsafe SIMD code
+# out of the dependency tree.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
