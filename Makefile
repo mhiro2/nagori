@@ -89,7 +89,7 @@ desktop-lint: ## Lint frontend (oxlint).
 	pnpm lint
 
 .PHONY: desktop-typecheck
-desktop-typecheck: ## Type-check frontend (tsgo + svelte-check).
+desktop-typecheck: ## Type-check frontend (tsc + svelte-check).
 	pnpm typecheck
 	pnpm check
 
