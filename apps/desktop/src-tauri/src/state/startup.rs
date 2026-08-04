@@ -654,11 +654,11 @@ mod tests {
             );
         }
 
-        /// End-to-end over the desktop host: the endpoint answers Health
-        /// while the app runs, and shutdown removes the socket and token
-        /// within the drain budget.
+        /// End-to-end over the desktop host: the endpoint answers Health while
+        /// the app runs, turning CLI IPC off tears it down and removes its
+        /// runtime files, and the host then exits with the shutdown signal.
         #[tokio::test]
-        async fn host_serves_health_and_cleans_up_on_shutdown() {
+        async fn host_serves_health_then_tears_down_when_disabled() {
             let temp = tempfile::tempdir().expect("temp dir");
             let mut state = build_test_state();
             state.instance_lock = Some(
@@ -694,19 +694,35 @@ mod tests {
                 .expect("health over the desktop-hosted endpoint");
             assert!(matches!(health, nagori_ipc::IpcResponse::Health(_)));
 
+            // Take the endpoint down through the settings path, not the shared
+            // shutdown signal. The accept loop watches shutdown itself, so
+            // cancelling it lets the loop exit on its own; the supervisor may
+            // then reap an already-dead server and return without staging the
+            // runtime files — deliberate, because it no longer owns their
+            // fingerprints and the next bind reclaims the leftovers (see the
+            // join-arm comment in `nagori-daemon`'s `supervise_ipc_server`).
+            // Only the supervisor treats `cli_ipc_enabled` as a lifecycle
+            // signal, so flipping it off makes `stop_ipc_server` the sole
+            // teardown path and the cleanup deterministic.
+            state
+                .runtime
+                .save_settings(AppSettings {
+                    cli_ipc_enabled: false,
+                    ..state.runtime.current_settings()
+                })
+                .await
+                .expect("disable cli ipc");
+            wait_until(Duration::from_secs(3), || {
+                !config.socket_path.exists() && !config.token_path.exists()
+            })
+            .await
+            .expect("socket and token should be removed when cli ipc is disabled");
+
             state.runtime.shutdown_handle().cancel();
             tokio::time::timeout(Duration::from_secs(3), handle)
                 .await
                 .expect("host should stop after shutdown")
                 .expect("host should not panic");
-            assert!(
-                !config.socket_path.exists(),
-                "socket should be removed on shutdown",
-            );
-            assert!(
-                !config.token_path.exists(),
-                "token file should be removed on shutdown",
-            );
         }
 
         /// Fail-closed: when the startup settings load failed (the gate
