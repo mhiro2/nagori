@@ -3,6 +3,9 @@ packages:
 
 overrides:
   chokidar: 5.0.0
+  # svelte-check still relies on the TypeScript JS API, which 7.x no longer ships.
+  # Keep it on 6.x until upstream supports 7.x; `tsc` itself runs on 7.x.
+  svelte-check>typescript: 6.0.3
 
 catalogs:
   frontend:
@@ -22,12 +25,15 @@ catalogs:
     vitest: 4.1.10
   tooling:
     "@types/node": 24.13.3
-    "@typescript/native-preview": 7.0.0-dev.20260707.2
     esbuild: 0.28.1
     oxfmt: 0.60.0
     oxlint: 1.75.0
     oxlint-tsgolint: 7.0.2001
+    typescript: 7.0.2
 
+# Keep the root TypeScript 7 devDependency from satisfying peer ranges in
+# apps/*, so the svelte-check override above stays in effect.
+resolvePeersFromWorkspaceRoot: false
 blockExoticSubdeps: true
 minimumReleaseAge: 10080
 strictDepBuilds: true

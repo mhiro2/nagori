@@ -12,8 +12,11 @@
     "lint": "pnpm -r --parallel run lint",
     "fmt": "pnpm -r --parallel run fmt",
     "fmt:check": "pnpm -r --parallel run fmt:check",
-    "typecheck": "pnpm -r --parallel run typecheck",
+    "typecheck": "tsc -p apps/desktop/tsconfig.json",
     "test": "pnpm -r --parallel run test"
+  },
+  "devDependencies": {
+    "typescript": "catalog:tooling"
   },
   "packageManager": "pnpm@11.1.3",
   "engines": {
