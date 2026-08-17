@@ -173,15 +173,23 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::Clear(request) => {
-                let cutoff = match request {
-                    ClearRequest::All => OffsetDateTime::now_utc(),
+                // `All` routes through the shared interactive clear so `nagori
+                // clear` returns as soon as the history is gone from every
+                // view, like the desktop's tray item — the physical reclaim
+                // runs in the background. A bounded `--older-than` sweep stays
+                // a direct hard delete: it is the same operation retention
+                // performs, and its row count is bounded by the window.
+                let deleted = match request {
+                    ClearRequest::All => self.clear_history().await?,
                     ClearRequest::OlderThanDays { days } => {
-                        OffsetDateTime::now_utc() - time::Duration::days(i64::from(days))
+                        let cutoff =
+                            OffsetDateTime::now_utc() - time::Duration::days(i64::from(days));
+                        self.invalidate_search_cache();
+                        let deleted = self.store.clear_older_than(cutoff).await?;
+                        self.invalidate_search_cache();
+                        deleted
                     }
                 };
-                self.invalidate_search_cache();
-                let deleted = self.store.clear_older_than(cutoff).await?;
-                self.invalidate_search_cache();
                 self.notify_external_mutation();
                 Ok(IpcResponse::Cleared(ClearResponse { deleted }))
             }

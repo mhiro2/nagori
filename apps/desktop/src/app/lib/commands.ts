@@ -70,6 +70,12 @@ export const deleteEntries = (ids: string[]): Promise<number> => invoke('delete_
 
 export const purgeDeletedEntries = (): Promise<number> => invoke('purge_deleted_entries');
 
+// Clear every non-pinned entry. Returns how many left the palette. The rows are
+// hidden synchronously and physically reclaimed in the background, so this
+// resolves in milliseconds regardless of history size — the caller can re-run
+// its query as soon as it returns and will see an empty list.
+export const clearHistory = (): Promise<number> => invoke('clear_history');
+
 export const copyEntriesCombined = (ids: string[]): Promise<void> =>
   invoke('copy_entries_combined', { ids });
 
@@ -157,6 +163,12 @@ export const getDataDirSyncWarning = (): Promise<DataDirSyncWarning | null> =>
 
 export const setCaptureEnabled = (enabled: boolean): Promise<AppSettings> =>
   invoke('set_capture_enabled', { enabled });
+
+// Record the "don't ask again" choice from the clear-history confirmation. A
+// single-field command because the palette is deliberately not granted
+// `update_settings`.
+export const setConfirmClearHistory = (confirm: boolean): Promise<AppSettings> =>
+  invoke('set_confirm_clear_history', { confirm });
 
 export const saveAiResult = (text: string): Promise<EntryDto> => invoke('save_ai_result', { text });
 

@@ -352,7 +352,7 @@ pub struct AppSettings {
     /// Optional auxiliary global shortcuts beyond `global_hotkey`. The value
     /// is the same accelerator-string format `tauri-plugin-global-shortcut`
     /// accepts. Empty entries are ignored.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_secondary_hotkeys")]
     pub secondary_hotkeys: BTreeMap<SecondaryHotkeyAction, String>,
     /// Number of result rows displayed in the palette before scrolling kicks
     /// in. Used purely for visual sizing — search itself is independent.
@@ -374,6 +374,12 @@ pub struct AppSettings {
     /// Pinned entries are always preserved.
     #[serde(default)]
     pub clear_on_quit: bool,
+    /// Whether "Clear history" asks for confirmation first. Defaults to `true`:
+    /// the action is destructive and irreversible, so the safe state is the one
+    /// a fresh install gets. The confirmation dialog offers to turn this off,
+    /// which is the only thing that ever writes `false` here.
+    #[serde(default = "default_confirm_clear_history")]
+    pub confirm_clear_history: bool,
     /// When `true`, per-entry delete performs an immediate hard delete instead
     /// of writing a tombstone for the maintenance loop to reclaim later.
     #[serde(default)]
@@ -567,13 +573,43 @@ pub enum PaletteHotkeyAction {
 /// Each variant is registered alongside the primary palette hotkey
 /// independently, and may be left unbound by omitting the entry from the
 /// settings map.
+///
+/// Only non-destructive actions belong here: a global shortcut fires with no
+/// palette open and no confirmation surface in front of it, so a mistyped
+/// chord would erase the history with nothing to catch it. Clearing the
+/// history is therefore a palette action (with its confirmation dialog), not a
+/// global one — see [`deserialize_secondary_hotkeys`] for what happens to the
+/// binding users had recorded for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SecondaryHotkeyAction {
     /// Re-paste the most recently used entry without opening the palette.
     RepasteLast,
-    /// Clear non-pinned history.
-    ClearHistory,
+}
+
+/// Read the secondary-hotkey map, dropping bindings whose action no longer
+/// exists instead of failing the whole settings row.
+///
+/// `clear-history` used to be bindable here. A strict map deserialize would
+/// turn every stored binding for it into an unparseable settings row — which
+/// the store surfaces as a hard error, so a user who had bound the retired
+/// action would find the app refusing to load its settings at all. The stale
+/// key is simply ignored, and the next settings write drops it for good.
+fn deserialize_secondary_hotkeys<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<SecondaryHotkeyAction, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, String>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(action, accelerator)| {
+            serde_json::from_value::<SecondaryHotkeyAction>(serde_json::Value::String(action))
+                .ok()
+                .map(|action| (action, accelerator))
+        })
+        .collect())
 }
 
 /// Handling strategy for entries classified as `Sensitivity::Secret`.
@@ -1022,6 +1058,7 @@ impl Default for AppSettings {
             show_preview_pane: default_show_preview_pane(),
             show_in_menu_bar: default_show_in_menu_bar(),
             clear_on_quit: false,
+            confirm_clear_history: default_confirm_clear_history(),
             permanent_delete_on_delete: false,
             block_sensitive_captures: false,
             otp_detection: default_otp_detection(),
@@ -1042,6 +1079,10 @@ pub const fn default_show_preview_pane() -> bool {
 }
 
 pub const fn default_show_in_menu_bar() -> bool {
+    true
+}
+
+pub const fn default_confirm_clear_history() -> bool {
     true
 }
 
@@ -1456,5 +1497,28 @@ mod tests {
             unrelated.semantic_policy_hash(),
             base.semantic_policy_hash()
         );
+    }
+
+    #[test]
+    fn stored_binding_for_a_retired_secondary_action_is_dropped_not_fatal() {
+        // Settings written before `clear-history` stopped being a global
+        // shortcut must still load: the retired key is ignored and the
+        // surviving binding is preserved, rather than the whole row failing to
+        // parse and taking the user's settings down with it.
+        let json = serde_json::json!({
+            "secondary_hotkeys": {
+                "repaste-last": "Cmd+Alt+V",
+                "clear-history": "Cmd+Shift+X",
+            }
+        });
+        let settings: AppSettings =
+            serde_json::from_value(json).expect("a retired binding must not fail the row");
+        assert_eq!(
+            settings
+                .secondary_hotkeys
+                .get(&SecondaryHotkeyAction::RepasteLast),
+            Some(&"Cmd+Alt+V".to_owned()),
+        );
+        assert_eq!(settings.secondary_hotkeys.len(), 1);
     }
 }

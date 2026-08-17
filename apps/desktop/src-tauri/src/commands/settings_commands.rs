@@ -131,6 +131,22 @@ pub async fn set_capture_enabled(
     Ok(settings.into())
 }
 
+/// Record the "don't ask again" choice from the clear-history confirmation.
+///
+/// A single-field command rather than a `update_settings` round trip because
+/// the palette — the window that shows the confirmation — is deliberately not
+/// granted `update_settings`. Only ever called with `false` today (the dialog
+/// can turn confirmation off; Settings turns it back on), but it takes the
+/// value so the Settings toggle can share the command.
+#[tauri::command]
+pub async fn set_confirm_clear_history(
+    state: State<'_, AppState>,
+    confirm: bool,
+) -> CommandResult<AppSettingsDto> {
+    let settings = state.runtime.set_confirm_clear_history(confirm).await?;
+    Ok(settings.into())
+}
+
 /// Trigger the host's accessibility prompt and return the resulting
 /// permission status. Wired to the Setup tab's `[ Grant Accessibility… ]`
 /// button.

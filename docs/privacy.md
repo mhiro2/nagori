@@ -100,10 +100,19 @@ that every byte disappeared immediately:
 - **Settings → Privacy → Purge deleted entries now** physically removes all
   tombstoned rows on demand. The maintenance loop runs the same purge
   periodically.
-- **Clear history**, clear-on-quit, retention-by-age, retention-by-count, and
-  total-byte-budget eviction are hard-delete paths. They cascade through
-  representations, FTS/ngram rows, thumbnails, and semantic embeddings and then
-  truncate the WAL when rows were removed.
+- Clear-on-quit, retention-by-age, retention-by-count, and total-byte-budget
+  eviction are hard-delete paths. They cascade through representations,
+  FTS/ngram rows, thumbnails, and semantic embeddings and then truncate the WAL
+  when rows were removed.
+- **Clear history** is two-phase, because a hard delete of a large history takes
+  minutes and nothing would leave the palette until it committed. It tombstones
+  every non-pinned row (hard-deleting `Secret` rows on the spot) so the history
+  is out of every view immediately, then kicks the maintenance loop, whose
+  purge runs the same cascade + WAL truncate seconds later. The window between
+  the two is the only difference from the paths above: the bodies sit on disk,
+  unreachable through the app, until that purge lands. It is asked for first —
+  a confirmation dialog stands in front of both the palette chord (⌘⌥⌫) and the
+  tray item, unless you turn it off.
 
 ## App denylist
 
@@ -387,11 +396,13 @@ policy rather than replaying old classifications.
 The vector follows the entry's lifecycle the same way the rest of the
 row does. A per-entry delete is a **soft delete**: the entry (and its
 vector) stays in the file, filtered out of search results. A retention
-sweep (count / age / size cap) and *Clear history* / clear-on-quit are
-**hard deletes**: `ON DELETE CASCADE` drops the vector — along with the
-body, blobs, and search index — in the same transaction, so the content
-is physically removed from the live database rather than tombstoned. So
-a vector persists at rest only after an *ordinary per-entry delete*; if
+sweep (count / age / size cap) and clear-on-quit are **hard deletes**:
+`ON DELETE CASCADE` drops the vector — along with the body, blobs, and
+search index — in the same transaction, so the content is physically
+removed from the live database rather than tombstoned. *Clear history*
+reaches the same end state one step later: it tombstones, and the purge
+it kicks runs that cascade seconds afterwards. So a vector persists at
+rest only after an *ordinary per-entry delete*; if
 you need a soft-deleted entry's bytes gone immediately, enable
 **Delete entries permanently** before deleting or run **Purge deleted
 entries now** after deleting. Freed pages can still be recovered from

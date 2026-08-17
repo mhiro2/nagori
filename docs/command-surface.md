@@ -77,7 +77,8 @@ Deletes history data.
 | `delete_entry` | palette | Soft-delete one entry (`Secret` is hard-deleted; see [privacy.md](privacy.md)). |
 | `delete_entries` | palette | Bulk soft-delete. |
 | `purge_deleted_entries` | settings | Hard-delete already soft-deleted rows now. |
-| `clear_history` | internal | Soft-delete every non-pinned entry (tray / hotkey). |
+| `clear_history` | palette | Hide every non-pinned entry now, reclaim in the background. Behind a confirmation dialog; the tray item routes to the same dialog. |
+| `set_confirm_clear_history` | palette | Record the confirmation dialog's "don't ask again" box. Single-field; the palette has no `update_settings`. |
 
 ## External side effect
 

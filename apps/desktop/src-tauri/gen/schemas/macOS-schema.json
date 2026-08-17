@@ -441,6 +441,12 @@
           "markdownDescription": "Enables the set_capture_enabled command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_confirm_clear_history command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-confirm-clear-history",
+          "markdownDescription": "Enables the set_confirm_clear_history command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_ai_action command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-ai-action",
@@ -721,6 +727,12 @@
           "type": "string",
           "const": "deny-set-capture-enabled",
           "markdownDescription": "Denies the set_capture_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_confirm_clear_history command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-confirm-clear-history",
+          "markdownDescription": "Denies the set_confirm_clear_history command without any pre-configured scope."
         },
         {
           "description": "Denies the start_ai_action command without any pre-configured scope.",

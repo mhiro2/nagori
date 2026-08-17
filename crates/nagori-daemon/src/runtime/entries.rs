@@ -297,8 +297,29 @@ impl NagoriRuntime {
         Ok(purged)
     }
 
-    /// Soft-delete every non-pinned entry. Returns the number of rows
-    /// purged so callers can surface "cleared N entries" toasts.
+    /// Clear the history: hide every non-pinned entry now and reclaim the rows
+    /// in the background. Returns the number of entries that left the palette
+    /// so callers can surface "cleared N entries" toasts.
+    ///
+    /// This is the interactive clear every UI surface (tray, palette, `nagori
+    /// clear`) goes through. The physical delete is deferred because it takes
+    /// tens of seconds on a large history and readers stay on the pre-commit
+    /// snapshot until it lands — the user would clear their clipboard and keep
+    /// seeing it. [`Self::clear_non_pinned`] is the synchronous variant
+    /// clear-on-quit needs.
+    pub async fn clear_history(&self) -> Result<usize> {
+        self.invalidate_search_cache();
+        let hidden = self.store.tombstone_non_pinned().await?;
+        self.invalidate_search_cache();
+        // Kick the maintenance sweep so the rows this hid are physically gone
+        // within seconds instead of sitting until the next periodic tick.
+        self.request_maintenance();
+        Ok(hidden)
+    }
+
+    /// Physically delete every non-pinned entry, blocking until the rows are
+    /// gone. Used by clear-on-quit, which has no later moment to run a
+    /// deferred purge in. Interactive callers want [`Self::clear_history`].
     pub async fn clear_non_pinned(&self) -> Result<usize> {
         self.invalidate_search_cache();
         let purged = self.store.clear_non_pinned().await?;

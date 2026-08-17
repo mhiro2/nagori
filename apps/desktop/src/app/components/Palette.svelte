@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { closePalette, openSettingsWindow } from '../lib/commands';
+  import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+  import { describeError } from '../lib/errors';
+  import { messages } from '../lib/i18n/index.svelte';
   import {
     buildBindings,
     formatBinding,
@@ -57,6 +59,7 @@
   import { refreshSettings, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
   import ActionInspector from './ActionInspector.svelte';
+  import ClearHistoryConfirmDialog from './ClearHistoryConfirmDialog.svelte';
   import EntryContextMenu from './EntryContextMenu.svelte';
   import FilterChips from './FilterChips.svelte';
   import PasteFormatPicker from './PasteFormatPicker.svelte';
@@ -69,6 +72,10 @@
   // open it takes the right column in place of the preview pane (see the body
   // markup below), so it cannot coexist with an expanded full-width preview.
   let actionsOpen = $state(false);
+  // Clear-history confirmation. Opened by the palette chord and by the tray
+  // item (which has no confirmation surface of its own and defers to this one).
+  let clearConfirmOpen = $state(false);
+  const t = $derived(messages());
 
   onMount(() => {
     // One-shot bootstrap. This must NOT live in an `$effect`: `refreshRecent`
@@ -98,10 +105,44 @@
         void refreshCurrent();
       },
     );
+    // The tray's "Clear History" item shows the palette and hands the
+    // confirmation to this window, so the tray and the in-palette chord can
+    // never drift on what the user is asked.
+    const offClearRequested = subscribe(TAURI_EVENTS.clearHistoryRequested, () => {
+      requestClearHistory();
+    });
     return () => {
       offClipboardChanged();
+      offClearRequested();
     };
   });
+
+  // Clearing is destructive and irreversible, so it goes through the
+  // confirmation unless the user turned that off in the dialog itself.
+  const requestClearHistory = (): void => {
+    if (settingsState.settings?.confirmClearHistory ?? true) {
+      clearConfirmOpen = true;
+      return;
+    }
+    void runClearHistory();
+  };
+
+  const runClearHistory = async (): Promise<void> => {
+    try {
+      await clearHistory();
+      afterClearHistory();
+    } catch (err) {
+      searchState.errorMessage = describeError(err);
+    }
+  };
+
+  // The cleared rows are hidden the moment `clear_history` returns, so a plain
+  // re-query is all it takes for them to leave the list. Any multi-selection
+  // referred to rows that no longer exist.
+  const afterClearHistory = (): void => {
+    clearMultiSelect();
+    void refreshCurrent();
+  };
 
   const selected = $derived(currentSelection());
   const resultIds = $derived(searchState.results.map((r) => r.id));
@@ -377,6 +418,9 @@
       case 'clear-query':
         scheduleQuery('');
         break;
+      case 'clear-history':
+        requestClearHistory();
+        break;
       case 'open-preview':
         previewExpanded = !previewExpanded;
         break;
@@ -475,6 +519,13 @@
       onClose={() => (actionsOpen = false)}
     />
   </div>
+  {#if clearConfirmOpen}
+    <ClearHistoryConfirmDialog
+      labels={t.palette.clearHistory}
+      onCleared={afterClearHistory}
+      onClose={() => (clearConfirmOpen = false)}
+    />
+  {/if}
   {#if pasteFormatPickerState.open}
     <PasteFormatPicker />
   {/if}

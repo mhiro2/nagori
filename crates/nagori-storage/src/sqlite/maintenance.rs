@@ -1,5 +1,5 @@
 use nagori_core::{AppError, Result};
-use rusqlite::params;
+use rusqlite::{TransactionBehavior, params};
 use time::OffsetDateTime;
 
 use super::SqliteStore;
@@ -10,6 +10,18 @@ use super::convert::{format_time, storage_err};
 /// typical overshoot, and a pathological backlog just runs more rounds
 /// within the same transaction.
 pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
+
+/// Rows hard-deleted per transaction in [`SqliteStore::purge_deleted`].
+///
+/// The purge cascades into representations, blobs, embeddings, thumbnails, and
+/// the FTS/ngram index, and `secure_delete` zeroes every freed page — clearing
+/// a 100k-row history takes tens of seconds. Doing that in one transaction
+/// holds the single writer for the whole run, so a capture landing meanwhile
+/// blocks behind it. Batching commits every `PURGE_DELETED_BATCH` rows and
+/// returns the pooled connection between batches, which caps the writer-lock
+/// hold at roughly one batch (~100ms at the measured per-row cost) while the
+/// total work stays the same.
+pub(super) const PURGE_DELETED_BATCH: i64 = 256;
 
 /// Fold the WAL back into the main file and truncate it to zero length after
 /// a purge that deleted at least one row.
@@ -68,10 +80,72 @@ impl SqliteStore {
         .await
     }
 
+    /// Hide every non-pinned entry immediately, deferring the physical delete
+    /// to [`Self::purge_deleted`]. This is the interactive "Clear history"
+    /// primitive; [`Self::clear_non_pinned`] is the synchronous counterpart
+    /// clear-on-quit needs.
+    ///
+    /// Why the split: the hard delete cascades into representations, blobs,
+    /// embeddings, thumbnails, and the FTS/ngram index with `secure_delete`
+    /// zeroing every freed page, which measures ~13s for 20k entries and scales
+    /// from there. Nothing leaves the palette until that transaction commits,
+    /// so on a large history the user clears their clipboard and keeps seeing
+    /// it — the readers are still on the pre-commit snapshot. Stamping
+    /// `deleted_at` instead costs ~170ms for the same 20k rows and every live
+    /// query already filters `deleted_at IS NULL`, so the history disappears
+    /// from the palette, CLI, and search the moment this commits.
+    ///
+    /// `Secret` rows are hard-deleted inline rather than tombstoned, mirroring
+    /// `mark_deleted`: their cleartext must never outlive the delete, and there
+    /// are few enough of them that they cannot dominate the latency.
+    ///
+    /// The search/ngram rows are deliberately *not* dropped here (unlike
+    /// `mark_deleted`, which does drop them for the row it tombstones). A
+    /// single tombstone can sit until the next 30-minute maintenance sweep, so
+    /// scrubbing the index early is worth it there; a bulk clear kicks the
+    /// purge immediately and the index rows are on the same cascade as the
+    /// bodies, so deleting them separately would just pay the expensive part of
+    /// the purge on the interactive path for no privacy gain. Every search path
+    /// joins `entries` and filters `deleted_at IS NULL`, so a stale index row
+    /// cannot surface a hidden entry in the meantime.
+    pub async fn tombstone_non_pinned(&self) -> Result<usize> {
+        self.run_blocking(move |store| {
+            let now = format_time(OffsetDateTime::now_utc())?;
+            let mut conn = store.conn()?;
+            // `BEGIN IMMEDIATE`: the secret purge and the tombstone must cover
+            // the same row set, so take the write lock up front rather than
+            // letting a capture commit between the two statements.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
+            let purged_secret = tx
+                .execute(
+                    "DELETE FROM entries
+                     WHERE pinned = 0 AND deleted_at IS NULL AND sensitivity = 'secret'",
+                    [],
+                )
+                .map_err(storage_err)?;
+            let hidden = tx
+                .execute(
+                    "UPDATE entries SET deleted_at = ?1, updated_at = ?1
+                     WHERE pinned = 0 AND deleted_at IS NULL",
+                    params![now],
+                )
+                .map_err(storage_err)?;
+            tx.commit().map_err(storage_err)?;
+            // Only the secret delete freed pages; the tombstone leaves the
+            // bodies in place for the purge, which runs its own checkpoint.
+            checkpoint_truncate_after_purge(&conn, purged_secret);
+            Ok(hidden + purged_secret)
+        })
+        .await
+    }
+
     /// Physically delete every non-pinned entry. Used by the desktop's
-    /// `clear_on_quit` setting and the "Clear history" hotkey/tray action.
-    /// Pinned rows survive so users can keep curated snippets across the
-    /// purge.
+    /// `clear_on_quit` setting, which cannot defer the reclaim: the app is
+    /// exiting, so there is no later moment to run the purge in and the
+    /// guarantee is that nothing survives the quit. Pinned rows survive so
+    /// users can keep curated snippets across the purge.
     ///
     /// This is a *hard* delete: the cascade drops each row's representations,
     /// blobs, embeddings, thumbnails, and search/ngram index, so "Clear
@@ -110,18 +184,61 @@ impl SqliteStore {
     /// `secure_delete` design. The `wal_checkpoint(TRUNCATE)` follow-up matches
     /// the documented purge contract so the pre-deletion cleartext cannot
     /// survive in historical WAL frames.
+    ///
+    /// Runs in [`PURGE_DELETED_BATCH`]-sized transactions, each on a freshly
+    /// checked-out pooled connection, so a bulk clear's backlog cannot hold the
+    /// single writer for the whole reclaim and starve captures behind it.
     pub async fn purge_deleted(&self) -> Result<usize> {
+        let mut total = 0_usize;
+        loop {
+            let purged = self.purge_deleted_batch().await?;
+            if purged == 0 {
+                break;
+            }
+            total += purged;
+        }
+        if total > 0 {
+            self.checkpoint_truncate().await;
+        }
+        Ok(total)
+    }
+
+    /// One batch of [`Self::purge_deleted`]. Returns the rows reclaimed, or 0
+    /// when the tombstone backlog is drained.
+    async fn purge_deleted_batch(&self) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
             let tx = conn.transaction().map_err(storage_err)?;
             let changed = tx
-                .execute("DELETE FROM entries WHERE deleted_at IS NOT NULL", [])
+                .execute(
+                    "DELETE FROM entries
+                     WHERE id IN (
+                         SELECT id FROM entries WHERE deleted_at IS NOT NULL LIMIT ?1
+                     )",
+                    params![PURGE_DELETED_BATCH],
+                )
                 .map_err(storage_err)?;
             tx.commit().map_err(storage_err)?;
-            checkpoint_truncate_after_purge(&conn, changed);
             Ok(changed)
         })
         .await
+    }
+
+    /// Fold the WAL back into the main file once a batched purge has drained.
+    /// Best-effort for the same reason as
+    /// [`checkpoint_truncate_after_purge`]: the rows are already gone, so a
+    /// busy checkpoint must not turn a completed purge into an error.
+    async fn checkpoint_truncate(&self) {
+        let checkpointed = self
+            .run_blocking(move |store| {
+                let conn = store.conn()?;
+                checkpoint_truncate_after_purge(&conn, 1);
+                Ok(())
+            })
+            .await;
+        if let Err(err) = checkpointed {
+            tracing::warn!(error = %err, "purge_deleted_checkpoint_failed");
+        }
     }
 
     pub async fn enforce_retention_count(&self, max_entries: usize) -> Result<usize> {

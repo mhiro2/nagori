@@ -109,6 +109,7 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
   showPreviewPane: true,
   showInMenuBar: true,
   clearOnQuit: false,
+  confirmClearHistory: true,
   permanentDeleteOnDelete: false,
   blockSensitiveCaptures: false,
   otpDetection: true,

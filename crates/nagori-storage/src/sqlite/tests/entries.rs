@@ -584,6 +584,125 @@ async fn clear_non_pinned_purges_only_unpinned_rows() {
 }
 
 #[tokio::test]
+async fn tombstone_non_pinned_hides_rows_without_deleting_them() {
+    // The interactive clear must make the history disappear from every live
+    // query the instant it returns, while leaving the expensive cascade to the
+    // deferred purge.
+    let store = SqliteStore::open_memory().unwrap();
+    let pinned = insert_text(&store, "pinned anchor").await;
+    let unpinned_a = insert_text(&store, "ephemeral one").await;
+    let unpinned_b = insert_text(&store, "ephemeral two").await;
+    store.set_pinned(pinned, true).await.unwrap();
+
+    let hidden = store.tombstone_non_pinned().await.unwrap();
+    assert_eq!(hidden, 2);
+
+    let surviving = store
+        .list_recent(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    assert_eq!(surviving, vec![pinned], "only the pinned row stays visible");
+    assert!(
+        store.get(unpinned_a).await.unwrap().is_none(),
+        "a hidden entry must not be readable by id",
+    );
+
+    // Still on disk — the reclaim is the purge's job, not the clear's.
+    assert_eq!(count_total(&store), 3);
+    assert_eq!(store.purge_deleted().await.unwrap(), 2);
+    assert_eq!(count_total(&store), 1);
+    let conn = store.conn().unwrap();
+    for (table, column) in [
+        ("entries", "id"),
+        ("entry_representations", "entry_id"),
+        ("search_documents", "entry_id"),
+        ("ngrams", "entry_id"),
+    ] {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+        let count: i64 = conn
+            .query_row(&sql, params![unpinned_b.to_string()], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} rows must be gone after the purge");
+    }
+}
+
+#[tokio::test]
+async fn tombstone_non_pinned_purges_secret_rows_immediately() {
+    // A `Secret` body must not survive the clear even for the few seconds the
+    // deferred purge takes, matching `mark_deleted`'s immediate hard delete.
+    let store = SqliteStore::open_memory().unwrap();
+    let mut secret = EntryFactory::from_text("sk-live-clear-me-now");
+    secret.search.normalized_text = normalize_text(secret.plain_text().unwrap());
+    secret.sensitivity = Sensitivity::Secret;
+    let secret_id = store.insert(secret).await.unwrap();
+    let ordinary = insert_text(&store, "ordinary clipboard text").await;
+
+    let hidden = store.tombstone_non_pinned().await.unwrap();
+    assert_eq!(hidden, 2, "both rows leave the palette");
+
+    let conn = store.conn().unwrap();
+    for (table, column) in [
+        ("entries", "id"),
+        ("entry_representations", "entry_id"),
+        ("search_documents", "entry_id"),
+    ] {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+        let count: i64 = conn
+            .query_row(&sql, params![secret_id.to_string()], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "the secret's {table} rows must be gone at once");
+    }
+    let ordinary_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entries WHERE id = ?1",
+            params![ordinary.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ordinary_rows, 1,
+        "a non-secret row keeps the deferred tombstone",
+    );
+}
+
+#[tokio::test]
+async fn tombstone_non_pinned_leaves_already_hidden_rows_uncounted() {
+    // The count is reported to the user ("cleared N entries"), so a row that
+    // was already tombstoned by a per-entry delete must not inflate it.
+    let store = SqliteStore::open_memory().unwrap();
+    let deleted = insert_text(&store, "already deleted").await;
+    let live = insert_text(&store, "still visible").await;
+    store.mark_deleted(deleted).await.unwrap();
+
+    let hidden = store.tombstone_non_pinned().await.unwrap();
+    assert_eq!(hidden, 1, "only the visible row counts");
+    assert_eq!(
+        store.purge_deleted().await.unwrap(),
+        2,
+        "both are reclaimed"
+    );
+    let _ = live;
+}
+
+#[tokio::test]
+async fn purge_deleted_drains_a_backlog_larger_than_one_batch() {
+    // The purge commits in batches so it cannot hold the writer lock for a
+    // whole 100k reclaim; the loop must still drain the backlog completely.
+    let store = SqliteStore::open_memory().unwrap();
+    let total = usize::try_from(super::super::maintenance::PURGE_DELETED_BATCH).unwrap() + 5;
+    for idx in 0..total {
+        insert_text(&store, &format!("entry {idx}")).await;
+    }
+
+    assert_eq!(store.tombstone_non_pinned().await.unwrap(), total);
+    assert_eq!(store.purge_deleted().await.unwrap(), total);
+    assert_eq!(count_total(&store), 0);
+}
+
+#[tokio::test]
 async fn clear_non_pinned_hard_deletes_unpinned_content() {
     // "Clear history" / clear-on-quit must physically purge non-pinned
     // rows (body, representations, search index) so nothing is

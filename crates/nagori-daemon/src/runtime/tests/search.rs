@@ -142,3 +142,39 @@ async fn search_cache_skips_long_queries() {
         "queries longer than the cache threshold must not populate the cache",
     );
 }
+
+#[tokio::test]
+async fn clear_history_hides_entries_and_kicks_maintenance() {
+    // The interactive clear has to satisfy three things at once: the rows are
+    // gone from the palette the moment it returns (so a large history can't
+    // keep serving cleared clips while a purge runs), the cached hits do not
+    // outlive them, and the deferred reclaim is asked for rather than left to
+    // the next 30-minute tick.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let pinned = runtime.add_text("keep me".to_owned()).await.expect("seed");
+    runtime.add_text("drop me".to_owned()).await.expect("seed");
+    runtime.pin_entry(pinned, true).await.expect("pin");
+    let _ = runtime
+        .search(SearchQuery::new("", String::new(), 10))
+        .await
+        .expect("warm cache");
+    let kicks = runtime.maintenance_kick_subscribe();
+
+    let hidden = runtime.clear_history().await.expect("clear");
+    assert_eq!(hidden, 1, "only the unpinned row leaves the palette");
+    assert!(
+        runtime.search_cache_handle().lock().unwrap().is_empty(),
+        "clear_history must invalidate the search cache",
+    );
+    assert!(
+        kicks.has_changed().expect("kick channel alive"),
+        "the deferred purge must be requested, not left to the periodic tick",
+    );
+
+    let results = runtime
+        .search(SearchQuery::new("", String::new(), 10))
+        .await
+        .expect("post-clear search");
+    assert_eq!(results.len(), 1, "the pinned row survives");
+    assert_eq!(results[0].entry_id, pinned);
+}

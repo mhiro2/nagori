@@ -27,6 +27,11 @@ pub(crate) const PASTE_FAILED_EVENT: &str = "nagori://paste_failed";
 /// the active result set so a visible window does not wait for another
 /// user-driven query/filter change before showing the newest row.
 pub(crate) const CLIPBOARD_CHANGED_EVENT: &str = "nagori://clipboard_changed";
+/// Asks the palette to run its clear-history flow — i.e. show the confirmation
+/// dialog. Emitted by the tray item, which has no confirmation surface of its
+/// own; the palette owns the dialog so the tray and the in-palette shortcut
+/// cannot drift on what the user is asked.
+pub(crate) const CLEAR_HISTORY_REQUESTED_EVENT: &str = "nagori://clear_history_requested";
 
 /// Event emitted when the capture loop *drops* a copy the built-in secret
 /// policy refuses to store (an OTP-shaped / fully-redacted body under the
@@ -269,6 +274,7 @@ pub fn run() {
             commands::settings_commands::data_dir_sync_warning,
             commands::settings_commands::update_settings,
             commands::settings_commands::set_capture_enabled,
+            commands::settings_commands::set_confirm_clear_history,
             commands::settings_commands::get_permissions,
             commands::settings_commands::get_capabilities,
             commands::settings_commands::last_hotkey_failure,
@@ -812,18 +818,29 @@ pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
         }
         let _ = window.hide();
     } else {
-        // Snapshot whichever app is frontmost *before* we steal focus —
-        // the paste flow needs it to re-focus the user's source app. See
-        // `AppState::remember_previous_frontmost`.
-        if let Some(state) = app.try_state::<AppState>() {
-            state.remember_previous_frontmost();
-        }
-        // Re-home the palette onto the monitor under the cursor before it
-        // becomes visible — `tauri.conf.json`'s `center: true` only pins it to
-        // the primary display once at creation. Done while hidden to avoid a
-        // visible jump.
-        commands::recenter_palette_on_cursor_monitor(&window);
-        let _ = window.show();
-        let _ = window.set_focus();
+        show_main_palette(app);
     }
+}
+
+/// Bring the palette up without toggling it away when it is already visible.
+/// Used by surfaces that need the palette *shown* to carry a follow-up
+/// interaction — today the tray's "Clear History" item, whose confirmation
+/// dialog lives in the palette window.
+pub(crate) fn show_main_palette(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    // Snapshot whichever app is frontmost *before* we steal focus —
+    // the paste flow needs it to re-focus the user's source app. See
+    // `AppState::remember_previous_frontmost`.
+    if let Some(state) = app.try_state::<AppState>() {
+        state.remember_previous_frontmost();
+    }
+    // Re-home the palette onto the monitor under the cursor before it
+    // becomes visible — `tauri.conf.json`'s `center: true` only pins it to
+    // the primary display once at creation. Done while hidden to avoid a
+    // visible jump.
+    commands::recenter_palette_on_cursor_monitor(&window);
+    let _ = window.show();
+    let _ = window.set_focus();
 }

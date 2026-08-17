@@ -138,7 +138,7 @@ pub struct HotkeyFailureRecord {
 /// secondary actions can fail at the same time (or share the same
 /// accelerator), and resolving one must not silently lose the other
 /// from cache + hydration. The action key is the kebab-case wire value
-/// (`repaste-last`, `clear-history`); cached secondary records without
+/// (`repaste-last`); cached secondary records without
 /// an action identifier are skipped on insert because there would be
 /// no way to address them on a later resolve.
 #[derive(Debug, Default, Clone)]
@@ -523,7 +523,7 @@ mod tests {
         // with the other failure permanently absent from hydration.
         let mut cache = HotkeyFailureCache::default();
         cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
-        cache.record(secondary_record("Cmd+Shift+K", "clear-history"));
+        cache.record(secondary_record("Cmd+Shift+K", "future-secondary"));
         assert_eq!(
             cache
                 .secondary
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(
             cache
                 .secondary
-                .get("clear-history")
+                .get("future-secondary")
                 .map(|r| r.hotkey.as_str()),
             Some("Cmd+Shift+K")
         );
@@ -566,7 +566,7 @@ mod tests {
         let mut cache = HotkeyFailureCache::default();
         cache.record(primary_record("Cmd+Shift+V"));
         cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
-        cache.record(secondary_record("Cmd+Shift+K", "clear-history"));
+        cache.record(secondary_record("Cmd+Shift+K", "future-secondary"));
 
         assert!(cache.clear_for_kind_action(None, None));
         assert!(cache.primary.is_none());
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(
             cache
                 .secondary
-                .get("clear-history")
+                .get("future-secondary")
                 .map(|r| r.hotkey.as_str()),
             Some("Cmd+Shift+K")
         );
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(
             cache
                 .secondary
-                .get("clear-history")
+                .get("future-secondary")
                 .map(|r| r.hotkey.as_str()),
             Some("Cmd+Shift+K")
         );
@@ -603,7 +603,7 @@ mod tests {
         // A blanket secondary clear (no action) must be a no-op — the
         // bug we are guarding against.
         assert!(!cache.clear_for_kind_action(Some("secondary"), None));
-        assert!(cache.secondary.contains_key("clear-history"));
+        assert!(cache.secondary.contains_key("future-secondary"));
     }
 
     #[test]

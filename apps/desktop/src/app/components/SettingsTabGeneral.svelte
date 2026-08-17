@@ -260,6 +260,15 @@
     {t.settings.integration.clearOnQuit}
   </label>
   <p class="help">{t.settings.integration.clearOnQuitHelp}</p>
+  <label>
+    <input
+      type="checkbox"
+      bind:checked={settings.confirmClearHistory}
+      onchange={() => scheduleSave(0)}
+    />
+    {t.settings.integration.confirmClearHistory}
+  </label>
+  <p class="help">{t.settings.integration.confirmClearHistoryHelp}</p>
 </fieldset>
 
 <style>

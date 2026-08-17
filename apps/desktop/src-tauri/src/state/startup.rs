@@ -423,6 +423,10 @@ fn spawn_maintenance_supervisor(
                 let health = runtime.maintenance_health();
                 let search_cache = runtime.search_cache_handle();
                 let mut settings_rx = runtime.settings_subscribe();
+                // Subscribe before the task is scheduled so a clear landing in
+                // the gap still wakes the first wait below rather than leaving
+                // its tombstones for the 30-minute tick.
+                let mut kicks = runtime.maintenance_kick_subscribe();
                 tokio::spawn(async move {
                     let maintenance =
                         MaintenanceService::new(store).with_search_cache(search_cache);
@@ -433,6 +437,9 @@ fn spawn_maintenance_supervisor(
                         tokio::select! {
                             () = worker_shutdown.cancelled() => return,
                             _ = settings_rx.changed() => {},
+                            // An interactive clear only tombstones; this is what
+                            // turns its rows into free pages promptly.
+                            _ = kicks.changed() => {},
                             () = tokio::time::sleep(Duration::from_mins(30)) => {},
                         }
                     }

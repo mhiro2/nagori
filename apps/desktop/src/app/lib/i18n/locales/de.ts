@@ -37,6 +37,16 @@ export const de: Messages = {
       allApps: 'Alle Apps',
       clear: 'Filter löschen',
     },
+    clearHistory: {
+      title: 'Verlauf löschen?',
+      description:
+        'Alle nicht angehefteten Einträge werden gelöscht. Angeheftete bleiben erhalten.',
+      undoWarning: 'Das lässt sich nicht rückgängig machen.',
+      dontAskAgain: 'Nicht mehr fragen',
+      cancel: 'Abbrechen',
+      confirm: 'Löschen',
+      failed: 'Der Verlauf konnte nicht gelöscht werden.',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('de')}`,
       locations: (count) => (count === 1 ? '1 Ort' : `${count.toLocaleString('de')} Orte`),
@@ -469,6 +479,9 @@ export const de: Messages = {
       clearOnQuit: 'Nicht angeheftete Einträge beim Beenden löschen',
       clearOnQuitHelp:
         'Beim Beenden werden alle nicht angehefteten Einträge entfernt. Angeheftete Einträge bleiben erhalten.',
+      confirmClearHistory: 'Vor dem Löschen des Verlaufs nachfragen',
+      confirmClearHistoryHelp:
+        'Beim Löschen werden alle nicht angehefteten Einträge entfernt; das lässt sich nicht rückgängig machen. Ausschalten überspringt die Rückfrage.',
     },
     display: {
       legend: 'Paletten-Anzeige',
@@ -508,7 +521,6 @@ export const de: Messages = {
       },
       secondaryActions: {
         'repaste-last': 'Letzten Eintrag erneut einfügen',
-        'clear-history': 'Gesamten nicht angehefteten Verlauf löschen',
       },
     },
     updates: {

@@ -14,11 +14,17 @@ fn main() {
     // deny-by-default: a command invoked from a webview is rejected unless a
     // capability for that window explicitly allows it. The per-window grants
     // live in `capabilities/palette.json` and `capabilities/settings.json`, so
-    // a compromised palette webview cannot reach `clear_history`, `install_cli`,
+    // a compromised palette webview cannot reach `install_cli`,
     // `update_settings`, or the other privileged settings/installer commands —
     // and the settings webview cannot drive paste/copy/delete. Commands omitted
-    // from every capability (e.g. `clear_history`, `add_entry`, `repaste_last`)
-    // are never invoked from a webview today and stay unreachable from one.
+    // from every capability (e.g. `add_entry`, `repaste_last`) are never
+    // invoked from a webview today and stay unreachable from one.
+    //
+    // `clear_history` *is* granted to the palette: clearing is a palette action
+    // gated behind a confirmation dialog, not a global shortcut. Its companion
+    // `set_confirm_clear_history` is granted for the dialog's "don't ask again"
+    // box — a single-field mutation, deliberately not the whole
+    // `update_settings` surface.
     //
     // The list must stay in sync with `generate_handler!` in `lib.rs`: a command
     // registered there but missing here has no generated permission, so no
@@ -60,6 +66,7 @@ fn main() {
             "data_dir_sync_warning",
             "update_settings",
             "set_capture_enabled",
+            "set_confirm_clear_history",
             "get_permissions",
             "get_capabilities",
             "last_hotkey_failure",

@@ -589,7 +589,7 @@ are forward-only; downgrades are not supported.
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
-| `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and *Clear history* / clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. |
+| `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. *Clear history* tombstones first and the deferred purge it kicks drops the vector moments later. |
 | `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) and the privacy-policy fingerprint (`policy_hash`, from `AppSettings::semantic_policy_hash`) the stored vectors were produced with, so a model *or policy* change clears the index and triggers a rebuild instead of mixing incompatible spaces or serving vectors the current policy forbids. |
 | `semantic_exclusions` | Tombstones for entries the semantic indexer refused to embed because the *current* policy re-assesses their stored text as `Secret` / `Blocked` (the capture-time `sensitivity` is frozen, so a later rule can't flip it). Keyed by `entry_id` (FK, `ON DELETE CASCADE`) with the refusing `content_hash`, so a rewritten entry is re-assessed; cleared together with the vectors on every rebuild. Keeps refused rows out of the pending backlog so backfill drains. |
 | `settings` | Key/value persistence for `AppSettings`. |
@@ -649,7 +649,7 @@ denormalised `total_byte_count` (maintained by triggers on
 `entry_representations`, so the budget total is a single-table
 aggregate over the live partition rather than a JOIN+SUM) and evicts
 oldest-first when the budget is exceeded. Eviction — like the count /
-age sweeps and *Clear history* / clear-on-quit — **hard-deletes** the
+age sweeps and clear-on-quit — **hard-deletes** the
 parent `entries` row, so `ON DELETE CASCADE` (plus `recursive_triggers`
 firing the `search_documents_ad_fts` sync trigger) drops the row's
 representations, blobs, embeddings, thumbnails, and search / ngram
@@ -661,6 +661,26 @@ than tombstoning rows that grow it forever. Per-entry deletes
 hard-delete primitive. Secret rows are always hard-deleted immediately, and
 `purge_deleted` / the desktop's **Purge deleted entries now** command reclaim
 any remaining tombstones.
+
+**Clear history is two-phase.** The hard delete above is far too slow to sit on
+an interactive path: on a 100k-entry history the single cascading transaction
+measures ~129 s (~13 s at 20k), and readers stay on the pre-commit snapshot for
+its whole duration — the user clears their clipboard and the palette keeps
+serving it. `tombstone_non_pinned` therefore stamps `deleted_at` on every
+non-pinned row instead (~1 s at 100k, ~170 ms at 20k) and hard-deletes `Secret`
+rows inline; every live query already filters `deleted_at IS NULL`, so the
+history leaves the palette, the CLI, and search the moment it commits. The
+runtime then fires a maintenance kick (a watch channel the maintenance
+supervisor selects on beside its periodic timer) so the deferred
+`purge_deleted` reclaims the rows within seconds rather than at the next
+30-minute tick. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
+transactions on freshly checked-out connections, so a 100k backlog cannot hold
+the single writer for the whole reclaim and starve captures behind it. Unlike
+`mark_deleted` — which drops a tombstoned row's search / ngram rows eagerly
+because that tombstone can sit until the next sweep — the bulk tombstone leaves
+them to the same cascade that drops the bodies, which is exactly the expensive
+part being deferred. Clear-on-quit keeps the synchronous `clear_non_pinned`:
+the app is exiting, so there is no later moment to run a purge in.
 
 Hard-delete reclaims the rows; `secure_delete = ON` (set on every pooled
 connection) zeroes their freed pages so the content is not recoverable
@@ -1607,8 +1627,9 @@ not duplicate runtime logic.
   open path, so the entry gesture matches the mouse-driven action
   selection. The result shows *Copy* (uses
   `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
-  Clearing the whole history is not offered here — that global, destructive
-  action lives on the tray menu and the `clear-history` hotkey.
+  Clearing the whole history is not offered here — that destructive action
+  lives on the tray menu and the palette's own `clear-history` chord, both
+  behind the confirmation dialog described below.
 - `EntryContextMenu.svelte` — a right-click context menu on a result row that
   surfaces the per-entry actions for mouse-driven use: *Paste*, *Copy*, *Paste
   as…*, *Pin* / *Unpin*, *Actions…* (opens `ActionInspector.svelte` anchored to
@@ -1633,6 +1654,20 @@ not duplicate runtime logic.
   outside right-click can immediately re-open the menu on another row). While the
   action inspector owns the column the list is a read-only reference surface, so a
   right-click there is suppressed entirely (mirrors the frozen hover / click).
+- `ClearHistoryConfirmDialog.svelte` — the confirmation in front of *Clear
+  history*, the palette's one irreversible bulk action. Reached by the ⌘⌥⌫
+  chord (the single-row ⌘⌫ delete plus a modifier) and by the tray item, which
+  shows the palette and emits `nagori://clear_history_requested` rather than
+  clearing on the click — one dialog for both surfaces, so they cannot drift on
+  what the user is asked. A *Don't ask again* box writes
+  `confirm_clear_history = false` through the narrow
+  `set_confirm_clear_history` command (the palette webview is deliberately not
+  granted `update_settings`), after which both surfaces clear straight away;
+  the Settings ▸ General toggle is how it comes back. The suppression is
+  persisted before the clear runs, so the answer to "stop asking me" survives a
+  clear that then fails. Like `PreviewUrlConfirmDialog.svelte` it focuses
+  itself on mount and swallows Escape / Enter so neither leaks into the palette
+  behind it.
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
   the `preview_entry` Tauri command, which is gated to the desktop
   process because the daemon does not host an AppKit event loop. The
@@ -2175,10 +2210,12 @@ change.
   glyph also dims to a paused variant — the same icon with its alpha
   scaled down — while capture is off, so the state reads at a glance
   without opening the menu), *Settings…*,
-  *Clear History* (hard-deletes every non-pinned entry — pinned rows are
-  kept — then emits `CLIPBOARD_CHANGED_EVENT` so an open palette refreshes
-  and confirms via a notification, mirroring the `ClearHistory` secondary
-  hotkey), *Quit Nagori*. The settings entry emits the Tauri event
+  *Clear History* (shows the palette and emits
+  `nagori://clear_history_requested` so the palette's confirmation dialog —
+  the only one either surface has — asks first; with
+  `confirm_clear_history` off it clears straight away, emits
+  `CLIPBOARD_CHANGED_EVENT` so an open palette refreshes, and confirms via a
+  notification), *Quit Nagori*. The settings entry emits the Tauri event
   `nagori://navigate` with payload `"settings"`; the frontend listens
   via `@tauri-apps/api/event` and switches its route. Visibility is
   gated by `AppSettings.show_in_menu_bar`; toggling the setting hides
@@ -2208,10 +2245,13 @@ change.
   disables the entry without a relaunch.
 - **Secondary hotkeys** — `AppSettings.secondary_hotkeys`
   (`SecondaryHotkeyAction → accelerator`) is reconciled by the same
-  watch channel. `RepasteLast` re-pastes the most recent entry;
-  `ClearHistory` deletes every non-pinned row. Conflicts surface via
-  the same `nagori://hotkey_register_failed` event used by the primary
-  hotkey.
+  watch channel. `RepasteLast` re-pastes the most recent entry. Only
+  non-destructive actions are eligible: a global shortcut fires with no
+  palette open and no confirmation in front of it, so *Clear history* is a
+  palette chord (⌘⌥⌫) rather than a global one. A binding stored for it by an
+  older build is dropped on load instead of failing the settings row.
+  Conflicts surface via the same `nagori://hotkey_register_failed` event used
+  by the primary hotkey.
 - **Clear-on-quit** — when `AppSettings.clear_on_quit` is true,
   `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
   Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries and
@@ -2554,8 +2594,7 @@ under 80 ms for 100k text entries on a developer machine.
   stores). A compromise of the palette webview therefore cannot reach
   `update_settings` / `install_cli` / `request_accessibility`, and a
   compromise of the settings webview cannot drive clipboard side effects.
-  Commands no webview invokes (`clear_history`, `add_entry`,
-  `repaste_last`, the `list_recent_entries` / `list_pinned_entries` /
+  Commands no webview invokes (`add_entry`, `repaste_last`, the `list_recent_entries` / `list_pinned_entries` /
   `get_entry` / `copy_entry` / `paste_entry` reads-and-headless variants,
   `open_palette`, `toggle_palette`, `close_settings`) are in the manifest
   but granted to neither window, so they stay unreachable from a webview

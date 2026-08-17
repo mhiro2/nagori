@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-confirm-clear-history"
+description = "Enables the set_confirm_clear_history command without any pre-configured scope."
+commands.allow = ["set_confirm_clear_history"]
+
+[[permission]]
+identifier = "deny-set-confirm-clear-history"
+description = "Denies the set_confirm_clear_history command without any pre-configured scope."
+commands.deny = ["set_confirm_clear_history"]

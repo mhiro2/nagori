@@ -64,10 +64,7 @@
     'clear',
     'open-preview',
   ];
-  const SECONDARY_HOTKEY_ACTIONS: readonly SecondaryHotkeyAction[] = [
-    'repaste-last',
-    'clear-history',
-  ];
+  const SECONDARY_HOTKEY_ACTIONS: readonly SecondaryHotkeyAction[] = ['repaste-last'];
 
   // Debounce profiles per control class. Checkbox / select edits commit in
   // a single discrete event, so 0 ms keeps the on-disk file in lock-step

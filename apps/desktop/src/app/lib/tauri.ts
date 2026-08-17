@@ -96,6 +96,12 @@ export const TAURI_EVENTS = {
   // Keep in lockstep with `CAPTURE_SKIPPED_EVENT` in `src-tauri/src/lib.rs`.
   captureSkipped: 'nagori://capture_skipped',
   pasteFailed: 'nagori://paste_failed',
+  // Emitted by the tray's "Clear History" item when confirmation is enabled.
+  // The tray menu has no confirmation surface, so it shows the palette and
+  // asks it to run the clear flow — i.e. open the confirmation dialog. Payload
+  // is empty. Keep in lockstep with `CLEAR_HISTORY_REQUESTED_EVENT` in
+  // `src-tauri/src/lib.rs`.
+  clearHistoryRequested: 'nagori://clear_history_requested',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
   // Emitted after a previously failed global-shortcut binds successfully
   // on a later reconcile. The frontend store uses this to drop the
