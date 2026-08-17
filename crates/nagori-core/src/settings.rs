@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use crate::ContentKind;
 use crate::errors::{AppError, Result};
 use crate::limits::{MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, ReadBudget};
-use crate::model::{AiActionId, AiProviderKind};
+use crate::model::{AiActionId, AiProviderKind, ContentHash};
 use crate::policy::compile_user_regex;
 
 /// Maximum entries the user can ask retention to keep. Beyond this the
@@ -668,6 +668,42 @@ impl AppSettings {
     #[must_use]
     pub const fn read_budget(&self) -> ReadBudget {
         ReadBudget::new(self.max_entry_size_bytes, self.max_image_entry_size_bytes)
+    }
+
+    /// Fingerprint of every setting that decides *what content* may reach the
+    /// embedding model: the user `regex_denylist`, the source-app denylist,
+    /// OTP detection, and the entry-size ceiling (an oversized body classifies
+    /// `Blocked`). Stored in `semantic_index_meta` alongside the vectors so a
+    /// later policy edit is detected as an index-invalidating change — the old
+    /// vectors may embed content the new policy forbids, so they must be
+    /// purged and rebuilt rather than trusted.
+    ///
+    /// Order-insensitive over the two rule lists (sorted + deduped) so
+    /// reordering rules in the settings UI does not force a spurious rebuild.
+    /// Code-revision changes to the classifier / redactor themselves are
+    /// covered separately by the indexer's `INDEX_VERSION`.
+    #[must_use]
+    pub fn semantic_policy_hash(&self) -> String {
+        let mut regex_rules = self.regex_denylist.clone();
+        regex_rules.sort_unstable();
+        regex_rules.dedup();
+        let mut app_rules: Vec<String> = self
+            .app_denylist
+            .iter()
+            .map(|rule| serde_json::to_string(rule).unwrap_or_default())
+            .collect();
+        app_rules.sort_unstable();
+        app_rules.dedup();
+        // `serde_json`'s default map is ordered (BTreeMap), so this canonical
+        // payload serializes deterministically.
+        let payload = serde_json::json!({
+            "version": 1,
+            "regex_denylist": regex_rules,
+            "app_denylist": app_rules,
+            "otp_detection": self.otp_detection,
+            "max_entry_size_bytes": self.max_entry_size_bytes,
+        });
+        ContentHash::sha256(payload.to_string().as_bytes()).value
     }
 
     /// Validate value-range invariants that the wire format alone cannot
@@ -1364,5 +1400,61 @@ mod tests {
         settings
             .validate()
             .expect("empty auxiliary hotkey must be treated as unset");
+    }
+
+    #[test]
+    fn semantic_policy_hash_is_stable_and_order_insensitive() {
+        let a = AppSettings {
+            regex_denylist: vec!["SECRET-\\d+".to_owned(), "INTERNAL-\\d+".to_owned()],
+            ..Default::default()
+        };
+        let b = AppSettings {
+            regex_denylist: vec!["INTERNAL-\\d+".to_owned(), "SECRET-\\d+".to_owned()],
+            ..Default::default()
+        };
+        // Same rules in a different order fingerprint identically, so
+        // reordering rules in the UI does not force a spurious rebuild.
+        assert_eq!(a.semantic_policy_hash(), b.semantic_policy_hash());
+        // And the fingerprint is deterministic across calls.
+        assert_eq!(a.semantic_policy_hash(), a.semantic_policy_hash());
+    }
+
+    #[test]
+    fn semantic_policy_hash_tracks_every_content_policy_field() {
+        let base = AppSettings::default();
+        let base_hash = base.semantic_policy_hash();
+
+        let mut regex = base.clone();
+        regex.regex_denylist.push("ACME-\\d+".to_owned());
+        assert_ne!(regex.semantic_policy_hash(), base_hash);
+
+        let mut otp = base.clone();
+        otp.otp_detection = !otp.otp_detection;
+        assert_ne!(otp.semantic_policy_hash(), base_hash);
+
+        let mut apps = base.clone();
+        apps.app_denylist.push(AppDenyRule::Pattern {
+            value: "example-vault".to_owned(),
+        });
+        assert_ne!(apps.semantic_policy_hash(), base_hash);
+
+        let mut size = base;
+        size.max_entry_size_bytes /= 2;
+        assert_ne!(size.semantic_policy_hash(), base_hash);
+    }
+
+    #[test]
+    fn semantic_policy_hash_ignores_unrelated_settings() {
+        let base = AppSettings::default();
+        let mut unrelated = base.clone();
+        unrelated.paste_delay_ms += 10;
+        unrelated.history_retention_count += 1;
+        unrelated.ai.semantic_index_enabled = !unrelated.ai.semantic_index_enabled;
+        // Toggling the index or tweaking non-privacy knobs must not
+        // invalidate stored vectors.
+        assert_eq!(
+            unrelated.semantic_policy_hash(),
+            base.semantic_policy_hash()
+        );
     }
 }

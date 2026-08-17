@@ -435,3 +435,119 @@ fn classifier_otp_preview_does_not_leak_digits() {
         "OTP digits leaked into preview: {preview:?}",
     );
 }
+
+#[test]
+fn assess_semantic_text_reflects_current_policy_not_stored_verdict() {
+    // The semantic indexer re-assesses stored text against the *current*
+    // policy before embedding: a body captured as Public must come back
+    // Blocked once a matching `regex_denylist` rule exists.
+    let settings = AppSettings {
+        regex_denylist: vec!["ACME-\\d+".to_owned()],
+        ..Default::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    assert_eq!(
+        classifier.assess_semantic_text("ticket ACME-1234 details", None),
+        Sensitivity::Blocked
+    );
+    assert_eq!(
+        classifier.assess_semantic_text("unrelated note", None),
+        Sensitivity::Public
+    );
+    // Built-in secret detectors apply too.
+    assert_eq!(
+        classifier.assess_semantic_text("token = ghp_abcdefghijklmnopqrstuvwxyz123456", None),
+        Sensitivity::Secret
+    );
+}
+
+#[test]
+fn assess_semantic_text_honours_app_denylist_and_size_ceiling() {
+    use crate::SourceApp;
+    use crate::settings::AppDenyRule;
+
+    let mut settings = AppSettings::default();
+    settings.app_denylist.push(AppDenyRule::Pattern {
+        value: "example-vault".to_owned(),
+    });
+    settings.max_entry_size_bytes = 16;
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    let vault = SourceApp {
+        bundle_id: Some("com.example-vault.app".to_owned()),
+        name: Some("Example Vault".to_owned()),
+        executable_path: None,
+    };
+    assert_eq!(
+        classifier.assess_semantic_text("short note", Some(&vault)),
+        Sensitivity::Blocked,
+        "an app-denylist match must block embedding"
+    );
+
+    assert_eq!(
+        classifier.assess_semantic_text("this body exceeds the tiny ceiling", None),
+        Sensitivity::Blocked,
+        "an oversized body must block embedding"
+    );
+}
+
+#[test]
+fn assess_semantic_texts_charges_the_size_ceiling_to_sized_payloads_only() {
+    // The normalized search text is derived from the stored body, so counting
+    // both against the ceiling would double-charge it: a body just under the
+    // limit at capture would come back `Oversized` and be refused forever.
+    let body = "Ticket Notes For The Release";
+    let normalized = crate::text::normalize_text(body);
+    let settings = AppSettings {
+        // Wide enough for the body alone, too tight for body + projection.
+        max_entry_size_bytes: body.len() + 4,
+        ..Default::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    assert_eq!(
+        classifier.assess_semantic_texts(&[normalized.as_str()], &[body], None),
+        Sensitivity::Public,
+        "a derived projection must not push a within-limit body over the ceiling"
+    );
+
+    // The sized payloads themselves are still summed, exactly as capture-time
+    // `classify` does, so a genuinely oversized entry is still refused. (An
+    // exact duplicate would dedup away, so the second payload must differ.)
+    let markup = format!("<p>{body}</p>");
+    assert_eq!(
+        classifier.assess_semantic_texts(&[normalized.as_str()], &[body, markup.as_str()], None),
+        Sensitivity::Blocked,
+        "distinct sized payloads must still be charged in aggregate"
+    );
+
+    // A `FilePaths` representation is scan-only at capture, so charging its
+    // joined paths here would make a file list that classified fine come back
+    // `Oversized` — and an `Oversized` verdict tombstones the entry.
+    let paths = "/Users/someone/a-fairly-long-path/report.txt";
+    assert!(paths.len() + body.len() > body.len() + 4);
+    assert_eq!(
+        classifier.assess_semantic_texts(&[normalized.as_str(), paths], &[body], None),
+        Sensitivity::Public,
+        "scan-only file paths must not be charged to the size ceiling"
+    );
+}
+
+#[test]
+fn assess_semantic_texts_scans_derived_projections_for_matches() {
+    // Not counting the projection must not mean ignoring it: normalization
+    // folds case, so a lowercase rule matches only the normalized form while
+    // an uppercase one matches only the raw body. Both must be caught.
+    let settings = AppSettings {
+        regex_denylist: vec!["acme-\\d+".to_owned()],
+        ..Default::default()
+    };
+    let classifier = SensitivityClassifier::try_new(settings).unwrap();
+
+    assert_eq!(
+        classifier.assess_semantic_texts(&["ticket acme-1234"], &["ticket ACME-1234"], None),
+        Sensitivity::Blocked,
+        "a rule matching only the normalized projection must still refuse"
+    );
+}
