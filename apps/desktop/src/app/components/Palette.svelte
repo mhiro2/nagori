@@ -107,9 +107,14 @@
     );
     // The tray's "Clear History" item shows the palette and hands the
     // confirmation to this window, so the tray and the in-palette chord can
-    // never drift on what the user is asked.
+    // never drift on what the user is asked. The dialog opens unconditionally:
+    // the event is only emitted after the *backend* read
+    // `confirm_clear_history` as true, and re-deciding here against this
+    // window's copy of the settings would skip the confirmation whenever the
+    // palette has not applied a `settings_changed` yet (e.g. right after the
+    // Settings window turned confirmation back on).
     const offClearRequested = subscribe(TAURI_EVENTS.clearHistoryRequested, () => {
-      requestClearHistory();
+      clearConfirmOpen = true;
     });
     return () => {
       offClipboardChanged();

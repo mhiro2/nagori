@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nagori_core::{AppSettings, AuditLog, Result};
 use nagori_storage::SqliteStore;
 use time::{Duration, OffsetDateTime};
@@ -9,6 +12,10 @@ use crate::search_cache::{SharedSearchCache, lock_or_recover};
 pub struct MaintenanceService {
     store: SqliteStore,
     search_cache: Option<SharedSearchCache>,
+    /// Set when a sweep deleted enough rows to be worth a `VACUUM`, consumed
+    /// by the *next* sweep. See [`Self::run_inner`] for why the rewrite is
+    /// deferred a round instead of running in the sweep that earned it.
+    vacuum_pending: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,14 +28,18 @@ pub struct MaintenanceReport {
     /// the deferred hard delete of rows a per-entry delete already tombstoned —
     /// the only path that reclaims a deleted *pinned* secret.
     pub purged_deleted: usize,
+    /// Whether this sweep ran the deferred `VACUUM` armed by an earlier one.
+    /// It does **not** describe the deletions reported above: those arm the
+    /// next sweep's rewrite rather than paying for it themselves.
     pub vacuumed: bool,
 }
 
 /// Minimum number of rows that must have been deleted in a maintenance run
-/// before we trigger a `VACUUM`. `SQLite` VACUUM rewrites the entire database
+/// before we arm a `VACUUM`. `SQLite` VACUUM rewrites the entire database
 /// file, which is expensive and stalls writers; running it for every TTL'd
 /// row burns CPU and disk for negligible space gains. Wait until the deletion
-/// is large enough that reclaiming pages actually matters.
+/// is large enough that reclaiming pages actually matters — and then run it on
+/// the *following* sweep, see `vacuum_pending`.
 const VACUUM_DELETION_THRESHOLD: usize = 256;
 
 /// Age past which audit events are trimmed by the maintenance sweep.
@@ -39,10 +50,11 @@ const VACUUM_DELETION_THRESHOLD: usize = 256;
 const AUDIT_RETENTION_DAYS: i64 = 90;
 
 impl MaintenanceService {
-    pub const fn new(store: SqliteStore) -> Self {
+    pub fn new(store: SqliteStore) -> Self {
         Self {
             store,
             search_cache: None,
+            vacuum_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -145,12 +157,26 @@ impl MaintenanceService {
             Err(err) => warn!(error = %err, "audit_log_trim_failed"),
         }
         let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size + purged_deleted;
-        let vacuumed = if total_deleted >= VACUUM_DELETION_THRESHOLD {
+        // `VACUUM` rewrites the whole database file and holds the single
+        // writer for the duration, so it is deferred one sweep rather than run
+        // by the sweep that earned it. The motivating case is *Clear history*:
+        // it kicks a sweep the moment the user clears, and vacuuming a
+        // multi-GB file right then would block captures past their
+        // `busy_timeout` — losing copies — immediately after an explicit user
+        // action. Carrying the flag to the next sweep still shrinks the file
+        // (within the periodic interval, typically while the app is idle)
+        // without stalling the writer at the worst possible moment. The flag
+        // lives in memory: a worker restart in between simply drops it and the
+        // file waits for the next qualifying sweep.
+        let vacuumed = if self.vacuum_pending.swap(false, Ordering::Relaxed) {
             self.store.vacuum().await?;
             true
         } else {
             false
         };
+        if total_deleted >= VACUUM_DELETION_THRESHOLD {
+            self.vacuum_pending.store(true, Ordering::Relaxed);
+        }
         let report = MaintenanceReport {
             deleted_by_age,
             deleted_by_count,
@@ -261,9 +287,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_vacuums_when_threshold_reached() {
-        // A large retention sweep should still trigger VACUUM so we actually
-        // reclaim space when it's worth it.
+    async fn run_defers_vacuum_to_the_sweep_after_a_large_deletion() {
+        // A large sweep still earns a VACUUM, but pays for it on the next run:
+        // rewriting the whole file holds the single writer, and the sweep that
+        // earned it may well be the one an interactive *Clear history* just
+        // kicked — stalling captures right after the user acted.
         let store = store_with_entries(VACUUM_DELETION_THRESHOLD + 5).await;
         let service = MaintenanceService::new(store);
         let settings = AppSettings {
@@ -272,9 +300,21 @@ mod tests {
         };
 
         let report = service.run(&settings).await.expect("maintenance run");
-
         assert!(report.deleted_by_count >= VACUUM_DELETION_THRESHOLD);
-        assert!(report.vacuumed, "vacuum must run on large sweeps");
+        assert!(
+            !report.vacuumed,
+            "the sweep that deleted the rows must not also rewrite the file",
+        );
+
+        let next = service
+            .run(&settings)
+            .await
+            .expect("second maintenance run");
+        assert_eq!(next.deleted_by_count, 0, "nothing left to evict");
+        assert!(next.vacuumed, "the armed vacuum must run on the next sweep");
+
+        let third = service.run(&settings).await.expect("third maintenance run");
+        assert!(!third.vacuumed, "the flag is consumed, not sticky");
     }
 
     #[tokio::test]

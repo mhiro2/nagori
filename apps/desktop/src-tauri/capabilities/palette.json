@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "palette-commands",
-  "description": "App commands the palette (`main`) webview is allowed to invoke: search, the paste/copy/delete/pin row actions, preview hydration, the AI action inspector, the clear-history action (with its confirmation dialog and the single-field `set_confirm_clear_history` toggle behind it), the status-bar capture toggle and Settings launcher, and the shared read-only stores (settings / permissions / capabilities / last hotkey failure). It deliberately omits every privileged settings/installer command (`update_settings`, `install_cli`, `request_accessibility`, the updater and semantic-index controls) so a compromised palette webview cannot reach them.",
+  "description": "App commands the palette (`main`) webview is allowed to invoke: search, the paste/copy/delete/pin row actions, preview hydration, the AI action inspector, the clear-history action and the single-field `set_confirm_clear_history` toggle its confirmation dialog writes (that dialog guards against a mistyped chord, not against a compromised webview — the window already holds `delete_entries`, which reaches the same rows), the status-bar capture toggle and Settings launcher, and the shared read-only stores (settings / permissions / capabilities / last hotkey failure). It deliberately omits every privileged settings/installer command (`update_settings`, `install_cli`, `request_accessibility`, the updater and semantic-index controls) so a compromised palette webview cannot reach them.",
   "windows": ["main"],
   "permissions": [
     "allow-search-clipboard",

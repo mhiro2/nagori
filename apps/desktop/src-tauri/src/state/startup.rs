@@ -406,6 +406,14 @@ fn spawn_ipc_mutation_forwarder(
     })
 }
 
+/// Cadence of the periodic retention sweep.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_mins(30);
+
+/// Retry delay after a failed sweep. Short because the failure may have left a
+/// cleared history's tombstoned rows unreclaimed, and the wake-up that
+/// triggered the run is already spent.
+const MAINTENANCE_RETRY_INTERVAL: Duration = Duration::from_mins(1);
+
 /// Supervise the periodic maintenance loop (retention sweep).
 fn spawn_maintenance_supervisor(
     runtime: NagoriRuntime,
@@ -433,14 +441,24 @@ fn spawn_maintenance_supervisor(
                     loop {
                         let settings = settings_rx.borrow().clone();
                         let outcome = maintenance.run(&settings).await;
+                        let failed = outcome.is_err();
                         note_maintenance_outcome(&health, &outcome);
+                        // A failed sweep has already consumed whatever woke it,
+                        // so waiting the full interval would leave a cleared
+                        // history's tombstoned bodies on disk for another 30
+                        // minutes. Retry soon instead.
+                        let wait = if failed {
+                            MAINTENANCE_RETRY_INTERVAL
+                        } else {
+                            MAINTENANCE_INTERVAL
+                        };
                         tokio::select! {
                             () = worker_shutdown.cancelled() => return,
                             _ = settings_rx.changed() => {},
                             // An interactive clear only tombstones; this is what
                             // turns its rows into free pages promptly.
                             _ = kicks.changed() => {},
-                            () = tokio::time::sleep(Duration::from_mins(30)) => {},
+                            () = tokio::time::sleep(wait) => {},
                         }
                     }
                 })

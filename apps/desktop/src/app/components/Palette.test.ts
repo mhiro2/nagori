@@ -743,6 +743,28 @@ describe('Palette', () => {
     expect(deleteSelection).toHaveBeenCalledTimes(1);
     expect(clearHistory).not.toHaveBeenCalled();
   });
+  // The tray only emits this after the backend read `confirm_clear_history` as
+  // true, so the palette must not re-decide against its own (possibly stale)
+  // settings copy — that would skip the confirmation right after Settings
+  // turned it back on.
+  it('always confirms a tray-requested clear, even with a stale suppressed setting', async () => {
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: false,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+    let fireClearRequested: (() => void) | undefined;
+    vi.mocked(subscribe).mockImplementation(((name: string, handler: () => void) => {
+      if (name === TAURI_EVENTS.clearHistoryRequested) fireClearRequested = handler;
+      return () => undefined;
+    }) as unknown as typeof subscribe);
+
+    const { findByTestId } = render(Palette);
+    expect(fireClearRequested).toBeTruthy();
+    fireClearRequested?.();
+    await findByTestId('clear-history-confirm');
+    expect(clearHistory).not.toHaveBeenCalled();
+  });
 });
 
 // `dispatch` is currently unused but kept here as a convenience for future

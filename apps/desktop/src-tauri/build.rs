@@ -21,10 +21,14 @@ fn main() {
     // invoked from a webview today and stay unreachable from one.
     //
     // `clear_history` *is* granted to the palette: clearing is a palette action
-    // gated behind a confirmation dialog, not a global shortcut. Its companion
-    // `set_confirm_clear_history` is granted for the dialog's "don't ask again"
-    // box — a single-field mutation, deliberately not the whole
-    // `update_settings` surface.
+    // now, not a global shortcut. Its companion `set_confirm_clear_history` is
+    // granted for the confirmation dialog's "don't ask again" box — a
+    // single-field mutation, deliberately not the whole `update_settings`
+    // surface. Neither widens the palette's blast radius: the window already
+    // holds `delete_entries`, so a compromised palette could erase the same
+    // rows by enumerating ids. The confirmation dialog is a UX guard against a
+    // mistyped chord, *not* a security boundary — the backend does not (and
+    // cannot usefully) verify that a human saw it.
     //
     // The list must stay in sync with `generate_handler!` in `lib.rs`: a command
     // registered there but missing here has no generated permission, so no

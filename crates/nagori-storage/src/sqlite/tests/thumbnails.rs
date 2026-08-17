@@ -260,3 +260,31 @@ async fn get_thumbnail_touch_rescues_hot_row_from_eviction() {
         "the older-by-access row must be evicted",
     );
 }
+
+#[tokio::test]
+async fn get_thumbnail_skips_a_soft_deleted_entry() {
+    // A tombstoned entry must not keep serving its image while the deferred
+    // purge is still pending — the window *Clear history* now opens by
+    // hiding first and reclaiming afterwards.
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(&store, "host entry").await;
+    store
+        .put_thumbnail(
+            id,
+            ThumbnailRecord {
+                payload: vec![1, 2, 3, 4],
+                mime_type: "image/png".to_owned(),
+                width: 16,
+                height: 16,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store.get_thumbnail(id).await.unwrap().is_some());
+
+    assert_eq!(store.tombstone_non_pinned().await.unwrap(), 1);
+    assert!(
+        store.get_thumbnail(id).await.unwrap().is_none(),
+        "a hidden entry must not serve its cached thumbnail",
+    );
+}

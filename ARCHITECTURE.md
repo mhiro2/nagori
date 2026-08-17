@@ -673,14 +673,20 @@ history leaves the palette, the CLI, and search the moment it commits. The
 runtime then fires a maintenance kick (a watch channel the maintenance
 supervisor selects on beside its periodic timer) so the deferred
 `purge_deleted` reclaims the rows within seconds rather than at the next
-30-minute tick. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
+30-minute tick — and a sweep that *fails* retries in a minute rather than
+leaving those bodies for the full interval. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
 transactions on freshly checked-out connections, so a 100k backlog cannot hold
 the single writer for the whole reclaim and starve captures behind it. Unlike
 `mark_deleted` — which drops a tombstoned row's search / ngram rows eagerly
 because that tombstone can sit until the next sweep — the bulk tombstone leaves
 them to the same cascade that drops the bodies, which is exactly the expensive
 part being deferred. Clear-on-quit keeps the synchronous `clear_non_pinned`:
-the app is exiting, so there is no later moment to run a purge in.
+the app is exiting, so there is no later moment to run a purge in. The
+maintenance sweep's `VACUUM` is deferred one round for the same reason the
+purge is batched — rewriting a multi-GB file holds the single writer long
+enough to push a concurrent capture past its `busy_timeout`, and the sweep that
+would earn it is the one the user's clear just kicked. A qualifying sweep arms
+the rewrite and the *next* one pays for it, typically while the app is idle.
 
 Hard-delete reclaims the rows; `secure_delete = ON` (set on every pooled
 connection) zeroes their freed pages so the content is not recoverable
@@ -1665,7 +1671,12 @@ not duplicate runtime logic.
   granted `update_settings`), after which both surfaces clear straight away;
   the Settings ▸ General toggle is how it comes back. The suppression is
   persisted before the clear runs, so the answer to "stop asking me" survives a
-  clear that then fails. Like `PreviewUrlConfirmDialog.svelte` it focuses
+  clear that then fails. The tray's event opens the dialog unconditionally —
+  the backend already decided confirmation was required, and re-deciding
+  against the palette's own settings copy would skip it whenever a
+  `settings_changed` has not been applied yet. The dialog guards against a
+  mistyped chord, not against a compromised webview: the palette already holds
+  `delete_entries`, which reaches the same rows. Like `PreviewUrlConfirmDialog.svelte` it focuses
   itself on mount and swallows Escape / Enter so neither leaks into the palette
   behind it.
 - **Quick Look (macOS only).** Cmd+Y on a selected palette row invokes
