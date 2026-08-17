@@ -365,9 +365,24 @@ vector is ever produced or stored. **Private** entries are embedded
 only after the same redaction that gates AI input shaping
 (built-in detectors plus your `regex_denylist`), so private content is
 not sent to the model verbatim. **Public** / unclassified bodies are
-embedded as-is. If you change which captures are Secret/Private, use
-*Rebuild index* to re-embed under the new policy; the index also
-rebuilds automatically when this embedding policy is revised.
+embedded as-is — but the capture-time classification is not the last
+word: before each entry is embedded, its stored text is re-checked
+against the *current* policy, so a `regex_denylist` or app-denylist
+rule you add later still applies to history that was classified
+Public when it was captured. An entry the current policy would treat
+as Secret or Blocked is refused (and any vector it already had is
+deleted) rather than embedded.
+
+Policy changes also invalidate the index as a whole: the settings
+that decide what may reach the model (`regex_denylist`, the app
+denylist, OTP detection, the entry-size ceiling) are fingerprinted
+and stored with the vectors. Editing any of them deletes the stored
+vectors immediately — even while the index is disabled or the
+embedding model is unavailable — and the index is rebuilt under the
+new policy the next time indexing can run, with every entry
+re-checked as above. *Rebuild index* remains available as a manual
+control, and a rebuild is likewise re-checked against the current
+policy rather than replaying old classifications.
 
 The vector follows the entry's lifecycle the same way the rest of the
 row does. A per-entry delete is a **soft delete**: the entry (and its
