@@ -148,6 +148,15 @@ pub struct NagoriRuntime {
     /// nothing else tells an open palette that `nagori add` just landed.
     external_mutations_tx: watch::Sender<u64>,
     external_mutations_rx: watch::Receiver<u64>,
+    /// Monotonic counter bumped when a caller needs the maintenance sweep to
+    /// run now instead of at its next periodic tick. [`Self::clear_history`]
+    /// fires it so the tombstones it just wrote are physically reclaimed
+    /// within seconds rather than up to 30 minutes later. Routing the reclaim
+    /// through the existing supervised worker keeps it serialised with the
+    /// retention sweep, so two clears in a row cannot put two purge loops in
+    /// contention for the single writer.
+    maintenance_kick_tx: watch::Sender<u64>,
+    maintenance_kick_rx: watch::Receiver<u64>,
 }
 
 impl NagoriRuntime {
@@ -232,6 +241,24 @@ impl NagoriRuntime {
     /// `nagori add` shows up as immediately as a clipboard capture.
     pub fn external_mutations_subscribe(&self) -> watch::Receiver<u64> {
         self.external_mutations_rx.clone()
+    }
+
+    /// Subscribe to maintenance kicks. The maintenance supervisor selects on
+    /// this alongside its periodic timer so an interactive clear's deferred
+    /// purge starts immediately. The value is a monotonic counter; only "it
+    /// changed" matters. The receiver is cloned from one that has never
+    /// observed a value, so a kick that lands before the supervisor subscribes
+    /// still wakes its first wait rather than being swallowed.
+    pub fn maintenance_kick_subscribe(&self) -> watch::Receiver<u64> {
+        self.maintenance_kick_rx.clone()
+    }
+
+    /// Ask the maintenance loop to sweep now. Fire-and-forget: `send_modify`
+    /// never fails, and with no supervisor running (tests, a headless build
+    /// without the serve loop) the tombstones simply wait for the next sweep.
+    pub fn request_maintenance(&self) {
+        self.maintenance_kick_tx
+            .send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// Record that an IPC client mutated the corpus. Called from the IPC
@@ -437,6 +464,7 @@ impl NagoriRuntimeBuilder {
         let (settings_tx, settings_rx) = watch::channel(AppSettings::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (external_mutations_tx, external_mutations_rx) = watch::channel(0_u64);
+        let (maintenance_kick_tx, maintenance_kick_rx) = watch::channel(0_u64);
         // Headless callers (the CLI's `add` / `ai` paths, in-process
         // tests) never expose IPC, so the capability report is never
         // queried — default to `unsupported_capabilities()` rather than
@@ -487,6 +515,8 @@ impl NagoriRuntimeBuilder {
             semantic: Arc::new(crate::semantic_index::SemanticState::new(self.power_probe)),
             external_mutations_tx,
             external_mutations_rx,
+            maintenance_kick_tx,
+            maintenance_kick_rx,
         }
     }
 }

@@ -367,18 +367,30 @@ fn clear_history(app: &AppHandle) {
     use tauri::Emitter;
     use tauri_plugin_notification::NotificationExt;
 
-    // Mirrors the `SecondaryHotkeyAction::ClearHistory` flow in `hotkey.rs`:
-    // both route through `commands::clear_non_pinned_and_previews` so the
-    // soft-delete, the last-pasted reset, and the plaintext preview-cache
-    // purge always run together (a tray-only path skipping the purge would
-    // leave cleared `Public` bodies in `/tmp`). We additionally emit
-    // `CLIPBOARD_CHANGED_EVENT` so an open palette re-runs its query and the
-    // cleared rows disappear live rather than lingering until the next open,
-    // and confirm with a notification since the tray click gives no other
-    // feedback.
+    // Clearing is destructive and irreversible, so the default path hands off
+    // to the palette's confirmation dialog rather than acting on the click:
+    // the tray menu has no confirmation surface of its own, and duplicating one
+    // here would let the two surfaces drift on what the user is asked. Users
+    // who ticked "don't ask again" get the immediate clear, with a notification
+    // as the only feedback a tray click can give.
+    //
+    // Either way the work goes through `commands::clear_non_pinned_and_previews`
+    // so the hide, the last-pasted reset, and the plaintext preview-cache purge
+    // always run together (a tray-only path skipping the purge would leave
+    // cleared `Public` bodies in `/tmp`), and `CLIPBOARD_CHANGED_EVENT` makes an
+    // open palette re-run its query so the rows disappear live.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
+        if state.runtime.current_settings().confirm_clear_history {
+            crate::show_main_palette(&app);
+            let _ = app.emit_to(
+                "main",
+                crate::CLEAR_HISTORY_REQUESTED_EVENT,
+                serde_json::json!({}),
+            );
+            return;
+        }
         match crate::commands::clear_non_pinned_and_previews(&state).await {
             Ok(purged) => {
                 let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));

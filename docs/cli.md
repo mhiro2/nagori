@@ -140,13 +140,22 @@ the platform paste shortcut into the frontmost app — Cmd+V on macOS
 
 ### `nagori clear (--all | --older-than-days N)`
 
-Hard-delete unpinned entries (the row and its representations, blobs,
-embeddings, and search index are physically removed via cascade). One scope
-flag is required: `--all`
+Delete unpinned entries — the row and its representations, blobs, embeddings,
+and search index all go, via cascade. One scope flag is required: `--all`
 deletes every unpinned entry, while `--older-than-days N` deletes only
 unpinned entries created before that cutoff. A bare `nagori clear` with no
 flag is rejected at parse time so the command can't wipe history by
 accident.
+
+With a running instance to talk to, `--all` shares the desktop's *Clear
+history*: it returns as soon as the entries are out of every view (a large
+history would otherwise block the command for minutes) and that instance
+reclaims the rows in the background, so an open palette reflects the clear
+immediately. Without one, the command opens the store itself and there is no
+process left afterwards to run a deferred reclaim, so it hard-deletes inline
+and takes as long as that needs. `--older-than-days` is a direct hard delete on
+both paths — the same operation retention performs, with its row count bounded
+by the window. Neither prompts; the confirmation lives on the GUI surfaces.
 
 ### `nagori quick <action> <id>`
 

@@ -36,6 +36,15 @@ export const ja: Messages = {
       allApps: 'すべてのアプリ',
       clear: 'フィルタをクリア',
     },
+    clearHistory: {
+      title: '履歴を消去しますか？',
+      description: 'ピン留めしていない項目をすべて削除します。ピン留めした項目は残ります。',
+      undoWarning: 'この操作は元に戻せません。',
+      dontAskAgain: '今後確認しない',
+      cancel: 'キャンセル',
+      confirm: '消去',
+      failed: '履歴を消去できませんでした。',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('ja')}`,
       locations: (count) => `${count.toLocaleString('ja')} か所`,
@@ -456,6 +465,9 @@ export const ja: Messages = {
       clearOnQuit: '終了時にピン留め以外を削除',
       clearOnQuitHelp:
         'アプリ終了時にピン留めしていない履歴をすべて削除します。ピン留めした項目は残ります。',
+      confirmClearHistory: '履歴の消去前に確認する',
+      confirmClearHistoryHelp:
+        '消去するとピン留め以外の項目がすべて削除され、元に戻せません。オフにすると確認なしで消去します。',
     },
     display: {
       legend: 'パレット表示',
@@ -494,7 +506,6 @@ export const ja: Messages = {
       },
       secondaryActions: {
         'repaste-last': '直近の項目を再ペースト',
-        'clear-history': 'ピン留め以外をすべて削除',
       },
     },
     updates: {

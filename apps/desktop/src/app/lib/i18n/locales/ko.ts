@@ -36,6 +36,15 @@ export const ko: Messages = {
       allApps: '모든 앱',
       clear: '필터 지우기',
     },
+    clearHistory: {
+      title: '기록을 지울까요?',
+      description: '고정하지 않은 항목이 모두 삭제됩니다. 고정한 항목은 유지됩니다.',
+      undoWarning: '이 작업은 되돌릴 수 없습니다.',
+      dontAskAgain: '다시 묻지 않기',
+      cancel: '취소',
+      confirm: '지우기',
+      failed: '기록을 지우지 못했습니다.',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('ko')}`,
       locations: (count) => `위치 ${count.toLocaleString('ko')}곳`,
@@ -454,6 +463,9 @@ export const ko: Messages = {
       clearOnQuit: '종료 시 고정되지 않은 기록 삭제',
       clearOnQuitHelp:
         '앱이 종료될 때 고정되지 않은 모든 항목을 제거합니다. 고정된 항목은 보존됩니다.',
+      confirmClearHistory: '기록을 지우기 전에 확인',
+      confirmClearHistoryHelp:
+        '지우면 고정하지 않은 항목이 모두 삭제되며 되돌릴 수 없습니다. 끄면 확인 없이 지웁니다.',
     },
     display: {
       legend: '팔레트 표시',
@@ -492,7 +504,6 @@ export const ko: Messages = {
       },
       secondaryActions: {
         'repaste-last': '최근 항목 다시 붙여넣기',
-        'clear-history': '고정 안 된 기록 모두 삭제',
       },
     },
     updates: {

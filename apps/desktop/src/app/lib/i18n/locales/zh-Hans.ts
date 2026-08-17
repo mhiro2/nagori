@@ -36,6 +36,15 @@ export const zhHans: Messages = {
       allApps: '所有应用',
       clear: '清除筛选',
     },
+    clearHistory: {
+      title: '要清除历史记录吗？',
+      description: '将删除所有未固定的项目，已固定的项目会保留。',
+      undoWarning: '此操作无法撤销。',
+      dontAskAgain: '不再询问',
+      cancel: '取消',
+      confirm: '清除',
+      failed: '无法清除历史记录。',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('zh-Hans')}`,
       locations: (count) => `${count.toLocaleString('zh-Hans')} 个位置`,
@@ -435,6 +444,8 @@ export const zhHans: Messages = {
         '在系统托盘显示 Nagori 图标（macOS: 菜单栏 / Windows: 通知区域 / Linux: 状态指示器）。如果只想后台运行，可以关闭。',
       clearOnQuit: '退出时清除未固定历史',
       clearOnQuitHelp: '退出应用时清除所有未固定的条目。固定的条目会保留。',
+      confirmClearHistory: '清除历史记录前先确认',
+      confirmClearHistoryHelp: '清除会删除所有未固定的项目且无法撤销。关闭后将不再询问。',
     },
     display: {
       legend: '面板显示',
@@ -472,7 +483,6 @@ export const zhHans: Messages = {
       },
       secondaryActions: {
         'repaste-last': '重新粘贴最近项目',
-        'clear-history': '删除所有未固定历史',
       },
     },
     updates: {

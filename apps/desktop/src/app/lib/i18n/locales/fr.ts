@@ -37,6 +37,16 @@ export const fr: Messages = {
       allApps: 'Toutes les apps',
       clear: 'Effacer les filtres',
     },
+    clearHistory: {
+      title: 'Effacer l’historique ?',
+      description:
+        'Tous les éléments non épinglés seront supprimés. Les éléments épinglés sont conservés.',
+      undoWarning: 'Cette action est irréversible.',
+      dontAskAgain: 'Ne plus demander',
+      cancel: 'Annuler',
+      confirm: 'Effacer',
+      failed: 'Impossible d’effacer l’historique.',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('fr')}`,
       locations: (count) =>
@@ -470,6 +480,9 @@ export const fr: Messages = {
       clearOnQuit: 'Effacer l’historique non épinglé à la fermeture',
       clearOnQuitHelp:
         'À la fermeture de l’application, toutes les entrées non épinglées sont supprimées. Les épinglées sont conservées.',
+      confirmClearHistory: 'Confirmer avant d’effacer l’historique',
+      confirmClearHistoryHelp:
+        'Effacer supprime tous les éléments non épinglés et est irréversible. Désactivez cette option pour ignorer la confirmation.',
     },
     display: {
       legend: 'Affichage de la palette',
@@ -508,7 +521,6 @@ export const fr: Messages = {
       },
       secondaryActions: {
         'repaste-last': 'Recoller l’élément le plus récent',
-        'clear-history': 'Supprimer tout l’historique non épinglé',
       },
     },
     updates: {

@@ -38,6 +38,15 @@ export const es: Messages = {
       allApps: 'Todas las apps',
       clear: 'Borrar filtros',
     },
+    clearHistory: {
+      title: '¿Borrar el historial?',
+      description: 'Se eliminarán todos los elementos sin fijar. Los fijados se conservan.',
+      undoWarning: 'Esta acción no se puede deshacer.',
+      dontAskAgain: 'No preguntar de nuevo',
+      cancel: 'Cancelar',
+      confirm: 'Borrar',
+      failed: 'No se pudo borrar el historial.',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('es')}`,
       locations: (count) =>
@@ -471,6 +480,9 @@ export const es: Messages = {
       clearOnQuit: 'Borrar historial no fijado al salir',
       clearOnQuitHelp:
         'Al salir de la aplicación se eliminan todas las entradas no fijadas. Las entradas fijadas se conservan.',
+      confirmClearHistory: 'Confirmar antes de borrar el historial',
+      confirmClearHistoryHelp:
+        'Borrar elimina todos los elementos sin fijar y no se puede deshacer. Desactívalo para omitir la confirmación.',
     },
     display: {
       legend: 'Visualización de la paleta',
@@ -509,7 +521,6 @@ export const es: Messages = {
       },
       secondaryActions: {
         'repaste-last': 'Volver a pegar el elemento más reciente',
-        'clear-history': 'Eliminar todo el historial no fijado',
       },
     },
     updates: {

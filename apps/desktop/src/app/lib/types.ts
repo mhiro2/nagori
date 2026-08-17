@@ -393,7 +393,7 @@ export type PaletteHotkeyAction =
   | 'clear'
   | 'open-preview';
 
-export type SecondaryHotkeyAction = 'repaste-last' | 'clear-history';
+export type SecondaryHotkeyAction = 'repaste-last';
 
 // Mirrors `OnboardingSettings` in `nagori-core`. The three timestamps are
 // sticky onboarding markers stamped by the daemon (never by the frontend);
@@ -433,6 +433,7 @@ export type AppSettings = {
   showPreviewPane: boolean;
   showInMenuBar: boolean;
   clearOnQuit: boolean;
+  confirmClearHistory: boolean;
   permanentDeleteOnDelete: boolean;
   blockSensitiveCaptures: boolean;
   otpDetection: boolean;
@@ -513,7 +514,7 @@ export type DataDirSyncWarning = {
 
 // Mirrors the `nagori://hotkey_register_failed` emit envelope and the
 // `last_hotkey_failure` query response. `kind` is absent for the primary
-// palette shortcut and `"secondary"` for repaste-last / clear-history
+// palette shortcut and `"secondary"` for repaste-last
 // accelerators — the UI collapses both into a single error surface but
 // the tag is preserved for future routing. `action` carries the
 // kebab-case wire value of the failing secondary action (absent for

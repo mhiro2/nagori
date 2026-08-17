@@ -20,6 +20,7 @@ export type PaletteAction =
   | 'toggle-pin'
   | 'delete'
   | 'clear-query'
+  | 'clear-history'
   | 'open-preview'
   | 'preview-quick-look'
   | 'open-settings'
@@ -56,6 +57,12 @@ export const PALETTE_BINDINGS: readonly Binding[] = [
   { action: 'open-actions', key: 'k', meta: true },
   { action: 'toggle-pin', key: 'p', meta: true },
   { action: 'delete', key: 'Backspace', meta: true },
+  // Clearing the whole history is the destructive escalation of the
+  // single-row delete above, so it takes the same key with an extra modifier
+  // (⌘⌥⌫ / Ctrl+Alt+Backspace). It is deliberately *not* a global shortcut:
+  // the palette has to be open, and a confirmation dialog stands in front of
+  // it, so a mistyped chord cannot erase the history unattended.
+  { action: 'clear-history', key: 'Backspace', meta: true, alt: true },
   { action: 'open-settings', key: ',', meta: true },
   // `j` is unused as a shortcut elsewhere in the palette and Cmd+J has
   // no OS-reserved meaning on macOS, so it can serve as the keyboard

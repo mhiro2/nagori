@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use nagori_core::SettingsRepository;
 use nagori_ipc::{
-    AddEntryRequest, CopyEntryRequest, DeleteEntryRequest, EntryDto, IpcRequest, IpcResponse,
-    ListRecentRequest, PinEntryRequest, SearchRequest, SearchResponse, UpdateSettingsRequest,
+    AddEntryRequest, ClearRequest, ClearResponse, CopyEntryRequest, DeleteEntryRequest, EntryDto,
+    IpcRequest, IpcResponse, ListRecentRequest, PinEntryRequest, SearchRequest, SearchResponse,
+    UpdateSettingsRequest,
 };
 use nagori_platform::MemoryClipboard;
 
@@ -307,4 +308,35 @@ fn ai_actions_capability_tracks_the_wired_engine() {
         ),
         "no engine must mark ai_actions Unsupported"
     );
+}
+
+#[tokio::test]
+async fn clear_all_ipc_hides_unpinned_entries_immediately() {
+    // `nagori clear --all` shares the desktop's interactive clear, so it
+    // returns once the history is out of every view rather than blocking on
+    // the physical reclaim — and it must still spare pinned rows.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let pinned = runtime.add_text("keep me".to_owned()).await.expect("seed");
+    runtime.add_text("drop me".to_owned()).await.expect("seed");
+    runtime.pin_entry(pinned, true).await.expect("pin");
+
+    let response = runtime
+        .handle_ipc(IpcRequest::Clear(ClearRequest::All))
+        .await;
+    let IpcResponse::Cleared(ClearResponse { deleted }) = response else {
+        panic!("expected cleared response");
+    };
+    assert_eq!(deleted, 1);
+
+    let response = runtime
+        .handle_ipc(IpcRequest::ListRecent(ListRecentRequest {
+            limit: 10,
+            include_sensitive: false,
+        }))
+        .await;
+    let IpcResponse::Entries(entries) = response else {
+        panic!("expected entries response");
+    };
+    assert_eq!(entries.len(), 1, "only the pinned row survives");
+    assert_eq!(entries[0].id, pinned);
 }

@@ -461,7 +461,7 @@ pub struct HotkeyFailureDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// Kebab-case wire value of the secondary action whose register
-    /// failed (`repaste-last`, `clear-history`). Absent for primary
+    /// failed (`repaste-last`). Absent for primary
     /// failures. The frontend store reads this so a later resolved
     /// event targeting a *different* secondary action can be ignored
     /// instead of wiping the displayed banner.

@@ -16,21 +16,28 @@ impl SqliteStore {
     ///
     /// On hit, this also bumps `last_accessed_at` so the LRU eviction
     /// path (`enforce_thumbnail_budget`) keeps frequently-previewed
-    /// rows around even when they were generated long ago. Soft-deleted
-    /// entries still resolve here because the row is removed via
-    /// `ON DELETE CASCADE` when the entry is finally purged, not on
-    /// soft-delete — but the desktop's `nagori-image://thumb/<id>`
-    /// handler re-checks sensitivity through `get_entry` before serving
-    /// the bytes, so a recently-Secret-tagged entry cannot leak its
-    /// pre-classification thumbnail.
+    /// rows around even when they were generated long ago.
+    ///
+    /// The lookup joins `entries` and gates on `deleted_at IS NULL`: the
+    /// thumbnail row itself outlives a soft delete (it goes with the entry via
+    /// `ON DELETE CASCADE`, only when the row is finally purged), so without
+    /// the join a deleted entry would keep serving its image until the next
+    /// purge. That window used to be invisible for *Clear history*, which hard
+    /// deleted in one transaction; now that the bulk clear tombstones and
+    /// reclaims afterwards, the join is what keeps a cleared image from being
+    /// served in between. The desktop's `nagori-image://thumb/<id>` handler
+    /// re-checks sensitivity through `get_entry` on top of this, so a
+    /// recently-Secret-tagged entry cannot leak its pre-classification
+    /// thumbnail either.
     pub async fn get_thumbnail(&self, id: EntryId) -> Result<Option<ThumbnailRecord>> {
         self.run_blocking(move |store| {
             let conn = store.conn()?;
             let record = conn
                 .query_row(
-                    "SELECT payload_blob, mime_type, width, height
-                     FROM entry_thumbnails
-                     WHERE entry_id = ?1",
+                    "SELECT t.payload_blob, t.mime_type, t.width, t.height
+                     FROM entry_thumbnails t
+                     JOIN entries e ON e.id = t.entry_id
+                     WHERE t.entry_id = ?1 AND e.deleted_at IS NULL",
                     params![id.to_string()],
                     |row| {
                         Ok(ThumbnailRecord {

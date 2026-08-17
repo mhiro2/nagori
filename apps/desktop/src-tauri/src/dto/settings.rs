@@ -479,6 +479,8 @@ pub struct AppSettingsDto {
     pub show_in_menu_bar: bool,
     #[serde(default)]
     pub clear_on_quit: bool,
+    #[serde(default = "nagori_core::settings::default_confirm_clear_history")]
+    pub confirm_clear_history: bool,
     #[serde(default)]
     pub permanent_delete_on_delete: bool,
     #[serde(default)]
@@ -585,6 +587,7 @@ impl From<AppSettings> for AppSettingsDto {
             show_preview_pane: value.show_preview_pane,
             show_in_menu_bar: value.show_in_menu_bar,
             clear_on_quit: value.clear_on_quit,
+            confirm_clear_history: value.confirm_clear_history,
             permanent_delete_on_delete: value.permanent_delete_on_delete,
             block_sensitive_captures: value.block_sensitive_captures,
             otp_detection: value.otp_detection,
@@ -631,6 +634,7 @@ impl From<AppSettingsDto> for AppSettings {
             show_preview_pane: value.show_preview_pane,
             show_in_menu_bar: value.show_in_menu_bar,
             clear_on_quit: value.clear_on_quit,
+            confirm_clear_history: value.confirm_clear_history,
             permanent_delete_on_delete: value.permanent_delete_on_delete,
             block_sensitive_captures: value.block_sensitive_captures,
             otp_detection: value.otp_detection,
@@ -716,6 +720,9 @@ mod tests {
             show_preview_pane: false,
             show_in_menu_bar: false,
             clear_on_quit: true,
+            // Non-default so the round trip proves the field is carried both
+            // ways rather than being re-defaulted on the way back.
+            confirm_clear_history: false,
             permanent_delete_on_delete: true,
             block_sensitive_captures: true,
             otp_detection: false,
@@ -770,6 +777,7 @@ mod tests {
         assert!(!restored.show_preview_pane);
         assert!(!restored.show_in_menu_bar);
         assert!(restored.clear_on_quit);
+        assert!(!restored.confirm_clear_history);
         assert!(restored.permanent_delete_on_delete);
         assert!(restored.block_sensitive_captures);
         assert!(!restored.otp_detection);

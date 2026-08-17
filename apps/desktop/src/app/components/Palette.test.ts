@@ -98,7 +98,7 @@ vi.mock('../stores/view.svelte', () => ({
   viewState: { current: 'palette' as const },
 }));
 
-import { closePalette, openSettingsWindow } from '../lib/commands';
+import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
 import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../lib/types';
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
@@ -692,6 +692,78 @@ describe('Palette', () => {
     const { container } = render(Palette);
     const body = container.querySelector('.preview-pane .body');
     expect(body?.textContent).toBe('FETCHED BODY');
+  });
+  // Clearing the whole history is destructive and irreversible, so the chord
+  // must land on a confirmation rather than on the backend.
+  it('asks for confirmation before clearing the history', async () => {
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: true,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container, findByTestId } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'Backspace', metaKey: true, altKey: true });
+    await findByTestId('clear-history-confirm');
+    expect(clearHistory).not.toHaveBeenCalled();
+  });
+
+  it('clears without confirming once the user turned the dialog off', async () => {
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: false,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container, queryByTestId } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'Backspace', metaKey: true, altKey: true });
+    await tick();
+    expect(queryByTestId('clear-history-confirm')).toBeNull();
+    expect(clearHistory).toHaveBeenCalledTimes(1);
+  });
+
+  // A plain Cmd+Backspace still deletes the single selected row: the
+  // clear-history chord only differs by the extra modifier, and a binding
+  // resolver that ignored it would silently escalate a row delete into a
+  // history wipe.
+  it('keeps the unmodified delete chord on the single-row path', async () => {
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: true,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+
+    const { container, queryByTestId } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    if (input) await fireEvent.keyDown(input, { key: 'Backspace', metaKey: true });
+    await tick();
+    expect(queryByTestId('clear-history-confirm')).toBeNull();
+    expect(deleteSelection).toHaveBeenCalledTimes(1);
+    expect(clearHistory).not.toHaveBeenCalled();
+  });
+  // The tray only emits this after the backend read `confirm_clear_history` as
+  // true, so the palette must not re-decide against its own (possibly stale)
+  // settings copy — that would skip the confirmation right after Settings
+  // turned it back on.
+  it('always confirms a tray-requested clear, even with a stale suppressed setting', async () => {
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: false,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+    let fireClearRequested: (() => void) | undefined;
+    vi.mocked(subscribe).mockImplementation(((name: string, handler: () => void) => {
+      if (name === TAURI_EVENTS.clearHistoryRequested) fireClearRequested = handler;
+      return () => undefined;
+    }) as unknown as typeof subscribe);
+
+    const { findByTestId } = render(Palette);
+    expect(fireClearRequested).toBeTruthy();
+    fireClearRequested?.();
+    await findByTestId('clear-history-confirm');
+    expect(clearHistory).not.toHaveBeenCalled();
   });
 });
 

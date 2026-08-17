@@ -247,4 +247,15 @@ impl NagoriRuntime {
         self.mutate_settings(|settings| settings.capture_enabled = enabled)
             .await
     }
+
+    /// Toggle `confirm_clear_history` on its own — the "don't ask again" box in
+    /// the clear-history confirmation. It exists as a narrow mutation for the
+    /// same reason [`Self::set_capture_enabled`] does: the palette webview is
+    /// deliberately barred from `update_settings`, so a single-field command is
+    /// the only way it can record the choice without being handed the whole
+    /// settings blob.
+    pub async fn set_confirm_clear_history(&self, confirm: bool) -> Result<AppSettings> {
+        self.mutate_settings(|settings| settings.confirm_clear_history = confirm)
+            .await
+    }
 }

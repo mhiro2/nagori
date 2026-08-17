@@ -36,6 +36,15 @@ export const zhHant: Messages = {
       allApps: '所有應用程式',
       clear: '清除篩選',
     },
+    clearHistory: {
+      title: '要清除歷史記錄嗎？',
+      description: '將刪除所有未釘選的項目，已釘選的項目會保留。',
+      undoWarning: '此操作無法復原。',
+      dontAskAgain: '不再詢問',
+      cancel: '取消',
+      confirm: '清除',
+      failed: '無法清除歷史記錄。',
+    },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('zh-Hant')}`,
       locations: (count) => `${count.toLocaleString('zh-Hant')} 個位置`,
@@ -436,6 +445,8 @@ export const zhHant: Messages = {
         '在系統列顯示 Nagori 圖示（macOS：選單列 / Windows：通知區域 / Linux：狀態列）。若僅需背景執行可關閉。',
       clearOnQuit: '結束時清除未釘選的歷史',
       clearOnQuitHelp: '結束應用程式時清除所有未釘選的項目。釘選的項目會保留。',
+      confirmClearHistory: '清除歷史記錄前先確認',
+      confirmClearHistoryHelp: '清除會刪除所有未釘選的項目且無法復原。關閉後將不再詢問。',
     },
     display: {
       legend: '面板顯示',
@@ -472,7 +483,6 @@ export const zhHant: Messages = {
       },
       secondaryActions: {
         'repaste-last': '重新貼上最近項目',
-        'clear-history': '刪除所有未釘選的歷史',
       },
     },
     updates: {

@@ -206,7 +206,6 @@ fn should_clear_secondary_cache(
 const fn secondary_action_wire(action: SecondaryHotkeyAction) -> &'static str {
     match action {
         SecondaryHotkeyAction::RepasteLast => "repaste-last",
-        SecondaryHotkeyAction::ClearHistory => "clear-history",
     }
 }
 
@@ -216,7 +215,6 @@ const fn secondary_action_wire(action: SecondaryHotkeyAction) -> &'static str {
 fn parse_secondary_action_wire(s: &str) -> Option<SecondaryHotkeyAction> {
     match s {
         "repaste-last" => Some(SecondaryHotkeyAction::RepasteLast),
-        "clear-history" => Some(SecondaryHotkeyAction::ClearHistory),
         _ => None,
     }
 }
@@ -386,8 +384,6 @@ pub(crate) fn register_secondary_hotkeys(
 }
 
 pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: SecondaryHotkeyAction) {
-    use tauri_plugin_notification::NotificationExt;
-
     let app = handle.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
@@ -411,31 +407,6 @@ pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: Secon
                         let reason = commands::paste_failure_reason(&err);
                         let cmd_err: crate::error::CommandError = err.into();
                         commands::emit_paste_failed_with_reason(&app, &cmd_err.message, &reason);
-                    }
-                }
-            }
-            // Route through the shared clear-history primitive (same one the
-            // `clear_history` command and the tray item use) so the
-            // soft-delete, last-pasted reset, and plaintext preview-cache
-            // purge always run together.
-            SecondaryHotkeyAction::ClearHistory => {
-                match crate::commands::clear_non_pinned_and_previews(&state).await {
-                    Ok(purged) => {
-                        // Re-run an open palette's query so the cleared rows
-                        // disappear live, matching the tray "Clear History" item.
-                        {
-                            use tauri::Emitter;
-                            let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
-                        }
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("Nagori")
-                            .body(format!("Cleared {purged} non-pinned entries."))
-                            .show();
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "clear_history_failed");
                     }
                 }
             }
@@ -606,10 +577,7 @@ mod hotkey_tests {
         // settings-watch tick that re-publishes the same accelerator
         // would tear the binding down for a heartbeat before
         // re-establishing it.
-        let m = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
-        ]);
+        let m = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
         let diff = compute_secondary_hotkey_diff(&m, &m);
         assert_eq!(diff, SecondaryHotkeyDiff::default());
     }
@@ -621,16 +589,15 @@ mod hotkey_tests {
         // Treat it as both a request to unregister whatever was there
         // before *and* a no-op on the register side.
         let previous = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
-        let next = map(&[
-            (SecondaryHotkeyAction::RepasteLast, ""),
-            (SecondaryHotkeyAction::ClearHistory, "   "),
-        ]);
-        let diff = compute_secondary_hotkey_diff(&previous, &next);
-        assert_eq!(
-            diff.unregister,
-            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
-        );
-        assert!(diff.register.is_empty(), "empty bindings must not register");
+        for blank in ["", "   "] {
+            let next = map(&[(SecondaryHotkeyAction::RepasteLast, blank)]);
+            let diff = compute_secondary_hotkey_diff(&previous, &next);
+            assert_eq!(
+                diff.unregister,
+                vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
+            );
+            assert!(diff.register.is_empty(), "empty bindings must not register");
+        }
     }
 
     #[test]
@@ -656,18 +623,12 @@ mod hotkey_tests {
     fn diff_unregisters_dropped_action() {
         // The user removed an action from the map (action no longer
         // bound). Just unregister; nothing to register for it.
-        let previous = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
-        ]);
-        let next = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let previous = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
+        let next = map(&[]);
         let diff = compute_secondary_hotkey_diff(&previous, &next);
         assert_eq!(
             diff.unregister,
-            vec![(
-                SecondaryHotkeyAction::ClearHistory,
-                "Cmd+Shift+X".to_owned()
-            )],
+            vec![(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R".to_owned())],
         );
         assert!(diff.register.is_empty());
     }
@@ -735,71 +696,6 @@ mod hotkey_tests {
     }
 
     #[test]
-    fn reconcile_keeps_cache_when_sibling_shares_accel_but_failing_action_unbound() {
-        // Regression guard for the codex-flagged duplicate-accel
-        // scenario: two secondary actions are both assigned the same
-        // accelerator. One register succeeds (`clear-history`), the
-        // other fails (`repaste-last`). Without action-aware matching
-        // `active.values().any()` would see the bound sibling and
-        // clear the cache, silently hiding the real failure. With
-        // action identity, the cache stays put.
-        let desired = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R"),
-        ]);
-        let active = map(&[(SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R")]);
-        assert!(!should_clear_secondary_cache(
-            "Cmd+Shift+R",
-            "repaste-last",
-            &desired,
-            &active,
-        ));
-    }
-
-    #[test]
-    fn reconcile_keeps_cache_when_unrelated_sibling_succeeds() {
-        // Regression guard for the blanket-clear bug: the user adds a
-        // brand new secondary binding that registers successfully, but
-        // a *different* accelerator is still cached as a failure. The
-        // success of the new binding must not wipe the still-failing
-        // sibling's cache.
-        let desired = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
-        ]);
-        let active = map(&[(SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X")]);
-        assert!(!should_clear_secondary_cache(
-            "Cmd+Shift+R",
-            "repaste-last",
-            &desired,
-            &active,
-        ));
-    }
-
-    #[test]
-    fn reconcile_clears_cache_when_failing_action_remapped_even_if_sibling_holds_old_accel() {
-        // Regression for the desired-side accelerator-only check.
-        // Cached failure: `repaste-last` / Cmd+Shift+R. User moves
-        // `repaste-last` to Cmd+Shift+P (and that succeeds), while
-        // `clear-history` independently keeps Cmd+Shift+R. The cached
-        // record is now stale — `repaste-last` no longer wants that
-        // accel — even though Cmd+Shift+R is still desired by some
-        // other action. Action-aware matching on both halves catches
-        // this; a values-only `still_desired` would miss it.
-        let desired = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+P"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+R"),
-        ]);
-        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+P")]);
-        assert!(should_clear_secondary_cache(
-            "Cmd+Shift+R",
-            "repaste-last",
-            &desired,
-            &active,
-        ));
-    }
-
-    #[test]
     fn reconcile_keeps_cache_when_cached_action_wire_value_is_unknown() {
         // Forward-compatibility: a future binary could write a cache
         // entry with an action wire value this build doesn't recognise.
@@ -816,32 +712,14 @@ mod hotkey_tests {
         ));
     }
 
-    #[test]
-    fn diff_keeps_unchanged_bindings_untouched_when_sibling_changes() {
-        // Regression guard for the partial-failure scenario described
-        // in `register_secondary_hotkeys`'s doc comment: changing one
-        // sibling must not produce a (un)register pair for the
-        // unchanged action, otherwise a transient unregister window
-        // would let the OS reassign the still-bound accelerator.
-        let previous = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Shift+X"),
-        ]);
-        let next = map(&[
-            (SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R"),
-            (SecondaryHotkeyAction::ClearHistory, "Cmd+Alt+X"),
-        ]);
-        let diff = compute_secondary_hotkey_diff(&previous, &next);
-        assert_eq!(
-            diff.unregister,
-            vec![(
-                SecondaryHotkeyAction::ClearHistory,
-                "Cmd+Shift+X".to_owned()
-            )],
-        );
-        assert_eq!(
-            diff.register,
-            vec![(SecondaryHotkeyAction::ClearHistory, "Cmd+Alt+X".to_owned())],
-        );
-    }
+    // NOTE: the "two secondary actions interact" cases (a sibling holding the
+    // same accelerator, an unrelated sibling registering successfully, a
+    // remap while a sibling keeps the old accel, and a sibling change leaving
+    // the untouched binding alone) used to live here. `SecondaryHotkeyAction`
+    // now has a single variant — clearing the history moved to a palette
+    // action with a confirmation in front of it — so those states are
+    // unconstructible. `compute_secondary_hotkey_diff` and
+    // `should_clear_secondary_cache` stay keyed by action rather than by
+    // accelerator precisely so they keep holding; restore the sibling cases
+    // when a second secondary action is introduced.
 }

@@ -265,19 +265,23 @@ pub async fn clear_history(state: State<'_, AppState>) -> CommandResult<usize> {
     Ok(clear_non_pinned_and_previews(&state).await?)
 }
 
-/// Soft-delete every non-pinned entry, drop the tracked last-pasted pointer,
-/// and wipe the plaintext Quick Look preview cache. Returns the purged count.
+/// Clear the history, drop the tracked last-pasted pointer, and wipe the
+/// plaintext Quick Look preview cache. Returns the count that left the palette.
 ///
 /// This is the single clear-history primitive shared by the `clear_history`
-/// Tauri command, the tray "Clear History" item, and the `ClearHistory`
-/// secondary hotkey, so the three surfaces cannot drift on which cleanup steps
-/// they run — in particular so none of them can skip the preview-cache purge
-/// and leave a cleared `Public` body in `/tmp`. Dropping the last-pasted
-/// pointer keeps a later repaste from resolving an evicted id; the cache purge
-/// may also drop a pinned entry's temp file, but that file regenerates on the
-/// next preview, so the purge is lossless.
+/// Tauri command and the tray "Clear History" item, so the two surfaces cannot
+/// drift on which cleanup steps they run — in particular so neither can skip
+/// the preview-cache purge and leave a cleared `Public` body in `/tmp`.
+/// Dropping the last-pasted pointer keeps a later repaste from resolving an
+/// evicted id; the cache purge may also drop a pinned entry's temp file, but
+/// that file regenerates on the next preview, so the purge is lossless.
+///
+/// The entries are hidden synchronously and reclaimed in the background (see
+/// [`NagoriRuntime::clear_history`]), so this returns in milliseconds even on a
+/// 100k history and the caller's palette refresh shows an empty list right
+/// away.
 pub(crate) async fn clear_non_pinned_and_previews(state: &AppState) -> Result<usize, AppError> {
-    let purged = state.runtime.clear_non_pinned().await?;
+    let purged = state.runtime.clear_history().await?;
     state.clear_last_pasted();
     purge_preview_temp_dir();
     Ok(purged)

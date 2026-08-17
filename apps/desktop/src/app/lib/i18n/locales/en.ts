@@ -49,6 +49,18 @@ export type Messages = {
       // Clears every active filter (shown only when some filter is active).
       clear: string;
     };
+    // Clear-history confirmation dialog. Shown by the palette chord and by the
+    // tray item, which defers to this dialog rather than acting on the click.
+    clearHistory: {
+      title: string;
+      description: string;
+      undoWarning: string;
+      dontAskAgain: string;
+      cancel: string;
+      confirm: string;
+      // Fallback when `clear_history` rejects with no describable code.
+      failed: string;
+    };
     // Basename-first labels for `fileList` result rows.
     fileList: {
       // "+N" overflow appended after the named files when the list holds more.
@@ -482,6 +494,10 @@ export type Messages = {
       menuBarHelp: string;
       clearOnQuit: string;
       clearOnQuitHelp: string;
+      // Whether "Clear history" asks first. The confirmation dialog's
+      // "don't ask again" box turns this off; this row is how it comes back.
+      confirmClearHistory: string;
+      confirmClearHistoryHelp: string;
     };
     display: {
       legend: string;
@@ -518,7 +534,6 @@ export type Messages = {
       };
       secondaryActions: {
         'repaste-last': string;
-        'clear-history': string;
       };
     };
     updates: {
@@ -657,6 +672,15 @@ export const en: Messages = {
       sourceShort: 'App',
       allApps: 'All apps',
       clear: 'Clear filters',
+    },
+    clearHistory: {
+      title: 'Clear history?',
+      description: 'Every unpinned item is deleted. Pinned items are kept.',
+      undoWarning: "You can't undo this.",
+      dontAskAgain: "Don't ask again",
+      cancel: 'Cancel',
+      confirm: 'Clear',
+      failed: 'Could not clear the history.',
     },
     fileList: {
       more: (overflow) => `+${overflow.toLocaleString('en')}`,
@@ -1066,6 +1090,9 @@ export const en: Messages = {
       clearOnQuit: 'Clear non-pinned history on quit',
       clearOnQuitHelp:
         'When the app exits, all non-pinned entries are removed. Pinned entries are preserved.',
+      confirmClearHistory: 'Confirm before clearing history',
+      confirmClearHistoryHelp:
+        'Clearing removes every unpinned entry and cannot be undone. Turn this off to skip the confirmation.',
     },
     display: {
       legend: 'Palette display',
@@ -1104,7 +1131,6 @@ export const en: Messages = {
       },
       secondaryActions: {
         'repaste-last': 'Repaste latest item',
-        'clear-history': 'Delete all unpinned history',
       },
     },
     updates: {

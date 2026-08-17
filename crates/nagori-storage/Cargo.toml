@@ -49,5 +49,9 @@ tempfile.workspace = true
 name = "storage_search"
 harness = false
 
+[[bench]]
+name = "clear_history"
+harness = false
+
 [lints]
 workspace = true

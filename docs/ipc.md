@@ -125,7 +125,10 @@ deterministic on-device transform (`"FormatJson"`, `"ExtractTasks"`,
 `"RedactSecrets"`, `"SummarizeFirstSentence"`) — distinct from the model-backed
 `RunAiAction`. `Clear` is an externally-tagged enum: `"All"` wipes every
 unpinned entry, `{"OlderThanDays":{"days":N}}` wipes unpinned entries older than
-`N` days.
+`N` days. `"All"` answers once the entries are out of every view and reclaims
+the rows in the background (a large history would otherwise hold the response
+for minutes); `Cleared.deleted` counts the entries that left. `OlderThanDays`
+is a direct hard delete.
 
 `RunAiAction.options` is optional (`AiRequestOptions`, defaulted when absent).
 It carries per-request overrides — `translate`'s `target_language` /

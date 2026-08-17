@@ -72,6 +72,12 @@ pub fn acquire_data_dir_lock(dir: &std::path::Path) -> Result<nagori_storage::Pr
     }
 }
 
+/// Retry delay after a failed maintenance sweep, instead of the full
+/// `maintenance_interval`. A failure may have left a cleared history's
+/// tombstoned rows unreclaimed, and the wake-up that triggered the run is
+/// already spent, so the backlog would otherwise sit until the next tick.
+const MAINTENANCE_RETRY_INTERVAL: Duration = Duration::from_mins(1);
+
 /// Initial delay before restarting a background worker that exited
 /// unexpectedly. Doubles on each consecutive failure up to
 /// [`WORKER_RESTART_BACKOFF_MAX`], so a worker that panics on every start
@@ -277,21 +283,29 @@ fn spawn_maintenance_supervisor(
                 let mut settings_rx = settings_rx.clone();
                 let search_cache = runtime.search_cache_handle();
                 let health = runtime.maintenance_health();
+                // Subscribe before the task is scheduled so a clear landing in
+                // the gap still wakes the first wait below rather than leaving
+                // its tombstones for the periodic tick.
+                let mut kicks = runtime.maintenance_kick_subscribe();
                 tokio::spawn(async move {
                     let maintenance =
                         MaintenanceService::new(store).with_search_cache(search_cache);
                     loop {
                         let settings = settings_rx.borrow().clone();
-                        match maintenance.run(&settings).await {
-                            Ok(_) => health.record_success(),
+                        let failed = match maintenance.run(&settings).await {
+                            Ok(_) => {
+                                health.record_success();
+                                false
+                            }
                             Err(err) => {
                                 // Record before logging so a concurrent
                                 // health-probe sees the latest counter even if
                                 // tracing back-pressure delays the warn line.
                                 health.record_failure(err.to_string());
                                 warn!(error = %err, "maintenance_failed");
+                                true
                             }
-                        }
+                        };
                         let applied_retention = RetentionKnobs::from(&settings);
                         // Wait for the next trigger: shutdown, the periodic
                         // interval, or a settings change that actually moves a
@@ -303,12 +317,29 @@ fn spawn_maintenance_supervisor(
                         // retention fields. The sleep is pinned outside the inner
                         // loop so a burst of unrelated changes can't keep
                         // resetting the interval and starve the periodic sweep.
-                        let sleep = tokio::time::sleep(interval);
+                        // A failed sweep has already consumed whatever woke
+                        // it, so waiting the full interval would leave a
+                        // cleared history's tombstoned bodies on disk until the
+                        // next tick. Retry soon instead.
+                        let wait = if failed {
+                            MAINTENANCE_RETRY_INTERVAL
+                        } else {
+                            interval
+                        };
+                        let sleep = tokio::time::sleep(wait);
                         tokio::pin!(sleep);
                         loop {
                             tokio::select! {
                                 () = worker_shutdown.cancelled() => return,
                                 () = &mut sleep => break,
+                                // An interactive clear only tombstones; this is
+                                // what turns its rows into free pages promptly.
+                                kicked = kicks.changed() => {
+                                    if kicked.is_err() {
+                                        return;
+                                    }
+                                    break;
+                                },
                                 changed = settings_rx.changed() => {
                                     if changed.is_err() {
                                         return;
