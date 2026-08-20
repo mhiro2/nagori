@@ -19,6 +19,7 @@ describe('normalizePasteReason', () => {
       'timeout',
       'synthUnsupported',
       'previousAppLost',
+      'clipboardChanged',
       'unknown',
     ] as const) {
       expect(normalizePasteReason(reason)).toBe(reason);

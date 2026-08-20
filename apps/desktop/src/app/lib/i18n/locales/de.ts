@@ -163,6 +163,8 @@ export const de: Messages = {
           'Auto-Einfügen ist auf dieser Plattform nicht verfügbar. Kopiert — manuell einfügen.',
         previousAppLost:
           'Auto-Einfügen übersprungen: Quell-App konnte nicht reaktiviert werden. Kopiert — manuell einfügen.',
+        clipboardChanged:
+          'Automatisches Einfügen abgebrochen: Die Zwischenablage hat sich nach dem Kopieren geändert, es wurde nichts eingefügt. Kopiere erneut.',
         unknown: 'Auto-Einfügen fehlgeschlagen. Kopiert — manuell einfügen.',
       },
     },

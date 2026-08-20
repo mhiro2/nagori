@@ -166,6 +166,8 @@ export const fr: Messages = {
           "Le collage automatique n'est pas disponible sur cette plateforme. Copié — collez manuellement.",
         previousAppLost:
           "Collage automatique ignoré : impossible de revenir à l'app source. Copié — collez manuellement.",
+        clipboardChanged:
+          'Collage automatique annulé : le presse-papiers a changé après la copie, rien n’a été collé. Copiez à nouveau.',
         unknown: 'Échec du collage automatique. Copié — collez manuellement.',
       },
     },

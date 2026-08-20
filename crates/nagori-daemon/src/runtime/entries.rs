@@ -3,10 +3,9 @@
 use std::time::Instant;
 
 use nagori_core::{
-    AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
-    PasteFormat, PasteOption, Result, SecretAction, SecretDropReason, Sensitivity,
-    SensitivityClassifier, SensitivityReason, SettingsRepository, build_paste_options,
-    select_representation,
+    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository, PasteFormat,
+    PasteOption, Result, SecretAction, SecretDropReason, Sensitivity, SensitivityClassifier,
+    SensitivityReason, SettingsRepository, build_paste_options,
 };
 
 use crate::ipc_handler::result_code;
@@ -112,54 +111,27 @@ impl NagoriRuntime {
         self.copy_entry_with_format(id, PasteFormat::Preserve).await
     }
 
+    /// Copy an entry back to the clipboard.
+    ///
+    /// `Preserve` re-offers every stored representation so a receiver that
+    /// understands HTML / RTF / image bytes can pick the richest one the
+    /// source originally advertised, while a plain-text target still finds the
+    /// matching `text/plain` fallback; `PlainText` publishes only the plain
+    /// body.
+    ///
+    /// Takes the clipboard lease for the length of the write, so this can
+    /// never interleave with another publish or with a paste in flight. A
+    /// caller that goes on to synthesise a paste must hold *one*
+    /// [`Self::clipboard_lease`] across both steps instead of calling this —
+    /// see [`crate::runtime::ClipboardLease`].
     pub async fn copy_entry_with_format(&self, id: EntryId, format: PasteFormat) -> Result<()> {
-        let mut entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
-        if matches!(entry.sensitivity, Sensitivity::Blocked) {
-            return Err(AppError::Policy(
-                "blocked entries cannot be copied".to_owned(),
-            ));
-        }
-        // Image bytes survive capture in an `entry_representations` row
-        // whose `ImageContent.pending_bytes` is dropped on deserialise, so
-        // hydrate the bytes before the platform writer needs them.
-        if let ClipboardContent::Image(image) = &mut entry.content
-            && image.pending_bytes.is_none()
-            && let Some((bytes, mime)) = self.store.get_payload(id).await?
-        {
-            image.pending_bytes = Some(bytes);
-            if image.mime_type.is_none() {
-                image.mime_type = Some(mime);
-            }
-        }
-        match format {
-            PasteFormat::Preserve => {
-                // Re-offer every stored representation so a receiver that
-                // understands HTML / RTF / image bytes can pick the richest
-                // representation the source originally advertised, while a
-                // plain-text target still finds the matching `text/plain`
-                // fallback. Adapters whose
-                // `clipboard_multi_representation_write` capability is
-                // `Unsupported` (e.g. `MemoryClipboard`, or any host
-                // adapter not built into this binary) inherit the trait's
-                // default impl, which delegates to `write_entry`.
-                let representations = self.store.list_representations(id).await?;
-                if representations.is_empty() {
-                    self.clipboard.write_entry(&entry).await?;
-                } else {
-                    self.clipboard
-                        .write_representations(&entry, &representations)
-                        .await?;
-                }
-            }
-            PasteFormat::PlainText => self.clipboard.write_plain(&entry).await?,
-        }
-        // The ranker scores by `metadata.use_count` (see nagori-search), so
-        // bumping it changes which results win — drop cached hits before
-        // *and* after the increment.
-        self.invalidate_search_cache();
-        self.store.increment_use_count(id).await?;
-        self.invalidate_search_cache();
-        Ok(())
+        self.clipboard_lease()
+            .await
+            .copy_entry_with_format(id, format)
+            .await
+            // Copy-only: no paste follows, so there is nothing for the
+            // publish token to authorise.
+            .map(drop)
     }
 
     /// Copy a single chosen representation of an entry back to the clipboard
@@ -174,29 +146,42 @@ impl NagoriRuntime {
     /// snapshot stale; `select_representation` resolves the request to the
     /// canonical (lowest role/ordinal) copy of that MIME.
     pub async fn copy_entry_representation(&self, id: EntryId, mime: &str) -> Result<()> {
-        let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
-        if matches!(entry.sensitivity, Sensitivity::Blocked) {
-            return Err(AppError::Policy(
-                "blocked entries cannot be copied".to_owned(),
-            ));
-        }
-        let representations = self.store.list_representations(id).await?;
-        let representation = select_representation(&representations, mime).ok_or_else(|| {
-            // Deliberately MIME- and payload-free: the error reaches the UI
-            // toast, and the requested format is the only safe detail.
-            AppError::InvalidInput(
-                "the requested clipboard format is not available for this entry".to_owned(),
-            )
-        })?;
-        self.clipboard
-            .write_representation_exact(representation)
-            .await?;
-        // Same use-count bump + cache invalidation contract as the other
-        // copy-back paths so the ranker reflects the re-paste.
-        self.invalidate_search_cache();
-        self.store.increment_use_count(id).await?;
-        self.invalidate_search_cache();
-        Ok(())
+        self.clipboard_lease()
+            .await
+            .copy_entry_representation(id, mime)
+            .await
+            // Copy-only: no paste follows, so there is nothing for the
+            // publish token to authorise.
+            .map(drop)
+    }
+
+    /// Join the text of several entries with newline separators, store the
+    /// result as one entry, and publish it to the clipboard. Backs the
+    /// palette's bulk copy action.
+    ///
+    /// Duplicate ids are collapsed, the selection is capped at
+    /// [`nagori_core::MAX_COMBINED_COPY_ENTRIES`], and the join is refused
+    /// (`InvalidInput`) once it would exceed `max_entry_size_bytes` — all
+    /// before anything is stored or published, so an over-limit selection
+    /// leaves neither the database nor the clipboard touched. Image / file-list entries and any
+    /// non-`Public`/`Unknown` row are skipped; the multi-select UI surfaces
+    /// the count of skipped entries to the user.
+    ///
+    /// Storing a history row for the combined text is deliberate, not a leak
+    /// we tolerate: the joined text lands on the OS clipboard, and the capture
+    /// loop would store it on its next tick regardless (this is a clipboard
+    /// manager — there is no self-write suppression). Inserting it up front
+    /// just makes that row appear immediately, with the shared sensitivity
+    /// classification, and lets the later capture dedupe against it instead of
+    /// producing a second copy.
+    pub async fn copy_entries_combined(&self, ids: &[EntryId]) -> Result<()> {
+        self.clipboard_lease()
+            .await
+            .copy_entries_combined(ids)
+            .await
+            // Copy-only: no paste follows, so there is nothing for the
+            // publish token to authorise.
+            .map(drop)
     }
 
     /// Enumerate the distinct representations the user can paste individually,
@@ -236,28 +221,17 @@ impl NagoriRuntime {
         // is on. The palette command has a separate fallback path that
         // keeps the copy even when OS paste synthesis fails.
         let settings = self.store.get_settings().await?;
-        self.copy_entry_with_format(id, format.unwrap_or(settings.paste_format_default))
+        // One lease spans the publish and the synthesis, so no other request
+        // can put its own clip on the clipboard in between — see
+        // [`crate::runtime::ClipboardLease`].
+        let mut lease = self.clipboard_lease().await;
+        let publish = lease
+            .copy_entry_with_format(id, format.unwrap_or(settings.paste_format_default))
             .await?;
         if settings.auto_paste_enabled {
-            ensure_pasted(self.paste.paste_frontmost().await?)?;
+            lease.paste_frontmost(publish).await?;
         }
         Ok(())
-    }
-
-    pub async fn paste_frontmost(&self) -> Result<()> {
-        // Same completion-event wrap as `paste_entry`: the desktop palette
-        // drives synthesis through this entry point after its own copy step.
-        let started = Instant::now();
-        let result = match self.paste.paste_frontmost().await {
-            Ok(outcome) => ensure_pasted(outcome),
-            Err(err) => Err(err),
-        };
-        tracing::debug!(
-            result_code = result_code(&result),
-            elapsed_ms = elapsed_ms(started),
-            "paste_frontmost"
-        );
-        result
     }
 
     pub async fn list_recent(&self, limit: usize) -> Result<Vec<ClipboardEntry>> {
@@ -339,29 +313,5 @@ impl NagoriRuntime {
 
     pub async fn get_payload(&self, id: EntryId) -> Result<Option<(Vec<u8>, String)>> {
         self.store.get_payload(id).await
-    }
-}
-
-/// Convert a `PasteResult` into an explicit success/failure.
-///
-/// `PasteController::paste_frontmost` reports OS-level outcomes via
-/// `PasteResult { pasted, message }` and historically the daemon discarded
-/// `pasted == false` as success. That hid both the unsupported-platform
-/// branch (Noop on Linux/Windows) and any future "we tried but the OS
-/// blocked it" path. We now treat `pasted=false` as a real failure and
-/// promote `message` to the error so it surfaces in IPC / Tauri responses.
-fn ensure_pasted(result: nagori_platform::PasteResult) -> Result<()> {
-    if result.pasted {
-        Ok(())
-    } else {
-        // `pasted == false` is the no-op controller branch (Noop on a host
-        // without a wired paste adapter), i.e. synthetic paste is not
-        // available here at all — classify it as such so the UI hint matches.
-        Err(AppError::Paste {
-            reason: nagori_core::PasteFailureReason::SynthUnsupported,
-            message: result.message.unwrap_or_else(|| {
-                "auto-paste did not run; OS paste controller reported pasted=false".to_owned()
-            }),
-        })
     }
 }

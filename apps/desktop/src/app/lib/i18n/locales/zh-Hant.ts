@@ -150,6 +150,7 @@ export const zhHant: Messages = {
         timeout: '自動貼上逾時——合成器可能忙碌中。已複製 — 請手動貼上或重試。',
         synthUnsupported: '此平台不支援自動貼上。已複製 — 請手動貼上。',
         previousAppLost: '已略過自動貼上：無法切回來源應用程式。已複製 — 請手動貼上。',
+        clipboardChanged: '已取消自動貼上：複製後剪貼簿已變更，未貼上任何內容。請重新複製。',
         unknown: '自動貼上失敗。已複製 — 請手動貼上。',
       },
     },

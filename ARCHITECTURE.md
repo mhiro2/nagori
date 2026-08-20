@@ -295,10 +295,10 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   the body, so a post-sleep foreign clip whose lapped macOS `changeCount`
   collides with our last self-write is hash-checked rather than dropped (the
   benign cost is an unchanged copy-back still on the clipboard across a sleep
-  being re-captured on wake). Safe for adapters whose sequence is a monotonic
-  native counter (macOS `changeCount`, Windows `GetClipboardSequenceNumber`);
-  the Wayland adapter's content-hash sequence is not wired and keeps the
-  default (no suppression).
+  being re-captured on wake). Windows' `GetClipboardSequenceNumber` is stable
+  across host pauses; macOS `changeCount` is used only while the wake-gap flag
+  is clear, because it can lap across sleep. The Wayland adapter's content-hash
+  sequence is not wired and keeps the default (no suppression).
 - Frontmost app metadata is captured **before** the clipboard body so
   `Cmd+C → Cmd+Tab → paste` flows still attribute the source correctly
   to the password manager / denylisted app.
@@ -1215,6 +1215,92 @@ diagnostic rather than degrading silently to a copy. Sensitivity is unchanged
 from Preserve — `Blocked` is refused and the chosen rep is a subset of what
 Preserve already offers — and the wire contract stays desktop-local (the
 IPC/CLI search result keeps its flat `preview`).
+
+**Publish-then-paste atomicity.** Putting an entry on the clipboard and
+synthesising ⌘/Ctrl+V are two side effects on shared OS state, and the
+front-ends deliberately split them — the palette hides its window, restores the
+source app's focus, and waits `paste_delay_ms` in between. Several requests can
+be in flight at once (the IPC server handles connections concurrently, a hotkey
+press can land mid-request), so interleaved the pair pastes the wrong content:
+request A publishes, request B publishes over it, A synthesises the keystroke,
+and B's clip — possibly a secret — lands in A's target app. The daemon makes
+the pair one serialised operation:
+
+- `NagoriRuntime::clipboard_lease()` hands out a process-wide
+  `ClipboardLease`. Every clipboard write in the runtime goes through it
+  (`copy_entry*`, `copy_entries_combined`, `paste_entry`), so no second publish
+  can interleave between a publish and its paste. A front-end that splits the
+  two steps — `paste_entry` / `run_palette_paste` in the Tauri layer — holds
+  **one** lease across the hide, the focus restore, and the delay.
+- Each publish mints a `ClipboardPublish` token naming both the lease and the
+  publish within it, and `ClipboardLease::paste_frontmost(publish)` refuses
+  anything else. A caller that copies under one lease and pastes under another
+  therefore fails closed instead of resurrecting the interleave — including
+  when nothing published in between, since holding the lease across both steps
+  is the contract being enforced.
+- Every OS-side step runs on a task that owns the lease guard
+  (`ClipboardLease::guarded`). An IPC handler future is dropped on peer
+  disconnect and on the server deadline (`run_handler_bounded`). Storage reads
+  and adapter preparation (notably Windows image / CF_DIBV5 decode) stay on the
+  caller future and are cancelled with it; only a `PreparedClipboardWrite`
+  whose next step is the OS publish crosses into the guarded task. Once that
+  write or a synthesis has handed uncancellable work to the blocking pool,
+  owning the guard on the step's task keeps "the lease is held" and "my side
+  effect is in flight" the same statement, so the next request cannot publish
+  underneath a late clipboard write or a keystroke that has not landed yet.
+- Immediately before the keystroke the lease re-reads the OS clipboard sequence
+  and confirms it is still this process's own write
+  (`ClipboardReader::current_sequence` + `matches_self_write`). That catches the
+  one writer the lease cannot lock out: the user copying in another app during
+  the hide → refocus → delay window. `ClipboardReader::self_write_tracking`
+  describes whether the adapter is `Untracked`, `Stable` (Windows
+  `GetClipboardSequenceNumber`), or `MayLapAfterHostPause` (macOS
+  `changeCount`); the Wayland content-hash fallback and any host without a
+  wired reader report *unverifiable* and the paste proceeds as before. A macOS
+  publish whose wall-clock age reaches the same 30 s host-pause threshold used
+  by capture is refused even when its sequence still matches: `changeCount` can
+  lap across sleep and make a foreign post-wake clip look like the pre-sleep
+  self-write. A backwards wall-clock step makes that age unknowable and is
+  refused on macOS for the same reason. Windows' stable sequence is not subject
+  to either age rule.
+  A probe that *fails* on a host that can normally answer is a refusal too, not
+  an "unverifiable": a clipboard too wedged to report its sequence is exactly
+  where an unnoticed foreign write is plausible, and the copy has already
+  landed, so re-copying costs the user less than typing someone else's clip.
+
+  The check is not airtight, and three windows stay open by construction. No OS
+  exposes an atomic write-and-return-sequence, so the adapter records its
+  write's sequence a few instructions after the write lands and a foreign write
+  inside that window is recorded as ours (the bounded race `SelfWriteTracker`
+  already documents for capture). The probe and the keystroke are separate
+  calls, so a write between them is invisible — the probe runs on the same task
+  as the synthesis, immediately before it, to keep that gap to one
+  `spawn_blocking` hop. And `CGEventPost` / `SendInput` only *post* the
+  keystroke: the target app reads the clipboard when it processes it, which is
+  after the call returns, so the lease is held a further
+  `PASTE_CONSUMPTION_GRACE` (60ms, the same settle the palette waits on the
+  other side of the handoff) before the next publish may proceed. What the
+  check buys, then, is moving the exposure out of the ~1s hide → refocus →
+  delay window — where a human can realistically copy something else — and into
+  windows measured in instructions and milliseconds. Closing those needs an OS
+  primitive that acknowledges "the clipboard has been read", which does not
+  exist.
+
+A failed check never falls back to pasting anyway. The copy already landed, so
+the paste is refused with `PasteFailureReason::ClipboardChanged` and the UI says
+the clipboard changed and nothing was pasted — the one framing that does *not*
+tell the user to press ⌘V, which would paste the new owner's content.
+
+**Combined copy bounds.** The palette's bulk copy joins the selected bodies
+into one clip through `NagoriRuntime::copy_entries_combined`, which admits the
+selection *before* it reads anything: duplicate ids are collapsed, the
+de-duplicated count is capped at `MAX_COMBINED_COPY_ENTRIES` (100), and each
+body is appended to a single buffer with a `checked_add` against the configured
+`max_entry_size_bytes`. An over-limit selection leaves both the database and the
+clipboard untouched, and peak memory is one buffer plus one entry rather than
+the whole selection twice over (the earlier shape collected every body into a
+`Vec<String>` and joined it, so a large selection of maximum-size entries
+reserved hundreds of megabytes only to fail the same limit at the end).
 
 ---
 
@@ -2291,8 +2377,8 @@ change.
   payload carries a classified `reason`
   (`nagori_core::PasteFailureReason` → camelCase token:
   `accessibilityMissing` / `toolMissing` (+ `tool`) / `timeout` /
-  `synthUnsupported` / `previousAppLost` / `unknown`) alongside the
-  curated `error` string. Platform adapters raise
+  `synthUnsupported` / `previousAppLost` / `clipboardChanged` / `unknown`)
+  alongside the curated `error` string. Platform adapters raise
   `AppError::Paste { reason, message }` so the classification survives the
   `AppError → CommandError` collapse (which otherwise genericises
   `Platform` detail); the desktop command layer adds `PreviousAppLost`

@@ -191,7 +191,7 @@ const SECURE_FOCUS_BUNDLE_OVERRIDES: &[&str] = &[
 /// body read and content-hash comparison. The 30-second threshold sits
 /// well above any normal scheduling jitter at the default 500 ms cadence
 /// (60x headroom) yet small enough to catch even short naps.
-const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
+pub(crate) const RESYNC_GAP_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Cheap, non-cryptographic entropy source for the backoff jitter in
 /// [`CaptureFailurePolicy::jittered_backoff`]. The wall clock is already imported

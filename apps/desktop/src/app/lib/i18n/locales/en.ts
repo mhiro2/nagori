@@ -205,6 +205,7 @@ export type Messages = {
         timeout: string;
         synthUnsupported: string;
         previousAppLost: string;
+        clipboardChanged: string;
         unknown: string;
       };
     };
@@ -780,6 +781,8 @@ export const en: Messages = {
         synthUnsupported: 'Auto-paste is not available on this platform. Copied — paste manually.',
         previousAppLost:
           'Auto-paste skipped: could not refocus the source app. Copied — paste manually.',
+        clipboardChanged:
+          'Auto-paste cancelled: the clipboard changed after the copy, so nothing was pasted. Copy again to retry.',
         unknown: 'Auto-paste failed. Copied — paste manually.',
       },
     },

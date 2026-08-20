@@ -1,10 +1,11 @@
 //! Paste and palette-copy commands plus the shared auto-paste orchestration.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use nagori_core::{
-    AppError, EntryId, MAX_PASTE_DELAY_MS, PasteFailureReason, PasteFormat,
-    is_text_safe_for_default_output,
+    AppError, EntryId, MAX_COMBINED_COPY_ENTRIES, MAX_PASTE_DELAY_MS, PasteFailureReason,
+    PasteFormat,
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
@@ -23,6 +24,10 @@ pub async fn paste_entry(
     format: Option<PasteFormatDto>,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
+    // Serialize the entire focus handoff with clipboard publication. Acquiring
+    // the lease before hiding the palette prevents a concurrent paste from
+    // changing focus while this command waits to publish its entry.
+    let mut lease = state.runtime.clipboard_lease().await;
     // Self-paste guard: hide the palette and re-activate the user's previous
     // frontmost app *before* we send the paste keystroke. Without this the
     // synthesised keystroke lands on Nagori's webview because its window
@@ -71,7 +76,10 @@ pub async fn paste_entry(
     // manually" hint to genuine synthesis failures: a copy failure
     // means the clipboard never received the entry, so telling the
     // user to "paste manually" would just paste whatever was there
-    // before.
+    // before. Splitting them is only safe under one `ClipboardLease`
+    // held across both: it locks out any other publish, and the
+    // `ClipboardPublish` token it mints is what authorises the paste
+    // below to act on *this* clip.
     // `get_settings` runs after the palette is hidden, so a settings-load
     // failure would otherwise strand inside the invisible webview. Emit
     // `nagori://paste_failed` first so the App-level toast (Settings
@@ -94,17 +102,16 @@ pub async fn paste_entry(
         }
     };
     let paste_format = format.map_or(settings.paste_format_default, Into::into);
-    if let Err(err) = state
-        .runtime
-        .copy_entry_with_format(entry_id, paste_format)
-        .await
-    {
-        tracing::warn!(error = %err, "paste_entry_copy_failed");
-        let cmd_err: CommandError = err.into();
-        let message = format!("copy failed: {}", cmd_err.message);
-        emit_paste_failed(&app, &message);
-        return Err(CommandError { message, ..cmd_err });
-    }
+    let publish = match lease.copy_entry_with_format(entry_id, paste_format).await {
+        Ok(publish) => publish,
+        Err(err) => {
+            tracing::warn!(error = %err, "paste_entry_copy_failed");
+            let cmd_err: CommandError = err.into();
+            let message = format!("copy failed: {}", cmd_err.message);
+            emit_paste_failed(&app, &message);
+            return Err(CommandError { message, ..cmd_err });
+        }
+    };
     if settings.auto_paste_enabled {
         // A restore failure means the synthesised paste would land in the
         // wrong window, so surface it and skip synthesis. The clipboard write
@@ -120,14 +127,11 @@ pub async fn paste_entry(
             emit_paste_failed_with_reason(&app, &message, &PasteFailureReason::PreviousAppLost);
             return Err(CommandError { message, ..cmd_err });
         }
-        if let Err(err) = state.runtime.paste_frontmost().await {
+        if let Err(err) = lease.paste_frontmost(publish).await {
             tracing::warn!(error = %err, "paste_entry_synth_failed");
             let reason = paste_failure_reason(&err);
             let cmd_err: CommandError = err.into();
-            let message = format!(
-                "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
-                cmd_err.message
-            );
+            let message = synthesis_failure_message(&reason, &cmd_err.message);
             emit_paste_failed_with_reason(&app, &message, &reason);
             return Err(CommandError { message, ..cmd_err });
         }
@@ -184,6 +188,25 @@ pub(crate) fn emit_paste_failed_with_reason(
         payload["tool"] = serde_json::Value::String(tool.clone());
     }
     let _ = app.emit_to("main", crate::PASTE_FAILED_EVENT, payload);
+}
+
+/// The user-facing message for a failed paste synthesis.
+///
+/// Every reason but one shares the "copy succeeded, paste manually" framing —
+/// the clipboard write landed, so a manual ⌘V still does what the user wanted.
+/// [`PasteFailureReason::ClipboardChanged`] is the exception: the clipboard no
+/// longer holds the entry, so telling the user to paste manually would tell
+/// them to paste someone else's content. That case says what happened and
+/// leaves the next step to them.
+fn synthesis_failure_message(reason: &PasteFailureReason, detail: &str) -> String {
+    if matches!(reason, PasteFailureReason::ClipboardChanged) {
+        format!(
+            "auto-paste cancelled: the clipboard changed after the copy, so nothing was pasted. \
+             Underlying error: {detail}"
+        )
+    } else {
+        format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {detail}")
+    }
 }
 
 /// Pull the classified [`PasteFailureReason`] out of an auto-paste failure.
@@ -311,20 +334,22 @@ async fn run_palette_paste(
             return Err(err.into());
         }
     };
-    match copy {
+    // One lease spans the copy, the window hide, the focus restore, the paste
+    // delay, and the synthesis. Nothing else in the process can publish to the
+    // clipboard inside that window, and the `ClipboardPublish` it mints is what
+    // authorises the synthesis below to act on this clip — see
+    // `nagori_daemon::ClipboardLease`.
+    let mut lease = state.runtime.clipboard_lease().await;
+    let publish = match copy {
         PaletteCopyTarget::Format(format) => {
-            state
-                .runtime
+            lease
                 .copy_entry_with_format(entry_id, format.unwrap_or(settings.paste_format_default))
-                .await?;
+                .await?
         }
         PaletteCopyTarget::Representation(mime) => {
-            state
-                .runtime
-                .copy_entry_representation(entry_id, &mime)
-                .await?;
+            lease.copy_entry_representation(entry_id, &mime).await?
         }
-    }
+    };
     hide_main_palette(app)?;
 
     // Re-focus the app the user came from *regardless* of the auto-paste
@@ -405,7 +430,7 @@ async fn run_palette_paste(
     // `searchState.errorMessage`. Emit `nagori://paste_failed` so the
     // App-level toast surfaces it on re-open (or in the open Settings
     // window) with the "copy succeeded" framing intact.
-    if let Err(err) = state.runtime.paste_frontmost().await {
+    if let Err(err) = lease.paste_frontmost(publish).await {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
@@ -415,10 +440,7 @@ async fn run_palette_paste(
         // framing so the user knows the clipboard write already landed.
         let reason = paste_failure_reason(&err);
         let cmd_err: CommandError = err.into();
-        let message = format!(
-            "auto-paste failed — copy succeeded, paste manually. Underlying error: {}",
-            cmd_err.message
-        );
+        let message = synthesis_failure_message(&reason, &cmd_err.message);
         emit_paste_failed_with_reason(app, &message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
@@ -439,80 +461,43 @@ pub async fn copy_entry_from_palette(
     Ok(())
 }
 
-/// Concatenate the text of multiple entries with newline separators and
-/// write the result to the system clipboard. Image / file-list entries and
-/// any non-`Public`/`Unknown` (Private / Secret / Blocked) rows are silently
-/// skipped — the multi-select UI surfaces the count of skipped entries to the
-/// user. Used by the palette's bulk copy action.
+/// Concatenate the text of the selected entries with newline separators, store
+/// the result as one entry, and publish it to the system clipboard. Used by the
+/// palette's bulk copy action.
+///
+/// The admission rules — duplicate ids collapsed, the selection capped at
+/// `nagori_core::MAX_COMBINED_COPY_ENTRIES`, the join refused once it would
+/// exceed `max_entry_size_bytes`, image / file-list and non-`Public`/`Unknown`
+/// rows skipped — live in `NagoriRuntime::copy_entries_combined` so the join is
+/// bounded before any body is read. Every id is parsed up front, so a malformed
+/// one fails the whole call without half-copying the selection.
 #[tauri::command]
 pub async fn copy_entries_combined(
     state: State<'_, AppState>,
     ids: Vec<String>,
 ) -> CommandResult<()> {
-    if ids.is_empty() {
-        return Err(CommandError::invalid_input("no entries selected"));
-    }
-    let mut chunks: Vec<String> = Vec::with_capacity(ids.len());
-    for id in ids {
-        let entry_id = parse_entry_id(&id)?;
-        // Skip ids that were concurrently swept by retention / another
-        // delete path. Aborting the whole copy because one row of a
-        // multi-selection raced with the maintenance loop would be
-        // worse than producing a slightly shorter joined string.
-        let Some(entry) = state.runtime.get_entry(entry_id).await? else {
-            continue;
-        };
-        // Only `Public` / `Unknown` text is safe to combine into the clipboard
-        // without an explicit opt-in. Skipping `Private` here (alongside
-        // `Secret` / `Blocked`) keeps bulk copy from silently concatenating
-        // sensitive bodies the single-row path would have dropped to
-        // preview-only — see `is_text_safe_for_default_output`.
-        if !is_text_safe_for_default_output(entry.sensitivity) {
+    // De-duplicate and cap while parsing, so neither the id vector nor the set
+    // can grow past the ceiling the runtime enforces — a caller must not be
+    // able to make the command allocate for a selection that is about to be
+    // refused. The runtime repeats both rules for its other callers (IPC,
+    // in-process) and remains the authority on them.
+    let capacity = ids.len().min(MAX_COMBINED_COPY_ENTRIES + 1);
+    let mut seen = HashSet::with_capacity(capacity);
+    let mut entry_ids = Vec::with_capacity(capacity);
+    for id in &ids {
+        let entry_id = parse_entry_id(id)?;
+        if !seen.insert(entry_id) {
             continue;
         }
-        let text = match &entry.content {
-            nagori_core::ClipboardContent::Text(t) => Some(t.text.clone()),
-            nagori_core::ClipboardContent::Url(u) => Some(u.raw.clone()),
-            nagori_core::ClipboardContent::Code(c) => Some(c.text.clone()),
-            nagori_core::ClipboardContent::RichText(r) => Some(r.plain_text.clone()),
-            _ => None,
-        };
-        if let Some(text) = text {
-            chunks.push(text);
+        entry_ids.push(entry_id);
+        if entry_ids.len() > MAX_COMBINED_COPY_ENTRIES {
+            return Err(CommandError::invalid_input(format!(
+                "combined copy accepts at most {MAX_COMBINED_COPY_ENTRIES} entries"
+            )));
         }
     }
-    if chunks.is_empty() {
-        return Err(CommandError::invalid_input("no copyable text in selection"));
-    }
-    let combined = chunks.join("\n");
-    // `add_text` only inserts a row; the bulk-copy intent is for the joined
-    // text to land on the OS clipboard so the user can ⌘V it elsewhere.
-    // Round-trip through `copy_entry` so the clipboard write happens via the
-    // same path the palette uses for single-row copies.
-    //
-    // Inserting a history row for the combined text is deliberate, not a
-    // leak we tolerate: the joined text lands on the OS clipboard, and the
-    // capture loop would store it on its next tick regardless (this is a
-    // clipboard manager — there is no self-write suppression). Going through
-    // `add_text` up front just makes that row appear immediately, with the
-    // shared sensitivity classification, and lets the later capture dedupe
-    // against it instead of producing a second copy. A copy-only API would
-    // not avoid the row; it would only defer and de-classify it.
-    //
-    // A retention sweep or IPC clear can race between `add_text` and
-    // `copy_entry` and remove the just-inserted row. Retry once before
-    // giving up — the user pressed bulk-copy expecting the OS clipboard
-    // to actually contain the combined text.
-    let id = state.runtime.add_text(combined.clone()).await?;
-    match state.runtime.copy_entry(id).await {
-        Ok(()) => Ok(()),
-        Err(AppError::NotFound) => {
-            let id = state.runtime.add_text(combined).await?;
-            state.runtime.copy_entry(id).await?;
-            Ok(())
-        }
-        Err(err) => Err(err.into()),
-    }
+    state.runtime.copy_entries_combined(&entry_ids).await?;
+    Ok(())
 }
 
 /// Re-paste the entry the user most recently pasted via the palette,

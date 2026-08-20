@@ -150,6 +150,7 @@ export const zhHans: Messages = {
         timeout: '自动粘贴超时——合成器可能正忙。已复制 — 请手动粘贴或重试。',
         synthUnsupported: '此平台不支持自动粘贴。已复制 — 请手动粘贴。',
         previousAppLost: '已跳过自动粘贴：无法切回源应用。已复制 — 请手动粘贴。',
+        clipboardChanged: '已取消自动粘贴：复制后剪贴板已改变，未粘贴任何内容。请重新复制。',
         unknown: '自动粘贴失败。已复制 — 请手动粘贴。',
       },
     },

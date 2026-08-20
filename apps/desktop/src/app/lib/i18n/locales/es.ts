@@ -164,6 +164,8 @@ export const es: Messages = {
           'El pegado automático no está disponible en esta plataforma. Copiado — pega manualmente.',
         previousAppLost:
           'Pegado automático omitido: no se pudo volver a la app de origen. Copiado — pega manualmente.',
+        clipboardChanged:
+          'Pegado automático cancelado: el portapapeles cambió después de copiar, así que no se pegó nada. Copia de nuevo.',
         unknown: 'Falló el pegado automático. Copiado — pega manualmente.',
       },
     },

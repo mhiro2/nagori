@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nagori_core::{ClipboardEntry, EntryId, EntryRepository, Result, SettingsRepository};
+use nagori_core::{
+    ClipboardEntry, EntryId, EntryRepository, PasteFormat, Result, SettingsRepository,
+};
 use nagori_ipc::{GetEntryRequest, IpcRequest, IpcResponse, ListPinnedRequest};
 
 use super::super::*;
@@ -464,8 +466,17 @@ async fn paste_frontmost_returns_error_when_controller_reports_pasted_false() {
     // pretending to paste.
     let store = SqliteStore::open_memory().expect("memory store");
     let runtime = NagoriRuntime::builder(store).build_for_test();
-    let err = runtime
-        .paste_frontmost()
+    let id = runtime
+        .add_text("hello".to_owned())
+        .await
+        .expect("add should succeed");
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .copy_entry_with_format(id, PasteFormat::Preserve)
+        .await
+        .expect("copy should succeed");
+    let err = lease
+        .paste_frontmost(publish)
         .await
         .expect_err("Noop paste must surface as error");
     assert!(
@@ -478,4 +489,142 @@ async fn paste_frontmost_returns_error_when_controller_reports_pasted_false() {
         ),
         "got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn copy_entries_combined_joins_in_order_and_collapses_duplicates() {
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    let first = runtime
+        .add_text("alpha".to_owned())
+        .await
+        .expect("add first");
+    let second = runtime
+        .add_text("beta".to_owned())
+        .await
+        .expect("add second");
+
+    // The same id twice must contribute one body, not two: a stale UI
+    // selection set or a hand-built IPC request must not double the text (nor
+    // eat the byte budget twice).
+    runtime
+        .copy_entries_combined(&[first, second, first])
+        .await
+        .expect("combined copy should succeed");
+
+    assert_eq!(clipboard.current_text().as_deref(), Some("alpha\nbeta"));
+}
+
+#[tokio::test]
+async fn copy_entries_combined_refuses_over_budget_without_touching_db_or_clipboard() {
+    // The join is admitted against `max_entry_size_bytes` while the buffer is
+    // being built, so an over-budget selection fails before anything is
+    // stored or published — the previous shape read every body, joined them,
+    // and only then hit the same limit.
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    runtime
+        .store()
+        .save_settings(AppSettings {
+            max_entry_size_bytes: 32,
+            ..AppSettings::default()
+        })
+        .await
+        .expect("save settings");
+    let first = runtime.add_text("a".repeat(20)).await.expect("add first");
+    let second = runtime.add_text("b".repeat(20)).await.expect("add second");
+    let before = runtime.list_recent(100).await.expect("list recent").len();
+
+    let err = runtime
+        .copy_entries_combined(&[first, second])
+        .await
+        .expect_err("an over-budget join must be refused");
+
+    assert!(
+        matches!(err, nagori_core::AppError::InvalidInput(_)),
+        "expected InvalidInput error, got {err:?}",
+    );
+    assert_eq!(
+        clipboard.current_text(),
+        None,
+        "the clipboard must be untouched",
+    );
+    assert_eq!(
+        runtime.list_recent(100).await.expect("list recent").len(),
+        before,
+        "no combined row may be stored",
+    );
+}
+
+#[tokio::test]
+async fn copy_entries_combined_caps_the_selection_before_reading_bodies() {
+    // The count cap exists to bound the *work*: without it a large selection
+    // reads N full bodies out of storage before discovering the join cannot
+    // fit. Ids beyond the cap are refused up front, so nothing is published.
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        ids.push(
+            runtime
+                .add_text(format!("entry {index}"))
+                .await
+                .expect("add entry"),
+        );
+    }
+    // Pad with distinct ids that do not exist: the cap must trip before any
+    // of them is looked up.
+    while ids.len() <= nagori_core::MAX_COMBINED_COPY_ENTRIES {
+        ids.push(EntryId::new());
+    }
+
+    let err = runtime
+        .copy_entries_combined(&ids)
+        .await
+        .expect_err("an oversized selection must be refused");
+
+    assert!(
+        matches!(err, nagori_core::AppError::InvalidInput(_)),
+        "expected InvalidInput error, got {err:?}",
+    );
+    assert_eq!(clipboard.current_text(), None);
+}
+
+#[tokio::test]
+async fn copy_entries_combined_skips_sensitive_and_non_text_rows() {
+    // Bulk copy must not concatenate a body the single-row path would have
+    // dropped to preview-only, and an image row has no text to contribute.
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    let public = runtime
+        .add_text("public body".to_owned())
+        .await
+        .expect("add public");
+    let secret = runtime
+        .add_text("token ghp_abcdefghijklmnopqrstuvwxyz123456".to_owned())
+        .await
+        .expect("add secret");
+
+    runtime
+        .copy_entries_combined(&[public, secret])
+        .await
+        .expect("combined copy should succeed");
+
+    let combined = clipboard.current_text().expect("clipboard text");
+    assert_eq!(combined, "public body");
+    assert!(
+        !combined.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
+        "a secret body must never be joined into a bulk copy: {combined:?}",
+    );
+}
+
+#[tokio::test]
+async fn copy_entries_combined_refuses_a_selection_with_no_copyable_text() {
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    let err = runtime
+        .copy_entries_combined(&[EntryId::new()])
+        .await
+        .expect_err("a selection of vanished ids must be refused");
+
+    assert!(
+        matches!(err, nagori_core::AppError::InvalidInput(_)),
+        "expected InvalidInput error, got {err:?}",
+    );
+    assert_eq!(clipboard.current_text(), None);
 }

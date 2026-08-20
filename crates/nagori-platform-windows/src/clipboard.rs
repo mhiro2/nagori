@@ -12,10 +12,10 @@ use nagori_core::{
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, ClipboardWriter, SNAPSHOT_CAPTURE_MAX_RETRIES,
-    SelfWriteTracker, clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
-    has_publishable_representation, lock_clipboard_for_write, lock_clipboard_recovering,
-    platform_err,
+    CapturedSnapshot, ClipboardReader, ClipboardWriter, PreparedClipboardWrite,
+    SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracker, SelfWriteTracking, clipboard_blocking,
+    clipboard_write_blocking, decode_rgba_with_pixel_cap, has_publishable_representation,
+    lock_clipboard_for_write, lock_clipboard_recovering, platform_err,
 };
 use time::OffsetDateTime;
 
@@ -38,6 +38,9 @@ const MAX_TEXT_REP_BYTES: usize = 256 * 1024 * 1024;
 /// writer settle, raising the odds the next attempt reads a stable sequence
 /// number. Mirrors the macOS adapter's `TORN_RETRY_BACKOFF`.
 const TORN_RETRY_BACKOFF: Duration = Duration::from_millis(1);
+
+#[cfg(windows)]
+type PreparedRepresentations = (Vec<StoredClipboardRepresentation>, Vec<Option<Vec<u8>>>);
 
 /// Windows clipboard adapter.
 ///
@@ -136,58 +139,36 @@ impl ClipboardReader for WindowsClipboard {
     fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
         self.self_write.matches(sequence)
     }
+
+    fn self_write_tracking(&self) -> SelfWriteTracking {
+        // Every write path records the sequence its write produced, and
+        // `GetClipboardSequenceNumber` is the OS's own monotonic counter — so
+        // "the clipboard still holds our last publish" is answerable on
+        // Windows. Off-target builds expose a constant fallback sequence and
+        // therefore cannot verify ownership.
+        if cfg!(windows) {
+            SelfWriteTracking::Stable
+        } else {
+            SelfWriteTracking::Untracked
+        }
+    }
 }
 
 #[async_trait]
 impl ClipboardWriter for WindowsClipboard {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()> {
-        if let ClipboardContent::Image(image) = &entry.content {
-            let bytes = image.pending_bytes.clone().ok_or_else(|| {
-                AppError::Platform(
-                    "image payload bytes were not loaded before clipboard write".to_owned(),
-                )
-            })?;
-            return self.write_image_bytes(bytes).await;
-        }
-        if let ClipboardContent::FileList(files) = &entry.content {
-            return self.write_files(files.paths.clone()).await;
-        }
-        let Some(text) = entry.plain_text() else {
-            return Err(AppError::Unsupported(
-                "clipboard entry has no representable payload".to_owned(),
-            ));
-        };
-        self.write_text(text).await
+        self.prepare_entry_write(entry.clone())
+            .await?
+            .publish()
+            .await
     }
 
     async fn write_plain(&self, entry: &ClipboardEntry) -> Result<()> {
-        let Some(text) = entry.plain_text() else {
-            return Err(AppError::Unsupported(
-                "clipboard entry has no plain-text payload".to_owned(),
-            ));
-        };
-        self.write_text(text).await
+        self.prepare_plain_write(entry)?.publish().await
     }
 
     async fn write_text(&self, text: &str) -> Result<()> {
-        let clipboard = self.clipboard.clone();
-        let self_write = self.self_write.clone();
-        let owned = text.to_owned();
-        clipboard_write_blocking("write_text", move || -> Result<()> {
-            // Bounded lock acquisition (no OS side effect yet) so a guard
-            // leaked by a timed-out read cannot park this write forever;
-            // the `set_text` itself still runs to completion unbounded.
-            let mut guard = lock_clipboard_for_write(&clipboard, "write_text")?;
-            guard.set_text(owned).map_err(|err| platform_err(&err))?;
-            // Record the sequence number this write produced so the capture
-            // loop's self-write suppression can skip re-capturing it. The
-            // residual write→record window is the bounded race documented on
-            // `SelfWriteTracker`.
-            record_self_write(&self_write);
-            Ok(())
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+        self.prepare_text_write(text.to_owned()).publish().await
     }
 
     async fn write_representations(
@@ -195,113 +176,98 @@ impl ClipboardWriter for WindowsClipboard {
         entry: &ClipboardEntry,
         representations: &[StoredClipboardRepresentation],
     ) -> Result<()> {
-        // Pre-scan before touching the clipboard so an entry whose stored
-        // reps all sit outside the Windows publisher's mapping table falls
-        // back through `write_entry` instead of issuing an `EmptyClipboard`
-        // followed by zero `SetClipboardData` calls. Matches the macOS /
-        // Linux Wayland contract: only when at least one rep is publishable
-        // do we go down the multi-rep path.
-        if representations.is_empty() || !has_publishable_representation(representations) {
-            return self.write_entry(entry).await;
-        }
-        #[cfg(windows)]
-        {
-            // Decode the image reps to their `CF_DIBV5` payloads off the
-            // OS-hang timeout path (same rationale as `write_image_bytes`):
-            // image decode is the only CPU/memory-bound step here and it
-            // touches neither the clipboard mutex nor the Win32 clipboard.
-            // `render_dibv5_payloads` returns one slot per rep so the publish
-            // step can pair each image rep with its pre-decoded bitmap instead
-            // of decoding under the timeout / lock. `reps` is threaded back out
-            // so the publish step reuses it without a second clone.
-            let reps = representations.to_vec();
-            let (reps, dibv5) = tokio::task::spawn_blocking(
-                move || -> Result<(Vec<StoredClipboardRepresentation>, Vec<Option<Vec<u8>>>)> {
-                    let dibv5 = win::render_dibv5_payloads(&reps)?;
-                    Ok((reps, dibv5))
-                },
-            )
+        self.prepare_representations_write(entry.clone(), representations.to_vec())
+            .await?
+            .publish()
             .await
-            .map_err(|err| AppError::Platform(err.to_string()))??;
-
-            let clipboard = self.clipboard.clone();
-            let self_write = self.self_write.clone();
-            clipboard_write_blocking("write_representations", move || -> Result<()> {
-                // Hold the arboard mutex across the entire OpenClipboard +
-                // EmptyClipboard + N × SetClipboardData batch so a concurrent
-                // text-write through arboard cannot land between our
-                // EmptyClipboard and the last SetClipboardData call and wipe
-                // a partial offer. Only the cheap HGLOBAL copies + Win32
-                // publish run here — the image decode already happened above.
-                // Acquisition is bounded so a guard leaked by a timed-out
-                // read cannot park the write.
-                let _guard = lock_clipboard_for_write(&clipboard, "write_representations")?;
-                win::write_multi_rep(&reps, &dibv5)?;
-                record_self_write(&self_write);
-                Ok(())
-            })
-            .await
-            .map_err(|err| AppError::Platform(err.to_string()))?
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = representations;
-            Err(AppError::Unsupported(
-                "Windows multi-representation writes are Windows-only".to_owned(),
-            ))
-        }
     }
 
     async fn write_representation_exact(
         &self,
         representation: &StoredClipboardRepresentation,
     ) -> Result<()> {
-        // Strict single-representation paste: refuse a MIME this adapter
-        // cannot publish rather than falling back to the primary the way
-        // `write_representations` does. `win::write_multi_rep` empties the
-        // clipboard and publishes exactly the reps it is handed, so a
-        // one-rep batch puts only the chosen format on the clipboard.
-        if !has_publishable_representation(std::slice::from_ref(representation)) {
-            return Err(AppError::Unsupported(
-                "representation cannot be published to the Windows clipboard".to_owned(),
-            ));
-        }
-        #[cfg(windows)]
-        {
-            // Decode any image rep to its CF_DIBV5 payload off the clipboard
-            // mutex / timeout path, exactly as `write_representations` does.
-            let reps = vec![representation.clone()];
-            let (reps, dibv5) = tokio::task::spawn_blocking(
-                move || -> Result<(Vec<StoredClipboardRepresentation>, Vec<Option<Vec<u8>>>)> {
-                    let dibv5 = win::render_dibv5_payloads(&reps)?;
-                    Ok((reps, dibv5))
-                },
-            )
+        self.prepare_representation_exact_write(representation.clone())
+            .await?
+            .publish()
             .await
-            .map_err(|err| AppError::Platform(err.to_string()))??;
+    }
 
-            let clipboard = self.clipboard.clone();
-            let self_write = self.self_write.clone();
-            clipboard_write_blocking("write_representation_exact", move || -> Result<()> {
-                let _guard = lock_clipboard_for_write(&clipboard, "write_representation_exact")?;
-                win::write_multi_rep(&reps, &dibv5)?;
+    async fn prepare_entry(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        self.prepare_entry_write(entry).await
+    }
+
+    async fn prepare_plain(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        self.prepare_plain_write(&entry)
+    }
+
+    async fn prepare_representations(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<PreparedClipboardWrite> {
+        self.prepare_representations_write(entry, representations)
+            .await
+    }
+
+    async fn prepare_representation_exact(
+        self: Arc<Self>,
+        representation: StoredClipboardRepresentation,
+    ) -> Result<PreparedClipboardWrite> {
+        self.prepare_representation_exact_write(representation)
+            .await
+    }
+}
+
+impl WindowsClipboard {
+    async fn prepare_entry_write(&self, entry: ClipboardEntry) -> Result<PreparedClipboardWrite> {
+        if let ClipboardContent::Image(image) = &entry.content {
+            let bytes = image.pending_bytes.clone().ok_or_else(|| {
+                AppError::Platform(
+                    "image payload bytes were not loaded before clipboard write".to_owned(),
+                )
+            })?;
+            return self.prepare_image_write(bytes).await;
+        }
+        if let ClipboardContent::FileList(files) = &entry.content {
+            return self.prepare_files_write(files.paths.clone());
+        }
+        let text = entry.plain_text().ok_or_else(|| {
+            AppError::Unsupported("clipboard entry has no representable payload".to_owned())
+        })?;
+        Ok(self.prepare_text_write(text.to_owned()))
+    }
+
+    fn prepare_plain_write(&self, entry: &ClipboardEntry) -> Result<PreparedClipboardWrite> {
+        let text = entry.plain_text().ok_or_else(|| {
+            AppError::Unsupported("clipboard entry has no plain-text payload".to_owned())
+        })?;
+        Ok(self.prepare_text_write(text.to_owned()))
+    }
+
+    fn prepare_text_write(&self, text: String) -> PreparedClipboardWrite {
+        let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
+        PreparedClipboardWrite::new(async move {
+            clipboard_write_blocking("write_text", move || -> Result<()> {
+                // Acquiring the adapter lock is bounded; once `set_text`
+                // starts, it runs to completion under the caller's lease.
+                let mut guard = lock_clipboard_for_write(&clipboard, "write_text")?;
+                guard.set_text(text).map_err(|err| platform_err(&err))?;
                 record_self_write(&self_write);
                 Ok(())
             })
             .await
             .map_err(|err| AppError::Platform(err.to_string()))?
-        }
-        #[cfg(not(windows))]
-        {
-            Err(AppError::Unsupported(
-                "Windows multi-representation writes are Windows-only".to_owned(),
-            ))
-        }
+        })
     }
-}
 
-impl WindowsClipboard {
-    async fn write_files(&self, paths: Vec<String>) -> Result<()> {
+    fn prepare_files_write(&self, paths: Vec<String>) -> Result<PreparedClipboardWrite> {
         if paths.is_empty() {
             return Err(AppError::Unsupported(
                 "file-list clipboard entry has no paths".to_owned(),
@@ -309,33 +275,32 @@ impl WindowsClipboard {
         }
         let clipboard = self.clipboard.clone();
         let self_write = self.self_write.clone();
-        clipboard_write_blocking("write_files", move || -> Result<()> {
-            // Hold the arboard mutex across the whole `OpenClipboard +
-            // EmptyClipboard + SetClipboardData(CF_HDROP)` batch so a
-            // concurrent text-write through arboard cannot land between
-            // our `EmptyClipboard` call (which would wipe our CF_HDROP
-            // offer) and `SetClipboardData`. Acquisition is bounded so a
-            // guard leaked by a timed-out read cannot park the write.
-            let _guard = lock_clipboard_for_write(&clipboard, "write_files")?;
-            #[cfg(windows)]
-            {
-                win::write_file_list(&paths)?;
-                record_self_write(&self_write);
-                Ok(())
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = (paths, &self_write);
-                Err(AppError::Unsupported(
-                    "Windows file-list writes are Windows-only".to_owned(),
-                ))
-            }
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
+        Ok(PreparedClipboardWrite::new(async move {
+            clipboard_write_blocking("write_files", move || -> Result<()> {
+                // Hold the adapter lock across EmptyClipboard and
+                // SetClipboardData so no concurrent writer exposes a partial
+                // file-list offer.
+                let _guard = lock_clipboard_for_write(&clipboard, "write_files")?;
+                #[cfg(windows)]
+                {
+                    win::write_file_list(&paths)?;
+                    record_self_write(&self_write);
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (paths, &self_write);
+                    Err(AppError::Unsupported(
+                        "Windows file-list writes are Windows-only".to_owned(),
+                    ))
+                }
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
+        }))
     }
 
-    async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
+    async fn prepare_image_write(&self, bytes: Vec<u8>) -> Result<PreparedClipboardWrite> {
         // arboard publishes images on Windows as `CF_DIBV5`, so callers must
         // hand us decoded RGBA. The capture path stores encoded bytes
         // (image/png from this adapter, image/{tiff,jpeg,gif,webp} from
@@ -368,24 +333,111 @@ impl WindowsClipboard {
         .await
         .map_err(|err| AppError::Platform(err.to_string()))??;
 
-        // The image decode above ran on a plain blocking task (CPU/memory
-        // bound, no clipboard lock). The actual Win32 clipboard write awaits
-        // to completion without a timeout: a timed-out `set_image` cannot be
-        // cancelled and would clobber newer clipboard content on late return.
+        // Only the returned future touches the OS clipboard. Dropping this
+        // preparation future can therefore never publish stale image data;
+        // once publish starts, the daemon keeps its lease until completion.
         let clipboard = self.clipboard.clone();
         let self_write = self.self_write.clone();
-        clipboard_write_blocking("write_image_bytes", move || -> Result<()> {
-            // Bounded lock acquisition; the `set_image` itself still runs
-            // to completion unbounded (see the decode rationale above).
-            let mut guard = lock_clipboard_for_write(&clipboard, "write_image_bytes")?;
-            guard
-                .set_image(image_data)
-                .map_err(|err| platform_err(&err))?;
-            record_self_write(&self_write);
-            Ok(())
+        Ok(PreparedClipboardWrite::new(async move {
+            clipboard_write_blocking("write_image_bytes", move || -> Result<()> {
+                // Bounded lock acquisition; the `set_image` itself still runs
+                // to completion unbounded (see the decode rationale above).
+                let mut guard = lock_clipboard_for_write(&clipboard, "write_image_bytes")?;
+                guard
+                    .set_image(image_data)
+                    .map_err(|err| platform_err(&err))?;
+                record_self_write(&self_write);
+                Ok(())
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
+        }))
+    }
+
+    async fn prepare_representations_write(
+        &self,
+        entry: ClipboardEntry,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<PreparedClipboardWrite> {
+        // Avoid EmptyClipboard when none of the stored formats can be
+        // published; preserve copy-back falls through to primary content.
+        if representations.is_empty() || !has_publishable_representation(&representations) {
+            return self.prepare_entry_write(entry).await;
+        }
+        #[cfg(windows)]
+        {
+            // Decode image formats while the request still owns this future.
+            // The prepared publish below contains only the Win32 transaction.
+            let (representations, dibv5) =
+                tokio::task::spawn_blocking(move || -> Result<PreparedRepresentations> {
+                    let dibv5 = win::render_dibv5_payloads(&representations)?;
+                    Ok((representations, dibv5))
+                })
+                .await
+                .map_err(|err| AppError::Platform(err.to_string()))??;
+            Ok(self.prepare_multi_write("write_representations", representations, dibv5))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = representations;
+            Err(AppError::Unsupported(
+                "Windows multi-representation writes are Windows-only".to_owned(),
+            ))
+        }
+    }
+
+    #[cfg_attr(not(windows), allow(clippy::unused_async))]
+    async fn prepare_representation_exact_write(
+        &self,
+        representation: StoredClipboardRepresentation,
+    ) -> Result<PreparedClipboardWrite> {
+        if !has_publishable_representation(std::slice::from_ref(&representation)) {
+            return Err(AppError::Unsupported(
+                "representation cannot be published to the Windows clipboard".to_owned(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let representations = vec![representation];
+            let (representations, dibv5) =
+                tokio::task::spawn_blocking(move || -> Result<PreparedRepresentations> {
+                    let dibv5 = win::render_dibv5_payloads(&representations)?;
+                    Ok((representations, dibv5))
+                })
+                .await
+                .map_err(|err| AppError::Platform(err.to_string()))??;
+            Ok(self.prepare_multi_write("write_representation_exact", representations, dibv5))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = representation;
+            Err(AppError::Unsupported(
+                "Windows multi-representation writes are Windows-only".to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(windows)]
+    fn prepare_multi_write(
+        &self,
+        operation: &'static str,
+        representations: Vec<StoredClipboardRepresentation>,
+        dibv5: Vec<Option<Vec<u8>>>,
+    ) -> PreparedClipboardWrite {
+        let clipboard = self.clipboard.clone();
+        let self_write = self.self_write.clone();
+        PreparedClipboardWrite::new(async move {
+            clipboard_write_blocking(operation, move || -> Result<()> {
+                // Keep one adapter lock across EmptyClipboard and the complete
+                // SetClipboardData batch so no writer sees a partial offer.
+                let _guard = lock_clipboard_for_write(&clipboard, operation)?;
+                win::write_multi_rep(&representations, &dibv5)?;
+                record_self_write(&self_write);
+                Ok(())
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))?
         })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))?
     }
 }
 

@@ -1,15 +1,41 @@
 use std::sync::Arc;
 
-use nagori_core::SettingsRepository;
+use async_trait::async_trait;
+use nagori_core::{ClipboardSequence, ClipboardSnapshot, Result, SettingsRepository};
 use nagori_ipc::{
     AddEntryRequest, ClearRequest, ClearResponse, CopyEntryRequest, DeleteEntryRequest, EntryDto,
-    IpcRequest, IpcResponse, ListRecentRequest, PinEntryRequest, SearchRequest, SearchResponse,
-    UpdateSettingsRequest,
+    IpcRequest, IpcResponse, ListRecentRequest, PasteEntryRequest, PinEntryRequest, SearchRequest,
+    SearchResponse, UpdateSettingsRequest,
 };
-use nagori_platform::MemoryClipboard;
+use nagori_platform::{ClipboardReader, MemoryClipboard, SelfWriteTracking};
+use time::OffsetDateTime;
 
 use super::super::*;
 use super::{runtime_with_memory_clipboard, runtime_with_mock_ai};
+
+/// A verifier that always observes a foreign clipboard sequence after the
+/// runtime's successful copy-back.
+struct ChangedClipboardReader;
+
+#[async_trait]
+impl ClipboardReader for ChangedClipboardReader {
+    async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+        Ok(ClipboardSnapshot {
+            sequence: ClipboardSequence::native(1),
+            captured_at: OffsetDateTime::now_utc(),
+            source: None,
+            representations: Vec::new(),
+        })
+    }
+
+    async fn current_sequence(&self) -> Result<ClipboardSequence> {
+        Ok(ClipboardSequence::native(1))
+    }
+
+    fn self_write_tracking(&self) -> SelfWriteTracking {
+        SelfWriteTracking::Stable
+    }
+}
 
 #[tokio::test]
 async fn shutdown_ipc_is_observed_after_worker_starts_waiting() {
@@ -125,6 +151,53 @@ async fn ipc_writes_notify_external_mutations_and_reads_do_not() {
         mutations.has_changed().expect("channel should be open"),
         "an IPC delete must bump the mutation counter",
     );
+}
+
+#[tokio::test]
+async fn a_refused_ipc_paste_still_notifies_its_copy_back_mutation() {
+    // ClipboardChanged is returned after copy-back has already incremented the
+    // entry's reuse metadata. Capture may be disabled, so the explicit IPC
+    // mutation signal is the only way an open palette learns to re-rank it.
+    let store = SqliteStore::open_memory().expect("memory store should open");
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let runtime = NagoriRuntime::builder(store)
+        .clipboard(clipboard)
+        .clipboard_reader(Arc::new(ChangedClipboardReader))
+        .build_for_test();
+    runtime
+        .store()
+        .save_settings(AppSettings {
+            auto_paste_enabled: true,
+            capture_enabled: false,
+            ..AppSettings::default()
+        })
+        .await
+        .expect("save settings");
+    let id = runtime
+        .add_text("rank me".to_owned())
+        .await
+        .expect("add entry");
+    let mut mutations = runtime.external_mutations_subscribe();
+    let _ = mutations.borrow_and_update();
+
+    let response = runtime
+        .handle_ipc(IpcRequest::PasteEntry(PasteEntryRequest {
+            id,
+            format: None,
+        }))
+        .await;
+
+    assert!(matches!(response, IpcResponse::Error(_)));
+    assert!(
+        mutations.has_changed().expect("channel should be open"),
+        "the successful copy-back must publish its ranking mutation",
+    );
+    let entry = runtime
+        .get_entry(id)
+        .await
+        .expect("load entry")
+        .expect("entry should exist");
+    assert_eq!(entry.metadata.use_count, 1);
 }
 
 #[tokio::test]

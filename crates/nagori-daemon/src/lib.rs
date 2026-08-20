@@ -15,7 +15,9 @@ pub use health::{
     StartupHealth,
 };
 pub use maintenance::{MaintenanceReport, MaintenanceService};
-pub use runtime::{NagoriRuntime, NagoriRuntimeBuilder, ShutdownHandle};
+pub use runtime::{
+    ClipboardLease, ClipboardPublish, NagoriRuntime, NagoriRuntimeBuilder, ShutdownHandle,
+};
 pub use search_cache::{
     CACHEABLE_QUERY_LEN, CacheKey, CacheLookup, DEFAULT_CACHE_CAPACITY, RecentSearchCache,
     SharedSearchCache, new_shared_cache,

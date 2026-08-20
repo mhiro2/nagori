@@ -40,6 +40,29 @@ Linux conventions are presence-only secret markers (no transient
 analogue), so they map to the same `Concealed` skip path; see
 [`docs/privacy.md`](./privacy.md#owner-exclusion-markers-all-platforms-always-on).
 
+Auto-paste is verified before the keystroke fires: the daemon re-reads the OS
+clipboard sequence right before synthesising ⌘/Ctrl+V and refuses to paste when
+the clipboard no longer holds the clip it just published (another app copied
+during the focus handoff). Windows' `GetClipboardSequenceNumber` is stable
+across suspend/resume. macOS `changeCount` can lap across sleep, so a publish
+that reaches the same 30-second host-pause threshold used by capture is refused
+even when the counter still matches; trusting that collision could paste a
+foreign post-wake clip. A backwards wall-clock step also makes that age
+unknowable and fails closed on macOS. Linux Wayland exposes no authoritative
+native counter, so there the check reports *unverifiable* and the paste
+proceeds. A probe that fails on macOS or Windows is treated the same as a
+changed clipboard rather than waved through. When the check trips, the copy has
+already landed and the palette says the clipboard changed and nothing was
+pasted — copy again to retry.
+
+The check covers the window a person can act in (the focus handoff), not the
+milliseconds around the keystroke itself: no OS offers an atomic
+write-and-sequence, nor any acknowledgement that the target app has read the
+clipboard. Nagori holds its internal clipboard lease for 60ms past the
+synthesised keystroke, which keeps a queued copy out of the first 60ms of that
+gap and lowers the odds — a target app that gets round to the keystroke later
+can still read a clip someone else published.
+
 macOS-only capabilities: secure-input detection, sleep/wake
 `changeCount` resynchronisation, and Quick Look preview (Cmd+Y in
 the palette, dispatched through `/usr/bin/qlmanage -p`; restricted to

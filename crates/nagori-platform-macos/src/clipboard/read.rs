@@ -8,8 +8,8 @@ use nagori_core::{
     ReadBudget, Result,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, clipboard_blocking,
-    lock_clipboard_recovering, platform_err,
+    CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracking,
+    clipboard_blocking, lock_clipboard_recovering, platform_err,
 };
 use time::OffsetDateTime;
 
@@ -95,6 +95,18 @@ impl ClipboardReader for MacosClipboard {
 
     fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
         self.self_write.matches(sequence)
+    }
+
+    fn self_write_tracking(&self) -> SelfWriteTracking {
+        // Darwin's changeCount can lap across sleep/wake. The runtime may use
+        // it to verify a fresh publish, but must distrust a token old enough to
+        // have crossed a host pause. Off-target builds expose only an
+        // unsupported sequence and therefore cannot verify ownership.
+        if cfg!(target_os = "macos") {
+            SelfWriteTracking::MayLapAfterHostPause
+        } else {
+            SelfWriteTracking::Untracked
+        }
     }
 }
 

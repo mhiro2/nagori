@@ -121,9 +121,15 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Ack)
             }
             IpcRequest::PasteEntry(PasteEntryRequest { id, format }) => {
-                self.paste_entry(id, format).await?;
-                self.notify_external_mutation();
-                Ok(IpcResponse::Ack)
+                let result = self.paste_entry(id, format).await;
+                // Every classified paste failure happens after copy-back has
+                // already bumped use_count / last_used_at. In particular,
+                // ClipboardChanged deliberately refuses only the keystroke;
+                // the open desktop palette must still refresh its ranking.
+                if result.is_ok() || matches!(&result, Err(AppError::Paste { .. })) {
+                    self.notify_external_mutation();
+                }
+                result.map(|()| IpcResponse::Ack)
             }
             IpcRequest::DeleteEntry(DeleteEntryRequest { id }) => {
                 self.delete_entry(id).await?;
