@@ -244,11 +244,30 @@ pub(crate) fn bool_int(value: bool) -> i64 {
 /// column-filter `:` to leak through unescaped. Empty fragments are
 /// discarded so a query of pure punctuation returns the empty string,
 /// which the caller treats as "no FTS candidates".
-pub(crate) fn fts_query(query: &str) -> String {
+///
+/// [`nagori_core::FtsQueryMode::AsciiPrefix`] appends the FTS5 prefix marker
+/// outside the closing quote for pure ASCII-alphanumeric fragments of at
+/// least three bytes (`"clip"*`). Keeping the marker out of user input
+/// preserves the escaping guarantee, while short, punctuation-bearing, and
+/// non-ASCII phrases retain the whole-token form. The minimum length prevents
+/// one- and two-character prefixes from expanding across most of a dense
+/// vocabulary before `bm25` can apply the candidate limit.
+pub(crate) fn fts_query(query: &str, mode: nagori_core::FtsQueryMode) -> String {
+    const MIN_PREFIX_BYTES: usize = 3;
+
     query
         .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ':' | '*' | '"'))
         .filter(|part| !part.is_empty())
-        .map(|part| format!("\"{part}\""))
+        .map(|part| {
+            let prefix = matches!(mode, nagori_core::FtsQueryMode::AsciiPrefix)
+                && part.len() >= MIN_PREFIX_BYTES
+                && part.chars().all(|ch| ch.is_ascii_alphanumeric());
+            if prefix {
+                format!("\"{part}\"*")
+            } else {
+                format!("\"{part}\"")
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

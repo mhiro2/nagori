@@ -74,6 +74,24 @@ pub struct FtsCandidate {
     pub fts_score: f32,
 }
 
+/// How the full-text candidate fetch should interpret query tokens.
+///
+/// The orchestrator owns this policy because it depends on the resolved
+/// [`SearchPlan`], which the provider never sees:
+///
+/// * `WholeToken` — require complete FTS tokens. Explicit `FullText` searches
+///   retain this precise behavior.
+/// * `AsciiPrefix` — treat safe ASCII-alphanumeric query fragments of at least
+///   three characters as FTS prefixes. The implicit `Hybrid` (Auto) plan uses
+///   this to recall an old `clipboard` entry from `clip` even when it falls
+///   outside the bounded substring window. One- and two-character, non-ASCII,
+///   and punctuation-bearing fragments remain whole-token queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsQueryMode {
+    WholeToken,
+    AsciiPrefix,
+}
+
 /// Ngram hit returned by a [`SearchCandidateProvider`].
 ///
 /// `ngram_overlap` is the ratio in `[0.0, 1.0]` of query ngrams matched in the
@@ -94,12 +112,12 @@ pub struct NgramCandidate {
 /// * `Full` — use every query gram. The explicit `Fuzzy` plan needs this so
 ///   short ASCII typos (`needel` → `needle`) still match via gram overlap.
 /// * `CjkOnly` — keep only grams that contain a CJK character. The implicit
-///   `Hybrid` (Auto) plan uses this: ASCII word recall is already covered by
-///   FTS + the bounded substring scan, and common ASCII bigrams own huge
-///   posting lists that make the `gram IN (...)` union explode on large
-///   histories. Filtering to CJK grams preserves CJK and mixed-script recall
-///   while shedding that cost. A pure-ASCII query yields no CJK grams, so the
-///   fetch short-circuits to empty.
+///   `Hybrid` (Auto) plan uses this: ASCII token-prefix recall is already
+///   covered by FTS plus the bounded substring scan, and common ASCII bigrams
+///   own huge posting lists that make the `gram IN (...)` union explode on
+///   large histories. Filtering to CJK grams preserves CJK and mixed-script
+///   recall while shedding that cost. A pure-ASCII query yields no CJK grams,
+///   so the fetch short-circuits to empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NgramQueryMode {
     Full,
@@ -150,13 +168,15 @@ pub trait SearchCandidateProvider: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchCandidate>>;
 
-    /// Full-text matches with raw `bm25` scores attached. See
+    /// Full-text matches with raw `bm25` scores attached. `mode` carries the
+    /// plan-level token policy (see [`FtsQueryMode`]). See
     /// [`Self::recent_entries`] for `cancel`.
     async fn fulltext_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
         budget: SearchCandidateBudget,
+        mode: FtsQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>>;
 
@@ -377,9 +397,10 @@ where
         let want_fts = matches!(plan, SearchPlan::FullText | SearchPlan::Hybrid);
         // Ngram fan-out runs for `Fuzzy` (full grams — its typo tolerance comes
         // from gram overlap) and for `Hybrid` *only when the query carries CJK*.
-        // A pure-ASCII `Hybrid` query is fully served by FTS + bounded
-        // substring, so we skip even dispatching the blocking ngram fetch and
-        // dodge the common-bigram posting-list explosion on large histories.
+        // A pure-ASCII `Hybrid` query is served by bounded substring plus FTS
+        // whole tokens / prefixes of at least three characters, so we skip
+        // even dispatching the blocking ngram fetch and dodge the common-
+        // bigram posting-list explosion on large histories.
         // Mixed CJK+ASCII queries still reach the provider, where
         // `NgramQueryMode::CjkOnly` strips the costly ASCII grams.
         let want_ngram = match plan {
@@ -391,6 +412,11 @@ where
             NgramQueryMode::CjkOnly
         } else {
             NgramQueryMode::Full
+        };
+        let fts_mode = if matches!(plan, SearchPlan::Hybrid) {
+            FtsQueryMode::AsciiPrefix
+        } else {
+            FtsQueryMode::WholeToken
         };
         let branch_count =
             usize::from(want_substring) + usize::from(want_fts) + usize::from(want_ngram);
@@ -429,7 +455,7 @@ where
         let fts_fut = async {
             if want_fts {
                 self.provider
-                    .fulltext_candidates(normalized, filters, branch_budget, cancel)
+                    .fulltext_candidates(normalized, filters, branch_budget, fts_mode, cancel)
                     .await
             } else {
                 Ok(Vec::new())
@@ -503,6 +529,7 @@ mod tests {
         fts: Vec<FtsCandidate>,
         ngram: Vec<NgramCandidate>,
         seen: Mutex<Vec<&'static str>>,
+        fts_mode: Mutex<Option<FtsQueryMode>>,
         ngram_mode: Mutex<Option<NgramQueryMode>>,
         recent_limit: Mutex<Option<usize>>,
         branch_budgets: Mutex<Vec<SearchCandidateBudget>>,
@@ -541,9 +568,11 @@ mod tests {
             _normalized: &str,
             _filters: &SearchFilters,
             budget: SearchCandidateBudget,
+            mode: FtsQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<FtsCandidate>> {
             self.seen.lock().unwrap().push("fts");
+            *self.fts_mode.lock().unwrap() = Some(mode);
             self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.fts.clone())
         }
@@ -706,6 +735,10 @@ mod tests {
 
         assert_eq!(calls, vec!["substring", "fts", "ngram"]);
         assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::AsciiPrefix)
+        );
+        assert_eq!(
             *provider.ngram_mode.lock().unwrap(),
             Some(NgramQueryMode::CjkOnly)
         );
@@ -737,9 +770,9 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_ascii_query_skips_ngram() {
-        // Pure-ASCII Auto queries are served by FTS + bounded substring; ngram
-        // is not dispatched at all, so the common-bigram posting-list scan
-        // never runs. This is the fix for the 100k fan-out blowup.
+        // Pure-ASCII Auto queries are served by bounded substring plus FTS
+        // whole tokens / prefixes of at least three characters. Ngram is not
+        // dispatched, so the common-bigram posting-list scan never runs.
         let provider = StubProvider {
             substring: vec![entry("alpha")],
             fts: vec![FtsCandidate {
@@ -759,6 +792,10 @@ mod tests {
         let calls = provider.seen.lock().unwrap().clone();
 
         assert_eq!(calls, vec!["substring", "fts"], "ngram must not run");
+        assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::AsciiPrefix)
+        );
         assert!(provider.ngram_mode.lock().unwrap().is_none());
         assert_eq!(results.len(), 2);
     }
@@ -856,6 +893,10 @@ mod tests {
         let results = svc.search(q).await.unwrap();
 
         let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::WholeToken)
+        );
         assert_eq!(scores.len(), 2);
         assert!(scores[0] >= scores[1]);
         // Top score must come from the strongest |fts| signal (5.0 → 6.0).
@@ -963,6 +1004,7 @@ mod tests {
             _normalized: &str,
             _filters: &SearchFilters,
             _budget: SearchCandidateBudget,
+            _mode: FtsQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<FtsCandidate>> {
             if self.fail_on == "fts" {

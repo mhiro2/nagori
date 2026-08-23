@@ -26,8 +26,9 @@ pub use policy::{
 };
 pub use repositories::{AuditLog, EntryRepository, SearchRepository, SettingsRepository};
 pub use services::{
-    FtsCandidate, MAX_RESULT_LIMIT, MAX_SEARCH_CANDIDATE_BYTES, NgramCandidate, NgramQueryMode,
-    Ranker, SearchCandidateBudget, SearchCandidateProvider, SearchPlan, SearchService,
+    FtsCandidate, FtsQueryMode, MAX_RESULT_LIMIT, MAX_SEARCH_CANDIDATE_BYTES, NgramCandidate,
+    NgramQueryMode, Ranker, SearchCandidateBudget, SearchCandidateProvider, SearchPlan,
+    SearchService,
 };
 pub use settings::{
     AiSettings, AppDenyRule, AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT,

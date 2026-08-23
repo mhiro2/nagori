@@ -2,10 +2,10 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use nagori_core::{
-    CANDIDATE_METADATA_MAX_CHARS, ClipboardEntry, EntryId, FtsCandidate, NgramCandidate,
-    NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder, Result, SearchCandidate, SearchCandidateBudget,
-    SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery, SearchRepository,
-    SearchResult, SearchService,
+    CANDIDATE_METADATA_MAX_CHARS, ClipboardEntry, EntryId, FtsCandidate, FtsQueryMode,
+    NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder, Result, SearchCandidate,
+    SearchCandidateBudget, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
+    SearchRepository, SearchResult, SearchService,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_document_ngrams, generate_query_ngrams, has_cjk,
@@ -478,9 +478,10 @@ impl SearchCandidateProvider for SqliteStore {
         normalized: &str,
         filters: &SearchFilters,
         budget: SearchCandidateBudget,
+        mode: FtsQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>> {
-        let fts = fts_query(normalized);
+        let fts = fts_query(normalized, mode);
         if fts.is_empty() {
             return Ok(Vec::new());
         }
@@ -551,12 +552,13 @@ impl SearchCandidateProvider for SqliteStore {
         }
         match mode {
             // Hybrid (Auto): keep only grams that carry a CJK character. ASCII
-            // word recall is already served by FTS + the bounded substring
-            // scan, and common ASCII bigrams own huge posting lists whose
-            // `gram IN (...)` union explodes on large histories (the 100k
-            // fan-out blowup). A pure-ASCII query leaves no grams here and
-            // short-circuits to empty; mixed CJK+ASCII queries keep just their
-            // CJK / boundary grams, so the costly ASCII postings never load.
+            // token-prefix recall is already served by FTS + the bounded
+            // substring scan, and common ASCII bigrams own huge posting lists
+            // whose `gram IN (...)` union explodes on large histories (the
+            // 100k fan-out blowup). A pure-ASCII query leaves no grams here
+            // and short-circuits to empty; mixed CJK+ASCII queries keep just
+            // their CJK / boundary grams, so the costly ASCII postings never
+            // load.
             NgramQueryMode::CjkOnly => {
                 query_grams.retain(|gram| has_cjk(gram));
                 if query_grams.is_empty() {
