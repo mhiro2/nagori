@@ -28,6 +28,7 @@ const PASTE_FAILURE_REASONS = [
   'timeout',
   'synthUnsupported',
   'previousAppLost',
+  'clipboardChanged',
   'unknown',
 ] as const satisfies readonly PasteFailureReason[];
 

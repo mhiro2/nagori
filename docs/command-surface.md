@@ -60,7 +60,7 @@ Mutates local state — the clipboard, history rows, pins, or settings.
 | --- | --- | --- |
 | `copy_entry` | internal | Write an entry to the system clipboard; bump use-count. |
 | `copy_entry_from_palette` | palette | Copy, hide the palette, restore source focus. |
-| `copy_entries_combined` | palette | Join selected text and copy it. **Also inserts a new history entry** for the joined text (surfaced in the palette's multi-select hint). |
+| `copy_entries_combined` | palette | Join selected text and copy it. **Also inserts a new history entry** for the joined text (surfaced in the palette's multi-select hint). Duplicate ids are collapsed, the selection is capped at 100 entries, and the join is refused once it would exceed `max_entry_size_bytes` — an over-limit selection touches neither the database nor the clipboard. |
 | `add_entry` | internal | Insert a manually-supplied text entry. |
 | `pin_entry` | palette | Toggle an entry's pin flag. |
 | `set_capture_enabled` | palette | Persist the capture pause/resume toggle. |

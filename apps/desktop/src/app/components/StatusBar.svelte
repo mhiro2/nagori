@@ -134,6 +134,8 @@
         return hint.synthUnsupported;
       case 'previousAppLost':
         return hint.previousAppLost;
+      case 'clipboardChanged':
+        return hint.clipboardChanged;
       case 'accessibilityMissing':
         return hint.accessibilityMissing;
       default:

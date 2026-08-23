@@ -21,6 +21,18 @@ pub const MAX_IPC_BYTES: usize = 1024 * 1024;
 /// the daemon stores but neither the desktop nor the CLI can read back.
 pub const MAX_ENTRY_SIZE_BYTES: usize = (MAX_IPC_BYTES * 3) / 4;
 
+/// Hard cap on how many entries one "copy selection as one clip" action may
+/// join.
+///
+/// The joined text is a single clipboard entry, so it is already bounded by
+/// `max_entry_size_bytes`. This cap bounds the *work* instead: without it a
+/// selection of N entries makes the daemon read N full bodies out of storage
+/// before discovering that the join cannot fit, so a large multi-selection of
+/// maximum-size entries would allocate hundreds of megabytes only to fail. 100
+/// is far above any plausible hand-made selection (the palette shows 200
+/// results at most) while keeping the pre-failure read work bounded.
+pub const MAX_COMBINED_COPY_ENTRIES: usize = 100;
+
 /// Hard cap on decoded image pixel count for clipboard image captures and
 /// copy-back.
 ///

@@ -52,8 +52,11 @@ pub enum AppError {
     /// Auto-paste (synthetic Cmd/Ctrl+V) failed. Carries a classified
     /// [`PasteFailureReason`] alongside the diagnostic message so surfaces can
     /// render a targeted hint instead of a raw string. The clipboard write
-    /// itself has already succeeded by the time this is raised, so callers
-    /// keep the "copy succeeded — paste manually" framing.
+    /// itself has already succeeded by the time this is raised, so callers keep
+    /// the "copy succeeded — paste manually" framing — except for
+    /// [`PasteFailureReason::ClipboardChanged`], where the clipboard no longer
+    /// holds the copied entry and "paste manually" would tell the user to paste
+    /// someone else's content; that one asks them to copy again.
     #[error("paste error: {message}")]
     Paste {
         reason: PasteFailureReason,
@@ -104,7 +107,9 @@ impl AppError {
 /// Platform adapters tag the failures they raise (`AccessibilityMissing` on
 /// macOS, `ToolMissing` / `Timeout` on Linux Wayland, …); the desktop command
 /// layer adds `PreviousAppLost` for the focus-restore step that lives above
-/// the platform adapter. The variants map onto the same remediation surfaces
+/// the platform adapter, and the daemon's clipboard coordinator adds
+/// `ClipboardChanged` when the clip it published is no longer the one the OS
+/// would paste. The variants map onto the same remediation surfaces
 /// `nagori doctor` already reports (Accessibility permission, the `wtype`
 /// external tool), so the UI hint and the doctor diagnostic stay consistent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +126,12 @@ pub enum PasteFailureReason {
     /// The app the user copied from could not be re-focused before the
     /// synthesised keystroke, so the paste would have landed in Nagori itself.
     PreviousAppLost,
+    /// The clipboard no longer holds the entry this paste published, so the
+    /// keystroke would have pasted someone else's content into the target
+    /// app. Raised when another publish or an external app's own copy lands
+    /// between the copy-back and the synthesised keystroke; the copy itself
+    /// already happened, so the user can re-copy and paste manually.
+    ClipboardChanged,
     /// Anything else — e.g. Windows `SendInput` rejected by UIPI, or an
     /// unexpected internal failure on the paste path.
     Unknown,
@@ -137,6 +148,7 @@ impl PasteFailureReason {
             Self::Timeout => "timeout",
             Self::SynthUnsupported => "synthUnsupported",
             Self::PreviousAppLost => "previousAppLost",
+            Self::ClipboardChanged => "clipboardChanged",
             Self::Unknown => "unknown",
         }
     }
@@ -171,6 +183,10 @@ mod tests {
         assert_eq!(
             PasteFailureReason::PreviousAppLost.token(),
             "previousAppLost"
+        );
+        assert_eq!(
+            PasteFailureReason::ClipboardChanged.token(),
+            "clipboardChanged"
         );
         assert_eq!(PasteFailureReason::Unknown.token(), "unknown");
     }

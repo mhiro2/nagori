@@ -132,6 +132,7 @@ fn build_native_runtime_inner(
     let runtime = assemble_runtime(
         store,
         clipboard,
+        clipboard_reader.clone(),
         Arc::new(MacosPasteController),
         Arc::new(MacosPermissionChecker),
         options,
@@ -164,6 +165,7 @@ fn build_native_runtime_inner(
     let runtime = assemble_runtime(
         store,
         clipboard,
+        clipboard_reader.clone(),
         Arc::new(WindowsPasteController),
         Arc::new(WindowsPermissionChecker),
         options,
@@ -198,6 +200,7 @@ fn build_native_runtime_inner(
     let runtime = assemble_runtime(
         store,
         clipboard,
+        clipboard_reader.clone(),
         Arc::new(LinuxPasteController),
         Arc::new(LinuxPermissionChecker),
         options,
@@ -224,6 +227,7 @@ fn build_native_runtime_inner(
 fn assemble_runtime<C, P, K>(
     store: SqliteStore,
     clipboard: Arc<C>,
+    clipboard_reader: Arc<dyn ClipboardReader>,
     paste: Arc<P>,
     permissions: Arc<K>,
     options: NativeRuntimeOptions,
@@ -233,8 +237,12 @@ where
     P: nagori_platform::PasteController + 'static,
     K: nagori_platform::PermissionChecker + 'static,
 {
+    // The reader is the same adapter object as the writer, so the runtime's
+    // pre-paste "is my clip still on the clipboard" check sees this process's
+    // own self-write marker rather than a second adapter's view.
     let mut builder = NagoriRuntime::builder(store)
         .clipboard(clipboard)
+        .clipboard_reader(clipboard_reader)
         .paste(paste)
         .permissions(permissions)
         .capabilities(capabilities());

@@ -120,7 +120,17 @@ payload shape.
 ```
 
 `PasteEntry.format` is optional (`PasteFormat`, `"preserve"` / `"plain_text"`);
-omit it to paste with the entry's preserved formatting. `RunQuickAction` runs a
+omit it to paste with the entry's preserved formatting. `CopyEntry` and
+`PasteEntry` are serialised process-wide: the clipboard write and the
+synthesised keystroke are one operation, so concurrent connections queue rather
+than publishing over each other's clip. A `PasteEntry` whose clip is no longer
+on the clipboard by the time the keystroke would fire (an external app copied in
+between) answers `paste_error` with a message saying the clipboard changed and
+nothing was pasted — the copy itself landed. The IPC envelope carries no
+structured paste reason (`code` / `message` / `recoverable` only); the
+`PasteFailureReason` token that drives the localized desktop hint is
+in-process state, so an IPC client distinguishes these cases by message, not by
+code. `RunQuickAction` runs a
 deterministic on-device transform (`"FormatJson"`, `"ExtractTasks"`,
 `"RedactSecrets"`, `"SummarizeFirstSentence"`) — distinct from the model-backed
 `RunAiAction`. `Clear` is an externally-tagged enum: `"All"` wipes every

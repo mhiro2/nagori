@@ -380,6 +380,7 @@ export type PasteFailureReason =
   | 'timeout'
   | 'synthUnsupported'
   | 'previousAppLost'
+  | 'clipboardChanged'
   | 'unknown';
 export type RecentOrder = 'by_recency' | 'by_use_count' | 'pinned_first_then_recency';
 export type Appearance = 'light' | 'dark' | 'system';

@@ -1,4 +1,6 @@
 use std::fmt::Display;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -16,6 +18,24 @@ use time::OffsetDateTime;
 /// most recent read; sharing the bound here keeps the two adapters from
 /// drifting apart.
 pub const SNAPSHOT_CAPTURE_MAX_RETRIES: usize = 3;
+
+/// How authoritative an adapter's self-write sequence is.
+///
+/// Native clipboard counters are not all equally stable. Windows' sequence
+/// number remains usable across suspend/resume, while macOS `changeCount` can
+/// lap and collide with an older value after the host wakes. Keeping that
+/// distinction in one enum prevents a verifier from accidentally treating
+/// "tracked" as "always monotonic".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfWriteTracking {
+    /// The adapter does not record self-writes against an authoritative
+    /// sequence, so callers cannot verify ownership from the sequence alone.
+    Untracked,
+    /// The native sequence remains authoritative across host pauses.
+    Stable,
+    /// The native sequence can collide with an older value after a host pause.
+    MayLapAfterHostPause,
+}
 
 /// A clipboard owner's explicit "do not record this in history" marker.
 ///
@@ -82,14 +102,12 @@ pub enum CapturedSnapshot {
 /// in) the history.
 ///
 /// The check is a non-consuming peek: it stays valid until the next write
-/// overwrites it. This is correct for adapters whose sequence is a monotonic
-/// native counter (macOS `changeCount`, Windows `GetClipboardSequenceNumber`),
-/// where a later sequence can never collide with an earlier self-write — with
-/// one deliberate exception the capture loop owns: a macOS `changeCount` can
-/// *lap* across a sleep/wake cycle, so the loop ignores this marker while its
-/// wake-gap resync flag is armed and re-reads the body instead, rather than
-/// risk dropping a post-wake foreign clip whose lapped sequence collides with
-/// our last self-write. Adapters whose "sequence" is a content hash (the
+/// overwrites it. Windows' monotonic `GetClipboardSequenceNumber` cannot
+/// collide with an earlier self-write. macOS `changeCount` can *lap* across a
+/// sleep/wake cycle, so consumers apply host-pause defences before trusting
+/// it: capture re-reads the body while its wake-gap resync flag is armed, and
+/// auto-paste refuses a publish old enough to have crossed that same gap.
+/// Adapters whose "sequence" is a content hash (the
 /// Wayland fallback) would need to clear the marker once the clipboard moves
 /// on, to avoid suppressing an identical clip the user later copies from
 /// another app; they are not wired yet and keep the default.
@@ -149,6 +167,29 @@ pub trait ClipboardReader: Send + Sync {
     fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
         let _ = sequence;
         false
+    }
+
+    /// How authoritative [`Self::matches_self_write`] is on this adapter.
+    ///
+    /// The daemon's clipboard coordinator verifies, right before it
+    /// synthesises a paste, that the clipboard still holds the clip it just
+    /// published — `current_sequence` + `matches_self_write`. That check is
+    /// only meaningful where the adapter both maintains a
+    /// [`SelfWriteTracker`] and reports a native sequence. Adapters whose
+    /// sequence is a content hash (the Wayland fallback) keep the
+    /// [`SelfWriteTracking::Untracked`] default: they never record self-writes,
+    /// so the check would report "changed" for every paste and degrade
+    /// auto-paste to copy-only. The coordinator treats that state as
+    /// *unverifiable* and pastes anyway, preserving today's behaviour there.
+    ///
+    /// A tracked answer still is not exact: `record` samples the sequence a few
+    /// instructions after the write lands, so the sub-millisecond race
+    /// documented on [`SelfWriteTracker`] applies to the coordinator's check
+    /// too, as does the gap between the probe and the keystroke it guards. It
+    /// covers the window a person can act in, not the instructions and
+    /// milliseconds around the write itself.
+    fn self_write_tracking(&self) -> SelfWriteTracking {
+        SelfWriteTracking::Untracked
     }
 
     /// Like [`Self::current_sequence`], but allows platforms that must read
@@ -218,8 +259,43 @@ fn oversized_kind(snapshot: &ClipboardSnapshot, budget: ReadBudget) -> Option<(u
     })
 }
 
+/// An adapter write whose cancellable preparation has completed.
+///
+/// Image decode and other CPU-only preparation belong before this value is
+/// created. Once [`Self::publish`] starts, the future may already have handed
+/// an uncancellable operation to the OS, so its caller must keep any
+/// serialisation guard alive until it returns.
+#[must_use]
+pub struct PreparedClipboardWrite {
+    publish: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+}
+
+impl std::fmt::Debug for PreparedClipboardWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedClipboardWrite")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedClipboardWrite {
+    /// Wrap the OS-publish half of an adapter write.
+    pub fn new<F>(publish: F) -> Self
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self {
+            publish: Box::pin(publish),
+        }
+    }
+
+    /// Perform the prepared OS write.
+    pub async fn publish(self) -> Result<()> {
+        self.publish.await
+    }
+}
+
 #[async_trait]
-pub trait ClipboardWriter: Send + Sync {
+pub trait ClipboardWriter: Send + Sync + 'static {
     async fn write_entry(&self, entry: &ClipboardEntry) -> Result<()>;
     async fn write_plain(&self, entry: &ClipboardEntry) -> Result<()>;
     async fn write_text(&self, text: &str) -> Result<()>;
@@ -267,6 +343,51 @@ pub trait ClipboardWriter: Send + Sync {
             "this clipboard adapter cannot publish a single representation".to_owned(),
         ))
     }
+
+    /// Prepare a primary-content write without touching the OS clipboard.
+    ///
+    /// The default adapter has no asynchronous preparation. Platforms with a
+    /// CPU-heavy conversion step override this method and complete it here,
+    /// before returning the OS-only [`PreparedClipboardWrite`].
+    async fn prepare_entry(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        Ok(PreparedClipboardWrite::new(async move {
+            self.write_entry(&entry).await
+        }))
+    }
+
+    /// Prepare a plain-text fallback write without touching the OS clipboard.
+    async fn prepare_plain(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        Ok(PreparedClipboardWrite::new(async move {
+            self.write_plain(&entry).await
+        }))
+    }
+
+    /// Prepare a multi-representation write without touching the OS clipboard.
+    async fn prepare_representations(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<PreparedClipboardWrite> {
+        Ok(PreparedClipboardWrite::new(async move {
+            self.write_representations(&entry, &representations).await
+        }))
+    }
+
+    /// Prepare an exact-representation write without touching the OS clipboard.
+    async fn prepare_representation_exact(
+        self: Arc<Self>,
+        representation: StoredClipboardRepresentation,
+    ) -> Result<PreparedClipboardWrite> {
+        Ok(PreparedClipboardWrite::new(async move {
+            self.write_representation_exact(&representation).await
+        }))
+    }
 }
 
 #[async_trait]
@@ -281,6 +402,10 @@ impl<T: ClipboardReader + ?Sized> ClipboardReader for Arc<T> {
 
     fn matches_self_write(&self, sequence: &ClipboardSequence) -> bool {
         (**self).matches_self_write(sequence)
+    }
+
+    fn self_write_tracking(&self) -> SelfWriteTracking {
+        (**self).self_write_tracking()
     }
 
     async fn current_sequence_with_max(&self, budget: ReadBudget) -> Result<ClipboardSequence> {
@@ -319,6 +444,39 @@ impl<T: ClipboardWriter + ?Sized> ClipboardWriter for Arc<T> {
         representation: &StoredClipboardRepresentation,
     ) -> Result<()> {
         (**self).write_representation_exact(representation).await
+    }
+
+    async fn prepare_entry(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        Self::clone(self.as_ref()).prepare_entry(entry).await
+    }
+
+    async fn prepare_plain(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+    ) -> Result<PreparedClipboardWrite> {
+        Self::clone(self.as_ref()).prepare_plain(entry).await
+    }
+
+    async fn prepare_representations(
+        self: Arc<Self>,
+        entry: ClipboardEntry,
+        representations: Vec<StoredClipboardRepresentation>,
+    ) -> Result<PreparedClipboardWrite> {
+        Self::clone(self.as_ref())
+            .prepare_representations(entry, representations)
+            .await
+    }
+
+    async fn prepare_representation_exact(
+        self: Arc<Self>,
+        representation: StoredClipboardRepresentation,
+    ) -> Result<PreparedClipboardWrite> {
+        Self::clone(self.as_ref())
+            .prepare_representation_exact(representation)
+            .await
     }
 }
 

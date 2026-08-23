@@ -5,6 +5,7 @@
 //! responsibility; each adds an `impl NagoriRuntime` block for its methods:
 //!
 //! - [`entries`] — capture, copy/paste, list, delete, pin.
+//! - [`clipboard`] — the lease that serialises clipboard publishes and pastes.
 //! - [`search`] — the cached search entry point and cache handle.
 //! - [`settings`] — settings read/write, onboarding markers, permission probes.
 //! - [`actions`] — quick (deterministic) and model-backed AI actions.
@@ -21,8 +22,9 @@ use nagori_ai::{AiActionEngine, QuickActionRunner};
 use nagori_core::{AppError, AppSettings};
 use nagori_ipc::IpcServerHealth;
 use nagori_platform::{
-    Capability, ClipboardWriter, MemoryClipboard, NO_AI_ENGINE_REASON, NoopPasteController,
-    PasteController, PermissionChecker, PlatformCapabilities, unsupported_capabilities,
+    Capability, ClipboardReader, ClipboardWriter, MemoryClipboard, NO_AI_ENGINE_REASON,
+    NoopPasteController, PasteController, PermissionChecker, PlatformCapabilities,
+    unsupported_capabilities,
 };
 use nagori_storage::SqliteStore;
 use tokio::sync::{Mutex as AsyncMutex, watch};
@@ -32,9 +34,13 @@ use crate::health::{CaptureHealth, MaintenanceHealth, StartupHealth};
 use crate::search_cache::{SharedSearchCache, new_shared_cache};
 use crate::thumbnails::ThumbnailGate;
 
+use self::clipboard::ClipboardCoordinator;
 use self::doctor::UpdateProbeState;
 
+pub use self::clipboard::{ClipboardLease, ClipboardPublish};
+
 mod actions;
+mod clipboard;
 mod doctor;
 mod entries;
 mod search;
@@ -48,6 +54,16 @@ mod tests;
 pub struct NagoriRuntime {
     pub(crate) store: SqliteStore,
     clipboard: Arc<dyn ClipboardWriter>,
+    /// The same adapter as `clipboard` wherever the host wires one, held as a
+    /// reader so the paste path can re-check that the clip it published is
+    /// still the one the OS would paste (see [`ClipboardLease`]). `None` for
+    /// hosts and tests that only wire a writer; the check then reports
+    /// "unverifiable" and the paste proceeds as before.
+    clipboard_reader: Option<Arc<dyn ClipboardReader>>,
+    /// Serialises every clipboard publish — and the synthetic paste that may
+    /// follow it — across the whole process. See [`clipboard`](self::clipboard)
+    /// for why the pair has to be one operation.
+    clipboard_coordinator: ClipboardCoordinator,
     paste: Arc<dyn PasteController>,
     /// Model-backed AI engine. `None` on platforms with no wired backend
     /// (currently everything but macOS); AI actions are refused there while
@@ -164,6 +180,7 @@ impl NagoriRuntime {
         NagoriRuntimeBuilder {
             store,
             clipboard: None,
+            clipboard_reader: None,
             paste: None,
             ai_engine: None,
             permissions: None,
@@ -334,6 +351,7 @@ pub(crate) fn elapsed_ms(started: Instant) -> u64 {
 pub struct NagoriRuntimeBuilder {
     store: SqliteStore,
     clipboard: Option<Arc<dyn ClipboardWriter>>,
+    clipboard_reader: Option<Arc<dyn ClipboardReader>>,
     paste: Option<Arc<dyn PasteController>>,
     ai_engine: Option<Arc<dyn AiActionEngine>>,
     permissions: Option<Arc<dyn PermissionChecker>>,
@@ -347,6 +365,19 @@ impl NagoriRuntimeBuilder {
     #[must_use]
     pub fn clipboard(mut self, clipboard: Arc<dyn ClipboardWriter>) -> Self {
         self.clipboard = Some(clipboard);
+        self
+    }
+
+    /// Wires the read side of the same clipboard adapter passed to
+    /// [`Self::clipboard`].
+    ///
+    /// Only the paste path uses it, and only to answer "is the clip I just
+    /// published still the one the OS would paste" before synthesising the
+    /// keystroke. Leave it unset and that check reports "unverifiable" — the
+    /// paste still runs, exactly as it did before the check existed.
+    #[must_use]
+    pub fn clipboard_reader(mut self, reader: Arc<dyn ClipboardReader>) -> Self {
+        self.clipboard_reader = Some(reader);
         self
     }
 
@@ -491,6 +522,8 @@ impl NagoriRuntimeBuilder {
         NagoriRuntime {
             store: self.store,
             clipboard,
+            clipboard_reader: self.clipboard_reader,
+            clipboard_coordinator: ClipboardCoordinator::default(),
             paste,
             ai_engine: self.ai_engine,
             quick_runner: Arc::new(QuickActionRunner::new()),
