@@ -1,6 +1,7 @@
 use nagori_core::{
-    AppError, ContentKind, EntryFactory, EntryId, EntryRepository, RankReason, RecentOrder,
-    SearchFilters, SearchMode, SearchQuery,
+    AppError, ContentKind, EntryFactory, EntryId, EntryRepository, MAX_ENTRY_SIZE_BYTES,
+    MAX_SEARCH_CANDIDATE_BYTES, PREVIEW_MAX_CHARS, RankReason, RecentOrder, SearchCandidate,
+    SearchCandidateBudget, SearchFilters, SearchMode, SearchQuery, TextMatch,
 };
 use nagori_search::normalize_text;
 use time::OffsetDateTime;
@@ -38,6 +39,166 @@ fn fts_query_returns_empty_for_pure_punctuation() {
     assert!(fts_query(":*").is_empty());
     assert!(fts_query("\"\"").is_empty());
     assert!(fts_query("   ").is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_computes_typed_text_matches_without_projecting_document_text() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let exact = insert_text(&store, "needle").await;
+    let prefix = insert_text(&store, "needle prefix").await;
+    let substring = insert_text(&store, "before needle after").await;
+    let candidates = store
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, 64 * 1024),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let signal = |id| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.entry_id == id)
+            .map(|candidate| candidate.text_match)
+    };
+    assert_eq!(signal(exact), Some(TextMatch::Exact));
+    assert_eq!(signal(prefix), Some(TextMatch::Prefix));
+    assert_eq!(signal(substring), Some(TextMatch::Substring));
+}
+
+#[tokio::test]
+async fn maximum_length_document_has_constant_size_candidate_projection() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let text = format!("needle {}", "x".repeat(MAX_ENTRY_SIZE_BYTES - 7));
+    let id = insert_text(&store, &text).await;
+    let candidates = store
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, 64 * 1024),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.entry_id == id)
+        .expect("maximum-length document should match");
+
+    assert_eq!(candidate.text_match, TextMatch::Prefix);
+    assert_eq!(candidate.normalized_char_count, text.len());
+    assert!(candidate.preview.chars().count() <= PREVIEW_MAX_CHARS);
+    assert!(candidate.owned_byte_count() < 4 * 1024);
+}
+
+#[tokio::test]
+async fn recent_candidate_recovers_bounded_preview_when_search_document_is_missing() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let text = format!("legacy preview {}", "x".repeat(PREVIEW_MAX_CHARS));
+    let id = insert_text(&store, &text).await;
+    store
+        .conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM search_documents WHERE entry_id = ?1",
+            rusqlite::params![id.to_string()],
+        )
+        .unwrap();
+
+    let candidates = store
+        .recent_entries(
+            &SearchFilters::default(),
+            RecentOrder::ByRecency,
+            SearchCandidateBudget::new(10, 64 * 1024),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.entry_id == id)
+        .expect("entry without a search document should remain visible");
+
+    assert!(candidate.preview.starts_with("legacy preview "));
+    assert_eq!(candidate.preview.chars().count(), PREVIEW_MAX_CHARS);
+    assert_eq!(candidate.normalized_char_count, 0);
+}
+
+#[tokio::test]
+async fn candidate_collection_honours_byte_budget_across_thousands_of_rows() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    const ROW_COUNT: usize = 5_000;
+    const BYTE_BUDGET: usize = 64 * 1024;
+    let store = SqliteStore::open_memory().unwrap();
+    let preview = "🦀".repeat(PREVIEW_MAX_CHARS);
+    let metadata = "界".repeat(nagori_core::CANDIDATE_METADATA_MAX_CHARS);
+    {
+        let mut conn = store.conn().unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 0..ROW_COUNT {
+            let id = EntryId::new().to_string();
+            let normalized = format!("candidate {index}");
+            tx.execute(
+                "INSERT INTO entries (
+                    id, content_kind, content_json, source_app_name, content_hash,
+                    representation_set_hash, sensitivity, created_at, updated_at
+                 ) VALUES (?1, 'text', '{}', ?2, ?1, ?1, 'public', ?3, ?3)",
+                rusqlite::params![id, metadata, "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO search_documents
+                    (entry_id, preview, normalized_text, language)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, preview, normalized, metadata],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let candidates = store
+        .recent_entries(
+            &SearchFilters::default(),
+            RecentOrder::ByRecency,
+            SearchCandidateBudget::new(ROW_COUNT, BYTE_BUDGET),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let allocation_bytes = candidates
+        .capacity()
+        .saturating_mul(std::mem::size_of::<SearchCandidate>())
+        .saturating_add(
+            candidates
+                .iter()
+                .map(SearchCandidate::owned_byte_count)
+                .sum::<usize>(),
+        );
+
+    assert!(!candidates.is_empty());
+    assert!(candidates.len() < ROW_COUNT);
+    assert!(allocation_bytes <= BYTE_BUDGET);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.preview.chars().count() <= PREVIEW_MAX_CHARS)
+    );
 }
 
 #[tokio::test]
@@ -206,11 +367,23 @@ async fn exact_substring_walks_full_corpus_unbounded() {
     }
     let cancel = CancellationToken::new();
     let bounded = store
-        .substring_candidates("needle", &SearchFilters::default(), 10, true, &cancel)
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            true,
+            &cancel,
+        )
         .await
         .unwrap();
     let unbounded = store
-        .substring_candidates("needle", &SearchFilters::default(), 10, false, &cancel)
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            false,
+            &cancel,
+        )
         .await
         .unwrap();
     // Both still find it on a 21-row DB (window is 5000), but the
@@ -244,7 +417,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             "needle",
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::CjkOnly,
             &cancel,
         )
@@ -260,7 +433,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             "needle",
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::Full,
             &cancel,
         )
@@ -277,7 +450,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             &normalize_text("alpha 設計"),
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::CjkOnly,
             &cancel,
         )
