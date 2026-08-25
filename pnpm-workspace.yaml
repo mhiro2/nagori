@@ -9,9 +9,9 @@ overrides:
 
 catalogs:
   frontend:
-    "@sveltejs/vite-plugin-svelte": 7.2.0
-    svelte: 5.56.8
-    svelte-check: 4.7.4
+    "@sveltejs/vite-plugin-svelte": 7.3.0
+    svelte: 5.56.9
+    svelte-check: 4.7.6
     vite: 8.2.1
   tauri:
     "@tauri-apps/api": 2.11.1
