@@ -19,15 +19,15 @@ fn fts_query_wraps_alnum_tokens_in_quotes() {
     );
     assert_eq!(
         fts_query("hello world", FtsQueryMode::AsciiPrefix),
-        r#""hello"* "world"*"#
+        r#"("hello" OR "hello"*) AND ("world" OR "world"*)"#
     );
     assert_eq!(
         fts_query("a ap app", FtsQueryMode::AsciiPrefix),
-        r#""a" "ap" "app"*"#
+        r#""a" AND "ap" AND ("app" OR "app"*)"#
     );
     assert_eq!(
         fts_query("hello-world 検索", FtsQueryMode::AsciiPrefix),
-        r#""hello-world" "検索""#
+        r#""hello-world" AND "検索""#
     );
 }
 
@@ -50,11 +50,11 @@ fn fts_query_strips_fts5_metacharacters() {
     );
     assert_eq!(
         fts_query("foo:bar*", FtsQueryMode::AsciiPrefix),
-        r#""foo"* "bar"*"#
+        r#"("foo" OR "foo"*) AND ("bar" OR "bar"*)"#
     );
     assert_eq!(
         fts_query(r#"say "hi""#, FtsQueryMode::AsciiPrefix),
-        r#""say"* "hi""#
+        r#"("say" OR "say"*) AND "hi""#
     );
 }
 

@@ -735,12 +735,14 @@ write does not stall search.
 `Substring`, or `None`) plus the document character count used by the long-text
 penalty, and projects only a capped preview and capped display metadata. This
 keeps a maximum-size clipboard body out of the thousands of branch hits that
-can coexist before deduplication. Every text search has one 4 MiB candidate
-allocation budget; `SearchService` divides it evenly across the active
-substring / FTS / ngram branches, and each provider stops collecting in SQL
-order before its vector slots plus owned strings would exceed that share.
-Duplicate branch hits merge their strongest `TextMatch` while FTS and ngram
-signals remain attached by entry id.
+can coexist before deduplication. Every text search has one 4 MiB budget for
+the provider branch vectors; `SearchService` divides it evenly across the
+active substring / FTS / ngram branches, and each provider stops collecting in
+SQL order before its vector slots plus owned strings would exceed that share.
+The merge step moves (never clones) candidates into one deduplicated vector,
+so its extra cost is bounded by the slot and index-map overhead of at most the
+same rows. Duplicate branch hits merge their strongest `TextMatch` while FTS
+and ngram signals remain attached by entry id.
 
 **Bounded admission + cancellation.** Each candidate fetch runs through
 `SqliteStore::run_search_blocking`, which adds two guards over the plain
@@ -765,7 +767,9 @@ ngram branch only fires for queries that carry a CJK character, and the
 orchestrator passes `NgramQueryMode::CjkOnly` so the provider keeps just
 the grams that contain a CJK char. ASCII recall is served by the bounded
 substring scan plus safe FTS token-prefix queries for fragments of at least
-three characters; shorter fragments stay whole-token queries so a common
+three characters (each written as `("tok" OR "tok"*)` so `bm25` ranks exact
+tokens ahead of prefix expansions before the candidate limit applies); shorter
+fragments stay whole-token queries so a common
 one- or two-character prefix cannot expand across most of the FTS vocabulary
 before `bm25` applies its result limit. Common ASCII bigrams have the same
 posting-list problem in the ngram index, where their `gram IN (...)` union
@@ -776,8 +780,9 @@ three characters onward. One- and two-character ASCII prefixes, accented
 Latin or Cyrillic prefixes, arbitrary infixes, and typos are limited to the
 bounded substring window unless they are complete FTS tokens; explicit
 `SearchMode::Fuzzy` remains the full-corpus option and runs the full gram set
-(`NgramQueryMode::Full`). Explicit `FullText` queries keep whole-token FTS
-semantics.
+(`NgramQueryMode::Full`; the provider still skips ngram for non-CJK queries
+longer than eight characters, which substring already covers). Explicit
+`FullText` queries keep whole-token FTS semantics.
 
 **Semantic plan.** `SearchMode::Semantic` resolves to its own plan but
 needs a query embedding, so `NagoriRuntime::search` routes it ahead of the

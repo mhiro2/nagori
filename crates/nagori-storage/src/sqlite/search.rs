@@ -59,17 +59,20 @@ const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
 /// memory failure mode.
 fn candidate_columns(text_match_sql: &str) -> String {
     // A stored `d.preview` is already `make_preview`-shaped and at most
-    // `PREVIEW_MAX_CHARS` long, so the cap is a no-op for it. The fallback
-    // body is raw text whose whitespace still has to be collapsed in Rust, so
-    // it gets a small overscan window (its own bounded allocation) and
-    // `row_to_candidate` finishes it with `make_preview` when
-    // `preview_is_fallback` is set.
+    // `PREVIEW_MAX_CHARS` long, so the trim and cap are no-ops for it. The
+    // fallback body is raw text: leading whitespace is trimmed in SQL, interior
+    // whitespace still has to be collapsed in Rust, so it gets a small overscan
+    // window (its own bounded allocation) and `row_to_candidate` finishes it
+    // with `make_preview` when `preview_is_fallback` is set. A body whose first
+    // window is dominated by whitespace runs yields a shorter preview than
+    // `make_preview` over the full text would; that is the accepted price for
+    // never pulling a full body into the candidate path.
     let fallback_scan_chars = PREVIEW_MAX_CHARS * FALLBACK_PREVIEW_OVERSCAN;
     format!(
         "e.id, e.content_kind, e.created_at, e.use_count, e.pinned,
          e.sensitivity,
          substr(e.source_app_name, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS source_app_name,
-         substr(COALESCE(d.preview, {FALLBACK_PLAIN_TEXT_SQL}, ''), 1, {fallback_scan_chars}) AS preview,
+         substr(ltrim(COALESCE(d.preview, {FALLBACK_PLAIN_TEXT_SQL}, ''), char(32, 9, 10, 13)), 1, {fallback_scan_chars}) AS preview,
          d.entry_id IS NULL AS preview_is_fallback,
          substr(d.language, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS language,
          COALESCE(length(d.normalized_text), 0) AS normalized_char_count,
@@ -129,10 +132,19 @@ impl<T> ByteBoundedVec<T> {
                 .capacity()
                 .saturating_sub(old_capacity)
                 .saturating_mul(slot_bytes);
-            self.used_bytes = self.used_bytes.saturating_add(actual_growth);
-            if self.used_bytes.saturating_add(owned_bytes) > self.max_bytes {
+            if self
+                .used_bytes
+                .saturating_add(actual_growth)
+                .saturating_add(owned_bytes)
+                > self.max_bytes
+            {
+                // `reserve_exact` may hand back more capacity than requested;
+                // give the overshoot back so the returned vector never holds
+                // an allocation the budget refused.
+                self.values.shrink_to(old_capacity);
                 return false;
             }
+            self.used_bytes = self.used_bytes.saturating_add(actual_growth);
         } else if self.used_bytes.saturating_add(owned_bytes) > self.max_bytes {
             return false;
         }

@@ -255,7 +255,8 @@ pub(crate) fn bool_int(value: bool) -> i64 {
 ///
 /// [`nagori_core::FtsQueryMode::AsciiPrefix`] appends the FTS5 prefix marker
 /// outside the closing quote for pure ASCII-alphanumeric fragments of at
-/// least three bytes (`"clip"*`). Keeping the marker out of user input
+/// least three bytes, OR-ed with the whole token (`("clip" OR "clip"*)`) so
+/// exact-token documents outscore prefix-only ones. Keeping the marker out of user input
 /// preserves the escaping guarantee, while short, punctuation-bearing, and
 /// non-ASCII phrases retain the whole-token form. The minimum length prevents
 /// one- and two-character prefixes from expanding across most of a dense
@@ -271,13 +272,22 @@ pub(crate) fn fts_query(query: &str, mode: nagori_core::FtsQueryMode) -> String 
                 && part.len() >= MIN_PREFIX_BYTES
                 && part.chars().all(|ch| ch.is_ascii_alphanumeric());
             if prefix {
-                format!("\"{part}\"*")
+                // Pair the whole token with its prefix form so `bm25` scores a
+                // document holding the exact token on both phrases and ranks it
+                // ahead of prefix-only expansions before the candidate LIMIT
+                // applies; otherwise dense prefix hits could evict exact hits.
+                format!("(\"{part}\" OR \"{part}\"*)")
             } else {
                 format!("\"{part}\"")
             }
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        // FTS5 only accepts implicit AND between bare phrases; a
+        // parenthesised group must be joined explicitly.
+        .join(match mode {
+            nagori_core::FtsQueryMode::WholeToken => " ",
+            nagori_core::FtsQueryMode::AsciiPrefix => " AND ",
+        })
 }
 
 /// Renders a timestamp as a UTC RFC 3339 string for storage.
