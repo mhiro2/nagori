@@ -3,6 +3,7 @@ use std::str::FromStr;
 use nagori_core::{
     AppError, ClipboardContent, ClipboardEntry, ContentHash, ContentKind, EntryId, EntryLifecycle,
     EntryMetadata, HashAlgorithm, Result, SearchCandidate, SearchDocument, Sensitivity, SourceApp,
+    TextMatch,
 };
 use nagori_search::normalize_text;
 use rusqlite::Row;
@@ -80,12 +81,9 @@ pub(crate) fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipboardEntry> {
 
 /// Search-path projection of a candidate row into the fields ranking reads.
 ///
-/// `candidate_content_json` is a CASE-gated copy of `content_json` the
-/// candidate queries emit only for image rows (the result row surfaces pixel
-/// dimensions) and for rows missing their `search_documents` join (the
-/// preview / normalized-text fallback needs the body) — for ordinary text
-/// candidates it is NULL, so the potentially large entry body is never
-/// deserialized on the per-keystroke search path.
+/// `candidate_content_json` is a CASE-gated copy of `content_json` emitted only
+/// for image rows whose result needs pixel dimensions. Text-shaped candidates
+/// never deserialize a body, and `normalized_text` never appears in this row.
 pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidate> {
     let entry_id = EntryId::from_str(&row.get::<_, String>("id")?)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
@@ -97,27 +95,48 @@ pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidat
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
         })
         .transpose()?;
-    let fallback_text = || {
-        content
-            .as_ref()
-            .and_then(ClipboardContent::plain_text)
-            .unwrap_or_default()
-    };
-    let normalized_text = match row.get::<_, Option<String>>("normalized_text")? {
-        Some(text) => text,
-        None => normalize_text(fallback_text()),
-    };
-    let preview = match row.get::<_, Option<String>>("preview")? {
-        Some(preview) => preview,
-        None => nagori_core::make_preview(fallback_text(), nagori_core::PREVIEW_MAX_CHARS),
+    let text_match = match row.get::<_, i64>("text_match")? {
+        0 => TextMatch::None,
+        1 => TextMatch::Substring,
+        2 => TextMatch::Prefix,
+        3 => TextMatch::Exact,
+        value => {
+            let index = row.as_ref().column_index("text_match")?;
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid text_match value {value}"),
+                )),
+            ));
+        }
     };
     let (image_width, image_height) = match &content {
         Some(ClipboardContent::Image(image)) => (image.width, image.height),
         _ => (None, None),
     };
+    let normalized_char_count_index = row.as_ref().column_index("normalized_char_count")?;
+    let normalized_char_count = usize::try_from(row.get::<_, i64>(normalized_char_count_index)?)
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                normalized_char_count_index,
+                rusqlite::types::Type::Integer,
+                Box::new(err),
+            )
+        })?;
+    let preview: String = row.get("preview")?;
+    let preview = if row.get::<_, i64>("preview_is_fallback")? != 0 {
+        // The SQL fallback is a bounded raw slice of the body; shape it like
+        // the stored previews (collapsed whitespace, ellipsis on truncation).
+        nagori_core::make_preview(&preview, nagori_core::PREVIEW_MAX_CHARS)
+    } else {
+        preview
+    };
     Ok(SearchCandidate {
         entry_id,
-        normalized_text,
+        text_match,
+        normalized_char_count,
         preview,
         language: row.get("language")?,
         content_kind,
@@ -233,11 +252,32 @@ pub(crate) fn bool_int(value: bool) -> i64 {
 /// column-filter `:` to leak through unescaped. Empty fragments are
 /// discarded so a query of pure punctuation returns the empty string,
 /// which the caller treats as "no FTS candidates".
-pub(crate) fn fts_query(query: &str) -> String {
+///
+/// [`nagori_core::FtsQueryMode::AsciiPrefix`] appends the FTS5 prefix marker
+/// outside the closing quote for pure ASCII-alphanumeric fragments of at
+/// least three bytes (`"clip"*`). The provider admits whole-token hits ahead
+/// of prefix-only ones itself (see `fulltext_candidates`), so the expression
+/// stays a plain implicit-AND phrase list. Keeping the marker out of user input
+/// preserves the escaping guarantee, while short, punctuation-bearing, and
+/// non-ASCII phrases retain the whole-token form. The minimum length prevents
+/// one- and two-character prefixes from expanding across most of a dense
+/// vocabulary before `bm25` can apply the candidate limit.
+pub(crate) fn fts_query(query: &str, mode: nagori_core::FtsQueryMode) -> String {
+    const MIN_PREFIX_BYTES: usize = 3;
+
     query
         .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ':' | '*' | '"'))
         .filter(|part| !part.is_empty())
-        .map(|part| format!("\"{part}\""))
+        .map(|part| {
+            let prefix = matches!(mode, nagori_core::FtsQueryMode::AsciiPrefix)
+                && part.len() >= MIN_PREFIX_BYTES
+                && part.chars().all(|ch| ch.is_ascii_alphanumeric());
+            if prefix {
+                format!("\"{part}\"*")
+            } else {
+                format!("\"{part}\"")
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

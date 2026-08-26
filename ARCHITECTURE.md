@@ -722,13 +722,27 @@ orchestrates a `SearchCandidateProvider` (storage primitive) and a
 and the `SearchCandidateProvider` impl; `nagori-search::DefaultRanker`
 supplies the scoring used by the daemon and tests.
 
-**Plans.** `SearchPlan::try_resolve(mode, normalized)` chooses between
+**Plans.** `SearchPlan::resolve(mode, normalized)` chooses between
 `Recent` (empty query), exact substring, FTS, ngram, and hybrid plans.
 Hybrid plans fan substring / FTS / ngram candidate fetches out
 concurrently via `tokio::try_join!`, and the storage layer hands each
 branch its own pooled SQLite connection so they run truly in parallel
 under WAL — readers do not block each other and an in-flight capture
 write does not stall search.
+
+**Bounded candidate projection.** Search candidates never carry the stored
+`normalized_text`. SQLite computes a typed `TextMatch` (`Exact`, `Prefix`,
+`Substring`, or `None`) plus the document character count used by the long-text
+penalty, and projects only a capped preview and capped display metadata. This
+keeps a maximum-size clipboard body out of the thousands of branch hits that
+can coexist before deduplication. Every text search has one 4 MiB budget for
+the provider branch vectors; `SearchService` divides it evenly across the
+active substring / FTS / ngram branches, and each provider stops collecting in
+SQL order before its vector slots plus owned strings would exceed that share.
+The merge step moves (never clones) candidates into one deduplicated vector,
+so its extra cost is bounded by the slot and index-map overhead of at most the
+same rows. Duplicate branch hits merge their strongest `TextMatch` while FTS
+and ngram signals remain attached by entry id.
 
 **Bounded admission + cancellation.** Each candidate fetch runs through
 `SqliteStore::run_search_blocking`, which adds two guards over the plain
@@ -751,14 +765,25 @@ borrower of the recycled connection is never aborted by a stale token.
 **Hybrid ngram is CJK-scoped.** In the implicit `Hybrid` (Auto) plan the
 ngram branch only fires for queries that carry a CJK character, and the
 orchestrator passes `NgramQueryMode::CjkOnly` so the provider keeps just
-the grams that contain a CJK char. ASCII word recall is already served by
-FTS (whole-token) plus the bounded substring scan, while common ASCII
-bigrams own huge posting lists whose `gram IN (...)` union explodes on
-large histories. Filtering to CJK grams preserves CJK and mixed-script
-recall while shedding that cost; a pure-ASCII Auto query skips ngram
-entirely. ASCII partial / typo recall therefore lives in explicit
-`SearchMode::Fuzzy`, which still runs the full gram set
-(`NgramQueryMode::Full`).
+the grams that contain a CJK char. ASCII recall is served by the bounded
+substring scan plus safe FTS token-prefix queries for fragments of at least
+three characters (the FTS branch runs the whole-token expression first and
+lets the prefix expression fill only the remaining candidate budget, so dense
+prefix expansions cannot evict exact tokens and every phase stays
+`LIMIT`-bounded); shorter fragments stay whole-token queries so a common
+one- or two-character prefix cannot expand across most of the FTS vocabulary
+before `bm25` applies its result limit. Common ASCII bigrams have the same
+posting-list problem in the ngram index, where their `gram IN (...)` union
+explodes on large histories. Filtering to CJK grams preserves CJK and mixed-
+script recall while shedding that cost; a pure-ASCII Auto query skips ngram
+entirely. Auto therefore retains full-history ASCII token-prefix recall from
+three characters onward. One- and two-character ASCII prefixes, accented
+Latin or Cyrillic prefixes, arbitrary infixes, and typos are limited to the
+bounded substring window unless they are complete FTS tokens; explicit
+`SearchMode::Fuzzy` remains the full-corpus option and runs the full gram set
+(`NgramQueryMode::Full`; the provider still skips ngram for non-CJK queries
+longer than eight characters, which substring already covers). Explicit
+`FullText` queries keep whole-token FTS semantics.
 
 **Semantic plan.** `SearchMode::Semantic` resolves to its own plan but
 needs a query embedding, so `NagoriRuntime::search` routes it ahead of the
@@ -805,7 +830,8 @@ keep showing rows the CLI just deleted / unpinned until the next
 mutation through the daemon. Use `--ipc` / `--auto-ipc` whenever the
 daemon is alive.
 
-**Ranker.** `DefaultRanker` combines weighted signals:
+**Ranker.** `DefaultRanker` combines the provider's typed text-match signal
+with the index scores and metadata signals:
 
 ```text
 score = exact_match + prefix + substring + fts + ngram
@@ -823,8 +849,8 @@ which keeps a 512KB paste from exploding `ngrams` to ~1M rows. Queries
 generate the same grams and rank by overlap before re-ranking with
 exact substring + recency. In the Auto plan only CJK-bearing query grams
 are used (see *Hybrid ngram is CJK-scoped* above); explicit `Fuzzy`
-matches on the full gram set, which is what backs ASCII partial / typo
-recall.
+matches on the full gram set, which backs arbitrary ASCII infix and typo
+recall beyond Auto's FTS token-prefix coverage.
 
 Two refinements live in the gram generator (not in `normalize_text`, so
 the stored `normalized_text`, FTS index, previews, and semantic embedding

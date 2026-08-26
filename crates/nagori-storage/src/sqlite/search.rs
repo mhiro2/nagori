@@ -2,8 +2,9 @@ use std::fmt::Write as _;
 
 use async_trait::async_trait;
 use nagori_core::{
-    ClipboardEntry, EntryId, FtsCandidate, NgramCandidate, NgramQueryMode, RecentOrder, Result,
-    SearchCandidate, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
+    CANDIDATE_METADATA_MAX_CHARS, ClipboardEntry, EntryId, FtsCandidate, FtsQueryMode,
+    NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder, Result, SearchCandidate,
+    SearchCandidateBudget, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
     SearchRepository, SearchResult, SearchService,
 };
 use nagori_search::{
@@ -18,16 +19,157 @@ use super::convert::{
     format_time, fts_query, kind_to_str, row_to_candidate, row_to_entry, storage_err,
 };
 
-/// Projection column list shared by every candidate query, consumed by
-/// [`row_to_candidate`]. The `CASE` keeps `content_json` out of the result set
-/// for ordinary text rows: it only travels when the row is an image (the
-/// result surfaces pixel dimensions) or its `search_documents` join is missing
-/// (the preview / normalized-text fallback needs the body), so the search hot
-/// path never reads or deserializes multi-hundred-KiB bodies per candidate.
-const CANDIDATE_COLUMNS: &str = "e.id, e.content_kind, e.created_at, e.use_count, e.pinned,
-            e.sensitivity, e.source_app_name, d.preview, d.normalized_text, d.language,
-            CASE WHEN e.content_kind = 'image' OR d.entry_id IS NULL
-                 THEN e.content_json END AS candidate_content_json";
+/// SQL expression for the strongest direct text relationship. The ranker
+/// consumes this typed scalar instead of carrying `normalized_text` in every
+/// candidate allocation.
+const TEXT_MATCH_SQL: &str = "CASE
+            WHEN d.normalized_text = ? THEN 3
+            WHEN instr(d.normalized_text, ?) = 1 THEN 2
+            WHEN instr(d.normalized_text, ?) > 0 THEN 1
+            ELSE 0
+        END";
+
+/// Bounded plain-text recovery for legacy or interrupted rows whose search
+/// document is missing. `ClipboardContent` uses externally tagged serde names,
+/// so each content kind maps to the field returned by `plain_text()` without
+/// projecting or deserializing the full JSON body in Rust.
+const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
+            WHEN 'text' THEN json_extract(e.content_json, '$.Text.text')
+            WHEN 'url' THEN json_extract(e.content_json, '$.Url.raw')
+            WHEN 'code' THEN json_extract(e.content_json, '$.Code.text')
+            WHEN 'file_list' THEN json_extract(e.content_json, '$.FileList.display_text')
+            WHEN 'rich_text' THEN json_extract(e.content_json, '$.RichText.plain_text')
+            WHEN 'unknown' THEN json_extract(e.content_json, '$.Unknown.plain_text')
+        END";
+
+/// Multiplier applied to `PREVIEW_MAX_CHARS` when scanning a fallback body for
+/// its preview, leaving room for whitespace runs that `make_preview` collapses.
+const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
+
+/// Build the bounded projection shared by every candidate query.
+///
+/// `normalized_text` is consulted by `SQLite` only for its character count and
+/// the supplied match expression; it never crosses into Rust. Preview and
+/// display metadata are capped in SQL so a malformed row cannot allocate a
+/// huge `String` before the provider gets a chance to enforce its byte budget.
+/// Missing search documents recover a preview from `content_json` inside
+/// `SQLite` and cap it before it crosses into Rust. Entry and document writes
+/// are atomic in normal operation, but preserving this bounded fallback keeps
+/// legacy or interrupted databases usable without reopening the candidate-
+/// memory failure mode.
+fn candidate_columns(text_match_sql: &str) -> String {
+    // A stored `d.preview` is already `make_preview`-shaped and at most
+    // `PREVIEW_MAX_CHARS` long, so the trim and cap are no-ops for it. The
+    // fallback body is raw text: leading whitespace is trimmed in SQL, interior
+    // whitespace still has to be collapsed in Rust, so it gets a small overscan
+    // window (its own bounded allocation) and `row_to_candidate` finishes it
+    // with `make_preview` when `preview_is_fallback` is set. A body whose first
+    // window is dominated by whitespace runs yields a shorter preview than
+    // `make_preview` over the full text would; that is the accepted price for
+    // never pulling a full body into the candidate path.
+    let fallback_scan_chars = PREVIEW_MAX_CHARS * FALLBACK_PREVIEW_OVERSCAN;
+    format!(
+        "e.id, e.content_kind, e.created_at, e.use_count, e.pinned,
+         e.sensitivity,
+         substr(e.source_app_name, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS source_app_name,
+         substr(ltrim(COALESCE(d.preview, {FALLBACK_PLAIN_TEXT_SQL}, ''), char(32, 9, 10, 13)), 1, {fallback_scan_chars}) AS preview,
+         d.entry_id IS NULL AS preview_is_fallback,
+         substr(d.language, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS language,
+         COALESCE(length(d.normalized_text), 0) AS normalized_char_count,
+         {text_match_sql} AS text_match,
+         CASE WHEN e.content_kind = 'image'
+              THEN e.content_json END AS candidate_content_json"
+    )
+}
+
+/// Vector whose fixed slots and candidate-owned strings fit in one branch's
+/// allocation budget. Collection stops at the first row that would exceed the
+/// ceiling, preserving the SQL order deterministically.
+struct ByteBoundedVec<T> {
+    values: Vec<T>,
+    max_count: usize,
+    max_bytes: usize,
+    used_bytes: usize,
+}
+
+impl<T> ByteBoundedVec<T> {
+    const fn new(max_count: usize, max_bytes: usize) -> Self {
+        Self {
+            values: Vec::new(),
+            max_count,
+            max_bytes,
+            used_bytes: 0,
+        }
+    }
+
+    fn push(&mut self, value: T, owned_bytes: usize) -> bool {
+        if self.values.len() == self.max_count {
+            return false;
+        }
+        let old_capacity = self.values.capacity();
+        if self.values.len() == old_capacity {
+            let desired_capacity = if old_capacity == 0 {
+                self.max_count.min(4)
+            } else {
+                self.max_count.min(old_capacity.saturating_mul(2))
+            };
+            let slot_bytes = std::mem::size_of::<T>();
+            let slot_growth = desired_capacity
+                .saturating_sub(old_capacity)
+                .saturating_mul(slot_bytes);
+            if self
+                .used_bytes
+                .saturating_add(slot_growth)
+                .saturating_add(owned_bytes)
+                > self.max_bytes
+            {
+                return false;
+            }
+            self.values
+                .reserve_exact(desired_capacity.saturating_sub(old_capacity));
+            let actual_growth = self
+                .values
+                .capacity()
+                .saturating_sub(old_capacity)
+                .saturating_mul(slot_bytes);
+            if self
+                .used_bytes
+                .saturating_add(actual_growth)
+                .saturating_add(owned_bytes)
+                > self.max_bytes
+            {
+                // `reserve_exact` may hand back more capacity than requested;
+                // give the overshoot back so the returned vector never holds
+                // an allocation the budget refused. `shrink_to` is documented
+                // as best-effort, so fall back to rebuilding at the old
+                // capacity; std's `RawVec` records the requested capacity for
+                // sized element types, which makes that rebuild exact in
+                // practice even though the API only promises a lower bound.
+                self.values.shrink_to(old_capacity);
+                if self.values.capacity() > old_capacity {
+                    let mut exact = Vec::with_capacity(old_capacity);
+                    exact.append(&mut self.values);
+                    self.values = exact;
+                }
+                return false;
+            }
+            self.used_bytes = self.used_bytes.saturating_add(actual_growth);
+        } else if self.used_bytes.saturating_add(owned_bytes) > self.max_bytes {
+            return false;
+        }
+        self.used_bytes = self.used_bytes.saturating_add(owned_bytes);
+        self.values.push(value);
+        true
+    }
+
+    const fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn into_vec(self) -> Vec<T> {
+        self.values
+    }
+}
 
 /// Current ngram-generator revision. Bump whenever
 /// [`generate_document_ngrams`]'s output for a given `normalized_text` changes
@@ -232,18 +374,21 @@ impl SearchCandidateProvider for SqliteStore {
         &self,
         filters: &SearchFilters,
         order: RecentOrder,
-        limit: usize,
+        budget: SearchCandidateBudget,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchCandidate>> {
         let filter = build_filter_fragment(filters)?;
-        let limit_i64 = clamp_limit(limit);
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
         self.run_search_blocking(cancel, move |conn| {
             // Same shape as `fetch_recent_entries` (which `list_recent` keeps
-            // for full-entry reads) but projected through `CANDIDATE_COLUMNS`
+            // for full-entry reads) but projected through `candidate_columns`
             // so the per-keystroke empty-query path never carries bodies.
             let order_sql = recent_order_sql(order);
+            let columns = candidate_columns("0");
             let sql = format!(
-                "SELECT {CANDIDATE_COLUMNS}
+                "SELECT {columns}
                  FROM entries e
                  LEFT JOIN search_documents d ON d.entry_id = e.id
                  WHERE e.deleted_at IS NULL
@@ -260,11 +405,15 @@ impl SearchCandidateProvider for SqliteStore {
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
                 .map_err(storage_err)?;
-            let mut candidates = Vec::new();
+            let mut candidates = ByteBoundedVec::new(max_count, max_bytes);
             for row in rows {
-                candidates.push(row.map_err(storage_err)?);
+                let candidate = row.map_err(storage_err)?;
+                let owned_bytes = candidate.owned_byte_count();
+                if !candidates.push(candidate, owned_bytes) {
+                    break;
+                }
             }
-            Ok(candidates)
+            Ok(candidates.into_vec())
         })
         .await
     }
@@ -273,13 +422,16 @@ impl SearchCandidateProvider for SqliteStore {
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
         bounded: bool,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchCandidate>> {
         let filter = build_filter_fragment(filters)?;
-        let like = format!("%{}%", escape_like(normalized));
-        let limit_i64 = clamp_limit(limit);
+        let normalized = normalized.to_owned();
+        let like = format!("%{}%", escape_like(&normalized));
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
         let scan_window = SUBSTRING_SCAN_WINDOW;
         self.run_search_blocking(cancel, move |conn| {
             // LIKE can't hit a secondary index for `%term%`, so for the hybrid
@@ -294,6 +446,7 @@ impl SearchCandidateProvider for SqliteStore {
             // For an explicit `Exact` query (`bounded == false`) substring
             // is the only branch, so we walk the full live corpus to avoid
             // silently hiding old matches outside the window.
+            let columns = candidate_columns(TEXT_MATCH_SQL);
             let sql = if bounded {
                 format!(
                     "WITH recent_live AS (
@@ -302,7 +455,7 @@ impl SearchCandidateProvider for SqliteStore {
                          ORDER BY pinned DESC, created_at DESC
                          LIMIT ?
                      )
-                     SELECT DISTINCT {CANDIDATE_COLUMNS}
+                     SELECT DISTINCT {columns}
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      JOIN recent_live r ON r.id = e.id
@@ -316,7 +469,7 @@ impl SearchCandidateProvider for SqliteStore {
                 )
             } else {
                 format!(
-                    "SELECT {CANDIDATE_COLUMNS}
+                    "SELECT {columns}
                      FROM entries e
                      JOIN search_documents d ON d.entry_id = e.id
                      WHERE e.deleted_at IS NULL
@@ -333,17 +486,26 @@ impl SearchCandidateProvider for SqliteStore {
             if bounded {
                 bound.push(&scan_window);
             }
+            bound.extend([
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+            ]);
             bound.push(&like);
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
-            let mut candidates = Vec::new();
+            let mut candidates = ByteBoundedVec::new(max_count, max_bytes);
             for row in stmt
                 .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
                 .map_err(storage_err)?
             {
-                candidates.push(row.map_err(storage_err)?);
+                let candidate = row.map_err(storage_err)?;
+                let owned_bytes = candidate.owned_byte_count();
+                if !candidates.push(candidate, owned_bytes) {
+                    break;
+                }
             }
-            Ok(candidates)
+            Ok(candidates.into_vec())
         })
         .await
     }
@@ -352,22 +514,40 @@ impl SearchCandidateProvider for SqliteStore {
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
+        mode: FtsQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>> {
-        let fts = fts_query(normalized);
+        let fts = fts_query(normalized, mode);
         if fts.is_empty() {
             return Ok(Vec::new());
         }
+        // Prefix expansion widens the hit set, and `bm25` alone cannot
+        // guarantee that a document holding the exact token outranks a short,
+        // repetitive prefix-only document. Run the whole-token expression
+        // first and let the prefix expression only fill whatever count / byte
+        // budget remains, so exact hits are admitted ahead of dense prefix
+        // expansions while every phase stays `LIMIT`-bounded — no
+        // materialized rowid set grows with the corpus.
+        let whole_token = fts_query(normalized, FtsQueryMode::WholeToken);
+        let phases: Vec<String> = if whole_token == fts {
+            vec![fts]
+        } else {
+            vec![whole_token, fts]
+        };
         let filter = build_filter_fragment(filters)?;
-        let limit_i64 = clamp_limit(limit);
+        let normalized = normalized.to_owned();
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
         self.run_search_blocking(cancel, move |conn| {
             // `search_fts` is an external-content FTS5 over
             // `search_documents`, so it has no `entry_id` column — join via
             // `search_fts.rowid = search_documents.doc_id` (the explicit
             // INTEGER PRIMARY KEY that aliases the source rowid).
+            let columns = candidate_columns(TEXT_MATCH_SQL);
             let sql = format!(
-                "SELECT {CANDIDATE_COLUMNS},
+                "SELECT {columns},
                         bm25(search_fts) AS fts_score
                  FROM search_fts
                  JOIN search_documents d ON d.doc_id = search_fts.rowid
@@ -381,25 +561,39 @@ impl SearchCandidateProvider for SqliteStore {
                 extra = filter.sql,
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
-            let mut bound: Vec<&dyn ToSql> = vec![&fts];
-            bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
-            bound.push(&limit_i64);
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(bound), |row| {
-                    let score: f64 = row.get("fts_score").unwrap_or(0.0);
-                    let candidate = row_to_candidate(row)?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    Ok(FtsCandidate {
-                        candidate,
-                        fts_score: score as f32,
+            let mut hits = ByteBoundedVec::new(max_count, max_bytes);
+            let mut seen: std::collections::HashSet<EntryId> = std::collections::HashSet::new();
+            'phases: for expression in &phases {
+                if hits.len() == max_count {
+                    break;
+                }
+                let mut bound: Vec<&dyn ToSql> =
+                    vec![&normalized, &normalized, &normalized, expression];
+                bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
+                bound.push(&limit_i64);
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(bound), |row| {
+                        let score: f64 = row.get("fts_score").unwrap_or(0.0);
+                        let candidate = row_to_candidate(row)?;
+                        #[allow(clippy::cast_possible_truncation)]
+                        Ok(FtsCandidate {
+                            candidate,
+                            fts_score: score as f32,
+                        })
                     })
-                })
-                .map_err(storage_err)?;
-            let mut hits = Vec::new();
-            for row in rows {
-                hits.push(row.map_err(storage_err)?);
+                    .map_err(storage_err)?;
+                for row in rows {
+                    let hit = row.map_err(storage_err)?;
+                    if !seen.insert(hit.candidate.entry_id) {
+                        continue;
+                    }
+                    let owned_bytes = hit.candidate.owned_byte_count();
+                    if !hits.push(hit, owned_bytes) {
+                        break 'phases;
+                    }
+                }
             }
-            Ok(hits)
+            Ok(hits.into_vec())
         })
         .await
     }
@@ -408,7 +602,7 @@ impl SearchCandidateProvider for SqliteStore {
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
         mode: NgramQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>> {
@@ -418,12 +612,13 @@ impl SearchCandidateProvider for SqliteStore {
         }
         match mode {
             // Hybrid (Auto): keep only grams that carry a CJK character. ASCII
-            // word recall is already served by FTS + the bounded substring
-            // scan, and common ASCII bigrams own huge posting lists whose
-            // `gram IN (...)` union explodes on large histories (the 100k
-            // fan-out blowup). A pure-ASCII query leaves no grams here and
-            // short-circuits to empty; mixed CJK+ASCII queries keep just their
-            // CJK / boundary grams, so the costly ASCII postings never load.
+            // token-prefix recall is already served by FTS + the bounded
+            // substring scan, and common ASCII bigrams own huge posting lists
+            // whose `gram IN (...)` union explodes on large histories (the
+            // 100k fan-out blowup). A pure-ASCII query leaves no grams here
+            // and short-circuits to empty; mixed CJK+ASCII queries keep just
+            // their CJK / boundary grams, so the costly ASCII postings never
+            // load.
             NgramQueryMode::CjkOnly => {
                 query_grams.retain(|gram| has_cjk(gram));
                 if query_grams.is_empty() {
@@ -440,13 +635,17 @@ impl SearchCandidateProvider for SqliteStore {
             }
         }
         let filter = build_filter_fragment(filters)?;
-        let limit_i64 = clamp_limit(limit);
+        let normalized = normalized.to_owned();
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
         self.run_search_blocking(cancel, move |conn| {
             let placeholders = std::iter::repeat_n("?", query_grams.len())
                 .collect::<Vec<_>>()
                 .join(",");
+            let columns = candidate_columns(TEXT_MATCH_SQL);
             let sql = format!(
-                "SELECT {CANDIDATE_COLUMNS},
+                "SELECT {columns},
                         COUNT(DISTINCT n.gram) AS hits
                  FROM ngrams n
                  JOIN entries e ON e.id = n.entry_id
@@ -461,7 +660,8 @@ impl SearchCandidateProvider for SqliteStore {
                 extra = filter.sql,
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
-            let mut bound: Vec<&dyn ToSql> = query_grams.iter().map(|g| g as &dyn ToSql).collect();
+            let mut bound: Vec<&dyn ToSql> = vec![&normalized, &normalized, &normalized];
+            bound.extend(query_grams.iter().map(|g| g as &dyn ToSql));
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
             bound.push(&limit_i64);
             #[allow(clippy::cast_precision_loss)]
@@ -473,17 +673,21 @@ impl SearchCandidateProvider for SqliteStore {
                     Ok((candidate, hits))
                 })
                 .map_err(storage_err)?;
-            let mut out = Vec::new();
+            let mut out = ByteBoundedVec::new(max_count, max_bytes);
             for row in rows {
                 let (candidate, hits) = row.map_err(storage_err)?;
                 #[allow(clippy::cast_precision_loss)]
                 let overlap = (hits as f32 / total).clamp(0.0, 1.0);
-                out.push(NgramCandidate {
+                let hit = NgramCandidate {
                     candidate,
                     ngram_overlap: overlap,
-                });
+                };
+                let owned_bytes = hit.candidate.owned_byte_count();
+                if !out.push(hit, owned_bytes) {
+                    break;
+                }
             }
-            Ok(out)
+            Ok(out.into_vec())
         })
         .await
     }

@@ -1,6 +1,7 @@
 use nagori_core::{
-    AppError, ContentKind, EntryFactory, EntryId, EntryRepository, RankReason, RecentOrder,
-    SearchFilters, SearchMode, SearchQuery,
+    AppError, ContentKind, EntryFactory, EntryId, EntryRepository, FtsQueryMode,
+    MAX_ENTRY_SIZE_BYTES, MAX_SEARCH_CANDIDATE_BYTES, PREVIEW_MAX_CHARS, RankReason, RecentOrder,
+    SearchCandidate, SearchCandidateBudget, SearchFilters, SearchMode, SearchQuery, TextMatch,
 };
 use nagori_search::normalize_text;
 use time::OffsetDateTime;
@@ -12,7 +13,22 @@ use super::{backdate_entry, insert_text};
 
 #[test]
 fn fts_query_wraps_alnum_tokens_in_quotes() {
-    assert_eq!(fts_query("hello world"), r#""hello" "world""#);
+    assert_eq!(
+        fts_query("hello world", FtsQueryMode::WholeToken),
+        r#""hello" "world""#
+    );
+    assert_eq!(
+        fts_query("hello world", FtsQueryMode::AsciiPrefix),
+        r#""hello"* "world"*"#
+    );
+    assert_eq!(
+        fts_query("a ap app", FtsQueryMode::AsciiPrefix),
+        r#""a" "ap" "app"*"#
+    );
+    assert_eq!(
+        fts_query("hello-world 検索", FtsQueryMode::AsciiPrefix),
+        r#""hello-world" "検索""#
+    );
 }
 
 #[test]
@@ -22,10 +38,24 @@ fn fts_query_strips_fts5_metacharacters() {
     // expression — even quoted, an unmatched `"` would corrupt the
     // expression, and `:` could be parsed as a column filter when
     // we later switch to column-scoped queries.
-    assert_eq!(fts_query("foo:bar"), r#""foo" "bar""#);
-    assert_eq!(fts_query("foo*"), r#""foo""#);
-    assert_eq!(fts_query("(foo)"), r#""foo""#);
-    assert_eq!(fts_query(r#"say "hi""#), r#""say" "hi""#);
+    assert_eq!(
+        fts_query("foo:bar", FtsQueryMode::WholeToken),
+        r#""foo" "bar""#
+    );
+    assert_eq!(fts_query("foo*", FtsQueryMode::WholeToken), r#""foo""#);
+    assert_eq!(fts_query("(foo)", FtsQueryMode::WholeToken), r#""foo""#);
+    assert_eq!(
+        fts_query(r#"say "hi""#, FtsQueryMode::WholeToken),
+        r#""say" "hi""#
+    );
+    assert_eq!(
+        fts_query("foo:bar*", FtsQueryMode::AsciiPrefix),
+        r#""foo"* "bar"*"#
+    );
+    assert_eq!(
+        fts_query(r#"say "hi""#, FtsQueryMode::AsciiPrefix),
+        r#""say"* "hi""#
+    );
 }
 
 #[test]
@@ -34,10 +64,177 @@ fn fts_query_returns_empty_for_pure_punctuation() {
     // string so the caller can short-circuit before issuing an
     // invalid FTS5 MATCH (the tokenizer would otherwise reject a
     // phrase that yields no terms).
-    assert!(fts_query("(").is_empty());
-    assert!(fts_query(":*").is_empty());
-    assert!(fts_query("\"\"").is_empty());
-    assert!(fts_query("   ").is_empty());
+    assert!(fts_query("(", FtsQueryMode::AsciiPrefix).is_empty());
+    assert!(fts_query(":*", FtsQueryMode::AsciiPrefix).is_empty());
+    assert!(fts_query("\"\"", FtsQueryMode::AsciiPrefix).is_empty());
+    assert!(fts_query("   ", FtsQueryMode::AsciiPrefix).is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_computes_typed_text_matches_without_projecting_document_text() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let exact = insert_text(&store, "needle").await;
+    let prefix = insert_text(&store, "needle prefix").await;
+    let substring = insert_text(&store, "before needle after").await;
+    let candidates = store
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, 64 * 1024),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let signal = |id| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.entry_id == id)
+            .map(|candidate| candidate.text_match)
+    };
+    assert_eq!(signal(exact), Some(TextMatch::Exact));
+    assert_eq!(signal(prefix), Some(TextMatch::Prefix));
+    assert_eq!(signal(substring), Some(TextMatch::Substring));
+}
+
+#[tokio::test]
+async fn maximum_length_document_has_constant_size_candidate_projection() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let text = format!("needle {}", "x".repeat(MAX_ENTRY_SIZE_BYTES - 7));
+    let id = insert_text(&store, &text).await;
+    let candidates = store
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, 64 * 1024),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.entry_id == id)
+        .expect("maximum-length document should match");
+
+    assert_eq!(candidate.text_match, TextMatch::Prefix);
+    assert_eq!(candidate.normalized_char_count, text.len());
+    assert!(candidate.preview.chars().count() <= PREVIEW_MAX_CHARS);
+    assert!(candidate.owned_byte_count() < 4 * 1024);
+}
+
+#[tokio::test]
+async fn recent_candidate_recovers_bounded_preview_when_search_document_is_missing() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    let store = SqliteStore::open_memory().unwrap();
+    // Raw newlines and whitespace runs must collapse exactly like a stored
+    // preview, and the truncation must end in the same ellipsis.
+    let text = format!("legacy\n\n  preview\t{}", "x".repeat(PREVIEW_MAX_CHARS));
+    let id = insert_text(&store, &text).await;
+    store
+        .conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM search_documents WHERE entry_id = ?1",
+            rusqlite::params![id.to_string()],
+        )
+        .unwrap();
+
+    let candidates = store
+        .recent_entries(
+            &SearchFilters::default(),
+            RecentOrder::ByRecency,
+            SearchCandidateBudget::new(10, 64 * 1024),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.entry_id == id)
+        .expect("entry without a search document should remain visible");
+
+    assert_eq!(
+        candidate.preview,
+        nagori_core::make_preview(&text, PREVIEW_MAX_CHARS)
+    );
+    assert!(candidate.preview.starts_with("legacy preview x"));
+    assert!(candidate.preview.ends_with('…'));
+    assert_eq!(candidate.preview.chars().count(), PREVIEW_MAX_CHARS);
+    assert_eq!(candidate.normalized_char_count, 0);
+}
+
+#[tokio::test]
+async fn candidate_collection_honours_byte_budget_across_thousands_of_rows() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    const ROW_COUNT: usize = 5_000;
+    const BYTE_BUDGET: usize = 64 * 1024;
+    let store = SqliteStore::open_memory().unwrap();
+    let preview = "🦀".repeat(PREVIEW_MAX_CHARS);
+    let metadata = "界".repeat(nagori_core::CANDIDATE_METADATA_MAX_CHARS);
+    {
+        let mut conn = store.conn().unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 0..ROW_COUNT {
+            let id = EntryId::new().to_string();
+            let normalized = format!("candidate {index}");
+            tx.execute(
+                "INSERT INTO entries (
+                    id, content_kind, content_json, source_app_name, content_hash,
+                    representation_set_hash, sensitivity, created_at, updated_at
+                 ) VALUES (?1, 'text', '{}', ?2, ?1, ?1, 'public', ?3, ?3)",
+                rusqlite::params![id, metadata, "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO search_documents
+                    (entry_id, preview, normalized_text, language)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, preview, normalized, metadata],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let candidates = store
+        .recent_entries(
+            &SearchFilters::default(),
+            RecentOrder::ByRecency,
+            SearchCandidateBudget::new(ROW_COUNT, BYTE_BUDGET),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let allocation_bytes = candidates
+        .capacity()
+        .saturating_mul(std::mem::size_of::<SearchCandidate>())
+        .saturating_add(
+            candidates
+                .iter()
+                .map(SearchCandidate::owned_byte_count)
+                .sum::<usize>(),
+        );
+
+    assert!(!candidates.is_empty());
+    assert!(candidates.len() < ROW_COUNT);
+    assert!(allocation_bytes <= BYTE_BUDGET);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.preview.chars().count() <= PREVIEW_MAX_CHARS)
+    );
 }
 
 #[tokio::test]
@@ -174,10 +371,10 @@ async fn exact_mode_skips_fts_only_matches() {
 async fn auto_skips_ascii_ngram_only_match() {
     // Regression for the ngram fan-out fix: the Auto/Hybrid plan must
     // not run ASCII ngram. `qui ck` reaches `the quick brown fox` only via
-    // whitespace-stripped ngram overlap (`quick`) — FTS sees the tokens
-    // `qui`/`ck` with no whole-token match, and the substring scan looks
-    // for the literal `qui ck`. So Auto now returns nothing; ASCII
-    // partial/typo recall lives in explicit Fuzzy.
+    // whitespace-stripped ngram overlap (`quick`) — FTS prefix-matches `qui`
+    // but cannot match a token beginning with `ck`, and the substring scan
+    // looks for the literal `qui ck`. So Auto still returns nothing; arbitrary
+    // ASCII infix/typo recall lives in explicit Fuzzy.
     let store = SqliteStore::open_memory().unwrap();
     let _ = insert_text(&store, "the quick brown fox").await;
 
@@ -187,6 +384,135 @@ async fn auto_skips_ascii_ngram_only_match() {
     assert!(
         auto.is_empty(),
         "Auto no longer chases ASCII ngram-only matches",
+    );
+}
+
+#[tokio::test]
+async fn fts_prefix_expansion_admits_whole_token_hits_before_the_limit() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    const PREFIX_ONLY_ROWS: usize = 40;
+    const LIMIT: usize = 5;
+    let store = SqliteStore::open_memory().unwrap();
+    // A long document holding the exact token scores worse under bm25 than
+    // short, repetitive prefix-only documents; the whole-token partition must
+    // still admit it ahead of them.
+    let exact = insert_text(
+        &store,
+        &format!("clip {}", "unrelated filler words ".repeat(40)),
+    )
+    .await;
+    for index in 0..PREFIX_ONLY_ROWS {
+        insert_text(&store, &format!("clipboard clipboard clipboard {index}")).await;
+    }
+
+    let hits = store
+        .fulltext_candidates(
+            "clip",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(LIMIT, MAX_SEARCH_CANDIDATE_BYTES),
+            FtsQueryMode::AsciiPrefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(hits.len(), LIMIT);
+    assert_eq!(
+        hits[0].candidate.entry_id, exact,
+        "the exact-token document must be admitted first",
+    );
+}
+
+#[tokio::test]
+async fn auto_ascii_prefix_recalls_entry_older_than_substring_window() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    const NEWER_ENTRY_COUNT: usize = 5_000;
+    let store = SqliteStore::open_memory().unwrap();
+    let oldest = insert_text(&store, "clipboard archive sentinel").await;
+    backdate_entry(
+        &store,
+        oldest,
+        OffsetDateTime::from_unix_timestamp(0).unwrap(),
+    );
+
+    // Fill the complete bounded LIKE window with newer, unrelated rows. Raw
+    // inserts keep this boundary fixture focused on the search indexes rather
+    // than representation serialization, while the search-document trigger
+    // still populates FTS exactly as production writes do.
+    {
+        let mut conn = store.conn().unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 0..NEWER_ENTRY_COUNT {
+            let id = EntryId::new().to_string();
+            let normalized = format!("unrelated filler {index}");
+            tx.execute(
+                "INSERT INTO entries (
+                    id, content_kind, content_json, content_hash,
+                    representation_set_hash, sensitivity, created_at, updated_at
+                 ) VALUES (?1, 'text', '{}', ?1, ?1, 'public', ?2, ?2)",
+                rusqlite::params![id, "2026-01-01T00:00:00Z"],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO search_documents (entry_id, preview, normalized_text)
+                 VALUES (?1, ?2, ?2)",
+                rusqlite::params![id, normalized],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let bounded = store
+        .substring_candidates(
+            "clip",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        bounded.iter().all(|candidate| candidate.entry_id != oldest),
+        "the oldest row must sit beyond the 5,000-entry LIKE window",
+    );
+    let unbounded = store
+        .substring_candidates(
+            "clip",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        unbounded
+            .iter()
+            .any(|candidate| candidate.entry_id == oldest),
+        "the same direct substring must match when the window is disabled",
+    );
+
+    let auto = store
+        .search(SearchQuery::new("clip", normalize_text("clip"), 10))
+        .await
+        .unwrap();
+    let recalled = auto
+        .iter()
+        .find(|result| result.entry_id == oldest)
+        .expect("Auto should recall the old row through an ASCII FTS prefix");
+    assert!(recalled.rank_reason.contains(&RankReason::PrefixMatch));
+
+    let mut fulltext_query = SearchQuery::new("clip", normalize_text("clip"), 10);
+    fulltext_query.mode = SearchMode::FullText;
+    assert!(
+        store.search(fulltext_query).await.unwrap().is_empty(),
+        "explicit FullText must retain whole-token semantics",
     );
 }
 
@@ -206,11 +532,23 @@ async fn exact_substring_walks_full_corpus_unbounded() {
     }
     let cancel = CancellationToken::new();
     let bounded = store
-        .substring_candidates("needle", &SearchFilters::default(), 10, true, &cancel)
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            true,
+            &cancel,
+        )
         .await
         .unwrap();
     let unbounded = store
-        .substring_candidates("needle", &SearchFilters::default(), 10, false, &cancel)
+        .substring_candidates(
+            "needle",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
+            false,
+            &cancel,
+        )
         .await
         .unwrap();
     // Both still find it on a 21-row DB (window is 5000), but the
@@ -244,7 +582,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             "needle",
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::CjkOnly,
             &cancel,
         )
@@ -260,7 +598,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             "needle",
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::Full,
             &cancel,
         )
@@ -277,7 +615,7 @@ async fn ngram_cjk_only_mode_drops_ascii_grams() {
         .ngram_candidates(
             &normalize_text("alpha 設計"),
             &SearchFilters::default(),
-            10,
+            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
             NgramQueryMode::CjkOnly,
             &cancel,
         )

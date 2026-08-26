@@ -124,6 +124,37 @@ fn gen_long(idx: usize) -> String {
     format!("doc-{idx:08} {salt} {body}")
 }
 
+fn gen_ascii_prefix_dense(idx: usize) -> String {
+    // Every row shares one- and two-character prefixes, while most also share
+    // a three-character prefix. This exposes FTS prefix expansion over dense
+    // posting lists instead of letting the short-query probes pass on a corpus
+    // where each prefix happens to identify only one token.
+    const TERMS: &[&str] = &[
+        "app",
+        "apple",
+        "appliance",
+        "applicant",
+        "application",
+        "applied",
+        "apply",
+        "appoint",
+        "appointment",
+        "appraisal",
+        "appreciate",
+        "apprentice",
+        "approach",
+        "approval",
+        "approximate",
+        "apartment",
+        "apology",
+        "apricot",
+        "april",
+        "aptitude",
+    ];
+    let term = TERMS[idx % TERMS.len()];
+    format!("entry-{idx:08} {term} shared-prefix corpus row {idx:04x}")
+}
+
 // ---- query patterns -----------------------------------------------------
 
 const Q_TEXT: &[QueryCase] = &[
@@ -278,6 +309,33 @@ const Q_LONG: &[QueryCase] = &[
     },
 ];
 
+const Q_ASCII_PREFIX_DENSE: &[QueryCase] = &[
+    QueryCase {
+        name: "one-char-dense",
+        raw: "a",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Probe,
+    },
+    QueryCase {
+        name: "short-dense",
+        raw: "ap",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Probe,
+    },
+    QueryCase {
+        name: "prefix-dense",
+        raw: "app",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Probe,
+    },
+    QueryCase {
+        name: "token",
+        raw: "application",
+        mode: SearchMode::Auto,
+        kind: QueryKind::Normal,
+    },
+];
+
 const DATASETS: &[Dataset] = &[
     Dataset {
         name: "text",
@@ -303,6 +361,11 @@ const DATASETS: &[Dataset] = &[
         name: "long",
         make: gen_long,
         queries: Q_LONG,
+    },
+    Dataset {
+        name: "ascii-prefix-dense",
+        make: gen_ascii_prefix_dense,
+        queries: Q_ASCII_PREFIX_DENSE,
     },
 ];
 

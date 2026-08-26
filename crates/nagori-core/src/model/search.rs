@@ -138,21 +138,57 @@ pub enum SearchMode {
     Semantic,
 }
 
-/// Search-time projection of a stored entry: exactly the fields the ranker
-/// scores on plus what a [`SearchResult`] carries — nothing else.
+/// Strongest direct text relationship between a query and a search document.
 ///
-/// Candidate fetches used to return full [`ClipboardEntry`] values, which
-/// meant deserialising and carrying up to 512 KiB of body per candidate
-/// (`limit × 8` per branch, three branches) on every keystroke even though
-/// ranking never reads the content. Providers project rows into this type
-/// instead so the per-candidate payload stays proportional to what ranking
-/// actually consumes (`normalized_text` is needed for the substring / exact
-/// checks and is the one potentially large field).
+/// Providers compute this signal at the storage boundary so the ranker never
+/// needs the document's full `normalized_text`. The declaration order is the
+/// signal strength order and lets duplicate branch hits retain the strongest
+/// relationship without carrying the source text through memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TextMatch {
+    #[default]
+    None,
+    Substring,
+    Prefix,
+    Exact,
+}
+
+impl TextMatch {
+    /// Classify a normalized query against normalized document text.
+    ///
+    /// `SQLite` providers calculate the equivalent signal in SQL. This helper
+    /// keeps in-memory providers and ranker tests on the same contract.
+    #[must_use]
+    pub fn classify(normalized_text: &str, normalized_query: &str) -> Self {
+        if normalized_query.is_empty() {
+            Self::None
+        } else if normalized_text == normalized_query {
+            Self::Exact
+        } else if normalized_text.starts_with(normalized_query) {
+            Self::Prefix
+        } else if normalized_text.contains(normalized_query) {
+            Self::Substring
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// Search-time projection of a stored entry: exactly the bounded fields and
+/// typed signals the ranker consumes plus what a [`SearchResult`] carries.
+///
+/// In particular this type must never own `SearchDocument::normalized_text`.
+/// A document can be hundreds of KiB and a hybrid search materializes several
+/// thousand branch hits before deduplication. Providers instead calculate
+/// [`TextMatch`] and the scalar character count next to the index, then cap all
+/// string projections before constructing candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchCandidate {
     pub entry_id: EntryId,
-    /// Same value as [`SearchDocument::normalized_text`].
-    pub normalized_text: String,
+    pub text_match: TextMatch,
+    /// Character count of `SearchDocument::normalized_text`, used only for the
+    /// ranker's long-document penalty.
+    pub normalized_char_count: usize,
     pub preview: String,
     /// Canonical language id for `Code` rows; see [`SearchResult::language`].
     pub language: Option<String>,
@@ -172,16 +208,22 @@ impl SearchCandidate {
     /// project at the SQL layer instead; this is for in-memory providers and
     /// tests that start from a [`ClipboardEntry`].
     #[must_use]
-    pub fn from_entry(entry: &ClipboardEntry) -> Self {
+    pub fn from_entry(entry: &ClipboardEntry, normalized_query: &str) -> Self {
         let (image_width, image_height) = match &entry.content {
             ClipboardContent::Image(image) => (image.width, image.height),
             _ => (None, None),
         };
+        let normalized_text = &entry.search.normalized_text;
         Self {
             entry_id: entry.id,
-            normalized_text: entry.search.normalized_text.clone(),
-            preview: entry.search.preview.clone(),
-            language: entry.search.language.clone(),
+            text_match: TextMatch::classify(normalized_text, normalized_query),
+            normalized_char_count: normalized_text.chars().count(),
+            preview: cap_candidate_string(&entry.search.preview, PREVIEW_MAX_CHARS),
+            language: entry
+                .search
+                .language
+                .as_deref()
+                .map(|value| cap_candidate_string(value, CANDIDATE_METADATA_MAX_CHARS)),
             content_kind: entry.content_kind(),
             created_at: entry.metadata.created_at,
             use_count: entry.metadata.use_count,
@@ -191,11 +233,35 @@ impl SearchCandidate {
                 .metadata
                 .source
                 .as_ref()
-                .and_then(|source| source.name.clone()),
+                .and_then(|source| source.name.as_deref())
+                .map(|value| cap_candidate_string(value, CANDIDATE_METADATA_MAX_CHARS)),
             image_width,
             image_height,
         }
     }
+
+    /// Heap bytes owned by this candidate's strings.
+    ///
+    /// Providers add the surrounding vector slot size separately because FTS
+    /// and ngram hits wrap the candidate in different fixed-size structs.
+    #[must_use]
+    pub fn owned_byte_count(&self) -> usize {
+        self.preview
+            .capacity()
+            .saturating_add(self.language.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.source_app_name.as_ref().map_or(0, String::capacity))
+    }
+}
+
+/// Maximum scalar count for search-candidate metadata strings.
+///
+/// Source app names and language identifiers are display hints rather
+/// than searchable bodies, so truncating corrupted or hostile oversized rows
+/// is preferable to letting one row consume a whole search budget.
+pub const CANDIDATE_METADATA_MAX_CHARS: usize = 256;
+
+fn cap_candidate_string(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -253,7 +319,59 @@ pub enum RankReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{keyword_followed_by_whitespace, make_preview};
+    use crate::{EntryFactory, MAX_ENTRY_SIZE_BYTES, MAX_SEARCH_CANDIDATE_BYTES};
+
+    use super::{
+        PREVIEW_MAX_CHARS, SearchCandidate, TextMatch, keyword_followed_by_whitespace, make_preview,
+    };
+
+    #[test]
+    fn text_match_classifies_strongest_relationship() {
+        assert_eq!(
+            TextMatch::classify("clipboard", "clipboard"),
+            TextMatch::Exact
+        );
+        assert_eq!(
+            TextMatch::classify("clipboard manager", "clip"),
+            TextMatch::Prefix
+        );
+        assert_eq!(
+            TextMatch::classify("saved clipboard entry", "clipboard"),
+            TextMatch::Substring
+        );
+        assert_eq!(TextMatch::classify("clipboard", "missing"), TextMatch::None);
+        assert_eq!(TextMatch::classify("clipboard", ""), TextMatch::None);
+    }
+
+    #[test]
+    fn maximum_length_entry_projects_to_a_bounded_candidate() {
+        let text = format!("needle {}", "x".repeat(MAX_ENTRY_SIZE_BYTES - 7));
+        let entry = EntryFactory::from_text(&text);
+        let candidate = SearchCandidate::from_entry(&entry, "needle");
+
+        assert_eq!(candidate.text_match, TextMatch::Prefix);
+        assert_eq!(candidate.normalized_char_count, text.len());
+        assert!(candidate.preview.chars().count() <= PREVIEW_MAX_CHARS);
+        assert!(
+            candidate.owned_byte_count() <= PREVIEW_MAX_CHARS * char::MAX_LEN_UTF8,
+            "candidate allocation must not scale with the full normalized document",
+        );
+
+        // A hybrid search can materialize roughly this many branch hits before
+        // deduplication. Cloning the old candidate shape here would clone the
+        // maximum-length normalized text thousands of times (several GiB).
+        let candidates = std::iter::repeat_n(candidate, 5_000).collect::<Vec<_>>();
+        let allocation_bytes = candidates
+            .capacity()
+            .saturating_mul(std::mem::size_of::<SearchCandidate>())
+            .saturating_add(
+                candidates
+                    .iter()
+                    .map(SearchCandidate::owned_byte_count)
+                    .sum::<usize>(),
+            );
+        assert!(allocation_bytes <= MAX_SEARCH_CANDIDATE_BYTES);
+    }
 
     #[test]
     fn keyword_match_needs_whitespace_on_the_right() {

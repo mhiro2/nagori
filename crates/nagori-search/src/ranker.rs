@@ -1,5 +1,5 @@
 use nagori_core::{
-    ContentKind, EntryId, RankReason, Ranker, RecentOrder, SearchCandidate, SearchResult,
+    ContentKind, EntryId, RankReason, Ranker, RecentOrder, SearchCandidate, SearchResult, TextMatch,
 };
 use time::OffsetDateTime;
 use tracing::debug;
@@ -25,7 +25,6 @@ impl Ranker for DefaultRanker {
         now: OffsetDateTime,
         recent_order: RecentOrder,
     ) -> Option<SearchResult> {
-        let text = &candidate.normalized_text;
         let query = query.trim();
         if query.is_empty() {
             return Some(rank_recent(candidate, recent_order));
@@ -39,17 +38,24 @@ impl Ranker for DefaultRanker {
 
         let mut score = 0.0;
         let mut reasons = Vec::new();
-        if text == query {
-            score += 100.0;
-            reasons.push(RankReason::ExactMatch);
-        }
-        if text.starts_with(query) {
-            score += 60.0;
-            reasons.push(RankReason::PrefixMatch);
-        }
-        if text.contains(query) {
-            score += 35.0;
-            reasons.push(RankReason::SubstringMatch);
+        match candidate.text_match {
+            TextMatch::Exact => {
+                score += 100.0 + 60.0 + 35.0;
+                reasons.extend([
+                    RankReason::ExactMatch,
+                    RankReason::PrefixMatch,
+                    RankReason::SubstringMatch,
+                ]);
+            }
+            TextMatch::Prefix => {
+                score += 60.0 + 35.0;
+                reasons.extend([RankReason::PrefixMatch, RankReason::SubstringMatch]);
+            }
+            TextMatch::Substring => {
+                score += 35.0;
+                reasons.push(RankReason::SubstringMatch);
+            }
+            TextMatch::None => {}
         }
         // FTS5 bm25 is non-positive (0 == no match, negative == better
         // match). Raw values are typically small (e.g. -0.5 .. -5.0); scale
@@ -100,7 +106,7 @@ impl Ranker for DefaultRanker {
         // hits in multi-megabyte blobs. Capped at half of the current score
         // so a real match never gets pushed to zero (and dropped) by length
         // alone.
-        let text_len = text.chars().count();
+        let text_len = candidate.normalized_char_count;
         if text_len > 200 && score > 0.0 {
             let extra = (text_len - 200) as f32;
             let penalty = ((extra / 2_000.0).min(1.0) * 15.0).min(score / 2.0);
@@ -226,17 +232,23 @@ mod tests {
     fn entry(text: &str) -> SearchCandidate {
         let mut entry = EntryFactory::from_text(text);
         entry.search.normalized_text = normalize_text(text);
-        SearchCandidate::from_entry(&entry)
+        SearchCandidate::from_entry(&entry, "")
     }
 
     fn rank(
         query: &str,
-        candidate: SearchCandidate,
+        mut candidate: SearchCandidate,
         fts_score: f32,
         ngram_overlap: f32,
         now: OffsetDateTime,
         recent_order: RecentOrder,
     ) -> Option<SearchResult> {
+        // Test entries are short enough for their preview to contain the full
+        // normalized body. Long-document tests must set `text_match` directly
+        // because production storage classifies against `normalized_text`
+        // before projecting the 180-character preview.
+        candidate.text_match =
+            TextMatch::classify(&normalize_text(&candidate.preview), &normalize_text(query));
         DefaultRanker.rank(
             query,
             candidate,
@@ -283,6 +295,35 @@ mod tests {
         assert!(result.rank_reason.contains(&RankReason::PrefixMatch));
         assert!(result.rank_reason.contains(&RankReason::SubstringMatch));
         assert!(result.score > 190.0);
+    }
+
+    #[test]
+    fn typed_text_match_controls_stacked_reasons_without_document_text() {
+        let cases = [
+            (TextMatch::Substring, 1),
+            (TextMatch::Prefix, 2),
+            (TextMatch::Exact, 3),
+        ];
+        for (text_match, expected_reason_count) in cases {
+            let mut candidate = entry("preview does not contain the query");
+            candidate.text_match = text_match;
+            let result = DefaultRanker
+                .rank("needle", candidate, 0.0, 0.0, now(), RecentOrder::ByRecency)
+                .expect("typed signal should surface the candidate");
+            let reason_count = result
+                .rank_reason
+                .iter()
+                .filter(|reason| {
+                    matches!(
+                        reason,
+                        RankReason::ExactMatch
+                            | RankReason::PrefixMatch
+                            | RankReason::SubstringMatch
+                    )
+                })
+                .count();
+            assert_eq!(reason_count, expected_reason_count);
+        }
     }
 
     #[test]

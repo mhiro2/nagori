@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
@@ -20,10 +20,49 @@ use crate::{
 /// sees a clear error instead of a silent truncation.
 pub const MAX_RESULT_LIMIT: usize = 200;
 
+/// Maximum candidate allocation retained by one text search before ranking.
+///
+/// Hybrid branches run concurrently and coexist until deduplication. The
+/// service divides this ceiling evenly across active branches, and providers
+/// must enforce their share while collecting rows rather than truncating after
+/// the allocations already happened.
+pub const MAX_SEARCH_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Multiplier applied to the requested `limit` when fetching candidates from
 /// the provider so the ranker has enough headroom to pick winners after
 /// dedup + score-sort.
 const CANDIDATE_OVERSAMPLE: usize = 8;
+
+/// Count and allocation ceilings for one candidate-provider branch.
+///
+/// `max_bytes` covers the returned vector's fixed slots plus strings owned by
+/// its candidates. It is deliberately a typed pair so provider implementations
+/// cannot accidentally apply the row limit while ignoring the byte limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchCandidateBudget {
+    max_count: usize,
+    max_bytes: usize,
+}
+
+impl SearchCandidateBudget {
+    #[must_use]
+    pub const fn new(max_count: usize, max_bytes: usize) -> Self {
+        Self {
+            max_count,
+            max_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_count(self) -> usize {
+        self.max_count
+    }
+
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        self.max_bytes
+    }
+}
 
 /// FTS hit returned by a [`SearchCandidateProvider`].
 ///
@@ -33,6 +72,24 @@ const CANDIDATE_OVERSAMPLE: usize = 8;
 pub struct FtsCandidate {
     pub candidate: SearchCandidate,
     pub fts_score: f32,
+}
+
+/// How the full-text candidate fetch should interpret query tokens.
+///
+/// The orchestrator owns this policy because it depends on the resolved
+/// [`SearchPlan`], which the provider never sees:
+///
+/// * `WholeToken` — require complete FTS tokens. Explicit `FullText` searches
+///   retain this precise behavior.
+/// * `AsciiPrefix` — treat safe ASCII-alphanumeric query fragments of at least
+///   three characters as FTS prefixes. The implicit `Hybrid` (Auto) plan uses
+///   this to recall an old `clipboard` entry from `clip` even when it falls
+///   outside the bounded substring window. One- and two-character, non-ASCII,
+///   and punctuation-bearing fragments remain whole-token queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsQueryMode {
+    WholeToken,
+    AsciiPrefix,
 }
 
 /// Ngram hit returned by a [`SearchCandidateProvider`].
@@ -55,12 +112,12 @@ pub struct NgramCandidate {
 /// * `Full` — use every query gram. The explicit `Fuzzy` plan needs this so
 ///   short ASCII typos (`needel` → `needle`) still match via gram overlap.
 /// * `CjkOnly` — keep only grams that contain a CJK character. The implicit
-///   `Hybrid` (Auto) plan uses this: ASCII word recall is already covered by
-///   FTS + the bounded substring scan, and common ASCII bigrams own huge
-///   posting lists that make the `gram IN (...)` union explode on large
-///   histories. Filtering to CJK grams preserves CJK and mixed-script recall
-///   while shedding that cost. A pure-ASCII query yields no CJK grams, so the
-///   fetch short-circuits to empty.
+///   `Hybrid` (Auto) plan uses this: ASCII token-prefix recall is already
+///   covered by FTS plus the bounded substring scan, and common ASCII bigrams
+///   own huge posting lists that make the `gram IN (...)` union explode on
+///   large histories. Filtering to CJK grams preserves CJK and mixed-script
+///   recall while shedding that cost. A pure-ASCII query yields no CJK grams,
+///   so the fetch short-circuits to empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NgramQueryMode {
     Full,
@@ -73,7 +130,9 @@ pub enum NgramQueryMode {
 /// ranker needs; the [`SearchService`] is responsible for plan dispatch,
 /// dedup, ranking, sorting, and truncation. Hits travel as the
 /// [`SearchCandidate`] projection, not full entries, so a provider never has
-/// to deserialise entry bodies just to let the ranker drop the row.
+/// to deserialise entry bodies just to let the ranker drop the row. Every
+/// implementation must enforce [`SearchCandidateBudget`] while collecting,
+/// before it returns an allocated vector to the service.
 #[async_trait]
 pub trait SearchCandidateProvider: Send + Sync {
     /// Most recent active entries, optionally with pinned rows hoisted to the
@@ -87,7 +146,7 @@ pub trait SearchCandidateProvider: Send + Sync {
         &self,
         filters: &SearchFilters,
         order: RecentOrder,
-        limit: usize,
+        budget: SearchCandidateBudget,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchCandidate>>;
 
@@ -104,18 +163,20 @@ pub trait SearchCandidateProvider: Send + Sync {
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
         bounded: bool,
         cancel: &CancellationToken,
     ) -> Result<Vec<SearchCandidate>>;
 
-    /// Full-text matches with raw `bm25` scores attached. See
+    /// Full-text matches with raw `bm25` scores attached. `mode` carries the
+    /// plan-level token policy (see [`FtsQueryMode`]). See
     /// [`Self::recent_entries`] for `cancel`.
     async fn fulltext_candidates(
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
+        mode: FtsQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<FtsCandidate>>;
 
@@ -128,7 +189,7 @@ pub trait SearchCandidateProvider: Send + Sync {
         &self,
         normalized: &str,
         filters: &SearchFilters,
-        limit: usize,
+        budget: SearchCandidateBudget,
         mode: NgramQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>>;
@@ -246,17 +307,22 @@ where
         let _cancel_guard = cancel.clone().drop_guard();
 
         let mut candidates: Vec<SearchCandidate> = Vec::new();
-        let mut seen: HashSet<EntryId> = HashSet::new();
+        let mut candidate_indexes: HashMap<EntryId, usize> = HashMap::new();
         let mut fts_scores: HashMap<EntryId, f32> = HashMap::new();
         let mut ngram_overlap: HashMap<EntryId, f32> = HashMap::new();
 
         if matches!(plan, SearchPlan::Recent) {
             for candidate in self
                 .provider
-                .recent_entries(filters, query.recent_order, candidate_limit, &cancel)
+                .recent_entries(
+                    filters,
+                    query.recent_order,
+                    SearchCandidateBudget::new(candidate_limit, MAX_SEARCH_CANDIDATE_BYTES),
+                    &cancel,
+                )
                 .await?
             {
-                push_unique(&mut candidates, &mut seen, candidate);
+                push_or_merge(&mut candidates, &mut candidate_indexes, candidate);
             }
         }
 
@@ -265,15 +331,15 @@ where
             .await?;
 
         for candidate in substring_hits {
-            push_unique(&mut candidates, &mut seen, candidate);
+            push_or_merge(&mut candidates, &mut candidate_indexes, candidate);
         }
         for hit in fts_hits {
             fts_scores.insert(hit.candidate.entry_id, hit.fts_score);
-            push_unique(&mut candidates, &mut seen, hit.candidate);
+            push_or_merge(&mut candidates, &mut candidate_indexes, hit.candidate);
         }
         for hit in ngram_hits {
             ngram_overlap.insert(hit.candidate.entry_id, hit.ngram_overlap);
-            push_unique(&mut candidates, &mut seen, hit.candidate);
+            push_or_merge(&mut candidates, &mut candidate_indexes, hit.candidate);
         }
 
         // The `Recent` plan is a recency listing: an explicit
@@ -331,9 +397,10 @@ where
         let want_fts = matches!(plan, SearchPlan::FullText | SearchPlan::Hybrid);
         // Ngram fan-out runs for `Fuzzy` (full grams — its typo tolerance comes
         // from gram overlap) and for `Hybrid` *only when the query carries CJK*.
-        // A pure-ASCII `Hybrid` query is fully served by FTS + bounded
-        // substring, so we skip even dispatching the blocking ngram fetch and
-        // dodge the common-bigram posting-list explosion on large histories.
+        // A pure-ASCII `Hybrid` query is served by bounded substring plus FTS
+        // whole tokens / prefixes of at least three characters, so we skip
+        // even dispatching the blocking ngram fetch and dodge the common-
+        // bigram posting-list explosion on large histories.
         // Mixed CJK+ASCII queries still reach the provider, where
         // `NgramQueryMode::CjkOnly` strips the costly ASCII grams.
         let want_ngram = match plan {
@@ -346,6 +413,17 @@ where
         } else {
             NgramQueryMode::Full
         };
+        let fts_mode = if matches!(plan, SearchPlan::Hybrid) {
+            FtsQueryMode::AsciiPrefix
+        } else {
+            FtsQueryMode::WholeToken
+        };
+        let branch_count =
+            usize::from(want_substring) + usize::from(want_fts) + usize::from(want_ngram);
+        let branch_bytes = MAX_SEARCH_CANDIDATE_BYTES
+            .checked_div(branch_count)
+            .unwrap_or(0);
+        let branch_budget = SearchCandidateBudget::new(candidate_limit, branch_bytes);
 
         // Only the implicit `Hybrid` plan opts into the recent-window
         // bound. There FTS gives word-level recall and ngram gives CJK
@@ -365,7 +443,7 @@ where
                     .substring_candidates(
                         normalized,
                         filters,
-                        candidate_limit,
+                        branch_budget,
                         bounded_substring,
                         cancel,
                     )
@@ -377,7 +455,7 @@ where
         let fts_fut = async {
             if want_fts {
                 self.provider
-                    .fulltext_candidates(normalized, filters, candidate_limit, cancel)
+                    .fulltext_candidates(normalized, filters, branch_budget, fts_mode, cancel)
                     .await
             } else {
                 Ok(Vec::new())
@@ -386,7 +464,7 @@ where
         let ngram_fut = async {
             if want_ngram {
                 self.provider
-                    .ngram_candidates(normalized, filters, candidate_limit, ngram_mode, cancel)
+                    .ngram_candidates(normalized, filters, branch_budget, ngram_mode, cancel)
                     .await
             } else {
                 Ok(Vec::new())
@@ -423,14 +501,17 @@ where
     }
 }
 
-fn push_unique(
+fn push_or_merge(
     candidates: &mut Vec<SearchCandidate>,
-    seen: &mut HashSet<EntryId>,
+    candidate_indexes: &mut HashMap<EntryId, usize>,
     candidate: SearchCandidate,
 ) {
-    if seen.insert(candidate.entry_id) {
-        candidates.push(candidate);
+    if let Some(&index) = candidate_indexes.get(&candidate.entry_id) {
+        candidates[index].text_match = candidates[index].text_match.max(candidate.text_match);
+        return;
     }
+    candidate_indexes.insert(candidate.entry_id, candidates.len());
+    candidates.push(candidate);
 }
 
 #[cfg(test)]
@@ -448,8 +529,10 @@ mod tests {
         fts: Vec<FtsCandidate>,
         ngram: Vec<NgramCandidate>,
         seen: Mutex<Vec<&'static str>>,
+        fts_mode: Mutex<Option<FtsQueryMode>>,
         ngram_mode: Mutex<Option<NgramQueryMode>>,
         recent_limit: Mutex<Option<usize>>,
+        branch_budgets: Mutex<Vec<SearchCandidateBudget>>,
     }
 
     #[async_trait]
@@ -458,11 +541,12 @@ mod tests {
             &self,
             _filters: &SearchFilters,
             _order: RecentOrder,
-            limit: usize,
+            budget: SearchCandidateBudget,
             _cancel: &CancellationToken,
         ) -> Result<Vec<SearchCandidate>> {
             self.seen.lock().unwrap().push("recent");
-            *self.recent_limit.lock().unwrap() = Some(limit);
+            *self.recent_limit.lock().unwrap() = Some(budget.max_count());
+            self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.recent.clone())
         }
 
@@ -470,11 +554,12 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            budget: SearchCandidateBudget,
             _bounded: bool,
             _cancel: &CancellationToken,
         ) -> Result<Vec<SearchCandidate>> {
             self.seen.lock().unwrap().push("substring");
+            self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.substring.clone())
         }
 
@@ -482,10 +567,13 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            budget: SearchCandidateBudget,
+            mode: FtsQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<FtsCandidate>> {
             self.seen.lock().unwrap().push("fts");
+            *self.fts_mode.lock().unwrap() = Some(mode);
+            self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.fts.clone())
         }
 
@@ -493,12 +581,13 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            budget: SearchCandidateBudget,
             mode: NgramQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<NgramCandidate>> {
             self.seen.lock().unwrap().push("ngram");
             *self.ngram_mode.lock().unwrap() = Some(mode);
+            self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.ngram.clone())
         }
     }
@@ -537,7 +626,7 @@ mod tests {
     }
 
     fn entry(text: &str) -> SearchCandidate {
-        SearchCandidate::from_entry(&EntryFactory::from_text(text))
+        SearchCandidate::from_entry(&EntryFactory::from_text(text), "")
     }
 
     #[tokio::test]
@@ -646,6 +735,10 @@ mod tests {
 
         assert_eq!(calls, vec!["substring", "fts", "ngram"]);
         assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::AsciiPrefix)
+        );
+        assert_eq!(
             *provider.ngram_mode.lock().unwrap(),
             Some(NgramQueryMode::CjkOnly)
         );
@@ -653,10 +746,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_candidate_branches_split_one_search_byte_budget() {
+        let provider = StubProvider::default();
+        let svc = SearchService::new(&provider, &SumRanker);
+
+        let q = SearchQuery::new("検索", "検索".to_owned(), MAX_RESULT_LIMIT);
+        svc.search(q).await.unwrap();
+
+        let budgets = provider.branch_budgets.lock().unwrap().clone();
+        assert_eq!(budgets.len(), 3);
+        assert!(budgets.iter().all(|budget| {
+            budget.max_count() == MAX_RESULT_LIMIT * CANDIDATE_OVERSAMPLE
+                && budget.max_bytes() == MAX_SEARCH_CANDIDATE_BYTES / 3
+        }));
+        assert!(
+            budgets
+                .iter()
+                .map(|budget| budget.max_bytes())
+                .sum::<usize>()
+                <= MAX_SEARCH_CANDIDATE_BYTES
+        );
+    }
+
+    #[tokio::test]
     async fn hybrid_ascii_query_skips_ngram() {
-        // Pure-ASCII Auto queries are served by FTS + bounded substring; ngram
-        // is not dispatched at all, so the common-bigram posting-list scan
-        // never runs. This is the fix for the 100k fan-out blowup.
+        // Pure-ASCII Auto queries are served by bounded substring plus FTS
+        // whole tokens / prefixes of at least three characters. Ngram is not
+        // dispatched, so the common-bigram posting-list scan never runs.
         let provider = StubProvider {
             substring: vec![entry("alpha")],
             fts: vec![FtsCandidate {
@@ -676,6 +792,10 @@ mod tests {
         let calls = provider.seen.lock().unwrap().clone();
 
         assert_eq!(calls, vec!["substring", "fts"], "ngram must not run");
+        assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::AsciiPrefix)
+        );
         assert!(provider.ngram_mode.lock().unwrap().is_none());
         assert_eq!(results.len(), 2);
     }
@@ -737,6 +857,22 @@ mod tests {
         assert!((result.score - 3.5).abs() < f32::EPSILON);
     }
 
+    #[test]
+    fn duplicate_candidates_keep_the_strongest_text_match() {
+        let mut weak = entry("shared");
+        weak.text_match = crate::TextMatch::Substring;
+        let mut strong = weak.clone();
+        strong.text_match = crate::TextMatch::Exact;
+        let mut candidates = Vec::new();
+        let mut indexes = HashMap::new();
+
+        push_or_merge(&mut candidates, &mut indexes, weak);
+        push_or_merge(&mut candidates, &mut indexes, strong);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].text_match, crate::TextMatch::Exact);
+    }
+
     #[tokio::test]
     async fn results_sorted_descending_and_truncated_to_limit() {
         let mut hits = Vec::new();
@@ -757,6 +893,10 @@ mod tests {
         let results = svc.search(q).await.unwrap();
 
         let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        assert_eq!(
+            *provider.fts_mode.lock().unwrap(),
+            Some(FtsQueryMode::WholeToken)
+        );
         assert_eq!(scores.len(), 2);
         assert!(scores[0] >= scores[1]);
         // Top score must come from the strongest |fts| signal (5.0 → 6.0).
@@ -836,7 +976,7 @@ mod tests {
             &self,
             _filters: &SearchFilters,
             _order: RecentOrder,
-            _limit: usize,
+            _budget: SearchCandidateBudget,
             _cancel: &CancellationToken,
         ) -> Result<Vec<SearchCandidate>> {
             if self.fail_on == "recent" {
@@ -849,7 +989,7 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            _budget: SearchCandidateBudget,
             _bounded: bool,
             _cancel: &CancellationToken,
         ) -> Result<Vec<SearchCandidate>> {
@@ -863,7 +1003,8 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            _budget: SearchCandidateBudget,
+            _mode: FtsQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<FtsCandidate>> {
             if self.fail_on == "fts" {
@@ -876,7 +1017,7 @@ mod tests {
             &self,
             _normalized: &str,
             _filters: &SearchFilters,
-            _limit: usize,
+            _budget: SearchCandidateBudget,
             _mode: NgramQueryMode,
             _cancel: &CancellationToken,
         ) -> Result<Vec<NgramCandidate>> {
