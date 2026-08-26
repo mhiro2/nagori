@@ -136,7 +136,9 @@ async fn recent_candidate_recovers_bounded_preview_when_search_document_is_missi
     use tokio_util::sync::CancellationToken;
 
     let store = SqliteStore::open_memory().unwrap();
-    let text = format!("legacy preview {}", "x".repeat(PREVIEW_MAX_CHARS));
+    // Raw newlines and whitespace runs must collapse exactly like a stored
+    // preview, and the truncation must end in the same ellipsis.
+    let text = format!("legacy\n\n  preview\t{}", "x".repeat(PREVIEW_MAX_CHARS));
     let id = insert_text(&store, &text).await;
     store
         .conn()
@@ -161,7 +163,12 @@ async fn recent_candidate_recovers_bounded_preview_when_search_document_is_missi
         .find(|candidate| candidate.entry_id == id)
         .expect("entry without a search document should remain visible");
 
-    assert!(candidate.preview.starts_with("legacy preview "));
+    assert_eq!(
+        candidate.preview,
+        nagori_core::make_preview(&text, PREVIEW_MAX_CHARS)
+    );
+    assert!(candidate.preview.starts_with("legacy preview x"));
+    assert!(candidate.preview.ends_with('…'));
     assert_eq!(candidate.preview.chars().count(), PREVIEW_MAX_CHARS);
     assert_eq!(candidate.normalized_char_count, 0);
 }

@@ -125,11 +125,19 @@ pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidat
                 Box::new(err),
             )
         })?;
+    let preview: String = row.get("preview")?;
+    let preview = if row.get::<_, i64>("preview_is_fallback")? != 0 {
+        // The SQL fallback is a bounded raw slice of the body; shape it like
+        // the stored previews (collapsed whitespace, ellipsis on truncation).
+        nagori_core::make_preview(&preview, nagori_core::PREVIEW_MAX_CHARS)
+    } else {
+        preview
+    };
     Ok(SearchCandidate {
         entry_id,
         text_match,
         normalized_char_count,
-        preview: row.get("preview")?,
+        preview,
         language: row.get("language")?,
         content_kind,
         created_at: parse_time(&row.get::<_, String>("created_at")?)?,

@@ -42,6 +42,10 @@ const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
             WHEN 'unknown' THEN json_extract(e.content_json, '$.Unknown.plain_text')
         END";
 
+/// Multiplier applied to `PREVIEW_MAX_CHARS` when scanning a fallback body for
+/// its preview, leaving room for whitespace runs that `make_preview` collapses.
+const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
+
 /// Build the bounded projection shared by every candidate query.
 ///
 /// `normalized_text` is consulted by `SQLite` only for its character count and
@@ -54,11 +58,19 @@ const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
 /// legacy or interrupted databases usable without reopening the candidate-
 /// memory failure mode.
 fn candidate_columns(text_match_sql: &str) -> String {
+    // A stored `d.preview` is already `make_preview`-shaped and at most
+    // `PREVIEW_MAX_CHARS` long, so the cap is a no-op for it. The fallback
+    // body is raw text whose whitespace still has to be collapsed in Rust, so
+    // it gets a small overscan window (its own bounded allocation) and
+    // `row_to_candidate` finishes it with `make_preview` when
+    // `preview_is_fallback` is set.
+    let fallback_scan_chars = PREVIEW_MAX_CHARS * FALLBACK_PREVIEW_OVERSCAN;
     format!(
         "e.id, e.content_kind, e.created_at, e.use_count, e.pinned,
          e.sensitivity,
          substr(e.source_app_name, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS source_app_name,
-         substr(COALESCE(d.preview, {FALLBACK_PLAIN_TEXT_SQL}, ''), 1, {PREVIEW_MAX_CHARS}) AS preview,
+         substr(COALESCE(d.preview, {FALLBACK_PLAIN_TEXT_SQL}, ''), 1, {fallback_scan_chars}) AS preview,
+         d.entry_id IS NULL AS preview_is_fallback,
          substr(d.language, 1, {CANDIDATE_METADATA_MAX_CHARS}) AS language,
          COALESCE(length(d.normalized_text), 0) AS normalized_char_count,
          {text_match_sql} AS text_match,
