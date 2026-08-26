@@ -255,7 +255,7 @@ pub(crate) fn bool_int(value: bool) -> i64 {
 ///
 /// [`nagori_core::FtsQueryMode::AsciiPrefix`] appends the FTS5 prefix marker
 /// outside the closing quote for pure ASCII-alphanumeric fragments of at
-/// least three bytes (`"clip"*`). The provider orders whole-token hits ahead
+/// least three bytes (`"clip"*`). The provider admits whole-token hits ahead
 /// of prefix-only ones itself (see `fulltext_candidates`), so the expression
 /// stays a plain implicit-AND phrase list. Keeping the marker out of user input
 /// preserves the escaping guarantee, while short, punctuation-bearing, and

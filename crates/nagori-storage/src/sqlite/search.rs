@@ -140,8 +140,11 @@ impl<T> ByteBoundedVec<T> {
             {
                 // `reserve_exact` may hand back more capacity than requested;
                 // give the overshoot back so the returned vector never holds
-                // an allocation the budget refused. `shrink_to` is best-effort,
-                // so fall back to rebuilding at the exact old capacity.
+                // an allocation the budget refused. `shrink_to` is documented
+                // as best-effort, so fall back to rebuilding at the old
+                // capacity; std's `RawVec` records the requested capacity for
+                // sized element types, which makes that rebuild exact in
+                // practice even though the API only promises a lower bound.
                 self.values.shrink_to(old_capacity);
                 if self.values.capacity() > old_capacity {
                     let mut exact = Vec::with_capacity(old_capacity);
@@ -157,6 +160,10 @@ impl<T> ByteBoundedVec<T> {
         self.used_bytes = self.used_bytes.saturating_add(owned_bytes);
         self.values.push(value);
         true
+    }
+
+    const fn len(&self) -> usize {
+        self.values.len()
     }
 
     fn into_vec(self) -> Vec<T> {
@@ -517,11 +524,17 @@ impl SearchCandidateProvider for SqliteStore {
         }
         // Prefix expansion widens the hit set, and `bm25` alone cannot
         // guarantee that a document holding the exact token outranks a short,
-        // repetitive prefix-only document. Partition the ordering on a
-        // whole-token MATCH so those exact hits are admitted first and dense
-        // prefix expansions can only fill the remaining LIMIT slots.
+        // repetitive prefix-only document. Run the whole-token expression
+        // first and let the prefix expression only fill whatever count / byte
+        // budget remains, so exact hits are admitted ahead of dense prefix
+        // expansions while every phase stays `LIMIT`-bounded — no
+        // materialized rowid set grows with the corpus.
         let whole_token = fts_query(normalized, FtsQueryMode::WholeToken);
-        let whole_token = (whole_token != fts).then_some(whole_token);
+        let phases: Vec<String> = if whole_token == fts {
+            vec![fts]
+        } else {
+            vec![whole_token, fts]
+        };
         let filter = build_filter_fragment(filters)?;
         let normalized = normalized.to_owned();
         let limit_i64 = clamp_limit(budget.max_count());
@@ -533,11 +546,6 @@ impl SearchCandidateProvider for SqliteStore {
             // `search_fts.rowid = search_documents.doc_id` (the explicit
             // INTEGER PRIMARY KEY that aliases the source rowid).
             let columns = candidate_columns(TEXT_MATCH_SQL);
-            let whole_token_order = if whole_token.is_some() {
-                "(search_fts.rowid IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?)) DESC,"
-            } else {
-                ""
-            };
             let sql = format!(
                 "SELECT {columns},
                         bm25(search_fts) AS fts_score
@@ -548,34 +556,41 @@ impl SearchCandidateProvider for SqliteStore {
                    AND e.deleted_at IS NULL
                    AND e.sensitivity != 'blocked'
                    {extra}
-                 ORDER BY {whole_token_order} fts_score
+                 ORDER BY fts_score
                  LIMIT ?",
                 extra = filter.sql,
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
-            let mut bound: Vec<&dyn ToSql> = vec![&normalized, &normalized, &normalized, &fts];
-            bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
-            if let Some(whole_token) = &whole_token {
-                bound.push(whole_token);
-            }
-            bound.push(&limit_i64);
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(bound), |row| {
-                    let score: f64 = row.get("fts_score").unwrap_or(0.0);
-                    let candidate = row_to_candidate(row)?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    Ok(FtsCandidate {
-                        candidate,
-                        fts_score: score as f32,
-                    })
-                })
-                .map_err(storage_err)?;
             let mut hits = ByteBoundedVec::new(max_count, max_bytes);
-            for row in rows {
-                let hit = row.map_err(storage_err)?;
-                let owned_bytes = hit.candidate.owned_byte_count();
-                if !hits.push(hit, owned_bytes) {
+            let mut seen: std::collections::HashSet<EntryId> = std::collections::HashSet::new();
+            'phases: for expression in &phases {
+                if hits.len() == max_count {
                     break;
+                }
+                let mut bound: Vec<&dyn ToSql> =
+                    vec![&normalized, &normalized, &normalized, expression];
+                bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
+                bound.push(&limit_i64);
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(bound), |row| {
+                        let score: f64 = row.get("fts_score").unwrap_or(0.0);
+                        let candidate = row_to_candidate(row)?;
+                        #[allow(clippy::cast_possible_truncation)]
+                        Ok(FtsCandidate {
+                            candidate,
+                            fts_score: score as f32,
+                        })
+                    })
+                    .map_err(storage_err)?;
+                for row in rows {
+                    let hit = row.map_err(storage_err)?;
+                    if !seen.insert(hit.candidate.entry_id) {
+                        continue;
+                    }
+                    let owned_bytes = hit.candidate.owned_byte_count();
+                    if !hits.push(hit, owned_bytes) {
+                        break 'phases;
+                    }
                 }
             }
             Ok(hits.into_vec())

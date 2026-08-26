@@ -767,9 +767,10 @@ ngram branch only fires for queries that carry a CJK character, and the
 orchestrator passes `NgramQueryMode::CjkOnly` so the provider keeps just
 the grams that contain a CJK char. ASCII recall is served by the bounded
 substring scan plus safe FTS token-prefix queries for fragments of at least
-three characters (the FTS branch orders whole-token hits ahead of prefix-only
-ones before its candidate limit, so dense prefix expansions cannot evict exact
-tokens); shorter fragments stay whole-token queries so a common
+three characters (the FTS branch runs the whole-token expression first and
+lets the prefix expression fill only the remaining candidate budget, so dense
+prefix expansions cannot evict exact tokens and every phase stays
+`LIMIT`-bounded); shorter fragments stay whole-token queries so a common
 one- or two-character prefix cannot expand across most of the FTS vocabulary
 before `bm25` applies its result limit. Common ASCII bigrams have the same
 posting-list problem in the ngram index, where their `gram IN (...)` union
