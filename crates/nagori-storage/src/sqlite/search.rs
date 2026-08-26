@@ -140,8 +140,14 @@ impl<T> ByteBoundedVec<T> {
             {
                 // `reserve_exact` may hand back more capacity than requested;
                 // give the overshoot back so the returned vector never holds
-                // an allocation the budget refused.
+                // an allocation the budget refused. `shrink_to` is best-effort,
+                // so fall back to rebuilding at the exact old capacity.
                 self.values.shrink_to(old_capacity);
+                if self.values.capacity() > old_capacity {
+                    let mut exact = Vec::with_capacity(old_capacity);
+                    exact.append(&mut self.values);
+                    self.values = exact;
+                }
                 return false;
             }
             self.used_bytes = self.used_bytes.saturating_add(actual_growth);
@@ -509,6 +515,13 @@ impl SearchCandidateProvider for SqliteStore {
         if fts.is_empty() {
             return Ok(Vec::new());
         }
+        // Prefix expansion widens the hit set, and `bm25` alone cannot
+        // guarantee that a document holding the exact token outranks a short,
+        // repetitive prefix-only document. Partition the ordering on a
+        // whole-token MATCH so those exact hits are admitted first and dense
+        // prefix expansions can only fill the remaining LIMIT slots.
+        let whole_token = fts_query(normalized, FtsQueryMode::WholeToken);
+        let whole_token = (whole_token != fts).then_some(whole_token);
         let filter = build_filter_fragment(filters)?;
         let normalized = normalized.to_owned();
         let limit_i64 = clamp_limit(budget.max_count());
@@ -520,6 +533,11 @@ impl SearchCandidateProvider for SqliteStore {
             // `search_fts.rowid = search_documents.doc_id` (the explicit
             // INTEGER PRIMARY KEY that aliases the source rowid).
             let columns = candidate_columns(TEXT_MATCH_SQL);
+            let whole_token_order = if whole_token.is_some() {
+                "(search_fts.rowid IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?)) DESC,"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT {columns},
                         bm25(search_fts) AS fts_score
@@ -530,13 +548,16 @@ impl SearchCandidateProvider for SqliteStore {
                    AND e.deleted_at IS NULL
                    AND e.sensitivity != 'blocked'
                    {extra}
-                 ORDER BY fts_score
+                 ORDER BY {whole_token_order} fts_score
                  LIMIT ?",
                 extra = filter.sql,
             );
             let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
             let mut bound: Vec<&dyn ToSql> = vec![&normalized, &normalized, &normalized, &fts];
             bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
+            if let Some(whole_token) = &whole_token {
+                bound.push(whole_token);
+            }
             bound.push(&limit_i64);
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(bound), |row| {

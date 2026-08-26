@@ -19,15 +19,15 @@ fn fts_query_wraps_alnum_tokens_in_quotes() {
     );
     assert_eq!(
         fts_query("hello world", FtsQueryMode::AsciiPrefix),
-        r#"("hello" OR "hello"*) AND ("world" OR "world"*)"#
+        r#""hello"* "world"*"#
     );
     assert_eq!(
         fts_query("a ap app", FtsQueryMode::AsciiPrefix),
-        r#""a" AND "ap" AND ("app" OR "app"*)"#
+        r#""a" "ap" "app"*"#
     );
     assert_eq!(
         fts_query("hello-world 検索", FtsQueryMode::AsciiPrefix),
-        r#""hello-world" AND "検索""#
+        r#""hello-world" "検索""#
     );
 }
 
@@ -50,11 +50,11 @@ fn fts_query_strips_fts5_metacharacters() {
     );
     assert_eq!(
         fts_query("foo:bar*", FtsQueryMode::AsciiPrefix),
-        r#"("foo" OR "foo"*) AND ("bar" OR "bar"*)"#
+        r#""foo"* "bar"*"#
     );
     assert_eq!(
         fts_query(r#"say "hi""#, FtsQueryMode::AsciiPrefix),
-        r#"("say" OR "say"*) AND "hi""#
+        r#""say"* "hi""#
     );
 }
 
@@ -384,6 +384,44 @@ async fn auto_skips_ascii_ngram_only_match() {
     assert!(
         auto.is_empty(),
         "Auto no longer chases ASCII ngram-only matches",
+    );
+}
+
+#[tokio::test]
+async fn fts_prefix_expansion_admits_whole_token_hits_before_the_limit() {
+    use nagori_core::SearchCandidateProvider;
+    use tokio_util::sync::CancellationToken;
+
+    const PREFIX_ONLY_ROWS: usize = 40;
+    const LIMIT: usize = 5;
+    let store = SqliteStore::open_memory().unwrap();
+    // A long document holding the exact token scores worse under bm25 than
+    // short, repetitive prefix-only documents; the whole-token partition must
+    // still admit it ahead of them.
+    let exact = insert_text(
+        &store,
+        &format!("clip {}", "unrelated filler words ".repeat(40)),
+    )
+    .await;
+    for index in 0..PREFIX_ONLY_ROWS {
+        insert_text(&store, &format!("clipboard clipboard clipboard {index}")).await;
+    }
+
+    let hits = store
+        .fulltext_candidates(
+            "clip",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(LIMIT, MAX_SEARCH_CANDIDATE_BYTES),
+            FtsQueryMode::AsciiPrefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(hits.len(), LIMIT);
+    assert_eq!(
+        hits[0].candidate.entry_id, exact,
+        "the exact-token document must be admitted first",
     );
 }
 
