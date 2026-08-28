@@ -80,7 +80,7 @@ Run the NSIS installer (`.exe`) from Releases. It is not yet
 Authenticode-signed, so SmartScreen warns on first launch — choose
 More info → Run anyway.
 
-### Linux (Wayland, x86_64)
+### Linux (Wayland, x86_64) — experimental
 
 ```sh
 # Debian / Ubuntu
@@ -90,12 +90,16 @@ sudo apt install ./nagori_*_amd64.deb wtype
 chmod +x Nagori_*_amd64.AppImage && ./Nagori_*_amd64.AppImage
 ```
 
-Auto-paste needs the `wtype` binary on `$PATH` (`pacman -S wtype` on Arch) and
-a Wayland compositor that exposes `wlr_data_control` or `ext_data_control`
-(sway, Hyprland, KDE Plasma 5.27+, river, …). **GNOME Wayland and X11 are not
+Linux support is **experimental**: capture and copy-back need a Wayland
+compositor that exposes `wlr_data_control` or `ext_data_control` (sway,
+Hyprland, KDE Plasma 5.27+, river, …). **GNOME Wayland and X11 are not
 supported.** Global hotkeys do not register on pure Wayland (toggle the palette
-from the tray icon). See [`docs/platforms.md`](./docs/platforms.md) for the
-full compatibility matrix and troubleshooting.
+from the tray icon). Auto-paste is **off by default** because Wayland cannot
+confirm which window receives the synthesised `Ctrl+V` after the palette hides;
+Enter copies the entry and you paste manually. To opt in anyway, start Nagori
+with `NAGORI_LINUX_AUTO_PASTE=1` and install `wtype` (`pacman -S wtype` on
+Arch). See [`docs/platforms.md`](./docs/platforms.md) for the full
+compatibility matrix and troubleshooting.
 
 ## Usage
 
