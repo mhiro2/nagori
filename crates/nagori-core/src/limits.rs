@@ -129,9 +129,164 @@ impl ReadBudget {
     }
 }
 
+/// Bytes reserved inside an IPC line for everything that is not entry text:
+/// the response envelope (`{"Entries":[…]}`), the protocol token, and the
+/// per-response scalar fields.
+pub const IPC_ENVELOPE_RESERVE_BYTES: usize = 8 * 1024;
+
+/// Bytes charged for one entry row's non-text JSON.
+///
+/// Covers the id, the two RFC 3339 timestamps, the flags, the capped preview
+/// ([`crate::PREVIEW_MAX_CHARS`] characters, at most 4 bytes each and 6 bytes
+/// once escaped), the source-app name, and the representation summaries.
+///
+/// A fixed allowance rather than a measurement: the sizing decision has to be
+/// made *before* the row is materialised, and every one of those fields is
+/// individually bounded well under this figure.
+pub const IPC_ROW_OVERHEAD_BYTES: usize = 2 * 1024;
+
+/// Budget for the JSON-escaped entry text one IPC response may carry in
+/// total, across every row in it.
+pub const MAX_RESPONSE_TEXT_WIRE_BYTES: usize = MAX_IPC_BYTES - IPC_ENVELOPE_RESERVE_BYTES;
+
+/// Ceiling on the JSON-escaped length of a single entry's text.
+///
+/// [`MAX_ENTRY_SIZE_BYTES`] bounds an entry's *raw* bytes, but the wire
+/// carries the JSON-escaped form, and escaping is not length-preserving: a
+/// control byte becomes the six-byte `\u0000` sequence, so 200 KB of control
+/// characters serialise to over 1 MB and breach [`MAX_IPC_BYTES`]. An entry
+/// admitted on its raw length alone could therefore be stored and then be
+/// unreadable by every client — an orphan row the daemon holds and neither the
+/// desktop nor the CLI can fetch.
+///
+/// Admission measures [`json_escaped_len`] against this ceiling so that
+/// "storage accepted it" implies "a single-entry response fits the frame".
+/// Text that escapes to no more than ~1.32x its raw size (all ASCII prose,
+/// JSON, source code, CJK) is unaffected; only escape-dense payloads are
+/// refused.
+pub const MAX_ENTRY_TEXT_WIRE_BYTES: usize = MAX_RESPONSE_TEXT_WIRE_BYTES - IPC_ROW_OVERHEAD_BYTES;
+
+/// Length `text` occupies inside a JSON string, excluding the surrounding
+/// quotes — i.e. `serde_json::to_string(text).len() - 2`.
+///
+/// Computed without allocating so admission can reject an oversized payload
+/// before a copy of it exists. Mirrors `serde_json`'s escape table: `"` and
+/// `\` and the five shorthand control escapes cost two bytes, every other
+/// control byte costs six (`\u00XX`), and all remaining bytes — including
+/// every non-ASCII UTF-8 byte — pass through unchanged.
+#[must_use]
+pub fn json_escaped_len(text: &str) -> usize {
+    text.bytes().fold(0_usize, |acc, byte| {
+        let cost = match byte {
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        };
+        acc.saturating_add(cost)
+    })
+}
+
+/// Whether `text` is small enough, once JSON-escaped, for a response carrying
+/// it to fit the IPC frame. See [`MAX_ENTRY_TEXT_WIRE_BYTES`].
+#[must_use]
+pub fn entry_text_fits_wire(text: &str) -> bool {
+    json_escaped_len(text) <= MAX_ENTRY_TEXT_WIRE_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deterministic pseudo-random corpus generator: a 64-bit LCG picking from
+    /// an alphabet that mixes every class the escape table treats differently
+    /// (quote, backslash, shorthand control escapes, `\u00XX` control bytes,
+    /// plain ASCII, multi-byte CJK). Fixed seeds keep the "property" test
+    /// reproducible without pulling in a property-testing dependency.
+    fn corpus(seed: u64, len: usize) -> String {
+        const ALPHABET: &[char] = &[
+            '"',
+            '\\',
+            '\n',
+            '\t',
+            '\r',
+            '\u{8}',
+            '\u{c}',
+            '\u{0}',
+            '\u{1}',
+            '\u{1f}',
+            'a',
+            'Z',
+            '0',
+            ' ',
+            '{',
+            '}',
+            '\u{3042}',
+            '\u{6f22}',
+            '\u{1f600}',
+        ];
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let index = (state >> 33) as usize % ALPHABET.len();
+                ALPHABET[index]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn json_escaped_len_matches_serde_json_for_every_escape_class() {
+        // The admission gate is only as good as this equality: if the
+        // predicted length ever undershoots what `serde_json` actually emits,
+        // an entry passes admission and then blows the frame on read-back.
+        for seed in 0..64_u64 {
+            let sample = corpus(seed, 256);
+            let encoded = serde_json::to_string(&sample).expect("string serialises");
+            assert_eq!(
+                json_escaped_len(&sample),
+                encoded.len() - 2,
+                "escaped length must match serde_json for {sample:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_escaped_len_covers_the_control_range_byte_by_byte() {
+        for byte in 0..=0x7f_u8 {
+            let sample = String::from(char::from(byte));
+            let encoded = serde_json::to_string(&sample).expect("string serialises");
+            assert_eq!(
+                json_escaped_len(&sample),
+                encoded.len() - 2,
+                "escaped length must match serde_json for byte {byte:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_size_limited_entry_of_ascii_always_fits_the_wire_budget() {
+        // ASCII prose never escapes, so the raw ceiling is the binding one and
+        // a maximum-size text entry must stay admissible.
+        const _: () = {
+            assert!(MAX_ENTRY_SIZE_BYTES <= MAX_ENTRY_TEXT_WIRE_BYTES);
+            assert!(MAX_ENTRY_TEXT_WIRE_BYTES < MAX_IPC_BYTES);
+        };
+        let text = "a".repeat(MAX_ENTRY_SIZE_BYTES);
+        assert!(entry_text_fits_wire(&text));
+    }
+
+    #[test]
+    fn control_character_payload_under_the_raw_limit_is_refused_by_the_wire_budget() {
+        // The case the raw ceiling alone misses: well under
+        // `MAX_ENTRY_SIZE_BYTES` in raw bytes, over `MAX_IPC_BYTES` once
+        // escaped, therefore storable but unreadable.
+        let text = "\u{1}".repeat(200_000);
+        assert!(text.len() < MAX_ENTRY_SIZE_BYTES);
+        assert!(json_escaped_len(&text) > MAX_IPC_BYTES);
+        assert!(!entry_text_fits_wire(&text));
+    }
 
     #[test]
     fn entry_size_leaves_envelope_headroom_under_ipc_ceiling() {

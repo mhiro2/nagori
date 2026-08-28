@@ -1,7 +1,7 @@
 use nagori_core::{
     AiProviderKind, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository,
-    MAX_ENTRY_SIZE_BYTES, RepresentationSummary, Result, SearchQuery,
-    is_text_safe_for_default_output,
+    IPC_ROW_OVERHEAD_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, RepresentationSummary, Result,
+    SearchQuery, is_text_safe_for_default_output, json_escaped_len,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -374,15 +374,23 @@ impl NagoriRuntime {
 /// guard (`MAX_IPC_RESPONSE_BYTES`) rejects the whole payload — that guard
 /// protects the wire and the client's bounded reader, not daemon memory.
 ///
-/// We stop including rows once the cumulative *materialised text* would
-/// exceed `MAX_ENTRY_SIZE_BYTES` — the same ceiling a single entry's text is
-/// held to, sized so the JSON-escaped payload still fits `MAX_IPC_BYTES`. The
-/// client therefore receives a bounded prefix instead of a `response_too_large`
-/// rejection, and the peak text allocation is held near one entry's worth
-/// rather than scaling with the row count. The first row is always included
-/// even when it alone exceeds the budget, so a single large pinned entry never
-/// collapses the list to empty. Each candidate's text length is read without
-/// cloning, so an over-budget row is never materialised.
+/// The budget is charged in *wire* bytes, not raw ones: each row costs its
+/// JSON-escaped text length (`json_escaped_len`) plus the fixed
+/// `IPC_ROW_OVERHEAD_BYTES` allowance for its id, timestamps, capped preview
+/// and representation summaries, and the total is held under
+/// `MAX_RESPONSE_TEXT_WIRE_BYTES` (`MAX_IPC_BYTES` less the envelope reserve).
+/// Summing raw lengths instead would under-count every escape, so a list of
+/// escape-dense rows could pass the budget and still breach the frame — the
+/// same admission/framing mismatch `MAX_ENTRY_TEXT_WIRE_BYTES` closes for a
+/// single entry.
+///
+/// The client therefore receives a bounded prefix instead of a
+/// `response_too_large` rejection, and the peak text allocation is held near
+/// one entry's worth rather than scaling with the row count. The first row is
+/// always included even when it alone exceeds the budget, so a single large
+/// pinned entry never collapses the list to empty. Each candidate's text
+/// length is read without cloning, so an over-budget row is never
+/// materialised.
 fn entry_dtos_within_budget(
     entries: Vec<ClipboardEntry>,
     summaries: &HashMap<EntryId, Vec<RepresentationSummary>>,
@@ -393,21 +401,22 @@ fn entry_dtos_within_budget(
     let mut used: usize = 0;
     for entry in entries {
         let include_text = include_sensitive || is_text_safe_for_default_output(entry.sensitivity);
-        let text_len = if include_text {
-            entry.plain_text().map_or(0, str::len)
+        let text_wire_len = if include_text {
+            entry.plain_text().map_or(0, json_escaped_len)
         } else {
             0
         };
-        if !dtos.is_empty() && used.saturating_add(text_len) > MAX_ENTRY_SIZE_BYTES {
+        let row_cost = text_wire_len.saturating_add(IPC_ROW_OVERHEAD_BYTES);
+        if !dtos.is_empty() && used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
             tracing::warn!(
                 returned = dtos.len(),
                 dropped = total - dtos.len(),
-                budget_bytes = MAX_ENTRY_SIZE_BYTES,
+                budget_bytes = MAX_RESPONSE_TEXT_WIRE_BYTES,
                 "ipc_list_truncated_to_byte_budget"
             );
             break;
         }
-        used = used.saturating_add(text_len);
+        used = used.saturating_add(row_cost);
         let entry_id = entry.id;
         let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
         dtos.push(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps));
@@ -483,6 +492,13 @@ mod tests {
         EntryFactory::from_text("a".repeat(len))
     }
 
+    /// A row whose text is all control characters: `len` raw bytes that cost
+    /// six each on the wire. Used to separate the raw length from the wire
+    /// length the budget actually charges.
+    fn entry_with_escaped_text(len: usize) -> ClipboardEntry {
+        EntryFactory::from_text("\u{1}".repeat(len))
+    }
+
     #[test]
     fn keeps_every_row_when_under_budget() {
         let entries = vec![
@@ -497,9 +513,10 @@ mod tests {
 
     #[test]
     fn truncates_once_cumulative_text_exceeds_budget() {
-        // Three rows at 300 KiB each: 300 + 300 = 600 KiB fits under the
-        // 768 KiB ceiling, the third (900 KiB total) does not.
-        let chunk = 300 * 1024;
+        // Three rows at 400 KiB each: two of them (plus their per-row
+        // overhead) fit under the ~1016 KiB response budget, the third does
+        // not.
+        let chunk = 400 * 1024;
         let entries = vec![
             entry_with_text(chunk),
             entry_with_text(chunk),
@@ -514,7 +531,7 @@ mod tests {
         // A single row whose text alone exceeds the budget must still be
         // returned — dropping it would yield a confusing empty list.
         let entries = vec![
-            entry_with_text(MAX_ENTRY_SIZE_BYTES + 1024),
+            entry_with_text(MAX_RESPONSE_TEXT_WIRE_BYTES + 1024),
             entry_with_text(16),
         ];
         let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
@@ -523,10 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_rows_cost_nothing_when_text_is_withheld() {
+    fn sensitive_rows_cost_only_their_row_overhead_when_text_is_withheld() {
         // When text is withheld (sensitive row, `include_sensitive = false`)
-        // the row contributes no text bytes, so a long list of them is not
-        // truncated by the text budget.
+        // the row contributes no text bytes — only the fixed per-row
+        // allowance — so a long list of them is not truncated by the budget.
         let mut entries = Vec::new();
         for _ in 0..8 {
             let mut entry = entry_with_text(300 * 1024);
@@ -540,5 +557,42 @@ mod tests {
             "withheld-text rows must not consume the budget"
         );
         assert!(dtos.iter().all(|d| d.text.is_none()));
+    }
+
+    #[test]
+    fn escape_dense_rows_are_charged_their_wire_length_not_their_raw_length() {
+        // 100 KiB of control characters is 100 KiB raw but 600 KiB on the
+        // wire. Charging raw lengths would fit ten such rows in the budget and
+        // then blow the frame; charging escaped lengths stops at one.
+        let chunk = 100 * 1024;
+        let entries = vec![
+            entry_with_escaped_text(chunk),
+            entry_with_escaped_text(chunk),
+            entry_with_escaped_text(chunk),
+        ];
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        assert_eq!(
+            dtos.len(),
+            1,
+            "a second escape-dense row would not fit the frame"
+        );
+    }
+
+    #[test]
+    fn a_budgeted_list_of_escape_dense_rows_serialises_inside_the_frame() {
+        // The end-to-end guarantee: whatever the budget lets through must fit
+        // the transport, so the client sees a shorter list rather than a
+        // `response_too_large` rejection.
+        let entries: Vec<_> = (0..nagori_core::MAX_RESULT_LIMIT)
+            .map(|_| entry_with_escaped_text(64 * 1024))
+            .collect();
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        let encoded = serde_json::to_vec(&nagori_ipc::IpcResponse::Entries(dtos))
+            .expect("response serialises");
+        assert!(
+            encoded.len() <= nagori_core::MAX_IPC_BYTES,
+            "the budgeted list must fit the frame (got {} bytes)",
+            encoded.len()
+        );
     }
 }

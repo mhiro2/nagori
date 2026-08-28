@@ -767,6 +767,51 @@ mod tests {
         );
     }
 
+    /// The admission contract, end to end: any text the daemon will store
+    /// (`entry_text_fits_wire`) must serialise into a single-entry response
+    /// that fits the frame. Uses the worst case — a body made entirely of
+    /// `\u0001` control characters, which escape sixfold — sized to sit right
+    /// at the admission ceiling.
+    #[test]
+    fn a_maximally_escaped_admissible_entry_fits_one_ipc_frame() {
+        use nagori_core::{
+            EntryFactory, MAX_ENTRY_TEXT_WIRE_BYTES, MAX_IPC_BYTES, entry_text_fits_wire,
+        };
+
+        // Six wire bytes per raw character, so the largest admissible
+        // control-character body is a sixth of the ceiling.
+        let text = "\u{1}".repeat(MAX_ENTRY_TEXT_WIRE_BYTES / 6);
+        assert!(
+            entry_text_fits_wire(&text),
+            "the fixture must sit inside the admission ceiling"
+        );
+        let entry = EntryFactory::from_text(text);
+        let envelope = IpcResponse::Entry(EntryDto::from_entry(entry, true));
+        let encoded = serde_json::to_vec(&envelope).expect("response serialises");
+        assert!(
+            encoded.len() <= MAX_IPC_BYTES,
+            "an admissible entry must fit the frame (got {} bytes)",
+            encoded.len()
+        );
+    }
+
+    /// One entry past the admission ceiling is exactly what would breach the
+    /// frame — the ceiling is not merely conservative, it is the boundary.
+    #[test]
+    fn an_entry_just_over_the_admission_ceiling_would_breach_the_frame() {
+        use nagori_core::{EntryFactory, MAX_IPC_BYTES, entry_text_fits_wire};
+
+        let text = "\u{1}".repeat(MAX_IPC_BYTES / 6);
+        assert!(!entry_text_fits_wire(&text), "the fixture must be refused");
+        let entry = EntryFactory::from_text(text);
+        let envelope = IpcResponse::Entry(EntryDto::from_entry(entry, true));
+        let encoded = serde_json::to_vec(&envelope).expect("response serialises");
+        assert!(
+            encoded.len() > MAX_IPC_BYTES,
+            "the refused fixture must be the one that would not fit"
+        );
+    }
+
     /// The envelope's reserved `version` field must be additive: a
     /// pre-versioning client (which omits it) deserialises as `0` rather than
     /// failing the parse, and a current client stamps [`IPC_PROTOCOL_VERSION`].

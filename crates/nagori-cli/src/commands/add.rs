@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use nagori_core::{
-    AppError, EntryRepository, MAX_ENTRY_SIZE_BYTES, is_text_safe_for_default_output,
+    AppError, EntryRepository, MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES,
+    entry_text_fits_wire, is_text_safe_for_default_output, json_escaped_len,
 };
 use nagori_ipc::{AddEntryRequest, IpcRequest};
 
@@ -40,6 +41,25 @@ pub async fn run(executor: &Executor, args: AddArgs, format: OutputFormat) -> Re
 }
 
 fn read_text(args: AddArgs) -> Result<String> {
+    let text = read_raw_text(args)?;
+    // The daemon refuses text that would not fit an IPC frame once JSON-escaped
+    // (a control-character body escapes to six times its raw length). Applying
+    // the same ceiling here makes both executors fail the same way: the IPC arm
+    // would otherwise put an over-long line on the wire and get the transport's
+    // generic framing rejection, and the local arm would get the daemon's
+    // policy error, for one input.
+    if !entry_text_fits_wire(&text) {
+        return Err(AppError::InvalidInput(format!(
+            "input exceeds the {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once \
+             JSON-escaped ({} bytes)",
+            json_escaped_len(&text)
+        ))
+        .into());
+    }
+    Ok(text)
+}
+
+fn read_raw_text(args: AddArgs) -> Result<String> {
     if args.stdin {
         use std::io::Read;
         // Bound the read so an unbounded or hostile stdin (e.g. `cat /dev/zero |

@@ -74,6 +74,27 @@ async fn capture_once_skips_oversized_blocked_text() {
 }
 
 #[tokio::test]
+async fn capture_once_skips_text_that_would_not_fit_the_transport_once_escaped() {
+    // 200 KB of control characters: well inside `max_entry_size_bytes`, but
+    // six times that on the wire, so no client could ever read the row back.
+    // Storing it would leave an entry the daemon holds and the desktop / CLI
+    // cannot fetch — the drop is what keeps "stored" and "readable" the same
+    // set.
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let settings = AppSettings::default();
+    let text = "\u{1}".repeat(200_000);
+    assert!(text.len() < settings.max_entry_size_bytes);
+    assert!(nagori_core::json_escaped_len(&text) > nagori_core::MAX_IPC_BYTES);
+
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), settings);
+    clipboard.write_text(&text).await.expect("clipboard write");
+
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn capture_once_drops_user_regex_match() {
     // Regex_denylist UI promises "Captures matching any pattern are
     // dropped" — so a UserRegex-matched clip must never reach SQLite,

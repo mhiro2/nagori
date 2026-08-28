@@ -241,6 +241,9 @@ ClipboardReader.current_sequence_with_max()
   → primary-size guard (per content kind:
                         settings.max_image_entry_size_bytes for images,
                         settings.max_entry_size_bytes otherwise)
+  → transport guard    (text kinds only: the JSON-escaped body must fit
+                        MAX_ENTRY_TEXT_WIRE_BYTES, so anything storage
+                        accepts a client can still read back)
   → SensitivityClassifier.classify()       (built-in detectors +
                                             app_denylist + user regexes)
         ├─ Blocked → audit + drop
@@ -2556,7 +2559,11 @@ are intentionally not localized to keep grep recipes portable.
 tokens where the two overlap (`capture_skipped` / `entry_blocked` /
 `secret_blocked` / `secret_redacted_dropped`; retention sweeps add
 `retention_count` / `retention_age` / `retention_size`), so the desktop UI
-and operators see one vocabulary.
+and operators see one vocabulary. `capture_skipped` carries the reason as
+its detail: `kind_disabled`, `oversized` (raw bytes over the per-kind
+budget), `oversized_escaped` (fits storage, would not fit an IPC frame once
+JSON-escaped), and the owner-marker exclusions `concealed_marker` /
+`transient_marker`.
 
 ---
 
@@ -2708,6 +2715,21 @@ under 80 ms for 100k text entries on a developer machine.
   representation against its kind's budget while reading. Raising the image
   budget toward its 64 MiB ceiling is a high-memory expert choice (raw
   TIFF/DIB, decoded RGBA, and re-encoded PNG can briefly coexist).
+- **Transport-size ceiling on text** — `max_entry_size_bytes` bounds an
+  entry's *raw* bytes, but the IPC line carries the JSON-escaped form and
+  escaping is not length-preserving: one control byte becomes the six-byte
+  `\u0000` sequence, so ~200 KB of control characters passes a 768 KiB raw
+  budget and then exceeds the 1 MiB frame. Admission therefore also measures
+  `nagori_core::json_escaped_len` against `MAX_ENTRY_TEXT_WIRE_BYTES`
+  (`MAX_IPC_BYTES` less the envelope reserve and one row's overhead) on every
+  path that creates a text entry — capture, `add_text`, combined copy, and the
+  CLI's own client-side check — so "storage accepted it" implies "a client can
+  read it back". List responses charge the same escaped length per row (plus
+  `IPC_ROW_OVERHEAD_BYTES`) against `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page
+  of escape-dense rows is truncated to a shorter prefix rather than rejected
+  wholesale at the frame. Without both halves an entry could be stored and
+  then be unfetchable by every surface — an orphan row the user can see in
+  neither the palette nor the CLI.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.

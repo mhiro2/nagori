@@ -16,8 +16,10 @@ pub use image_signature::{
     ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,
 };
 pub use limits::{
-    MAX_COMBINED_COPY_ENTRIES, MAX_DECODED_IMAGE_PIXELS, MAX_ENTRY_SIZE_BYTES,
-    MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES, ReadBudget,
+    IPC_ENVELOPE_RESERVE_BYTES, IPC_ROW_OVERHEAD_BYTES, MAX_COMBINED_COPY_ENTRIES,
+    MAX_DECODED_IMAGE_PIXELS, MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES,
+    MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, ReadBudget,
+    entry_text_fits_wire, json_escaped_len,
 };
 pub use model::*;
 pub use policy::{

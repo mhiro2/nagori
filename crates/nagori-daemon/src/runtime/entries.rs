@@ -3,9 +3,10 @@
 use std::time::Instant;
 
 use nagori_core::{
-    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository, PasteFormat,
-    PasteOption, Result, SecretAction, SecretDropReason, Sensitivity, SensitivityClassifier,
-    SensitivityReason, SettingsRepository, build_paste_options,
+    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
+    MAX_ENTRY_TEXT_WIRE_BYTES, PasteFormat, PasteOption, Result, SecretAction, SecretDropReason,
+    Sensitivity, SensitivityClassifier, SensitivityReason, SettingsRepository, build_paste_options,
+    entry_text_fits_wire, json_escaped_len,
 };
 
 use crate::ipc_handler::result_code;
@@ -27,6 +28,16 @@ impl NagoriRuntime {
             return Err(AppError::Policy(format!(
                 "entry exceeds max_entry_size_bytes ({})",
                 settings.max_entry_size_bytes
+            )));
+        }
+        // Second ceiling, on the JSON-escaped form: the entry is handed back to
+        // clients inside an `EntryDto`, and escaping a control-character body
+        // can multiply its length sixfold. Storing text that no client could
+        // then read back would leave an unreachable row behind.
+        if !entry_text_fits_wire(&text) {
+            return Err(AppError::Policy(format!(
+                "entry exceeds the {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once                  JSON-escaped ({} bytes)",
+                json_escaped_len(&text)
             )));
         }
         let mut entry = EntryFactory::from_text(text);

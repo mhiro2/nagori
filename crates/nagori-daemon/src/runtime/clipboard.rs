@@ -78,9 +78,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
     AppError, ClipboardContent, ClipboardEntry, EntryId, EntryRepository,
-    MAX_COMBINED_COPY_ENTRIES, PasteFailureReason, PasteFormat, Result, Sensitivity,
-    SettingsRepository, StoredClipboardRepresentation, is_text_safe_for_default_output,
-    select_representation,
+    MAX_COMBINED_COPY_ENTRIES, MAX_ENTRY_TEXT_WIRE_BYTES, PasteFailureReason, PasteFormat, Result,
+    Sensitivity, SettingsRepository, StoredClipboardRepresentation,
+    is_text_safe_for_default_output, json_escaped_len, select_representation,
 };
 use nagori_platform::{PreparedClipboardWrite, SelfWriteTracking};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, oneshot};
@@ -686,7 +686,13 @@ impl NagoriRuntime {
             }
         }
         let budget = settings.max_entry_size_bytes;
+        // The joined text becomes an entry like any other, so it answers to
+        // both ceilings `add_text` enforces: the raw budget below and the
+        // JSON-escaped transport budget. Tracking the escaped length as the
+        // buffer grows keeps an over-limit selection refused before the join
+        // is materialised, rather than stored and then unreadable.
         let mut combined = String::new();
+        let mut escaped_len = 0_usize;
         for id in &unique {
             // Skip ids that were concurrently swept by retention / another
             // delete path. Aborting the whole copy because one row of a
@@ -725,6 +731,17 @@ impl NagoriRuntime {
                      select fewer entries"
                 )));
             }
+            let projected_escaped = escaped_len
+                .checked_add(json_escaped_len(separator))
+                .and_then(|len| len.checked_add(json_escaped_len(text)));
+            if projected_escaped.is_none_or(|len| len > MAX_ENTRY_TEXT_WIRE_BYTES) {
+                return Err(AppError::InvalidInput(format!(
+                    "the selected entries join to more than the \
+                     {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once JSON-escaped; \
+                     select fewer entries"
+                )));
+            }
+            escaped_len = projected_escaped.unwrap_or(escaped_len);
             combined.push_str(separator);
             combined.push_str(text);
         }
