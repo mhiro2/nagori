@@ -35,8 +35,8 @@ pub use services::{
 pub use settings::{
     AiSettings, AppDenyRule, AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT,
     MAX_PASTE_DELAY_MS, MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, OnboardingSettings,
-    PASSWORD_MANAGER_PRESET, PaletteHotkeyAction, PasteFormat, PresetEntry, RecentOrder,
-    RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
+    PASSWORD_MANAGER_PRESET, PaletteHotkeyAction, PasteFormat, PresetEntry, REQUIRED_PRIVACY_KEYS,
+    RecentOrder, RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
     password_manager_preset_rules, validate_hotkey,
 };
 pub use storage_location::{CloudSyncMatch, CloudSyncProvider, detect_cloud_sync};

@@ -304,41 +304,13 @@ fn classifies_windows_exe_name_typed_rule_as_blocked() {
 }
 
 #[test]
-fn legacy_string_app_denylist_deserialises_as_pattern_rule() {
-    // Settings JSON persisted by an older build stored each
-    // denylist entry as a bare string. The custom
-    // `deserialize_app_denylist` must read that shape and lift
-    // each entry into `AppDenyRule::Pattern`, otherwise upgrading
-    // would silently wipe a user's existing rules.
-    use crate::settings::AppDenyRule;
-
-    let json = r#"{
-        "app_denylist": ["1Password", "Bitwarden"]
-    }"#;
-    let settings: AppSettings =
-        serde_json::from_str(json).expect("legacy Vec<String> deserialises");
-    assert_eq!(settings.app_denylist.len(), 2);
-    assert_eq!(
-        settings.app_denylist[0],
-        AppDenyRule::Pattern {
-            value: "1Password".to_owned()
-        },
-    );
-    assert_eq!(
-        settings.app_denylist[1],
-        AppDenyRule::Pattern {
-            value: "Bitwarden".to_owned()
-        },
-    );
-}
-
-#[test]
-fn missing_app_denylist_field_defaults_to_password_manager_preset() {
-    // Settings JSON that omits `app_denylist` entirely (e.g. an
-    // older row from before the field existed) must fall back to
-    // the bundled password-manager preset rather than an empty Vec
-    // — otherwise upgrading from a pre-field build would silently
-    // drop the default protections.
+fn the_app_denylist_serde_default_is_the_preset_not_an_empty_list() {
+    // `AppSettings::default()` and any in-process construction that omits the
+    // field must carry the bundled password-manager preset, not an empty Vec
+    // — an empty denylist is the fail-open shape. (A *persisted* blob missing
+    // the key never reaches this default: `from_complete_json` refuses it, so
+    // a damaged row cannot quietly adopt whichever list serde would have
+    // supplied.)
     use crate::settings::password_manager_preset_rules;
 
     let json = "{}";
@@ -349,14 +321,17 @@ fn missing_app_denylist_field_defaults_to_password_manager_preset() {
         !settings.app_denylist.is_empty(),
         "preset must seed at least one rule, otherwise the regression is masked",
     );
+    assert!(
+        AppSettings::from_complete_json(json).is_err(),
+        "the strict read must refuse a blob with no denylist at all",
+    );
 }
 
 #[test]
 fn pattern_rule_preserves_substring_match_behaviour() {
-    // `Pattern` rules keep the original case-insensitive substring
-    // semantics so a settings snapshot full of legacy strings (now
-    // lifted to `Pattern`) keeps blocking the same apps after the
-    // upgrade.
+    // `Pattern` rules match case-insensitively on a substring of
+    // name + bundle id + executable path — the hatch for apps the
+    // typed identifiers do not cover.
     use crate::settings::AppDenyRule;
 
     let mut entry = EntryFactory::from_text("safe-looking value");

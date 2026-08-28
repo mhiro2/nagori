@@ -2730,6 +2730,18 @@ under 80 ms for 100k text entries on a developer machine.
   wholesale at the frame. Without both halves an entry could be stored and
   then be unfetchable by every surface — an orphan row the user can see in
   neither the palette nor the CLI.
+- **Fail-closed settings read** — `AppSettings::from_complete_json` is the
+  only way a persisted blob (or a client's full-blob `UpdateSettings`)
+  becomes an `AppSettings`. It requires every key in `REQUIRED_PRIVACY_KEYS`
+  (`app_denylist`, `regex_denylist`, `capture_kinds`, `capture_enabled`,
+  `secret_handling`, `block_sensitive_captures`, `otp_detection`) to be
+  present, refuses a denylist rule shape this build cannot parse, and runs
+  `validate()`. Struct-level `#[serde(default)]` keeps a blob written before a
+  *cosmetic* field existed loadable, but for these keys a default is
+  fail-open — a damaged row would quietly widen what gets captured or stored
+  in the clear. The error propagates: the daemon refuses to start and the
+  desktop's startup gate stays closed, so capture never runs under a policy
+  the user did not choose.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.

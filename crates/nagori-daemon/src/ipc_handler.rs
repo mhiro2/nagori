@@ -164,8 +164,11 @@ impl NagoriRuntime {
                 value,
                 expected_revision,
             }) => {
-                let settings: AppSettings = serde_json::from_value(value)
-                    .map_err(|err| AppError::InvalidInput(err.to_string()))?;
+                // The same completeness contract the storage read applies: a
+                // client blob that omits a privacy key would otherwise
+                // deserialise with that field's default and persist a wider
+                // policy than the user has — a full-blob update is not a patch.
+                let settings = AppSettings::from_complete_value(value)?;
                 // Route through the compare-and-swap save when the client
                 // supplied a revision so a stale full-blob write can't clobber a
                 // concurrent single-field change; fall back to the unconditional

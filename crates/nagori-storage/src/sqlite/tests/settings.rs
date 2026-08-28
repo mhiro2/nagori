@@ -67,10 +67,47 @@ async fn get_settings_surfaces_unparseable_row() {
 
     let err = store.get_settings().await.unwrap_err();
     assert!(
-        matches!(err, AppError::Storage { .. }),
-        "unparseable settings must surface as a storage error, got {err:?}"
+        matches!(err, AppError::InvalidInput(_)),
+        "unparseable settings must surface as a bad-input error, got {err:?}"
     );
     // The revision-paired read mirrors the same behaviour.
+    assert!(store.get_settings_with_revision().await.is_err());
+}
+
+#[tokio::test]
+async fn get_settings_refuses_a_row_missing_a_privacy_field() {
+    // The field would deserialize to its default and the daemon would run a
+    // policy the user never chose — with no denylist, no user patterns, or a
+    // wider capture set than they configured. Both readers must refuse the
+    // row so capture stays off until it is repaired.
+    for key in nagori_core::REQUIRED_PRIVACY_KEYS {
+        let store = SqliteStore::open_memory().unwrap();
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove(*key);
+        write_raw_settings_row(&store, &serde_json::to_string(&value).unwrap());
+
+        let err = store.get_settings().await.unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "a row missing `{key}` must surface as InvalidInput, got {err:?}"
+        );
+        assert!(store.get_settings_with_revision().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn get_settings_refuses_a_row_carrying_an_unreadable_denylist_rule() {
+    // Dropping just the unreadable rule and loading the rest silently narrows
+    // the denylist: the user goes on copying from an app they had blocked.
+    let store = SqliteStore::open_memory().unwrap();
+    let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+    value["app_denylist"] = serde_json::json!([
+        { "type": "future_variant", "value": "x" },
+        { "type": "pattern", "value": "keep-me" }
+    ]);
+    write_raw_settings_row(&store, &serde_json::to_string(&value).unwrap());
+
+    assert!(store.get_settings().await.is_err());
     assert!(store.get_settings_with_revision().await.is_err());
 }
 

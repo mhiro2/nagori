@@ -241,6 +241,26 @@ groups", …) instead of a generic save failure. Split complex
 intents into multiple lines rather than nesting groups — the
 denylist is an `OR` of every line.
 
+## Damaged settings stop capture
+
+Your privacy choices — the app denylist, the regex denylist, which
+content kinds are captured, whether capture is on at all, how secrets
+are handled, whether sensitive captures are blocked outright, and OTP
+detection — are read strictly. If the stored settings are missing any
+of them, or carry a denylist rule this build cannot read, nagori
+refuses the whole settings read instead of filling in a default.
+
+That is deliberate. A default here is always the *more permissive*
+choice: an absent denylist means nothing is blocked, an absent capture
+list means every kind is captured. Loading the rest and quietly
+dropping the unreadable part would leave you copying from an app you
+had blocked with nothing to tell you the rule had stopped applying.
+
+When that happens, capture does not start: the daemon refuses to
+launch and the desktop app leaves its startup gate closed and reports
+the failure (`nagori doctor` shows it under `startup`). Fix or reset
+the settings and capture resumes.
+
 ## Preview thumbnails and external URL open
 
 - Image entries get a 512px cached thumbnail under
