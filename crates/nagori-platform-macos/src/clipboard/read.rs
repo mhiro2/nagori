@@ -44,12 +44,18 @@ impl ClipboardReader for MacosClipboard {
         // longer drifts from it: it now gets torn-snapshot retry and the
         // owner-exclusion check for free, instead of sampling the sequence once
         // at the end and trusting it.
+        //
+        // Snapshot reads take the adapter mutex, so they go through the
+        // single-flight gate: a pasteboard call that never returns leaks one
+        // blocking thread, not one per capture tick.
         let clipboard = self.clipboard.clone();
-        let captured = clipboard_blocking("current_snapshot", move || {
-            capture_snapshot_attempts(&clipboard)
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))??;
+        let captured = self
+            .read_gate
+            .run("current_snapshot", move || {
+                capture_snapshot_attempts(&clipboard)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
         // Map the captured result back to a plain snapshot. The unbounded path
         // has no budget, so `Oversized` cannot occur; an `Excluded` clip yields
         // an empty snapshot — we never materialise the secret body.
@@ -74,7 +80,10 @@ impl ClipboardReader for MacosClipboard {
         // `NSPasteboard::changeCount` is cheap, but it still touches AppKit
         // global state. Hop to a blocking thread for consistency with
         // `current_snapshot` so the polling loop can never block a tokio
-        // worker even if AppKit hits an internal lock.
+        // worker even if AppKit hits an internal lock. Deliberately *not*
+        // routed through `read_gate`: this poll takes no mutex, and keeping it
+        // flowing is what lets change detection continue through a hung body
+        // read.
         clipboard_blocking("current_sequence", pasteboard_sequence)
             .await
             .map_err(|err| AppError::Platform(err.to_string()))
@@ -82,11 +91,13 @@ impl ClipboardReader for MacosClipboard {
 
     async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
-        let captured = clipboard_blocking("current_snapshot_with_max", move || {
-            capture_snapshot_with_max(&clipboard, budget)
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))??;
+        let captured = self
+            .read_gate
+            .run("current_snapshot_with_max", move || {
+                capture_snapshot_with_max(&clipboard, budget)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
         // Normalise any captured TIFF to PNG off the read timeout, then
         // re-apply the image budget to the transcoded image (see
         // `finalize_captured`).
