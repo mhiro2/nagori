@@ -184,6 +184,20 @@ async fn check_accessibility() -> PermissionStatus {
     // attempt the paste; the compositor may still refuse it".
     #[cfg(target_os = "linux")]
     {
+        // Auto-paste is off by default on Linux (see `LinuxAutoPaste`). Report
+        // that before probing for `wtype`: a Granted row here would tell
+        // `nagori doctor` and the Setup card that paste is ready while the
+        // controller refuses every keystroke.
+        if crate::paste::LinuxAutoPaste::from_env() == crate::paste::LinuxAutoPaste::Disabled {
+            return PermissionStatus {
+                kind: PermissionKind::Accessibility,
+                state: PermissionState::Unsupported,
+                message: Some(crate::paste::LinuxAutoPaste::disabled_reason()),
+                reason_code: Some("accessibility_auto_paste_disabled".to_owned()),
+                setup_route: None,
+                docs_url: None,
+            };
+        }
         // Bound the subprocess probe: a hung `wtype` (or a host under heavy
         // fork pressure) must not pin the runtime for the whole report.
         // `kill_on_drop` reaps the child if the deadline elapses and the

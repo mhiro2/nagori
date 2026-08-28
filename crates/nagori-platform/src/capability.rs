@@ -37,9 +37,12 @@ pub enum Platform {
     Unsupported,
 }
 
-/// Overall maturity of the platform port. Mirrors the README support
-/// table: macOS, Windows, and Linux Wayland are supported; everything
-/// else is unsupported.
+/// Overall maturity of the platform port.
+///
+/// Mirrors the README support table: macOS and Windows are supported,
+/// Linux Wayland is experimental (no X11 / GNOME path, no Wayland global
+/// hotkey, auto-paste off by default because the paste target cannot be
+/// verified); everything else is unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportTier {

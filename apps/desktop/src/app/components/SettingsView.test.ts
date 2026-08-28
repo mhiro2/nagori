@@ -156,17 +156,20 @@ const windowsCapabilities = (): PlatformCapabilities => ({
 
 const linuxWaylandCapabilities = (): PlatformCapabilities => ({
   platform: 'linuxWayland',
-  tier: 'supported',
+  tier: 'experimental',
   captureText: { status: 'available' },
   captureImage: { status: 'available' },
   captureFiles: { status: 'available' },
   writeText: { status: 'available' },
   writeImage: { status: 'available' },
   clipboardMultiRepresentationWrite: { status: 'available' },
+  // Off by default: Wayland cannot confirm which surface receives the
+  // synthesised Ctrl+V. The row flips to `requiresExternalTool` (wtype)
+  // only when the process opted in with NAGORI_LINUX_AUTO_PASTE=1.
   autoPaste: {
-    status: 'requiresExternalTool',
-    tool: 'wtype',
-    installHint: 'apt install wtype',
+    status: 'unsupported',
+    reason:
+      'auto-paste is off by default on Linux Wayland: the compositor cannot confirm which window will receive the synthesised Ctrl+V. Set NAGORI_LINUX_AUTO_PASTE=1 to opt in.',
   },
   globalHotkey: {
     status: 'unsupported',
@@ -1503,12 +1506,12 @@ describe('SettingsView Advanced tab — capability table', () => {
     expect(permissions?.detail).toContain('permission UI');
   });
 
-  it('renders Linux Wayland capabilities — wtype external tool + global hotkey unsupported', async () => {
+  it('renders Linux Wayland capabilities — experimental tier, auto-paste off by default, global hotkey unsupported', async () => {
     const { container } = await openAdvancedTab(linuxWaylandCapabilities());
     const table = readCapabilityTable(container);
 
     expect(table.platform).toBe('linuxWayland');
-    expect(table.tier).toBe('supported');
+    expect(table.tier).toBe('experimental');
 
     const expectedStatus: Record<string, string> = {
       'Capture text': STATUS_BADGE.available,
@@ -1517,7 +1520,7 @@ describe('SettingsView Advanced tab — capability table', () => {
       'Write text': STATUS_BADGE.available,
       'Write image': STATUS_BADGE.available,
       'Multi-representation copy-back': STATUS_BADGE.available,
-      'Auto-paste': STATUS_BADGE.requiresExternalTool,
+      'Auto-paste': STATUS_BADGE.unsupported,
       'Global hotkey': STATUS_BADGE.unsupported,
       'Frontmost app': STATUS_BADGE.unsupported,
       'Permissions UI': STATUS_BADGE.unsupported,
@@ -1528,12 +1531,12 @@ describe('SettingsView Advanced tab — capability table', () => {
       expect(row.status, `unexpected badge for ${row.label}`).toBe(expectedStatus[row.label]);
     }
 
-    // Auto-paste needs the `wtype` external tool; its install guidance now
-    // lives on the Setup tab, so the row only renders the `Open Setup`
-    // button rather than inline tool/hint copy.
+    // Auto-paste is off by default on Linux: the row explains the opt-in
+    // instead of offering the wtype Setup flow, which only applies once
+    // the process opted in.
     const autoPaste = table.rows.find((r) => r.label === 'Auto-paste');
-    expect(autoPaste?.detail).toBe('');
-    expect(autoPaste?.hasSetupButton).toBe(true);
+    expect(autoPaste?.detail).toContain('NAGORI_LINUX_AUTO_PASTE');
+    expect(autoPaste?.hasSetupButton).toBe(false);
 
     // Global hotkey explanation covers the X11-only upstream constraint
     // that motivates the README's Linux footnote.

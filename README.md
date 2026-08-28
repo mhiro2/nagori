@@ -84,7 +84,7 @@ More info → Run anyway.
 
 ```sh
 # Debian / Ubuntu
-sudo apt install ./nagori_*_amd64.deb wtype
+sudo apt install ./nagori_*_amd64.deb
 
 # or run the AppImage directly
 chmod +x Nagori_*_amd64.AppImage && ./Nagori_*_amd64.AppImage
