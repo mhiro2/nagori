@@ -12,7 +12,7 @@ use nagori_core::{
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, ClipboardWriter, PreparedClipboardWrite,
+    CapturedSnapshot, ClipboardReadGate, ClipboardReader, ClipboardWriter, PreparedClipboardWrite,
     SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracker, SelfWriteTracking, clipboard_blocking,
     clipboard_write_blocking, decode_rgba_with_pixel_cap, has_publishable_representation,
     lock_clipboard_for_write, lock_clipboard_recovering, platform_err,
@@ -58,6 +58,10 @@ pub struct WindowsClipboard {
     /// `WindowsClipboard` instance to both the runtime writer and the capture
     /// loop reader.
     self_write: SelfWriteTracker,
+    /// Single-flight admission for mutex-taking snapshot reads, so a foreground
+    /// app that never calls `CloseClipboard` leaks one blocking thread rather
+    /// than one per capture tick (see `nagori_platform::ClipboardReadGate`).
+    read_gate: ClipboardReadGate,
 }
 
 impl WindowsClipboard {
@@ -67,6 +71,7 @@ impl WindowsClipboard {
                 Clipboard::new().map_err(|err| platform_err(&err))?,
             )),
             self_write: SelfWriteTracker::default(),
+            read_gate: ClipboardReadGate::new(),
         })
     }
 }
@@ -89,12 +94,18 @@ impl ClipboardReader for WindowsClipboard {
         // up to `MAX_RETRIES` times before giving up and accepting the
         // last attempt. The retry bound prevents an infinite loop if a
         // process is steadily flooding the clipboard.
+        //
+        // Snapshot reads take the adapter mutex, so they go through the
+        // single-flight gate: a clipboard lock that is never released leaks
+        // one blocking thread, not one per capture tick.
         let clipboard = self.clipboard.clone();
-        let (captured, image) = clipboard_blocking("current_snapshot", move || {
-            capture_snapshot(&clipboard, None)
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))??;
+        let (captured, image) = self
+            .read_gate
+            .run("current_snapshot", move || {
+                capture_snapshot(&clipboard, None)
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
         // Encode any captured image to PNG off the read timeout (see
         // `finalize_capture`); the raw bytes are already captured under the
         // clipboard lock above.
@@ -116,7 +127,10 @@ impl ClipboardReader for WindowsClipboard {
     async fn current_sequence(&self) -> Result<ClipboardSequence> {
         // `GetClipboardSequenceNumber` is documented thread-safe and does
         // not need `OpenClipboard`. We still route through the blocking
-        // pool for consistency with `current_snapshot`.
+        // pool for consistency with `current_snapshot`, but deliberately not
+        // through `read_gate`: this poll takes no mutex, and keeping it
+        // flowing is what lets change detection continue through a hung body
+        // read.
         clipboard_blocking("current_sequence", || {
             ClipboardSequence::native(i64::from(native_sequence_number()))
         })
@@ -126,11 +140,13 @@ impl ClipboardReader for WindowsClipboard {
 
     async fn current_snapshot_with_max(&self, budget: ReadBudget) -> Result<CapturedSnapshot> {
         let clipboard = self.clipboard.clone();
-        let (captured, image) = clipboard_blocking("current_snapshot_with_max", move || {
-            capture_snapshot(&clipboard, Some(budget))
-        })
-        .await
-        .map_err(|err| AppError::Platform(err.to_string()))??;
+        let (captured, image) = self
+            .read_gate
+            .run("current_snapshot_with_max", move || {
+                capture_snapshot(&clipboard, Some(budget))
+            })
+            .await
+            .map_err(|err| AppError::Platform(err.to_string()))??;
         // Encode any captured image to PNG off the read timeout, then apply
         // the per-kind budget to the full payload (see `finalize_capture`).
         finalize_capture(captured, image, Some(budget)).await

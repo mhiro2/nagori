@@ -94,7 +94,7 @@ domain code. This leads to four design rules:
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image + file-list copy-back (PNG → RGBA via arboard, file paths packed into a hand-rolled `DROPFILES` + `SetClipboardData(CF_HDROP)`), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste, frontmost-app probe unsupported (no Wayland API exposes it); hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
+| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste that is off by default (`LinuxAutoPaste`; the paste target cannot be verified on Wayland, opt in with `NAGORI_LINUX_AUTO_PASTE=1`), frontmost-app probe unsupported (no Wayland API exposes it), reported as the `Experimental` tier; hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
 | `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device text — summaries, rewrites, Markdown reformatting, task extraction, code explanations — via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), `AppleEmbedderBackend` (an `Embedder` over `NLContextualEmbedding` for semantic search), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
@@ -1002,7 +1002,14 @@ Implementations:
   the `PermissionChecker` reports `Granted` for those kinds and
   `Unsupported` for `InputMonitoring`, `Notifications`, and
   `AutoLaunch` (managed elsewhere).
-- **Linux** (`nagori-platform-linux`) — Wayland-only, wired for the
+- **Linux** (`nagori-platform-linux`) — Wayland-only and reported as
+  `SupportTier::Experimental`: the adapter cannot start on X11 or GNOME
+  Wayland, pure Wayland has no in-app global hotkey, and synthetic paste
+  is off by default (`LinuxAutoPaste::Disabled`) because the compositor
+  cannot confirm which surface receives the keystroke — the session opts
+  in with `NAGORI_LINUX_AUTO_PASTE=1`, and the capability report follows
+  the same switch so the UI never advertises a paste the controller
+  refuses. Wired for the
   daemon (`nagori daemon run` and `nagori-cli` in-process mode). The
   clipboard adapter talks directly to `wl-clipboard-rs` over the
   `wlr_data_control` / `ext_data_control` protocols; arboard is
@@ -1149,7 +1156,7 @@ channel. The result is exposed on three surfaces:
 The desktop shell additionally exposes the matrix as a `get_capabilities`
 Tauri command, rendered read-only under Settings → Advanced. Wayland
 `frontmost_app`, Windows `update_check`, and Linux Wayland `auto_paste`
-without `wtype` are the canonical examples of where capability state
+(unsupported until `NAGORI_LINUX_AUTO_PASTE=1`, then gated on `wtype`) are the canonical examples of where capability state
 diverges from permission state — the UI can render an actionable hint
 ("install `wtype`", "switch to a wlroots compositor") instead of a
 generic "feature unavailable" toast.
@@ -1274,6 +1281,18 @@ the pair one serialised operation:
   owning the guard on the step's task keeps "the lease is held" and "my side
   effect is in flight" the same statement, so the next request cannot publish
   underneath a late clipboard write or a keystroke that has not landed yet.
+- Blocking clipboard *reads* are bounded (`CLIPBOARD_OP_TIMEOUT`, 3 s) and
+  single-flight per adapter (`nagori_platform::ClipboardReadGate`). A
+  `spawn_blocking` closure cannot be aborted, so a snapshot read whose OS call
+  never returns keeps its blocking thread and the adapter mutex; the capture
+  loop would otherwise retry the same sequence every tick and leak one more
+  thread each time until the tokio blocking pool — shared with every write,
+  paste, DB job and the shutdown path — ran dry. While a previous read closure
+  is still in flight the gate refuses the next one with `BlockingError::Busy`
+  before spawning, the capture loop counts it as a failed tick and backs off,
+  and the gate clears when the wedged call finally unwinds. The cheap
+  sequence-only poll bypasses the gate (it takes no mutex) so change detection
+  keeps running through a hung body read.
 - Immediately before the keystroke the lease re-reads the OS clipboard sequence
   and confirms it is still this process's own write
   (`ClipboardReader::current_sequence` + `matches_self_write`). That catches the

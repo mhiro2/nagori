@@ -26,7 +26,7 @@ mod window;
 pub use capability::report_capabilities;
 pub use clipboard::LinuxClipboard;
 pub use hotkey::LinuxHotkeyManager;
-pub use paste::LinuxPasteController;
+pub use paste::{LINUX_AUTO_PASTE_ENV, LinuxAutoPaste, LinuxPasteController};
 pub use permissions::LinuxPermissionChecker;
 pub use window::LinuxWindowBehavior;
 

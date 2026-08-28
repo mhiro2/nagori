@@ -1,11 +1,19 @@
 //! Static capability report for the Linux Wayland host adapter.
 //!
-//! Linux Wayland is supported: text / image / file-list capture and
-//! text + image copy-back work on compositors that expose
-//! `wlr_data_control` / `ext_data_control`, auto-paste is conditional
-//! on the external `wtype` binary, and global hotkeys / frontmost-app
-//! probing have no portable Wayland API and are surfaced as
-//! `Unsupported`. The permission UI is a no-op probe (no TCC-style
+//! Linux Wayland is **experimental**: text / image / file-list capture
+//! and text + image copy-back work on compositors that expose
+//! `wlr_data_control` / `ext_data_control`, but the adapter refuses to
+//! start on X11 and on compositors without a data-control manager
+//! (notably GNOME Wayland), global hotkeys / frontmost-app probing have
+//! no portable Wayland API and are surfaced as `Unsupported`, and
+//! auto-paste is off by default because the compositor cannot confirm
+//! which surface receives the keystroke (`LinuxAutoPaste`; opt in with
+//! `NAGORI_LINUX_AUTO_PASTE=1`, which then also requires the external
+//! `wtype` binary). Those gaps — no X11 backend, no GNOME path, no
+//! Wayland global shortcut, unverifiable paste target — are why the
+//! tier is `Experimental` rather than `Supported`: the core "hotkey →
+//! pick → paste into the previous window" flow does not hold on every
+//! Linux desktop the way it does on macOS / Windows. The permission UI is a no-op probe (no TCC-style
 //! gate on Wayland). The release feed publishes a `latest.json` entry
 //! for Linux too — availability check runs everywhere, and the
 //! updater plugin can swap an `AppImage` install in place; `deb`
@@ -27,25 +35,42 @@ use nagori_platform::{
     Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
 };
 
+use crate::paste::LinuxAutoPaste;
+
+/// Capability report for the running process, with the auto-paste row
+/// following the `NAGORI_LINUX_AUTO_PASTE` opt-in.
 #[must_use]
 pub fn report_capabilities() -> PlatformCapabilities {
+    report_capabilities_for(LinuxAutoPaste::from_env())
+}
+
+/// [`report_capabilities`] for an explicit auto-paste mode, so the desktop
+/// / CLI surfaces and the paste controller can never disagree about whether
+/// synthetic paste is on.
+#[must_use]
+pub fn report_capabilities_for(auto_paste: LinuxAutoPaste) -> PlatformCapabilities {
     PlatformCapabilities {
         platform: Platform::LinuxWayland,
-        tier: SupportTier::Supported,
+        tier: SupportTier::Experimental,
         capture_text: Capability::Available,
         capture_image: Capability::Available,
         capture_files: Capability::Available,
         write_text: Capability::Available,
         write_image: Capability::Available,
         clipboard_multi_representation_write: Capability::Available,
-        auto_paste: Capability::RequiresExternalTool {
-            tool: "wtype".to_owned(),
-            install_hint: Some(
-                "install the `wtype` package (e.g. `apt install wtype` or \
-                 `pacman -S wtype`); the compositor must also expose \
-                 zwp_virtual_keyboard_v1."
-                    .to_owned(),
-            ),
+        auto_paste: match auto_paste {
+            LinuxAutoPaste::Disabled => Capability::Unsupported {
+                reason: LinuxAutoPaste::disabled_reason(),
+            },
+            LinuxAutoPaste::Unverified => Capability::RequiresExternalTool {
+                tool: "wtype".to_owned(),
+                install_hint: Some(
+                    "install the `wtype` package (e.g. `apt install wtype` or \
+                     `pacman -S wtype`); the compositor must also expose \
+                     zwp_virtual_keyboard_v1."
+                        .to_owned(),
+                ),
+            },
         },
         global_hotkey: Capability::Unsupported {
             reason: "tauri-plugin-global-shortcut is X11-only upstream; pure \
@@ -93,10 +118,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn report_advertises_linux_wayland_supported_tier() {
-        let caps = report_capabilities();
+    fn report_advertises_linux_wayland_experimental_tier() {
+        // X11 / GNOME Wayland cannot start the adapter, pure Wayland has no
+        // global hotkey, and the paste target is unverifiable — the report
+        // must not claim first-class support.
+        let caps = report_capabilities_for(LinuxAutoPaste::Disabled);
         assert_eq!(caps.platform, Platform::LinuxWayland);
-        assert_eq!(caps.tier, SupportTier::Supported);
+        assert_eq!(caps.tier, SupportTier::Experimental);
+    }
+
+    #[test]
+    fn auto_paste_is_unsupported_until_the_session_opts_in() {
+        let caps = report_capabilities_for(LinuxAutoPaste::Disabled);
+        match &caps.auto_paste {
+            Capability::Unsupported { reason } => {
+                assert!(reason.contains("NAGORI_LINUX_AUTO_PASTE"), "{reason}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert!(!caps.auto_paste.is_supported_by_platform());
     }
 
     #[test]
@@ -107,8 +147,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_paste_requires_wtype() {
-        let caps = report_capabilities();
+    fn opted_in_auto_paste_requires_wtype() {
+        let caps = report_capabilities_for(LinuxAutoPaste::Unverified);
         match &caps.auto_paste {
             Capability::RequiresExternalTool { tool, install_hint } => {
                 assert_eq!(tool, "wtype");
@@ -120,6 +160,7 @@ mod tests {
             other => panic!("expected RequiresExternalTool, got {other:?}"),
         }
         assert!(!caps.auto_paste.is_usable());
+        assert!(caps.auto_paste.is_supported_by_platform());
     }
 
     #[test]

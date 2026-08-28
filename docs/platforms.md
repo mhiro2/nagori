@@ -12,12 +12,21 @@ desktop shell mirrors the same matrix under
 | ---------------------- | ----------- | ---------- | --------- | --------- | ----------------- | --------------------------------------------- |
 | macOS (arm64 / x86_64) | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned `.app` / `.dmg`, in-app update probe) |
 | Windows (x86_64)       | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned NSIS, in-app update probe)      |
-| Linux Wayland (x86_64) | Supported   | Supported  | Supported | Supported | Supported (note*) | Yes (`deb` + `AppImage`, in-app update probe) |
+| Linux Wayland (x86_64) | Experimental | Experimental | Supported | Supported | Off by default (note*) | Yes (`deb` + `AppImage`, in-app update probe) |
 | Linux X11              | Unsupported | Unsupported | —        | —         | —                 | n/a                                           |
 
-*Linux auto-paste depends on the `wtype` binary being on `$PATH` and on
-the compositor advertising `zwp_virtual_keyboard_manager_v1`. See
+*Linux auto-paste is disabled unless the process is started with
+`NAGORI_LINUX_AUTO_PASTE=1`; once opted in it depends on the `wtype`
+binary being on `$PATH` and on the compositor advertising
+`zwp_virtual_keyboard_manager_v1`. See
 [Linux requirements](#linux-requirements) below.
+
+Linux Wayland is reported as the `experimental` tier (`nagori
+capabilities`, Settings → Advanced) rather than `supported`: the
+adapter cannot start on X11 or GNOME Wayland, pure Wayland sessions
+have no in-app global hotkey, and the paste target cannot be verified,
+so the hotkey → pick → paste-into-previous-window flow that macOS and
+Windows guarantee does not hold on every Linux desktop.
 
 The clipboard pipeline (capture of text / image / file-list, copy-back,
 and `nagori paste` auto-paste) is covered by per-OS CI smoke tests:
@@ -90,7 +99,14 @@ Known limitations:
 - X11 sessions are not supported.
 - GNOME Wayland exposes neither `wlr_data_control` nor
   `ext_data_control` and is not supported today.
-- Auto-paste requires the `wtype` binary on `$PATH`.
+- Auto-paste is off by default. Wayland exposes no portable frontmost
+  query and no way for a client to re-focus another surface, so the
+  desktop shell cannot confirm which window will receive the
+  synthesised `Ctrl+V` after the palette hides — a focus handoff could
+  paste (possibly secret) clipboard content into an unrelated app.
+  Pressing Enter copies the entry and the user pastes manually. Set
+  `NAGORI_LINUX_AUTO_PASTE=1` in the daemon / desktop environment to
+  opt in; that also requires the `wtype` binary on `$PATH`.
 - Global-shortcut registration is X11-only upstream; pure Wayland
   sessions cannot bind hotkeys and the failure is surfaced in the UI.
 - `WindowBehavior::frontmost_app()` returns `None` because Wayland has
