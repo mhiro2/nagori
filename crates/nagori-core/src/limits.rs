@@ -134,16 +134,61 @@ impl ReadBudget {
 /// per-response scalar fields.
 pub const IPC_ENVELOPE_RESERVE_BYTES: usize = 8 * 1024;
 
-/// Bytes charged for one entry row's non-text JSON.
+/// Longest source-app name an entry DTO carries.
 ///
-/// Covers the id, the two RFC 3339 timestamps, the flags, the capped preview
-/// ([`crate::PREVIEW_MAX_CHARS`] characters, at most 4 bytes each and 6 bytes
-/// once escaped), the source-app name, and the representation summaries.
+/// The OS supplies this string (macOS `localizedName`, a Windows executable
+/// name) and nothing upstream bounds it, so the DTO truncates it. Without a
+/// cap the row's non-text JSON is unbounded and no fixed overhead allowance
+/// could be honest. 128 bytes is far past any real application name.
+pub const MAX_DTO_SOURCE_APP_NAME_BYTES: usize = 128;
+
+/// Longest MIME string a representation summary carries, truncated for the
+/// same reason as [`MAX_DTO_SOURCE_APP_NAME_BYTES`]: the value originates in a
+/// clipboard type declared by another process.
+pub const MAX_DTO_MIME_BYTES: usize = 64;
+
+/// Most representation summaries one entry DTO carries.
 ///
-/// A fixed allowance rather than a measurement: the sizing decision has to be
-/// made *before* the row is materialised, and every one of those fields is
-/// individually bounded well under this figure.
-pub const IPC_ROW_OVERHEAD_BYTES: usize = 2 * 1024;
+/// Real captures hold a handful (primary plus HTML / RTF / plain / file-list
+/// alternatives); the cap keeps a hand-edited row from making the summary list
+/// the dominant cost of a response.
+pub const MAX_DTO_REPRESENTATION_SUMMARIES: usize = 8;
+
+/// Bytes charged for the fixed-width part of one entry row's JSON.
+///
+/// The id, the three RFC 3339 timestamps, the flags, the counts, and every
+/// field name. All bounded by the schema, unlike the strings above.
+pub const IPC_ROW_SCALAR_BYTES: usize = 512;
+
+/// Worst-case wire cost of one entry row's non-text JSON.
+///
+/// Every variable-length part is bounded — the preview at
+/// [`crate::PREVIEW_MAX_CHARS`] characters, the source-app name at
+/// [`MAX_DTO_SOURCE_APP_NAME_BYTES`], the summaries at
+/// [`MAX_DTO_REPRESENTATION_SUMMARIES`] entries of
+/// [`MAX_DTO_MIME_BYTES`] — so this figure is derived from those caps at their
+/// most expensive escaping (six bytes per byte) rather than guessed. It is the
+/// headroom [`MAX_ENTRY_TEXT_WIRE_BYTES`] reserves so that an admitted entry
+/// plus its worst-case metadata still fits one frame.
+pub const IPC_ROW_OVERHEAD_BYTES: usize = IPC_ROW_SCALAR_BYTES
+    + crate::PREVIEW_MAX_CHARS * 4 * 6
+    + MAX_DTO_SOURCE_APP_NAME_BYTES * 6
+    + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + 64);
+
+/// Longest prefix of `text` that is at most `max_bytes` long and ends on a
+/// character boundary. Used to enforce the DTO string caps without splitting a
+/// multi-byte character.
+#[must_use]
+pub fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 /// Budget for the JSON-escaped entry text one IPC response may carry in
 /// total, across every row in it.

@@ -1,7 +1,9 @@
 use nagori_core::{
     AiProviderKind, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository,
-    IPC_ROW_OVERHEAD_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, RepresentationSummary, Result,
-    SearchQuery, is_text_safe_for_default_output, json_escaped_len,
+    IPC_ROW_SCALAR_BYTES, MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES,
+    MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, PREVIEW_MAX_CHARS,
+    RepresentationSummary, Result, SearchQuery, is_text_safe_for_default_output, json_escaped_len,
+    truncate_on_char_boundary,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -377,15 +379,16 @@ impl NagoriRuntime {
 /// guard (`MAX_IPC_RESPONSE_BYTES`) rejects the whole payload — that guard
 /// protects the wire and the client's bounded reader, not daemon memory.
 ///
-/// The budget is charged in *wire* bytes, not raw ones: each row costs its
-/// JSON-escaped text length (`json_escaped_len`) plus the fixed
-/// `IPC_ROW_OVERHEAD_BYTES` allowance for its id, timestamps, capped preview
-/// and representation summaries, and the total is held under
-/// `MAX_RESPONSE_TEXT_WIRE_BYTES` (`MAX_IPC_BYTES` less the envelope reserve).
-/// Summing raw lengths instead would under-count every escape, so a list of
-/// escape-dense rows could pass the budget and still breach the frame — the
-/// same admission/framing mismatch `MAX_ENTRY_TEXT_WIRE_BYTES` closes for a
-/// single entry.
+/// The budget is charged in *wire* bytes, not raw ones: each row costs the
+/// JSON-escaped length (`json_escaped_len`) of every string it will carry —
+/// text, preview, source-app name, representation MIMEs — plus
+/// `IPC_ROW_SCALAR_BYTES` for the fixed-width remainder, and the total is held
+/// under `MAX_RESPONSE_TEXT_WIRE_BYTES` (`MAX_IPC_BYTES` less the envelope
+/// reserve). Summing raw text lengths instead would under-count every escape
+/// *and* ignore the metadata, so a page of escape-dense rows, or of rows from
+/// an app with a long name, could pass the budget and still breach the frame —
+/// the same admission/framing mismatch `MAX_ENTRY_TEXT_WIRE_BYTES` closes for
+/// a single entry.
 ///
 /// The client therefore receives a bounded prefix instead of a
 /// `response_too_large` rejection, and the peak text allocation is held near
@@ -409,7 +412,9 @@ fn entry_dtos_within_budget(
         } else {
             0
         };
-        let row_cost = text_wire_len.saturating_add(IPC_ROW_OVERHEAD_BYTES);
+        let entry_id = entry.id;
+        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+        let row_cost = text_wire_len.saturating_add(row_metadata_wire_len(&entry, reps));
         if !dtos.is_empty() && used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
             tracing::warn!(
                 returned = dtos.len(),
@@ -420,11 +425,50 @@ fn entry_dtos_within_budget(
             break;
         }
         used = used.saturating_add(row_cost);
-        let entry_id = entry.id;
-        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
         dtos.push(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps));
     }
     dtos
+}
+
+/// Wire cost of everything in one entry row's JSON except its text.
+///
+/// Measured rather than assumed: the preview, the source-app name and the
+/// representation MIMEs are all strings whose escaped length varies per row.
+/// `EntryDto` truncates each to its cap, so this can never exceed
+/// `IPC_ROW_OVERHEAD_BYTES` — the allowance the admission ceiling reserves —
+/// but a typical row costs a small fraction of it, which is what keeps a full
+/// page of short entries from being truncated by a pessimistic flat charge.
+fn row_metadata_wire_len(entry: &ClipboardEntry, reps: &[RepresentationSummary]) -> usize {
+    let preview_len = json_escaped_len(truncate_on_char_boundary(
+        &entry.search.preview,
+        PREVIEW_MAX_CHARS * 4,
+    ));
+    let source_len = entry
+        .metadata
+        .source
+        .as_ref()
+        .and_then(|source| source.name.as_deref())
+        .map_or(0, |name| {
+            json_escaped_len(truncate_on_char_boundary(
+                name,
+                MAX_DTO_SOURCE_APP_NAME_BYTES,
+            ))
+        });
+    let summaries_len: usize = reps
+        .iter()
+        .take(MAX_DTO_REPRESENTATION_SUMMARIES)
+        .map(|rep| {
+            json_escaped_len(truncate_on_char_boundary(
+                &rep.mime_type,
+                MAX_DTO_MIME_BYTES,
+            ))
+            .saturating_add(64)
+        })
+        .sum();
+    IPC_ROW_SCALAR_BYTES
+        .saturating_add(preview_len)
+        .saturating_add(source_len)
+        .saturating_add(summaries_len)
 }
 
 const fn is_ipc_control_request(request: &IpcRequest) -> bool {
@@ -578,6 +622,33 @@ mod tests {
             dtos.len(),
             1,
             "a second escape-dense row would not fit the frame"
+        );
+    }
+
+    #[test]
+    fn a_long_source_app_name_is_charged_and_bounded() {
+        // The app name comes from the OS and nothing upstream bounds it. It is
+        // truncated on the DTO and charged here, so a page of rows from an app
+        // with a pathological name can neither slip past the budget nor blow
+        // the frame.
+        let entries: Vec<_> = (0..nagori_core::MAX_RESULT_LIMIT)
+            .map(|index| {
+                let mut entry = entry_with_text(64);
+                entry.metadata.source = Some(nagori_core::SourceApp {
+                    name: Some(format!("{index}{}", "\u{1}".repeat(8192))),
+                    bundle_id: None,
+                    executable_path: None,
+                });
+                entry
+            })
+            .collect();
+        let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
+        let encoded = serde_json::to_vec(&nagori_ipc::IpcResponse::Entries(dtos))
+            .expect("response serialises");
+        assert!(
+            encoded.len() <= nagori_core::MAX_IPC_BYTES,
+            "the budgeted list must fit the frame (got {} bytes)",
+            encoded.len()
         );
     }
 

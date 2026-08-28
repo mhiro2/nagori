@@ -1,7 +1,9 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiRequestOptions, AppSettings, ClipboardEntry,
-    ContentKind, EntryId, PasteFormat, QuickActionId, RankReason, RepresentationRole,
-    RepresentationSummary, SearchResult, Sensitivity, safe_preview_for_dto,
+    ContentKind, EntryId, MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES,
+    MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS, PasteFormat, QuickActionId, RankReason,
+    RepresentationRole, RepresentationSummary, SearchResult, Sensitivity, safe_preview_for_dto,
+    truncate_on_char_boundary,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -520,13 +522,16 @@ impl From<SearchResult> for SearchResultDto {
         Self {
             id: value.entry_id,
             kind: value.content_kind,
-            preview: value.preview,
+            preview: bounded_preview(&value.preview),
             score: value.score,
             created_at: value.created_at,
             pinned: value.pinned,
             sensitivity: value.sensitivity,
             rank_reasons: value.rank_reason,
-            source_app_name: value.source_app_name,
+            source_app_name: value
+                .source_app_name
+                .as_deref()
+                .map(bounded_source_app_name),
             language: value.language,
             image_width: value.image_width,
             image_height: value.image_height,
@@ -538,10 +543,7 @@ impl From<SearchResult> for SearchResultDto {
 impl SearchResultDto {
     #[must_use]
     pub fn with_representation_summaries(mut self, summaries: &[RepresentationSummary]) -> Self {
-        self.representation_summary = summaries
-            .iter()
-            .map(RepresentationSummaryDto::from_summary)
-            .collect();
+        self.representation_summary = summaries_within_wire_caps(summaries);
         self
     }
 }
@@ -563,11 +565,29 @@ pub struct RepresentationSummaryDto {
 impl RepresentationSummaryDto {
     pub fn from_summary(summary: &RepresentationSummary) -> Self {
         Self {
-            mime_type: summary.mime_type.clone(),
+            // The MIME string comes from a clipboard type another process
+            // declared, so nothing upstream bounds it. Truncating here is what
+            // makes `IPC_ROW_OVERHEAD_BYTES` an honest ceiling rather than an
+            // assumption — see `summaries_within_wire_caps`.
+            mime_type: truncate_on_char_boundary(&summary.mime_type, MAX_DTO_MIME_BYTES).to_owned(),
             role: summary.role,
             byte_count: summary.byte_count,
         }
     }
+}
+
+/// Project at most [`MAX_DTO_REPRESENTATION_SUMMARIES`] summaries, each with a
+/// bounded MIME string. Real captures carry a handful; the cap keeps a
+/// hand-edited row from making the summary list the dominant cost of a
+/// response.
+fn summaries_within_wire_caps(
+    summaries: &[RepresentationSummary],
+) -> Vec<RepresentationSummaryDto> {
+    summaries
+        .iter()
+        .take(MAX_DTO_REPRESENTATION_SUMMARIES)
+        .map(RepresentationSummaryDto::from_summary)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,7 +613,7 @@ pub struct EntryDto {
 
 impl EntryDto {
     pub fn from_entry(entry: ClipboardEntry, include_text: bool) -> Self {
-        let preview = safe_preview_for_dto(&entry);
+        let preview = bounded_preview(&safe_preview_for_dto(&entry));
         Self {
             id: entry.id,
             kind: entry.content_kind(),
@@ -604,7 +624,11 @@ impl EntryDto {
             last_used_at: entry.metadata.last_used_at,
             use_count: entry.metadata.use_count,
             pinned: entry.lifecycle.pinned,
-            source_app_name: entry.metadata.source.and_then(|source| source.name),
+            source_app_name: entry
+                .metadata
+                .source
+                .and_then(|source| source.name)
+                .map(|name| bounded_source_app_name(&name)),
             sensitivity: entry.sensitivity,
             representation_summary: Vec::new(),
         }
@@ -612,12 +636,26 @@ impl EntryDto {
 
     #[must_use]
     pub fn with_representation_summaries(mut self, summaries: &[RepresentationSummary]) -> Self {
-        self.representation_summary = summaries
-            .iter()
-            .map(RepresentationSummaryDto::from_summary)
-            .collect();
+        self.representation_summary = summaries_within_wire_caps(summaries);
         self
     }
+}
+
+/// Truncate an OS-supplied application name to [`MAX_DTO_SOURCE_APP_NAME_BYTES`].
+///
+/// macOS hands over `localizedName` and Windows an executable name; neither is
+/// length-bounded upstream, and an unbounded name repeated across a full page
+/// of rows would push a budget-approved response past the frame.
+fn bounded_source_app_name(name: &str) -> String {
+    truncate_on_char_boundary(name, MAX_DTO_SOURCE_APP_NAME_BYTES).to_owned()
+}
+
+/// Hold the preview to [`PREVIEW_MAX_CHARS`] characters' worth of bytes.
+///
+/// Previews are built capped, but a hand-edited `search_documents` row is not
+/// bound by that, and the row-overhead allowance is derived from this ceiling.
+fn bounded_preview(preview: &str) -> String {
+    truncate_on_char_boundary(preview, PREVIEW_MAX_CHARS * 4).to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -809,6 +847,46 @@ mod tests {
         assert!(
             encoded.len() > MAX_IPC_BYTES,
             "the refused fixture must be the one that would not fit"
+        );
+    }
+
+    /// `IPC_ROW_OVERHEAD_BYTES` is the headroom the admission ceiling reserves
+    /// for one row's non-text JSON. Prove it holds against a worst case built
+    /// from every cap at its most expensive escaping: a full-length preview,
+    /// source-app name and MIME strings made entirely of control characters
+    /// (six wire bytes each), and the maximum number of summaries.
+    #[test]
+    fn one_rows_non_text_json_never_exceeds_the_reserved_overhead() {
+        use nagori_core::{
+            ClipboardEntry, EntryFactory, IPC_ROW_OVERHEAD_BYTES, MAX_DTO_MIME_BYTES,
+            MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS,
+            SourceApp,
+        };
+
+        let mut entry: ClipboardEntry = EntryFactory::from_text("x".to_owned());
+        entry.search.preview = "\u{1}".repeat(PREVIEW_MAX_CHARS * 4 + 64);
+        entry.metadata.source = Some(SourceApp {
+            name: Some("\u{1}".repeat(MAX_DTO_SOURCE_APP_NAME_BYTES + 64)),
+            bundle_id: None,
+            executable_path: None,
+        });
+        let summaries: Vec<_> = (0..MAX_DTO_REPRESENTATION_SUMMARIES + 4)
+            .map(|_| RepresentationSummary {
+                role: RepresentationRole::Alternative,
+                mime_type: "\u{1}".repeat(MAX_DTO_MIME_BYTES + 32),
+                byte_count: u64::MAX,
+            })
+            .collect();
+
+        let mut dto = EntryDto::from_entry(entry, true).with_representation_summaries(&summaries);
+        // Measure the row without its text: the text is budgeted separately.
+        dto.text = None;
+        let encoded = serde_json::to_vec(&dto).expect("row serialises");
+        assert!(
+            encoded.len() <= IPC_ROW_OVERHEAD_BYTES,
+            "a row's non-text JSON must fit the reserved overhead (got {} bytes, reserve {})",
+            encoded.len(),
+            IPC_ROW_OVERHEAD_BYTES
         );
     }
 

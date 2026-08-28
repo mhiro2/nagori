@@ -244,9 +244,10 @@ denylist is an `OR` of every line.
 ## Damaged settings stop capture
 
 Your privacy choices — the app denylist, the regex denylist, which
-content kinds are captured, whether capture is on at all, how secrets
-are handled, whether sensitive captures are blocked outright, and OTP
-detection — are read strictly. If the stored settings are missing any
+content kinds are captured, whether capture is on at all, whether the
+clipboard is captured at launch, whether the CLI endpoint is served, the
+two entry-size budgets, how secrets are handled, whether sensitive
+captures are blocked outright, and OTP detection — are read strictly. If the stored settings are missing any
 of them, or carry a denylist rule this build cannot read, nagori
 refuses the whole settings read instead of filling in a default.
 

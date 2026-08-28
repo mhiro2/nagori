@@ -225,11 +225,15 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 ///
 /// [`AppSettings`] carries `#[serde(default)]` so a blob written before a
 /// non-privacy field existed still loads. That default is fail-open for these
-/// keys specifically: a blob missing `app_denylist` would load with the
-/// password-manager preset the user had removed, one missing `regex_denylist`
-/// would load with no user patterns at all, and one missing `capture_kinds`
-/// would start capturing kinds the user had turned off. Each of those turns a
-/// partially damaged row into a *quietly wider* capture policy.
+/// keys specifically. A blob missing `app_denylist` would load with the
+/// password-manager preset the user had removed; one missing `regex_denylist`
+/// with no user patterns at all; one missing `capture_kinds` would start
+/// capturing kinds the user had turned off; one missing
+/// `capture_initial_clipboard_on_launch` would capture whatever was on the
+/// pasteboard before launch; one missing `cli_ipc_enabled` would re-open the
+/// CLI endpoint; and one missing either size budget would admit clips larger
+/// than the user allowed. Each turns a partially damaged row into a *quietly
+/// wider* capture policy.
 ///
 /// [`AppSettings::from_persisted_json`] therefore requires every key here to
 /// be present before it deserialises anything, so a damaged blob fails the
@@ -241,6 +245,10 @@ pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "regex_denylist",
     "capture_kinds",
     "capture_enabled",
+    "capture_initial_clipboard_on_launch",
+    "cli_ipc_enabled",
+    "max_entry_size_bytes",
+    "max_image_entry_size_bytes",
     "secret_handling",
     "block_sensitive_captures",
     "otp_detection",

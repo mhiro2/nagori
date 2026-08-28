@@ -54,13 +54,6 @@ impl From<ContentKindDto> for ContentKind {
     }
 }
 
-pub(crate) fn default_capture_kind_dtos() -> Vec<ContentKindDto> {
-    nagori_core::settings::default_capture_kinds()
-        .into_iter()
-        .map(Into::into)
-        .collect()
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RepresentationRoleDto {

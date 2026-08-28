@@ -2724,19 +2724,29 @@ under 80 ms for 100k text entries on a developer machine.
   (`MAX_IPC_BYTES` less the envelope reserve and one row's overhead) on every
   path that creates a text entry — capture, `add_text`, combined copy, and the
   CLI's own client-side check — so "storage accepted it" implies "a client can
-  read it back". List responses charge the same escaped length per row (plus
-  `IPC_ROW_OVERHEAD_BYTES`) against `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page
-  of escape-dense rows is truncated to a shorter prefix rather than rejected
-  wholesale at the frame. Without both halves an entry could be stored and
+  read it back". List responses charge each row the escaped length of every
+  string it carries — text, preview, source-app name, representation MIMEs —
+  plus `IPC_ROW_SCALAR_BYTES` for the fixed-width remainder, against
+  `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page of escape-dense rows is truncated
+  to a shorter prefix rather than rejected wholesale at the frame. The
+  OS-supplied strings the row carries are bounded on the DTO
+  (`MAX_DTO_SOURCE_APP_NAME_BYTES`, `MAX_DTO_MIME_BYTES`,
+  `MAX_DTO_REPRESENTATION_SUMMARIES`, the preview at `PREVIEW_MAX_CHARS`), which
+  is what makes `IPC_ROW_OVERHEAD_BYTES` — the headroom the admission ceiling
+  reserves — a derived worst case rather than an assumption. Without both halves an entry could be stored and
   then be unfetchable by every surface — an orphan row the user can see in
   neither the palette nor the CLI.
 - **Fail-closed settings read** — `AppSettings::from_complete_json` is the
   only way a persisted blob (or a client's full-blob `UpdateSettings`)
   becomes an `AppSettings`. It requires every key in `REQUIRED_PRIVACY_KEYS`
   (`app_denylist`, `regex_denylist`, `capture_kinds`, `capture_enabled`,
-  `secret_handling`, `block_sensitive_captures`, `otp_detection`) to be
-  present, refuses a denylist rule shape this build cannot parse, and runs
-  `validate()`. Struct-level `#[serde(default)]` keeps a blob written before a
+  `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`,
+  `max_entry_size_bytes`, `max_image_entry_size_bytes`, `secret_handling`,
+  `block_sensitive_captures`, `otp_detection`) to be present, refuses a
+  denylist rule shape this build cannot parse, and runs `validate()`. The
+  desktop's `AppSettingsDto` drops the serde defaults on the same fields, so a
+  partial payload to `update_settings` is rejected rather than persisting a
+  wider policy through the typed path. Struct-level `#[serde(default)]` keeps a blob written before a
   *cosmetic* field existed loadable, but for these keys a default is
   fail-open — a damaged row would quietly widen what gets captured or stored
   in the clear. The error propagates: the daemon refuses to start and the
