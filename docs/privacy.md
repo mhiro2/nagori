@@ -248,8 +248,8 @@ content kinds are captured, whether capture is on at all, whether the
 clipboard is captured at launch, whether the CLI endpoint is served, the
 two entry-size budgets, how long history is kept, whether it is cleared
 on quit, whether deletes are permanent, how secrets are handled, whether
-sensitive captures are blocked outright, and OTP detection — are read
-strictly. If the stored settings are missing any
+sensitive captures are blocked outright, whether the updater probes on
+launch, and OTP detection — are read strictly. If the stored settings are missing any
 of them, or carry a denylist rule this build cannot read, nagori
 refuses the whole settings read instead of filling in a default.
 

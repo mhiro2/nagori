@@ -443,7 +443,8 @@ impl From<SecretHandlingDto> for SecretHandling {
 /// `capture_enabled`, `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`,
 /// the two denylists, `secret_handling`, `block_sensitive_captures`,
 /// `otp_detection`, the retention budgets, `clear_on_quit`,
-/// `permanent_delete_on_delete`) deliberately carry **no**
+/// `permanent_delete_on_delete`, `auto_update_check`) deliberately carry
+/// **no**
 /// `#[serde(default)]`:
 /// `update_settings` takes a full blob, not a patch, so a payload that omits
 /// one would persist that field's default and silently widen the policy —
@@ -496,7 +497,6 @@ pub struct AppSettingsDto {
     pub block_sensitive_captures: bool,
     pub otp_detection: bool,
     pub capture_initial_clipboard_on_launch: bool,
-    #[serde(default = "nagori_core::settings::default_auto_update_check")]
     pub auto_update_check: bool,
     #[serde(default)]
     pub update_channel: UpdateChannelDto,

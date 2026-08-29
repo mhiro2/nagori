@@ -235,12 +235,13 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// than the user allowed. The retention keys are here for the same reason from
 /// the other end: defaulting `history_retention_count` /
 /// `history_retention_days` / `max_total_bytes` keeps history the user had
-/// asked to be swept, and defaulting `clear_on_quit` /
-/// `permanent_delete_on_delete` drops deletion guarantees they had turned on.
-/// Each turns a partially damaged row into a *quietly wider* capture or
-/// retention policy.
+/// asked to be swept, defaulting `clear_on_quit` /
+/// `permanent_delete_on_delete` drops deletion guarantees they had turned on,
+/// and defaulting `auto_update_check` re-enables a startup network request
+/// they had opted out of. Each turns a partially damaged row into a *quietly
+/// wider* capture, retention, or network policy.
 ///
-/// [`AppSettings::from_persisted_json`] therefore requires every key here to
+/// [`AppSettings::from_complete_json`] therefore requires every key here to
 /// be present before it deserialises anything, so a damaged blob fails the
 /// read outright. The daemon and the desktop both refuse to start capture on a
 /// settings-load failure, which is the fail-closed behaviour this list exists
@@ -262,6 +263,7 @@ pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "max_total_bytes",
     "clear_on_quit",
     "permanent_delete_on_delete",
+    "auto_update_check",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

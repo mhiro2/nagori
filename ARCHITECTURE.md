@@ -2750,8 +2750,8 @@ under 80 ms for 100k text entries on a developer machine.
   `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`, both size budgets,
   `secret_handling`, `block_sensitive_captures`, `otp_detection`, and the
   retention controls `history_retention_count` / `history_retention_days` /
-  `max_total_bytes` / `clear_on_quit` / `permanent_delete_on_delete`) to be
-  present, refuses a denylist rule shape this build cannot parse, and runs
+  `max_total_bytes` / `clear_on_quit` / `permanent_delete_on_delete`, plus
+  `auto_update_check`) to be present, refuses a denylist rule shape this build cannot parse, and runs
   `validate()`. The
   desktop's `AppSettingsDto` drops the serde defaults on the same fields, so a
   partial payload to `update_settings` is rejected rather than persisting a
