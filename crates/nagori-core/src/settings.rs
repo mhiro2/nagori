@@ -232,8 +232,13 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// `capture_initial_clipboard_on_launch` would capture whatever was on the
 /// pasteboard before launch; one missing `cli_ipc_enabled` would re-open the
 /// CLI endpoint; and one missing either size budget would admit clips larger
-/// than the user allowed. Each turns a partially damaged row into a *quietly
-/// wider* capture policy.
+/// than the user allowed. The retention keys are here for the same reason from
+/// the other end: defaulting `history_retention_count` /
+/// `history_retention_days` / `max_total_bytes` keeps history the user had
+/// asked to be swept, and defaulting `clear_on_quit` /
+/// `permanent_delete_on_delete` drops deletion guarantees they had turned on.
+/// Each turns a partially damaged row into a *quietly wider* capture or
+/// retention policy.
 ///
 /// [`AppSettings::from_persisted_json`] therefore requires every key here to
 /// be present before it deserialises anything, so a damaged blob fails the
@@ -252,6 +257,11 @@ pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "secret_handling",
     "block_sensitive_captures",
     "otp_detection",
+    "history_retention_count",
+    "history_retention_days",
+    "max_total_bytes",
+    "clear_on_quit",
+    "permanent_delete_on_delete",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -442,7 +442,9 @@ impl From<SecretHandlingDto> for SecretHandling {
 /// The fields backing a privacy decision (both size budgets, `capture_kinds`,
 /// `capture_enabled`, `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`,
 /// the two denylists, `secret_handling`, `block_sensitive_captures`,
-/// `otp_detection`) deliberately carry **no** `#[serde(default)]`:
+/// `otp_detection`, the retention budgets, `clear_on_quit`,
+/// `permanent_delete_on_delete`) deliberately carry **no**
+/// `#[serde(default)]`:
 /// `update_settings` takes a full blob, not a patch, so a payload that omits
 /// one would persist that field's default and silently widen the policy —
 /// the same fail-open `AppSettings::from_complete_value` closes on the IPC
@@ -487,11 +489,9 @@ pub struct AppSettingsDto {
     pub show_preview_pane: bool,
     #[serde(default = "nagori_core::settings::default_show_in_menu_bar")]
     pub show_in_menu_bar: bool,
-    #[serde(default)]
     pub clear_on_quit: bool,
     #[serde(default = "nagori_core::settings::default_confirm_clear_history")]
     pub confirm_clear_history: bool,
-    #[serde(default)]
     pub permanent_delete_on_delete: bool,
     pub block_sensitive_captures: bool,
     pub otp_detection: bool,

@@ -2728,7 +2728,11 @@ under 80 ms for 100k text entries on a developer machine.
   string it carries — text, preview, source-app name, representation MIMEs —
   plus `IPC_ROW_SCALAR_BYTES` for the fixed-width remainder, against
   `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page of escape-dense rows is truncated
-  to a shorter prefix rather than rejected wholesale at the frame. The
+  to a shorter prefix rather than rejected wholesale at the frame. Search
+  responses are charged the same way (they carry no entry text, but 200 rows of
+  capped previews and app names would still breach the frame), and a legacy row
+  that exceeds the whole budget on its own is returned with its text withheld
+  so it shortens the response instead of breaking it. The
   OS-supplied strings the row carries are bounded on the DTO
   (`MAX_DTO_SOURCE_APP_NAME_BYTES`, `MAX_DTO_MIME_BYTES`,
   `MAX_DTO_REPRESENTATION_SUMMARIES`, the preview at `PREVIEW_MAX_CHARS`), which
@@ -2739,11 +2743,13 @@ under 80 ms for 100k text entries on a developer machine.
 - **Fail-closed settings read** — `AppSettings::from_complete_json` is the
   only way a persisted blob (or a client's full-blob `UpdateSettings`)
   becomes an `AppSettings`. It requires every key in `REQUIRED_PRIVACY_KEYS`
-  (`app_denylist`, `regex_denylist`, `capture_kinds`, `capture_enabled`,
-  `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`,
-  `max_entry_size_bytes`, `max_image_entry_size_bytes`, `secret_handling`,
-  `block_sensitive_captures`, `otp_detection`) to be present, refuses a
-  denylist rule shape this build cannot parse, and runs `validate()`. The
+  (the two denylists, `capture_kinds`, `capture_enabled`,
+  `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`, both size budgets,
+  `secret_handling`, `block_sensitive_captures`, `otp_detection`, and the
+  retention controls `history_retention_count` / `history_retention_days` /
+  `max_total_bytes` / `clear_on_quit` / `permanent_delete_on_delete`) to be
+  present, refuses a denylist rule shape this build cannot parse, and runs
+  `validate()`. The
   desktop's `AppSettingsDto` drops the serde defaults on the same fields, so a
   partial payload to `update_settings` is rejected rather than persisting a
   wider policy through the typed path. Struct-level `#[serde(default)]` keeps a blob written before a

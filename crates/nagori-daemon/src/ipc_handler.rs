@@ -69,14 +69,7 @@ impl NagoriRuntime {
                     .await?;
                 let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
                 let summaries = self.store.list_representation_summaries(&ids).await?;
-                let dtos = results
-                    .into_iter()
-                    .map(|result| {
-                        let entry_id = result.entry_id;
-                        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-                        SearchResultDto::from(result).with_representation_summaries(reps)
-                    })
-                    .collect();
+                let dtos = search_dtos_within_budget(results, &summaries);
                 Ok(IpcResponse::Search(SearchResponse { results: dtos }))
             }
             IpcRequest::GetEntry(GetEntryRequest {
@@ -392,9 +385,10 @@ impl NagoriRuntime {
 ///
 /// The client therefore receives a bounded prefix instead of a
 /// `response_too_large` rejection, and the peak text allocation is held near
-/// one entry's worth rather than scaling with the row count. The first row is
-/// always included even when it alone exceeds the budget, so a single large
-/// pinned entry never collapses the list to empty. Each candidate's text
+/// one entry's worth rather than scaling with the row count. A row that
+/// exceeds the whole budget on its own — an entry stored before the admission
+/// gate existed — is still returned, with its text withheld, so a single such
+/// row shortens the response instead of breaking it. Each candidate's text
 /// length is read without cloning, so an over-budget row is never
 /// materialised.
 fn entry_dtos_within_budget(
@@ -414,15 +408,34 @@ fn entry_dtos_within_budget(
         };
         let entry_id = entry.id;
         let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-        let row_cost = text_wire_len.saturating_add(row_metadata_wire_len(&entry, reps));
-        if !dtos.is_empty() && used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
+        let metadata_len = row_metadata_wire_len(&entry, reps);
+        let row_cost = text_wire_len.saturating_add(metadata_len);
+        if used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
+            if !dtos.is_empty() {
+                tracing::warn!(
+                    returned = dtos.len(),
+                    dropped = total - dtos.len(),
+                    budget_bytes = MAX_RESPONSE_TEXT_WIRE_BYTES,
+                    "ipc_list_truncated_to_byte_budget"
+                );
+                break;
+            }
+            // The first row is over budget on its own — an entry stored before
+            // the wire-size admission gate existed, or written straight into
+            // the database. Returning it whole would blow the frame and the
+            // transport would replace the *entire* response with
+            // `response_too_large`, so the list breaks rather than shortens.
+            // Keep the row and withhold its text instead: the user still sees
+            // the entry (and can delete it), and the rest of the page loads.
             tracing::warn!(
-                returned = dtos.len(),
-                dropped = total - dtos.len(),
+                entry_id = %entry_id,
+                text_wire_bytes = text_wire_len,
                 budget_bytes = MAX_RESPONSE_TEXT_WIRE_BYTES,
-                "ipc_list_truncated_to_byte_budget"
+                "ipc_list_row_text_withheld_over_budget"
             );
-            break;
+            used = used.saturating_add(metadata_len);
+            dtos.push(EntryDto::from_entry(entry, false).with_representation_summaries(reps));
+            continue;
         }
         used = used.saturating_add(row_cost);
         dtos.push(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps));
@@ -439,21 +452,34 @@ fn entry_dtos_within_budget(
 /// but a typical row costs a small fraction of it, which is what keeps a full
 /// page of short entries from being truncated by a pessimistic flat charge.
 fn row_metadata_wire_len(entry: &ClipboardEntry, reps: &[RepresentationSummary]) -> usize {
-    let preview_len = json_escaped_len(truncate_on_char_boundary(
+    wire_len_of_strings(
         &entry.search.preview,
-        PREVIEW_MAX_CHARS * 4,
-    ));
-    let source_len = entry
-        .metadata
-        .source
-        .as_ref()
-        .and_then(|source| source.name.as_deref())
-        .map_or(0, |name| {
-            json_escaped_len(truncate_on_char_boundary(
-                name,
-                MAX_DTO_SOURCE_APP_NAME_BYTES,
-            ))
-        });
+        entry
+            .metadata
+            .source
+            .as_ref()
+            .and_then(|source| source.name.as_deref()),
+        None,
+        reps,
+    )
+}
+
+/// Shared cost model for the variable-length strings a row carries, each
+/// measured at the length its DTO will truncate it to.
+fn wire_len_of_strings(
+    preview: &str,
+    source_app_name: Option<&str>,
+    language: Option<&str>,
+    reps: &[RepresentationSummary],
+) -> usize {
+    let preview_len = json_escaped_len(truncate_on_char_boundary(preview, PREVIEW_MAX_CHARS * 4));
+    let source_len = source_app_name.map_or(0, |name| {
+        json_escaped_len(truncate_on_char_boundary(
+            name,
+            MAX_DTO_SOURCE_APP_NAME_BYTES,
+        ))
+    });
+    let language_len = language.map_or(0, json_escaped_len);
     let summaries_len: usize = reps
         .iter()
         .take(MAX_DTO_REPRESENTATION_SUMMARIES)
@@ -468,7 +494,49 @@ fn row_metadata_wire_len(entry: &ClipboardEntry, reps: &[RepresentationSummary])
     IPC_ROW_SCALAR_BYTES
         .saturating_add(preview_len)
         .saturating_add(source_len)
+        .saturating_add(language_len)
         .saturating_add(summaries_len)
+}
+
+/// Materialise search results while holding the response inside the IPC frame.
+///
+/// Search rows carry no entry text, but they are not free: the preview, the
+/// source-app name, the language tag and the representation summaries are all
+/// strings, and `MAX_RESULT_LIMIT` (200) rows of them at their caps would
+/// exceed `MAX_IPC_BYTES`. Charging each row what it will actually occupy —
+/// and stopping at `MAX_RESPONSE_TEXT_WIRE_BYTES` — gives the client a bounded
+/// prefix, the same contract `entry_dtos_within_budget` provides for
+/// `list_recent` / `list_pinned`, instead of a `response_too_large` rejection
+/// that returns nothing at all.
+fn search_dtos_within_budget(
+    results: Vec<nagori_core::SearchResult>,
+    summaries: &HashMap<EntryId, Vec<RepresentationSummary>>,
+) -> Vec<SearchResultDto> {
+    let total = results.len();
+    let mut dtos = Vec::with_capacity(total);
+    let mut used: usize = 0;
+    for result in results {
+        let entry_id = result.entry_id;
+        let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
+        let row_cost = wire_len_of_strings(
+            &result.preview,
+            result.source_app_name.as_deref(),
+            result.language.as_deref(),
+            reps,
+        );
+        if !dtos.is_empty() && used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
+            tracing::warn!(
+                returned = dtos.len(),
+                dropped = total - dtos.len(),
+                budget_bytes = MAX_RESPONSE_TEXT_WIRE_BYTES,
+                "ipc_search_truncated_to_byte_budget"
+            );
+            break;
+        }
+        used = used.saturating_add(row_cost);
+        dtos.push(SearchResultDto::from(result).with_representation_summaries(reps));
+    }
+    dtos
 }
 
 const fn is_ipc_control_request(request: &IpcRequest) -> bool {
@@ -574,16 +642,63 @@ mod tests {
     }
 
     #[test]
-    fn always_keeps_the_first_row_even_when_oversized() {
-        // A single row whose text alone exceeds the budget must still be
-        // returned — dropping it would yield a confusing empty list.
+    fn keeps_an_over_budget_first_row_but_withholds_its_text() {
+        // A row too large for the whole budget — an entry stored before the
+        // admission gate existed — must not be returned whole: the frame guard
+        // would reject the entire response and the list would break rather
+        // than shorten. It stays in the list without its text, and the rows
+        // after it still load.
         let entries = vec![
             entry_with_text(MAX_RESPONSE_TEXT_WIRE_BYTES + 1024),
             entry_with_text(16),
         ];
         let dtos = entry_dtos_within_budget(entries, &HashMap::new(), false);
-        assert_eq!(dtos.len(), 1);
-        assert!(dtos[0].text.is_some());
+        assert_eq!(dtos.len(), 2);
+        assert!(
+            dtos[0].text.is_none(),
+            "the over-budget row must not carry its text"
+        );
+        assert!(dtos[1].text.is_some());
+        let encoded = serde_json::to_vec(&nagori_ipc::IpcResponse::Entries(dtos))
+            .expect("response serialises");
+        assert!(encoded.len() <= nagori_core::MAX_IPC_BYTES);
+    }
+
+    #[test]
+    fn search_results_are_truncated_to_the_response_budget() {
+        // Search rows carry no entry text, but 200 rows of maximum-length
+        // previews and app names would still breach the frame. The client gets
+        // a shorter list instead of `response_too_large`.
+        let results: Vec<_> = (0..nagori_core::MAX_RESULT_LIMIT)
+            .map(|index| nagori_core::SearchResult {
+                entry_id: EntryId::new(),
+                content_kind: nagori_core::ContentKind::Text,
+                preview: format!("{index}{}", "\u{1}".repeat(4096)),
+                score: 1.0,
+                created_at: time::OffsetDateTime::UNIX_EPOCH,
+                pinned: false,
+                sensitivity: nagori_core::Sensitivity::Public,
+                rank_reason: Vec::new(),
+                source_app_name: Some("\u{1}".repeat(4096)),
+                language: None,
+                image_width: None,
+                image_height: None,
+            })
+            .collect();
+        let dtos = search_dtos_within_budget(results, &HashMap::new());
+        assert!(
+            dtos.len() < nagori_core::MAX_RESULT_LIMIT,
+            "the budget must drop rows that would not fit"
+        );
+        let encoded = serde_json::to_vec(&nagori_ipc::IpcResponse::Search(
+            nagori_ipc::SearchResponse { results: dtos },
+        ))
+        .expect("response serialises");
+        assert!(
+            encoded.len() <= nagori_core::MAX_IPC_BYTES,
+            "the budgeted search response must fit the frame (got {} bytes)",
+            encoded.len()
+        );
     }
 
     #[test]
