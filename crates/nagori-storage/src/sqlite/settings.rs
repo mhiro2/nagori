@@ -17,17 +17,15 @@ impl SettingsRepository for SqliteStore {
                 })
                 .optional()
                 .map_err(storage_err)?;
-            let settings: AppSettings = match value {
-                Some(value) => serde_json::from_str(&value).map_err(json_err)?,
-                None => return Ok(AppSettings::default()),
-            };
-            // Hand-edited or downgraded rows can carry out-of-range values
-            // (`paste_delay_ms = u64::MAX`, `palette_row_count = 0`, …) that
-            // wedge the consumer. Validate on every load — the same gate
-            // `save_settings` enforces — so a corrupt row surfaces loudly
-            // instead of silently freezing paste or breaking the palette.
-            settings.validate()?;
-            Ok(settings)
+            // `from_complete_json` is the fail-closed read: it requires every
+            // privacy key to be present, refuses a rule shape this build cannot
+            // parse, and applies the same `validate` gate `save_settings`
+            // enforces. A partially readable row is an error here rather than a
+            // silently widened capture policy.
+            match value {
+                Some(value) => AppSettings::from_complete_json(&value),
+                None => Ok(AppSettings::default()),
+            }
         })
         .await
     }
@@ -122,7 +120,7 @@ pub(super) fn stored_settings_policy_hash(conn: &rusqlite::Connection) -> Result
         .optional()
         .map_err(storage_err)?;
     Ok(match value {
-        Some(value) => serde_json::from_str::<AppSettings>(&value)
+        Some(value) => AppSettings::from_complete_json(&value)
             .ok()
             .map(|old| old.semantic_policy_hash()),
         None => Some(AppSettings::default().semantic_policy_hash()),
@@ -154,10 +152,9 @@ impl SqliteStore {
             let Some((value, revision)) = row else {
                 return Ok((AppSettings::default(), 0));
             };
-            let settings: AppSettings = serde_json::from_str(&value).map_err(json_err)?;
-            // Mirror `get_settings`: a hand-edited or downgraded row surfaces
-            // loudly here too instead of wedging the consumer.
-            settings.validate()?;
+            // Mirror `get_settings`: a row this build cannot fully reconstruct
+            // surfaces loudly here too instead of wedging the consumer.
+            let settings = AppSettings::from_complete_json(&value)?;
             Ok((settings, u64::try_from(revision).unwrap_or(0)))
         })
         .await

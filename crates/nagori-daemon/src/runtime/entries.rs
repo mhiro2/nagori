@@ -3,9 +3,10 @@
 use std::time::Instant;
 
 use nagori_core::{
-    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository, PasteFormat,
-    PasteOption, Result, SecretAction, SecretDropReason, Sensitivity, SensitivityClassifier,
-    SensitivityReason, SettingsRepository, build_paste_options,
+    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
+    MAX_ENTRY_TEXT_WIRE_BYTES, PasteFormat, PasteOption, Result, SecretAction, SecretDropReason,
+    Sensitivity, SensitivityClassifier, SensitivityReason, SettingsRepository, build_paste_options,
+    entry_text_fits_wire, json_escaped_len,
 };
 
 use crate::ipc_handler::result_code;
@@ -97,6 +98,20 @@ impl NagoriRuntime {
                     ));
                 }
             }
+        }
+        // Second ceiling, on the JSON-escaped form: the entry is handed back
+        // to clients inside an `EntryDto`, and escaping a control-character
+        // body can multiply its length sixfold, so storing it would leave a
+        // row no client could read back. Checked here rather than on the raw
+        // input because what has to fit the frame is the body that ends up
+        // stored — `StoreRedacted` may have shortened it.
+        let stored_text = entry.plain_text().unwrap_or_default();
+        if !entry_text_fits_wire(stored_text) {
+            return Err(AppError::Policy(format!(
+                "entry exceeds the {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once \
+                 JSON-escaped ({} bytes)",
+                json_escaped_len(stored_text)
+            )));
         }
         // Invalidate before *and* after: the pre-call closes the window
         // where a concurrent `search` could still serve a pre-insert hit

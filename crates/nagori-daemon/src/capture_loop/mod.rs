@@ -3,9 +3,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
     AppError, AppSettings, AuditLog, ClipboardContent, ClipboardSequence, ContentKind,
-    EntryFactory, EntryId, EntryRepository, MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES,
-    ReadBudget, Result, SecretAction, SecretDropReason, Sensitivity, SensitivityClassifier,
-    SensitivityReason, StoredClipboardRepresentation, factory::compute_representation_set_hash,
+    EntryFactory, EntryId, EntryRepository, MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES,
+    MAX_IMAGE_ENTRY_SIZE_BYTES, ReadBudget, Result, SecretAction, SecretDropReason, Sensitivity,
+    SensitivityClassifier, SensitivityReason, StoredClipboardRepresentation, entry_text_fits_wire,
+    factory::compute_representation_set_hash, json_escaped_len,
 };
 use nagori_ipc::CaptureEventCategory;
 use nagori_platform::{CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, WindowBehavior};
@@ -1095,6 +1096,40 @@ where
     /// resolve to [`Admission::Dropped`] with the dedup state left anchored
     /// (the clip is decided); only a config failure propagates as `Err`, and
     /// the caller owns the dedup rollback for that case.
+    /// Whether `entry`'s text still fits an IPC frame once JSON-escaped.
+    ///
+    /// The `max_entry_size_bytes` gate bounds what storage holds; this one
+    /// bounds what a client can read back. `EntryDto` carries the plain text
+    /// inline as a JSON string and escaping is not length-preserving, so a
+    /// control-character body well under the raw ceiling can still exceed the
+    /// frame once escaped. Admitting it would leave a row the daemon stores
+    /// and neither the desktop nor the CLI can fetch.
+    ///
+    /// Image primaries are exempt: their bytes never ride the line inline.
+    async fn text_survives_transport(&self, entry: &nagori_core::ClipboardEntry) -> bool {
+        if matches!(entry.content_kind(), ContentKind::Image) {
+            return true;
+        }
+        let Some(text) = entry.plain_text() else {
+            return true;
+        };
+        if entry_text_fits_wire(text) {
+            return true;
+        }
+        warn!(
+            bytes = text.len(),
+            escaped_bytes = json_escaped_len(text),
+            limit = MAX_ENTRY_TEXT_WIRE_BYTES,
+            "capture_skipped reason=oversized_escaped"
+        );
+        let _ = self
+            .audit
+            .record("capture_skipped", Some(entry.id), Some("oversized_escaped"))
+            .await;
+        self.note_capture_drop(CaptureEventCategory::OversizedDrop);
+        false
+    }
+
     async fn admit_entry(
         &self,
         mut entry: nagori_core::ClipboardEntry,
@@ -1177,6 +1212,15 @@ where
         {
             self.record_secret_drop(entry.id, reason, &classification.reasons)
                 .await;
+            return Ok(Admission::Dropped);
+        }
+
+        // Transport gate, after redaction rather than before it: what has to
+        // fit an IPC frame is the body that ends up *stored*, and
+        // `StoreRedacted` can turn an escape-dense secret into a short one.
+        // Checking the raw body would refuse clips whose durable form fits
+        // comfortably.
+        if !self.text_survives_transport(&entry).await {
             return Ok(Admission::Dropped);
         }
 

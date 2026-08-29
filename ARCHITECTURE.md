@@ -249,6 +249,10 @@ ClipboardReader.current_sequence_with_max()
         ├─ Block         → audit + drop
         ├─ StoreRedacted → rewrite body / hash / FTS / ngrams
         └─ StoreFull     → keep raw bytes
+  → transport guard    (text kinds only: the *stored* body's JSON-escaped
+                        length must fit MAX_ENTRY_TEXT_WIRE_BYTES, so anything
+                        storage accepts a client can read back; checked after
+                        redaction, which can shorten the body)
   → Secret? clear pending_representations   (alternatives still hold the
                                              raw secret — drop them and
                                              reset representation_set_hash
@@ -2556,7 +2560,11 @@ are intentionally not localized to keep grep recipes portable.
 tokens where the two overlap (`capture_skipped` / `entry_blocked` /
 `secret_blocked` / `secret_redacted_dropped`; retention sweeps add
 `retention_count` / `retention_age` / `retention_size`), so the desktop UI
-and operators see one vocabulary.
+and operators see one vocabulary. `capture_skipped` carries the reason as
+its detail: `kind_disabled`, `oversized` (raw bytes over the per-kind
+budget), `oversized_escaped` (fits storage, would not fit an IPC frame once
+JSON-escaped), and the owner-marker exclusions `concealed_marker` /
+`transient_marker`.
 
 ---
 
@@ -2708,6 +2716,51 @@ under 80 ms for 100k text entries on a developer machine.
   representation against its kind's budget while reading. Raising the image
   budget toward its 64 MiB ceiling is a high-memory expert choice (raw
   TIFF/DIB, decoded RGBA, and re-encoded PNG can briefly coexist).
+- **Transport-size ceiling on text** — `max_entry_size_bytes` bounds an
+  entry's *raw* bytes, but the IPC line carries the JSON-escaped form and
+  escaping is not length-preserving: one control byte becomes the six-byte
+  `\u0000` sequence, so ~200 KB of control characters passes a 768 KiB raw
+  budget and then exceeds the 1 MiB frame. Admission therefore also measures
+  `nagori_core::json_escaped_len` against `MAX_ENTRY_TEXT_WIRE_BYTES`
+  (`MAX_IPC_BYTES` less the envelope reserve and one row's overhead) on every
+  path that creates a text entry — capture, `add_text`, combined copy, and the
+  CLI's own client-side check — so "storage accepted it" implies "a client can
+  read it back". The capture and `add_text` gates run *after* redaction, since
+  what has to fit the frame is the body that ends up stored. List responses charge each row the escaped length of every
+  string it carries — text, preview, source-app name, representation MIMEs —
+  plus `IPC_ROW_SCALAR_BYTES` for the fixed-width remainder, against
+  `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page of escape-dense rows is truncated
+  to a shorter prefix rather than rejected wholesale at the frame. Search
+  responses are charged the same way (they carry no entry text, but 200 rows of
+  capped previews and app names would still breach the frame), and a legacy row
+  that exceeds the whole budget on its own is returned with its text withheld
+  so it shortens the response instead of breaking it. The
+  OS-supplied strings the row carries are bounded on the DTO
+  (`MAX_DTO_SOURCE_APP_NAME_BYTES`, `MAX_DTO_MIME_BYTES`,
+  `MAX_DTO_LANGUAGE_BYTES`, `MAX_DTO_REPRESENTATION_SUMMARIES`, the preview at
+  `PREVIEW_MAX_CHARS`), which is what makes `IPC_ROW_OVERHEAD_BYTES` — the
+  headroom the admission ceiling reserves — a derived worst case rather than an
+  assumption. Without both halves an entry could be stored and
+  then be unfetchable by every surface — an orphan row the user can see in
+  neither the palette nor the CLI.
+- **Fail-closed settings read** — `AppSettings::from_complete_json` is the
+  only way a persisted blob (or a client's full-blob `UpdateSettings`)
+  becomes an `AppSettings`. It requires every key in `REQUIRED_PRIVACY_KEYS`
+  (the two denylists, `capture_kinds`, `capture_enabled`,
+  `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`, both size budgets,
+  `secret_handling`, `block_sensitive_captures`, `otp_detection`, and the
+  retention controls `history_retention_count` / `history_retention_days` /
+  `max_total_bytes` / `clear_on_quit` / `permanent_delete_on_delete`, plus
+  `auto_update_check`) to be present, refuses a denylist rule shape this build cannot parse, and runs
+  `validate()`. The
+  desktop's `AppSettingsDto` drops the serde defaults on the same fields, so a
+  partial payload to `update_settings` is rejected rather than persisting a
+  wider policy through the typed path. Struct-level `#[serde(default)]` keeps a blob written before a
+  *cosmetic* field existed loadable, but for these keys a default is
+  fail-open — a damaged row would quietly widen what gets captured or stored
+  in the clear. The error propagates: the daemon refuses to start and the
+  desktop's startup gate stays closed, so capture never runs under a policy
+  the user did not choose.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.

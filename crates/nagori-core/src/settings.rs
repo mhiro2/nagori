@@ -221,50 +221,50 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
         .collect()
 }
 
-/// Custom deserializer for `app_denylist` that accepts both the new
-/// shape (`Vec<AppDenyRule>`) and the legacy free-text form
-/// (`Vec<String>`).
+/// Settings keys whose absence would silently relax a privacy decision.
 ///
-/// A legacy settings snapshot stored each entry as a bare string;
-/// the schema is now an internally-tagged enum. The settings JSON
-/// blob lives in `SQLite`, so a hard format break would silently lose
-/// the user's rules on first launch. Reading either shape — and
-/// mapping the legacy strings to [`AppDenyRule::Pattern`] — keeps
-/// every existing rule active across the upgrade.
+/// [`AppSettings`] carries `#[serde(default)]` so a blob written before a
+/// non-privacy field existed still loads. That default is fail-open for these
+/// keys specifically. A blob missing `app_denylist` would load with the
+/// password-manager preset the user had removed; one missing `regex_denylist`
+/// with no user patterns at all; one missing `capture_kinds` would start
+/// capturing kinds the user had turned off; one missing
+/// `capture_initial_clipboard_on_launch` would capture whatever was on the
+/// pasteboard before launch; one missing `cli_ipc_enabled` would re-open the
+/// CLI endpoint; and one missing either size budget would admit clips larger
+/// than the user allowed. The retention keys are here for the same reason from
+/// the other end: defaulting `history_retention_count` /
+/// `history_retention_days` / `max_total_bytes` keeps history the user had
+/// asked to be swept, defaulting `clear_on_quit` /
+/// `permanent_delete_on_delete` drops deletion guarantees they had turned on,
+/// and defaulting `auto_update_check` re-enables a startup network request
+/// they had opted out of. Each turns a partially damaged row into a *quietly
+/// wider* capture, retention, or network policy.
 ///
-/// Parsing is per-element so a single unreadable rule cannot abort the
-/// whole [`AppSettings`] deserialize. A future `AppDenyRule` variant seen
-/// by an older build (downgrade) or a hand-edited DB row would otherwise
-/// fail the entire settings read — and a caller that falls back to
-/// `AppSettings::default()` on that error would drop *every* denylist
-/// rule, a fail-open privacy regression. Each element is buffered as an
-/// untyped value first, then converted; the ones that do not parse are
-/// warned about and skipped, so every still-readable rule survives.
-pub fn deserialize_app_denylist<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Vec<AppDenyRule>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RuleOrString {
-        Rule(AppDenyRule),
-        Legacy(String),
-    }
-    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
-    let mut rules = Vec::with_capacity(raw.len());
-    for value in raw {
-        match serde_json::from_value::<RuleOrString>(value) {
-            Ok(RuleOrString::Rule(rule)) => rules.push(rule),
-            Ok(RuleOrString::Legacy(value)) => rules.push(AppDenyRule::Pattern { value }),
-            Err(err) => {
-                tracing::warn!(error = %err, "app_denylist_rule_skipped");
-            }
-        }
-    }
-    Ok(rules)
-}
+/// [`AppSettings::from_complete_json`] therefore requires every key here to
+/// be present before it deserialises anything, so a damaged blob fails the
+/// read outright. The daemon and the desktop both refuse to start capture on a
+/// settings-load failure, which is the fail-closed behaviour this list exists
+/// to trigger.
+pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
+    "app_denylist",
+    "regex_denylist",
+    "capture_kinds",
+    "capture_enabled",
+    "capture_initial_clipboard_on_launch",
+    "cli_ipc_enabled",
+    "max_entry_size_bytes",
+    "max_image_entry_size_bytes",
+    "secret_handling",
+    "block_sensitive_captures",
+    "otp_detection",
+    "history_retention_count",
+    "history_retention_days",
+    "max_total_bytes",
+    "clear_on_quit",
+    "permanent_delete_on_delete",
+    "auto_update_check",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -302,11 +302,14 @@ pub struct AppSettings {
     pub paste_delay_ms: u64,
     /// Source-app denylist. Mixes typed identifier rules (preferred
     /// for the bundled "Password managers" preset) with free-text
-    /// pattern rules (free-text substring match, retained for
-    /// backward compatibility and for cases the typed identifiers do
-    /// not cover). Deserialised through a custom path so a legacy
-    /// snapshot persisted as `Vec<String>` is read as
-    /// [`AppDenyRule::Pattern`] without losing the user's rules.
+    /// pattern rules (substring match against name / bundle id /
+    /// executable path, for cases the typed identifiers do not cover).
+    ///
+    /// Deserialised strictly: a rule this build cannot parse fails the
+    /// whole settings read. Skipping the unreadable rule and keeping the
+    /// rest — which this field used to do — silently narrows the
+    /// denylist, so the user goes on copying from an app they had
+    /// blocked with nothing to tell them the rule stopped applying.
     // `default` resolves to `password_manager_preset_rules` rather than
     // `Vec::default`. Field-level `#[serde(default)]` would call
     // `<Vec<AppDenyRule>>::default()` (empty), but the struct-level
@@ -315,10 +318,7 @@ pub struct AppSettings {
     // `Default::default()` ships with. Without this, a pre-1.0 settings
     // row that omitted the field would silently drop the password-
     // manager preset on read.
-    #[serde(
-        deserialize_with = "deserialize_app_denylist",
-        default = "password_manager_preset_rules"
-    )]
+    #[serde(default = "password_manager_preset_rules")]
     pub app_denylist: Vec<AppDenyRule>,
     pub regex_denylist: Vec<String>,
     /// AI feature configuration. Replaces the former flat `ai_enabled` /
@@ -740,6 +740,60 @@ impl AppSettings {
             "max_entry_size_bytes": self.max_entry_size_bytes,
         });
         ContentHash::sha256(payload.to_string().as_bytes()).value
+    }
+
+    /// Read a settings blob, failing closed on anything this build cannot
+    /// fully reconstruct. Used for both halves of the settings lifecycle: the
+    /// row read back out of `SQLite`, and a client's full-blob update over
+    /// IPC.
+    ///
+    /// Three gates, in order:
+    ///
+    /// 1. Every key in [`REQUIRED_PRIVACY_KEYS`] must be present. Struct-level
+    ///    `#[serde(default)]` would otherwise substitute a default for a
+    ///    missing privacy field, which is fail-open: capture would run under a
+    ///    policy the user never chose and nothing would say so.
+    /// 2. The blob must deserialise in full. A rule shape this build does not
+    ///    know — a hand-edited row, or a newer variant seen after a
+    ///    downgrade — fails the read instead of being dropped from the list.
+    /// 3. [`AppSettings::validate`] must pass, so an out-of-range value in a
+    ///    hand-edited row surfaces here rather than wedging a consumer.
+    ///
+    /// Callers are expected to propagate the error rather than fall back to
+    /// [`AppSettings::default`]: the daemon refuses to start and the desktop
+    /// leaves its startup gate closed, so capture stays off until the blob is
+    /// repaired.
+    pub fn from_complete_json(raw: &str) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
+            AppError::InvalidInput(format!("settings blob is not valid JSON: {err}"))
+        })?;
+        Self::from_complete_value(value)
+    }
+
+    /// [`AppSettings::from_complete_json`] for a blob that is already parsed
+    /// (the IPC `UpdateSettings` payload arrives as a `Value`).
+    pub fn from_complete_value(value: serde_json::Value) -> Result<Self> {
+        let Some(object) = value.as_object() else {
+            return Err(AppError::InvalidInput(
+                "settings blob must be a JSON object".to_owned(),
+            ));
+        };
+        let missing: Vec<&str> = REQUIRED_PRIVACY_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !object.contains_key(*key))
+            .collect();
+        if !missing.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "settings blob is missing privacy fields ({}); refusing to substitute defaults",
+                missing.join(", ")
+            )));
+        }
+        let settings: Self = serde_json::from_value(value).map_err(|err| {
+            AppError::InvalidInput(format!("settings blob could not be read: {err}"))
+        })?;
+        settings.validate()?;
+        Ok(settings)
     }
 
     /// Validate value-range invariants that the wire format alone cannot
@@ -1282,21 +1336,17 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_app_denylist_keeps_legacy_and_typed_rules() {
-        let json = r#"[
-            "1Password",
-            { "type": "pattern", "value": "Secrets" },
-            { "type": "source_app", "kind": "macos_bundle_id", "value": "com.example.app", "label": "Example", "source": "preset" }
-        ]"#;
-        let rules: Vec<AppDenyRule> =
-            deserialize_app_denylist(&mut serde_json::Deserializer::from_str(json))
-                .expect("mixed shapes deserialize");
+    fn typed_denylist_rules_round_trip() {
+        let json = r#"{
+            "app_denylist": [
+                { "type": "pattern", "value": "Secrets" },
+                { "type": "source_app", "kind": "macos_bundle_id", "value": "com.example.app", "label": "Example", "source": "preset" }
+            ]
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).expect("typed rules deserialize");
         assert_eq!(
-            rules,
+            settings.app_denylist,
             vec![
-                AppDenyRule::Pattern {
-                    value: "1Password".to_owned()
-                },
                 AppDenyRule::Pattern {
                     value: "Secrets".to_owned()
                 },
@@ -1311,53 +1361,84 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_app_denylist_skips_unreadable_rule() {
-        // A rule shape this build cannot parse (e.g. a future variant seen
-        // after a downgrade, or a hand-edited row) must be skipped rather
-        // than aborting the whole settings deserialize and dropping every
-        // surviving rule.
-        let json = r#"[
-            "1Password",
-            { "type": "future_variant", "value": "x" },
-            { "type": "pattern", "value": "Secrets" }
-        ]"#;
-        let rules: Vec<AppDenyRule> =
-            deserialize_app_denylist(&mut serde_json::Deserializer::from_str(json))
-                .expect("one bad rule must not fail the whole list");
-        assert_eq!(
-            rules,
-            vec![
-                AppDenyRule::Pattern {
-                    value: "1Password".to_owned()
-                },
-                AppDenyRule::Pattern {
-                    value: "Secrets".to_owned()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn app_settings_deserialize_survives_bad_denylist_rule() {
-        let settings = AppSettings {
-            app_denylist: vec![AppDenyRule::Pattern {
-                value: "keep-me".to_owned(),
-            }],
-            ..AppSettings::default()
-        };
-        let mut value = serde_json::to_value(&settings).expect("settings serialize");
-        // Splice an unreadable rule into the persisted blob alongside a good
-        // one and confirm the whole `AppSettings` still deserializes.
+    fn a_denylist_rule_this_build_cannot_read_fails_the_whole_settings_read() {
+        // Previously the unreadable rule was warned about and skipped, and the
+        // remaining rules loaded. That is fail-open: the user keeps copying
+        // from an app they had blocked, with nothing to tell them the rule
+        // stopped applying. The read must fail so capture never starts under a
+        // policy we cannot reconstruct.
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
         value["app_denylist"] = serde_json::json!([
             { "type": "future_variant", "value": "x" },
             { "type": "pattern", "value": "keep-me" }
         ]);
-        let restored: AppSettings = serde_json::from_value(value).expect("settings deserialize");
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+        let err = AppSettings::from_complete_json(&raw)
+            .expect_err("an unreadable rule must fail the read");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_legacy_free_text_denylist_shape_is_no_longer_accepted() {
+        // Rules used to be persisted as bare strings and were lifted into
+        // `Pattern` on read. That compatibility path is gone: the blob is read
+        // strictly, so an old shape is a repair prompt rather than a silent
+        // reinterpretation.
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
+        value["app_denylist"] = serde_json::json!(["1Password", "Bitwarden"]);
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+        assert!(AppSettings::from_complete_json(&raw).is_err());
+    }
+
+    #[test]
+    fn a_blob_missing_a_privacy_field_is_refused_rather_than_defaulted() {
+        // Each of these, if defaulted, silently widens what gets captured or
+        // what gets stored in the clear.
+        for key in REQUIRED_PRIVACY_KEYS {
+            let mut value =
+                serde_json::to_value(AppSettings::default()).expect("settings serialize");
+            value
+                .as_object_mut()
+                .expect("settings serialize to an object")
+                .remove(*key);
+            let raw = serde_json::to_string(&value).expect("blob serialize");
+            assert!(
+                AppSettings::from_complete_json(&raw).is_err(),
+                "a blob missing `{key}` must fail the read"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blob_missing_a_non_privacy_field_still_loads() {
+        // The completeness gate is deliberately narrow: a blob written before
+        // a cosmetic field existed must still load, or every added setting
+        // would be a breaking read.
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
+        value
+            .as_object_mut()
+            .expect("settings serialize to an object")
+            .remove("palette_row_count");
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+        let settings =
+            AppSettings::from_complete_json(&raw).expect("a missing cosmetic field must load");
+        assert_eq!(settings.palette_row_count, default_palette_row_count());
+    }
+
+    #[test]
+    fn a_complete_blob_round_trips_through_the_strict_read() {
+        let settings = AppSettings {
+            regex_denylist: vec!["secret".to_owned()],
+            block_sensitive_captures: true,
+            ..AppSettings::default()
+        };
+        let raw = serde_json::to_string(&settings).expect("settings serialize");
         assert_eq!(
-            restored.app_denylist,
-            vec![AppDenyRule::Pattern {
-                value: "keep-me".to_owned()
-            }]
+            AppSettings::from_complete_json(&raw).expect("a complete blob must load"),
+            settings
         );
     }
 

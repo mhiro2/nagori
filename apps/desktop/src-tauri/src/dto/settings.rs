@@ -9,7 +9,7 @@ use nagori_core::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ContentKindDto, default_capture_kind_dtos};
+use super::ContentKindDto;
 
 /// Warning surfaced when the data directory lives inside a cloud-sync
 /// folder (iCloud Drive, Dropbox, `OneDrive`, …), which would copy the
@@ -437,6 +437,22 @@ impl From<SecretHandlingDto> for SecretHandling {
     }
 }
 
+/// Wire shape of [`AppSettings`] for the desktop commands.
+///
+/// The fields backing a privacy decision (both size budgets, `capture_kinds`,
+/// `capture_enabled`, `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`,
+/// the two denylists, `secret_handling`, `block_sensitive_captures`,
+/// `otp_detection`, the retention budgets, `clear_on_quit`,
+/// `permanent_delete_on_delete`, `auto_update_check`) deliberately carry
+/// **no**
+/// `#[serde(default)]`:
+/// `update_settings` takes a full blob, not a patch, so a payload that omits
+/// one would persist that field's default and silently widen the policy —
+/// the same fail-open `AppSettings::from_complete_value` closes on the IPC
+/// side. The settings window always round-trips the snapshot it read from
+/// `get_settings`, so every field is present in practice; a payload that
+/// drops one is a bug and is rejected as such. Cosmetic fields keep their
+/// defaults so a client predating them still works.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsDto {
@@ -444,9 +460,7 @@ pub struct AppSettingsDto {
     pub history_retention_count: usize,
     pub history_retention_days: Option<u32>,
     pub max_entry_size_bytes: usize,
-    #[serde(default = "nagori_core::settings::default_max_image_entry_size_bytes")]
     pub max_image_entry_size_bytes: usize,
-    #[serde(default = "default_capture_kind_dtos")]
     pub capture_kinds: Vec<ContentKindDto>,
     pub max_total_bytes: Option<u64>,
     pub capture_enabled: bool,
@@ -465,7 +479,6 @@ pub struct AppSettingsDto {
     #[serde(default)]
     pub appearance: AppearanceDto,
     pub auto_launch: bool,
-    #[serde(default)]
     pub secret_handling: SecretHandlingDto,
     #[serde(default)]
     pub palette_hotkeys: BTreeMap<PaletteHotkeyAction, String>,
@@ -477,19 +490,13 @@ pub struct AppSettingsDto {
     pub show_preview_pane: bool,
     #[serde(default = "nagori_core::settings::default_show_in_menu_bar")]
     pub show_in_menu_bar: bool,
-    #[serde(default)]
     pub clear_on_quit: bool,
     #[serde(default = "nagori_core::settings::default_confirm_clear_history")]
     pub confirm_clear_history: bool,
-    #[serde(default)]
     pub permanent_delete_on_delete: bool,
-    #[serde(default)]
     pub block_sensitive_captures: bool,
-    #[serde(default = "nagori_core::settings::default_otp_detection")]
     pub otp_detection: bool,
-    #[serde(default = "nagori_core::settings::default_capture_initial_clipboard_on_launch")]
     pub capture_initial_clipboard_on_launch: bool,
-    #[serde(default = "nagori_core::settings::default_auto_update_check")]
     pub auto_update_check: bool,
     #[serde(default)]
     pub update_channel: UpdateChannelDto,

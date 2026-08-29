@@ -16,8 +16,12 @@ pub use image_signature::{
     ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,
 };
 pub use limits::{
-    MAX_COMBINED_COPY_ENTRIES, MAX_DECODED_IMAGE_PIXELS, MAX_ENTRY_SIZE_BYTES,
-    MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES, ReadBudget,
+    IPC_ENVELOPE_RESERVE_BYTES, IPC_ROW_OVERHEAD_BYTES, IPC_ROW_SCALAR_BYTES,
+    MAX_COMBINED_COPY_ENTRIES, MAX_DECODED_IMAGE_PIXELS, MAX_DTO_LANGUAGE_BYTES,
+    MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES,
+    MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES,
+    MAX_RESPONSE_TEXT_WIRE_BYTES, ReadBudget, entry_text_fits_wire, json_escaped_len,
+    truncate_on_char_boundary,
 };
 pub use model::*;
 pub use policy::{
@@ -33,8 +37,8 @@ pub use services::{
 pub use settings::{
     AiSettings, AppDenyRule, AppSettings, Appearance, Locale, MAX_PALETTE_ROW_COUNT,
     MAX_PASTE_DELAY_MS, MAX_RETENTION_COUNT, MAX_RETENTION_DAYS, OnboardingSettings,
-    PASSWORD_MANAGER_PRESET, PaletteHotkeyAction, PasteFormat, PresetEntry, RecentOrder,
-    RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
+    PASSWORD_MANAGER_PRESET, PaletteHotkeyAction, PasteFormat, PresetEntry, REQUIRED_PRIVACY_KEYS,
+    RecentOrder, RuleSource, SecondaryHotkeyAction, SecretHandling, SourceAppIdKind, UpdateChannel,
     password_manager_preset_rules, validate_hotkey,
 };
 pub use storage_location::{CloudSyncMatch, CloudSyncProvider, detect_cloud_sync};

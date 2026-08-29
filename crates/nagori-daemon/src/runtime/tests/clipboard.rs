@@ -10,6 +10,32 @@ use super::super::*;
 use super::{CountingPaste, runtime_with_memory_clipboard, runtime_with_paste};
 
 #[tokio::test]
+async fn add_text_refuses_text_that_would_not_fit_the_transport_once_escaped() {
+    // Inside `max_entry_size_bytes` in raw bytes, six times that on the wire.
+    // Storing it would leave a row the CLI and the desktop could never fetch.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let text = "\u{1}".repeat(200_000);
+    assert!(text.len() < nagori_core::AppSettings::default().max_entry_size_bytes);
+
+    let err = runtime
+        .add_text(text)
+        .await
+        .expect_err("untransportable text must be refused");
+
+    assert!(
+        matches!(err, nagori_core::AppError::Policy(_)),
+        "expected a policy refusal, got {err:?}",
+    );
+    assert!(
+        runtime
+            .list_recent(10)
+            .await
+            .expect("list recent")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn add_text_rejects_fully_redacted_secret_and_audits() {
     // A bare OTP body redacts to nothing but `[REDACTED]` under the default
     // `StoreRedacted`, so `add_text` must refuse it (nothing information-bearing
@@ -537,6 +563,45 @@ async fn copy_entries_combined_refuses_over_budget_without_touching_db_or_clipbo
         .copy_entries_combined(&[first, second])
         .await
         .expect_err("an over-budget join must be refused");
+
+    assert!(
+        matches!(err, nagori_core::AppError::InvalidInput(_)),
+        "expected InvalidInput error, got {err:?}",
+    );
+    assert_eq!(
+        clipboard.current_text(),
+        None,
+        "the clipboard must be untouched",
+    );
+    assert_eq!(
+        runtime.list_recent(100).await.expect("list recent").len(),
+        before,
+        "no combined row may be stored",
+    );
+}
+
+#[tokio::test]
+async fn copy_entries_combined_refuses_a_join_that_would_not_fit_the_transport() {
+    // Two escape-dense bodies, each admissible alone, whose join would exceed
+    // the frame once JSON-escaped. Charging raw bytes only would store a
+    // combined row no client could read back.
+    let (runtime, clipboard) = runtime_with_memory_clipboard();
+    // Distinct bodies: identical text would dedupe to a single row and the
+    // selection would collapse to one entry.
+    let first = runtime
+        .add_text(format!("a{}", "\u{1}".repeat(120_000)))
+        .await
+        .expect("add first");
+    let second = runtime
+        .add_text(format!("b{}", "\u{1}".repeat(120_000)))
+        .await
+        .expect("add second");
+    let before = runtime.list_recent(100).await.expect("list recent").len();
+
+    let err = runtime
+        .copy_entries_combined(&[first, second])
+        .await
+        .expect_err("a join over the transport ceiling must be refused");
 
     assert!(
         matches!(err, nagori_core::AppError::InvalidInput(_)),
