@@ -241,9 +241,6 @@ ClipboardReader.current_sequence_with_max()
   → primary-size guard (per content kind:
                         settings.max_image_entry_size_bytes for images,
                         settings.max_entry_size_bytes otherwise)
-  → transport guard    (text kinds only: the JSON-escaped body must fit
-                        MAX_ENTRY_TEXT_WIRE_BYTES, so anything storage
-                        accepts a client can still read back)
   → SensitivityClassifier.classify()       (built-in detectors +
                                             app_denylist + user regexes)
         ├─ Blocked → audit + drop
@@ -252,6 +249,10 @@ ClipboardReader.current_sequence_with_max()
         ├─ Block         → audit + drop
         ├─ StoreRedacted → rewrite body / hash / FTS / ngrams
         └─ StoreFull     → keep raw bytes
+  → transport guard    (text kinds only: the *stored* body's JSON-escaped
+                        length must fit MAX_ENTRY_TEXT_WIRE_BYTES, so anything
+                        storage accepts a client can read back; checked after
+                        redaction, which can shorten the body)
   → Secret? clear pending_representations   (alternatives still hold the
                                              raw secret — drop them and
                                              reset representation_set_hash
@@ -2724,7 +2725,8 @@ under 80 ms for 100k text entries on a developer machine.
   (`MAX_IPC_BYTES` less the envelope reserve and one row's overhead) on every
   path that creates a text entry — capture, `add_text`, combined copy, and the
   CLI's own client-side check — so "storage accepted it" implies "a client can
-  read it back". List responses charge each row the escaped length of every
+  read it back". The capture and `add_text` gates run *after* redaction, since
+  what has to fit the frame is the body that ends up stored. List responses charge each row the escaped length of every
   string it carries — text, preview, source-app name, representation MIMEs —
   plus `IPC_ROW_SCALAR_BYTES` for the fixed-width remainder, against
   `MAX_RESPONSE_TEXT_WIRE_BYTES`, so a page of escape-dense rows is truncated
@@ -2735,9 +2737,10 @@ under 80 ms for 100k text entries on a developer machine.
   so it shortens the response instead of breaking it. The
   OS-supplied strings the row carries are bounded on the DTO
   (`MAX_DTO_SOURCE_APP_NAME_BYTES`, `MAX_DTO_MIME_BYTES`,
-  `MAX_DTO_REPRESENTATION_SUMMARIES`, the preview at `PREVIEW_MAX_CHARS`), which
-  is what makes `IPC_ROW_OVERHEAD_BYTES` — the headroom the admission ceiling
-  reserves — a derived worst case rather than an assumption. Without both halves an entry could be stored and
+  `MAX_DTO_LANGUAGE_BYTES`, `MAX_DTO_REPRESENTATION_SUMMARIES`, the preview at
+  `PREVIEW_MAX_CHARS`), which is what makes `IPC_ROW_OVERHEAD_BYTES` — the
+  headroom the admission ceiling reserves — a derived worst case rather than an
+  assumption. Without both halves an entry could be stored and
   then be unfetchable by every surface — an orphan row the user can see in
   neither the palette nor the CLI.
 - **Fail-closed settings read** — `AppSettings::from_complete_json` is the

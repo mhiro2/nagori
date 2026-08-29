@@ -1162,9 +1162,6 @@ where
             self.note_capture_drop(CaptureEventCategory::OversizedDrop);
             return Ok(Admission::Dropped);
         }
-        if !self.text_survives_transport(&entry).await {
-            return Ok(Admission::Dropped);
-        }
         // Use the classifier cached at the last settings change rather than
         // recompiling the `regex_denylist` for every admitted clip. A cached
         // build failure (an uncompilable pattern) fails closed exactly as the
@@ -1215,6 +1212,15 @@ where
         {
             self.record_secret_drop(entry.id, reason, &classification.reasons)
                 .await;
+            return Ok(Admission::Dropped);
+        }
+
+        // Transport gate, after redaction rather than before it: what has to
+        // fit an IPC frame is the body that ends up *stored*, and
+        // `StoreRedacted` can turn an escape-dense secret into a short one.
+        // Checking the raw body would refuse clips whose durable form fits
+        // comfortably.
+        if !self.text_survives_transport(&entry).await {
             return Ok(Admission::Dropped);
         }
 

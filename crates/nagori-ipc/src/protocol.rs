@@ -1,9 +1,9 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiRequestOptions, AppSettings, ClipboardEntry,
-    ContentKind, EntryId, MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES,
-    MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS, PasteFormat, QuickActionId, RankReason,
-    RepresentationRole, RepresentationSummary, SearchResult, Sensitivity, safe_preview_for_dto,
-    truncate_on_char_boundary,
+    ContentKind, EntryId, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
+    MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS,
+    PasteFormat, QuickActionId, RankReason, RepresentationRole, RepresentationSummary,
+    SearchResult, Sensitivity, safe_preview_for_dto, truncate_on_char_boundary,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -532,7 +532,10 @@ impl From<SearchResult> for SearchResultDto {
                 .source_app_name
                 .as_deref()
                 .map(bounded_source_app_name),
-            language: value.language,
+            language: value
+                .language
+                .as_deref()
+                .map(|tag| truncate_on_char_boundary(tag, MAX_DTO_LANGUAGE_BYTES).to_owned()),
             image_width: value.image_width,
             image_height: value.image_height,
             representation_summary: Vec::new(),
@@ -885,6 +888,48 @@ mod tests {
         assert!(
             encoded.len() <= IPC_ROW_OVERHEAD_BYTES,
             "a row's non-text JSON must fit the reserved overhead (got {} bytes, reserve {})",
+            encoded.len(),
+            IPC_ROW_OVERHEAD_BYTES
+        );
+    }
+
+    /// The same overhead bound for the search row shape, which additionally
+    /// carries a language tag and rank reasons.
+    #[test]
+    fn one_search_rows_json_never_exceeds_the_reserved_overhead() {
+        use nagori_core::{
+            ContentKind, EntryId, IPC_ROW_OVERHEAD_BYTES, MAX_DTO_LANGUAGE_BYTES,
+            MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES,
+            PREVIEW_MAX_CHARS, SearchResult, Sensitivity,
+        };
+
+        let result = SearchResult {
+            entry_id: EntryId::new(),
+            content_kind: ContentKind::Code,
+            preview: "\u{1}".repeat(PREVIEW_MAX_CHARS * 4 + 64),
+            score: 1.0,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            pinned: true,
+            sensitivity: Sensitivity::Public,
+            rank_reason: Vec::new(),
+            source_app_name: Some("\u{1}".repeat(MAX_DTO_SOURCE_APP_NAME_BYTES + 64)),
+            language: Some("\u{1}".repeat(MAX_DTO_LANGUAGE_BYTES + 64)),
+            image_width: Some(u32::MAX),
+            image_height: Some(u32::MAX),
+        };
+        let summaries: Vec<_> = (0..MAX_DTO_REPRESENTATION_SUMMARIES + 4)
+            .map(|_| RepresentationSummary {
+                role: RepresentationRole::Alternative,
+                mime_type: "\u{1}".repeat(MAX_DTO_MIME_BYTES + 32),
+                byte_count: u64::MAX,
+            })
+            .collect();
+
+        let dto = SearchResultDto::from(result).with_representation_summaries(&summaries);
+        let encoded = serde_json::to_vec(&dto).expect("row serialises");
+        assert!(
+            encoded.len() <= IPC_ROW_OVERHEAD_BYTES,
+            "a search row must fit the reserved overhead (got {} bytes, reserve {})",
             encoded.len(),
             IPC_ROW_OVERHEAD_BYTES
         );

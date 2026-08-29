@@ -147,6 +147,13 @@ pub const MAX_DTO_SOURCE_APP_NAME_BYTES: usize = 128;
 /// clipboard type declared by another process.
 pub const MAX_DTO_MIME_BYTES: usize = 64;
 
+/// Longest code-language tag a search-result DTO carries.
+///
+/// Canonical ids (`json`, `rust`, …) are a handful of bytes, but the column is
+/// written per row and a hand-edited one is not bound by that, so the DTO
+/// truncates it like the other OS/row-supplied strings.
+pub const MAX_DTO_LANGUAGE_BYTES: usize = 32;
+
 /// Most representation summaries one entry DTO carries.
 ///
 /// Real captures hold a handful (primary plus HTML / RTF / plain / file-list
@@ -173,6 +180,7 @@ pub const IPC_ROW_SCALAR_BYTES: usize = 512;
 pub const IPC_ROW_OVERHEAD_BYTES: usize = IPC_ROW_SCALAR_BYTES
     + crate::PREVIEW_MAX_CHARS * 4 * 6
     + MAX_DTO_SOURCE_APP_NAME_BYTES * 6
+    + MAX_DTO_LANGUAGE_BYTES * 6
     + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + 64);
 
 /// Longest prefix of `text` that is at most `max_bytes` long and ends on a

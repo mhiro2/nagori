@@ -1,9 +1,9 @@
 use nagori_core::{
     AiProviderKind, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository,
-    IPC_ROW_SCALAR_BYTES, MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES,
-    MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, PREVIEW_MAX_CHARS,
-    RepresentationSummary, Result, SearchQuery, is_text_safe_for_default_output, json_escaped_len,
-    truncate_on_char_boundary,
+    IPC_ROW_SCALAR_BYTES, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
+    MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES,
+    PREVIEW_MAX_CHARS, RepresentationSummary, Result, SearchQuery, is_text_safe_for_default_output,
+    json_escaped_len, truncate_on_char_boundary,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -479,7 +479,9 @@ fn wire_len_of_strings(
             MAX_DTO_SOURCE_APP_NAME_BYTES,
         ))
     });
-    let language_len = language.map_or(0, json_escaped_len);
+    let language_len = language.map_or(0, |tag| {
+        json_escaped_len(truncate_on_char_boundary(tag, MAX_DTO_LANGUAGE_BYTES))
+    });
     let summaries_len: usize = reps
         .iter()
         .take(MAX_DTO_REPRESENTATION_SUMMARIES)

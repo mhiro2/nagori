@@ -30,16 +30,6 @@ impl NagoriRuntime {
                 settings.max_entry_size_bytes
             )));
         }
-        // Second ceiling, on the JSON-escaped form: the entry is handed back to
-        // clients inside an `EntryDto`, and escaping a control-character body
-        // can multiply its length sixfold. Storing text that no client could
-        // then read back would leave an unreachable row behind.
-        if !entry_text_fits_wire(&text) {
-            return Err(AppError::Policy(format!(
-                "entry exceeds the {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once                  JSON-escaped ({} bytes)",
-                json_escaped_len(&text)
-            )));
-        }
         let mut entry = EntryFactory::from_text(text);
         let secret_handling = settings.secret_handling;
         let block_sensitive_captures = settings.block_sensitive_captures;
@@ -108,6 +98,20 @@ impl NagoriRuntime {
                     ));
                 }
             }
+        }
+        // Second ceiling, on the JSON-escaped form: the entry is handed back
+        // to clients inside an `EntryDto`, and escaping a control-character
+        // body can multiply its length sixfold, so storing it would leave a
+        // row no client could read back. Checked here rather than on the raw
+        // input because what has to fit the frame is the body that ends up
+        // stored — `StoreRedacted` may have shortened it.
+        let stored_text = entry.plain_text().unwrap_or_default();
+        if !entry_text_fits_wire(stored_text) {
+            return Err(AppError::Policy(format!(
+                "entry exceeds the {MAX_ENTRY_TEXT_WIRE_BYTES}-byte transport limit once \
+                 JSON-escaped ({} bytes)",
+                json_escaped_len(stored_text)
+            )));
         }
         // Invalidate before *and* after: the pre-call closes the window
         // where a concurrent `search` could still serve a pre-insert hit
