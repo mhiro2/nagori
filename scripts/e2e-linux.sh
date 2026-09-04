@@ -105,18 +105,41 @@ wait_for() {
   return 1
 }
 
-step "start daemon"
-"${BIN}" \
-  --ipc "${SOCKET}" \
-  --db "${DB}" \
-  daemon run \
-  --capture-interval-ms 200 \
-  --maintenance-interval-min 60 \
-  > "${DAEMON_LOG}" 2>&1 &
-DAEMON_PID=$!
+# Start the daemon in the background. Extra arguments are `env`-style
+# `KEY=VALUE` assignments applied to the daemon process only, so a later
+# restart can flip an opt-in (e.g. Linux auto-paste) without leaking the
+# variable into the CLI invocations or the developer's shell.
+start_daemon() {
+  env "$@" "${BIN}" \
+    --ipc "${SOCKET}" \
+    --db "${DB}" \
+    daemon run \
+    --capture-interval-ms 200 \
+    --maintenance-interval-min 60 \
+    >> "${DAEMON_LOG}" 2>&1 &
+  DAEMON_PID=$!
 
-wait_for "ipc socket" test -S "${SOCKET}"
-wait_for "daemon health" run_cli daemon status >/dev/null
+  wait_for "ipc socket" test -S "${SOCKET}"
+  wait_for "daemon health" run_cli daemon status >/dev/null
+}
+
+# Ask the daemon to exit via IPC and wait for the process to go away on its
+# own; never force-kill, so a hang in the shutdown path fails the test.
+stop_daemon() {
+  run_cli daemon stop >/dev/null
+  for _ in $(seq 1 50); do
+    kill -0 "${DAEMON_PID}" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${DAEMON_PID}" 2>/dev/null; then
+    echo "daemon did not exit after 'nagori daemon stop'" >&2
+    return 1
+  fi
+  DAEMON_PID=""
+}
+
+step "start daemon"
+start_daemon
 
 step "capture: wl-copy -> daemon -> nagori list"
 MARKER="nagori e2e marker $(date -u +%Y%m%dT%H%M%SZ) ${RANDOM}${RANDOM}"
@@ -176,14 +199,62 @@ if [[ "${PASTED}" != "${MARKER}" ]]; then
   exit 1
 fi
 
-step "paste: nagori paste -> selection rewritten + wtype exits cleanly"
-# `nagori paste` writes the entry to the OS clipboard then synthesises Ctrl+V
-# via the platform PasteController. On Linux that is `LinuxPasteController`,
-# which shells out to `wtype` (-> `zwp_virtual_keyboard_v1`). sway --headless
-# exposes the protocol, so the keystroke succeeds even though there is no
-# text target. We verify the observable half: the selection is rewritten to
-# the marker and the CLI exits 0 (meaning the wtype invocation returned Ok).
+step "paste: refused by default on Linux Wayland"
+# Linux auto-paste is opt-in (`NAGORI_LINUX_AUTO_PASTE=1`): Wayland cannot
+# confirm which surface receives the synthesised Ctrl+V after the palette
+# hides, so the default daemon must refuse before spawning `wtype`. The
+# capability report and the paste error share one reason string; check both
+# surfaces so they cannot drift apart. The copy half still has to land —
+# the runtime deliberately keeps the clipboard write even when synthesis
+# is refused, so the user can paste manually.
+AUTO_PASTE_STATUS="$(run_cli capabilities --json | jq -r '.auto_paste.status')"
+if [[ "${AUTO_PASTE_STATUS}" != "unsupported" ]]; then
+  echo "expected auto_paste.status=unsupported without the opt-in, got ${AUTO_PASTE_STATUS}" >&2
+  exit 1
+fi
+printf %s "sentinel-before-refused-paste" | wl-copy
+if run_cli paste "${ENTRY_ID}" >/dev/null 2> "${CLI_ERR}"; then
+  echo "'nagori paste' succeeded without NAGORI_LINUX_AUTO_PASTE=1" >&2
+  exit 1
+fi
+if ! grep -q "NAGORI_LINUX_AUTO_PASTE=1" "${CLI_ERR}"; then
+  echo "'nagori paste' refusal did not mention the opt-in; stderr was:" >&2
+  cat "${CLI_ERR}" >&2
+  exit 1
+fi
+PASTED=""
+deadline=$(( $(date +%s) + 5 ))
+while (( $(date +%s) < deadline )); do
+  PASTED="$(wl-paste --no-newline 2>/dev/null || true)"
+  [[ "${PASTED}" == "${MARKER}" ]] && break
+  sleep 0.1
+done
+if [[ "${PASTED}" != "${MARKER}" ]]; then
+  echo "refused 'nagori paste' did not keep the copy half (selection should hold the marker)" >&2
+  echo "  expected: ${MARKER}" >&2
+  echo "  actual:   ${PASTED}" >&2
+  exit 1
+fi
+: > "${CLI_ERR}"
+
+step "paste: opted-in daemon -> selection rewritten + wtype exits cleanly"
+# Restart the daemon with the opt-in so the platform PasteController is
+# `LinuxPasteController` in `Unverified` mode, which shells out to `wtype`
+# (-> `zwp_virtual_keyboard_v1`). sway --headless exposes the protocol, so
+# the keystroke succeeds even though there is no text target. We verify
+# the observable half: the capability row now only gates on the external
+# tool, the selection is rewritten to the marker, and the CLI exits 0
+# (meaning the wtype invocation returned Ok).
 if command -v wtype >/dev/null 2>&1; then
+  stop_daemon
+  start_daemon NAGORI_LINUX_AUTO_PASTE=1
+
+  AUTO_PASTE_STATUS="$(run_cli capabilities --json | jq -r '.auto_paste.status')"
+  if [[ "${AUTO_PASTE_STATUS}" != "requires_external_tool" ]]; then
+    echo "expected auto_paste.status=requires_external_tool with the opt-in, got ${AUTO_PASTE_STATUS}" >&2
+    exit 1
+  fi
+
   printf %s "sentinel-before-paste" | wl-copy
   run_cli paste "${ENTRY_ID}" >/dev/null
 
@@ -201,7 +272,7 @@ if command -v wtype >/dev/null 2>&1; then
     exit 1
   fi
 else
-  echo "wtype not on PATH; skipping auto-paste round-trip"
+  echo "wtype not on PATH; skipping opted-in auto-paste round-trip"
 fi
 
 step "pin / unpin round-trip"
@@ -423,16 +494,6 @@ if [[ "${PASTED_PNG_SHA}" != "${EXPECTED_PNG_SHA}" ]]; then
 fi
 
 step "graceful shutdown via daemon stop"
-run_cli daemon stop >/dev/null
-# Wait for the background process to exit on its own; do not force-kill.
-for _ in $(seq 1 50); do
-  kill -0 "${DAEMON_PID}" 2>/dev/null || break
-  sleep 0.1
-done
-if kill -0 "${DAEMON_PID}" 2>/dev/null; then
-  echo "daemon did not exit after 'nagori daemon stop'" >&2
-  exit 1
-fi
-DAEMON_PID=""
+stop_daemon
 
 echo "e2e ok"
