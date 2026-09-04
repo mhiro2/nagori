@@ -105,10 +105,11 @@ wait_for() {
   return 1
 }
 
-# Start the daemon in the background. Extra arguments are `env`-style
-# `KEY=VALUE` assignments applied to the daemon process only, so a later
-# restart can flip an opt-in (e.g. Linux auto-paste) without leaking the
-# variable into the CLI invocations or the developer's shell.
+# Start the daemon in the background. Extra arguments are passed to `env`
+# (`KEY=VALUE` assignments or `-u KEY`) and apply to the daemon process
+# only, so a later restart can flip an opt-in (e.g. Linux auto-paste)
+# without leaking the variable into the CLI invocations or the developer's
+# shell.
 start_daemon() {
   env "$@" "${BIN}" \
     --ipc "${SOCKET}" \
@@ -124,10 +125,13 @@ start_daemon() {
 }
 
 # Ask the daemon to exit via IPC and wait for the process to go away on its
-# own; never force-kill, so a hang in the shutdown path fails the test.
+# own; never force-kill, so a hang in the shutdown path fails the test. The
+# deadline has to cover the daemon's full drain budget (IPC shutdown grace
+# of 5s plus supervisor / worker join slack of a few seconds), otherwise a
+# slow-but-legitimate shutdown would be reported as a hang.
 stop_daemon() {
   run_cli daemon stop >/dev/null
-  for _ in $(seq 1 50); do
+  for _ in $(seq 1 200); do
     kill -0 "${DAEMON_PID}" 2>/dev/null || break
     sleep 0.1
   done
@@ -135,11 +139,21 @@ stop_daemon() {
     echo "daemon did not exit after 'nagori daemon stop'" >&2
     return 1
   fi
+  # Reap the process and surface a non-zero exit from the shutdown path,
+  # which `kill -0` alone would hide.
+  local status=0
+  wait "${DAEMON_PID}" || status=$?
   DAEMON_PID=""
+  if (( status != 0 )); then
+    echo "daemon exited with status ${status} after 'nagori daemon stop'" >&2
+    return 1
+  fi
 }
 
 step "start daemon"
-start_daemon
+# Explicitly drop any auto-paste opt-in inherited from the developer's shell
+# so the "refused by default" step below really exercises the default.
+start_daemon -u NAGORI_LINUX_AUTO_PASTE
 
 step "capture: wl-copy -> daemon -> nagori list"
 MARKER="nagori e2e marker $(date -u +%Y%m%dT%H%M%SZ) ${RANDOM}${RANDOM}"
