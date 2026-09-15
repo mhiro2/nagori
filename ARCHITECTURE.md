@@ -626,7 +626,12 @@ decoder, and a global decode-pool semaphore admits the request only if a slot
 is free — both are acquired *before* `tokio::spawn`, so a burst of misses
 against *distinct* entries (an image-heavy scroll, a prefetch sweep) is bounded
 to the pool size instead of piling up detached tasks each parked on the
-semaphore and each ready to allocate a large decode buffer. A rejected request
+semaphore and each ready to allocate a large decode buffer. That pool is sized
+at half the host's cores, capped at four: decoding is CPU-bound and shares the
+blocking pool with the per-keystroke search fan-out and the capture tick, so
+leaving half the cores to that latency-critical work keeps an image-heavy
+scroll from lengthening the next keystroke, while the cap holds peak RSS down
+however many cores the host has. A rejected request
 is retried on the next fetch (the `503` path below) once a slot frees. The same
 `is_text_safe_for_default_output` sensitivity check that gates the
 original-payload scheme handler is re-asserted inside the generator
@@ -1285,18 +1290,28 @@ the pair one serialised operation:
   owning the guard on the step's task keeps "the lease is held" and "my side
   effect is in flight" the same statement, so the next request cannot publish
   underneath a late clipboard write or a keystroke that has not landed yet.
-- Blocking clipboard *reads* are bounded (`CLIPBOARD_OP_TIMEOUT`, 3 s) and
-  single-flight per adapter (`nagori_platform::ClipboardReadGate`). A
-  `spawn_blocking` closure cannot be aborted, so a snapshot read whose OS call
-  never returns keeps its blocking thread and the adapter mutex; the capture
-  loop would otherwise retry the same sequence every tick and leak one more
-  thread each time until the tokio blocking pool — shared with every write,
-  paste, DB job and the shutdown path — ran dry. While a previous read closure
-  is still in flight the gate refuses the next one with `BlockingError::Busy`
-  before spawning, the capture loop counts it as a failed tick and backs off,
-  and the gate clears when the wedged call finally unwinds. The cheap
-  sequence-only poll bypasses the gate (it takes no mutex) so change detection
-  keeps running through a hung body read.
+- Every blocking OS call the capture loop reaches *on a tick* is both bounded
+  by a timeout and single-flight (`nagori_platform::SingleFlightGate`). A
+  `spawn_blocking` closure cannot be aborted, so a call whose OS side never
+  returns keeps its blocking thread (and any lock it holds); the loop would
+  otherwise re-drive it every tick and leak one more thread each time until the
+  tokio blocking pool — shared with every write, paste, DB job and the shutdown
+  path — ran dry. While a previous closure is still in flight the gate refuses
+  the next one with `BlockingError::Busy` before spawning, and clears when the
+  wedged call finally unwinds. Three call sites carry a gate: the clipboard
+  snapshot read (`CLIPBOARD_OP_TIMEOUT`, 3 s — a refusal counts as a failed
+  tick and the loop backs off) and, on macOS, the frontmost-app probe and the
+  secure-focus AX walk (`WINDOW_OP_TIMEOUT`, 3 s). The two window probes matter
+  because the fail-closed recovery state sets `force_content_check`, which
+  bypasses the sequence dedup that would otherwise skip them, so they genuinely
+  run once per tick while AX is blind; a `Busy` refusal stays an `Err` there,
+  which is the same "AX is blind" signal a timeout gives and keeps the
+  fail-closed threshold advancing. They hold separate gates because the capture
+  loop joins them concurrently. Gates are for polled paths only: focus restore
+  before a synthesised paste runs once per user action, so refusing it would
+  only abort a paste the user asked for. The cheap sequence-only poll also
+  bypasses its gate (it takes no mutex) so change detection keeps running
+  through a hung body read.
 - Immediately before the keystroke the lease re-reads the OS clipboard sequence
   and confirms it is still this process's own write
   (`ClipboardReader::current_sequence` + `matches_self_write`). That catches the
