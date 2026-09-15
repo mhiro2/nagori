@@ -53,17 +53,56 @@ pub const MAX_THUMBNAIL_DIMENSION: u32 = 512;
 /// can't dominate the LRU budget.
 pub const MAX_THUMBNAIL_BYTES: usize = 256 * 1024;
 
-/// Default ceiling for simultaneously running thumbnail decodes.
+/// Hard ceiling for simultaneously running thumbnail decodes, whatever the
+/// host's core count.
 ///
 /// Each decode can materialise an RGBA buffer up to
 /// `MAX_DECODED_IMAGE_PIXELS` (64M px → ~256 MiB) before the resize +
 /// re-encode step trims it. Capping the global concurrency keeps a
 /// burst of distinct-entry misses (e.g. scrolling an image-heavy
 /// history) from starving the blocking pool or pushing peak RSS into
-/// the gigabyte range. The value is intentionally conservative; raising
-/// it past the host CPU count yields little throughput because the
-/// per-decode work is CPU-bound.
-pub(crate) const DEFAULT_THUMBNAIL_CONCURRENCY: usize = 4;
+/// the gigabyte range. This bound is about *memory*, so it stays fixed:
+/// a 32-core host has no more headroom for four 256 MiB buffers than a
+/// 4-core one.
+pub(crate) const MAX_THUMBNAIL_CONCURRENCY: usize = 4;
+
+/// Fraction of the host's cores thumbnail decoding may occupy, as a divisor.
+///
+/// Decoding is CPU-bound and runs on the same blocking pool as the search
+/// fan-out (up to three concurrent `SQLite` branches per keystroke) and the
+/// capture tick's clipboard read. The blocking pool hands out threads freely,
+/// so an unscaled cap does not *queue* behind those — it competes with them
+/// for physical cores, and the cost lands on the one path the user feels
+/// directly. Leaving half the cores to the latency-critical work keeps an
+/// image-heavy scroll from lengthening the next keystroke.
+const THUMBNAIL_CORE_DIVISOR: usize = 2;
+
+/// Default ceiling for simultaneously running thumbnail decodes on this host.
+///
+/// Scales with the core count rather than sitting at a fixed 4: on a 2-core
+/// machine four concurrent CPU-bound decoders oversubscribe the box and every
+/// palette keystroke pays for it, while on a 16-core machine there is no point
+/// going past the memory ceiling. See [`MAX_THUMBNAIL_CONCURRENCY`] and
+/// [`THUMBNAIL_CORE_DIVISOR`] for the two bounds this sits between.
+pub(crate) fn default_thumbnail_concurrency() -> usize {
+    // An unavailable core count is the conservative case, not a reason to
+    // guess high: fall back to a single decoder.
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    thumbnail_concurrency_for_cores(cores)
+}
+
+/// Pure core-count → decoder-count mapping, split out so the clamp is
+/// testable without depending on the test host's parallelism.
+const fn thumbnail_concurrency_for_cores(cores: usize) -> usize {
+    let scaled = cores / THUMBNAIL_CORE_DIVISOR;
+    if scaled < 1 {
+        1
+    } else if scaled > MAX_THUMBNAIL_CONCURRENCY {
+        MAX_THUMBNAIL_CONCURRENCY
+    } else {
+        scaled
+    }
+}
 
 /// Concurrency control for in-flight thumbnail generation.
 ///
@@ -88,7 +127,7 @@ pub(crate) struct ThumbnailGate {
 
 impl Default for ThumbnailGate {
     fn default() -> Self {
-        Self::with_capacity(DEFAULT_THUMBNAIL_CONCURRENCY)
+        Self::with_capacity(default_thumbnail_concurrency())
     }
 }
 
@@ -387,6 +426,45 @@ fn fit_within(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decode cap sits between two bounds that fail differently: a
+    /// single-core host must still get one decoder (zero would deadlock every
+    /// admission), and a many-core host must not go past the memory ceiling
+    /// however many cores it has. In between, decoding takes half the cores so
+    /// the search fan-out and the capture tick keep the other half.
+    #[test]
+    fn thumbnail_concurrency_stays_between_one_and_the_memory_ceiling() {
+        // Below the divisor the floor applies — a 1-core host would otherwise
+        // compute 0 permits and refuse every decode forever.
+        assert_eq!(thumbnail_concurrency_for_cores(1), 1);
+        assert_eq!(thumbnail_concurrency_for_cores(2), 1);
+        // Mid-range hosts scale with the core count.
+        assert_eq!(thumbnail_concurrency_for_cores(4), 2);
+        assert_eq!(thumbnail_concurrency_for_cores(6), 3);
+        // At and past the ceiling the memory bound takes over: more cores buy
+        // no more concurrent 256 MiB decode buffers.
+        assert_eq!(
+            thumbnail_concurrency_for_cores(8),
+            MAX_THUMBNAIL_CONCURRENCY,
+        );
+        assert_eq!(
+            thumbnail_concurrency_for_cores(64),
+            MAX_THUMBNAIL_CONCURRENCY,
+        );
+    }
+
+    /// Whatever this test host reports, the default gate must be admissible —
+    /// a zero-permit semaphore would refuse every thumbnail for the life of
+    /// the process.
+    #[test]
+    fn default_thumbnail_concurrency_admits_at_least_one_decode() {
+        let permits = default_thumbnail_concurrency();
+        assert!(
+            (1..=MAX_THUMBNAIL_CONCURRENCY).contains(&permits),
+            "default concurrency {permits} must sit within 1..={MAX_THUMBNAIL_CONCURRENCY}",
+        );
+        assert!(ThumbnailGate::default().try_acquire_permit().is_some());
+    }
 
     /// The global decode cap bounds admission: once the pool is full, the
     /// next `try_acquire_permit` is *refused* (returns `None`) rather than

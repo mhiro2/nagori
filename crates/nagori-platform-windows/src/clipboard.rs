@@ -12,10 +12,11 @@ use nagori_core::{
     StoredClipboardRepresentation,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReadGate, ClipboardReader, ClipboardWriter, PreparedClipboardWrite,
-    SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracker, SelfWriteTracking, clipboard_blocking,
-    clipboard_write_blocking, decode_rgba_with_pixel_cap, has_publishable_representation,
-    lock_clipboard_for_write, lock_clipboard_recovering, platform_err,
+    CLIPBOARD_OP_TIMEOUT, CapturedSnapshot, ClipboardReader, ClipboardWriter,
+    PreparedClipboardWrite, SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracker, SelfWriteTracking,
+    SingleFlightGate, clipboard_blocking, clipboard_write_blocking, decode_rgba_with_pixel_cap,
+    has_publishable_representation, lock_clipboard_for_write, lock_clipboard_recovering,
+    platform_err,
 };
 use time::OffsetDateTime;
 
@@ -60,8 +61,8 @@ pub struct WindowsClipboard {
     self_write: SelfWriteTracker,
     /// Single-flight admission for mutex-taking snapshot reads, so a foreground
     /// app that never calls `CloseClipboard` leaks one blocking thread rather
-    /// than one per capture tick (see `nagori_platform::ClipboardReadGate`).
-    read_gate: ClipboardReadGate,
+    /// than one per capture tick (see `nagori_platform::SingleFlightGate`).
+    read_gate: SingleFlightGate,
 }
 
 impl WindowsClipboard {
@@ -71,7 +72,7 @@ impl WindowsClipboard {
                 Clipboard::new().map_err(|err| platform_err(&err))?,
             )),
             self_write: SelfWriteTracker::default(),
-            read_gate: ClipboardReadGate::new(),
+            read_gate: SingleFlightGate::new(),
         })
     }
 }
@@ -101,7 +102,7 @@ impl ClipboardReader for WindowsClipboard {
         let clipboard = self.clipboard.clone();
         let (captured, image) = self
             .read_gate
-            .run("current_snapshot", move || {
+            .run("current_snapshot", CLIPBOARD_OP_TIMEOUT, move || {
                 capture_snapshot(&clipboard, None)
             })
             .await
@@ -142,9 +143,11 @@ impl ClipboardReader for WindowsClipboard {
         let clipboard = self.clipboard.clone();
         let (captured, image) = self
             .read_gate
-            .run("current_snapshot_with_max", move || {
-                capture_snapshot(&clipboard, Some(budget))
-            })
+            .run(
+                "current_snapshot_with_max",
+                CLIPBOARD_OP_TIMEOUT,
+                move || capture_snapshot(&clipboard, Some(budget)),
+            )
             .await
             .map_err(|err| AppError::Platform(err.to_string()))??;
         // Encode any captured image to PNG off the read timeout, then apply

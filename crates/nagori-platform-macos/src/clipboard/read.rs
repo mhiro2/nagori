@@ -8,8 +8,8 @@ use nagori_core::{
     ReadBudget, Result,
 };
 use nagori_platform::{
-    CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES, SelfWriteTracking,
-    clipboard_blocking, lock_clipboard_recovering, platform_err,
+    CLIPBOARD_OP_TIMEOUT, CapturedSnapshot, ClipboardReader, SNAPSHOT_CAPTURE_MAX_RETRIES,
+    SelfWriteTracking, clipboard_blocking, lock_clipboard_recovering, platform_err,
 };
 use time::OffsetDateTime;
 
@@ -51,7 +51,7 @@ impl ClipboardReader for MacosClipboard {
         let clipboard = self.clipboard.clone();
         let captured = self
             .read_gate
-            .run("current_snapshot", move || {
+            .run("current_snapshot", CLIPBOARD_OP_TIMEOUT, move || {
                 capture_snapshot_attempts(&clipboard)
             })
             .await
@@ -93,9 +93,11 @@ impl ClipboardReader for MacosClipboard {
         let clipboard = self.clipboard.clone();
         let captured = self
             .read_gate
-            .run("current_snapshot_with_max", move || {
-                capture_snapshot_with_max(&clipboard, budget)
-            })
+            .run(
+                "current_snapshot_with_max",
+                CLIPBOARD_OP_TIMEOUT,
+                move || capture_snapshot_with_max(&clipboard, budget),
+            )
             .await
             .map_err(|err| AppError::Platform(err.to_string()))??;
         // Normalise any captured TIFF to PNG off the read timeout, then
