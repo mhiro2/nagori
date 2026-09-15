@@ -34,16 +34,24 @@
 //!   Windows, the timeout-free `run_clipboard_write` on Linux), and reserve
 //!   the timeout for *reads*, whose late result is simply discarded.
 //!
-//! **Leaked reads are single-flight.** A timed-out read closure keeps its
-//! blocking thread (and the adapter's clipboard mutex) until the OS call
-//! returns. The capture loop retries the same clipboard sequence on its next
-//! tick, so a *permanently* wedged OS call would otherwise spawn one more
-//! leaked thread per tick and eventually exhaust the tokio blocking pool —
-//! stalling every later clipboard write, paste, DB job and the shutdown path
-//! behind it. [`ClipboardReadGate`] caps that at one: while a previous read
-//! closure is still running, a new read is refused with
-//! [`BlockingError::Busy`] instead of being spawned, and the caller degrades
-//! (the capture loop counts it as a failed tick and backs off).
+//! **Leaked calls on a polled path must be single-flight.** A timed-out
+//! closure keeps its blocking thread (and any lock it holds) until the OS call
+//! returns. The capture loop re-runs the same probes on its next tick, so a
+//! *permanently* wedged OS call would otherwise spawn one more leaked thread
+//! per tick and eventually exhaust the tokio blocking pool — stalling every
+//! later clipboard write, paste, DB job and the shutdown path behind it.
+//! [`SingleFlightGate`] caps that at one per gate: while a previous closure is
+//! still running, a new call is refused with [`BlockingError::Busy`] instead of
+//! being spawned, and the caller degrades (the capture loop counts it as a
+//! failed tick and backs off).
+//!
+//! Every timeout-bounded call the capture loop reaches on a *tick* needs a
+//! gate, not just the clipboard read: the macOS window adapter's frontmost-app
+//! and secure-focus AX probes run once per tick whenever the loop is in its
+//! fail-closed recovery state (which sets `force_content_check`, bypassing the
+//! sequence dedup that would otherwise skip them). One-shot, user-initiated
+//! calls — focus restore before a synthesised paste — do not, because nothing
+//! re-drives them at a polling cadence.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,24 +94,29 @@ where
     run_blocking_with_timeout(op, CLIPBOARD_OP_TIMEOUT, f).await
 }
 
-/// Single-flight admission for one adapter's blocking clipboard *reads*.
+/// Single-flight admission for one timeout-bounded blocking OS call.
 ///
-/// One gate per clipboard adapter, shared by every snapshot read that takes
-/// the adapter's mutex. [`Self::run`] behaves like [`clipboard_blocking`] while
-/// the gate is idle; if an earlier read closure is still on the blocking pool
-/// — it timed out and its OS call has not returned — the new read is refused
-/// with [`BlockingError::Busy`] *before* anything is spawned. That bounds the
-/// leaked-thread accumulation described in the module docs at one per
-/// adapter: a wedged host costs one blocking worker, not one per capture
-/// tick.
+/// One gate per logical call site — a clipboard adapter's snapshot read, the
+/// macOS frontmost-app probe, the macOS secure-focus AX walk. [`Self::run`]
+/// behaves like [`run_blocking_with_timeout`] while the gate is idle; if an
+/// earlier closure is still on the blocking pool — it timed out and its OS
+/// call has not returned — the new call is refused with
+/// [`BlockingError::Busy`] *before* anything is spawned. That bounds the
+/// leaked-thread accumulation described in the module docs at one per gate: a
+/// wedged host costs one blocking worker, not one per capture tick.
+///
+/// Gates are per call site rather than per adapter so two probes the capture
+/// loop drives *concurrently* (the macOS window adapter joins frontmost-app
+/// and secure-focus on every tick) cannot refuse each other.
 ///
 /// The in-flight flag is released by a drop guard inside the closure, so it
 /// clears whether the closure returns normally, late, or by panicking. The
 /// cheap sequence-only poll (`current_sequence`) is deliberately *not* routed
-/// through the gate: it does not take the mutex, and keeping it flowing is
-/// what lets steady-state change detection continue through a hung body read.
+/// through a gate: it does not take the adapter mutex, and keeping it flowing
+/// is what lets steady-state change detection continue through a hung body
+/// read.
 #[derive(Debug, Clone, Default)]
-pub struct ClipboardReadGate {
+pub struct SingleFlightGate {
     in_flight: Arc<AtomicBool>,
 }
 
@@ -116,32 +129,28 @@ impl Drop for InFlightGuard {
     }
 }
 
-impl ClipboardReadGate {
+impl SingleFlightGate {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Whether a previous read closure is still running on the blocking pool.
+    /// Whether a previous closure is still running on the blocking pool.
     #[must_use]
     pub fn is_busy(&self) -> bool {
         self.in_flight.load(Ordering::Acquire)
     }
 
-    /// Run a blocking clipboard read bounded by [`CLIPBOARD_OP_TIMEOUT`],
-    /// refusing with [`BlockingError::Busy`] while an earlier read is still in
+    /// Run a blocking OS call bounded by `limit`, refusing with
+    /// [`BlockingError::Busy`] while an earlier call on this gate is still in
     /// flight.
-    pub async fn run<F, T>(&self, op: &'static str, f: F) -> Result<T, BlockingError>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.run_with_limit(op, CLIPBOARD_OP_TIMEOUT, f).await
-    }
-
-    /// [`Self::run`] with an injectable deadline so tests do not have to sit
-    /// out the production window.
-    async fn run_with_limit<F, T>(
+    ///
+    /// The deadline is the caller's because the gate spans call sites with
+    /// different healthy latencies — a clipboard read
+    /// ([`CLIPBOARD_OP_TIMEOUT`]) and a window / AX probe are not the same
+    /// budget — and because tests need to inject one short enough not to sit
+    /// out a production window.
+    pub async fn run<F, T>(
         &self,
         op: &'static str,
         limit: Duration,
@@ -156,7 +165,7 @@ impl ClipboardReadGate {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            tracing::warn!(op, "clipboard_read_refused_previous_read_still_in_flight");
+            tracing::warn!(op, "blocking_op_refused_previous_call_still_in_flight");
             return Err(BlockingError::Busy { op });
         }
         let guard = InFlightGuard(Arc::clone(&self.in_flight));
@@ -311,7 +320,7 @@ pub enum BlockingError {
         op: &'static str,
     },
     /// Refused before spawning: an earlier read on the same
-    /// [`ClipboardReadGate`] timed out and its OS call has still not returned.
+    /// [`SingleFlightGate`] timed out and its OS call has still not returned.
     /// The caller treats this like a failed tick; the read is retried once the
     /// wedged call unwinds and the gate clears.
     Busy {
@@ -420,12 +429,12 @@ mod tests {
         // admitted while it is still running must be refused *without*
         // spawning — the whole point is that the pool does not accumulate one
         // leaked thread per capture tick.
-        let gate = ClipboardReadGate::new();
+        let gate = SingleFlightGate::new();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started_first = Arc::clone(&started);
         let err = gate
-            .run_with_limit("wedged", Duration::from_millis(50), move || {
+            .run("wedged", Duration::from_millis(50), move || {
                 started_first.fetch_add(1, Ordering::SeqCst);
                 let _ = rx.recv();
             })
@@ -437,7 +446,7 @@ mod tests {
         for _ in 0..3 {
             let started_next = Arc::clone(&started);
             let err = gate
-                .run_with_limit("retry", Duration::from_secs(5), move || {
+                .run("retry", Duration::from_secs(5), move || {
                     started_next.fetch_add(1, Ordering::SeqCst);
                 })
                 .await
@@ -467,7 +476,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let value = gate
-            .run_with_limit("after", Duration::from_secs(5), || 9_u8)
+            .run("after", Duration::from_secs(5), || 9_u8)
             .await
             .expect("a read after the gate cleared must run");
         assert_eq!(value, 9);
@@ -478,23 +487,28 @@ mod tests {
     async fn gate_clears_after_a_panicking_read() {
         // The drop guard must release the gate even when the closure unwinds;
         // otherwise one panic would refuse every later capture until restart.
-        let gate = ClipboardReadGate::new();
+        let gate = SingleFlightGate::new();
         let err = gate
-            .run("boom", || -> u8 { panic!("read closure blew up") })
+            .run("boom", CLIPBOARD_OP_TIMEOUT, || -> u8 {
+                panic!("read closure blew up")
+            })
             .await
             .expect_err("a panicking read surfaces as Panicked");
         assert!(matches!(err, BlockingError::Panicked { op: "boom" }));
         assert!(!gate.is_busy(), "a panic must not leave the gate held");
-        let value = gate.run("next", || 4_u8).await.expect("next read runs");
+        let value = gate
+            .run("next", CLIPBOARD_OP_TIMEOUT, || 4_u8)
+            .await
+            .expect("next read runs");
         assert_eq!(value, 4);
     }
 
     #[tokio::test]
     async fn gate_admits_sequential_reads() {
-        let gate = ClipboardReadGate::new();
+        let gate = SingleFlightGate::new();
         for expected in 0..3_u8 {
             let value = gate
-                .run("sequential", move || expected)
+                .run("sequential", CLIPBOARD_OP_TIMEOUT, move || expected)
                 .await
                 .expect("idle gate admits every read");
             assert_eq!(value, expected);

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use core_foundation::base::{CFRelease, CFType, TCFType};
 use core_foundation::string::CFString;
 use nagori_core::{Result, SourceApp};
-use nagori_platform::{FrontmostApp, RestoreTarget, WindowBehavior};
+use nagori_platform::{FrontmostApp, RestoreTarget, SingleFlightGate, WindowBehavior};
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
 
@@ -24,8 +24,28 @@ use objc2_foundation::NSString;
 /// contended) `AppKit` lock cannot leave the `spawn_blocking` pending forever —
 /// the detached worker is leaked until the lock frees, but the async caller is
 /// released within the window.
+///
+/// The timeout alone is not enough for the two probes the capture loop drives
+/// on a *tick*. `spawn_blocking` cannot be aborted, so each timed-out call
+/// leaks its worker until the OS unwedges; once the loop enters its
+/// fail-closed recovery state it sets `force_content_check`, which bypasses
+/// the sequence dedup that would otherwise skip these probes, so a permanently
+/// wedged `AppKit` / AX would leak one worker *per tick* and eventually
+/// exhaust the blocking pool — stalling every clipboard write, paste and DB
+/// job behind it. `frontmost_app` and `frontmost_focused_is_secure` therefore
+/// each carry a [`SingleFlightGate`], which caps the leak at one worker apiece
+/// and refuses further calls with `Busy` until the wedged one returns. They
+/// hold *separate* gates because the capture loop joins them concurrently on
+/// every tick and must not have one refuse the other.
+///
+/// `activate_app` deliberately has no gate: it runs once per user-initiated
+/// paste, not at a polling cadence, so there is nothing to accumulate, and
+/// refusing a focus restore would abort a paste the user actually asked for.
 #[derive(Debug, Default)]
-pub struct MacosWindowBehavior;
+pub struct MacosWindowBehavior {
+    frontmost_gate: SingleFlightGate,
+    secure_focus_gate: SingleFlightGate,
+}
 
 /// Upper bound on a blocking `NSWorkspace` / `activateWithOptions` call.
 /// Frontmost-app probing happens at palette-open and focus restore happens
@@ -37,8 +57,8 @@ const WINDOW_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3)
 
 impl MacosWindowBehavior {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Synchronous variant of `frontmost_app` so callers running in a
@@ -82,14 +102,15 @@ impl WindowBehavior for MacosWindowBehavior {
     async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
         // Hop off the tokio worker so a contended AppKit lock can't stall
         // IPC handlers running in parallel, and bound it so a *wedged* lock
-        // (a frozen frontmost app) can't leave the hop pending forever.
-        nagori_platform::run_blocking_with_timeout(
-            "frontmost_app",
-            WINDOW_OP_TIMEOUT,
-            frontmost_app_sync,
-        )
-        .await
-        .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
+        // (a frozen frontmost app) can't leave the hop pending forever. The
+        // gate caps what a wedge costs at one leaked worker — see the type
+        // docs; a `Busy` refusal surfaces as an `Err`, which the capture loop
+        // degrades to "no source app" rather than treating as a capture
+        // failure.
+        self.frontmost_gate
+            .run("frontmost_app", WINDOW_OP_TIMEOUT, frontmost_app_sync)
+            .await
+            .map_err(|err| nagori_core::AppError::Platform(err.to_string()))
     }
 
     // The Tauri shell controls the palette window directly via its own
@@ -137,7 +158,30 @@ impl WindowBehavior for MacosWindowBehavior {
         // counter increments and the fail-closed threshold can fire —
         // before this fix, AX errors silently coerced to `Ok(false)` and
         // the counter never advanced.
-        let outcome = tokio::task::spawn_blocking(frontmost_focused_is_secure_sync)
+        //
+        // Bounded by [`WINDOW_OP_TIMEOUT`] like the other two window ops.
+        // `frontmost_focused_is_secure_sync` already asks AX to bound each
+        // per-element trip at 250 ms, but that is a best-effort request we
+        // deliberately ignore the result of, and it only covers the messaging
+        // layer — a hang anywhere else in the walk (the systemwide handle, a
+        // `CFRelease` behind a wedged lock) would still leave the hop pending
+        // forever. This is the outer guarantee: whatever AX does, the capture
+        // tick is released within the window, and the timeout lands on the
+        // fail-closed path below rather than stalling the loop.
+        //
+        // The gate then caps the cost of a *permanent* wedge at one leaked
+        // worker: the fail-closed state re-runs this probe every tick, so
+        // timeout-without-gate would leak one per tick. A `Busy` refusal stays
+        // an `Err` — the same "AX is blind" signal a timeout gives — so the
+        // fail-closed threshold keeps advancing while the wedge persists
+        // rather than silently reading as "not a secure field".
+        let outcome = self
+            .secure_focus_gate
+            .run(
+                "frontmost_focused_is_secure",
+                WINDOW_OP_TIMEOUT,
+                frontmost_focused_is_secure_sync,
+            )
             .await
             .map_err(|err| nagori_core::AppError::Platform(err.to_string()))?;
         outcome.ok_or_else(|| {

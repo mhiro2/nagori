@@ -9,7 +9,7 @@ pub mod preview;
 pub mod window;
 
 pub use blocking::{
-    BlockingError, CLIPBOARD_OP_TIMEOUT, ClipboardReadGate, clipboard_blocking,
+    BlockingError, CLIPBOARD_OP_TIMEOUT, SingleFlightGate, clipboard_blocking,
     clipboard_write_blocking, lock_clipboard_for_write, lock_clipboard_recovering,
     run_blocking_with_timeout,
 };
