@@ -147,6 +147,11 @@ unpinned entries created before that cutoff. A bare `nagori clear` with no
 flag is rejected at parse time so the command can't wipe history by
 accident.
 
+`N` runs from 1 to 3650 (~10 years), the same window
+`history_retention_days` accepts, and is checked at parse time. `0` is
+outside it on purpose: it would mean every entry, which is what `--all`
+says explicitly. Anything out of range exits 2 naming the range.
+
 With a running instance to talk to, `--all` shares the desktop's *Clear
 history*: it returns as soon as the entries are out of every view (a large
 history would otherwise block the command for minutes) and that instance

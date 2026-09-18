@@ -3,7 +3,7 @@ use nagori_core::{
     ContentKind, EntryId, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
     MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS,
     PasteFormat, QuickActionId, RankReason, RepresentationRole, RepresentationSummary,
-    SearchResult, Sensitivity, safe_preview_for_dto, truncate_on_char_boundary,
+    RetentionDays, SearchResult, Sensitivity, safe_preview_for_dto, truncate_on_char_boundary,
 };
 use nagori_platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
@@ -215,7 +215,13 @@ pub enum ClearRequest {
     /// Wipe every unpinned entry.
     All,
     /// Wipe unpinned entries older than `days` days.
-    OlderThanDays { days: u32 },
+    ///
+    /// [`RetentionDays`] rejects `0` and anything past
+    /// `MAX_RETENTION_DAYS` while decoding, so the handler cannot be handed
+    /// a window that means "everything" without the caller asking for
+    /// [`ClearRequest::All`], nor one whose cutoff would overflow the
+    /// timestamp type.
+    OlderThanDays { days: RetentionDays },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -974,9 +980,10 @@ mod tests {
             .expect("Clear(All) must serialize");
         assert_eq!(all, r#"{"Clear":"All"}"#);
 
-        let older =
-            serde_json::to_string(&IpcRequest::Clear(ClearRequest::OlderThanDays { days: 30 }))
-                .expect("Clear(OlderThanDays) must serialize");
+        let older = serde_json::to_string(&IpcRequest::Clear(ClearRequest::OlderThanDays {
+            days: RetentionDays::new(30).expect("30 days"),
+        }))
+        .expect("Clear(OlderThanDays) must serialize");
         assert_eq!(older, r#"{"Clear":{"OlderThanDays":{"days":30}}}"#);
 
         // Both documented shapes parse back to the matching request.
@@ -987,8 +994,21 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<IpcRequest>(r#"{"Clear":{"OlderThanDays":{"days":7}}}"#)
                 .expect("parse OlderThanDays"),
-            IpcRequest::Clear(ClearRequest::OlderThanDays { days: 7 })
+            IpcRequest::Clear(ClearRequest::OlderThanDays { days }) if days.get() == 7
         ));
+
+        // A window outside `1..=MAX_RETENTION_DAYS` is refused here, at the
+        // decode boundary, rather than reaching the handler that turns it
+        // into a cutoff instant.
+        for raw in [
+            r#"{"Clear":{"OlderThanDays":{"days":0}}}"#,
+            r#"{"Clear":{"OlderThanDays":{"days":4294967295}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<IpcRequest>(raw).is_err(),
+                "{raw} must be rejected while decoding"
+            );
+        }
 
         // The pre-fix doc shape is *not* valid and must fail rather than
         // silently decode to a default — that mismatch is the bug this guards.

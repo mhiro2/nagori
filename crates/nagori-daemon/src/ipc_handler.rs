@@ -186,8 +186,7 @@ impl NagoriRuntime {
                 let deleted = match request {
                     ClearRequest::All => self.clear_history().await?,
                     ClearRequest::OlderThanDays { days } => {
-                        let cutoff =
-                            OffsetDateTime::now_utc() - time::Duration::days(i64::from(days));
+                        let cutoff = days.cutoff(OffsetDateTime::now_utc());
                         self.invalidate_search_cache();
                         let deleted = self.store.clear_older_than(cutoff).await?;
                         self.invalidate_search_cache();

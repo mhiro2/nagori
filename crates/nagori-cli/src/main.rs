@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use nagori_core::{AiActionId, AppError, QuickActionId};
+use nagori_core::{AiActionId, AppError, MAX_RETENTION_DAYS, QuickActionId};
 use nagori_daemon::default_socket_path;
 use nagori_ipc::{IpcClient, IpcRequest};
 
@@ -119,8 +119,14 @@ struct IdArgs {
 #[derive(Debug, Clone, Args)]
 #[command(group = clap::ArgGroup::new("clear_scope").required(true).args(&["older_than_days", "all"]))]
 struct ClearArgs {
-    #[arg(long)]
-    older_than_days: Option<i64>,
+    /// Delete unpinned entries older than this many days (1-3650).
+    ///
+    /// `clap` enforces the range at parse time so an out-of-range window is
+    /// a usage error naming the bound, not a failure from inside the
+    /// command. `0` is excluded deliberately: it would mean every entry,
+    /// which is `--all`'s job.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RETENTION_DAYS)))]
+    older_than_days: Option<u32>,
     /// Wipe every unpinned entry. Required when no time window is given.
     #[arg(long)]
     all: bool,
@@ -547,6 +553,21 @@ mod tests {
             code: code.to_owned(),
             message: format!("test message for {code}"),
             recoverable: false,
+        }
+    }
+
+    #[test]
+    fn clear_window_parsing_spans_the_whole_legal_range() {
+        // The out-of-range half of this contract is a black-box test (exit 2,
+        // no panic); this is the accepted half, so a tightened bound cannot
+        // quietly start rejecting a window the docs promise.
+        for days in ["1", "3650"] {
+            let cli = Cli::try_parse_from(["nagori", "clear", "--older-than-days", days])
+                .expect("a legal window must parse");
+            let Command::Clear(args) = cli.command else {
+                panic!("expected the clear command");
+            };
+            assert_eq!(args.older_than_days, Some(days.parse().expect("digits")));
         }
     }
 

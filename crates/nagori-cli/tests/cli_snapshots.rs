@@ -206,6 +206,35 @@ fn clear_invalid_older_than_days_exits_non_one() {
 }
 
 #[test]
+fn clear_out_of_range_older_than_days_is_a_usage_error_not_a_crash() {
+    // `4294967295` used to parse as a day count and then overflow the cutoff
+    // subtraction, aborting the process with exit 101 and a panic message.
+    // `0` parsed fine and quietly widened the sweep to every unpinned entry,
+    // which is `--all`'s job. Both are usage errors naming the bound.
+    let (_dir, db) = temp_db();
+    for window in ["0", "4294967295", "3651"] {
+        let output = nagori(&db)
+            .args(["clear", "--older-than-days", window])
+            .output()
+            .expect("invoke nagori");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--older-than-days {window} must be exit 2, not a panic"
+        );
+        let stderr = String::from_utf8(output.stderr.clone()).expect("stderr utf-8");
+        assert!(
+            !stderr.contains("panicked"),
+            "--older-than-days {window} must not panic, got: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("3650"),
+            "the error must name the accepted range, got: {stderr:?}"
+        );
+    }
+}
+
+#[test]
 fn add_without_text_or_stdin_exits_with_invalid_input_code() {
     // `nagori add` with neither --text nor --stdin is a usage error: it maps
     // to InvalidInput / exit 2, lining up with the oversize-stdin guard rather

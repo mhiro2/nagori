@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use nagori_core::{AppSettings, AuditLog, Result};
+use nagori_core::{AppSettings, AuditLog, Result, RetentionDays};
 use nagori_storage::SqliteStore;
 use time::{Duration, OffsetDateTime};
 use tracing::{info, warn};
@@ -238,8 +238,17 @@ impl MaintenanceService {
         let Some(days) = settings.history_retention_days else {
             return Ok(0);
         };
-        let cutoff = OffsetDateTime::now_utc() - Duration::days(days.into());
-        self.store.clear_older_than(cutoff).await
+        // `validate` already holds `history_retention_days` to this range, so
+        // for a persisted or IPC-supplied row this only restates the bound.
+        // It is not redundant for a hand-built `AppSettings`: `0` used to
+        // compute a cutoff of *now* and sweep the whole history, and a wild
+        // day count panicked on the subtraction. The window is the same unit
+        // `nagori clear --older-than-days` works in, so it goes through the
+        // same type.
+        let window = RetentionDays::new(days)?;
+        self.store
+            .clear_older_than(window.cutoff(OffsetDateTime::now_utc()))
+            .await
     }
 }
 
