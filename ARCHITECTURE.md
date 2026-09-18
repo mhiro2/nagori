@@ -2798,9 +2798,15 @@ under 80 ms for 100k text entries on a developer machine.
   + `NT AUTHORITY\SYSTEM` DACL under `%LOCALAPPDATA%\nagori\` on Windows).
   Tight read
   timeouts on the unauthenticated handshake (`FIRST_READ_TIMEOUT` 1 s,
-  `READ_TIMEOUT` 3 s) cap slow-loris pressure on the 32 connection
-  permits; no TCP listener. Token verification uses constant-time
-  comparison.
+  `READ_TIMEOUT` 3 s) cap slow-loris pressure on the default 32
+  connection permits; no TCP listener. `--ipc-max-connections` tunes that count
+  within `1..=IpcServerConfig::MAX_CONCURRENT_CONNECTIONS` (4096), and
+  the accept loops take their permit count from
+  `IpcServerConfig::permits`, which clamps to the same ceiling: a larger
+  count reaches `Semaphore::new`, which panics past its own permit
+  limit, so an operator flag or an in-process config could otherwise
+  abort the daemon before it served anything. Token verification uses
+  constant-time comparison.
 - **Tauri command ACL** — `build.rs` declares every `generate_handler!`
   command in `tauri_build::AppManifest::commands`, which flips app
   commands from "callable by any window by default" to deny-by-default:

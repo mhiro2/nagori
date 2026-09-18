@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use nagori_core::{AiActionId, AppError, MAX_RETENTION_DAYS, QuickActionId};
 use nagori_daemon::default_socket_path;
-use nagori_ipc::{IpcClient, IpcRequest};
+use nagori_ipc::{IpcClient, IpcRequest, IpcServerConfig};
 
 mod commands;
 mod output;
@@ -184,10 +184,27 @@ struct DaemonRunArgs {
     maintenance_interval_min: u64,
     /// Cap on concurrent IPC handlers. Defaults to the IPC crate's
     /// built-in ceiling; tune down in regression tests or up when the
-    /// daemon serves many automated probes simultaneously. Must be
-    /// non-zero — `0` is rejected at parse time.
-    #[arg(long)]
+    /// daemon serves many automated probes simultaneously. Bounded to
+    /// `1..=4096` at parse time: `0` would deadlock every connection, and a
+    /// value past the ceiling used to panic the accept loop's semaphore
+    /// before the daemon served anything.
+    #[arg(long, value_parser = parse_ipc_max_connections)]
     ipc_max_connections: Option<NonZeroUsize>,
+}
+
+/// Parse `--ipc-max-connections` against the range the accept loop can
+/// actually run with.
+///
+/// `clap`'s numeric `range` needs an `i64`, which cannot express a `usize`
+/// bound on every target, so the check is spelled out here instead.
+fn parse_ipc_max_connections(raw: &str) -> Result<NonZeroUsize, String> {
+    let value: usize = raw
+        .parse()
+        .map_err(|_| format!("`{raw}` is not a number of connections"))?;
+    let max = IpcServerConfig::MAX_CONCURRENT_CONNECTIONS;
+    NonZeroUsize::new(value)
+        .filter(|value| value.get() <= max)
+        .ok_or_else(|| format!("must be between 1 and {max}"))
 }
 
 #[tokio::main]
@@ -568,6 +585,31 @@ mod tests {
                 panic!("expected the clear command");
             };
             assert_eq!(args.older_than_days, Some(days.parse().expect("digits")));
+        }
+    }
+
+    #[test]
+    fn ipc_max_connections_is_bounded_at_parse_time() {
+        // Above the ceiling the value reached `Semaphore::new`, which panics
+        // past `MAX_PERMITS` and aborted `daemon run` before it accepted
+        // anything. Zero deadlocks every connection instead.
+        for rejected in [
+            "0",
+            &(IpcServerConfig::MAX_CONCURRENT_CONNECTIONS + 1).to_string(),
+            &usize::MAX.to_string(),
+        ] {
+            assert!(
+                parse_ipc_max_connections(rejected).is_err(),
+                "{rejected} connections must be refused"
+            );
+        }
+        for accepted in [1, 32, IpcServerConfig::MAX_CONCURRENT_CONNECTIONS] {
+            assert_eq!(
+                parse_ipc_max_connections(&accepted.to_string())
+                    .expect("a legal ceiling")
+                    .get(),
+                accepted
+            );
         }
     }
 

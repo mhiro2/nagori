@@ -209,7 +209,7 @@ where
 {
     let handler = Arc::new(handler);
     let token = Arc::new(expected_token);
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_connections.get()));
+    let semaphore = Arc::new(Semaphore::new(config.permits()));
     let mut tasks: JoinSet<()> = JoinSet::new();
     // Stamp the active tuning onto the health snapshot so `nagori
     // doctor` / `nagori health` can show the active connection ceiling

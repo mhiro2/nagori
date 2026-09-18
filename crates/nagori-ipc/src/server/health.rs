@@ -39,6 +39,32 @@ impl IpcServerConfig {
     /// is typical and a saturated pool is more likely a sign of a wedged
     /// handler than legitimate fan-out.
     pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 32;
+
+    /// Hard ceiling on [`Self::max_concurrent_connections`], whatever an
+    /// operator asks for.
+    ///
+    /// Two reasons, one of them fatal. The fatal one: the value becomes the
+    /// permit count of a [`tokio::sync::Semaphore`], which panics above
+    /// `Semaphore::MAX_PERMITS` (`usize::MAX >> 3`), so a large enough
+    /// `--ipc-max-connections` aborted `nagori daemon run` before it served
+    /// anything. The other: this is a single-user, same-machine endpoint, so
+    /// thousands of concurrent handlers describe a wedged daemon rather than
+    /// real fan-out, and each one holds a blocking DB slot. Well clear of
+    /// both the semaphore limit and any local workload.
+    pub const MAX_CONCURRENT_CONNECTIONS: usize = 4096;
+
+    /// The permit count to build the accept loop's semaphore with: the
+    /// configured ceiling, clamped to [`Self::MAX_CONCURRENT_CONNECTIONS`].
+    ///
+    /// The CLI bounds the flag at parse time; clamping here covers a config
+    /// built in-process, since the field is public and a panicking
+    /// `Semaphore::new` is not a failure mode a caller can handle.
+    #[must_use]
+    pub fn permits(self) -> usize {
+        self.max_concurrent_connections
+            .get()
+            .min(Self::MAX_CONCURRENT_CONNECTIONS)
+    }
 }
 
 impl Default for IpcServerConfig {
@@ -256,9 +282,11 @@ impl IpcServerHealth {
     /// accepting so `nagori doctor` / `nagori health` can show the
     /// active connection ceiling without an extra IPC roundtrip.
     pub fn record_config(&self, config: IpcServerConfig) {
+        // The effective ceiling, not the requested one: doctor / health must
+        // report the number of permits the accept loop actually holds.
         self.inner
             .max_concurrent_connections
-            .store(config.max_concurrent_connections.get(), Ordering::Relaxed);
+            .store(config.permits(), Ordering::Relaxed);
     }
 
     /// Convenience wrapper that redacts the caller's raw message before
@@ -697,6 +725,31 @@ mod tests {
         assert!(
             last.contains("ENOENT"),
             "post-closing-quote prose must survive: {last:?}",
+        );
+    }
+
+    #[test]
+    fn permits_clamp_a_config_built_past_the_ceiling() {
+        let ceiling = IpcServerConfig::MAX_CONCURRENT_CONNECTIONS;
+        let default = IpcServerConfig::default();
+        assert_eq!(
+            default.permits(),
+            IpcServerConfig::DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            "the default must pass through untouched"
+        );
+        // The field is public, so a config can be built in-process with a
+        // permit count `Semaphore::new` would panic on. The accept loops
+        // build their semaphore from `permits()` for exactly this case.
+        let over = IpcServerConfig {
+            max_concurrent_connections: NonZeroUsize::new(usize::MAX).expect("non-zero"),
+        };
+        assert_eq!(over.permits(), ceiling);
+        let health = IpcServerHealth::new();
+        health.record_config(over);
+        assert_eq!(
+            health.max_concurrent_connections(),
+            ceiling,
+            "health must report the effective ceiling, not the requested one"
         );
     }
 }
