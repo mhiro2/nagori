@@ -246,6 +246,18 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// read outright. The daemon and the desktop both refuse to start capture on a
 /// settings-load failure, which is the fail-closed behaviour this list exists
 /// to trigger.
+///
+/// A key only belongs here once every release that could have written the row
+/// we are reading already persisted it. The completeness gate runs before
+/// deserialisation, so listing a key that a shipped release did not write
+/// turns that release's rows into an unreadable settings blob: the user
+/// upgrades and the app refuses to start with no way back. `otp_detection` is
+/// the counter-example and is deliberately absent — it postdates every
+/// shipped release, and [`default_otp_detection`] resolves a missing key to
+/// the always-on behaviour those releases had, so defaulting it narrows the
+/// capture policy instead of widening it. A privacy field added from here on
+/// defaults to its strictest value for the same reason rather than joining
+/// this list.
 pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "app_denylist",
     "regex_denylist",
@@ -257,7 +269,6 @@ pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "max_image_entry_size_bytes",
     "secret_handling",
     "block_sensitive_captures",
-    "otp_detection",
     "history_retention_count",
     "history_retention_days",
     "max_total_bytes",
@@ -1150,6 +1161,9 @@ pub const fn default_capture_initial_clipboard_on_launch() -> bool {
 /// character OTP heuristic. It must stay a named fn (not a bare
 /// `#[serde(default)]`) so an existing install whose persisted settings JSON
 /// lacks the key deserializes with OTP detection enabled rather than off.
+/// This default is also why the key is not in [`REQUIRED_PRIVACY_KEYS`]:
+/// every row written before the field existed resolves to the stricter
+/// setting, so requiring it would only make those rows unreadable.
 pub const fn default_otp_detection() -> bool {
     true
 }
@@ -1410,6 +1424,25 @@ mod tests {
                 "a blob missing `{key}` must fail the read"
             );
         }
+    }
+
+    #[test]
+    fn a_blob_written_before_otp_detection_existed_loads_with_detection_on() {
+        // Shape of a row persisted by a release that predates the field. The
+        // completeness gate runs before deserialisation, so requiring
+        // `otp_detection` made every such row an unreadable blob and left the
+        // app refusing to start after an upgrade. Defaulting it is the
+        // stricter outcome: the detector stays on, exactly as it was in the
+        // release that wrote the row.
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
+        value
+            .as_object_mut()
+            .expect("settings serialize to an object")
+            .remove("otp_detection");
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+        let settings = AppSettings::from_complete_json(&raw)
+            .expect("a row written before the field existed must load");
+        assert!(settings.otp_detection);
     }
 
     #[test]
