@@ -147,6 +147,11 @@ unpinned entries created before that cutoff. A bare `nagori clear` with no
 flag is rejected at parse time so the command can't wipe history by
 accident.
 
+`N` runs from 1 to 3650 (~10 years), the same window
+`history_retention_days` accepts, and is checked at parse time. `0` is
+outside it on purpose: it would mean every entry, which is what `--all`
+says explicitly. Anything out of range exits 2 naming the range.
+
 With a running instance to talk to, `--all` shares the desktop's *Clear
 history*: it returns as soon as the entries are out of every view (a large
 history would otherwise block the command for minutes) and that instance
@@ -252,7 +257,7 @@ daemon returns the same matrix as a local probe, since the report is
 static and wired in at startup), and falls back to a local probe
 otherwise.
 
-### `nagori daemon run [--capture-interval-ms N] [--maintenance-interval-min N]`
+### `nagori daemon run [--capture-interval-ms N] [--maintenance-interval-min N] [--ipc-max-connections N]`
 
 Boot the daemon. Holds the SQLite handle, runs the capture loop, and serves
 the IPC endpoint (Unix socket on macOS / Linux, named pipe on Windows).
@@ -262,6 +267,12 @@ Available on macOS, Windows, and Linux; other platforms exit with
 `--capture-interval-ms` accepts `1`–`3600000` (default `500`) and
 `--maintenance-interval-min` accepts `1`–`525600` (default `30`); `0` is
 rejected at parse time so neither loop can be spun into a busy loop.
+
+`--ipc-max-connections` caps concurrent IPC handlers and accepts `1`–`4096`
+(default `32`). `0` would deadlock every connection, and a count past the
+ceiling reaches the accept loop's semaphore, which refuses to be built that
+large — so both ends are rejected at parse time rather than at startup.
+`nagori health` reports the count in effect.
 
 ### `nagori daemon stop`
 

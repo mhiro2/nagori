@@ -20,6 +20,88 @@ pub const MAX_RETENTION_COUNT: usize = 1_000_000;
 /// hurting retention sweep performance.
 pub const MAX_RETENTION_DAYS: u32 = 3650;
 
+/// The floor [`RetentionDays::cutoff`] saturates to.
+///
+/// Year zero rather than [`time::PrimitiveDateTime::MIN`], because a cutoff
+/// is only useful if it can be compared against stored timestamps, and those
+/// are RFC 3339 — a format with no negative years. Saturating past this would
+/// hand callers an instant that fails to format instead of one that selects
+/// nothing.
+pub const EARLIEST_CUTOFF: OffsetDateTime = match time::Date::from_ordinal_date(0, 1) {
+    Ok(date) => date.midnight().assume_utc(),
+    Err(_) => panic!("day 1 of year zero is a valid date"),
+};
+
+/// A validated "older than N days" window, the unit every delete-by-age
+/// caller works in.
+///
+/// The bound is [`MAX_RETENTION_DAYS`] at the top and 1 at the bottom, the
+/// same range `history_retention_days` accepts — the two describe the same
+/// sweep from opposite ends, so they cannot disagree on what a legal window
+/// is. Both ends of the range are load-bearing:
+///
+/// - Zero is not "no window", it is *every* entry. A caller that means that
+///   has to say so (`ClearRequest::All`, `--all`), so a mistyped or defaulted
+///   `0` can never turn a bounded sweep into a full wipe.
+/// - The ceiling keeps [`RetentionDays::cutoff`] meaningful. Subtracting an
+///   unbounded day count from the current instant overflows
+///   [`OffsetDateTime`]'s year range and panics — `u32::MAX` days is ~11.7
+///   million years — which took down whatever computed it: exit 101 for the
+///   CLI, a killed worker for the daemon. Ten years of days leaves the
+///   representable range only for an instant already within ten years of the
+///   start of time, which `cutoff` saturates rather than panics on.
+///
+/// `Deserialize` goes through [`RetentionDays::new`], so an out-of-range
+/// value arriving over IPC is a decode error at the boundary rather than a
+/// panic inside the handler. The representation is a bare integer, so the
+/// wire form is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct RetentionDays(u32);
+
+impl RetentionDays {
+    /// Validate a day count against `1..=MAX_RETENTION_DAYS`.
+    pub fn new(days: u32) -> Result<Self> {
+        if days == 0 || days > MAX_RETENTION_DAYS {
+            return Err(AppError::InvalidInput(format!(
+                "days must be between 1 and {MAX_RETENTION_DAYS}"
+            )));
+        }
+        Ok(Self(days))
+    }
+
+    /// The validated day count.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The instant this window starts at: entries created before it are in
+    /// scope, entries at or after it are not.
+    ///
+    /// Total for every `OffsetDateTime`, not just the ones a healthy clock
+    /// reports. `now - window` leaves the representable range only when `now`
+    /// is itself within the window of the start of time, and that saturates
+    /// to [`EARLIEST_CUTOFF`]: no entry is created before it, so such a clock
+    /// makes the sweep select nothing. The bare `-` this replaced panicked
+    /// instead, and took the caller with it.
+    #[must_use]
+    pub fn cutoff(self, now: OffsetDateTime) -> OffsetDateTime {
+        now.checked_sub(time::Duration::days(i64::from(self.0)))
+            .unwrap_or(EARLIEST_CUTOFF)
+    }
+}
+
+impl<'de> Deserialize<'de> for RetentionDays {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let days = u32::deserialize(deserializer)?;
+        Self::new(days).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Upper bound for `paste_delay_ms`.
 ///
 /// The synthesised ⌘V keystroke needs a few-tens-of-ms wait after focus
@@ -246,6 +328,18 @@ pub fn password_manager_preset_rules() -> Vec<AppDenyRule> {
 /// read outright. The daemon and the desktop both refuse to start capture on a
 /// settings-load failure, which is the fail-closed behaviour this list exists
 /// to trigger.
+///
+/// A key only belongs here once every release that could have written the row
+/// we are reading already persisted it. The completeness gate runs before
+/// deserialisation, so listing a key that a shipped release did not write
+/// turns that release's rows into an unreadable settings blob: the user
+/// upgrades and the app refuses to start with no way back. `otp_detection` is
+/// the counter-example and is deliberately absent — it postdates every
+/// shipped release, and [`default_otp_detection`] resolves a missing key to
+/// the always-on behaviour those releases had, so defaulting it narrows the
+/// capture policy instead of widening it. A privacy field added from here on
+/// defaults to its strictest value for the same reason rather than joining
+/// this list.
 pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "app_denylist",
     "regex_denylist",
@@ -257,7 +351,6 @@ pub const REQUIRED_PRIVACY_KEYS: &[&str] = &[
     "max_image_entry_size_bytes",
     "secret_handling",
     "block_sensitive_captures",
-    "otp_detection",
     "history_retention_count",
     "history_retention_days",
     "max_total_bytes",
@@ -1150,6 +1243,9 @@ pub const fn default_capture_initial_clipboard_on_launch() -> bool {
 /// character OTP heuristic. It must stay a named fn (not a bare
 /// `#[serde(default)]`) so an existing install whose persisted settings JSON
 /// lacks the key deserializes with OTP detection enabled rather than off.
+/// This default is also why the key is not in [`REQUIRED_PRIVACY_KEYS`]:
+/// every row written before the field existed resolves to the stricter
+/// setting, so requiring it would only make those rows unreadable.
 pub const fn default_otp_detection() -> bool {
     true
 }
@@ -1413,6 +1509,25 @@ mod tests {
     }
 
     #[test]
+    fn a_blob_written_before_otp_detection_existed_loads_with_detection_on() {
+        // Shape of a row persisted by a release that predates the field. The
+        // completeness gate runs before deserialisation, so requiring
+        // `otp_detection` made every such row an unreadable blob and left the
+        // app refusing to start after an upgrade. Defaulting it is the
+        // stricter outcome: the detector stays on, exactly as it was in the
+        // release that wrote the row.
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
+        value
+            .as_object_mut()
+            .expect("settings serialize to an object")
+            .remove("otp_detection");
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+        let settings = AppSettings::from_complete_json(&raw)
+            .expect("a row written before the field existed must load");
+        assert!(settings.otp_detection);
+    }
+
+    #[test]
     fn a_blob_missing_a_non_privacy_field_still_loads() {
         // The completeness gate is deliberately narrow: a blob written before
         // a cosmetic field existed must still load, or every added setting
@@ -1522,6 +1637,81 @@ mod tests {
         settings
             .validate()
             .expect("empty auxiliary hotkey must be treated as unset");
+    }
+
+    #[test]
+    fn retention_days_accepts_the_whole_legal_window_and_nothing_else() {
+        assert_eq!(RetentionDays::new(1).expect("1 day").get(), 1);
+        assert_eq!(
+            RetentionDays::new(MAX_RETENTION_DAYS)
+                .expect("the ceiling")
+                .get(),
+            MAX_RETENTION_DAYS
+        );
+        // Zero means "everything", which callers have to ask for explicitly,
+        // and the ceiling is what keeps `cutoff` from overflowing.
+        for rejected in [0, MAX_RETENTION_DAYS + 1, u32::MAX] {
+            assert!(
+                matches!(RetentionDays::new(rejected), Err(AppError::InvalidInput(_))),
+                "{rejected} days must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn retention_days_cutoff_stays_in_range_across_the_window() {
+        let now = OffsetDateTime::now_utc();
+        let one = RetentionDays::new(1).expect("1 day").cutoff(now);
+        assert_eq!(now - one, time::Duration::days(1));
+        // The old code subtracted an unbounded day count here and panicked
+        // on the way out of `OffsetDateTime`'s year range. At the ceiling the
+        // result is still an ordinary timestamp.
+        let ceiling = RetentionDays::new(MAX_RETENTION_DAYS)
+            .expect("the ceiling")
+            .cutoff(now);
+        assert!(ceiling < now);
+        assert_eq!(now - ceiling, time::Duration::days(3650));
+
+        // `cutoff` takes any timestamp, not just a clock reading, so the
+        // instants where the subtraction cannot land in range saturate.
+        let start_of_time = time::PrimitiveDateTime::MIN.assume_utc();
+        for days in [1, MAX_RETENTION_DAYS] {
+            let window = RetentionDays::new(days).expect("a legal window");
+            assert_eq!(
+                window.cutoff(start_of_time),
+                EARLIEST_CUTOFF,
+                "{days} days before the start of time must saturate, not panic"
+            );
+        }
+        // The floor has to survive the round trip into storage, or the
+        // saturated sweep fails to format its bound instead of matching no
+        // rows. RFC 3339 has no negative years, which is what rules out
+        // `PrimitiveDateTime::MIN` here.
+        assert_eq!(
+            EARLIEST_CUTOFF
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("the floor must render as RFC 3339"),
+            "0000-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn retention_days_decodes_as_a_bare_integer_and_rejects_out_of_range_wire_values() {
+        let days: RetentionDays = serde_json::from_str("30").expect("a legal window decodes");
+        assert_eq!(days.get(), 30);
+        assert_eq!(
+            serde_json::to_string(&days).expect("serialize"),
+            "30",
+            "the wire form must stay a bare integer"
+        );
+        // A peer sending either of these used to panic the handler that
+        // computed the cutoff; now it fails at the decode boundary.
+        for raw in ["0", "4294967295"] {
+            assert!(
+                serde_json::from_str::<RetentionDays>(raw).is_err(),
+                "{raw} must fail to decode"
+            );
+        }
     }
 
     #[test]

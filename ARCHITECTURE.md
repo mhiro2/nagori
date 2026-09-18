@@ -2763,7 +2763,7 @@ under 80 ms for 100k text entries on a developer machine.
   becomes an `AppSettings`. It requires every key in `REQUIRED_PRIVACY_KEYS`
   (the two denylists, `capture_kinds`, `capture_enabled`,
   `capture_initial_clipboard_on_launch`, `cli_ipc_enabled`, both size budgets,
-  `secret_handling`, `block_sensitive_captures`, `otp_detection`, and the
+  `secret_handling`, `block_sensitive_captures`, and the
   retention controls `history_retention_count` / `history_retention_days` /
   `max_total_bytes` / `clear_on_quit` / `permanent_delete_on_delete`, plus
   `auto_update_check`) to be present, refuses a denylist rule shape this build cannot parse, and runs
@@ -2776,6 +2776,17 @@ under 80 ms for 100k text entries on a developer machine.
   in the clear. The error propagates: the daemon refuses to start and the
   desktop's startup gate stays closed, so capture never runs under a policy
   the user did not choose.
+
+  A key joins that list only once every release that could have written the
+  row already persisted it. The completeness check runs before
+  deserialisation, so requiring a key a shipped release never wrote makes
+  that release's rows unreadable and leaves the app refusing to start after
+  an upgrade, with the fail-closed path offering no way back. `otp_detection`
+  is excluded on exactly that ground: it postdates every shipped release, and
+  `default_otp_detection` resolves a missing key to the always-on detector
+  those releases ran, so the default narrows the capture policy rather than
+  widening it. Privacy fields added from here on take the same route —
+  strictest-value default, not a new required key.
 - **AI** — remote providers are off by default. The classifier runs
   before any provider call, and `AiInputPolicy::require_redaction`
   forces the canonical scrubber on the payload.
@@ -2787,9 +2798,15 @@ under 80 ms for 100k text entries on a developer machine.
   + `NT AUTHORITY\SYSTEM` DACL under `%LOCALAPPDATA%\nagori\` on Windows).
   Tight read
   timeouts on the unauthenticated handshake (`FIRST_READ_TIMEOUT` 1 s,
-  `READ_TIMEOUT` 3 s) cap slow-loris pressure on the 32 connection
-  permits; no TCP listener. Token verification uses constant-time
-  comparison.
+  `READ_TIMEOUT` 3 s) cap slow-loris pressure on the default 32
+  connection permits; no TCP listener. `--ipc-max-connections` tunes that count
+  within `1..=IpcServerConfig::MAX_CONCURRENT_CONNECTIONS` (4096), and
+  the accept loops take their permit count from
+  `IpcServerConfig::permits`, which clamps to the same ceiling: a larger
+  count reaches `Semaphore::new`, which panics past its own permit
+  limit, so an operator flag or an in-process config could otherwise
+  abort the daemon before it served anything. Token verification uses
+  constant-time comparison.
 - **Tauri command ACL** — `build.rs` declares every `generate_handler!`
   command in `tauri_build::AppManifest::commands`, which flips app
   commands from "callable by any window by default" to deny-by-default:

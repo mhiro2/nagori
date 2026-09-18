@@ -1,4 +1,6 @@
-use nagori_core::{EntryFactory, EntryRepository, SearchFilters, SearchQuery, Sensitivity};
+use nagori_core::{
+    EARLIEST_CUTOFF, EntryFactory, EntryRepository, SearchFilters, SearchQuery, Sensitivity,
+};
 use nagori_search::{MAX_NGRAM_INPUT_CHARS, normalize_text};
 use rusqlite::params;
 use time::OffsetDateTime;
@@ -528,6 +530,33 @@ async fn enforce_retention_count_keeps_pinned_above_cap() {
     assert!(active_ids.contains(&newest), "newest unpinned must survive");
     assert!(!active_ids.contains(&middle));
     assert!(!active_ids.contains(&oldest));
+}
+
+#[tokio::test]
+async fn clear_older_than_deletes_nothing_at_the_saturated_cutoff() {
+    // `RetentionDays::cutoff` saturates to `EARLIEST_CUTOFF` when the clock
+    // reports an instant within the window of the start of time. The sweep
+    // has to reach the query and match no rows: saturating below RFC 3339's
+    // year zero instead would fail to format the bound and turn the no-op
+    // into a storage error.
+    let store = SqliteStore::open_memory().unwrap();
+    let entry = insert_text(&store, "keep me").await;
+    backdate_entry(
+        &store,
+        entry,
+        OffsetDateTime::now_utc() - time::Duration::days(4000),
+    );
+
+    let removed = store.clear_older_than(EARLIEST_CUTOFF).await.unwrap();
+    assert_eq!(removed, 0, "nothing is created before the start of time");
+    assert!(
+        store
+            .list_recent(10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == entry)
+    );
 }
 
 #[tokio::test]
