@@ -134,7 +134,6 @@ const availability = (actionsAvailable: boolean): AiAvailability => ({
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   for (const key of Object.keys(handlers)) delete handlers[key];
   readyState.auto = true;
   readyState.fail = false;

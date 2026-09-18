@@ -69,7 +69,6 @@ import { settingsState } from './stores/settings.svelte';
 import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(false);
   vi.mocked(lastHotkeyFailure).mockResolvedValue(null);
   vi.mocked(subscribe).mockImplementation((_event, _handler, onReady) => {

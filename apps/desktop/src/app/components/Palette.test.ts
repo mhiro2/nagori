@@ -178,8 +178,7 @@ const urlPreview = (id: string, url: string): EntryPreviewDto =>
   });
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  // `vi.clearAllMocks` wipes call history but keeps any `mockReturnValue`
+  // Vitest clears call history before each test but keeps any `mockReturnValue`
   // implementation a prior test installed, so re-pin the defaults the
   // selection-dependent tests below override per-case.
   vi.mocked(currentSelection).mockReturnValue(undefined);

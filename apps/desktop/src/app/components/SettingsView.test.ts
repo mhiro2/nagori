@@ -197,7 +197,6 @@ const linuxWaylandCapabilities = (): PlatformCapabilities => ({
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(getSettings).mockResolvedValue(baseSettings());
   // Default permissions response: empty array means `accessibilityGranted()`

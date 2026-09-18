@@ -42,7 +42,6 @@ const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => 
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.useFakeTimers();
   vi.mocked(isTauri).mockReturnValue(true);
   searchState.query = '';

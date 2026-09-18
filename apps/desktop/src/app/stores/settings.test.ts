@@ -76,7 +76,6 @@ const accessibilityPerm = (state: PermissionStatus['state']): PermissionStatus =
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   // Reset the shared state so test order doesn't leak between cases.
   settingsState.settings = undefined;

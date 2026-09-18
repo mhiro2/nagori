@@ -135,7 +135,6 @@ const seed = (
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
   resetPollerForTests();
   settingsState.settings = undefined;
   settingsState.permissions = [];

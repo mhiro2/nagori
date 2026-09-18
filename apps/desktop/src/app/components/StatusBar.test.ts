@@ -126,7 +126,6 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   settingsState.settings = undefined;
   settingsState.permissions = [];
   settingsState.loaded = false;
