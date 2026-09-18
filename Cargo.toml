@@ -34,7 +34,7 @@ async-trait = "0.1"
 # out of the dependency tree.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 futures = "0.3"
 hex = "0.4"
 idna = "1"
