@@ -35,10 +35,6 @@ afterEach(() => {
   closeEntryContextMenu();
 });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-});
-
 describe('EntryContextMenu (single target)', () => {
   beforeEach(() => {
     openEntryContextMenu({

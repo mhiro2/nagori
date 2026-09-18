@@ -46,7 +46,6 @@ const dispatchVisibility = (state: DocumentVisibilityState): void => {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.useFakeTimers();
   vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(accessibilityGranted).mockReturnValue(false);

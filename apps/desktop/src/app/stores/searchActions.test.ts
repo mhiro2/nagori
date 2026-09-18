@@ -51,7 +51,6 @@ const result = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
   sampleSearchResult({ id: 'r1', preview: 'hello', score: 1, ...overrides });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   // Bulk actions always re-run the active query after the IPC settles, so a
   // benign default keeps the post-call refresh from clobbering assertions.

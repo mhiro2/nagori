@@ -61,7 +61,6 @@ const baseSettings = (): AppSettings => ({
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(invoke).mockResolvedValue(undefined);
 });
 

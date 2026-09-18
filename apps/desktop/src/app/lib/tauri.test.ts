@@ -17,7 +17,6 @@ const setTauriInternals = (value: unknown): void => {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
   setTauriInternals(undefined);
 });
 

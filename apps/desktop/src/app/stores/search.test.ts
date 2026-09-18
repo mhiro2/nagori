@@ -71,7 +71,6 @@ const resetState = () => {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   resetState();
 });

@@ -40,7 +40,6 @@ describe('ClearHistoryConfirmDialog', () => {
 
   afterEach(() => {
     cleanup();
-    vi.clearAllMocks();
   });
 
   it('clears and notifies the caller on confirm', async () => {

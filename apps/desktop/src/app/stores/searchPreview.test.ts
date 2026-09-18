@@ -28,7 +28,6 @@ const preview = (id: string): EntryPreviewDto => ({
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   vi.mocked(isTauri).mockReturnValue(true);
   previewState.entryId = undefined;
   previewState.query = undefined;

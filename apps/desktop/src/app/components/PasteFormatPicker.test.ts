@@ -19,7 +19,6 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  vi.clearAllMocks();
   openPasteFormatPicker('e1', [
     { mime: 'text/uri-list', category: 'files' },
     { mime: 'image/png', category: 'image' },
