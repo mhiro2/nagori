@@ -59,7 +59,7 @@ Download bundles from [GitHub Releases](https://github.com/mhiro2/nagori/release
 The `nagori` CLI ships inside the desktop bundle — there is one app to
 install and update.
 
-### macOS 26+ (Apple Silicon / Intel)
+### macOS 26+ (Apple Silicon)
 
 ```sh
 brew install --cask mhiro2/tap/nagori

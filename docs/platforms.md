@@ -10,7 +10,8 @@ desktop shell mirrors the same matrix under
 
 | Platform               | Desktop app | CLI daemon | Capture   | Copy back | Auto-paste        | Release bundle                                |
 | ---------------------- | ----------- | ---------- | --------- | --------- | ----------------- | --------------------------------------------- |
-| macOS (arm64 / x86_64) | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned `.app` / `.dmg`, in-app update probe) |
+| macOS (arm64)          | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned `.app` / `.dmg`, in-app update probe) |
+| macOS (x86_64)         | Unsupported | Unsupported | —        | —         | —                 | n/a                                           |
 | Windows (x86_64)       | Supported   | Supported  | Supported | Supported | Supported         | Yes (unsigned NSIS, in-app update probe)      |
 | Linux Wayland (x86_64) | Experimental | Experimental | Supported | Supported | Off by default (note*) | Yes (`deb` + `AppImage`, in-app update probe) |
 | Linux X11              | Unsupported | Unsupported | —        | —         | —                 | n/a                                           |
@@ -207,8 +208,8 @@ Known limitations:
 
 Supported environment:
 
-- macOS 26 (Tahoe) or later on Apple Silicon and Intel. The bundle
-  declares `LSMinimumSystemVersion = 26.0` via
+- macOS 26 (Tahoe) or later on Apple Silicon. The bundle declares
+  `LSMinimumSystemVersion = 26.0` via
   `bundle.macOS.minimumSystemVersion` in `tauri.conf.json`, so the
   installer refuses to launch on earlier releases. Releases are
   validated only against Tahoe — auto-paste in particular routes its
@@ -216,6 +217,17 @@ Supported environment:
   `dispatch_assert_queue(main)` and aborts from non-main threads on
   macOS 26+, so the workaround is required there but unnecessary on
   earlier releases.
+- Intel Macs are not supported. Releases through v0.1.1 shipped an
+  `x86_64-apple-darwin` bundle, but the target was never covered by CI
+  or the E2E suites — only built at release time — and the AI actions
+  are unavailable on it regardless (Foundation Models reports
+  `deviceNotEligible`). Tahoe is also Apple's last Intel macOS. An
+  existing Intel install keeps working at the version it has and is
+  never offered an arm64 bundle it cannot launch: `latest.json` carries
+  no `darwin-x86_64` entry, so the updater's target lookup fails. The
+  probe at launch only logs that, while **Settings → Advanced → Check
+  for updates** reports a failed check rather than "up to date".
+  `brew install --cask` refuses with an arch message.
 
 The desktop shell runs as an `NSApplicationActivationPolicyAccessory`
 application: the menu-bar tray is the primary entry point and no Dock
@@ -250,11 +262,10 @@ one being unavailable does not disable the others:
 
 - **Text generation** (Summarize, Rewrite, Format Markdown, Extract
   tasks, Explain code) runs on Foundation Models / Apple Intelligence.
-  It requires **Apple Silicon (M1 or later)** — Intel Macs report
-  `deviceNotEligible` — and **Apple Intelligence enabled** in System
-  Settings, which Nagori cannot turn on programmatically. Until it is
-  on, **Settings → AI** shows the status as unavailable and `nagori
-  doctor` reports `appleIntelligenceNotEnabled`. The on-device model
+  It requires **Apple Intelligence enabled** in System Settings, which
+  Nagori cannot turn on programmatically. Until it is on, **Settings →
+  AI** shows the status as unavailable and `nagori doctor` reports
+  `appleIntelligenceNotEnabled`. The on-device model
   needs **~7 GB of free space** and supports a fixed set of locales
   (English, Japanese, Korean, Chinese, and major European languages),
   with the device and Siri language required to match a supported

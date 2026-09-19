@@ -2491,10 +2491,16 @@ change.
   asked" from "asked and not granted".
 - **Updater (`tauri-plugin-updater`)** — registered on every OS so
   `app.updater()` is always wired. `release.yaml` builds bundles for
-  macOS (arm64 + x86_64), Windows x86_64 (NSIS), and Linux x86_64
+  macOS arm64, Windows x86_64 (NSIS), and Linux x86_64
   (`deb` + `AppImage`), and a dedicated `updater` job emits one
   consolidated signed `latest.json` covering every row in the matrix,
-  so the availability probe runs on every supported OS. The MVP surface is read-only — the
+  so the availability probe runs on every supported OS. Intel macOS is
+  not a release target, so the manifest carries no `darwin-x86_64`
+  entry. The plugin resolves the host's key in `get_urls` *before* it
+  compares versions, so an Intel install from v0.1.1 or earlier gets
+  `TargetsNotFound` from `check()` rather than an arm64 bundle it
+  cannot launch; `spawn_startup_update_probe` logs that and stays
+  quiet, and only the manual check reports it as a failed check. The MVP surface is read-only — the
   desktop shell calls `updater.check()` for the version comparison but
   does not call `update.download_and_install()`; users still follow
   the GitHub release link to upgrade. The wording differs by install

@@ -65,7 +65,7 @@ jobs:
     # Platform policy (see README → "Platform support" and ARCHITECTURE
     # updater notes): every target ships an installer bundle and an
     # `updater` companion (created by `bundle.createUpdaterArtifacts`
-    # in tauri.conf.json). macOS arm64/x86_64 deliver `.app`/`.dmg`,
+    # in tauri.conf.json). macOS arm64 delivers `.app`/`.dmg`,
     # Linux ships `deb` (Debian/Ubuntu family) plus `appimage` (any
     # distro + the only Linux format the updater plugin can install
     # in place), and Windows ships an unsigned NSIS `.exe`. The
@@ -87,9 +87,6 @@ jobs:
         include:
           - os: macos-26
             target: aarch64-apple-darwin
-            bundles: app,dmg
-          - os: macos-26-intel
-            target: x86_64-apple-darwin
             bundles: app,dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -241,15 +238,19 @@ jobs:
           }
 
           mac_arm="$(resolve 'aarch64\.app\.tar\.gz$')"
-          mac_x64="$(resolve 'x64\.app\.tar\.gz$')"
           appimage="$(resolve '\.AppImage$')"
           deb="$(resolve '\.deb$')"
           nsis="$(resolve 'x64-setup\.exe$')"
 
+          # No `darwin-x86_64` keys: Intel macOS is no longer a release
+          # target. The plugin's `get_urls` resolves the running host's key
+          # before it compares versions, so an Intel install from v0.1.1 or
+          # earlier gets `TargetsNotFound` out of `updater.check()` rather
+          # than an arm64 bundle it cannot launch. The launch probe only
+          # logs that; the manual Settings → Advanced check shows it as a
+          # failed check.
           add 'darwin-aarch64'        "${mac_arm}"
           add 'darwin-aarch64-app'    "${mac_arm}"
-          add 'darwin-x86_64'         "${mac_x64}"
-          add 'darwin-x86_64-app'     "${mac_x64}"
           add 'linux-x86_64'          "${appimage}"
           add 'linux-x86_64-appimage' "${appimage}"
           add 'linux-x86_64-deb'      "${deb}"
