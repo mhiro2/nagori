@@ -100,8 +100,7 @@ jobs:
             version "${VERSION}"
 
             sha256 "${ARM_SHA}"
-            url "https://github.com/mhiro2/nagori/releases/download/v#{version}/${arm_url_template}",
-              verified: "github.com/mhiro2/nagori/"
+            url "https://github.com/mhiro2/nagori/releases/download/v#{version}/${arm_url_template}"
 
             name "Nagori"
             desc "Local-first, AI-assisted clipboard manager"
