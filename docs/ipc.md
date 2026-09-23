@@ -203,6 +203,10 @@ server and removes the socket/token files. While disabled, only `Health`,
 requests return `permission_error` if they reach an already-authenticated
 in-flight handler.
 
+`Shutdown` answers `Ack` and then stops the host process. On the desktop
+app this is a full quit through its normal exit path, not a stop of the
+background workers alone.
+
 ## Example session
 
 Each connection carries exactly one request and one response — the
