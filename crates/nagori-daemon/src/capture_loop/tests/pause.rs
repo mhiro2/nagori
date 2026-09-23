@@ -431,3 +431,51 @@ async fn pause_published_mid_read_drops_the_clip() {
         .unwrap()
         .expect("a later copy is captured");
 }
+
+#[tokio::test]
+async fn unhashable_resume_baseline_does_not_mask_a_recopy_of_earlier_content() {
+    // Capture A, pause, and leave the clipboard empty at resume: the resume
+    // baseline has no body to hash, so it must clear the stale hash of A.
+    // Otherwise a fresh copy of A whose lapped sequence collides with the
+    // baseline would be dropped by the wake-resync content check as "the
+    // clip we already anchored".
+    let store = SqliteStore::open_memory().expect("memory store");
+    let reader = stub::StubReader::new("seq-a", Some("content A"));
+    let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default());
+
+    let t0 = SystemTime::now();
+    loop_
+        .capture_once_at(t0)
+        .await
+        .unwrap()
+        .expect("A is captured");
+
+    loop_.update_settings(paused());
+    loop_.reader.set("seq-b", None);
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    loop_.update_settings(AppSettings::default());
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_secs(2))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Re-copy A at the colliding sequence across a sleep gap.
+    loop_.reader.set("seq-b", Some("content A"));
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_mins(1))
+            .await
+            .unwrap()
+            .is_some(),
+        "a post-resume re-copy of earlier content must not be masked by a stale hash",
+    );
+}

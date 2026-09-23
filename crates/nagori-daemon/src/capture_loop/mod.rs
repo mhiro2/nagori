@@ -926,6 +926,12 @@ where
     /// internal decoded-pixel cap, so a forged-dimension image can't OOM the
     /// probe.
     ///
+    /// The baseline *replaces* the dedup state: when the clipboard yields no
+    /// hashable body (oversized, excluded, empty) `last_content_hash` is
+    /// cleared rather than left at the last captured clip's hash, so a later
+    /// wake-resync cannot mistake a fresh copy of that earlier content for the
+    /// baseline and drop it.
+    ///
     /// `pristine` flips only after the snapshot read succeeds — a transient
     /// platform error propagates first, keeping us in the pristine state so
     /// the next tick retries instead of stranding the loop with no baseline.
@@ -935,9 +941,8 @@ where
         match self.reader.current_snapshot_with_max(budget).await? {
             CapturedSnapshot::Captured(snapshot) => {
                 self.dedup.last_sequence = Some(snapshot.sequence.clone());
-                if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                    self.dedup.last_content_hash = Some(effective_dedupe_hash(&entry));
-                }
+                self.dedup.last_content_hash = EntryFactory::from_snapshot(snapshot)
+                    .map(|entry| effective_dedupe_hash(&entry));
             }
             CapturedSnapshot::Oversized { sequence, .. } => {
                 // Larger than the hard limit, so it can never be captured
@@ -946,6 +951,7 @@ where
                 // a later wake-resync re-reads through the bounded steady-state
                 // path, hits the same oversize guard, and skips it again.
                 self.dedup.last_sequence = Some(sequence);
+                self.dedup.last_content_hash = None;
             }
             CapturedSnapshot::Excluded { sequence, .. } => {
                 // The pre-launch clipboard carries an owner exclusion marker
@@ -953,6 +959,7 @@ where
                 // there is nothing to hash. Anchor the sequence like the
                 // oversized case so the next poll skips it without re-probing.
                 self.dedup.last_sequence = Some(sequence);
+                self.dedup.last_content_hash = None;
             }
         }
         self.dedup.pristine = false;
