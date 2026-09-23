@@ -269,3 +269,147 @@ async fn resume_reanchor_retries_on_snapshot_failure() {
         "a failed resume re-anchor must retry rather than capture the paused-era clip",
     );
 }
+
+#[tokio::test]
+async fn coalesced_pause_still_reanchors_through_the_pause_epoch() {
+    // The settings watch keeps only its latest value, so a pause and resume
+    // published during one tick reach the loop as "still enabled" and
+    // `update_settings(paused)` never runs. The runtime's pause counter must
+    // carry the pause across instead.
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let epoch = CapturePauseEpoch::new();
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), AppSettings::default())
+        .with_pause_epoch(epoch.clone());
+
+    clipboard
+        .write_text("before pause")
+        .await
+        .expect("clipboard write");
+    loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("pre-pause clip is captured");
+
+    epoch.note_pause();
+    clipboard
+        .write_text("secret copied while paused")
+        .await
+        .expect("clipboard write");
+    assert!(
+        loop_.capture_once().await.unwrap().is_none(),
+        "a coalesced pause must still keep the paused-era clip out of history",
+    );
+
+    clipboard
+        .write_text("after resume")
+        .await
+        .expect("clipboard write");
+    loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("a copy made after resume is captured");
+    let texts: Vec<_> = store
+        .list_recent(10)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|e| e.plain_text().map(str::to_owned))
+        .collect();
+    assert_eq!(texts, vec!["after resume", "before pause"]);
+}
+
+mod stub {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use nagori_core::{
+        ClipboardData, ClipboardRepresentation, ClipboardSequence, ClipboardSnapshot, Result,
+    };
+    use nagori_platform::ClipboardReader;
+    use time::OffsetDateTime;
+
+    use super::CapturePauseEpoch;
+
+    /// Reader with a hand-set sequence and body, optionally publishing a
+    /// pause while a snapshot is being read.
+    pub(super) struct StubReader {
+        pub(super) sequence: Mutex<String>,
+        pub(super) text: Mutex<Option<String>>,
+        pub(super) pause_during_read: Mutex<Option<CapturePauseEpoch>>,
+    }
+
+    impl StubReader {
+        pub(super) fn new(sequence: &str, text: Option<&str>) -> Self {
+            Self {
+                sequence: Mutex::new(sequence.to_owned()),
+                text: Mutex::new(text.map(str::to_owned)),
+                pause_during_read: Mutex::new(None),
+            }
+        }
+
+        pub(super) fn set(&self, sequence: &str, text: Option<&str>) {
+            *self.sequence.lock().unwrap() = sequence.to_owned();
+            *self.text.lock().unwrap() = text.map(str::to_owned);
+        }
+    }
+
+    #[async_trait]
+    impl ClipboardReader for StubReader {
+        async fn current_snapshot(&self) -> Result<ClipboardSnapshot> {
+            let pause = self.pause_during_read.lock().unwrap().take();
+            if let Some(epoch) = pause {
+                epoch.note_pause();
+            }
+            let representations = self
+                .text
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|text| ClipboardRepresentation {
+                    mime_type: "text/plain".to_owned(),
+                    data: ClipboardData::Text(text),
+                })
+                .into_iter()
+                .collect();
+            Ok(ClipboardSnapshot {
+                sequence: ClipboardSequence::content_hash(self.sequence.lock().unwrap().clone()),
+                captured_at: OffsetDateTime::now_utc(),
+                source: None,
+                representations,
+            })
+        }
+        async fn current_sequence(&self) -> Result<ClipboardSequence> {
+            Ok(ClipboardSequence::content_hash(
+                self.sequence.lock().unwrap().clone(),
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn pause_published_mid_read_drops_the_clip() {
+    // The tick started while capture was enabled, but the user paused while
+    // the body was being read. That body may postdate the pause, so it must
+    // not be persisted, and the next enabled tick re-anchors instead of
+    // capturing it.
+    let store = SqliteStore::open_memory().expect("memory store");
+    let epoch = CapturePauseEpoch::new();
+    let reader = stub::StubReader::new("seq-1", Some("read after the pause"));
+    *reader.pause_during_read.lock().unwrap() = Some(epoch.clone());
+    let mut loop_ = CaptureLoop::new(reader, store.clone(), store.clone(), AppSettings::default())
+        .with_pause_epoch(epoch);
+
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+
+    loop_.reader.set("seq-2", Some("after resume"));
+    loop_
+        .capture_once()
+        .await
+        .unwrap()
+        .expect("a later copy is captured");
+}

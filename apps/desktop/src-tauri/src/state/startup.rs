@@ -311,6 +311,7 @@ fn spawn_capture_supervisor(
                 let settings = runtime.current_settings();
                 let search_cache = runtime.search_cache_handle();
                 let capture_health = runtime.capture_health();
+                let pause_epoch = runtime.capture_pause_epoch();
                 let settings_rx = runtime.settings_subscribe();
                 tokio::spawn(async move {
                     let app_for_capture_event = app.clone();
@@ -344,6 +345,7 @@ fn spawn_capture_supervisor(
                             .with_window(window)
                             .with_search_cache(search_cache)
                             .with_capture_health(capture_health)
+                            .with_pause_epoch(pause_epoch)
                             .with_capture_notifier(capture_notifier)
                             .with_capture_skip_notifier(capture_skip_notifier);
                     let shutdown_signal = async move { worker_shutdown.cancelled().await };

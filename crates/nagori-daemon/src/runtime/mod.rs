@@ -30,6 +30,7 @@ use nagori_storage::SqliteStore;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::ai_registry::AiRequestRegistry;
+use crate::capture_loop::CapturePauseEpoch;
 use crate::health::{CaptureHealth, MaintenanceHealth, StartupHealth};
 use crate::search_cache::{SharedSearchCache, new_shared_cache};
 use crate::thumbnails::ThumbnailGate;
@@ -173,6 +174,10 @@ pub struct NagoriRuntime {
     /// contention for the single writer.
     maintenance_kick_tx: watch::Sender<u64>,
     maintenance_kick_rx: watch::Receiver<u64>,
+    /// Bumped by [`Self::publish_settings`] ahead of every paused settings
+    /// snapshot, so the capture loop re-anchors on resume even when the
+    /// settings watch coalesced the pause away. See [`CapturePauseEpoch`].
+    capture_pause_epoch: CapturePauseEpoch,
 }
 
 impl NagoriRuntime {
@@ -227,6 +232,12 @@ impl NagoriRuntime {
     /// `nagori doctor` without grepping logs.
     pub fn capture_health(&self) -> CaptureHealth {
         self.capture_health.clone()
+    }
+
+    /// Shared pause counter for the capture loop. Whichever process hosts
+    /// the capture task wires it with `CaptureLoop::with_pause_epoch`.
+    pub fn capture_pause_epoch(&self) -> CapturePauseEpoch {
+        self.capture_pause_epoch.clone()
     }
 
     /// Shared handle to the IPC server's handler-panic counter. The
@@ -550,6 +561,7 @@ impl NagoriRuntimeBuilder {
             external_mutations_rx,
             maintenance_kick_tx,
             maintenance_kick_rx,
+            capture_pause_epoch: CapturePauseEpoch::new(),
         }
     }
 }

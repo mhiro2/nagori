@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
@@ -254,6 +255,37 @@ struct DedupState {
     /// resume would see a changed sequence and record a clip the user copied
     /// precisely *because* capture was paused (a password, say).
     reseed_on_resume: bool,
+}
+
+/// Count of settings publishes that left capture paused, shared between the
+/// runtime (which bumps it) and the capture loop (which compares it every
+/// tick).
+///
+/// The loop learns about settings through a `watch` channel, which keeps only
+/// the latest value: a pause and resume published while the loop is busy in
+/// one tick coalesce into a single "still enabled" observation, and the loop
+/// would never know the clipboard changed hands during a pause. The counter
+/// is bumped *before* the paused settings are sent, so any tick that runs
+/// after a pause was published sees it advance even when the paused value
+/// itself was never observed.
+#[derive(Clone, Debug, Default)]
+pub struct CapturePauseEpoch(Arc<AtomicU64>);
+
+impl CapturePauseEpoch {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a settings snapshot with capture paused is about to be
+    /// published.
+    pub fn note_pause(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 /// Pre-clip snapshot of [`DedupState`], returned by
@@ -626,6 +658,13 @@ pub struct CaptureLoop<R, E, A> {
     /// Desktop uses this to surface a "not stored" toast without coupling
     /// the daemon crate to Tauri; CLI/server callers leave it unset.
     capture_skip_notifier: Option<Arc<dyn Fn(CaptureSkipNotice) + Send + Sync>>,
+    /// Shared pause counter and the last value this loop acted on. `None` in
+    /// unit tests that drive pauses through `update_settings` directly. The
+    /// seen value starts at zero rather than the counter's current value, so a
+    /// loop built (or restarted by its supervisor) after any pause in this
+    /// runtime's lifetime re-anchors on its first enabled tick instead of
+    /// capturing whatever is on the clipboard.
+    pause_epoch: Option<(CapturePauseEpoch, u64)>,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -653,6 +692,7 @@ where
             capture_health: None,
             capture_notifier: None,
             capture_skip_notifier: None,
+            pause_epoch: None,
         }
     }
 
@@ -784,6 +824,29 @@ where
         self
     }
 
+    /// Wire the runtime's [`CapturePauseEpoch`] so a pause the settings
+    /// watch coalesced away still re-anchors the baseline on resume.
+    #[must_use]
+    pub fn with_pause_epoch(mut self, epoch: CapturePauseEpoch) -> Self {
+        self.pause_epoch = Some((epoch, 0));
+        self
+    }
+
+    /// Arm the resume re-anchor if a pause was published since the last call.
+    /// Returns whether one was.
+    fn observe_pause_epoch(&mut self) -> bool {
+        let Some((epoch, seen)) = &mut self.pause_epoch else {
+            return false;
+        };
+        let current = epoch.current();
+        if current == *seen {
+            return false;
+        }
+        *seen = current;
+        self.dedup.reseed_on_resume = true;
+        true
+    }
+
     pub fn update_settings(&mut self, settings: AppSettings) {
         // Rebuild the cached classifier in lockstep with the settings snapshot
         // so admission always classifies against the live `regex_denylist` /
@@ -906,6 +969,7 @@ where
     /// belonged to a clip the pause already decided, so it is cleared with
     /// the new baseline.
     async fn hold_for_pause(&mut self, capture_enabled: bool) -> Result<bool> {
+        self.observe_pause_epoch();
         if !capture_enabled {
             self.dedup.reseed_on_resume = true;
             return Ok(true);
@@ -1524,8 +1588,7 @@ where
             }
         };
 
-        let id = self.persist_entry(entry, rollback).await?;
-        Ok(Some(id))
+        self.persist_entry(entry, rollback).await
     }
 
     /// Durably insert an admitted entry and fan out the post-insert
@@ -1535,11 +1598,23 @@ where
     /// the pre-call, a concurrent `runtime.search()` could lock the cache
     /// between `SQLite` commit and our post-invalidate and serve a
     /// pre-insert hit even though the new row is already durable.
+    ///
+    /// A pause published while the tick was reading the clipboard wins and
+    /// yields `Ok(None)`: the body may have been read after the user paused,
+    /// so it is dropped rather than persisted. `observe_pause_epoch` has then
+    /// armed the resume re-anchor, so the next enabled tick decides the clip
+    /// afresh. The check sits after the body read on purpose and is not
+    /// atomic with the insert: a pause landing between the two can only let
+    /// through a body read *before* the pause, i.e. content copied before the
+    /// user paused, which recording is still correct for.
     async fn persist_entry(
         &mut self,
         entry: nagori_core::ClipboardEntry,
         rollback: DedupRollback,
-    ) -> Result<EntryId> {
+    ) -> Result<Option<EntryId>> {
+        if self.observe_pause_epoch() {
+            return Ok(None);
+        }
         if let Some(cache) = &self.search_cache {
             lock_or_recover(cache).invalidate();
         }
@@ -1570,7 +1645,7 @@ where
                 tracing::warn!(entry_id = %id, "capture_notifier_panicked");
             }
         }
-        Ok(id)
+        Ok(Some(id))
     }
 
     pub async fn run_polling(
