@@ -85,7 +85,7 @@ describe('ResultList', () => {
     expect(options.map((o) => o.getAttribute('aria-selected'))).toEqual(['false', 'true', 'false']);
   });
 
-  it('auto-scrolls for navigation and new queries but not same-query refreshes', async () => {
+  it('auto-scrolls for navigation, new queries, and a moved selection on refresh', async () => {
     const itemsA = [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })];
     const spy = vi.spyOn(Element.prototype, 'scrollIntoView');
     const { rerender } = render(ResultList, {
@@ -111,16 +111,29 @@ describe('ResultList', () => {
     expect(spy).toHaveBeenCalled();
     spy.mockClear();
 
-    // Same-query refresh (pin/delete/clipboard): the array is replaced and the
-    // cursor reset, but the query is unchanged -> leave the scroll position.
+    // Same-query refresh (pin/delete/clipboard) that keeps the cursor on the
+    // same row: the array is replaced but nothing moved -> leave the scroll
+    // position.
     await rerender({
       items: [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })],
-      selectedIndex: 0,
+      selectedIndex: 2,
       appliedQuery: 'q',
       onSelect: () => {},
       onConfirm: () => {},
     });
     expect(spy).not.toHaveBeenCalled();
+    spy.mockClear();
+
+    // Same-query refresh where a new capture pushed the selected entry down a
+    // row -> keep the entry the next Enter acts on in view.
+    await rerender({
+      items: [sample({ id: 'n' }), sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })],
+      selectedIndex: 3,
+      appliedQuery: 'q',
+      onSelect: () => {},
+      onConfirm: () => {},
+    });
+    expect(spy).toHaveBeenCalled();
     spy.mockClear();
 
     // New query: jump to the top of the fresh result set.
