@@ -213,6 +213,17 @@ they are treated like `ConcealedType`: the marked clip is skipped without its
 body being read. The skip is audited the same way (`capture_skipped` with
 `concealed_marker`).
 
+## Pausing capture
+
+While capture is paused from the tray or settings, nagori does not read the
+clipboard at all. When capture resumes, whatever is on the clipboard at that
+moment was copied during the pause, so it is **not** recorded. This holds
+even when "capture the clipboard at launch" is on and the app was started
+paused, and a clip that was being read at the instant you paused is dropped
+too. Recording picks up again with the first copy nagori sees after its
+first clipboard poll following the resume; a copy made in the fraction of a
+second between resuming and that poll is treated as part of the pause.
+
 ## User regex denylist
 
 The privacy panel accepts user-defined patterns under

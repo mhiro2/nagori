@@ -209,6 +209,7 @@ fn spawn_capture_supervisor(
                 let settings_rx = settings_rx.clone();
                 let search_cache = runtime.search_cache_handle();
                 let capture_health = runtime.capture_health();
+                let pause_epoch = runtime.capture_pause_epoch();
                 let notify_runtime = runtime.clone();
                 tokio::spawn(async move {
                     let settings = settings_rx.borrow().clone();
@@ -218,6 +219,7 @@ fn spawn_capture_supervisor(
                         CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                             .with_search_cache(search_cache)
                             .with_capture_health(capture_health)
+                            .with_pause_epoch(pause_epoch)
                             .with_capture_notifier(semantic_notifier);
                     if !secure_focus_fail_closed {
                         capture = capture.without_secure_focus_fail_closed();

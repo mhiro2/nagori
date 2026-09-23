@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
@@ -245,6 +246,46 @@ struct DedupState {
     /// skipped, so whatever was already on the pasteboard at startup never
     /// reaches storage.
     pristine: bool,
+    /// Set whenever capture is paused (`capture_enabled == false`) and
+    /// consumed by the first enabled tick. That tick re-anchors the dedup
+    /// baseline to whatever is on the clipboard at resume — the same
+    /// non-capturing seed the pristine phase uses — instead of capturing it.
+    /// Without this, `last_sequence` stays frozen at its pre-pause value
+    /// (paused ticks never read the pasteboard), so the first tick after
+    /// resume would see a changed sequence and record a clip the user copied
+    /// precisely *because* capture was paused (a password, say).
+    reseed_on_resume: bool,
+}
+
+/// Count of settings publishes that left capture paused, shared between the
+/// runtime (which bumps it) and the capture loop (which compares it every
+/// tick).
+///
+/// The loop learns about settings through a `watch` channel, which keeps only
+/// the latest value: a pause and resume published while the loop is busy in
+/// one tick coalesce into a single "still enabled" observation, and the loop
+/// would never know the clipboard changed hands during a pause. The counter
+/// is bumped *before* the paused settings are sent, so any tick that runs
+/// after a pause was published sees it advance even when the paused value
+/// itself was never observed.
+#[derive(Clone, Debug, Default)]
+pub struct CapturePauseEpoch(Arc<AtomicU64>);
+
+impl CapturePauseEpoch {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a settings snapshot with capture paused is about to be
+    /// published.
+    pub fn note_pause(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn current(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 /// Pre-clip snapshot of [`DedupState`], returned by
@@ -263,6 +304,7 @@ impl DedupState {
             last_content_hash: None,
             force_content_check: false,
             pristine: true,
+            reseed_on_resume: false,
         }
     }
 
@@ -616,6 +658,13 @@ pub struct CaptureLoop<R, E, A> {
     /// Desktop uses this to surface a "not stored" toast without coupling
     /// the daemon crate to Tauri; CLI/server callers leave it unset.
     capture_skip_notifier: Option<Arc<dyn Fn(CaptureSkipNotice) + Send + Sync>>,
+    /// Shared pause counter and the last value this loop acted on. `None` in
+    /// unit tests that drive pauses through `update_settings` directly. The
+    /// seen value starts at zero rather than the counter's current value, so a
+    /// loop built (or restarted by its supervisor) after any pause in this
+    /// runtime's lifetime re-anchors on its first enabled tick instead of
+    /// capturing whatever is on the clipboard.
+    pause_epoch: Option<(CapturePauseEpoch, u64)>,
 }
 
 impl<R, E, A> CaptureLoop<R, E, A>
@@ -626,13 +675,17 @@ where
 {
     pub fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
         let classifier = build_classifier(&settings);
+        let mut dedup = DedupState::new();
+        // A loop that starts paused has never seen the clipboard, so the first
+        // enabled tick must re-anchor even if no paused tick ran in between.
+        dedup.reseed_on_resume = !settings.capture_enabled;
         Self {
             reader,
             entries,
             audit,
             settings: Arc::new(settings),
             classifier,
-            dedup: DedupState::new(),
+            dedup,
             window: None,
             failures: CaptureFailurePolicy::new(),
             consecutive_secure_ax_failures: 0,
@@ -643,6 +696,7 @@ where
             capture_health: None,
             capture_notifier: None,
             capture_skip_notifier: None,
+            pause_epoch: None,
         }
     }
 
@@ -774,12 +828,41 @@ where
         self
     }
 
+    /// Wire the runtime's [`CapturePauseEpoch`] so a pause the settings
+    /// watch coalesced away still re-anchors the baseline on resume.
+    #[must_use]
+    pub fn with_pause_epoch(mut self, epoch: CapturePauseEpoch) -> Self {
+        self.pause_epoch = Some((epoch, 0));
+        self
+    }
+
+    /// Arm the resume re-anchor if a pause was published since the last call.
+    /// Returns whether one was.
+    fn observe_pause_epoch(&mut self) -> bool {
+        let Some((epoch, seen)) = &mut self.pause_epoch else {
+            return false;
+        };
+        let current = epoch.current();
+        if current == *seen {
+            return false;
+        }
+        *seen = current;
+        self.dedup.reseed_on_resume = true;
+        true
+    }
+
     pub fn update_settings(&mut self, settings: AppSettings) {
         // Rebuild the cached classifier in lockstep with the settings snapshot
         // so admission always classifies against the live `regex_denylist` /
         // `app_denylist` — and never recompiles those patterns on the capture
         // hot path.
         self.classifier = build_classifier(&settings);
+        // Arm the resume re-anchor here as well as at the paused tick gate: a
+        // pause shorter than one poll interval never reaches a paused tick,
+        // yet a clip copied inside it must not be captured on resume either.
+        if !settings.capture_enabled {
+            self.dedup.reseed_on_resume = true;
+        }
         self.settings = Arc::new(settings);
     }
 
@@ -824,7 +907,7 @@ where
     }
 
     /// Anchor the dedup baseline to whatever was on the clipboard before
-    /// launch, without capturing it.
+    /// launch (or before capture resumed from a pause), without capturing it.
     ///
     /// Reads through the bounded path rather than the unbounded
     /// `current_snapshot`, so a huge pre-launch text/image isn't fully
@@ -843,18 +926,23 @@ where
     /// internal decoded-pixel cap, so a forged-dimension image can't OOM the
     /// probe.
     ///
+    /// The baseline *replaces* the dedup state: when the clipboard yields no
+    /// hashable body (oversized, excluded, empty) `last_content_hash` is
+    /// cleared rather than left at the last captured clip's hash, so a later
+    /// wake-resync cannot mistake a fresh copy of that earlier content for the
+    /// baseline and drop it.
+    ///
     /// `pristine` flips only after the snapshot read succeeds — a transient
     /// platform error propagates first, keeping us in the pristine state so
     /// the next tick retries instead of stranding the loop with no baseline.
-    async fn seed_pristine_baseline(&mut self) -> Result<()> {
+    async fn seed_baseline(&mut self) -> Result<()> {
         // Per-kind hard ceilings, independent of the user's live budgets.
         let budget = ReadBudget::new(MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES);
         match self.reader.current_snapshot_with_max(budget).await? {
             CapturedSnapshot::Captured(snapshot) => {
                 self.dedup.last_sequence = Some(snapshot.sequence.clone());
-                if let Some(entry) = EntryFactory::from_snapshot(snapshot) {
-                    self.dedup.last_content_hash = Some(effective_dedupe_hash(&entry));
-                }
+                self.dedup.last_content_hash = EntryFactory::from_snapshot(snapshot)
+                    .map(|entry| effective_dedupe_hash(&entry));
             }
             CapturedSnapshot::Oversized { sequence, .. } => {
                 // Larger than the hard limit, so it can never be captured
@@ -863,6 +951,7 @@ where
                 // a later wake-resync re-reads through the bounded steady-state
                 // path, hits the same oversize guard, and skips it again.
                 self.dedup.last_sequence = Some(sequence);
+                self.dedup.last_content_hash = None;
             }
             CapturedSnapshot::Excluded { sequence, .. } => {
                 // The pre-launch clipboard carries an owner exclusion marker
@@ -870,10 +959,39 @@ where
                 // there is nothing to hash. Anchor the sequence like the
                 // oversized case so the next poll skips it without re-probing.
                 self.dedup.last_sequence = Some(sequence);
+                self.dedup.last_content_hash = None;
             }
         }
         self.dedup.pristine = false;
         Ok(())
+    }
+
+    /// Apply the pause gate for one tick. Returns `true` when the tick must
+    /// end here without capturing.
+    ///
+    /// While paused there is deliberately no pasteboard access — not even the
+    /// sequence read, which on some adapters touches the body — so the first
+    /// enabled tick re-anchors instead (see `DedupState::reseed_on_resume`):
+    /// whatever is on the clipboard at resume was put there while capture was
+    /// off, so its sequence and content hash are anchored without capturing
+    /// it. The flag is consumed only after the seed read succeeds, so a
+    /// transient platform error retries the re-anchor next tick rather than
+    /// capturing the paused-era clip. Any armed one-shot content check
+    /// belonged to a clip the pause already decided, so it is cleared with
+    /// the new baseline.
+    async fn hold_for_pause(&mut self, capture_enabled: bool) -> Result<bool> {
+        self.observe_pause_epoch();
+        if !capture_enabled {
+            self.dedup.reseed_on_resume = true;
+            return Ok(true);
+        }
+        if !self.dedup.reseed_on_resume {
+            return Ok(false);
+        }
+        self.seed_baseline().await?;
+        self.dedup.force_content_check = false;
+        self.dedup.reseed_on_resume = false;
+        Ok(true)
     }
 
     /// Resolve the frontmost app and whether a secure text field has focus.
@@ -1300,7 +1418,7 @@ where
             self.secure_recovery = None;
         }
 
-        if !settings.capture_enabled {
+        if self.hold_for_pause(settings.capture_enabled).await? {
             return Ok(None);
         }
 
@@ -1370,7 +1488,7 @@ where
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
         if self.dedup.pristine && !settings.capture_initial_clipboard_on_launch {
-            self.seed_pristine_baseline().await?;
+            self.seed_baseline().await?;
             return Ok(None);
         }
         let (frontmost_source, secure_outcome) = self.resolve_secure_focus().await;
@@ -1481,8 +1599,7 @@ where
             }
         };
 
-        let id = self.persist_entry(entry, rollback).await?;
-        Ok(Some(id))
+        self.persist_entry(entry, rollback).await
     }
 
     /// Durably insert an admitted entry and fan out the post-insert
@@ -1492,11 +1609,23 @@ where
     /// the pre-call, a concurrent `runtime.search()` could lock the cache
     /// between `SQLite` commit and our post-invalidate and serve a
     /// pre-insert hit even though the new row is already durable.
+    ///
+    /// A pause published while the tick was reading the clipboard wins and
+    /// yields `Ok(None)`: the body may have been read after the user paused,
+    /// so it is dropped rather than persisted. `observe_pause_epoch` has then
+    /// armed the resume re-anchor, so the next enabled tick decides the clip
+    /// afresh. The check sits after the body read on purpose and is not
+    /// atomic with the insert: a pause landing between the two can only let
+    /// through a body read *before* the pause, i.e. content copied before the
+    /// user paused, which recording is still correct for.
     async fn persist_entry(
         &mut self,
         entry: nagori_core::ClipboardEntry,
         rollback: DedupRollback,
-    ) -> Result<EntryId> {
+    ) -> Result<Option<EntryId>> {
+        if self.observe_pause_epoch() {
+            return Ok(None);
+        }
         if let Some(cache) = &self.search_cache {
             lock_or_recover(cache).invalidate();
         }
@@ -1527,7 +1656,7 @@ where
                 tracing::warn!(entry_id = %id, "capture_notifier_panicked");
             }
         }
-        Ok(id)
+        Ok(Some(id))
     }
 
     pub async fn run_polling(

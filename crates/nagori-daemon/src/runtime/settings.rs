@@ -20,6 +20,12 @@ impl NagoriRuntime {
         // instead of silently swallowing it so this is visible in logs
         // rather than discovered when reload-after-restart "fixes"
         // things.
+        // Bump before sending so a capture tick that could observe the paused
+        // value — or a resume that overwrites it before the loop looks — has
+        // already seen the pause counter move.
+        if !settings.capture_enabled {
+            self.capture_pause_epoch.note_pause();
+        }
         if let Err(err) = self.settings_tx.send(settings) {
             error!(error = %err, "settings_broadcast_failed reason=no_receivers");
         }

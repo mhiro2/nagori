@@ -398,6 +398,30 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   skipped. A pre-launch clip carrying an owner exclusion marker is handled
   the same way: the baseline read surfaces `Excluded`, anchors only the
   sequence, and never hashes the body.
+- While capture is paused (`capture_enabled=false`) the loop returns before
+  touching the clipboard at all — no sequence read, no body read — and arms a
+  resume re-anchor. The first enabled tick runs the same bounded baseline read
+  as the pristine launch path: it anchors the sequence and returns without
+  capturing, so a clip copied during the pause (the reason to pause) is not
+  recorded on resume. The baseline replaces the dedupe hash too — set to the
+  clip's hash, or cleared when there is no hashable body (oversized, excluded,
+  empty) — so a later wake-resync neither promotes the paused-era clip nor
+  mistakes a fresh copy of older content for it. The re-anchor applies
+  regardless of `capture_initial_clipboard_on_launch`, clears any one-shot
+  content check armed during the pause, and stays armed across a failed read.
+  It is armed from four places, because the loop sees settings through a
+  `watch` channel that keeps only the latest value: a loop constructed paused,
+  a paused tick, `update_settings` with a paused snapshot, and the runtime's
+  `CapturePauseEpoch` — a counter `publish_settings` bumps *before* sending
+  each paused snapshot. The counter is what catches a pause and resume that
+  coalesced into one "still enabled" observation while a tick was running; it
+  is checked again just before the durable insert, so a tick that was reading
+  the clipboard when the pause landed drops its clip instead of persisting it.
+  That check is not atomic with the insert, and need not be: it runs after
+  the body read, so a pause landing later only lets through a body read
+  before the pause — content copied before the user paused.
+  The tradeoff is that a copy made between resume and the next tick is
+  anchored rather than captured.
 - After frontmost is captured, the loop asks the platform whether the
   frontmost app's currently-focused element is a secure text field
   (`kAXSecureTextField` role/subrole). A *positively* secure result — AX

@@ -83,3 +83,26 @@ async fn set_capture_enabled_does_not_roll_back_concurrent_field_edits() {
         "capture toggle must not roll back a concurrent global_hotkey edit",
     );
 }
+
+#[tokio::test]
+async fn publishing_paused_settings_advances_the_capture_pause_epoch() {
+    // The capture loop relies on this counter to notice a pause the settings
+    // watch coalesced away, so every paused publish must move it and a
+    // resume must not.
+    let (runtime, _) = runtime_with_memory_clipboard();
+    let epoch = runtime.capture_pause_epoch();
+    let before = epoch.current();
+
+    runtime
+        .set_capture_enabled(false)
+        .await
+        .expect("pause should persist");
+    let paused = epoch.current();
+    assert!(paused > before, "pausing must advance the pause epoch");
+
+    runtime
+        .set_capture_enabled(true)
+        .await
+        .expect("resume should persist");
+    assert_eq!(epoch.current(), paused, "resuming must not advance it");
+}
