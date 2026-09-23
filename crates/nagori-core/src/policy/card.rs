@@ -1,22 +1,77 @@
 //! Payment-card (PAN) detection and redaction.
 //!
-//! Detection and redaction share one candidate regex and one predicate so a
-//! number the classifier flags as a card is always one the redactor scrubs.
+//! Detection and redaction share one scanner and one predicate so a number
+//! the classifier flags as a card is always one the redactor scrubs.
 
-use std::sync::OnceLock;
+use std::ops::Range;
 
-use regex::Regex;
+const MIN_PAN_DIGITS: usize = 13;
+const MAX_PAN_DIGITS: usize = 19;
 
-fn credit_card_candidate_regex() -> &'static Regex {
-    // 13–19 digit runs with optional single-space or single-dash
-    // separators. Word boundaries keep us from matching inside larger
-    // alphanumeric blobs (UUIDs, base64, etc.), and `is_probable_pan` at
-    // the call site filters out unrelated runs (phone numbers, ISBNs,
-    // timestamps, IDs).
-    static CC_CANDIDATE: OnceLock<Regex> = OnceLock::new();
-    CC_CANDIDATE.get_or_init(|| {
-        Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").expect("credit-card regex compiles")
+/// Byte ranges of the card numbers in `text`, found lazily so a caller that
+/// only needs to know whether there is one can stop at the first.
+///
+/// A candidate is a 13–19 digit run with optional single-space or
+/// single-dash separators that is not glued to further digits. Only digits
+/// delimit it — not word boundaries — so a number written straight after
+/// letters or CJK text (`PAN4111…`, `カード4111…です`) is still found.
+/// From each run start the longest candidate that passes `is_probable_pan`
+/// wins, falling back to shorter ones, so digits trailing a card after a
+/// separator (`4111 1111 1111 1111 123`) cannot hide it.
+fn card_spans(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        while start < bytes.len() {
+            let at_run_start =
+                bytes[start].is_ascii_digit() && (start == 0 || !bytes[start - 1].is_ascii_digit());
+            if at_run_start && let Some(end) = longest_pan_from(bytes, start) {
+                let span = start..end;
+                start = end;
+                return Some(span);
+            }
+            start += 1;
+        }
+        None
     })
+}
+
+/// End of the longest card number starting at `start` (a digit), if any.
+/// Candidate bounds always fall on ASCII bytes, so the returned range slices
+/// the text on char boundaries.
+fn longest_pan_from(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut digits = [0_u8; MAX_PAN_DIGITS];
+    // (end offset, digit count) of each candidate, shortest first.
+    let mut ends = [(0_usize, 0_usize); MAX_PAN_DIGITS - MIN_PAN_DIGITS + 1];
+    let mut end_count = 0;
+    let mut count = 0;
+    let mut pos = start;
+    while count < MAX_PAN_DIGITS {
+        // `bytes[pos]` is a digit here.
+        digits[count] = bytes[pos];
+        count += 1;
+        pos += 1;
+        let next = bytes.get(pos).copied();
+        if count >= MIN_PAN_DIGITS && !next.is_some_and(|b| b.is_ascii_digit()) {
+            ends[end_count] = (pos, count);
+            end_count += 1;
+        }
+        match next {
+            Some(b) if b.is_ascii_digit() => {}
+            Some(b' ' | b'-') if bytes.get(pos + 1).is_some_and(u8::is_ascii_digit) => pos += 1,
+            _ => break,
+        }
+    }
+    // Only ASCII digits were copied in, so this never fails.
+    let scanned = std::str::from_utf8(&digits[..count]).ok()?;
+    // Every candidate from this start shares its leading digits, so look the
+    // issuer up once rather than per candidate length.
+    let issued = issued_lengths(scanned);
+    ends[..end_count]
+        .iter()
+        .rev()
+        .find(|&&(_, count)| is_probable_pan(&scanned[..count], issued))
+        .map(|&(end, _)| end)
 }
 
 /// Replace every card number in `text` with a masked marker that keeps only
@@ -31,16 +86,15 @@ fn credit_card_candidate_regex() -> &'static Regex {
 /// delete, and cards with different last four digits no longer dedup into
 /// one row (two cards that share them still do).
 pub(super) fn redact_credit_cards(text: &str) -> String {
-    credit_card_candidate_regex()
-        .replace_all(text, |caps: &regex::Captures<'_>| {
-            let matched = &caps[0];
-            if is_probable_pan(matched) {
-                masked_pan(matched)
-            } else {
-                matched.to_owned()
-            }
-        })
-        .into_owned()
+    let mut redacted = String::with_capacity(text.len());
+    let mut last = 0;
+    for span in card_spans(text) {
+        redacted.push_str(&text[last..span.start]);
+        redacted.push_str(&masked_pan(&text[span.clone()]));
+        last = span.end;
+    }
+    redacted.push_str(&text[last..]);
+    redacted
 }
 
 fn masked_pan(matched: &str) -> String {
@@ -49,10 +103,10 @@ fn masked_pan(matched: &str) -> String {
     format!("[REDACTED ••••{last_four}]")
 }
 
-/// True when `matched` — a digit run from `credit_card_candidate_regex`,
-/// possibly carrying single space/dash separators — is shaped like a real
-/// PAN: its issuer prefix and length pair up with a card network's published
-/// range, and it passes Luhn.
+/// True when `digits` — a candidate from `card_spans` with its separators
+/// stripped — is shaped like a real PAN: its length is one that
+/// `issued` (the [`issued_lengths`] of its leading digits) allows, and it
+/// passes Luhn.
 ///
 /// Luhn alone is far too weak a filter: it holds for roughly one in ten
 /// random digit strings, so on its own it flagged about a tenth of all
@@ -67,9 +121,8 @@ fn masked_pan(matched: &str) -> String {
 /// detector flags as a card is always one the redactor scrubs. Keeping the
 /// prefix / length table and the Luhn check in one place removes the risk of
 /// editing one side and silently leaving a detected card in plaintext.
-fn is_probable_pan(matched: &str) -> bool {
-    let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
-    matches_issuer_range(&digits) && luhn_valid(&digits)
+fn is_probable_pan(digits: &str, issued: u32) -> bool {
+    issued & (1 << digits.len()) != 0 && luhn_valid(digits)
 }
 
 /// One card network's issuer-prefix range and the PAN lengths it issues.
@@ -132,7 +185,7 @@ const ISSUER_RANGES: &[IssuerRange] = &[
     // Mir.
     issuer(4, 2200, 2204, LEN_16_TO_19),
     // Maestro (the ranges still issued; 12-digit PANs sit below the
-    // candidate regex's 13-digit floor).
+    // scanner's 13-digit floor).
     issuer(4, 5018, 5018, LEN_13_TO_19),
     issuer(4, 5020, 5020, LEN_13_TO_19),
     issuer(4, 5038, 5038, LEN_13_TO_19),
@@ -155,16 +208,20 @@ const ISSUER_RANGES: &[IssuerRange] = &[
     issuer(1, 1, 1, &[15]),
 ];
 
-/// Whether `digits` (separators already stripped) has a length and leading
-/// digits that some network in [`ISSUER_RANGES`] issues.
-fn matches_issuer_range(digits: &str) -> bool {
-    ISSUER_RANGES.iter().any(|range| {
-        range.lengths.contains(&digits.len())
-            && digits
+/// Bitmask (bit `n` set = length `n`) of the PAN lengths that the networks
+/// in [`ISSUER_RANGES`] issue for the leading digits of `digits`; `0` when
+/// no network issues from them.
+fn issued_lengths(digits: &str) -> u32 {
+    ISSUER_RANGES
+        .iter()
+        .filter(|range| {
+            digits
                 .get(..range.prefix_len)
                 .and_then(|prefix| prefix.parse::<u32>().ok())
                 .is_some_and(|prefix| (range.low..=range.high).contains(&prefix))
-    })
+        })
+        .flat_map(|range| range.lengths)
+        .fold(0, |mask, &len| mask | (1 << len))
 }
 
 pub(super) fn contains_credit_card(text: &str) -> bool {
@@ -173,9 +230,7 @@ pub(super) fn contains_credit_card(text: &str) -> bool {
     // CVV digits still classifies as Secret. Earlier whole-string Luhn made
     // `4111 1111 1111 1111 exp 12/30 cvv 123` come out Public — the raw
     // PAN then bypassed `apply_secret_handling` and landed on disk.
-    credit_card_candidate_regex()
-        .find_iter(text)
-        .any(|m| is_probable_pan(m.as_str()))
+    card_spans(text).next().is_some()
 }
 
 pub(super) fn luhn_valid(digits: &str) -> bool {

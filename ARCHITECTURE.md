@@ -945,8 +945,10 @@ scrubber and must keep parity with the detector list. In particular:
   END marker, since the detector flags as soon as `-----BEGIN` and
   `PRIVATE KEY-----` both appear.
 - Credit-card candidates are 13–19 digit runs (with optional single
-  spaces / dashes) whose issuer prefix and length match a card network's
-  published range (`policy::card::ISSUER_RANGES`) and that pass Luhn.
+  spaces / dashes) delimited only by non-digits — so a number written
+  straight after letters or CJK text is still a candidate — whose issuer
+  prefix and length match a card network's published range
+  (`policy::card::ISSUER_RANGES`) and that pass Luhn.
   Luhn alone holds for about one in ten random digit strings, so the
   issuer check is what keeps most epoch-millisecond timestamps, snowflake
   IDs and order numbers (which mostly lead with `1` or another non-issuer

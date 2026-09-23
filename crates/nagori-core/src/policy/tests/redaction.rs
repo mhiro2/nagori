@@ -857,3 +857,44 @@ fn block_drops_credit_card_secret_without_mutating_body() {
     // must not be touched on the way out.
     assert_eq!(entry.plain_text(), Some(pan));
 }
+
+#[test]
+fn redacts_card_numbers_touching_letters_or_cjk_text() {
+    // Candidates are delimited by digits, not word boundaries, so a PAN
+    // written straight after a label or inside Japanese prose is scrubbed.
+    for (raw, expected) in [
+        ("PAN4111111111111111", "PAN[REDACTED ••••1111]"),
+        (
+            "カード4111111111111111です",
+            "カード[REDACTED ••••1111]です",
+        ),
+        ("card:4111-1111-1111-1111.", "card:[REDACTED ••••1111]."),
+        ("番号は4111 1111 1111 1111", "番号は[REDACTED ••••1111]"),
+    ] {
+        assert_eq!(redact_text(raw), expected, "{raw:?}");
+        let entry = EntryFactory::from_text(raw);
+        let result = SensitivityClassifier::try_new(AppSettings::default())
+            .unwrap()
+            .classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Secret, "{raw:?}");
+    }
+}
+
+#[test]
+fn redacts_card_numbers_next_to_other_digit_groups() {
+    // Digits trailing or leading a PAN across a separator must not hide it,
+    // and two cards separated by a space are each scrubbed.
+    for (raw, expected) in [
+        ("4111 1111 1111 1111 123", "[REDACTED ••••1111] 123"),
+        ("1234 4111111111111111", "1234 [REDACTED ••••1111]"),
+        (
+            "4111 1111 1111 1111 5555 5555 5555 4444",
+            "[REDACTED ••••1111] [REDACTED ••••4444]",
+        ),
+    ] {
+        assert_eq!(redact_text(raw), expected, "{raw:?}");
+    }
+    // A PAN glued to further digits is part of a longer number, not a card.
+    let glued = "41111111111111119";
+    assert_eq!(redact_text(glued), glued);
+}
