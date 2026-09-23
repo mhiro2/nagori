@@ -359,6 +359,47 @@ export const buildBindings = (
 export const isImeComposing = (event: KeyboardEvent): boolean =>
   event.isComposing || event.keyCode === 229;
 
+// Text-editing keystrokes the search box owns while it holds text. Palette
+// bindings are matched at the window level (see `Palette.svelte`), so without
+// this guard a chord that doubles as an editing gesture fires the palette
+// action *instead of* editing the query. The costly case is Windows/Linux,
+// where the primary-modifier swap turns the ⌘⌫ delete into Ctrl+Backspace —
+// the everyday "delete previous word" gesture — so clearing a search word by
+// word would irreversibly delete the selected entry (or the whole
+// multi-selection). Only chords the platform's text fields actually give an
+// editing meaning are listed: Ctrl+Backspace/Delete (word delete) on
+// Windows/Linux, ⌥⌫/⌥⌦ (word delete) on macOS, plus the bare keys, which only
+// reach a palette action through a user remap. ⌘⌫ on macOS stays with the
+// palette on purpose: it is the established Finder / Maccy-style "delete
+// item" chord there.
+const isTextDeletionChord = (event: KeyboardEvent, platform: Platform | undefined): boolean => {
+  if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
+  if (event.metaKey || event.shiftKey) return false;
+  // The platform's word-delete modifier alone, or no modifier at all.
+  const isMac = macOsLikePlatform(platform);
+  const otherModifier = isMac ? event.ctrlKey : event.altKey;
+  return !otherModifier;
+};
+
+const isTextEntryElement = (
+  target: EventTarget | null,
+): target is HTMLInputElement | HTMLTextAreaElement =>
+  target instanceof HTMLTextAreaElement ||
+  (target instanceof HTMLInputElement && (target.type === 'text' || target.type === 'search'));
+
+/// True when a keystroke should be left to the focused text field instead of
+/// being resolved to a palette action. A deletion chord belongs to the field
+/// while it holds any text; once the query is empty the chord falls through to
+/// the palette again, so the binding still works from an empty search box.
+/// An auto-repeated deletion chord always stays with the field: holding
+/// Ctrl+Backspace to wipe the query must not roll on into deleting entries the
+/// moment the text runs out.
+export const yieldsToTextField = (event: KeyboardEvent, platform?: Platform): boolean => {
+  if (!isTextEntryElement(event.target)) return false;
+  if (isTextDeletionChord(event, platform)) return event.repeat || event.target.value !== '';
+  return false;
+};
+
 export const resolveAction = (
   event: KeyboardEvent,
   bindings: readonly Binding[] = PALETTE_BINDINGS,

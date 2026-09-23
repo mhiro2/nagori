@@ -740,6 +740,31 @@ describe('Palette', () => {
     expect(deleteSelection).toHaveBeenCalledTimes(1);
     expect(clearHistory).not.toHaveBeenCalled();
   });
+  // On Windows/Linux the delete chord is Ctrl+Backspace, which is also the
+  // search box's "delete previous word". While the query holds text the
+  // keystroke must edit the query, not delete the selected entry.
+  it('lets Ctrl+Backspace edit a non-empty query on Windows instead of deleting', async () => {
+    capabilitiesState.capabilities = { platform: 'windows' } as PlatformCapabilities;
+    const { container } = render(Palette);
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input).not.toBeNull();
+    input!.value = 'foo bar';
+    const notCancelled = await fireEvent.keyDown(input!, { key: 'Backspace', ctrlKey: true });
+    expect(deleteSelection).not.toHaveBeenCalled();
+    // The default action stays intact so the input performs the word delete.
+    expect(notCancelled).toBe(true);
+  });
+
+  it('still deletes on Ctrl+Backspace from an empty query on Windows', async () => {
+    capabilitiesState.capabilities = { platform: 'windows' } as PlatformCapabilities;
+    const { container } = render(Palette);
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input).not.toBeNull();
+    input!.value = '';
+    await fireEvent.keyDown(input!, { key: 'Backspace', ctrlKey: true });
+    expect(deleteSelection).toHaveBeenCalledTimes(1);
+  });
+
   // The tray only emits this after the backend read `confirm_clear_history` as
   // true, so the palette must not re-decide against its own (possibly stale)
   // settings copy — that would skip the confirmation right after Settings

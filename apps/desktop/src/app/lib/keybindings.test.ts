@@ -8,6 +8,7 @@ import {
   isImeComposing,
   isPrimaryModifierHeld,
   resolveAction,
+  yieldsToTextField,
 } from './keybindings';
 
 const event = (init: KeyboardEventInit & { key: string }): KeyboardEvent =>
@@ -89,6 +90,78 @@ describe('resolveAction', () => {
     const overlaid = buildBindings({ pin: 'Cmd+Shift+P' });
     expect(resolveAction(event({ key: 'P', metaKey: true, shiftKey: true }), overlaid)).toBe(
       'toggle-pin',
+    );
+  });
+});
+
+// Dispatch through a real input so `event.target` is the text field the
+// guard inspects, the same shape the palette's window listener receives.
+const keyOn = (target: HTMLElement, init: KeyboardEventInit & { key: string }): KeyboardEvent => {
+  let captured: KeyboardEvent | undefined;
+  target.addEventListener('keydown', (e) => (captured = e), { once: true });
+  target.dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true }));
+  if (!captured) throw new Error('keydown not dispatched');
+  return captured;
+};
+const searchInput = (value: string): HTMLInputElement => {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value;
+  return input;
+};
+
+describe('yieldsToTextField', () => {
+  it('leaves Ctrl+Backspace to a non-empty search box on Windows/Linux', () => {
+    const input = searchInput('foo bar');
+    for (const platform of ['windows', 'linuxWayland'] as const) {
+      expect(yieldsToTextField(keyOn(input, { key: 'Backspace', ctrlKey: true }), platform)).toBe(
+        true,
+      );
+      expect(yieldsToTextField(keyOn(input, { key: 'Delete', ctrlKey: true }), platform)).toBe(
+        true,
+      );
+    }
+  });
+
+  it('hands Ctrl+Backspace back to the palette once the query is empty', () => {
+    const input = searchInput('');
+    expect(yieldsToTextField(keyOn(input, { key: 'Backspace', ctrlKey: true }), 'windows')).toBe(
+      false,
+    );
+  });
+
+  // Holding Ctrl+Backspace wipes the query word by word; the auto-repeat that
+  // arrives after the text runs out must not start deleting entries.
+  it('keeps an auto-repeated deletion chord with the field even when it is empty', () => {
+    const input = searchInput('');
+    expect(
+      yieldsToTextField(keyOn(input, { key: 'Backspace', ctrlKey: true, repeat: true }), 'windows'),
+    ).toBe(true);
+  });
+
+  it('keeps the macOS Cmd+Backspace delete with the palette while typing', () => {
+    const input = searchInput('foo');
+    expect(yieldsToTextField(keyOn(input, { key: 'Backspace', metaKey: true }), 'macos')).toBe(
+      false,
+    );
+    // Option+Backspace is the macOS word delete, so the field keeps it.
+    expect(yieldsToTextField(keyOn(input, { key: 'Backspace', altKey: true }), 'macos')).toBe(true);
+  });
+
+  it('never claims the clear-history chord', () => {
+    const input = searchInput('foo');
+    expect(
+      yieldsToTextField(keyOn(input, { key: 'Backspace', ctrlKey: true, altKey: true }), 'windows'),
+    ).toBe(false);
+    expect(
+      yieldsToTextField(keyOn(input, { key: 'Backspace', metaKey: true, altKey: true }), 'macos'),
+    ).toBe(false);
+  });
+
+  it('only applies while a text field has focus', () => {
+    const list = document.createElement('div');
+    expect(yieldsToTextField(keyOn(list, { key: 'Backspace', ctrlKey: true }), 'windows')).toBe(
+      false,
     );
   });
 });

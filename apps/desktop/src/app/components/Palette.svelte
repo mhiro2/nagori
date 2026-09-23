@@ -10,6 +10,7 @@
     isImeComposing,
     isPrimaryModifierHeld,
     resolveAction,
+    yieldsToTextField,
   } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
   import { offersPasteFormatChoice } from '../lib/representations';
@@ -369,6 +370,10 @@
     // once focused; this stands the window handler down for any key that slips
     // through in the frame before its focus lands.
     if (entryContextMenuState.open) return;
+    // Editing keys typed into the search box (e.g. Ctrl+Backspace word delete
+    // on Windows/Linux) edit the query rather than firing the palette action
+    // that shares the chord.
+    if (yieldsToTextField(event, capabilitiesState.capabilities?.platform)) return;
     const action = resolveAction(event, paletteBindings);
     if (!action) return;
     event.preventDefault();
