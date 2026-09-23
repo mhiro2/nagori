@@ -245,6 +245,15 @@ struct DedupState {
     /// skipped, so whatever was already on the pasteboard at startup never
     /// reaches storage.
     pristine: bool,
+    /// Set whenever capture is paused (`capture_enabled == false`) and
+    /// consumed by the first enabled tick. That tick re-anchors the dedup
+    /// baseline to whatever is on the clipboard at resume — the same
+    /// non-capturing seed the pristine phase uses — instead of capturing it.
+    /// Without this, `last_sequence` stays frozen at its pre-pause value
+    /// (paused ticks never read the pasteboard), so the first tick after
+    /// resume would see a changed sequence and record a clip the user copied
+    /// precisely *because* capture was paused (a password, say).
+    reseed_on_resume: bool,
 }
 
 /// Pre-clip snapshot of [`DedupState`], returned by
@@ -263,6 +272,7 @@ impl DedupState {
             last_content_hash: None,
             force_content_check: false,
             pristine: true,
+            reseed_on_resume: false,
         }
     }
 
@@ -780,6 +790,12 @@ where
         // `app_denylist` — and never recompiles those patterns on the capture
         // hot path.
         self.classifier = build_classifier(&settings);
+        // Arm the resume re-anchor here as well as at the paused tick gate: a
+        // pause shorter than one poll interval never reaches a paused tick,
+        // yet a clip copied inside it must not be captured on resume either.
+        if !settings.capture_enabled {
+            self.dedup.reseed_on_resume = true;
+        }
         self.settings = Arc::new(settings);
     }
 
@@ -824,7 +840,7 @@ where
     }
 
     /// Anchor the dedup baseline to whatever was on the clipboard before
-    /// launch, without capturing it.
+    /// launch (or before capture resumed from a pause), without capturing it.
     ///
     /// Reads through the bounded path rather than the unbounded
     /// `current_snapshot`, so a huge pre-launch text/image isn't fully
@@ -846,7 +862,7 @@ where
     /// `pristine` flips only after the snapshot read succeeds — a transient
     /// platform error propagates first, keeping us in the pristine state so
     /// the next tick retries instead of stranding the loop with no baseline.
-    async fn seed_pristine_baseline(&mut self) -> Result<()> {
+    async fn seed_baseline(&mut self) -> Result<()> {
         // Per-kind hard ceilings, independent of the user's live budgets.
         let budget = ReadBudget::new(MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES);
         match self.reader.current_snapshot_with_max(budget).await? {
@@ -874,6 +890,33 @@ where
         }
         self.dedup.pristine = false;
         Ok(())
+    }
+
+    /// Apply the pause gate for one tick. Returns `true` when the tick must
+    /// end here without capturing.
+    ///
+    /// While paused there is deliberately no pasteboard access — not even the
+    /// sequence read, which on some adapters touches the body — so the first
+    /// enabled tick re-anchors instead (see `DedupState::reseed_on_resume`):
+    /// whatever is on the clipboard at resume was put there while capture was
+    /// off, so its sequence and content hash are anchored without capturing
+    /// it. The flag is consumed only after the seed read succeeds, so a
+    /// transient platform error retries the re-anchor next tick rather than
+    /// capturing the paused-era clip. Any armed one-shot content check
+    /// belonged to a clip the pause already decided, so it is cleared with
+    /// the new baseline.
+    async fn hold_for_pause(&mut self, capture_enabled: bool) -> Result<bool> {
+        if !capture_enabled {
+            self.dedup.reseed_on_resume = true;
+            return Ok(true);
+        }
+        if !self.dedup.reseed_on_resume {
+            return Ok(false);
+        }
+        self.seed_baseline().await?;
+        self.dedup.force_content_check = false;
+        self.dedup.reseed_on_resume = false;
+        Ok(true)
     }
 
     /// Resolve the frontmost app and whether a secure text field has focus.
@@ -1300,7 +1343,7 @@ where
             self.secure_recovery = None;
         }
 
-        if !settings.capture_enabled {
+        if self.hold_for_pause(settings.capture_enabled).await? {
             return Ok(None);
         }
 
@@ -1370,7 +1413,7 @@ where
         // platform error keeps us in the pristine state and we retry on
         // the next tick instead of stranding the loop with no baseline.
         if self.dedup.pristine && !settings.capture_initial_clipboard_on_launch {
-            self.seed_pristine_baseline().await?;
+            self.seed_baseline().await?;
             return Ok(None);
         }
         let (frontmost_source, secure_outcome) = self.resolve_secure_focus().await;

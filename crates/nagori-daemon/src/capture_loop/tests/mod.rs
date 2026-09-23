@@ -6,6 +6,7 @@ mod baseline;
 mod dedup_insert;
 mod filters;
 mod images;
+mod pause;
 mod secure_focus;
 
 use std::sync::Arc;
