@@ -46,7 +46,9 @@ contract.
 
 - A built-in classifier flags API keys, JWTs, PEM private-key
   blocks (BEGIN-only is enough), AWS access keys, GitHub tokens,
-  Luhn-checked credit-card runs, OTP-style 6–8 digit bodies, and
+  credit-card numbers (13–19 digits with a card network's issuer
+  prefix and a valid Luhn check digit, which keeps most timestamps and
+  long IDs from being mistaken for cards), OTP-style 6–8 digit bodies, and
   the source app's bundle id against the password-manager list.
 - **Settings → Privacy → Detect one-time codes** (default: on) controls the
   OTP check: when on, a clip whose entire trimmed body is a 6–8 digit run is

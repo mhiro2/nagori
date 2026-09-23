@@ -916,9 +916,10 @@ already run), so it never serves stale grams.
 
 **Detectors** (`nagori-core::policy`): API-key-like strings, JWTs, SSH
 private keys (PEM blocks tolerate a missing END marker), AWS access
-keys, GitHub tokens, Luhn-checked credit-card runs, OTP-like 6–8 digit
-short codes, source-app denylist matches (typed identifiers from the
-bundled password-manager preset plus free-text patterns — see
+keys, GitHub tokens, issuer-prefixed Luhn-valid credit-card runs,
+OTP-like 6–8 digit short codes, source-app denylist matches (typed
+identifiers from the bundled password-manager preset plus free-text
+patterns — see
 [`docs/privacy.md`](./docs/privacy.md#app-denylist)), and user-defined
 regex. The OTP detector is gated by `AppSettings::otp_detection`
 (default `true`, named-fn serde default so an upgraded install without the
@@ -944,8 +945,15 @@ scrubber and must keep parity with the detector list. In particular:
   END marker, since the detector flags as soon as `-----BEGIN` and
   `PRIVATE KEY-----` both appear.
 - Credit-card candidates are 13–19 digit runs (with optional single
-  spaces / dashes) gated by a Luhn check, so phone numbers and ISBNs
-  are not touched.
+  spaces / dashes) whose issuer prefix and length match a card network's
+  published range (`policy::card::ISSUER_RANGES`) and that pass Luhn.
+  Luhn alone holds for about one in ten random digit strings, so the
+  issuer check is what keeps most epoch-millisecond timestamps, snowflake
+  IDs and order numbers (which mostly lead with `1` or another non-issuer
+  digit, or have the wrong length for their prefix) from being redacted.
+  It narrows false positives rather than eliminating them: a number that
+  happens to start with an issuer prefix, have that network's length and
+  pass Luhn is still treated as a card.
 - OTP redaction only fires when the **whole** trimmed body is a 6–8
   digit ASCII run, mirroring the classifier; arbitrary 6–8 digit
   substrings in prose are left intact. Unlike classification, this scrub is
