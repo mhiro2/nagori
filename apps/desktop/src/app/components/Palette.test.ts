@@ -740,6 +740,19 @@ describe('Palette', () => {
     expect(deleteSelection).toHaveBeenCalledTimes(1);
     expect(clearHistory).not.toHaveBeenCalled();
   });
+  // Home / End jump the list only from an empty query; with text typed they
+  // move the search box's caret instead.
+  it('lets Home / End move the caret while the query holds text', async () => {
+    const { container } = render(Palette);
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input).not.toBeNull();
+    input!.value = 'foo';
+    await fireEvent.keyDown(input!, { key: 'Home' });
+    await fireEvent.keyDown(input!, { key: 'End' });
+    expect(selectFirst).not.toHaveBeenCalled();
+    expect(selectLast).not.toHaveBeenCalled();
+  });
+
   // On Windows/Linux the delete chord is Ctrl+Backspace, which is also the
   // search box's "delete previous word". While the query holds text the
   // keystroke must edit the query, not delete the selected entry.

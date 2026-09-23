@@ -158,6 +158,20 @@ describe('yieldsToTextField', () => {
     ).toBe(false);
   });
 
+  it('leaves Home / End to the caret while the query holds text', () => {
+    const input = searchInput('foo');
+    for (const key of ['Home', 'End']) {
+      expect(yieldsToTextField(keyOn(input, { key }), 'macos')).toBe(true);
+      expect(yieldsToTextField(keyOn(input, { key, shiftKey: true }), 'windows')).toBe(true);
+    }
+  });
+
+  it('hands Home / End back to the palette once the query is empty', () => {
+    const input = searchInput('');
+    expect(yieldsToTextField(keyOn(input, { key: 'Home' }), 'macos')).toBe(false);
+    expect(yieldsToTextField(keyOn(input, { key: 'End' }), 'macos')).toBe(false);
+  });
+
   it('only applies while a text field has focus', () => {
     const list = document.createElement('div');
     expect(yieldsToTextField(keyOn(list, { key: 'Backspace', ctrlKey: true }), 'windows')).toBe(

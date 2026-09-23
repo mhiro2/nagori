@@ -381,6 +381,15 @@ const isTextDeletionChord = (event: KeyboardEvent, platform: Platform | undefine
   return !otherModifier;
 };
 
+// Home / End move the caret (Shift extends the selection) inside a text field,
+// so while the query holds text they belong to the field rather than to the
+// palette's jump-to-first / jump-to-last bindings.
+const isCaretMoveChord = (event: KeyboardEvent): boolean =>
+  (event.key === 'Home' || event.key === 'End') &&
+  !event.metaKey &&
+  !event.ctrlKey &&
+  !event.altKey;
+
 const isTextEntryElement = (
   target: EventTarget | null,
 ): target is HTMLInputElement | HTMLTextAreaElement =>
@@ -388,15 +397,17 @@ const isTextEntryElement = (
   (target instanceof HTMLInputElement && (target.type === 'text' || target.type === 'search'));
 
 /// True when a keystroke should be left to the focused text field instead of
-/// being resolved to a palette action. A deletion chord belongs to the field
-/// while it holds any text; once the query is empty the chord falls through to
-/// the palette again, so the binding still works from an empty search box.
+/// being resolved to a palette action. Deletion and caret-move chords belong
+/// to the field while it holds any text; once the query is empty they fall
+/// through to the palette again, so the bindings still work from an empty
+/// search box.
 /// An auto-repeated deletion chord always stays with the field: holding
 /// Ctrl+Backspace to wipe the query must not roll on into deleting entries the
 /// moment the text runs out.
 export const yieldsToTextField = (event: KeyboardEvent, platform?: Platform): boolean => {
   if (!isTextEntryElement(event.target)) return false;
   if (isTextDeletionChord(event, platform)) return event.repeat || event.target.value !== '';
+  if (isCaretMoveChord(event)) return event.target.value !== '';
   return false;
 };
 
