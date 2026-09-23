@@ -177,6 +177,7 @@ pub fn run() {
             app.manage(state);
             app.state::<AppState>()
                 .spawn_background_tasks(app.handle().clone());
+            spawn_exit_on_runtime_shutdown(app.handle());
 
             // Tray icon is installed on every platform. macOS exposes it in
             // the menu bar, Windows in the system notification area, and
@@ -391,6 +392,25 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
         }
         _ => {}
     }
+}
+
+/// Quit the app when its runtime is shut down from outside the quit path —
+/// today an IPC `Shutdown` (`nagori daemon stop`) against the desktop-hosted
+/// endpoint. Going through `exit` runs the same `ExitRequested` cleanup as a
+/// tray Quit, so the workers drain, the IPC endpoint removes its socket /
+/// token files, and `clear_on_quit` is honoured.
+fn spawn_exit_on_runtime_shutdown(handle: &tauri::AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let mut shutdown = state.runtime.shutdown_handle();
+    let app = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if state::runtime_shutdown_requires_app_exit(&mut shutdown, &EXIT_CLEANUP_FIRED).await {
+            tracing::info!("runtime_shutdown_requested_exiting_app");
+            app.exit(0);
+        }
+    });
 }
 
 /// Block the tauri runtime briefly so background workers and optional

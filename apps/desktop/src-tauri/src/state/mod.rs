@@ -16,8 +16,8 @@ mod test_support;
 mod window_focus;
 
 use clear_on_quit::clear_on_quit_marker_path;
-pub(crate) use startup::settings_loaded_or_shutdown;
 use startup::{BackgroundTasks, SettingsLoadGate};
+pub(crate) use startup::{runtime_shutdown_requires_app_exit, settings_loaded_or_shutdown};
 
 /// How long a "last pasted" entry id stays valid before it falls back to
 /// the recency head. Picked at 30 min so a short break between pastes

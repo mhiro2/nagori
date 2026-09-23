@@ -278,6 +278,10 @@ large — so both ends are rejected at parse time rather than at startup.
 
 Send a shutdown request via IPC. Requires `--ipc <endpoint>`.
 
+The request stops whichever process serves the endpoint: a headless
+daemon exits, and a running desktop app quits as if Quit were chosen
+from the tray (including `clear_on_quit`).
+
 ### `nagori daemon status`
 
 Report status for the store the command can see. Without `--ipc` /

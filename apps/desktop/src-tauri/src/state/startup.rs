@@ -6,6 +6,7 @@
 //! daemon's `serve/lifecycle.rs`) plus the shutdown drain.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use nagori_core::{AppSettings, EntryId, Result};
@@ -64,6 +65,21 @@ pub(crate) async fn settings_loaded_or_shutdown(
         ok = settings_loaded_ok(gate) => ok,
         () = shutdown.cancelled() => false,
     }
+}
+
+/// Wait for the runtime's shutdown signal and report whether the app itself
+/// must now quit. The signal has two sources: the app's own exit cleanup
+/// (which sets `exiting` before cancelling, so there is nothing left to do)
+/// and an IPC `Shutdown` from `nagori daemon stop`. The latter stops every
+/// in-process worker and the IPC endpoint, so leaving the tray and palette
+/// up would present a GUI whose runtime is gone while health still reads
+/// ok — the caller routes it into the normal quit path instead.
+pub(crate) async fn runtime_shutdown_requires_app_exit(
+    shutdown: &mut ShutdownHandle,
+    exiting: &AtomicBool,
+) -> bool {
+    shutdown.cancelled().await;
+    !exiting.load(Ordering::SeqCst)
 }
 
 pub(super) struct BackgroundTasks {
@@ -900,6 +916,43 @@ mod tests {
             !settings_loaded_or_shutdown(&mut rx, &mut shutdown).await,
             "a pending gate must not block past shutdown",
         );
+    }
+
+    /// `nagori daemon stop` against the desktop-hosted endpoint cancels the
+    /// shared runtime. The desktop must treat that as a quit request rather
+    /// than keep the tray and palette up over stopped workers.
+    #[tokio::test]
+    async fn ipc_shutdown_requires_app_exit() {
+        let state = build_test_state();
+        let mut shutdown = state.runtime.shutdown_handle();
+        let exiting = AtomicBool::new(false);
+
+        let response = state
+            .runtime
+            .handle_ipc(nagori_ipc::IpcRequest::Shutdown)
+            .await;
+        assert!(matches!(response, nagori_ipc::IpcResponse::Ack));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                runtime_shutdown_requires_app_exit(&mut shutdown, &exiting),
+            )
+            .await
+            .expect("an IPC shutdown must resolve the watcher"),
+            "an IPC shutdown outside the quit path must exit the app",
+        );
+    }
+
+    /// The app's own quit path cancels the same signal after marking itself
+    /// as exiting; the watcher must not request a second exit on top of it.
+    #[tokio::test]
+    async fn app_exit_does_not_request_another_exit() {
+        let state = build_test_state();
+        let mut shutdown = state.runtime.shutdown_handle();
+        let exiting = AtomicBool::new(true);
+
+        state.runtime.shutdown_handle().cancel();
+        assert!(!runtime_shutdown_requires_app_exit(&mut shutdown, &exiting).await);
     }
 
     /// Desktop maintenance loop must record `record_failure` with the

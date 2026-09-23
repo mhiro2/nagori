@@ -1540,6 +1540,14 @@ endpoint", so to address two instances *intentionally* start the
 desktop always serves the default endpoint (it is not configurable) and
 then owns it uncontended.
 
+`Shutdown` means "stop the process that serves this endpoint" on both
+hosts. The daemon exits; the desktop routes the cancelled runtime into
+its normal quit path (the same `ExitRequested` cleanup as tray Quit, so
+workers drain, the socket / token files are removed, and `clear_on_quit`
+is honoured). A desktop that kept its tray and palette up over a stopped
+runtime would look healthy while capturing nothing, so it never stays
+running after `nagori daemon stop`.
+
 **Request / response types** (`nagori-ipc::protocol`):
 
 ```rust
