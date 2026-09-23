@@ -953,7 +953,10 @@ scrubber and must keep parity with the detector list. In particular:
   digit, or have the wrong length for their prefix) from being redacted.
   It narrows false positives rather than eliminating them: a number that
   happens to start with an issuer prefix, have that network's length and
-  pass Luhn is still treated as a card.
+  pass Luhn is still treated as a card. A card is replaced by a masked
+  marker that keeps its last four digits (`[REDACTED ••••1111]`), the part
+  receipts already print, so the marker still identifies which card was
+  copied.
 - OTP redaction only fires when the **whole** trimmed body is a 6–8
   digit ASCII run, mirroring the classifier; arbitrary 6–8 digit
   substrings in prose are left intact. Unlike classification, this scrub is
@@ -979,11 +982,15 @@ the bare `redact_text` or the AI crate's `Redactor`.
   affected rows and `VACUUM`; no in-place migration is provided.
   `apply_secret_handling` bails out *before* that rewrite —
   `SecretAction::Drop(SecretDropReason::FullyRedacted)` — when the redacted
-  body would be nothing but `[REDACTED]` markers (an OTP-shaped body, a bare
-  credit-card number, a `token = …` line the detector fully consumes):
+  body would be nothing but `[REDACTED]` markers (an OTP-shaped body, a
+  `token = …` line the detector fully consumes):
   persisting it would store a zero-information row, and since the content
   hash is re-keyed off the redacted bytes, every such row would otherwise
-  dedup into one confusing `[REDACTED]` entry. Image and file-list entries
+  dedup into one confusing `[REDACTED]` entry. A bare credit-card number is
+  deliberately *not* in this set: its masked marker keeps the last four
+  digits, so it persists as its own row rather than being dropped — a
+  number wrongly taken for a card stays visible and deletable instead of
+  vanishing. Image and file-list entries
   are exempt (a FileList keeps its list structure; an Image's empty plain
   projection can't match). The drop is audited as `secret_redacted_dropped`
   (reason tokens, e.g. `one_time_password_pattern`, in the message) — a

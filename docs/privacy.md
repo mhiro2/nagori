@@ -57,18 +57,21 @@ contract.
   only — typically `Public`, stored as-is. Turning it off does not affect
   the other detectors above.
 - The default **secret handling** is `Store redacted`: matched
-  clips land in SQLite with the secret replaced by `[REDACTED]`,
+  clips land in SQLite with the secret replaced by `[REDACTED]`
+  (a credit-card number keeps its last four digits, e.g.
+  `[REDACTED ••••1111]`, so you can still tell which card it was),
   and the content hash, normalized text, and search tokens are all
   recomputed from the scrubbed form. Switching to `Store full`
   requires an explicit in-app confirmation because the durable
   copy then keeps the raw bytes.
 - Under `Store redacted`, if redaction would leave nothing but
-  `[REDACTED]` markers — a one-time code, a bare credit-card number, a
-  `token = …` line fully consumed by the detector — the clip is **not**
-  stored at all rather than saved as a zero-information row. (Image and
-  file-list clips are exempt and always persist as before.) The palette
-  shows a dismissible notice that the copy was not saved; `nagori add`
-  returns an error instead. Either way the drop is recorded in the audit
+  `[REDACTED]` markers — a one-time code, or a `token = …` line fully
+  consumed by the detector — the clip is **not** stored at all rather
+  than saved as a zero-information row. (Image and file-list clips are
+  exempt and always persist as before. A clip that is only a credit-card
+  number is stored as its masked marker, so it is not dropped either.)
+  The palette shows a dismissible notice that the copy was not saved;
+  `nagori add` returns an error instead. Either way the drop is recorded in the audit
   log, so the 90-day audit trail still shows that *something* was copied
   and refused, even though nothing is left to inspect.
 - `Store redacted` rewrites *new* captures only. Pre-existing

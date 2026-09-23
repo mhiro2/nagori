@@ -19,17 +19,34 @@ fn credit_card_candidate_regex() -> &'static Regex {
     })
 }
 
+/// Replace every card number in `text` with a masked marker that keeps only
+/// the last four digits, e.g. `[REDACTED ••••1111]`.
+///
+/// The last four are what receipts and card-management screens show, so
+/// keeping them discloses nothing a cardholder would not already print, but
+/// it makes the marker information-bearing. That matters for a clip that is
+/// *only* a card number: a bare `[REDACTED]` body counts as fully redacted
+/// and is refused storage, which silently lost any number mistaken for a
+/// card, whereas the masked marker persists as a row the user can see and
+/// delete, and cards with different last four digits no longer dedup into
+/// one row (two cards that share them still do).
 pub(super) fn redact_credit_cards(text: &str) -> String {
     credit_card_candidate_regex()
         .replace_all(text, |caps: &regex::Captures<'_>| {
             let matched = &caps[0];
             if is_probable_pan(matched) {
-                "[REDACTED]".to_owned()
+                masked_pan(matched)
             } else {
                 matched.to_owned()
             }
         })
         .into_owned()
+}
+
+fn masked_pan(matched: &str) -> String {
+    let digits: Vec<char> = matched.chars().filter(char::is_ascii_digit).collect();
+    let last_four: String = digits[digits.len().saturating_sub(4)..].iter().collect();
+    format!("[REDACTED ••••{last_four}]")
 }
 
 /// True when `matched` — a digit run from `credit_card_candidate_regex`,
