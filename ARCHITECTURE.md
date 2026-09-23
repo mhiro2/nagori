@@ -1626,7 +1626,16 @@ not duplicate runtime logic.
   delete, a filter change — keeps the cursor on the selected entry by id (or
   on its neighbour at the same position when that entry left the list). A
   capture landing mid-browse therefore can't swap the target of the next
-  Enter, the preview, or the inspector for the newest entry.
+  Enter, the preview, or the inspector for the newest entry. Palette
+  bindings are resolved by a window-level keydown listener, so a chord that
+  doubles as a text-editing gesture is left to the search box while it holds
+  text (`yieldsToTextField` in `keybindings.ts`): the word-delete chords
+  (Ctrl+Backspace / Ctrl+Delete on Windows/Linux — where the primary-modifier
+  swap turns the ⌘⌫ delete into Ctrl+Backspace — and ⌥⌫ on macOS) and
+  Home / End. From an empty query they fire their palette actions as usual,
+  and an auto-repeated deletion chord never does, so holding Ctrl+Backspace
+  to wipe the query cannot roll on into deleting entries. ⌘⌫ on macOS stays
+  a palette chord even while typing, matching the Finder / Maccy convention.
 - `FilterChips.svelte` — single-line quick-filter row directly under the
   search input. Composite filters that compose freely, split by cardinality:
   the low-churn axes stay as one-click chips — a single-select date window
