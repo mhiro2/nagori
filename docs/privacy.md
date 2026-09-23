@@ -46,27 +46,34 @@ contract.
 
 - A built-in classifier flags API keys, JWTs, PEM private-key
   blocks (BEGIN-only is enough), AWS access keys, GitHub tokens,
-  Luhn-checked credit-card runs, OTP-style 6–8 digit bodies, and
+  credit-card numbers (13–19 digits with a card network's issuer
+  prefix and a valid Luhn check digit, which keeps most timestamps and
+  long IDs from being mistaken for cards), OTP-style 6–8 digit bodies, and
   the source app's bundle id against the password-manager list.
 - **Settings → Privacy → Detect one-time codes** (default: on) controls the
   OTP check: when on, a clip whose entire trimmed body is a 6–8 digit run is
-  flagged as a one-time code and handled like any other secret; when off,
-  that check is skipped and such a clip is classified on its other signals
-  only — typically `Public`, stored as-is. Turning it off does not affect
-  the other detectors above.
+  flagged as a one-time code and handled like any other secret. An 8-digit
+  `YYYYMMDD` date such as `20260923` is not treated as a code and is stored
+  as-is, so a real code that happens to read as a date is stored as-is too
+  (about 0.07% of 8-digit codes). When off, that check is skipped and such
+  a clip is classified on its other signals only — typically `Public`,
+  stored as-is. Turning it off does not affect the other detectors above.
 - The default **secret handling** is `Store redacted`: matched
-  clips land in SQLite with the secret replaced by `[REDACTED]`,
+  clips land in SQLite with the secret replaced by `[REDACTED]`
+  (a credit-card number keeps its last four digits, e.g.
+  `[REDACTED ••••1111]`, so you can still tell which card it was),
   and the content hash, normalized text, and search tokens are all
   recomputed from the scrubbed form. Switching to `Store full`
   requires an explicit in-app confirmation because the durable
   copy then keeps the raw bytes.
 - Under `Store redacted`, if redaction would leave nothing but
-  `[REDACTED]` markers — a one-time code, a bare credit-card number, a
-  `token = …` line fully consumed by the detector — the clip is **not**
-  stored at all rather than saved as a zero-information row. (Image and
-  file-list clips are exempt and always persist as before.) The palette
-  shows a dismissible notice that the copy was not saved; `nagori add`
-  returns an error instead. Either way the drop is recorded in the audit
+  `[REDACTED]` markers — a one-time code, or a `token = …` line fully
+  consumed by the detector — the clip is **not** stored at all rather
+  than saved as a zero-information row. (Image and file-list clips are
+  exempt and always persist as before. A clip that is only a credit-card
+  number is stored as its masked marker, so it is not dropped either.)
+  The palette shows a dismissible notice that the copy was not saved;
+  `nagori add` returns an error instead. Either way the drop is recorded in the audit
   log, so the 90-day audit trail still shows that *something* was copied
   and refused, even though nothing is left to inspect.
 - `Store redacted` rewrites *new* captures only. Pre-existing

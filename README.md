@@ -173,10 +173,12 @@ OS-downloaded language packs / embedding assets. See
   …, from the hostname alone — no network), and pixel dimensions, file size,
   and a *Screenshot* hint on image rows.
 - Built-in secret classifier that redacts API keys, JWTs, AWS / GitHub tokens,
-  PEM blocks, credit-card numbers, and OTPs (one-time codes; the OTP check
-  can be disabled in Settings → Privacy) before they are written to disk —
+  PEM blocks, credit-card numbers, and OTPs (one-time codes other than those
+  that read as an 8-digit date; the OTP check can be disabled in Settings →
+  Privacy) before they are written to disk —
   a clip that redacts down to nothing but the secret is dropped rather than
-  stored — plus a user regex denylist for project-specific patterns.
+  stored (a card number instead keeps its last four digits and is stored) —
+  plus a user regex denylist for project-specific patterns.
 - Honors the "do not record" clipboard markers password managers and apps set
   on every platform (macOS, Windows, and KDE on Linux) — a marked clip is
   skipped without being stored. The exact markers are in

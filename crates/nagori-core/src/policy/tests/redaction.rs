@@ -58,7 +58,7 @@ fn redacts_luhn_valid_credit_card() {
             !redacted.contains("4111"),
             "credit card leaked from {case:?}: {redacted:?}",
         );
-        assert!(redacted.contains("[REDACTED]"));
+        assert_eq!(redacted, "card [REDACTED ••••1111] expires soon");
     }
 }
 
@@ -129,7 +129,7 @@ fn store_redacted_strips_credit_card_from_persisted_body() {
         !body.contains("4111"),
         "credit card digits leaked into stored entry: {body:?}",
     );
-    assert!(body.contains("[REDACTED]"));
+    assert!(body.contains("[REDACTED ••••1111]"));
 }
 
 #[test]
@@ -528,15 +528,17 @@ fn contains_digit_run_at_least(text: &str, min: usize) -> bool {
 fn redact_text_scrubs_credit_cards() {
     // Regression for the gap where `sensitive_regexes()` had no CC rule
     // and PANs survived even under the default `StoreRedacted` policy.
-    // Assert both that the redaction marker appears and that no digit
-    // run of 13+ digits (the shortest valid PAN length) remains
-    // anywhere in the output — guarding against a partial scrub that
-    // strips the spaces but leaves the digits in place.
+    // Assert both that the masked marker (keeping only the last four
+    // digits) appears and that no digit run of 13+ digits (the shortest
+    // valid PAN length) remains anywhere in the output — guarding against
+    // a partial scrub that strips the spaces but leaves the digits in place.
     for pan in TEST_CREDIT_CARDS {
         let redacted = redact_text(pan);
-        assert!(
-            redacted.contains("[REDACTED]"),
-            "expected redaction marker for {pan:?}, got {redacted:?}",
+        let last_four = &pan[pan.len() - 4..];
+        assert_eq!(
+            redacted,
+            format!("[REDACTED ••••{last_four}]"),
+            "expected a masked marker for {pan:?}",
         );
         assert!(
             !redacted.contains(pan),
@@ -595,9 +597,9 @@ fn store_redacted_round_trip_credit_card_strips_pan() {
     // survives in either the durable body or the normalized search
     // text — a `!body.contains("4111")` style check would miss a
     // partial leak that only kept some digits.
-    // Wrap the PAN in prose so the redacted body keeps residual text and
-    // persists (a bare PAN body redacts to nothing and is dropped — covered
-    // by `store_redacted_drops_bare_credit_card_body`).
+    // The bare-PAN body is covered by
+    // `store_redacted_keeps_bare_credit_card_body_masked`; this one checks a
+    // PAN embedded in prose.
     let pan = "4111 1111 1111 1111";
     let stripped = pan.replace([' ', '-'], "");
     let mut entry = EntryFactory::from_text(format!("card {pan} on file"));
@@ -609,7 +611,7 @@ fn store_redacted_round_trip_credit_card_strips_pan() {
     assert_eq!(action, SecretAction::Persist);
 
     let body = entry.plain_text().expect("persisted body").to_owned();
-    assert!(body.contains("[REDACTED]"));
+    assert!(body.contains("[REDACTED ••••1111]"));
     assert!(!body.contains(pan), "spaced PAN survived: {body:?}");
     assert!(
         !body.contains(stripped.as_str()),
@@ -755,19 +757,37 @@ fn store_redacted_drops_otp_only_body_without_mutation() {
 }
 
 #[test]
-fn store_redacted_drops_bare_credit_card_body() {
-    // A bare Luhn-valid PAN redacts to `[REDACTED]` with no surrounding
-    // text, so like the OTP-only case it is refused persistence rather than
-    // stored as a zero-information row.
-    let raw = "4111 1111 1111 1111";
-    let mut entry = EntryFactory::from_text(raw);
+fn store_redacted_keeps_bare_credit_card_body_masked() {
+    // A clip that is nothing but a PAN used to redact to a bare `[REDACTED]`
+    // and be dropped, which silently lost any number mistaken for a card.
+    // The masked marker keeps the last four digits, so the row persists —
+    // visible and deletable — and cards whose last four differ stay
+    // distinct rows.
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
-    entry.sensitivity = classifier.classify(&entry).sensitivity;
-    assert_eq!(entry.sensitivity, Sensitivity::Secret);
+    let mut hashes = Vec::new();
+    for (raw, expected) in [
+        ("4111 1111 1111 1111", "[REDACTED ••••1111]"),
+        ("5555555555554444", "[REDACTED ••••4444]"),
+    ] {
+        let mut entry = EntryFactory::from_text(raw);
+        entry.sensitivity = classifier.classify(&entry).sensitivity;
+        assert_eq!(entry.sensitivity, Sensitivity::Secret);
 
-    let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
-    assert_eq!(action, SecretAction::Drop(SecretDropReason::FullyRedacted));
-    assert_eq!(entry.plain_text(), Some(raw), "body must stay raw on drop");
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+        assert_eq!(action, SecretAction::Persist, "{raw:?} must persist");
+        assert_eq!(entry.plain_text(), Some(expected));
+        assert_eq!(entry.search.preview, expected);
+        assert!(
+            !contains_digit_run_at_least(&entry.search.normalized_text, 5),
+            "PAN digits leaked into normalized_text: {:?}",
+            entry.search.normalized_text,
+        );
+        hashes.push(entry.metadata.content_hash.value.clone());
+    }
+    assert_ne!(
+        hashes[0], hashes[1],
+        "cards with different last four digits must not dedup",
+    );
 }
 
 #[test]
@@ -836,4 +856,45 @@ fn block_drops_credit_card_secret_without_mutating_body() {
     // Block returns Drop so the caller throws the entry away; body
     // must not be touched on the way out.
     assert_eq!(entry.plain_text(), Some(pan));
+}
+
+#[test]
+fn redacts_card_numbers_touching_letters_or_cjk_text() {
+    // Candidates are delimited by digits, not word boundaries, so a PAN
+    // written straight after a label or inside Japanese prose is scrubbed.
+    for (raw, expected) in [
+        ("PAN4111111111111111", "PAN[REDACTED ••••1111]"),
+        (
+            "カード4111111111111111です",
+            "カード[REDACTED ••••1111]です",
+        ),
+        ("card:4111-1111-1111-1111.", "card:[REDACTED ••••1111]."),
+        ("番号は4111 1111 1111 1111", "番号は[REDACTED ••••1111]"),
+    ] {
+        assert_eq!(redact_text(raw), expected, "{raw:?}");
+        let entry = EntryFactory::from_text(raw);
+        let result = SensitivityClassifier::try_new(AppSettings::default())
+            .unwrap()
+            .classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Secret, "{raw:?}");
+    }
+}
+
+#[test]
+fn redacts_card_numbers_next_to_other_digit_groups() {
+    // Digits trailing or leading a PAN across a separator must not hide it,
+    // and two cards separated by a space are each scrubbed.
+    for (raw, expected) in [
+        ("4111 1111 1111 1111 123", "[REDACTED ••••1111] 123"),
+        ("1234 4111111111111111", "1234 [REDACTED ••••1111]"),
+        (
+            "4111 1111 1111 1111 5555 5555 5555 4444",
+            "[REDACTED ••••1111] [REDACTED ••••4444]",
+        ),
+    ] {
+        assert_eq!(redact_text(raw), expected, "{raw:?}");
+    }
+    // A PAN glued to further digits is part of a longer number, not a card.
+    let glued = "41111111111111119";
+    assert_eq!(redact_text(glued), glued);
 }

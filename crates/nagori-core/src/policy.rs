@@ -9,6 +9,12 @@ use crate::{
     settings::{AppDenyRule, MAX_USER_REGEX_COUNT, SecretHandling, SourceAppIdKind},
 };
 
+mod card;
+
+#[cfg(test)]
+use card::luhn_valid;
+use card::{contains_credit_card, redact_credit_cards};
+
 /// Hard upper bound on the source byte length of a single user-provided
 /// `regex_denylist` entry.
 ///
@@ -710,8 +716,11 @@ pub fn redact_text(text: &str) -> String {
     // standalone redactor deliberately keeps scrubbing OTP-shaped bodies
     // regardless — it is settings-independent and stays conservative so any
     // caller redacting a body before it leaves the trust boundary never leaks
-    // an OTP just because the classifier's heuristic was disabled.
-    if is_probable_otp(&redacted) {
+    // an OTP just because the classifier's heuristic was disabled. For the
+    // same reason it checks the bare shape and ignores the classifier's
+    // calendar-date exemption: a real code that happens to read as a date
+    // is still scrubbed here.
+    if is_otp_shaped(&redacted) {
         redacted = redact_full_body(&redacted);
     }
     redacted
@@ -753,45 +762,6 @@ fn redact_private_keys(text: &str) -> String {
     regex.replace_all(text, "[REDACTED]").into_owned()
 }
 
-fn credit_card_candidate_regex() -> &'static Regex {
-    // 13–19 digit runs with optional single-space or single-dash
-    // separators. Word boundaries keep us from matching inside larger
-    // alphanumeric blobs (UUIDs, base64, etc.), and the Luhn check at
-    // the call site filters out unrelated runs (phone numbers, ISBNs).
-    static CC_CANDIDATE: OnceLock<Regex> = OnceLock::new();
-    CC_CANDIDATE.get_or_init(|| {
-        Regex::new(r"\b\d(?:[ -]?\d){12,18}\b").expect("credit-card regex compiles")
-    })
-}
-
-fn redact_credit_cards(text: &str) -> String {
-    credit_card_candidate_regex()
-        .replace_all(text, |caps: &regex::Captures<'_>| {
-            let matched = &caps[0];
-            if is_luhn_pan(matched) {
-                "[REDACTED]".to_owned()
-            } else {
-                matched.to_owned()
-            }
-        })
-        .into_owned()
-}
-
-/// True when `matched` — a digit run from `credit_card_candidate_regex`,
-/// possibly carrying single space/dash separators — is a 13–19 digit
-/// Luhn-valid PAN.
-///
-/// Shared by detection (`contains_credit_card`) and redaction
-/// (`redact_credit_cards`) so the two can never drift: a candidate the
-/// detector flags as a card is always one the redactor scrubs. Keeping the
-/// digit-length range and Luhn check in one place removes the risk of editing
-/// one side (e.g. the `13..=19` bound) and silently leaving a detected card in
-/// plaintext.
-fn is_luhn_pan(matched: &str) -> bool {
-    let digits: String = matched.chars().filter(char::is_ascii_digit).collect();
-    (13..=19).contains(&digits.len()) && luhn_valid(&digits)
-}
-
 fn redact_full_body(text: &str) -> String {
     // Preserve the surrounding whitespace so consumers that rely on
     // newline-delimited entries don't see a layout shift after redaction.
@@ -812,39 +782,52 @@ fn contains_api_key(text: &str) -> bool {
     sensitive_regexes().iter().any(|regex| regex.is_match(text))
 }
 
-fn is_probable_otp(text: &str) -> bool {
+/// Whether the whole trimmed `text` is a 6–8 digit ASCII run — the shape of
+/// a one-time code, before any exemption for numbers that are more likely
+/// something else.
+fn is_otp_shaped(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.len() >= 6 && trimmed.len() <= 8 && trimmed.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn contains_credit_card(text: &str) -> bool {
-    // Detection runs candidate-by-candidate (rather than collapsing every
-    // digit in the body) so a clip that pairs a PAN with adjacent expiry /
-    // CVV digits still classifies as Secret. Earlier whole-string Luhn made
-    // `4111 1111 1111 1111 exp 12/30 cvv 123` come out Public — the raw
-    // PAN then bypassed `apply_secret_handling` and landed on disk.
-    credit_card_candidate_regex()
-        .find_iter(text)
-        .any(|m| is_luhn_pan(m.as_str()))
+/// The classifier's OTP verdict: an OTP-shaped body that is not a compact
+/// calendar date. The date exemption only decides whether a clip is stored
+/// as-is; `redact_text` keeps scrubbing every OTP-shaped body.
+fn is_probable_otp(text: &str) -> bool {
+    is_otp_shaped(text) && !is_compact_calendar_date(text.trim())
 }
 
-fn luhn_valid(digits: &str) -> bool {
-    let mut sum = 0;
-    let mut double = false;
-    for ch in digits.chars().rev() {
-        let Some(mut digit) = ch.to_digit(10) else {
-            return false;
-        };
-        if double {
-            digit *= 2;
-            if digit > 9 {
-                digit -= 9;
-            }
-        }
-        sum += digit;
-        double = !double;
+/// Whether an all-digit `text` reads as a real `YYYYMMDD` date between 1900
+/// and 2099 (e.g. `20260923`).
+///
+/// Compact dates are a common thing to copy — file names, log folders,
+/// release tags — and an 8-digit one is otherwise indistinguishable from an
+/// 8-digit one-time code, so it used to be classified as an OTP and dropped.
+/// The trade-off is that a real code which happens to read as a date is
+/// stored as-is, like any code copied with `otp_detection` off.
+/// Only about 0.07% of random 8-digit codes form such a date, so excluding
+/// them costs almost no OTP coverage. Six-digit `YYMMDD` is not excluded: it
+/// would match several percent of 6-digit codes, the most common OTP length.
+fn is_compact_calendar_date(text: &str) -> bool {
+    if text.len() != 8 {
+        return false;
     }
-    sum % 10 == 0
+    let (Ok(year), Ok(month), Ok(day)) = (
+        text[..4].parse::<u32>(),
+        text[4..6].parse::<u32>(),
+        text[6..].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1900..=2099).contains(&year) && (1..=days_in_month).contains(&day)
 }
 
 #[cfg(test)]

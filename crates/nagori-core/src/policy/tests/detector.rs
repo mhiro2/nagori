@@ -227,3 +227,101 @@ fn classifies_credit_card_with_adjacent_expiry_and_cvv_as_secret() {
         result.reasons,
     );
 }
+
+/// Append the Luhn check digit to `base`, so a test can build a number that
+/// passes Luhn and isolate the issuer-prefix / length filter.
+fn with_luhn_check_digit(base: &str) -> String {
+    (0..=9)
+        .map(|check| format!("{base}{check}"))
+        .find(|candidate| luhn_valid(candidate))
+        .expect("exactly one check digit makes any base Luhn-valid")
+}
+
+#[test]
+fn luhn_valid_numbers_outside_issuer_ranges_are_not_credit_cards() {
+    // Luhn holds for about one in ten random digit strings, so Luhn plus a
+    // 13–19 length window used to flag every tenth timestamp / ID as a card
+    // — and a clip made of just that number was then dropped. Each of these
+    // passes Luhn but has no issuer prefix (or the wrong length for the one
+    // it has), so it must stay Public.
+    let candidates = [
+        with_luhn_check_digit("175862720512"),    // epoch milliseconds
+        with_luhn_check_digit("175862720512345"), // epoch microseconds
+        with_luhn_check_digit("128340512987654321"), // snowflake ID
+        with_luhn_check_digit("700012345678901"), // order number
+        with_luhn_check_digit("900000123456789"), // 9-prefixed ID
+        with_luhn_check_digit("000000000001234"), // zero-padded ID
+        with_luhn_check_digit("1758627205123"),   // 1-prefixed, not UATP's 15 digits
+        with_luhn_check_digit("340000000000000"), // Amex prefix, 16 digits
+        with_luhn_check_digit("51000000000000"),  // Mastercard prefix, 15 digits
+        with_luhn_check_digit("41111111111111"),  // Visa prefix, 15 digits
+    ];
+    for digits in &candidates {
+        assert!(luhn_valid(digits), "test premise: {digits} passes Luhn");
+        let result = classify_default(digits);
+        assert!(
+            !result
+                .reasons
+                .contains(&SensitivityReason::CreditCardPattern),
+            "{digits:?} has no matching issuer range but was flagged as a card",
+        );
+        assert_eq!(result.sensitivity, Sensitivity::Public, "{digits:?}");
+    }
+}
+
+#[test]
+fn epoch_millisecond_timestamps_are_never_credit_cards() {
+    // A run of consecutive timestamps covers every Luhn residue, so under
+    // the old Luhn-only rule about a hundred of these thousand were flagged.
+    for millis in 1_758_000_000_000_u64..1_758_000_001_000 {
+        let text = millis.to_string();
+        let result = classify_default(&text);
+        assert!(
+            !result
+                .reasons
+                .contains(&SensitivityReason::CreditCardPattern),
+            "timestamp {text} was flagged as a card",
+        );
+    }
+}
+
+#[test]
+fn compact_calendar_dates_are_not_otp() {
+    // An 8-digit `YYYYMMDD` date is a common copy (file names, log
+    // folders) and used to be classified as an OTP and dropped. The
+    // exemption is classification-only: the canonical redactor still
+    // scrubs the body, so a real code shaped like a date never leaves the
+    // trust boundary unredacted.
+    for date in ["20260923", "19991231", "20240229", "20000101"] {
+        let result = classify_default(date);
+        assert_eq!(
+            result.sensitivity,
+            Sensitivity::Public,
+            "date {date:?} should stay Public, got {:?}",
+            result.reasons,
+        );
+        assert_eq!(
+            redact_text(date),
+            "[REDACTED]",
+            "the redactor must still scrub OTP-shaped {date:?}",
+        );
+    }
+}
+
+#[test]
+fn eight_digit_codes_that_are_not_real_dates_stay_otp() {
+    // Only a real calendar date is exempt: an impossible month or day, a
+    // non-leap Feb 29, or a year outside 1900–2099 is still an OTP.
+    for code in [
+        "20261301", "20260230", "20250229", "20260900", "18991231", "21000101", "48291537",
+    ] {
+        let result = classify_default(code);
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::OneTimePasswordPattern),
+            "{code:?} should still be OTP, got {:?}",
+            result.reasons,
+        );
+    }
+}
