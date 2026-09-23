@@ -675,13 +675,17 @@ where
 {
     pub fn new(reader: R, entries: E, audit: A, settings: AppSettings) -> Self {
         let classifier = build_classifier(&settings);
+        let mut dedup = DedupState::new();
+        // A loop that starts paused has never seen the clipboard, so the first
+        // enabled tick must re-anchor even if no paused tick ran in between.
+        dedup.reseed_on_resume = !settings.capture_enabled;
         Self {
             reader,
             entries,
             audit,
             settings: Arc::new(settings),
             classifier,
-            dedup: DedupState::new(),
+            dedup,
             window: None,
             failures: CaptureFailurePolicy::new(),
             consecutive_secure_ax_failures: 0,

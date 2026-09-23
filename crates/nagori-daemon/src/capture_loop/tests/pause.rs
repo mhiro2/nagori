@@ -271,6 +271,24 @@ async fn resume_reanchor_retries_on_snapshot_failure() {
 }
 
 #[tokio::test]
+async fn loop_built_paused_reanchors_even_without_a_paused_tick() {
+    // A loop constructed with capture paused and resumed before its first
+    // tick has never observed the clipboard, so the first enabled tick must
+    // still re-anchor rather than capture (even with initial capture on).
+    let clipboard = Arc::new(MemoryClipboard::new());
+    clipboard
+        .write_text("copied while paused")
+        .await
+        .expect("seed clipboard");
+    let store = SqliteStore::open_memory().expect("memory store");
+    let mut loop_ = loop_for(clipboard.clone(), store.clone(), paused());
+
+    loop_.update_settings(AppSettings::default());
+    assert!(loop_.capture_once().await.unwrap().is_none());
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn coalesced_pause_still_reanchors_through_the_pause_epoch() {
     // The settings watch keeps only its latest value, so a pause and resume
     // published during one tick reach the loop as "still enabled" and
