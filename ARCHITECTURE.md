@@ -1619,7 +1619,14 @@ not duplicate runtime logic.
   `FilterChips` → (`ResultList` + `PreviewPane`) → `StatusBar`. The body's
   right column is shared: `ActionInspector.svelte` takes it over the preview
   pane while the action inspector is open (and forces an expanded full-width
-  preview back to the list+panel split first).
+  preview back to the list+panel split first). The selection is an index into
+  the result list, so each result set decides where the cursor lands
+  (`searchQuery.svelte.ts`): a new query starts at the top, while a same-query
+  refresh — a background capture's `clipboard_changed`, a pin toggle, a
+  delete, a filter change — keeps the cursor on the selected entry by id (or
+  on its neighbour at the same position when that entry left the list). A
+  capture landing mid-browse therefore can't swap the target of the next
+  Enter, the preview, or the inspector for the newest entry.
 - `FilterChips.svelte` — single-line quick-filter row directly under the
   search input. Composite filters that compose freely, split by cardinality:
   the low-churn axes stay as one-click chips — a single-select date window
