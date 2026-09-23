@@ -1,7 +1,7 @@
 // Selection helpers operating on `searchState.selectedIndex`. Selection
 // lives alongside `searchState.results` so it stays in lock-step with the
-// list (a fresh result set always resets the cursor to 0); these helpers
-// keep that mutation in one place.
+// list (a new query resets the cursor to 0, a same-query refresh keeps it on
+// the selected entry); these helpers keep that mutation in one place.
 
 import type { SearchResultDto } from '../lib/types';
 import { searchState } from './searchQuery.svelte';
