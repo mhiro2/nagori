@@ -163,17 +163,10 @@ const applyPinToggle = async (target: { id: string; pinned: boolean }): Promise<
     searchState.errorMessage = describeError(err);
     return;
   }
+  // The same-query refresh keeps the cursor on the selected entry by id, so it
+  // follows a toggled row to its new slot when a pinned-first ordering floats
+  // it up, and toggling some other row's pin leaves the selection alone.
   await runQuery(searchState.query);
-  // `runQuery` snaps the cursor back to index 0, which would yank the selection
-  // onto the newest entry after every pin — jarring and making repeated
-  // toggling on one row impossible. Re-anchor to the entry we just toggled by
-  // id so the cursor stays on it (or follows it to its new slot when a
-  // pinned-first ordering floats it up). If the entry dropped out of the list
-  // (e.g. unpinning under the Pinned filter), leave the index where the refresh
-  // left it. ResultList leaves the scroll position alone on this same-query
-  // refresh, so the viewport doesn't jump.
-  const anchored = searchState.results.findIndex((r) => r.id === target.id);
-  if (anchored >= 0) searchState.selectedIndex = anchored;
 };
 
 export const togglePinSelection = async (): Promise<void> => {

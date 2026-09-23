@@ -116,6 +116,60 @@ describe('runQuery', () => {
   });
 });
 
+describe('selection across result sets', () => {
+  it('keeps the selected entry when a same-query refresh inserts a newer row', async () => {
+    // A background capture lands while row 'c' is selected: the refresh pushes
+    // it down one slot, and the cursor must follow it rather than snap to the
+    // new top entry that the next Enter would otherwise paste.
+    searchState.appliedQuery = 'q';
+    searchState.results = [result('a'), result('b'), result('c')];
+    searchState.selectedIndex = 2;
+    vi.mocked(searchClipboard).mockResolvedValue(
+      response({ results: [result('new'), result('a'), result('b'), result('c')] }),
+    );
+    await runQuery('q');
+    expect(searchState.selectedIndex).toBe(3);
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('c');
+  });
+
+  it('keeps the selection on an empty-query refresh too', async () => {
+    searchState.results = [result('a'), result('b')];
+    searchState.selectedIndex = 1;
+    vi.mocked(searchClipboard).mockResolvedValue(
+      response({ results: [result('new'), result('a'), result('b')] }),
+    );
+    await refreshRecent();
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('b');
+  });
+
+  it('stays at the same position when the selected entry left the list', async () => {
+    searchState.appliedQuery = 'q';
+    searchState.results = [result('a'), result('b'), result('c')];
+    searchState.selectedIndex = 1;
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a'), result('c')] }));
+    await runQuery('q');
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('c');
+  });
+
+  it('clamps to the last row when the selected tail entry left the list', async () => {
+    searchState.appliedQuery = 'q';
+    searchState.results = [result('a'), result('b')];
+    searchState.selectedIndex = 1;
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a')] }));
+    await runQuery('q');
+    expect(searchState.selectedIndex).toBe(0);
+  });
+
+  it('resets to the top when the query changes', async () => {
+    searchState.appliedQuery = 'q';
+    searchState.results = [result('a'), result('b')];
+    searchState.selectedIndex = 1;
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a'), result('b')] }));
+    await runQuery('qq');
+    expect(searchState.selectedIndex).toBe(0);
+  });
+});
+
 describe('scheduleQuery + cancelPendingQuery', () => {
   it('mirrors the input into searchState.query immediately', () => {
     scheduleQuery('he');

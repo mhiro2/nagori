@@ -62,6 +62,7 @@ beforeEach(() => {
     totalElapsedMs: 0,
   });
   searchState.query = '';
+  searchState.appliedQuery = '';
   searchState.results = [result()];
   searchState.selectedIndex = 0;
   searchState.loading = false;
@@ -226,6 +227,27 @@ describe('togglePinAt', () => {
     vi.mocked(pinEntry).mockResolvedValue();
     await togglePinAt(1);
     expect(pinEntry).toHaveBeenCalledWith('b', false);
+  });
+
+  it('leaves the keyboard selection on its own entry', async () => {
+    // Unpinning 'b' re-sorts it below 'c'; the cursor stays on 'a' instead of
+    // following the toggled row or snapping back to the top.
+    searchState.results = [
+      result({ id: 'b', pinned: true }),
+      result({ id: 'a' }),
+      result({ id: 'c' }),
+    ];
+    searchState.selectedIndex = 1;
+    vi.mocked(pinEntry).mockResolvedValue();
+    vi.mocked(searchClipboard).mockResolvedValue({
+      results: [result({ id: 'a' }), result({ id: 'b' }), result({ id: 'c' })],
+      totalCandidates: 3,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
+    });
+    await togglePinAt(0);
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('a');
   });
 
   it('does nothing when the index is out of range', async () => {

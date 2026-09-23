@@ -82,6 +82,36 @@ const SEARCH_DEBOUNCE_MS = 80;
 let pendingQueryTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingQueryRaw: string | undefined;
 
+// Where the cursor lands when a result set replaces the one on screen. A new
+// query starts from the top. A same-query refresh — a clipboard capture landing
+// in the background, a pin toggle, a delete, a filter change — keeps the cursor
+// on the entry the user had selected, following it by id when the refresh moves
+// it (a new capture pushes everything down one row). Resetting to 0 there would
+// silently swap the target of the next Enter for whatever is newest, which is
+// how a background copy turned into pasting the wrong entry. When the selected
+// entry left the list, stay at the same position (clamped) so the cursor lands
+// on its neighbour instead of jumping back to the top.
+const nextSelectedIndex = (nextResults: SearchResultDto[], nextQuery: string): number => {
+  if (nextQuery !== searchState.appliedQuery) return 0;
+  const index = searchState.selectedIndex;
+  const previous = searchState.results[index];
+  if (previous === undefined) return 0;
+  const anchored = nextResults.findIndex((r) => r.id === previous.id);
+  if (anchored >= 0) return anchored;
+  return Math.max(0, Math.min(index, nextResults.length - 1));
+};
+
+// Publish a result set produced for `query`. The cursor is computed against the
+// outgoing list before it is replaced, so no intermediate `selectedIndex = 0`
+// is ever observable by effects.
+const applyResults = (results: SearchResultDto[], query: string): void => {
+  const selectedIndex = nextSelectedIndex(results, query);
+  searchState.results = results;
+  searchState.appliedQuery = query;
+  searchState.selectedIndex = selectedIndex;
+  reconcileMultiSelect(results.map((r) => r.id));
+};
+
 const setQuery = (raw: string): void => {
   // Skip the assignment when nothing changed so downstream `$derived` /
   // `$effect` chains don't re-run on every keystroke that didn't actually
@@ -128,12 +158,9 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     // writing these now-stale results — even briefly — would let the user act
     // on the wrong list before the queued search overwrites it.
     if (isFreshest(ticket)) {
-      searchState.results = response.results;
-      searchState.appliedQuery = request.query;
+      applyResults(response.results, request.query);
       appliedTicket = ticket;
-      searchState.selectedIndex = 0;
       searchState.lastElapsedMs = response.totalElapsedMs;
-      reconcileMultiSelect(response.results.map((r) => r.id));
       // Feed the source-app dropdown. When this search was itself app-filtered
       // the results only carry the active app, so the recorder retains the full
       // set last seen unfiltered instead of collapsing the menu to one app.
@@ -160,10 +187,7 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
 
 export const refreshRecent = async (): Promise<void> => {
   if (!isTauri()) {
-    searchState.results = fallbackFixture();
-    searchState.appliedQuery = '';
-    searchState.selectedIndex = 0;
-    reconcileMultiSelect(searchState.results.map((r) => r.id));
+    applyResults(fallbackFixture(), '');
     return;
   }
   await runSearch({ query: '', mode: 'Recent', limit: 50 });
@@ -254,10 +278,10 @@ export const runQuery = async (raw: string): Promise<void> => {
   }
   if (!isTauri()) {
     const lower = raw.toLowerCase();
-    searchState.results = fallbackFixture().filter((r) => r.preview.toLowerCase().includes(lower));
-    searchState.appliedQuery = raw;
-    searchState.selectedIndex = 0;
-    reconcileMultiSelect(searchState.results.map((r) => r.id));
+    applyResults(
+      fallbackFixture().filter((r) => r.preview.toLowerCase().includes(lower)),
+      raw,
+    );
     return;
   }
   await runSearch({ query: raw, mode: 'Auto', limit: 50 });

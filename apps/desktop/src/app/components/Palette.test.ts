@@ -588,10 +588,8 @@ describe('Palette', () => {
   });
 
   it('makes per-row pin toggles inert while the inspector is open', async () => {
-    // `togglePinAt` refreshes via `runQuery`, which publishes a transient
-    // `selectedIndex = 0` before re-anchoring by id — observable across the
-    // await — so even pinning the target row would briefly re-target and cancel
-    // the run. The whole per-row pin affordance stands down while open.
+    // The list is a read-only reference surface while the inspector is open,
+    // so the whole per-row pin affordance stands down.
     const a = resultRow('a', 'alpha');
     const b = resultRow('b', 'bravo');
     vi.mocked(currentSelection).mockReturnValue(a);
