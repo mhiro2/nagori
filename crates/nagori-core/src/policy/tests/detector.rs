@@ -284,3 +284,44 @@ fn epoch_millisecond_timestamps_are_never_credit_cards() {
         );
     }
 }
+
+#[test]
+fn compact_calendar_dates_are_not_otp() {
+    // An 8-digit `YYYYMMDD` date is a common copy (file names, log
+    // folders) and used to be classified as an OTP and dropped. The
+    // exemption is classification-only: the canonical redactor still
+    // scrubs the body, so a real code shaped like a date never leaves the
+    // trust boundary unredacted.
+    for date in ["20260923", "19991231", "20240229", "20000101"] {
+        let result = classify_default(date);
+        assert_eq!(
+            result.sensitivity,
+            Sensitivity::Public,
+            "date {date:?} should stay Public, got {:?}",
+            result.reasons,
+        );
+        assert_eq!(
+            redact_text(date),
+            "[REDACTED]",
+            "the redactor must still scrub OTP-shaped {date:?}",
+        );
+    }
+}
+
+#[test]
+fn eight_digit_codes_that_are_not_real_dates_stay_otp() {
+    // Only a real calendar date is exempt: an impossible month or day, a
+    // non-leap Feb 29, or a year outside 1900–2099 is still an OTP.
+    for code in [
+        "20261301", "20260230", "20250229", "20260900", "18991231", "21000101", "48291537",
+    ] {
+        let result = classify_default(code);
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::OneTimePasswordPattern),
+            "{code:?} should still be OTP, got {:?}",
+            result.reasons,
+        );
+    }
+}

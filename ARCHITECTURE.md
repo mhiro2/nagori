@@ -959,7 +959,13 @@ scrubber and must keep parity with the detector list. In particular:
   copied.
 - OTP redaction only fires when the **whole** trimmed body is a 6–8
   digit ASCII run, mirroring the classifier; arbitrary 6–8 digit
-  substrings in prose are left intact. Unlike classification, this scrub is
+  substrings in prose are left intact. The classifier additionally exempts
+  an 8-digit body that is a real `YYYYMMDD` date in 1900–2099 (`20260923`),
+  a common copy that is only about 0.07% of 8-digit codes, so such a clip
+  is stored as-is; a real code that happens to read as a date is stored
+  unredacted the same way. The exemption is classification-only:
+  `redact_text` checks the bare 6–8 digit shape and still scrubs a body
+  shaped like a date. Unlike classification, this scrub is
   **not** gated by `otp_detection` — `redact_text` stays settings-independent
   and always scrubs an OTP-shaped body, so any caller redacting text before
   it crosses the trust boundary can't leak one just because the setting is
