@@ -709,7 +709,7 @@ mod tests {
     /// Serve `handler` on a Unix socket under `dir`, with the auth token
     /// written where [`IpcContext::connect`] looks for it.
     #[cfg(unix)]
-    fn spawn_stub_owner<F, Fut>(dir: &Path, handler: F) -> PathBuf
+    fn spawn_stub_owner<F, Fut>(dir: &Path, handler: F) -> (PathBuf, tokio::task::JoinHandle<()>)
     where
         F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = IpcResponse> + Send + 'static,
@@ -719,8 +719,10 @@ mod tests {
         let token_path = nagori_ipc::token_path_for_endpoint(&socket).expect("token path");
         nagori_ipc::write_token_file(&token_path, &token).expect("token file");
         let listener = nagori_ipc::bind_unix(&socket).expect("bind");
-        tokio::spawn(nagori_ipc::accept_loop(listener, token, handler));
-        socket
+        let owner = tokio::spawn(async move {
+            let _ = nagori_ipc::accept_loop(listener, token, handler).await;
+        });
+        (socket, owner)
     }
 
     #[cfg(unix)]
@@ -744,7 +746,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
         let held = db_path.clone();
-        let socket = spawn_stub_owner(dir.path(), move |request| {
+        let (socket, _owner) = spawn_stub_owner(dir.path(), move |request| {
             let held = held.clone();
             async move {
                 match request {
@@ -946,7 +948,7 @@ mod tests {
         let target = dir.path().join("other.sqlite");
         let wrote = Arc::new(AtomicBool::new(false));
         let wrote_in_owner = wrote.clone();
-        let socket = spawn_stub_owner(dir.path(), move |request| {
+        let (socket, _owner) = spawn_stub_owner(dir.path(), move |request| {
             let held = held.clone();
             let wrote = wrote_in_owner.clone();
             async move {
@@ -997,39 +999,28 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn owner_exiting_after_the_probe_keeps_the_recovery_hint() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
         let held = db_path.clone();
-        let gone = Arc::new(AtomicBool::new(false));
-        let gone_in_owner = gone.clone();
-        let socket = spawn_stub_owner(dir.path(), move |request| {
+        let (socket, owner) = spawn_stub_owner(dir.path(), move |_request| {
             let held = held.clone();
-            let gone = gone_in_owner.clone();
-            async move {
-                if matches!(request, IpcRequest::Health) && !gone.load(Ordering::SeqCst) {
-                    stub_health(&held)
-                } else {
-                    // Stand-in for an owner that went away mid-command: the
-                    // write and the follow-up probe both fail at the
-                    // transport level.
-                    gone.store(true, Ordering::SeqCst);
-                    IpcResponse::Error(err_with_code("platform_error"))
-                }
-            }
+            async move { stub_health(&held) }
         });
         let executor = connect_to_store_owner(&socket, &db_path)
             .await
             .expect("the owner answers the first probe");
+        // The owner exits between the probe and the write: its listener
+        // closes, so the write's own connection is refused.
+        owner.abort();
+        let _ = owner.await;
+
         let err = run_write_on_owner(
             Cli::try_parse_from(["nagori", "delete", "00000000-0000-4000-8000-000000000000"])
                 .expect("delete should parse"),
             &executor,
         )
         .await
-        .expect_err("the write fails");
+        .expect_err("nothing serves the write");
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("IPC endpoint was unreachable"),
@@ -1045,7 +1036,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
         let held = db_path.clone();
-        let socket = spawn_stub_owner(dir.path(), move |request| {
+        let (socket, _owner) = spawn_stub_owner(dir.path(), move |request| {
             let held = held.clone();
             async move {
                 match request {
