@@ -216,7 +216,10 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Health(HealthResponse {
                     ok: !maintenance.degraded && !capture.degraded,
                     version: env!("CARGO_PKG_VERSION").to_owned(),
-                    db_path: self.db_path.display().to_string(),
+                    // A path that is not valid Unicode can't travel losslessly
+                    // in the JSON report; leave it unreported so the CLI refuses
+                    // to route a write rather than matching a mangled spelling.
+                    db_path: self.db_path.to_str().unwrap_or_default().to_owned(),
                     maintenance,
                     capture,
                     ipc,

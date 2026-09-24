@@ -175,7 +175,8 @@ ARCHITECTURE.md "Optimistic concurrency on settings writes".
 ```
 
 `Health.db_path` is the canonical path of the store the serving instance
-holds (empty if the host did not report one). The CLI compares it with
+holds (empty if the host did not report one, or if the path is not valid
+Unicode). The CLI compares it with
 the store a write targets before routing the write to the default
 endpoint, and refuses the write when they differ.
 

@@ -474,7 +474,8 @@ pub struct HealthResponse {
     pub ok: bool,
     pub version: String,
     /// Canonical path of the database this instance holds, or empty when
-    /// the host did not report one. The CLI compares it against the store
+    /// the host did not report one (or the path is not valid Unicode and
+    /// could not be carried losslessly). The CLI compares it against the store
     /// it means to write before routing a write here: every instance
     /// shares the default endpoint, so reaching it alone does not prove it
     /// holds the `NAGORI_DB_PATH` store the command targets.
