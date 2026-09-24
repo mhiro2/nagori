@@ -329,6 +329,18 @@
   // the highlighted URL. We then suppress the palette's own Enter-to-paste so
   // a single Enter doesn't both open the URL and paste the entry.
   let previewEnterOpensUrl = $state(false);
+  // Set by PreviewPane while its open-URL confirm dialog is up.
+  let previewUrlConfirmOpen = $state(false);
+  // A confirm dialog owns the keyboard while it is open. The dialogs stop
+  // their own keydowns, but a key can still arrive here when focus is not
+  // inside one — e.g. after the focused button disables itself mid-request —
+  // and it must not paste, delete or pin the entry behind the modal. Gate the
+  // preview's flag on the pane being mounted so a stale value from an
+  // unmounted pane can never wedge the palette's keyboard shut.
+  const confirmDialogOpen = $derived(
+    clearConfirmOpen ||
+      (previewUrlConfirmOpen && (showPreviewPane || previewExpanded) && !actionsOpen),
+  );
 
   // The single entry point that docks the inspector — shared by the keyboard
   // chord and the mouse affordances (the preview-pane header button and the
@@ -370,6 +382,7 @@
     // once focused; this stands the window handler down for any key that slips
     // through in the frame before its focus lands.
     if (entryContextMenuState.open) return;
+    if (confirmDialogOpen) return;
     // Editing keys typed into the search box (Ctrl+Backspace word delete on
     // Windows/Linux, Home / End caret moves) edit the query rather than firing
     // the palette action that shares the chord.
@@ -514,6 +527,7 @@
         onExpandBody={(id) => void expandPreview(id)}
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
+        bind:urlConfirmOpen={previewUrlConfirmOpen}
         query={searchState.appliedQuery}
         bindings={paletteBindings}
       />
