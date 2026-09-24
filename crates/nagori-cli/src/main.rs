@@ -372,18 +372,23 @@ async fn connect_to_store_owner(socket_path: &Path, db_path: &Path) -> Result<Ex
     };
     let (context, health) = probe.await.context(OWNER_UNREACHABLE_HINT)?;
     let target = resolve_db_path(db_path);
-    if !holds_store(&health, &target) {
-        let held = if health.db_path.is_empty() {
-            "an unreported store".to_owned()
-        } else {
-            health.db_path
-        };
+    if health.db_path.is_empty() {
         anyhow::bail!(
-            "a running nagori owns {} but the instance on {} holds {held}. Pass \
+            "a running nagori owns {} but the instance on {} does not report which \
+             store it holds, so the write was not sent. Update the running nagori, \
+             or quit it to write to the DB directly.",
+            target.display(),
+            socket_path.display(),
+        );
+    }
+    if !holds_store(&health, &target) {
+        anyhow::bail!(
+            "a running nagori owns {} but the instance on {} holds {}. Pass \
              --ipc <endpoint> of the instance that owns {}, or quit it to write \
              to the DB directly.",
             target.display(),
             socket_path.display(),
+            health.db_path,
             target.display(),
         );
     }
@@ -420,8 +425,35 @@ async fn owner_answers(executor: &Executor) -> bool {
 /// (an already [`resolve_db_path`]-resolved path). An instance that does not
 /// report its store fails the check: without the path there is no telling
 /// which store a write would land in.
+///
+/// Matching canonical paths is the common case. Where the filesystem can
+/// spell one file several ways — a case-insensitive volume, a hard link — the
+/// two paths are also compared by file identity, so the right store is never
+/// refused over its spelling. A path the report could not carry losslessly
+/// (non-UTF-8) matches neither way and fails closed.
 fn holds_store(health: &nagori_ipc::HealthResponse, target: &Path) -> bool {
-    !health.db_path.is_empty() && Path::new(&health.db_path) == target
+    if health.db_path.is_empty() {
+        return false;
+    }
+    let reported = Path::new(&health.db_path);
+    reported == target || is_same_file(reported, target)
+}
+
+#[cfg(unix)]
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+// `canonicalize` on Windows resolves through the file handle and returns the
+// on-disk spelling, so the path comparison above already covers case; std
+// exposes no stable file id to compare beyond that.
+#[cfg(not(unix))]
+fn is_same_file(_a: &Path, _b: &Path) -> bool {
+    false
 }
 
 async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
@@ -938,6 +970,28 @@ mod tests {
             !wrote.load(Ordering::SeqCst),
             "nothing may reach the other store"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_the_held_store_is_the_same_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = dir.path().join("nagori.sqlite");
+        std::fs::write(&held, b"").expect("store file");
+        let link = dir.path().join("link.sqlite");
+        std::fs::hard_link(&held, &link).expect("hard link");
+        let other = dir.path().join("other.sqlite");
+        std::fs::write(&other, b"").expect("other store file");
+        let health = nagori_ipc::HealthResponse {
+            ok: true,
+            version: "test".to_owned(),
+            db_path: resolve_db_path(&held).display().to_string(),
+            maintenance: nagori_ipc::MaintenanceHealthReport::default(),
+            capture: nagori_ipc::CaptureHealthReport::default(),
+            ipc: nagori_ipc::IpcHealthReport::default(),
+        };
+        assert!(holds_store(&health, &resolve_db_path(&link)));
+        assert!(!holds_store(&health, &resolve_db_path(&other)));
     }
 
     #[cfg(unix)]
