@@ -331,7 +331,7 @@ export const zhHans: Messages = {
       maxDaysHelp: '设置为 0 时将永久保留条目。',
       maxTotalBytes: '总存储上限',
       maxTotalBytesPlaceholder: '0 = 无限制',
-      maxTotalBytesHelp: '固定条目即使超过上限也会保留。',
+      maxTotalBytesHelp: '固定条目不计入此上限，也不会因此被删除。',
       maxBytes: '每条最大字节数',
       maxImageBytes: '每张图片最大字节数',
       maxImageBytesHelp:

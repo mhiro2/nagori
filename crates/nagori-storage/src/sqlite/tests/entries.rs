@@ -1157,8 +1157,7 @@ async fn enforce_retention_count_truncates_wal_sidecar() {
 /// (`TOTAL_BYTES_EVICTION_BATCH` oldest rows at a time) instead of loading
 /// every live, unpinned row id into memory inside the write lock. Verify a
 /// backlog larger than one round is still drained completely and that
-/// pinned rows survive — the loop must terminate on "nothing evictable
-/// left" rather than spinning when only pinned rows remain over budget.
+/// pinned rows survive.
 #[tokio::test]
 async fn enforce_total_bytes_drains_backlog_across_eviction_rounds() {
     use super::super::maintenance::TOTAL_BYTES_EVICTION_BATCH;
@@ -1172,15 +1171,53 @@ async fn enforce_total_bytes_drains_backlog_across_eviction_rounds() {
     store.set_pinned(pinned_id, true).await.unwrap();
 
     // A zero budget forces eviction of every unpinned row, which takes
-    // more than one candidate round; the pinned row keeps the total
-    // above budget, so the loop must still stop once only pinned rows
-    // are left.
+    // more than one candidate round.
     let deleted = store.enforce_total_bytes(0).await.unwrap();
     assert_eq!(deleted, backlog, "every unpinned row should be evicted");
     assert!(
         store.get(pinned_id).await.unwrap().is_some(),
         "pinned rows must survive the byte budget"
     );
+}
+
+/// Pinned rows sit outside the byte budget: eviction cannot remove them, so
+/// counting them would let a large pinned set push the total over the cap on
+/// every sweep and evict all unpinned history each time.
+#[tokio::test]
+async fn enforce_total_bytes_ignores_pinned_bytes() {
+    let store = SqliteStore::open_memory().unwrap();
+    let pinned_id = insert_text(&store, &"p".repeat(1000)).await;
+    store.set_pinned(pinned_id, true).await.unwrap();
+    let recent_id = insert_text(&store, &"r".repeat(10)).await;
+
+    // The pinned row alone is far over budget, but the unpinned history
+    // fits, so nothing is evicted.
+    let deleted = store.enforce_total_bytes(100).await.unwrap();
+    assert_eq!(deleted, 0, "pinned bytes must not force eviction");
+    assert!(store.get(pinned_id).await.unwrap().is_some());
+    assert!(store.get(recent_id).await.unwrap().is_some());
+}
+
+/// With pins excluded, the budget trims unpinned history only down to the
+/// cap: the oldest unpinned row goes, the newer one that fits stays.
+#[tokio::test]
+async fn enforce_total_bytes_trims_unpinned_to_budget_beside_large_pins() {
+    let store = SqliteStore::open_memory().unwrap();
+    let pinned_id = insert_text(&store, &"p".repeat(1000)).await;
+    store.set_pinned(pinned_id, true).await.unwrap();
+    let old_id = insert_text(&store, &"o".repeat(60)).await;
+    backdate_entry(
+        &store,
+        old_id,
+        OffsetDateTime::now_utc() - time::Duration::days(1),
+    );
+    let recent_id = insert_text(&store, &"r".repeat(60)).await;
+
+    let deleted = store.enforce_total_bytes(100).await.unwrap();
+    assert_eq!(deleted, 1);
+    assert!(store.get(old_id).await.unwrap().is_none());
+    assert!(store.get(recent_id).await.unwrap().is_some());
+    assert!(store.get(pinned_id).await.unwrap().is_some());
 }
 
 /// Same-instant rows must leave largest-first (the `total_byte_count DESC`

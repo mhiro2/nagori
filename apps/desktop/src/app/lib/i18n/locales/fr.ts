@@ -360,7 +360,8 @@ export const fr: Messages = {
       maxDaysHelp: 'Définir à 0 pour conserver les entrées indéfiniment.',
       maxTotalBytes: 'Limite de stockage totale',
       maxTotalBytesPlaceholder: '0 = illimité',
-      maxTotalBytesHelp: 'Les entrées épinglées sont protégées même si elles dépassent la limite.',
+      maxTotalBytesHelp:
+        'Les entrées épinglées ne comptent pas dans cette limite et ne sont jamais supprimées par elle.',
       maxBytes: 'Octets max. par entrée',
       maxImageBytes: 'Octets max. par image',
       maxImageBytesHelp:

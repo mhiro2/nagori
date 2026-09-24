@@ -347,7 +347,8 @@ export const ja: Messages = {
       maxDaysHelp: '0 を指定すると履歴を期限なく保持します。',
       maxTotalBytes: '総ストレージ上限',
       maxTotalBytesPlaceholder: '0 で無制限',
-      maxTotalBytesHelp: 'ピン留めした項目は上限超過時も削除されません。',
+      maxTotalBytesHelp:
+        'ピン留めした項目はこの上限に含まれず、上限による削除の対象にもなりません。',
       maxBytes: '1 件あたりの最大バイト数',
       maxImageBytes: '画像 1 件あたりの最大バイト数',
       maxImageBytesHelp:

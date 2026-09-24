@@ -346,7 +346,7 @@ export const ko: Messages = {
       maxDaysHelp: '0으로 설정하면 항목을 무기한 보존합니다.',
       maxTotalBytes: '전체 저장 용량 제한',
       maxTotalBytesPlaceholder: '0 = 무제한',
-      maxTotalBytesHelp: '고정된 항목은 제한을 초과해도 보호됩니다.',
+      maxTotalBytesHelp: '고정된 항목은 이 제한에 포함되지 않으며 제한 때문에 삭제되지 않습니다.',
       maxBytes: '항목당 최대 바이트',
       maxImageBytes: '이미지당 최대 바이트',
       maxImageBytesHelp:

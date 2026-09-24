@@ -295,11 +295,18 @@ impl SqliteStore {
             // `entries.total_byte_count` is materialised by the
             // `entry_representations_ai/ad/au_total` triggers, so the
             // budget total is a single-table aggregate.
+            //
+            // Pinned rows are outside the budget, mirroring
+            // `enforce_retention_count`: eviction can never delete them, so
+            // counting their bytes would only let pins crowd out history.
+            // Once the pinned total alone exceeded the cap, every sweep would
+            // evict all unpinned rows (including a clip captured seconds
+            // earlier) and still end over budget.
             let total_i64: i64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(total_byte_count), 0)
                      FROM entries
-                     WHERE deleted_at IS NULL",
+                     WHERE deleted_at IS NULL AND pinned = 0",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -355,7 +362,10 @@ impl SqliteStore {
                         .collect::<Result<Vec<_>>>()?
                 };
                 if candidates.is_empty() {
-                    // Everything evictable is gone; the remainder is pinned.
+                    // Every unpinned row is gone. Only reachable when the
+                    // running total drifted from the live set (the sum and
+                    // the candidates cover the same rows), so stop rather
+                    // than spin.
                     break;
                 }
                 let mut removed_this_round = 0usize;
