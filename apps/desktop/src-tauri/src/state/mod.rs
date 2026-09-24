@@ -293,7 +293,7 @@ impl AppState {
         let instance_lock = acquire_instance_lock(lock_dir_for(db_path))?;
         let store = SqliteStore::open(db_path)
             .map_err(|err| annotate_startup_error(err, db_path, StartupStage::OpenDb))?;
-        let mut state = Self::build(store)?;
+        let mut state = Self::build(store, db_path)?;
         state.instance_lock = Some(instance_lock);
         state.clear_on_quit_marker = Some(clear_on_quit_marker_path(db_path));
         // Fail-closed: complete any clear-on-quit purge the previous session
@@ -304,8 +304,17 @@ impl AppState {
         Ok(state)
     }
 
-    fn build(store: SqliteStore) -> Result<Self> {
-        let parts = build_native_runtime(store, NativeRuntimeOptions::default())?;
+    fn build(store: SqliteStore, db_path: &Path) -> Result<Self> {
+        // Report the opened store over IPC so the CLI can confirm a write it
+        // routes here targets this store rather than another one reached
+        // through the shared default endpoint.
+        let parts = build_native_runtime(
+            store,
+            NativeRuntimeOptions {
+                db_path: Some(db_path.to_path_buf()),
+                ..NativeRuntimeOptions::default()
+            },
+        )?;
         let (settings_load_tx, settings_load_rx) =
             tokio::sync::watch::channel(SettingsLoadGate::Pending);
         Ok(Self {

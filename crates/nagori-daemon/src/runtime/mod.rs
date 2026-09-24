@@ -418,13 +418,17 @@ impl NagoriRuntimeBuilder {
         self
     }
 
-    /// Record the on-disk database path so the IPC `Doctor` report can echo
-    /// which store the daemon is holding. Daemon callers pass the resolved
-    /// `--db` / default path; library callers (desktop, tests) leave it unset
-    /// and the report omits the `db` row as before.
+    /// Record the on-disk database path so the IPC `Doctor` and `Health`
+    /// reports can echo which store this instance is holding. Hosts that own
+    /// a store (the daemon and the desktop app) pass the path they opened;
+    /// tests may leave it unset and the reports then omit it.
+    ///
+    /// The path is canonicalized here (the store is already open, so it
+    /// exists) so a relative `--db` or a symlinked data directory compares
+    /// equal to the CLI's own resolution of the same file.
     #[must_use]
     pub fn db_path(mut self, path: std::path::PathBuf) -> Self {
-        self.db_path = Some(path);
+        self.db_path = Some(std::fs::canonicalize(&path).unwrap_or(path));
         self
     }
 

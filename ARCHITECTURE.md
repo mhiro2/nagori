@@ -1548,7 +1548,13 @@ contest. Which store the CLI reaches is still "whichever process owns the
 endpoint", so to address two instances *intentionally* start the
 *daemon* with a custom `--ipc <endpoint>` and point the CLI at it; the
 desktop always serves the default endpoint (it is not configurable) and
-then owns it uncontended.
+then owns it uncontended. Because reaching the endpoint does not identify
+the store behind it, both hosts report the canonical path of the store
+they opened in `Health`, and the CLI checks it before routing a
+lock-gated write: a write aimed at a `NAGORI_DB_PATH` store that another
+instance serves the endpoint for is refused (pass `--ipc` for the owner of
+that store) instead of landing in the wrong history, and an `--auto-ipc`
+read in the same situation reads the targeted store locally.
 
 `Shutdown` means "stop the process that serves this endpoint" on both
 hosts. The daemon exits; the desktop routes the cancelled runtime into

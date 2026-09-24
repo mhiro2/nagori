@@ -492,6 +492,7 @@ mod tests {
             IpcResponse::Health(HealthResponse {
                 ok: true,
                 version: "test-version".to_owned(),
+                db_path: String::new(),
                 maintenance: crate::MaintenanceHealthReport::default(),
                 capture: crate::CaptureHealthReport::default(),
                 ipc: crate::IpcHealthReport::default(),

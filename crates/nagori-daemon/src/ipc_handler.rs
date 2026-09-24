@@ -216,6 +216,7 @@ impl NagoriRuntime {
                 Ok(IpcResponse::Health(HealthResponse {
                     ok: !maintenance.degraded && !capture.degraded,
                     version: env!("CARGO_PKG_VERSION").to_owned(),
+                    db_path: self.db_path.display().to_string(),
                     maintenance,
                     capture,
                     ipc,

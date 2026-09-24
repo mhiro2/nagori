@@ -473,6 +473,13 @@ pub struct IpcError {
 pub struct HealthResponse {
     pub ok: bool,
     pub version: String,
+    /// Canonical path of the database this instance holds, or empty when
+    /// the host did not report one. The CLI compares it against the store
+    /// it means to write before routing a write here: every instance
+    /// shares the default endpoint, so reaching it alone does not prove it
+    /// holds the `NAGORI_DB_PATH` store the command targets.
+    #[serde(default)]
+    pub db_path: String,
     /// Health snapshot of the background maintenance loop. Cheap to
     /// serialise even when nothing is wrong (default-zero), and gives
     /// callers (`nagori doctor`, dashboards, oncall checks) a single

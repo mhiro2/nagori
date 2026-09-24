@@ -369,6 +369,7 @@ mod tests_windows {
                 IpcResponse::Health(HealthResponse {
                     ok: true,
                     version: "pipe-test".to_owned(),
+                    db_path: String::new(),
                     maintenance: crate::MaintenanceHealthReport::default(),
                     capture: crate::CaptureHealthReport::default(),
                     ipc: crate::IpcHealthReport::default(),

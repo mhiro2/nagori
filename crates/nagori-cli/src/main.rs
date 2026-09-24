@@ -244,7 +244,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         // the write must go through its IPC endpoint). Probing the
         // endpoint first would leave a gap between the health check and
         // the command's own connection in which the owner can exit.
-        if let Some(lock) = try_acquire_direct_write_lock(&default_db_path())? {
+        let db_path = default_db_path();
+        if let Some(lock) = try_acquire_direct_write_lock(&db_path)? {
             init_tracing();
             tracing::warn!(
                 "ipc_fallback_to_local_db reason=no_running_instance mode=write-fallback"
@@ -252,7 +253,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let _write_lock = lock;
             return run_locally(cli).await;
         }
-        let executor = connect_to_store_owner(&default_socket_path()).await?;
+        let executor = connect_to_store_owner(&default_socket_path(), &db_path).await?;
         return commands::run_cli(cli, &executor).await;
     }
     // `--auto-ipc` only changes *reads* (see the flag's help): non-read
@@ -263,13 +264,28 @@ async fn dispatch(cli: Cli) -> Result<()> {
     // command like `daemon stop` (whose success closes the connection).
     if cli.db.is_none() && cli.auto_ipc && can_fall_back_to_local_read(&cli.command) {
         let candidate = default_socket_path();
-        if let Ok(token_path) = nagori_ipc::token_path_for_endpoint(&candidate)
-            && let Ok(token) = nagori_ipc::read_token_file(&token_path)
-            && IpcClient::new(candidate.to_string_lossy().as_ref(), token)
-                .send(IpcRequest::Health)
-                .await
-                .is_ok()
+        let probe = match nagori_ipc::token_path_for_endpoint(&candidate)
+            .and_then(|token_path| nagori_ipc::read_token_file(&token_path))
         {
+            Ok(token) => {
+                IpcClient::new(candidate.to_string_lossy().as_ref(), token)
+                    .send(IpcRequest::Health)
+                    .await
+            }
+            Err(err) => Err(err),
+        };
+        // A reachable endpoint may still belong to an instance holding a
+        // different store than the `NAGORI_DB_PATH` one this read targets
+        // (every instance shares the default endpoint); read that store
+        // locally instead of answering from the wrong history.
+        let (reachable, other_store) = match &probe {
+            Ok(IpcResponse::Health(health)) => (
+                true,
+                !holds_store(health, &resolve_db_path(&default_db_path())),
+            ),
+            _ => (false, false),
+        };
+        if reachable && !other_store {
             // The probe succeeded, but the owner can still exit in the window
             // between it and the command's own connection (a probe→connect
             // TOCTOU). If that race makes the endpoint unreachable mid-flight,
@@ -287,6 +303,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 }
                 Err(err) => return Err(err),
             }
+        } else if other_store {
+            init_tracing();
+            tracing::warn!(
+                socket = %candidate.display(),
+                "ipc_fallback_to_local_db reason=owner_holds_another_store mode=local-fallback"
+            );
         } else {
             // The endpoint either had no readable token or failed the health
             // probe. Reads fall back to opening the SQLite file directly —
@@ -328,22 +350,53 @@ async fn dispatch(cli: Cli) -> Result<()> {
 /// refusal, …) is the daemon's own verdict and must reach the user — and
 /// `exit_code_for` — as-is instead of being relabelled as a connection
 /// problem.
-async fn connect_to_store_owner(socket_path: &Path) -> Result<Executor> {
+///
+/// Reaching the endpoint does not prove the instance behind it holds
+/// `db_path`: every instance serves the same default endpoint, while the
+/// lock only says *some* instance owns the store's directory. A write aimed
+/// at a `NAGORI_DB_PATH` store (a `clear --all` included) would otherwise land
+/// in whatever store the default-endpoint instance holds, so the store it
+/// reports must match before anything is sent.
+async fn connect_to_store_owner(socket_path: &Path, db_path: &Path) -> Result<Executor> {
     let probe = async {
         let context = IpcContext::connect(socket_path)?;
         match context.client.send(IpcRequest::Health).await? {
-            IpcResponse::Health(_) => Ok(context),
+            IpcResponse::Health(health) => Ok((context, health)),
             IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
             _ => Err(anyhow!("unexpected ipc response to the health probe")),
         }
     };
-    let context = probe.await.context(
+    let (context, health) = probe.await.context(
         "a running nagori owns the store but its IPC endpoint was unreachable. \
          Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
          `nagori daemon run`, or quit the running instance to write to the DB \
          directly.",
     )?;
+    let target = resolve_db_path(db_path);
+    if !holds_store(&health, &target) {
+        let held = if health.db_path.is_empty() {
+            "an unreported store".to_owned()
+        } else {
+            health.db_path
+        };
+        anyhow::bail!(
+            "a running nagori owns {} but the instance on {} holds {held}. Pass \
+             --ipc <endpoint> of the instance that owns {}, or quit it to write \
+             to the DB directly.",
+            target.display(),
+            socket_path.display(),
+            target.display(),
+        );
+    }
     Ok(Executor::Ipc(context))
+}
+
+/// Whether the instance that answered `health` holds the store at `target`
+/// (an already [`resolve_db_path`]-resolved path). An instance that does not
+/// report its store fails the check: without the path there is no telling
+/// which store a write would land in.
+fn holds_store(health: &nagori_ipc::HealthResponse, target: &Path) -> bool {
+    !health.db_path.is_empty() && Path::new(&health.db_path) == target
 }
 
 async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
@@ -376,19 +429,31 @@ fn try_acquire_direct_write_lock(db_path: &Path) -> Result<Option<nagori_storage
     };
     nagori_storage::ensure_private_directory(lexical_parent)
         .with_context(|| format!("failed to create {}", lexical_parent.display()))?;
-    let resolved_db = std::fs::canonicalize(db_path).unwrap_or_else(|_| {
+    let resolved_db = resolve_db_path(db_path);
+    let lock_dir = resolved_db
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
+}
+
+/// Resolve `db_path` through symlinks, the same way a running instance
+/// reports the store it holds. A DB that doesn't exist yet (fresh store)
+/// can't be canonicalized itself, so its parent is resolved instead and the
+/// filename re-attached.
+fn resolve_db_path(db_path: &Path) -> PathBuf {
+    std::fs::canonicalize(db_path).unwrap_or_else(|_| {
+        let lexical_parent = match db_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
         let resolved_parent =
             std::fs::canonicalize(lexical_parent).unwrap_or_else(|_| lexical_parent.to_path_buf());
         match db_path.file_name() {
             Some(name) => resolved_parent.join(name),
             None => resolved_parent,
         }
-    });
-    let lock_dir = resolved_db
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
+    })
 }
 
 const fn is_write_command(cmd: &Command) -> bool {
@@ -587,7 +652,7 @@ mod tests {
     /// Serve `handler` on a Unix socket under `dir`, with the auth token
     /// written where [`IpcContext::connect`] looks for it.
     #[cfg(unix)]
-    async fn spawn_stub_owner<F, Fut>(dir: &Path, handler: F) -> PathBuf
+    fn spawn_stub_owner<F, Fut>(dir: &Path, handler: F) -> PathBuf
     where
         F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = IpcResponse> + Send + 'static,
@@ -602,10 +667,11 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn stub_health() -> IpcResponse {
+    fn stub_health(db_path: &Path) -> IpcResponse {
         IpcResponse::Health(nagori_ipc::HealthResponse {
             ok: true,
             version: "test".to_owned(),
+            db_path: db_path.display().to_string(),
             maintenance: nagori_ipc::MaintenanceHealthReport::default(),
             capture: nagori_ipc::CaptureHealthReport::default(),
             ipc: nagori_ipc::IpcHealthReport::default(),
@@ -619,17 +685,21 @@ mod tests {
         // write, so a daemon-side `NotFound` printed as a connection problem
         // while still exiting 4.
         let dir = tempfile::tempdir().expect("tempdir");
-        let socket = spawn_stub_owner(dir.path(), |request| async move {
-            match request {
-                IpcRequest::Health => stub_health(),
-                _ => IpcResponse::Error(err_with_code("not_found")),
+        let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
+        let held = db_path.clone();
+        let socket = spawn_stub_owner(dir.path(), move |request| {
+            let held = held.clone();
+            async move {
+                match request {
+                    IpcRequest::Health => stub_health(&held),
+                    _ => IpcResponse::Error(err_with_code("not_found")),
+                }
             }
-        })
-        .await;
+        });
         let cli = Cli::try_parse_from(["nagori", "delete", "00000000-0000-4000-8000-000000000000"])
             .expect("delete should parse");
 
-        let executor = connect_to_store_owner(&socket)
+        let executor = connect_to_store_owner(&socket, &db_path)
             .await
             .expect("a responsive owner should be reachable");
         let err = commands::run_cli(cli, &executor)
@@ -653,7 +723,8 @@ mod tests {
         let token = nagori_ipc::AuthToken::generate().expect("token should generate");
         nagori_ipc::write_token_file(&token_path, &token).expect("token file");
 
-        let Err(err) = connect_to_store_owner(&socket).await else {
+        let Err(err) = connect_to_store_owner(&socket, &dir.path().join("nagori.sqlite")).await
+        else {
             panic!("nothing listens on the socket");
         };
 
@@ -802,6 +873,79 @@ mod tests {
         let wrapped = ipc_error_to_anyhow(&err);
         assert!(wrapped.downcast_ref::<AppError>().is_none());
         assert_eq!(exit_code_for(&wrapped), 8);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_is_refused_when_the_owner_holds_another_store() {
+        // Regression: a `NAGORI_DB_PATH` write whose store is locked was sent
+        // to the default endpoint unchecked, so `clear --all` aimed at one
+        // store could wipe the everyday store another instance holds there.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = resolve_db_path(&dir.path().join("nagori.sqlite"));
+        let target = dir.path().join("other.sqlite");
+        let wrote = Arc::new(AtomicBool::new(false));
+        let wrote_in_owner = wrote.clone();
+        let socket = spawn_stub_owner(dir.path(), move |request| {
+            let held = held.clone();
+            let wrote = wrote_in_owner.clone();
+            async move {
+                if matches!(request, IpcRequest::Health) {
+                    stub_health(&held)
+                } else {
+                    wrote.store(true, Ordering::SeqCst);
+                    IpcResponse::Ack
+                }
+            }
+        });
+
+        let Err(err) = connect_to_store_owner(&socket, &target).await else {
+            panic!("an owner of another store must not accept the write");
+        };
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("--ipc"), "{rendered}");
+        assert!(!rendered.contains("unreachable"), "{rendered}");
+        assert!(
+            !wrote.load(Ordering::SeqCst),
+            "nothing may reach the other store"
+        );
+    }
+
+    #[test]
+    fn an_instance_that_does_not_report_its_store_holds_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = resolve_db_path(&dir.path().join("nagori.sqlite"));
+        let mut health = nagori_ipc::HealthResponse {
+            ok: true,
+            version: "test".to_owned(),
+            db_path: String::new(),
+            maintenance: nagori_ipc::MaintenanceHealthReport::default(),
+            capture: nagori_ipc::CaptureHealthReport::default(),
+            ipc: nagori_ipc::IpcHealthReport::default(),
+        };
+        assert!(!holds_store(&health, &target));
+        health.db_path = target.display().to_string();
+        assert!(holds_store(&health, &target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_db_path_sees_through_a_symlinked_data_dir() {
+        // The owner reports its canonical path; a CLI reaching the same
+        // store through a symlinked directory must compare equal.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("real dir");
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("symlink");
+        assert_eq!(
+            resolve_db_path(&alias.join("nagori.sqlite")),
+            resolve_db_path(&real.join("nagori.sqlite")),
+        );
     }
 
     /// The CLI tells users in `--help` and the desktop's startup error
