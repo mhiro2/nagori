@@ -973,7 +973,8 @@ export const en: Messages = {
       maxDaysHelp: 'Set to 0 to keep entries forever.',
       maxTotalBytes: 'Total storage limit',
       maxTotalBytesPlaceholder: '0 = unlimited',
-      maxTotalBytesHelp: 'Pinned entries are protected even if they exceed this limit.',
+      maxTotalBytesHelp:
+        'Pinned entries do not count toward this limit and are never removed by it.',
       maxBytes: 'Max bytes per entry',
       maxImageBytes: 'Max bytes per image',
       maxImageBytesHelp:

@@ -1,5 +1,5 @@
 use nagori_core::{AppError, EntryId, Result, ThumbnailRecord};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use time::OffsetDateTime;
 
 use super::SqliteStore;
@@ -178,7 +178,13 @@ impl SqliteStore {
     pub async fn enforce_thumbnail_budget(&self, budget: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
+            // `BEGIN IMMEDIATE` for the same read-then-delete reason as
+            // `enforce_total_bytes`: a DEFERRED snapshot would fail the lock
+            // upgrade with `SQLITE_BUSY_SNAPSHOT` if a thumbnail write
+            // committed between the total and the first eviction.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
             let total_i64: i64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(byte_count), 0) FROM entry_thumbnails",

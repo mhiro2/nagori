@@ -285,7 +285,15 @@ impl SqliteStore {
     pub async fn enforce_total_bytes(&self, max_total_bytes: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
+            // `BEGIN IMMEDIATE`: the sweep reads the budget total and then
+            // deletes. A DEFERRED transaction would upgrade its read snapshot
+            // to a write lock at the first DELETE and fail with
+            // `SQLITE_BUSY_SNAPSHOT` whenever a capture committed in between,
+            // skipping this sweep entirely; taking the write lock up front
+            // waits on `busy_timeout` instead.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
             // Budget the retained representation payload only — the
             // `content_json` envelope is bookkeeping, not user content, and
             // for text-shaped entries the same text already appears in
@@ -295,11 +303,18 @@ impl SqliteStore {
             // `entries.total_byte_count` is materialised by the
             // `entry_representations_ai/ad/au_total` triggers, so the
             // budget total is a single-table aggregate.
+            //
+            // Pinned rows are outside the budget, mirroring
+            // `enforce_retention_count`: eviction can never delete them, so
+            // counting their bytes would only let pins crowd out history.
+            // Once the pinned total alone exceeded the cap, every sweep would
+            // evict all unpinned rows (including a clip captured seconds
+            // earlier) and still end over budget.
             let total_i64: i64 = tx
                 .query_row(
                     "SELECT COALESCE(SUM(total_byte_count), 0)
                      FROM entries
-                     WHERE deleted_at IS NULL",
+                     WHERE deleted_at IS NULL AND pinned = 0",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -355,7 +370,10 @@ impl SqliteStore {
                         .collect::<Result<Vec<_>>>()?
                 };
                 if candidates.is_empty() {
-                    // Everything evictable is gone; the remainder is pinned.
+                    // Every unpinned row is gone. Only reachable when the
+                    // running total drifted from the live set (the sum and
+                    // the candidates cover the same rows), so stop rather
+                    // than spin.
                     break;
                 }
                 let mut removed_this_round = 0usize;

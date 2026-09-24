@@ -332,7 +332,7 @@ export const zhHant: Messages = {
       maxDaysHelp: '設為 0 時將永久保留項目。',
       maxTotalBytes: '總儲存上限',
       maxTotalBytesPlaceholder: '0 = 不限',
-      maxTotalBytesHelp: '釘選的項目即使超過上限也會保留。',
+      maxTotalBytesHelp: '釘選的項目不計入此上限，也不會因此被刪除。',
       maxBytes: '每項最大位元組數',
       maxImageBytes: '每張圖片最大位元組數',
       maxImageBytesHelp:

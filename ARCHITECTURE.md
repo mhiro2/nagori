@@ -677,11 +677,17 @@ back to the original payload URL so the row still renders. The
 regular retention sweep, evicting the least-recently-accessed rows
 first.
 
-**Retention budget.** `enforce_total_bytes` sums every live entry's
-denormalised `total_byte_count` (maintained by triggers on
+**Retention budget.** `enforce_total_bytes` sums every live, unpinned
+entry's denormalised `total_byte_count` (maintained by triggers on
 `entry_representations`, so the budget total is a single-table
 aggregate over the live partition rather than a JOIN+SUM) and evicts
-oldest-first when the budget is exceeded. Eviction — like the count /
+oldest-first when the budget is exceeded. Pinned entries sit outside
+`max_total_bytes` entirely, the same way `history_retention_count`
+counts only unpinned rows: they are never evicted and their bytes are
+not charged against the cap. Charging them would let a pinned set
+larger than the cap empty the unpinned history on every sweep while
+the total still stayed over budget. The on-disk total can therefore
+exceed `max_total_bytes` by the size of the pinned set. Eviction — like the count /
 age sweeps and clear-on-quit — **hard-deletes** the
 parent `entries` row, so `ON DELETE CASCADE` (plus `recursive_triggers`
 firing the `search_documents_ad_fts` sync trigger) drops the row's

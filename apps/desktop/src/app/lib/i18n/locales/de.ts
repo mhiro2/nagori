@@ -359,7 +359,8 @@ export const de: Messages = {
       maxDaysHelp: 'Auf 0 setzen, um Einträge unbegrenzt zu behalten.',
       maxTotalBytes: 'Gesamtspeicherlimit',
       maxTotalBytesPlaceholder: '0 = unbegrenzt',
-      maxTotalBytesHelp: 'Angeheftete Einträge bleiben auch über dem Limit geschützt.',
+      maxTotalBytesHelp:
+        'Angeheftete Einträge zählen nicht zu diesem Limit und werden dadurch nie entfernt.',
       maxBytes: 'Max. Bytes pro Eintrag',
       maxImageBytes: 'Max. Bytes pro Bild',
       maxImageBytesHelp:

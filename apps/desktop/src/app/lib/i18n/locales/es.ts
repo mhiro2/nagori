@@ -359,7 +359,8 @@ export const es: Messages = {
       maxDaysHelp: 'Pon 0 para conservar las entradas para siempre.',
       maxTotalBytes: 'Límite total de almacenamiento',
       maxTotalBytesPlaceholder: '0 = ilimitado',
-      maxTotalBytesHelp: 'Las entradas fijadas se protegen aunque superen el límite.',
+      maxTotalBytesHelp:
+        'Las entradas fijadas no cuentan para este límite y nunca se eliminan por él.',
       maxBytes: 'Bytes máx. por entrada',
       maxImageBytes: 'Bytes máx. por imagen',
       maxImageBytesHelp:

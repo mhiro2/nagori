@@ -379,6 +379,9 @@ pub struct AppSettings {
     pub max_image_entry_size_bytes: usize,
     #[serde(default = "default_capture_kinds")]
     pub capture_kinds: BTreeSet<ContentKind>,
+    /// Byte budget for unpinned live history. Pinned entries are neither
+    /// counted nor evicted, so the stored total can exceed this by the size
+    /// of the pinned set. `None` disables the byte-budget sweep.
     pub max_total_bytes: Option<u64>,
     /// Cap on the aggregate `entry_thumbnails.byte_count`. `None` disables
     /// the LRU eviction sweep entirely; `Some(0)` evicts every thumbnail
