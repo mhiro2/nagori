@@ -49,6 +49,9 @@
     // the URL, so the palette can stand down its Enter-to-paste binding and
     // the two handlers don't both fire on the same keystroke.
     enterOpensUrl?: boolean;
+    // Bindable: true while the open-URL confirm dialog is up, so the palette
+    // can stand its whole keyboard down behind the modal.
+    urlConfirmOpen?: boolean;
     // The query the visible results were produced for (searchState.appliedQuery),
     // forwarded to the text body so the preview marks the same hits as the row.
     query?: string | undefined;
@@ -68,6 +71,7 @@
     onExpandBody,
     onOpenActions,
     enterOpensUrl = $bindable(false),
+    urlConfirmOpen = $bindable(false),
     query,
     bindings,
   }: Props = $props();
@@ -201,6 +205,14 @@
   // names the host so a renderer compromise can't silently re-direct
   // the user to an attacker URL while the dialog reads "example.com".
   let confirmOpenUrl = $state(false);
+  // Matches the dialog's render condition below, so the palette sees exactly
+  // whether the modal is on screen.
+  const urlConfirmShown = $derived(
+    confirmOpenUrl && urlBody !== undefined && preview !== undefined && urlCanOpen,
+  );
+  $effect(() => {
+    urlConfirmOpen = urlConfirmShown;
+  });
 
   // Enter-to-open owns the keystroke only inside the expanded preview, and
   // only for a plain Enter — modified Enter (paste-as-plain = ⌘⇧Enter,
@@ -388,7 +400,7 @@
   {:else}
     <p class="empty">{t.preview.empty}</p>
   {/if}
-  {#if confirmOpenUrl && urlBody && preview && urlCanOpen}
+  {#if urlConfirmShown && urlBody && preview}
     <PreviewUrlConfirmDialog
       entryId={preview.id}
       body={urlBody}

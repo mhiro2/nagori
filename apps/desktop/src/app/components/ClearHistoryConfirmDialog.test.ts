@@ -92,4 +92,81 @@ describe('ClearHistoryConfirmDialog', () => {
     expect(clearHistory).toHaveBeenCalledTimes(1);
     expect(onCleared).toHaveBeenCalledTimes(1);
   });
+
+  // The palette resolves its shortcuts on a window keydown listener, so any key
+  // that bubbles out of the dialog acts on the list behind it. Enter on the
+  // focused Cancel button must cancel — not also paste the selected entry — and
+  // chords like ⌘⌫ must not delete it.
+  describe('keyboard containment', () => {
+    const windowKeys: string[] = [];
+    const onWindowKeydown = (e: KeyboardEvent): void => {
+      windowKeys.push(e.key);
+    };
+
+    beforeEach(() => {
+      windowKeys.length = 0;
+      window.addEventListener('keydown', onWindowKeydown);
+    });
+
+    afterEach(() => {
+      window.removeEventListener('keydown', onWindowKeydown);
+    });
+
+    it('cancels on Enter over Cancel without the key reaching the window', async () => {
+      const { getByTestId, onClose } = mount();
+      getByTestId('clear-history-confirm-cancel').focus();
+      await userEvent.keyboard('{Enter}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(clearHistory).not.toHaveBeenCalled();
+      expect(windowKeys).toEqual([]);
+    });
+
+    it('keeps palette chords inside the dialog', async () => {
+      mount();
+      await userEvent.keyboard('{Meta>}{Backspace}p{/Meta}');
+      await userEvent.keyboard('{ArrowDown}');
+      expect(windowKeys).toEqual([]);
+    });
+
+    it('wraps Tab and Shift+Tab around the dialog controls', async () => {
+      const { getByTestId } = mount();
+      const suppress = getByTestId('clear-history-confirm-suppress');
+      const clear = getByTestId('clear-history-confirm-clear');
+      await userEvent.tab();
+      expect(document.activeElement).toBe(suppress);
+      clear.focus();
+      await userEvent.tab();
+      expect(document.activeElement).toBe(suppress);
+      await userEvent.tab({ shift: true });
+      expect(document.activeElement).toBe(clear);
+    });
+
+    // A focused button that disables itself drops focus to <body>, where keys
+    // would slip past the dialog to the palette (and Escape to App.svelte's
+    // hide-the-palette handler). Focus must stay on the dialog while the clear
+    // runs.
+    it('keeps focus and keys inside the dialog while the clear is in flight', async () => {
+      vi.mocked(clearHistory).mockReturnValue(new Promise(() => undefined));
+      const { getByTestId, onClose } = mount();
+      const dialog = getByTestId('clear-history-confirm');
+      await userEvent.click(getByTestId('clear-history-confirm-clear'));
+      expect(document.activeElement).toBe(dialog);
+      await userEvent.tab();
+      expect(document.activeElement).toBe(dialog);
+      await userEvent.keyboard('{Escape}{Enter}');
+      expect(onClose).not.toHaveBeenCalled();
+      expect(windowKeys).toEqual([]);
+    });
+
+    it('hands focus back to the previously focused element on close', async () => {
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      input.focus();
+      const { getByTestId, unmount } = mount();
+      expect(document.activeElement).toBe(getByTestId('clear-history-confirm'));
+      unmount();
+      expect(document.activeElement).toBe(input);
+      input.remove();
+    });
+  });
 });

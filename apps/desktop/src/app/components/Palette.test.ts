@@ -360,6 +360,66 @@ describe('Palette', () => {
     expect(confirmSelection).not.toHaveBeenCalled();
   });
 
+  // A confirm dialog owns the keyboard. The dialogs stop their own keydowns,
+  // but a key can still reach the window listener when focus is not inside
+  // one (e.g. the focused button disabled itself mid-request). Dispatching on
+  // `window` directly models that: none of these may act on the entry behind.
+  it('stands its shortcuts down while the clear-history dialog is open', async () => {
+    const item = resultRow('r1', 'secret');
+    vi.mocked(currentSelection).mockReturnValue(item);
+    searchState.results = [item];
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      confirmClearHistory: true,
+    } as unknown as NonNullable<typeof settingsState.settings>;
+    capabilitiesState.capabilities = { platform: 'macos' } as PlatformCapabilities;
+
+    const { container, findByTestId } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    expect(input).not.toBeNull();
+    await fireEvent.keyDown(input!, { key: 'Backspace', metaKey: true, altKey: true });
+    await findByTestId('clear-history-confirm');
+
+    window.dispatchEvent(dispatch({ key: 'Enter' }));
+    window.dispatchEvent(dispatch({ key: 'Backspace', metaKey: true }));
+    window.dispatchEvent(dispatch({ key: 'p', metaKey: true }));
+    window.dispatchEvent(dispatch({ key: 'ArrowDown' }));
+    expect(confirmSelection).not.toHaveBeenCalled();
+    expect(deleteSelection).not.toHaveBeenCalled();
+    expect(togglePinSelection).not.toHaveBeenCalled();
+    expect(selectNext).not.toHaveBeenCalled();
+  });
+
+  it('stands its shortcuts down while the open-URL dialog is open', async () => {
+    const item = urlRow('u1', 'https://example.com/');
+    vi.mocked(currentSelection).mockReturnValue(item);
+    searchState.results = [item];
+    previewState.entryId = 'u1';
+    previewState.preview = urlPreview('u1', 'https://example.com/');
+    settingsState.settings = {
+      showPreviewPane: true,
+      paletteRowCount: 8,
+      paletteHotkeys: { 'open-preview': 'e' },
+    } as unknown as NonNullable<typeof settingsState.settings>;
+    capabilitiesState.capabilities = { platform: 'macos' } as PlatformCapabilities;
+
+    const { container, findByTestId } = render(Palette);
+    const input = container.querySelector('input[type="text"]');
+    expect(input).not.toBeNull();
+    await fireEvent.keyDown(input!, { key: 'e' });
+    await tick();
+    await fireEvent.keyDown(input!, { key: 'Enter' });
+    await findByTestId('preview-url-confirm');
+
+    window.dispatchEvent(dispatch({ key: 'Enter' }));
+    window.dispatchEvent(dispatch({ key: 'Backspace', metaKey: true }));
+    window.dispatchEvent(dispatch({ key: 'p', metaKey: true }));
+    expect(confirmSelection).not.toHaveBeenCalled();
+    expect(deleteSelection).not.toHaveBeenCalled();
+    expect(togglePinSelection).not.toHaveBeenCalled();
+  });
+
   it('lets the IME keep the Enter that commits a 変換 instead of pasting', async () => {
     // Regression: with a Japanese IME, the Enter that confirms a candidate
     // conversion arrives as a keydown flagged `isComposing`. The palette must

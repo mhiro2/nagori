@@ -1,5 +1,6 @@
 <script lang="ts">
   import { clearHistory, setConfirmClearHistory } from '../lib/commands';
+  import { holdDialogFocus, trapTabFocus } from '../lib/dialogFocus';
   import { describeError } from '../lib/errors';
 
   type Labels = {
@@ -27,17 +28,20 @@
   let dontAskAgain = $state(false);
   let dialogEl = $state<HTMLDivElement | undefined>(undefined);
 
-  // Focus the dialog on mount so screen readers announce the role, Escape
-  // fires from a reachable element, and Tab stays inside the dialog rather
-  // than landing on the result list behind it. Mirrors
-  // PreviewUrlConfirmDialog.svelte.
+  // Focus the dialog on mount so screen readers announce the role and Escape
+  // fires from a reachable element, then give focus back to the search box on
+  // close. Mirrors PreviewUrlConfirmDialog.svelte.
   $effect(() => {
     if (dialogEl) {
-      dialogEl.focus();
+      return holdDialogFocus(dialogEl);
     }
   });
 
   async function performClear(): Promise<void> {
+    // Park focus on the dialog before the buttons disable themselves: a
+    // focused button that turns disabled drops focus to <body>, and keys typed
+    // while the clear runs would then bypass the dialog's containment.
+    dialogEl?.focus();
     clearing = true;
     clearError = undefined;
     try {
@@ -77,23 +81,27 @@
   data-testid="clear-history-confirm"
   bind:this={dialogEl}
   onkeydown={(e) => {
-    // Trap keys inside the dialog: the palette behind would otherwise act on
-    // Escape (close the window) and Enter (paste the selected entry).
+    // Every key stops here. The palette resolves its shortcuts on a window
+    // listener, so anything that bubbled out would act on the list behind the
+    // dialog — Enter on Cancel would paste the selected entry, ⌘⌫ would delete
+    // it. The browser's own handling (button activation, checkbox toggle) is
+    // left intact because nothing but Enter-on-scaffold and Tab is cancelled.
+    e.stopPropagation();
     if (e.key === 'Escape') {
-      e.stopPropagation();
       if (!clearing) {
         onClose();
       }
       return;
     }
     // Enter confirms only while focus is on the dialog scaffold itself. Once
-    // Tab has moved focus onto a button, fall through so the browser activates
-    // that button and the Cancel path is honoured.
+    // Tab has moved focus onto a button, let the browser activate that button
+    // so the Cancel path is honoured.
     if (e.key === 'Enter' && !clearing && e.target === dialogEl) {
-      e.stopPropagation();
       e.preventDefault();
       void performClear();
+      return;
     }
+    trapTabFocus(e, e.currentTarget);
   }}
 >
   <div class="confirm-card">
