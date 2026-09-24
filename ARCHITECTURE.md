@@ -1159,7 +1159,11 @@ path needs `Accessibility`; when it is missing, the desktop and CLI
 both fall back to **copy-only** behaviour (palette `Enter` and
 `nagori paste` write to the clipboard but skip the Cmd+V synthesis).
 The onboarding banner and `nagori doctor` surface the missing
-permission so the user can fix it.
+permission so the user can fix it. On macOS the ⌘V synthesis itself
+only checks the grant (`AXIsProcessTrustedWithOptions(prompt:NO)`) and
+never raises the TCC dialog, so a paste without the grant fails with
+the `accessibilityMissing` reason and the palette points at the Setup
+card; only the explicit `request_accessibility` command prompts.
 
 **Capability model.** Permissions answer "does this work right now";
 capabilities answer "could this OS ever do it". The two are intentionally

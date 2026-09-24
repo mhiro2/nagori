@@ -39,10 +39,10 @@ impl PasteController for MacosPasteController {
                 pasted: true,
                 message: None,
             }),
-            // `synthesize_cmd_v` carries the reason so an enigo
-            // *initialisation* failure (an environment problem) is not
-            // misreported as a missing Accessibility grant — only the
-            // CGEvent *posts* are gated by that grant.
+            // `synthesize_cmd_v` carries the reason so an environment
+            // failure during enigo initialisation is not misreported as a
+            // missing Accessibility grant, while enigo's own permission check
+            // still routes to the Setup card.
             Err((reason, message)) => Err(AppError::Paste { reason, message }),
         }
     }
@@ -58,11 +58,13 @@ impl PasteController for MacosPasteController {
 
 /// Why a synthetic-paste step failed, paired with a human-readable message.
 ///
-/// Splitting the reason out lets the caller tell an enigo *initialisation*
-/// failure (an environment problem — no window-server session, event tap could
-/// not open) from a `CGEvent` *post* failure (which the Accessibility grant
-/// gates). Collapsing both into `AccessibilityMissing` previously sent users
-/// to the Setup card even when the grant was present.
+/// Splitting the reason out lets the caller tell an environment problem during
+/// enigo *initialisation* (no window-server session, event source could not be
+/// created) from a missing Accessibility grant (enigo's `NoPermission` check,
+/// or a rejected `CGEvent` *post*). Collapsing every failure into
+/// `AccessibilityMissing` would send users to the Setup card even when the
+/// grant was present; collapsing every init failure into `Unknown` would hide
+/// the Setup card exactly when the grant is missing.
 #[cfg(target_os = "macos")]
 type SynthError = (PasteFailureReason, String);
 
@@ -73,6 +75,43 @@ fn key_post_error(err: &enigo::InputError) -> SynthError {
         PasteFailureReason::AccessibilityMissing,
         format!("auto-paste failed (Accessibility permission may be missing): {err}"),
     )
+}
+
+/// enigo settings for the ⌘V synthesis.
+///
+/// `open_prompt_to_get_permissions` defaults to `true`, which makes
+/// `Enigo::new` call `AXIsProcessTrustedWithOptions(prompt: true)` and pop the
+/// system TCC dialog on every paste while the grant is missing. Nagori owns
+/// that prompt (the Setup card's explicit request records when it was shown),
+/// so the paste path only *checks* the grant and lets the UI steer the user.
+#[cfg(target_os = "macos")]
+fn synth_settings() -> Settings {
+    Settings {
+        open_prompt_to_get_permissions: false,
+        ..Settings::default()
+    }
+}
+
+/// Classify an `Enigo::new` failure.
+///
+/// enigo checks the Accessibility grant before opening the event source and
+/// reports a missing grant as `NoPermission`; that is the one initialisation
+/// failure the Setup card can fix. Every other variant is an environment
+/// problem (no window-server session, event source could not be created), so
+/// it stays `Unknown` rather than sending the user to a grant they already
+/// have.
+#[cfg(target_os = "macos")]
+fn init_error(err: &enigo::NewConError) -> SynthError {
+    match err {
+        enigo::NewConError::NoPermission => (
+            PasteFailureReason::AccessibilityMissing,
+            format!("auto-paste failed: Accessibility permission is missing: {err}"),
+        ),
+        _ => (
+            PasteFailureReason::Unknown,
+            format!("auto-paste failed: could not initialise input synthesis: {err}"),
+        ),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -93,16 +132,7 @@ fn synthesize_cmd_v() -> std::result::Result<(), SynthError> {
     // synthesised keystroke; that case currently has to fall back to
     // manual ⌘V.
     const KVK_ANSI_V: u32 = 0x09;
-    // `Enigo::new` opens the event source. A failure here is an
-    // initialisation/environment problem, not the missing Accessibility grant
-    // (the grant gates the CGEvent posts below), so report it as `Unknown`
-    // rather than steering the user to the Accessibility Setup card.
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|err| {
-        (
-            PasteFailureReason::Unknown,
-            format!("auto-paste failed: could not initialise input synthesis: {err}"),
-        )
-    })?;
+    let mut enigo = Enigo::new(&synth_settings()).map_err(|err| init_error(&err))?;
     enigo
         .key(Key::Meta, Direction::Press)
         .map_err(|err| key_post_error(&err))?;
@@ -142,4 +172,34 @@ fn release_meta_with_retry(enigo: &mut Enigo) -> std::result::Result<(), enigo::
                 "Meta key release retry failed; ⌘ may remain virtually pressed"
             );
         })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synth_settings_never_opens_the_tcc_prompt() {
+        // The system prompt belongs to the Setup card's explicit request;
+        // letting enigo raise it would re-open the dialog on every paste.
+        assert!(!synth_settings().open_prompt_to_get_permissions);
+    }
+
+    #[test]
+    fn missing_permission_maps_to_accessibility_missing() {
+        let (reason, _) = init_error(&enigo::NewConError::NoPermission);
+        assert_eq!(reason, PasteFailureReason::AccessibilityMissing);
+    }
+
+    #[test]
+    fn other_init_failures_stay_unknown() {
+        for err in [
+            enigo::NewConError::EstablishCon("failed creating event source"),
+            enigo::NewConError::Reply,
+            enigo::NewConError::NoEmptyKeycodes,
+        ] {
+            let (reason, _) = init_error(&err);
+            assert_eq!(reason, PasteFailureReason::Unknown, "{err:?}");
+        }
+    }
 }
