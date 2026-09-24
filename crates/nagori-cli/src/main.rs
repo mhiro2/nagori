@@ -254,7 +254,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             return run_locally(cli).await;
         }
         let executor = connect_to_store_owner(&default_socket_path(), &db_path).await?;
-        return commands::run_cli(cli, &executor).await;
+        return run_write_on_owner(cli, &executor).await;
     }
     // `--auto-ipc` only changes *reads* (see the flag's help): non-read
     // commands ignore it and route exactly as they would without it. Gating
@@ -357,6 +357,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
 /// at a `NAGORI_DB_PATH` store (a `clear --all` included) would otherwise land
 /// in whatever store the default-endpoint instance holds, so the store it
 /// reports must match before anything is sent.
+const OWNER_UNREACHABLE_HINT: &str = "a running nagori owns the store but its IPC endpoint \
+     was unreachable. Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
+     `nagori daemon run`, or quit the running instance to write to the DB directly.";
+
 async fn connect_to_store_owner(socket_path: &Path, db_path: &Path) -> Result<Executor> {
     let probe = async {
         let context = IpcContext::connect(socket_path)?;
@@ -366,12 +370,7 @@ async fn connect_to_store_owner(socket_path: &Path, db_path: &Path) -> Result<Ex
             _ => Err(anyhow!("unexpected ipc response to the health probe")),
         }
     };
-    let (context, health) = probe.await.context(
-        "a running nagori owns the store but its IPC endpoint was unreachable. \
-         Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
-         `nagori daemon run`, or quit the running instance to write to the DB \
-         directly.",
-    )?;
+    let (context, health) = probe.await.context(OWNER_UNREACHABLE_HINT)?;
     let target = resolve_db_path(db_path);
     if !holds_store(&health, &target) {
         let held = if health.db_path.is_empty() {
@@ -389,6 +388,32 @@ async fn connect_to_store_owner(socket_path: &Path, db_path: &Path) -> Result<Ex
         );
     }
     Ok(Executor::Ipc(context))
+}
+
+/// Run a write on the owner [`connect_to_store_owner`] reached.
+async fn run_write_on_owner(cli: Cli, executor: &Executor) -> Result<()> {
+    match commands::run_cli(cli, executor).await {
+        // The owner can exit between the probe and the write's own
+        // connection. A transport failure alone can't say which happened
+        // — a reachable daemon also reports `platform_error` for, e.g., a
+        // failed paste — so ask again: only an owner that no longer
+        // answers gets the recovery hint.
+        Err(err) if is_ipc_transport_error(&err) && !owner_answers(executor).await => {
+            Err(err.context(OWNER_UNREACHABLE_HINT))
+        }
+        outcome => outcome,
+    }
+}
+
+/// Whether the owner behind `executor` still answers a health probe.
+async fn owner_answers(executor: &Executor) -> bool {
+    let Executor::Ipc(context) = executor else {
+        return false;
+    };
+    matches!(
+        context.client.send(IpcRequest::Health).await,
+        Ok(IpcResponse::Health(_))
+    )
 }
 
 /// Whether the instance that answered `health` holds the store at `target`
@@ -913,6 +938,80 @@ mod tests {
             !wrote.load(Ordering::SeqCst),
             "nothing may reach the other store"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_exiting_after_the_probe_keeps_the_recovery_hint() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
+        let held = db_path.clone();
+        let gone = Arc::new(AtomicBool::new(false));
+        let gone_in_owner = gone.clone();
+        let socket = spawn_stub_owner(dir.path(), move |request| {
+            let held = held.clone();
+            let gone = gone_in_owner.clone();
+            async move {
+                if matches!(request, IpcRequest::Health) && !gone.load(Ordering::SeqCst) {
+                    stub_health(&held)
+                } else {
+                    // Stand-in for an owner that went away mid-command: the
+                    // write and the follow-up probe both fail at the
+                    // transport level.
+                    gone.store(true, Ordering::SeqCst);
+                    IpcResponse::Error(err_with_code("platform_error"))
+                }
+            }
+        });
+        let executor = connect_to_store_owner(&socket, &db_path)
+            .await
+            .expect("the owner answers the first probe");
+        let err = run_write_on_owner(
+            Cli::try_parse_from(["nagori", "delete", "00000000-0000-4000-8000-000000000000"])
+                .expect("delete should parse"),
+            &executor,
+        )
+        .await
+        .expect_err("the write fails");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("IPC endpoint was unreachable"),
+            "{rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reachable_owners_platform_error_gets_no_recovery_hint() {
+        // A failed paste on a live owner is a `platform_error` too; it must not
+        // be relabelled as an unreachable endpoint.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = resolve_db_path(&dir.path().join("nagori.sqlite"));
+        let held = db_path.clone();
+        let socket = spawn_stub_owner(dir.path(), move |request| {
+            let held = held.clone();
+            async move {
+                match request {
+                    IpcRequest::Health => stub_health(&held),
+                    _ => IpcResponse::Error(err_with_code("platform_error")),
+                }
+            }
+        });
+        let executor = connect_to_store_owner(&socket, &db_path)
+            .await
+            .expect("the owner answers");
+        let err = run_write_on_owner(
+            Cli::try_parse_from(["nagori", "delete", "00000000-0000-4000-8000-000000000000"])
+                .expect("delete should parse"),
+            &executor,
+        )
+        .await
+        .expect_err("the write fails");
+        let rendered = format!("{err:#}");
+        assert!(!rendered.contains("unreachable"), "{rendered}");
     }
 
     #[test]
