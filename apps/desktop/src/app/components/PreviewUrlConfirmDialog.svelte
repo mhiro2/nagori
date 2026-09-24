@@ -1,5 +1,6 @@
 <script lang="ts">
   import { openUrlExternal } from '../lib/commands';
+  import { holdDialogFocus, trapTabFocus } from '../lib/dialogFocus';
   import { describeError } from '../lib/errors';
 
   type UrlBody = {
@@ -31,12 +32,12 @@
   let dialogEl = $state<HTMLDivElement | undefined>(undefined);
 
   // Move keyboard focus into the dialog on mount so screen readers
-  // announce the role, Escape can fire from a reachable element, and
-  // tab navigation lands inside the dialog rather than on a button
-  // behind it. Mirrors the focus-on-open pattern in ActionInspector.svelte.
+  // announce the role and Escape can fire from a reachable element, then
+  // give focus back to whatever held it on close. Mirrors
+  // ClearHistoryConfirmDialog.svelte.
   $effect(() => {
     if (dialogEl) {
-      dialogEl.focus();
+      return holdDialogFocus(dialogEl);
     }
   });
 
@@ -85,12 +86,14 @@
   data-testid="preview-url-confirm"
   bind:this={dialogEl}
   onkeydown={(e) => {
-    // Trap keyboard events inside the dialog so they cannot bubble
-    // into the palette behind. Escape closes the dialog first; the
-    // global Escape handler in App.svelte would otherwise close
-    // the whole preview window.
+    // Every key stops here so none of them reach the palette's window
+    // listener behind the dialog: Enter on Cancel would otherwise paste the
+    // selected entry and ⌘⌫ / ⌘P would delete or pin it. Escape closing the
+    // dialog here also keeps App.svelte's global Escape handler from closing
+    // the whole palette. Native button activation still runs because only
+    // Enter-on-scaffold and Tab are cancelled.
+    e.stopPropagation();
     if (e.key === 'Escape') {
-      e.stopPropagation();
       if (!openingUrl) {
         onClose();
       }
@@ -98,15 +101,15 @@
     }
     // Enter on the dialog scaffold itself (initial focus target)
     // confirms — matches the "Enter to open" hint that triggered
-    // this dialog. When focus has Tab-moved to a button, fall
-    // through so the browser's native button activation runs and
-    // the Cancel path is honoured. The Enter window-listener
-    // short-circuits when the dialog is already open.
+    // this dialog. When focus has Tab-moved to a button, let the
+    // browser's native button activation run so the Cancel path is
+    // honoured.
     if (e.key === 'Enter' && !openingUrl && e.target === dialogEl) {
-      e.stopPropagation();
       e.preventDefault();
       void performOpenUrl();
+      return;
     }
+    trapTabFocus(e, e.currentTarget);
   }}
 >
   <div class="confirm-card">
