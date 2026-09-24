@@ -28,6 +28,18 @@ use super::health::{IpcServerHealth, observe_handler_outcome};
 /// it out.
 pub(super) const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
+/// How often the accept loop refreshes its liveness timestamp while it is
+/// parked waiting for a handler permit.
+///
+/// A saturated pool stops the loop from calling `accept()`, so without a
+/// heartbeat the supervisor's wedge probe would read the stale timestamp as
+/// a stuck loop and abort a server that is merely busy (e.g. one
+/// long-running AI request under `--ipc-max-connections 1`). Every handler
+/// runs under its own server-side deadline, so a permit is always released
+/// eventually; waiting on one is progress, not a wedge. Kept far below the
+/// supervisor's wedge threshold so a single missed tick can never trip it.
+pub(super) const PERMIT_WAIT_HEARTBEAT: Duration = Duration::from_secs(5);
+
 /// Whether an accept-stage I/O error is transient — i.e. expected to resolve
 /// on its own without rebinding the listener.
 ///
@@ -81,25 +93,38 @@ pub(super) fn is_transient_accept_error(err: &std::io::Error) -> bool {
 /// Selecting on shutdown here keeps shutdown observation latency
 /// independent of handler progress.
 ///
+/// While parked, the liveness timestamp is refreshed every `heartbeat`
+/// (see [`PERMIT_WAIT_HEARTBEAT`]) so a busy pool is not mistaken for a
+/// wedged accept loop.
+///
 /// Returns `Ok(None)` when shutdown fired first — the caller refuses the
 /// just-accepted connection (dropping its stream so the client sees EOF)
 /// and proceeds to the drain stage.
 pub(super) async fn acquire_permit_or_shutdown<S>(
-    shutdown: Pin<&mut S>,
+    mut shutdown: Pin<&mut S>,
     semaphore: Arc<Semaphore>,
+    server_health: &IpcServerHealth,
+    heartbeat: Duration,
 ) -> Result<Option<OwnedSemaphorePermit>>
 where
     S: Future<Output = ()> + Send,
 {
-    tokio::select! {
-        biased;
-        () = shutdown => Ok(None),
-        permit = semaphore.acquire_owned() => match permit {
-            Ok(permit) => Ok(Some(permit)),
-            Err(err) => Err(AppError::Platform(format!(
-                "failed to acquire IPC connection permit: {err}"
-            ))),
-        },
+    let acquire = semaphore.acquire_owned();
+    tokio::pin!(acquire);
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.as_mut() => return Ok(None),
+            permit = &mut acquire => {
+                return match permit {
+                    Ok(permit) => Ok(Some(permit)),
+                    Err(err) => Err(AppError::Platform(format!(
+                        "failed to acquire IPC connection permit: {err}"
+                    ))),
+                };
+            }
+            () = tokio::time::sleep(heartbeat) => server_health.record_accept(),
+        }
     }
 }
 
@@ -138,8 +163,46 @@ pub(super) async fn drain_handlers(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
+
+    #[tokio::test]
+    async fn permit_wait_keeps_accept_liveness_fresh() {
+        // A saturated pool parks the accept loop on the permit; the
+        // liveness timestamp must keep advancing meanwhile so the
+        // supervisor's wedge probe does not abort a merely busy server.
+        let health = IpcServerHealth::default();
+        health.record_accept();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+        let heartbeat = Duration::from_millis(20);
+        let shutdown = std::future::pending::<()>();
+        tokio::pin!(shutdown);
+
+        let wait = acquire_permit_or_shutdown(shutdown.as_mut(), semaphore, &health, heartbeat);
+        tokio::pin!(wait);
+        assert!(
+            timeout(Duration::from_millis(300), &mut wait)
+                .await
+                .is_err(),
+            "the permit is still held, so the wait must not resolve",
+        );
+        let age = health.accept_age().expect("liveness was seeded");
+        assert!(
+            age < Duration::from_millis(200),
+            "liveness must be refreshed while parked on the permit, age {age:?}",
+        );
+
+        drop(held);
+        let permit = timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("the released permit should be handed over")
+            .expect("permit acquisition should not fail");
+        assert!(permit.is_some());
+    }
 
     #[cfg(unix)]
     #[test]

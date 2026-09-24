@@ -1594,7 +1594,11 @@ permit, the AI permit, and any pending DB query — instead of finishing a
 response no one will read. The deadline only fires for the degenerate case where
 the peer neither reads nor closes while a handler is wedged; it is sized above
 the longest legitimate handler (a `RunAiAction` bounded by its own absolute
-deadline).
+deadline). Because every handler is bounded this way, an accept loop parked on
+a saturated permit pool is busy rather than wedged: it keeps refreshing the
+liveness timestamp while it waits, so the supervisor's wedge probe does not
+abort a healthy server that is serving a long request (e.g. an AI action under
+`--ipc-max-connections 1`).
 
 **Error model.** `IpcError` carries a stable `code` (English) plus a
 human-readable `message`. The desktop frontend maps `code` to
