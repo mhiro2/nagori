@@ -285,7 +285,15 @@ impl SqliteStore {
     pub async fn enforce_total_bytes(&self, max_total_bytes: u64) -> Result<usize> {
         self.run_blocking(move |store| {
             let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
+            // `BEGIN IMMEDIATE`: the sweep reads the budget total and then
+            // deletes. A DEFERRED transaction would upgrade its read snapshot
+            // to a write lock at the first DELETE and fail with
+            // `SQLITE_BUSY_SNAPSHOT` whenever a capture committed in between,
+            // skipping this sweep entirely; taking the write lock up front
+            // waits on `busy_timeout` instead.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_err)?;
             // Budget the retained representation payload only — the
             // `content_json` envelope is bookkeeping, not user content, and
             // for text-shaped entries the same text already appears in
