@@ -4,16 +4,16 @@ use std::{
     process::ExitCode,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use nagori_core::{AiActionId, AppError, MAX_RETENTION_DAYS, QuickActionId};
 use nagori_daemon::default_socket_path;
-use nagori_ipc::{IpcClient, IpcRequest, IpcServerConfig};
+use nagori_ipc::{IpcClient, IpcRequest, IpcResponse, IpcServerConfig};
 
 mod commands;
 mod output;
 
-use commands::{Executor, IpcContext, LocalContext};
+use commands::{Executor, IpcContext, LocalContext, ipc_error_to_anyhow};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "nagori")]
@@ -213,7 +213,9 @@ async fn main() -> ExitCode {
     match dispatch(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err}");
+            // `{:#}` renders the whole cause chain, so a context hint added
+            // on the way up never hides the error underneath it.
+            eprintln!("error: {err:#}");
             ExitCode::from(exit_code_for(&err))
         }
     }
@@ -250,14 +252,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let _write_lock = lock;
             return run_locally(cli).await;
         }
-        let candidate = default_socket_path();
-        return run_over_ipc(cli, &candidate).await.with_context(|| {
-            "a running nagori owns the store but its IPC endpoint was unreachable. \
-             Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
-             `nagori daemon run`, or quit the running instance to write to the DB \
-             directly."
-                .to_owned()
-        });
+        let executor = connect_to_store_owner(&default_socket_path()).await?;
+        return commands::run_cli(cli, &executor).await;
     }
     // `--auto-ipc` only changes *reads* (see the flag's help): non-read
     // commands ignore it and route exactly as they would without it. Gating
@@ -322,6 +318,32 @@ async fn dispatch(cli: Cli) -> Result<()> {
         None
     };
     run_locally(cli).await
+}
+
+/// Connect to the endpoint of the instance that holds the store lock and
+/// confirm it answers before a write is sent to it.
+///
+/// The "endpoint unreachable" hint is attached to this probe only: once the
+/// owner has answered, a failure of the write itself (`NotFound`, a policy
+/// refusal, …) is the daemon's own verdict and must reach the user — and
+/// `exit_code_for` — as-is instead of being relabelled as a connection
+/// problem.
+async fn connect_to_store_owner(socket_path: &Path) -> Result<Executor> {
+    let probe = async {
+        let context = IpcContext::connect(socket_path)?;
+        match context.client.send(IpcRequest::Health).await? {
+            IpcResponse::Health(_) => Ok(context),
+            IpcResponse::Error(err) => Err(ipc_error_to_anyhow(&err)),
+            _ => Err(anyhow!("unexpected ipc response to the health probe")),
+        }
+    };
+    let context = probe.await.context(
+        "a running nagori owns the store but its IPC endpoint was unreachable. \
+         Enable Settings → CLI (cli_ipc_enabled) in the desktop app or start \
+         `nagori daemon run`, or quit the running instance to write to the DB \
+         directly.",
+    )?;
+    Ok(Executor::Ipc(context))
 }
 
 async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
@@ -562,8 +584,89 @@ mod tests {
             );
         }
     }
-    use anyhow::anyhow;
-    use commands::ipc_error_to_anyhow;
+    /// Serve `handler` on a Unix socket under `dir`, with the auth token
+    /// written where [`IpcContext::connect`] looks for it.
+    #[cfg(unix)]
+    async fn spawn_stub_owner<F, Fut>(dir: &Path, handler: F) -> PathBuf
+    where
+        F: Fn(IpcRequest) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = IpcResponse> + Send + 'static,
+    {
+        let socket = dir.join("owner.sock");
+        let token = nagori_ipc::AuthToken::generate().expect("token should generate");
+        let token_path = nagori_ipc::token_path_for_endpoint(&socket).expect("token path");
+        nagori_ipc::write_token_file(&token_path, &token).expect("token file");
+        let listener = nagori_ipc::bind_unix(&socket).expect("bind");
+        tokio::spawn(nagori_ipc::accept_loop(listener, token, handler));
+        socket
+    }
+
+    #[cfg(unix)]
+    fn stub_health() -> IpcResponse {
+        IpcResponse::Health(nagori_ipc::HealthResponse {
+            ok: true,
+            version: "test".to_owned(),
+            maintenance: nagori_ipc::MaintenanceHealthReport::default(),
+            capture: nagori_ipc::CaptureHealthReport::default(),
+            ipc: nagori_ipc::IpcHealthReport::default(),
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_write_failure_keeps_the_daemon_error() {
+        // Regression: the "endpoint unreachable" hint used to wrap the whole
+        // write, so a daemon-side `NotFound` printed as a connection problem
+        // while still exiting 4.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = spawn_stub_owner(dir.path(), |request| async move {
+            match request {
+                IpcRequest::Health => stub_health(),
+                _ => IpcResponse::Error(err_with_code("not_found")),
+            }
+        })
+        .await;
+        let cli = Cli::try_parse_from(["nagori", "delete", "00000000-0000-4000-8000-000000000000"])
+            .expect("delete should parse");
+
+        let executor = connect_to_store_owner(&socket)
+            .await
+            .expect("a responsive owner should be reachable");
+        let err = commands::run_cli(cli, &executor)
+            .await
+            .expect_err("the owner refused the delete");
+
+        assert_eq!(exit_code_for(&err), 4);
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains("unreachable"),
+            "a daemon verdict must not be relabelled as a connection failure: {rendered}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreachable_owner_explains_how_to_recover() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("missing.sock");
+        let token_path = nagori_ipc::token_path_for_endpoint(&socket).expect("token path");
+        let token = nagori_ipc::AuthToken::generate().expect("token should generate");
+        nagori_ipc::write_token_file(&token_path, &token).expect("token file");
+
+        let Err(err) = connect_to_store_owner(&socket).await else {
+            panic!("nothing listens on the socket");
+        };
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("IPC endpoint was unreachable"),
+            "{rendered}"
+        );
+        assert!(
+            is_ipc_transport_error(&err),
+            "the transport cause must stay in the chain: {rendered}",
+        );
+    }
 
     fn err_with_code(code: &str) -> nagori_ipc::IpcError {
         nagori_ipc::IpcError {
