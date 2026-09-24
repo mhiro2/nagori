@@ -141,6 +141,23 @@ describe('ClearHistoryConfirmDialog', () => {
       expect(document.activeElement).toBe(clear);
     });
 
+    // A focused button that disables itself drops focus to <body>, where keys
+    // would slip past the dialog to the palette (and Escape to App.svelte's
+    // hide-the-palette handler). Focus must stay on the dialog while the clear
+    // runs.
+    it('keeps focus and keys inside the dialog while the clear is in flight', async () => {
+      vi.mocked(clearHistory).mockReturnValue(new Promise(() => undefined));
+      const { getByTestId, onClose } = mount();
+      const dialog = getByTestId('clear-history-confirm');
+      await userEvent.click(getByTestId('clear-history-confirm-clear'));
+      expect(document.activeElement).toBe(dialog);
+      await userEvent.tab();
+      expect(document.activeElement).toBe(dialog);
+      await userEvent.keyboard('{Escape}{Enter}');
+      expect(onClose).not.toHaveBeenCalled();
+      expect(windowKeys).toEqual([]);
+    });
+
     it('hands focus back to the previously focused element on close', async () => {
       const input = document.createElement('input');
       document.body.appendChild(input);

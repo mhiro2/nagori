@@ -38,6 +38,10 @@
   });
 
   async function performClear(): Promise<void> {
+    // Park focus on the dialog before the buttons disable themselves: a
+    // focused button that turns disabled drops focus to <body>, and keys typed
+    // while the clear runs would then bypass the dialog's containment.
+    dialogEl?.focus();
     clearing = true;
     clearError = undefined;
     try {

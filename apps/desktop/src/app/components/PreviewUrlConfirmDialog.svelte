@@ -42,6 +42,9 @@
   });
 
   async function performOpenUrl(): Promise<void> {
+    // Park focus on the dialog before the buttons disable themselves; see
+    // ClearHistoryConfirmDialog.svelte.
+    dialogEl?.focus();
     openingUrl = true;
     openUrlError = undefined;
     try {
