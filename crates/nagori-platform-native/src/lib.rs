@@ -190,7 +190,7 @@ fn build_native_runtime_inner(
     };
 
     // Annotate the platform error with Wayland-specific guidance: the
-    // typical cause is a compositor without `wl_data_control` or an X11
+    // typical cause is a compositor without a data-control protocol or an X11
     // session. Without this wrapper users see a bare
     // `AppError::Platform(…)` and can't tell whether it's transient or
     // an architectural constraint of their desktop environment.
@@ -318,12 +318,13 @@ pub fn default_ai_engine() -> Option<Arc<dyn AiActionEngine>> {
 fn annotate_linux_clipboard_error(err: AppError) -> AppError {
     // Preserve the original variant so the CLI's exit-code mapping stays
     // stable across the refactor — `LinuxClipboard::new()` returns
-    // `Unsupported` for "compositor lacks wl_data_control / X11 session"
+    // `Unsupported` for "compositor lacks data-control / X11 session"
     // and `Platform` for other failures, and those exit as 7 and 8
     // respectively. Without this split everything would funnel into 8.
     const HINT: &str = "Nagori requires a Wayland session whose compositor supports the \
-         `wl_data_control` protocol (wlroots-based compositors such as \
-         sway/Hyprland qualify; GNOME Wayland currently does not). \
+         `ext_data_control_manager_v1` or `zwlr_data_control_manager_v1` global (KDE Plasma 5.27+ \
+         and wlroots-based compositors such as sway/Hyprland qualify; GNOME Wayland \
+         currently does not). \
          X11 is not supported. Run `nagori doctor` for a diagnostic dump.";
     match err {
         AppError::Unsupported(message) => AppError::Unsupported(format!(

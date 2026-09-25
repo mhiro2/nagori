@@ -101,7 +101,7 @@ domain code. This leads to four design rules:
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, the background semantic-index worker, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
-| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-`wl_data_control` hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
+| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-data-control hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
 
 Repository layout (abbreviated):
 
@@ -1156,7 +1156,7 @@ Implementations:
   registration on the daemon side is `Unsupported`. The Tauri desktop
   shell now wires the same `LinuxClipboard` + `LinuxPasteController` +
   `LinuxPermissionChecker` adapters through `AppState::build` and runs
-  the in-process capture loop against them; a missing `wl_data_control`
+  the in-process capture loop against them; a missing data-control
   protocol surfaces at startup as an `AppError::Platform` with an
   explicit Wayland/X11 hint instead of silently degrading to a no-op
   runtime. The Tauri plugin surface — tray (via the StatusNotifierItem /
@@ -2588,7 +2588,7 @@ change.
   so an already-granted cold start does not flash a spurious
   confirmation. No-op silently if notification permission is not granted.
 - **Startup fallback window** — when `AppState::try_new()` fails in
-  `setup()` (Linux session whose compositor lacks `wl_data_control` /
+  `setup()` (Linux session whose compositor lacks `wlr_data_control` /
   `ext_data_control`, denied data directory, corrupted SQLite file),
   the setup closure builds a small `WebviewWindow` labelled `fallback`
   whose contents are an inline `data:text/html;base64,...` document
