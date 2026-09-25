@@ -250,7 +250,8 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // candidate fetch) skip the page-cache copy on macOS where mmap is
     // cheap. 64 MiB is small enough that we don't fight other tenants
     // for address space on 32-bit CI runners while still covering a
-    // typical ~50k-row history.
+    // typical ~50k-row history. Windows is the exception, see
+    // [`MMAP_SIZE`].
     //
     // `recursive_triggers = ON` makes FK CASCADE deletes fire the AFTER
     // DELETE triggers on the cascaded child table. The
@@ -290,11 +291,24 @@ fn configure_connection(conn: &Connection) -> Result<()> {
          PRAGMA secure_delete = ON;
          PRAGMA temp_store = MEMORY;
          PRAGMA wal_autocheckpoint = 1000;
-         PRAGMA journal_size_limit = 16777216;
-         PRAGMA mmap_size = 67108864;",
+         PRAGMA journal_size_limit = 16777216;",
     )
-    .map_err(storage_err)
+    .map_err(storage_err)?;
+    conn.pragma_update(None, "mmap_size", MMAP_SIZE)
+        .map_err(storage_err)
 }
+
+/// `mmap_size` for every pooled connection; see `configure_connection`.
+///
+/// Windows refuses to shrink a file while any handle still has it mapped, and
+/// each pooled connection maps the database separately. With mmap on, the
+/// checkpoint that should drop the pages a vacuum released fails to truncate
+/// the main file, so the database never gets smaller on disk. Windows
+/// therefore reads through the page cache instead.
+#[cfg(not(windows))]
+const MMAP_SIZE: i64 = 64 * 1024 * 1024;
+#[cfg(windows)]
+const MMAP_SIZE: i64 = 0;
 
 pub(super) const MAX_READ_LIMIT: usize = 200;
 
