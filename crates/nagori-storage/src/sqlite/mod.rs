@@ -272,9 +272,10 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // that still hold the pre-deletion content; see ARCHITECTURE.md §19
     // for the at-rest posture and why app-level encryption is deferred.
     //
-    // `auto_vacuum = INCREMENTAL` comes first because it only takes effect
-    // while the file is still empty — once `journal_mode = WAL` has written
-    // the header it is fixed until a `VACUUM`. It lets the maintenance
+    // `auto_vacuum = INCREMENTAL` comes first because turning auto-vacuum
+    // on only takes effect before the file's first write — the header
+    // `journal_mode = WAL` writes on a fresh file is already too late, let
+    // alone the migrations' tables — and after that only a `VACUUM` can. It lets the maintenance
     // sweep hand free pages back to the filesystem in small chunks
     // (`incremental_vacuum`) instead of rebuilding the whole file. On an
     // existing `NONE` database the statement changes nothing on disk;

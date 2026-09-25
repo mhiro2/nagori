@@ -23,8 +23,9 @@ pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
 /// total work stays the same.
 pub(super) const PURGE_DELETED_BATCH: i64 = 256;
 
-/// `PRAGMA auto_vacuum` value for incremental mode (`0` none, `1` full).
-const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+/// `PRAGMA auto_vacuum` value for a database without auto-vacuum (`1` is full,
+/// `2` incremental).
+const AUTO_VACUUM_NONE: i64 = 0;
 
 /// Free pages released per `incremental_vacuum` statement in
 /// [`SqliteStore::vacuum`].
@@ -461,10 +462,13 @@ impl SqliteStore {
             let mode: i64 = conn
                 .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
                 .map_err(storage_err)?;
-            if mode == AUTO_VACUUM_INCREMENTAL {
-                release_free_pages(&conn)?;
-            } else {
+            // Only `NONE` needs the rebuild: `configure_connection` switches a
+            // `FULL` database to `INCREMENTAL` in place (`SQLite` allows that
+            // without a `VACUUM`), and a full-mode freelist is empty anyway.
+            if mode == AUTO_VACUUM_NONE {
                 rebuild_as_incremental(&conn)?;
+            } else {
+                release_free_pages(&conn)?;
             }
             // In WAL mode both paths write every page they move through the
             // WAL, so a full rebuild leaves a sidecar as large as the database

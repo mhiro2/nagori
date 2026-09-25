@@ -159,3 +159,25 @@ async fn vacuum_converts_a_database_without_auto_vacuum() {
         assert_eq!(temp_store, TEMP_STORE_MEMORY);
     }
 }
+
+/// `FULL` → `INCREMENTAL` needs no rebuild, so opening a full-mode database
+/// must switch it in place and `vacuum` must never pay for a full `VACUUM`.
+#[tokio::test]
+async fn opening_a_full_auto_vacuum_database_switches_it_in_place() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    {
+        let store = SqliteStore::open(&db_path).unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute_batch("PRAGMA auto_vacuum = FULL; VACUUM;")
+            .unwrap();
+        let mode: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, 1, "the fixture must start in full mode");
+    }
+
+    let store = SqliteStore::open(&db_path).unwrap();
+
+    assert_eq!(pragma(&store, "auto_vacuum"), AUTO_VACUUM_INCREMENTAL);
+}
