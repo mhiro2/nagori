@@ -412,7 +412,7 @@ mod image_scheme_tests {
             height: Some(1),
             byte_count: bytes.len(),
             mime_type: Some(mime.to_owned()),
-            pending_bytes: Some(bytes),
+            pending_bytes: Some(bytes.into()),
         });
         let mut entry = EntryFactory::from_content(content, None, None);
         entry.sensitivity = sensitivity;

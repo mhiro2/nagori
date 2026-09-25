@@ -166,7 +166,7 @@ mod tests {
             role: RepresentationRole::Alternative,
             mime_type: mime.to_owned(),
             ordinal,
-            data: RepresentationDataRef::DatabaseBlob(vec![1, 2, 3]),
+            data: RepresentationDataRef::DatabaseBlob(vec![1, 2, 3].into()),
         }
     }
 
@@ -251,7 +251,7 @@ mod tests {
             role: RepresentationRole::Alternative,
             mime_type: "image/png".to_owned(),
             ordinal: 0,
-            data: RepresentationDataRef::DatabaseBlob(Vec::new()),
+            data: RepresentationDataRef::DatabaseBlob(Vec::new().into()),
         };
         assert_eq!(canonical_pasteable_mime(&empty_image), None);
     }

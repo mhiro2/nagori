@@ -18,7 +18,7 @@ fn image_entry(bytes: Vec<u8>, mime: &str) -> ClipboardEntry {
             height: Some(1),
             byte_count,
             mime_type: Some(mime.to_owned()),
-            pending_bytes: Some(bytes),
+            pending_bytes: Some(bytes.into()),
         }),
         None,
         None,
@@ -413,7 +413,7 @@ async fn write_entry_round_trips_image_and_text() {
         role: RepresentationRole::Primary,
         mime_type: "application/pdf".to_owned(),
         ordinal: 0,
-        data: RepresentationDataRef::DatabaseBlob(vec![0x25, 0x50, 0x44, 0x46]),
+        data: RepresentationDataRef::DatabaseBlob(vec![0x25, 0x50, 0x44, 0x46].into()),
     }];
     clipboard
         .write_representations(&only_unsupported_entry, &unsupported_reps)

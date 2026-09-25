@@ -4,7 +4,7 @@ use nagori_core::{
     Result, StoredClipboardRepresentation,
 };
 #[cfg(target_os = "linux")]
-use nagori_core::{ClipboardData, ClipboardRepresentation, RepresentationDataRef};
+use nagori_core::{Bytes, ClipboardData, ClipboardRepresentation, RepresentationDataRef};
 use nagori_platform::{
     CapturedSnapshot, ClipboardReader, ClipboardWriter, has_publishable_representation,
 };
@@ -541,7 +541,7 @@ impl LinuxClipboard {
         .await
     }
 
-    async fn write_image_bytes(&self, bytes: Vec<u8>) -> Result<()> {
+    async fn write_image_bytes(&self, bytes: Bytes) -> Result<()> {
         // Detect the MIME from the byte magic before handing the buffer
         // to `wl-clipboard-rs`. We cannot use `CopyMimeType::Autodetect`
         // — that codepath shells out to `xdg-mime` which is not always
@@ -550,7 +550,9 @@ impl LinuxClipboard {
         // produces (e.g. ICO), so we get a clear error rather than a
         // silent mismatch on copy-back.
         let mime = guess_image_mime(&bytes)?;
-        let boxed = bytes.into_boxed_slice();
+        // `Source::Bytes` needs an owned `Box<[u8]>`; the entry still holds
+        // its `Bytes`, so this is the one copy the write has to make.
+        let boxed: Box<[u8]> = Box::from(&bytes[..]);
         run_clipboard_write("write_image_bytes", move || -> Result<()> {
             copy::copy(
                 Options::new(),
@@ -594,7 +596,7 @@ fn build_mime_sources(reps: &[StoredClipboardRepresentation]) -> Result<Vec<Mime
                     continue;
                 }
                 out.push(MimeSource {
-                    source: Source::Bytes(bytes.clone().into_boxed_slice()),
+                    source: Source::Bytes(Box::from(&bytes[..])),
                     mime_type: CopyMimeType::Specific(mime.to_owned()),
                 });
             }

@@ -248,6 +248,36 @@ fn snapshot_image_bytes_yields_image_content() {
 }
 
 #[test]
+fn snapshot_image_bytes_are_held_once() {
+    // The adapter's buffer must travel through normalisation into both the
+    // image content and the primary rep without a copy: a 64 MiB capture
+    // should occupy 64 MiB, not one copy per holder.
+    let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0];
+    let adapter_ptr = png_bytes.as_ptr();
+    let snapshot = ClipboardSnapshot {
+        sequence: crate::ClipboardSequence::content_hash("image-once"),
+        captured_at: OffsetDateTime::now_utc(),
+        source: None,
+        representations: vec![ClipboardRepresentation {
+            mime_type: "image/png".to_owned(),
+            data: ClipboardData::Bytes(png_bytes),
+        }],
+    };
+
+    let entry = EntryFactory::from_snapshot(snapshot).expect("png should build entry");
+    let crate::ClipboardContent::Image(img) = &entry.content else {
+        panic!("expected Image, got {:?}", entry.content);
+    };
+    let content_bytes = img.pending_bytes.as_ref().expect("pending bytes");
+    let RepresentationDataRef::DatabaseBlob(primary_bytes) = &entry.pending_representations[0].data
+    else {
+        panic!("primary should carry image bytes");
+    };
+    assert_eq!(content_bytes.as_ptr(), adapter_ptr);
+    assert_eq!(primary_bytes.as_ptr(), adapter_ptr);
+}
+
+#[test]
 fn snapshot_uses_captured_at_for_metadata_timestamps() {
     // The capture loop runs on a 500ms tick, so the snapshot is the
     // closest signal we have to "when did the user actually copy this".

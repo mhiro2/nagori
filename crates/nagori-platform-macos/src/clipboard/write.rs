@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardEntry, Result, StoredClipboardRepresentation,
+    AppError, Bytes, ClipboardContent, ClipboardEntry, Result, StoredClipboardRepresentation,
 };
 #[cfg(target_os = "macos")]
 use nagori_core::{ClipboardSequence, RepresentationDataRef};
@@ -126,7 +126,7 @@ impl ClipboardWriter for MacosClipboard {
 
 impl MacosClipboard {
     #[cfg(target_os = "macos")]
-    async fn write_image_bytes(&self, bytes: Vec<u8>, mime: &str) -> Result<()> {
+    async fn write_image_bytes(&self, bytes: Bytes, mime: &str) -> Result<()> {
         let mime_owned = mime.to_owned();
         let clipboard = self.clipboard.clone();
         let self_write = self.self_write.clone();
@@ -212,7 +212,7 @@ impl MacosClipboard {
     // Keep this async so the cfg-neutral caller can await both platform variants.
     #[cfg(not(target_os = "macos"))]
     #[allow(clippy::unused_async)]
-    async fn write_image_bytes(&self, _bytes: Vec<u8>, _mime: &str) -> Result<()> {
+    async fn write_image_bytes(&self, _bytes: Bytes, _mime: &str) -> Result<()> {
         Err(AppError::Unsupported(
             "image clipboard writes are macOS-only".to_owned(),
         ))

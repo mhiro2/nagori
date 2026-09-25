@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -148,10 +149,14 @@ impl RepresentationRole {
 /// `entry_representations.text_content`; image bytes land in
 /// `entry_representations.payload_blob`; file URL lists are encoded into
 /// `text_content` as a JSON array (see [`encode_file_paths`]).
+///
+/// Blob payloads are [`Bytes`] so an image primary shares its allocation
+/// with [`crate::ImageContent::pending_bytes`] and cloning a rep never
+/// duplicates the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationDataRef {
     InlineText(String),
-    DatabaseBlob(Vec<u8>),
+    DatabaseBlob(Bytes),
     FilePaths(Vec<String>),
 }
 

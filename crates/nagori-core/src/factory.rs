@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 
+use bytes::Bytes;
 use time::OffsetDateTime;
 
 use crate::{
@@ -23,15 +24,19 @@ impl EntryFactory {
         // plain_fallback / alternatives so copy-back can re-publish each
         // flavour the source advertised.
         //
-        // Consume `snapshot.representations` so `normalize_representations`
-        // *moves* each payload (image bytes / markup) into the normalized set
-        // rather than cloning it — for a multi-MB image that drops one full
-        // transient copy off the capture path. `source` / `captured_at` are
-        // distinct fields, so the partial move leaves them usable below.
+        // The snapshot is consumed by `normalize_representations`, which
+        // adopts each image `Vec` as a `Bytes` without copying, and
+        // `build_stored_set` consumes the normalized set, so stored reps take
+        // their payloads by move. An image primary's bytes are then one
+        // shared allocation referenced by both `ImageContent::pending_bytes`
+        // and the primary `DatabaseBlob` rather than one copy per holder;
+        // only text bodies are cloned, once, into `content`. `source` /
+        // `captured_at` are distinct fields, so the partial move leaves them
+        // usable below.
         let normalized = normalize_representations(snapshot.representations);
         let (content, primary_idx, has_plain_fallback) = pick_primary(&normalized)?;
         let mut entry = Self::from_content(content, snapshot.source, Some(snapshot.captured_at));
-        let stored = build_stored_set(&normalized, primary_idx, has_plain_fallback);
+        let stored = build_stored_set(normalized, primary_idx, has_plain_fallback);
         let set_hash = compute_representation_set_hash(&stored);
         entry.metadata.representation_set_hash = Some(set_hash);
         entry.pending_representations = stored;
@@ -103,8 +108,9 @@ enum NormalizedPayload {
         text: String,
     },
     /// Magic-number-verified image bytes. `mime` is the canonical lowercase
-    /// IANA form so dedupe and copy-back never disagree on case.
-    Image { mime: String, bytes: Vec<u8> },
+    /// IANA form so dedupe and copy-back never disagree on case. `Bytes`
+    /// so the primary content and the stored rep can share one allocation.
+    Image { mime: String, bytes: Bytes },
     /// Non-empty file-URL list. The stored row keeps the original mime so a
     /// future copy-back path can re-publish it under the same UTI / IANA
     /// flavour the source advertised.
@@ -182,7 +188,7 @@ fn normalize_representations(reps: Vec<ClipboardRepresentation>) -> Vec<Normaliz
             out.push(NormalizedRep {
                 payload: NormalizedPayload::Image {
                     mime: bare.to_ascii_lowercase(),
-                    bytes,
+                    bytes: Bytes::from(bytes),
                 },
             });
             continue;
@@ -292,6 +298,7 @@ fn pick_image_primary(normalized: &[NormalizedRep]) -> Option<(ClipboardContent,
         .iter()
         .enumerate()
         .find_map(|(i, n)| match &n.payload {
+            // `Bytes::clone` bumps a refcount; the payload is not copied.
             NormalizedPayload::Image { mime, bytes } => Some((i, mime.clone(), bytes.clone())),
             _ => None,
         })?;
@@ -348,38 +355,38 @@ fn text_at(normalized: &[NormalizedRep], idx: usize) -> String {
 /// (`primary` → `plain_fallback` → `alternative`). Within each role bucket
 /// the snapshot's original index is preserved so a multi-alternative entry
 /// keeps the same ranking copy-back would otherwise reconstruct.
+///
+/// Consumes `normalized` so every payload moves into its stored rep instead
+/// of being cloned alongside the soon-to-be-dropped normalized set.
 fn build_stored_set(
-    normalized: &[NormalizedRep],
+    normalized: Vec<NormalizedRep>,
     primary_idx: usize,
     has_plain_fallback: bool,
 ) -> Vec<StoredClipboardRepresentation> {
-    let mut out = Vec::with_capacity(normalized.len());
-    let mut consumed = vec![false; normalized.len()];
-    out.push(stored_from(
-        &normalized[primary_idx],
-        RepresentationRole::Primary,
-        0,
-    ));
-    consumed[primary_idx] = true;
+    let plain_fallback_idx = if has_plain_fallback {
+        find_text_idx(&normalized, "text/plain").filter(|&pi| pi != primary_idx)
+    } else {
+        None
+    };
+    let mut slots: Vec<Option<NormalizedRep>> = normalized.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(slots.len());
+    if let Some(primary) = slots[primary_idx].take() {
+        out.push(stored_from(primary, RepresentationRole::Primary, 0));
+    }
 
     let mut ordinal: u32 = 1;
-    if has_plain_fallback
-        && let Some(pi) = find_text_idx(normalized, "text/plain")
-        && !consumed[pi]
+    if let Some(pi) = plain_fallback_idx
+        && let Some(plain) = slots[pi].take()
     {
         out.push(stored_from(
-            &normalized[pi],
+            plain,
             RepresentationRole::PlainFallback,
             ordinal,
         ));
-        consumed[pi] = true;
         ordinal = ordinal.saturating_add(1);
     }
 
-    for (idx, rep) in normalized.iter().enumerate() {
-        if consumed[idx] {
-            continue;
-        }
+    for rep in slots.into_iter().flatten() {
         out.push(stored_from(rep, RepresentationRole::Alternative, ordinal));
         ordinal = ordinal.saturating_add(1);
     }
@@ -387,31 +394,31 @@ fn build_stored_set(
 }
 
 fn stored_from(
-    n: &NormalizedRep,
+    n: NormalizedRep,
     role: RepresentationRole,
     ordinal: u32,
 ) -> StoredClipboardRepresentation {
-    match &n.payload {
+    match n.payload {
         NormalizedPayload::Text {
             canonical_mime,
             text,
         } => StoredClipboardRepresentation {
             role,
-            mime_type: (*canonical_mime).to_owned(),
+            mime_type: canonical_mime.to_owned(),
             ordinal,
-            data: RepresentationDataRef::InlineText(text.clone()),
+            data: RepresentationDataRef::InlineText(text),
         },
         NormalizedPayload::Image { mime, bytes } => StoredClipboardRepresentation {
             role,
-            mime_type: mime.clone(),
+            mime_type: mime,
             ordinal,
-            data: RepresentationDataRef::DatabaseBlob(bytes.clone()),
+            data: RepresentationDataRef::DatabaseBlob(bytes),
         },
         NormalizedPayload::FilePaths { mime, paths } => StoredClipboardRepresentation {
             role,
-            mime_type: mime.clone(),
+            mime_type: mime,
             ordinal,
-            data: RepresentationDataRef::FilePaths(paths.clone()),
+            data: RepresentationDataRef::FilePaths(paths),
         },
     }
 }
