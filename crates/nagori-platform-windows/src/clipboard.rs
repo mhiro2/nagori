@@ -7,7 +7,7 @@ use arboard::{Clipboard, ImageData};
 use async_trait::async_trait;
 use image::ImageFormat;
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
+    AppError, Bytes, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardRepresentation,
     ClipboardSequence, ClipboardSnapshot, MAX_DECODED_IMAGE_PIXELS, ReadBudget, Result,
     StoredClipboardRepresentation,
 };
@@ -319,7 +319,7 @@ impl WindowsClipboard {
         }))
     }
 
-    async fn prepare_image_write(&self, bytes: Vec<u8>) -> Result<PreparedClipboardWrite> {
+    async fn prepare_image_write(&self, bytes: Bytes) -> Result<PreparedClipboardWrite> {
         // arboard publishes images on Windows as `CF_DIBV5`, so callers must
         // hand us decoded RGBA. The capture path stores encoded bytes
         // (image/png from this adapter, image/{tiff,jpeg,gif,webp} from

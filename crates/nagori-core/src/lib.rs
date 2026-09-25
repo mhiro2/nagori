@@ -10,6 +10,9 @@ pub mod settings;
 pub mod storage_location;
 pub mod text;
 
+// Payload type of `ImageContent::pending_bytes` / `DatabaseBlob`, re-exported
+// so adapters can name it without a direct `bytes` dependency.
+pub use bytes::Bytes;
 pub use errors::{AppError, PasteFailureReason, Result};
 pub use factory::EntryFactory;
 pub use image_signature::{

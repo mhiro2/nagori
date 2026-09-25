@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -178,8 +179,12 @@ pub struct ImageContent {
     /// In-memory bytes carried from capture → factory → storage. Always
     /// `None` after deserialisation; the storage layer reads the same data
     /// out of the dependent `entry_representations` row instead.
+    ///
+    /// A captured image's primary representation carries the same payload,
+    /// so the factory hands both a cheap `Bytes` clone of one allocation
+    /// instead of a second multi-MB copy.
     #[serde(skip)]
-    pub pending_bytes: Option<Vec<u8>>,
+    pub pending_bytes: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -579,7 +579,7 @@ fn decode_representation_payload(
                 Ok(RepresentationDataRef::InlineText(text))
             }
         }
-        (None, Some(bytes)) => Ok(RepresentationDataRef::DatabaseBlob(bytes)),
+        (None, Some(bytes)) => Ok(RepresentationDataRef::DatabaseBlob(bytes.into())),
         (Some(_), Some(_)) | (None, None) => Err(AppError::storage(
             "entry_representations row violated text_content/payload_blob CHECK".to_owned(),
         )),
@@ -819,7 +819,10 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
 
 enum PrimaryPayload {
     Text(String),
-    Bytes { mime: String, bytes: Vec<u8> },
+    Bytes {
+        mime: String,
+        bytes: nagori_core::Bytes,
+    },
 }
 
 fn insert_primary_representation(
@@ -862,7 +865,7 @@ fn insert_primary_representation(
                     representation_id,
                     entry_id,
                     mime,
-                    bytes,
+                    &bytes[..],
                     byte_count,
                     created_at
                 ],
@@ -922,7 +925,7 @@ fn insert_pending_representations(
                         role,
                         rep.mime_type,
                         ordinal,
-                        bytes,
+                        &bytes[..],
                         byte_count,
                         created_at,
                     ],

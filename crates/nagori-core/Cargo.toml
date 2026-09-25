@@ -14,6 +14,11 @@ clap = ["dep:clap"]
 
 [dependencies]
 async-trait.workspace = true
+# Captured image payloads are shared between `ImageContent::pending_bytes`
+# and the primary representation. `Bytes::from(Vec<u8>)` takes over the
+# adapter's allocation without copying (unlike `Arc<[u8]>::from`), so a
+# multi-MB image is held exactly once on the capture → insert path.
+bytes.workspace = true
 clap = { workspace = true, optional = true }
 hex.workspace = true
 regex.workspace = true

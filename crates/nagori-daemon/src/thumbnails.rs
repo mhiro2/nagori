@@ -707,7 +707,7 @@ mod tests {
                 height: Some(1),
                 byte_count: png_bytes.len(),
                 mime_type: Some("image/png".to_owned()),
-                pending_bytes: Some(png_bytes.clone()),
+                pending_bytes: Some(png_bytes.clone().into()),
             });
             let mut entry = EntryFactory::from_content(content, None, None);
             entry.sensitivity = blocked;
@@ -760,7 +760,7 @@ mod tests {
                 role: RepresentationRole::Alternative,
                 mime_type: "image/png".to_owned(),
                 ordinal: 1,
-                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png()),
+                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png().into()),
             },
         ];
         let id = store.insert(entry).await.expect("insert");
@@ -811,7 +811,7 @@ mod tests {
                 role: RepresentationRole::Alternative,
                 mime_type: "image/png".to_owned(),
                 ordinal: 1,
-                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png()),
+                data: RepresentationDataRef::DatabaseBlob(tiny_transparent_png().into()),
             },
         ];
         let id = store.insert(entry).await.expect("insert");

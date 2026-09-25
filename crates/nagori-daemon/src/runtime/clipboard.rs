@@ -564,7 +564,7 @@ impl NagoriRuntime {
             && image.pending_bytes.is_none()
             && let Some((bytes, mime)) = self.store.get_payload(id).await?
         {
-            image.pending_bytes = Some(bytes);
+            image.pending_bytes = Some(bytes.into());
             if image.mime_type.is_none() {
                 image.mime_type = Some(mime);
             }

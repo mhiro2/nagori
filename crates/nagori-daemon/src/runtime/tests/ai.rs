@@ -46,7 +46,7 @@ async fn add_image_entry(runtime: &NagoriRuntime) -> EntryId {
         height: Some(1),
         byte_count: 4,
         mime_type: Some("image/png".to_owned()),
-        pending_bytes: Some(vec![0u8, 1, 2, 3]),
+        pending_bytes: Some(vec![0u8, 1, 2, 3].into()),
     });
     runtime
         .store

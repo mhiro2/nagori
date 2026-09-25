@@ -676,7 +676,7 @@ mod tests {
             role: RepresentationRole::Alternative,
             mime_type: "image/png".to_owned(),
             ordinal: 1,
-            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50]),
+            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50].into()),
         };
         assert!(clipboard.write_representation_exact(&image).await.is_err());
         // The refused write left the prior contents untouched.
@@ -701,7 +701,7 @@ mod tests {
             role: RepresentationRole::Primary,
             mime_type: "image/png".to_owned(),
             ordinal: 2,
-            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50, 0x4e, 0x47]),
+            data: RepresentationDataRef::DatabaseBlob(vec![0x89, 0x50, 0x4e, 0x47].into()),
         };
         let paths = StoredClipboardRepresentation {
             role: RepresentationRole::Primary,

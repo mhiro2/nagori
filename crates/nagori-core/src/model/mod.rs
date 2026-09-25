@@ -606,7 +606,7 @@ mod tests {
             role: RepresentationRole::Primary,
             mime_type: "image/png".to_owned(),
             ordinal: 0,
-            data: RepresentationDataRef::DatabaseBlob(vec![0, 1, 2, 3]),
+            data: RepresentationDataRef::DatabaseBlob(vec![0, 1, 2, 3].into()),
         };
         assert_eq!(blob.byte_count(), 4);
 
@@ -721,7 +721,7 @@ mod tests {
                 role: RepresentationRole::Primary,
                 mime_type: "image/png".to_owned(),
                 ordinal: 0,
-                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 2000]),
+                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 2000].into()),
             },
             StoredClipboardRepresentation {
                 role: RepresentationRole::Alternative,
@@ -753,7 +753,7 @@ mod tests {
                 role: RepresentationRole::Alternative,
                 mime_type: "image/png".to_owned(),
                 ordinal: 1,
-                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 5000]),
+                data: RepresentationDataRef::DatabaseBlob(vec![0u8; 5000].into()),
             },
         ];
         // text_total = 5 ≤ 10_000; image_total = 5000 > 100 → drop the image alt.
