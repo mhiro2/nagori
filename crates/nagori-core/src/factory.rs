@@ -24,14 +24,15 @@ impl EntryFactory {
         // plain_fallback / alternatives so copy-back can re-publish each
         // flavour the source advertised.
         //
-        // Payloads move rather than copy along the whole path: the snapshot
-        // is consumed by `normalize_representations`, which adopts each
-        // image `Vec` as a `Bytes` without copying, and `build_stored_set`
-        // consumes the normalized set. An image primary's bytes are then one
+        // The snapshot is consumed by `normalize_representations`, which
+        // adopts each image `Vec` as a `Bytes` without copying, and
+        // `build_stored_set` consumes the normalized set, so stored reps take
+        // their payloads by move. An image primary's bytes are then one
         // shared allocation referenced by both `ImageContent::pending_bytes`
-        // and the primary `DatabaseBlob`, so a multi-MB image is held once
-        // rather than once per holder. `source` / `captured_at` are distinct
-        // fields, so the partial move leaves them usable below.
+        // and the primary `DatabaseBlob` rather than one copy per holder;
+        // only text bodies are cloned, once, into `content`. `source` /
+        // `captured_at` are distinct fields, so the partial move leaves them
+        // usable below.
         let normalized = normalize_representations(snapshot.representations);
         let (content, primary_idx, has_plain_fallback) = pick_primary(&normalized)?;
         let mut entry = Self::from_content(content, snapshot.source, Some(snapshot.captured_at));

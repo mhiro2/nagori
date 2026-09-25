@@ -799,7 +799,8 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
 
 /// The primary-only representation row for entries without a
 /// `pending_representations` set. Borrows from the entry so the image
-/// bytes / text body are bound straight into the INSERT without a copy.
+/// bytes / text body are bound into the INSERT without an owned copy on
+/// the Rust side; `SQLite` still takes its own transient copy while binding.
 enum PrimaryPayload<'a> {
     Text(&'a str),
     Bytes { mime: &'a str, bytes: &'a [u8] },
