@@ -226,20 +226,32 @@ impl Drop for ProgressGuard<'_> {
 fn configure_connection(conn: &Connection) -> Result<()> {
     // `temp_store = MEMORY` keeps SQLite scratch (sorter spill, transient
     // indices) off the on-disk temp files that would otherwise land in
-    // `$TMPDIR` with default umask permissions — the DB file itself is
-    // chmod 0o600, but the temp sidecar isn't, so this prevents a
-    // narrow class of disclosure under multi-user macOS.
+    // `$TMPDIR`. Those files are `0600` and unlinked on open, but their
+    // freed blocks are not covered by `secure_delete`, so keeping scratch
+    // in RAM avoids leaving clipboard fragments on the temp volume. The
+    // one exception is the full-file `VACUUM`, whose temporary copy is as
+    // large as the database; see `maintenance::rebuild_as_incremental`.
     //
     // `wal_autocheckpoint = 1000` (pages, ~4 MiB at the default 4 KiB
     // page size) bounds WAL growth on a long-running daemon. Without it
     // an idle writer can leave a multi-GiB WAL after a burst of
     // captures, which surprises users inspecting the data dir.
     //
+    // `journal_size_limit = 16 MiB` is what actually shrinks the file back:
+    // a checkpoint (passive or not) only rewinds the WAL to its start and
+    // leaves the sidecar at its high-water mark, so without a limit one
+    // 64 MiB image capture or a whole-file `VACUUM` leaves a sidecar that
+    // large for the life of the process. With the limit SQLite truncates
+    // the WAL back to 16 MiB each time it resets it after a full
+    // checkpoint. 16 MiB is 4× the autocheckpoint target, so ordinary
+    // capture traffic never pays a truncate-then-regrow cycle.
+    //
     // `mmap_size = 64 MiB` lets read-heavy paths (substring scan, FTS
     // candidate fetch) skip the page-cache copy on macOS where mmap is
     // cheap. 64 MiB is small enough that we don't fight other tenants
     // for address space on 32-bit CI runners while still covering a
-    // typical ~50k-row history.
+    // typical ~50k-row history. Windows is the exception, see
+    // [`MMAP_SIZE`].
     //
     // `recursive_triggers = ON` makes FK CASCADE deletes fire the AFTER
     // DELETE triggers on the cascaded child table. The
@@ -260,8 +272,18 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // up with `wal_checkpoint(TRUNCATE)` to drop the historical WAL frames
     // that still hold the pre-deletion content; see ARCHITECTURE.md §19
     // for the at-rest posture and why app-level encryption is deferred.
+    //
+    // `auto_vacuum = INCREMENTAL` comes first because turning auto-vacuum
+    // on only takes effect before the file's first write — the header
+    // `journal_mode = WAL` writes on a fresh file is already too late, let
+    // alone the migrations' tables — and after that only a `VACUUM` can. It lets the maintenance
+    // sweep hand free pages back to the filesystem in small chunks
+    // (`incremental_vacuum`) instead of rebuilding the whole file. On an
+    // existing `NONE` database the statement changes nothing on disk;
+    // `SqliteStore::vacuum` converts it with a one-time rebuild.
     conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         PRAGMA foreign_keys = ON;
          PRAGMA recursive_triggers = ON;
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;
@@ -269,10 +291,24 @@ fn configure_connection(conn: &Connection) -> Result<()> {
          PRAGMA secure_delete = ON;
          PRAGMA temp_store = MEMORY;
          PRAGMA wal_autocheckpoint = 1000;
-         PRAGMA mmap_size = 67108864;",
+         PRAGMA journal_size_limit = 16777216;",
     )
-    .map_err(storage_err)
+    .map_err(storage_err)?;
+    conn.pragma_update(None, "mmap_size", MMAP_SIZE)
+        .map_err(storage_err)
 }
+
+/// `mmap_size` for every pooled connection; see `configure_connection`.
+///
+/// Windows refuses to shrink a file while any handle still has it mapped, and
+/// each pooled connection maps the database separately. With mmap on, the
+/// checkpoint that should drop the pages a vacuum released fails to truncate
+/// the main file, so the database never gets smaller on disk. Windows
+/// therefore reads through the page cache instead.
+#[cfg(not(windows))]
+const MMAP_SIZE: i64 = 64 * 1024 * 1024;
+#[cfg(windows)]
+const MMAP_SIZE: i64 = 0;
 
 pub(super) const MAX_READ_LIMIT: usize = 200;
 

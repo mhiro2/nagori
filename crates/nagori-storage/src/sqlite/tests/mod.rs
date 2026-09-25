@@ -4,6 +4,7 @@
 
 mod audit;
 mod entries;
+mod maintenance;
 mod permissions;
 mod representations;
 mod schema;

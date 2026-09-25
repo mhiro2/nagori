@@ -693,7 +693,7 @@ parent `entries` row, so `ON DELETE CASCADE` (plus `recursive_triggers`
 firing the `search_documents_ad_fts` sync trigger) drops the row's
 representations, blobs, embeddings, thumbnails, and search / ngram
 index in the same transaction. Retention therefore reclaims disk (a
-later `VACUUM` from the maintenance sweep then shrinks the file) rather
+later vacuum from the maintenance sweep then shrinks the file) rather
 than tombstoning rows that grow it forever. Per-entry deletes
 (`delete_entry`) soft-delete by default, but
 `permanent_delete_on_delete` switches that surface to the same immediate
@@ -721,11 +721,20 @@ because that tombstone can sit until the next sweep — the bulk tombstone leave
 them to the same cascade that drops the bodies, which is exactly the expensive
 part being deferred. Clear-on-quit keeps the synchronous `clear_non_pinned`:
 the app is exiting, so there is no later moment to run a purge in. The
-maintenance sweep's `VACUUM` is deferred one round for the same reason the
-purge is batched — rewriting a multi-GB file holds the single writer long
-enough to push a concurrent capture past its `busy_timeout`, and the sweep that
-would earn it is the one the user's clear just kicked. A qualifying sweep arms
-the rewrite and the *next* one pays for it, typically while the app is idle.
+maintenance sweep's vacuum is batched for the same reason. Databases run in
+`auto_vacuum = INCREMENTAL`, so the sweep hands free pages back to the
+filesystem with `incremental_vacuum` in 2048-page chunks, each its own short
+write transaction, rather than rewriting the whole file under the single
+writer. A database created before that mode is `auto_vacuum = NONE`; its first
+vacuum is a one-time full `VACUUM` that switches the mode. That rebuild runs
+with `temp_store = FILE` because `VACUUM` builds a complete temporary copy of
+the database, and under the connections' usual `temp_store = MEMORY` that
+copy sits in RAM (peak RSS ~790 MB for a 600 MB database, versus ~180 MB with
+`FILE`). The vacuum is also deferred one round: the one-time rebuild holds the
+writer long enough to push a concurrent capture past its `busy_timeout`, and
+the sweep that would earn it is the one the user's clear just kicked. A
+qualifying sweep arms the vacuum and the *next* one pays for it, typically
+while the app is idle.
 
 Hard-delete reclaims the rows; `secure_delete = ON` (set on every pooled
 connection) zeroes their freed pages so the content is not recoverable
@@ -733,7 +742,12 @@ from the freelist, and the explicit purge paths (`clear_non_pinned`,
 `clear_older_than`, `purge_deleted`, `hard_delete_entry`) follow up with
 `wal_checkpoint(TRUNCATE)` so the pre-deletion bytes do not survive in
 historical WAL frames. This is residue reduction inside the file, **not**
-encryption — see [section 19](#19-security-notes).
+encryption — see [section 19](#19-security-notes). The maintenance vacuum
+ends with the same truncate, since it writes every page it moves through the
+WAL. Outside those paths `journal_size_limit` (16 MiB) bounds the sidecar: a
+checkpoint alone only rewinds the WAL and leaves the file at its high-water
+mark, so without the limit one large image capture would pin a sidecar that
+size for the life of the process.
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**

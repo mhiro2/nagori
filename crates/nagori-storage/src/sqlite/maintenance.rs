@@ -23,6 +23,19 @@ pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
 /// total work stays the same.
 pub(super) const PURGE_DELETED_BATCH: i64 = 256;
 
+/// `PRAGMA auto_vacuum` value for a database without auto-vacuum (`1` is full,
+/// `2` incremental).
+const AUTO_VACUUM_NONE: i64 = 0;
+
+/// Free pages released per `incremental_vacuum` statement in
+/// [`SqliteStore::vacuum`].
+///
+/// Each statement is its own autocommit write transaction, so the chunk bounds
+/// how long a reclaim holds the single writer: 2048 pages is 8 MiB at the
+/// default 4 KiB page size, so a capture that lands mid-reclaim waits for one
+/// chunk instead of the whole freelist.
+const INCREMENTAL_VACUUM_CHUNK_PAGES: i64 = 2048;
+
 /// Fold the WAL back into the main file and truncate it to zero length after
 /// a purge that deleted at least one row.
 ///
@@ -47,8 +60,22 @@ pub(super) fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, delet
     if deleted == 0 {
         return;
     }
-    if let Err(err) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-        tracing::warn!(error = %err, "wal_checkpoint_truncate_after_purge_failed");
+    checkpoint_truncate(conn);
+}
+
+/// Best-effort `wal_checkpoint(TRUNCATE)`: the caller's write already
+/// committed, so a failed truncate is logged rather than surfaced.
+///
+/// A reader that outlasts `busy_timeout` does not make the pragma fail — it
+/// reports `busy = 1` in its result row and leaves the WAL untruncated — so the
+/// row is read and that case logged too, instead of passing silently.
+fn checkpoint_truncate(conn: &rusqlite::Connection) {
+    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    }) {
+        Ok(0) => {}
+        Ok(_) => tracing::warn!("wal_checkpoint_truncate_busy"),
+        Err(err) => tracing::warn!(error = %err, "wal_checkpoint_truncate_failed"),
     }
 }
 
@@ -419,12 +446,88 @@ impl SqliteStore {
         .await
     }
 
+    /// Return the database's free pages to the filesystem.
+    ///
+    /// Databases run in `auto_vacuum = INCREMENTAL` (set before the first
+    /// table in `configure_connection`), so this normally releases the
+    /// freelist in [`INCREMENTAL_VACUUM_CHUNK_PAGES`] chunks: no copy of the
+    /// database is built and the writer is free between chunks. A database
+    /// created before that mode existed is still `auto_vacuum = NONE`, where
+    /// the only way to shrink the file — and to switch the mode — is a full
+    /// `VACUUM`; that one-time rebuild runs with `temp_store = FILE`, see
+    /// [`rebuild_as_incremental`].
     pub async fn vacuum(&self) -> Result<()> {
         self.run_blocking(|store| {
             let conn = store.conn()?;
-            conn.execute_batch("VACUUM").map_err(storage_err)?;
+            let mode: i64 = conn
+                .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                .map_err(storage_err)?;
+            // Only `NONE` needs the rebuild: `configure_connection` switches a
+            // `FULL` database to `INCREMENTAL` in place (`SQLite` allows that
+            // without a `VACUUM`), and a full-mode freelist is empty anyway.
+            if mode == AUTO_VACUUM_NONE {
+                rebuild_as_incremental(&conn)?;
+            } else {
+                release_free_pages(&conn)?;
+            }
+            // In WAL mode both paths write every page they move through the
+            // WAL, so a full rebuild leaves a sidecar as large as the database
+            // itself. The autocheckpoint copies those frames back but leaves
+            // the file at that size, still holding pre-rewrite page images.
+            // Truncate it here instead of waiting for `journal_size_limit` to
+            // trim it on the next write.
+            checkpoint_truncate(&conn);
             Ok(())
         })
         .await
     }
+}
+
+/// Drain the freelist of an `auto_vacuum = INCREMENTAL` database one chunk at
+/// a time, so a capture waits at most one chunk for the writer.
+fn release_free_pages(conn: &rusqlite::Connection) -> Result<()> {
+    let freelist_count = |conn: &rusqlite::Connection| -> Result<i64> {
+        conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .map_err(storage_err)
+    };
+    let mut remaining = freelist_count(conn)?;
+    while remaining > 0 {
+        conn.execute_batch(&format!(
+            "PRAGMA incremental_vacuum({INCREMENTAL_VACUUM_CHUNK_PAGES});"
+        ))
+        .map_err(storage_err)?;
+        let next = freelist_count(conn)?;
+        // A concurrent delete can refill the freelist between chunks; keep
+        // going while chunks make progress, but never spin on a count that
+        // stopped falling.
+        if next >= remaining {
+            break;
+        }
+        remaining = next;
+    }
+    Ok(())
+}
+
+/// Rebuild an `auto_vacuum = NONE` database with `VACUUM`, switching it to
+/// incremental mode so later reclaims take [`release_free_pages`].
+///
+/// `VACUUM` copies the whole database into a temporary database first. Under
+/// the connection's usual `temp_store = MEMORY` that copy lives in RAM — the
+/// peak resident set measured ~790 MB for a 600 MB database versus ~180 MB
+/// with `temp_store = FILE` — so a multi-GB image history could exhaust memory.
+/// The rebuild therefore switches this connection to `FILE` for the one
+/// statement. `SQLite` creates that temporary file `0600` and unlinks it right
+/// after opening, so the copy has no path on disk; the connection goes back to
+/// `MEMORY` whether or not the rebuild succeeded.
+fn rebuild_as_incremental(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         PRAGMA temp_store = FILE;",
+    )
+    .map_err(storage_err)?;
+    let rebuilt = conn.execute_batch("VACUUM").map_err(storage_err);
+    let restored = conn
+        .execute_batch("PRAGMA temp_store = MEMORY;")
+        .map_err(storage_err);
+    rebuilt.and(restored)
 }
