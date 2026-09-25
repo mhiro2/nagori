@@ -507,6 +507,65 @@ if [[ "${PASTED_PNG_SHA}" != "${EXPECTED_PNG_SHA}" ]]; then
   exit 1
 fi
 
+step "paste-once offer is captured, not consumed by change detection"
+# `wl-copy --paste-once` serves exactly one request and then clears the
+# selection. Change detection follows selection events and never requests a
+# body, so the capture read is the only request and it gets the text. A
+# detector that fetched bodies to notice changes would spend the single serve
+# itself and leave the capture read with an empty clipboard.
+PASTE_ONCE_MARKER="nagori e2e paste-once $(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}${RANDOM}"
+push_and_wait_once() {
+  printf %s "$1" | wl-copy --paste-once
+  local deadline=$(( $(date +%s) + 10 ))
+  while (( $(date +%s) < deadline )); do
+    if run_cli list --limit 1 --json 2> "${CLI_ERR}" \
+      | jq -e --arg t "$1" '.[0] | (.text // .preview) == $t' >/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "paste-once marker was not captured: $1" >&2
+  return 1
+}
+push_and_wait_once "${PASTE_ONCE_MARKER}"
+
+step "large images that share their first megabytes are distinct captures"
+# Two screenshots-sized payloads that are byte-identical for their first
+# 2 MiB and differ only in the last byte. Each copy is a new selection, so
+# both land as separate image entries regardless of how much of the body a
+# fingerprint would have looked at. PNG decoders stop at IEND, so the
+# trailing bytes keep the fixture a valid PNG.
+LARGE_PNG_A="${WORK_DIR}/large-a.png"
+LARGE_PNG_B="${WORK_DIR}/large-b.png"
+{ cat "${IMAGE_FIXTURE}"; head -c $(( 2 * 1024 * 1024 )) /dev/zero; printf 'A'; } > "${LARGE_PNG_A}"
+{ cat "${IMAGE_FIXTURE}"; head -c $(( 2 * 1024 * 1024 )) /dev/zero; printf 'B'; } > "${LARGE_PNG_B}"
+
+top_image_id() {
+  run_cli list --limit 1 --json 2> "${CLI_ERR}" \
+    | jq -r '.[0] | select(.kind == "Image") | .id' || true
+}
+wait_for_new_top_image() {
+  local previous="$1"
+  local deadline=$(( $(date +%s) + 15 ))
+  local id=""
+  while (( $(date +%s) < deadline )); do
+    id="$(top_image_id)"
+    if [[ -n "${id}" && "${id}" != "${previous}" ]]; then
+      printf %s "${id}"
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "no new image entry reached the top of the list (previous=${previous})" >&2
+  return 1
+}
+
+wl-copy --type image/png < "${LARGE_PNG_A}"
+LARGE_A_ID="$(wait_for_new_top_image "${IMAGE_ENTRY_ID}")"
+wl-copy --type image/png < "${LARGE_PNG_B}"
+LARGE_B_ID="$(wait_for_new_top_image "${LARGE_A_ID}")"
+echo "captured large images a=${LARGE_A_ID} b=${LARGE_B_ID}"
+
 step "graceful shutdown via daemon stop"
 stop_daemon
 
