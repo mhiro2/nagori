@@ -64,9 +64,17 @@ pub(super) fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, delet
 
 /// Best-effort `wal_checkpoint(TRUNCATE)`: the caller's write already
 /// committed, so a failed truncate is logged rather than surfaced.
+///
+/// A reader that outlasts `busy_timeout` does not make the pragma fail — it
+/// reports `busy = 1` in its result row and leaves the WAL untruncated — so the
+/// row is read and that case logged too, instead of passing silently.
 fn checkpoint_truncate(conn: &rusqlite::Connection) {
-    if let Err(err) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-        tracing::warn!(error = %err, "wal_checkpoint_truncate_failed");
+    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    }) {
+        Ok(0) => {}
+        Ok(_) => tracing::warn!("wal_checkpoint_truncate_busy"),
+        Err(err) => tracing::warn!(error = %err, "wal_checkpoint_truncate_failed"),
     }
 }
 
