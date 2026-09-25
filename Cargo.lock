@@ -2928,16 +2928,17 @@ name = "nagori-platform-linux"
 version = "0.1.2"
 dependencies = [
  "async-trait",
- "hex",
  "image",
  "libc",
  "nagori-core",
  "nagori-platform",
- "sha2 0.11.0",
  "time",
  "tokio",
  "tracing",
  "url",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
  "wl-clipboard-rs",
 ]
 
