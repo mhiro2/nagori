@@ -168,11 +168,17 @@ ARCHITECTURE.md "Optimistic concurrency on settings writes".
 { "AiOutput": { /* AiOutputDto */ } }
 { "Cleared":  { "deleted": 12 } }
 { "Doctor":       { /* DoctorReport */ } }
-{ "Health":       { "ok": true, "version": "0.0.0" } }
+{ "Health":       { "ok": true, "version": "0.0.0", "db_path": "/…/nagori.sqlite" } }
 { "Capabilities": { /* PlatformCapabilities */ } }
 "Ack"
 { "Error":    { "code": "not_found", "message": "...", "recoverable": false } }
 ```
+
+`Health.db_path` is the canonical path of the store the serving instance
+holds (empty if the host did not report one, or if the path is not valid
+Unicode). The CLI compares it with
+the store a write targets before routing the write to the default
+endpoint, and refuses the write when they differ.
 
 ## Error codes
 
@@ -229,7 +235,7 @@ macOS / Linux:
 ```
 $ nc -U ~/Library/Application\ Support/nagori/nagori.sock
 {"token":"<hex>","request":"Health"}
-{"Health":{"ok":true,"version":"0.0.0"}}
+{"Health":{"ok":true,"version":"0.0.0","db_path":"/…/nagori.sqlite"}}
 ```
 
 ```

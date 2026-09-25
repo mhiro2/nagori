@@ -1548,7 +1548,13 @@ contest. Which store the CLI reaches is still "whichever process owns the
 endpoint", so to address two instances *intentionally* start the
 *daemon* with a custom `--ipc <endpoint>` and point the CLI at it; the
 desktop always serves the default endpoint (it is not configurable) and
-then owns it uncontended.
+then owns it uncontended. Because reaching the endpoint does not identify
+the store behind it, both hosts report the canonical path of the store
+they opened in `Health`, and the CLI checks it before routing a
+lock-gated write: a write aimed at a `NAGORI_DB_PATH` store that another
+instance serves the endpoint for is refused (pass `--ipc` for the owner of
+that store) instead of landing in the wrong history, and an `--auto-ipc`
+read in the same situation reads the targeted store locally.
 
 `Shutdown` means "stop the process that serves this endpoint" on both
 hosts. The daemon exits; the desktop routes the cancelled runtime into
@@ -1594,7 +1600,11 @@ permit, the AI permit, and any pending DB query — instead of finishing a
 response no one will read. The deadline only fires for the degenerate case where
 the peer neither reads nor closes while a handler is wedged; it is sized above
 the longest legitimate handler (a `RunAiAction` bounded by its own absolute
-deadline).
+deadline). Because every handler is bounded this way, an accept loop parked on
+a saturated permit pool is busy rather than wedged: it keeps refreshing the
+liveness timestamp while it waits, so the supervisor's wedge probe does not
+abort a healthy server that is serving a long request (e.g. an AI action under
+`--ipc-max-connections 1`).
 
 **Error model.** `IpcError` carries a stable `code` (English) plus a
 human-readable `message`. The desktop frontend maps `code` to

@@ -15,7 +15,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::accept::{
-    ACCEPT_RETRY_BACKOFF, acquire_permit_or_shutdown, drain_handlers, is_transient_accept_error,
+    ACCEPT_RETRY_BACKOFF, PERMIT_WAIT_HEARTBEAT, acquire_permit_or_shutdown, drain_handlers,
+    is_transient_accept_error,
 };
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
@@ -262,9 +263,9 @@ where
                 };
                 // Bump the liveness timestamp before we touch the
                 // semaphore. The supervisor's wedge probe relies on this
-                // landing per accept; running it before the permit await
-                // means even a saturated handler pool keeps the timestamp
-                // advancing as long as accept() itself is still firing.
+                // landing per accept; a saturated pool stops `accept()`
+                // from firing, so the permit wait below keeps the
+                // timestamp advancing with its own heartbeat.
                 server_health.record_accept();
                 // Race permit acquisition against shutdown (see
                 // `acquire_permit_or_shutdown`); on shutdown, refuse the
@@ -273,6 +274,8 @@ where
                 let permit = match acquire_permit_or_shutdown(
                     shutdown.as_mut(),
                     semaphore.clone(),
+                    &server_health,
+                    PERMIT_WAIT_HEARTBEAT,
                 )
                 .await
                 {
@@ -489,6 +492,7 @@ mod tests {
             IpcResponse::Health(HealthResponse {
                 ok: true,
                 version: "test-version".to_owned(),
+                db_path: String::new(),
                 maintenance: crate::MaintenanceHealthReport::default(),
                 capture: crate::CaptureHealthReport::default(),
                 ipc: crate::IpcHealthReport::default(),

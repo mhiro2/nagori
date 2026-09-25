@@ -14,7 +14,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::accept::{
-    ACCEPT_RETRY_BACKOFF, acquire_permit_or_shutdown, drain_handlers, is_transient_accept_error,
+    ACCEPT_RETRY_BACKOFF, PERMIT_WAIT_HEARTBEAT, acquire_permit_or_shutdown, drain_handlers,
+    is_transient_accept_error,
 };
 use super::connection::handle_connection;
 use super::health::{IpcServerConfig, IpcServerHealth, observe_handler_outcome};
@@ -275,6 +276,8 @@ where
                 let permit = match acquire_permit_or_shutdown(
                     shutdown.as_mut(),
                     semaphore.clone(),
+                    &server_health,
+                    PERMIT_WAIT_HEARTBEAT,
                 )
                 .await
                 {
@@ -366,6 +369,7 @@ mod tests_windows {
                 IpcResponse::Health(HealthResponse {
                     ok: true,
                     version: "pipe-test".to_owned(),
+                    db_path: String::new(),
                     maintenance: crate::MaintenanceHealthReport::default(),
                     capture: crate::CaptureHealthReport::default(),
                     ipc: crate::IpcHealthReport::default(),

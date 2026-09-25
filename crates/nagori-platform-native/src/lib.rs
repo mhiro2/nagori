@@ -50,11 +50,12 @@ pub struct NativeRuntimeOptions {
     /// `Health` reports can echo it back. Daemon callers pass the
     /// resolved endpoint; library callers (desktop) leave it unset.
     pub socket_path: Option<PathBuf>,
-    /// Database path threaded into the runtime so the IPC `Doctor` report can
-    /// echo which store the daemon is holding (it may be a non-default `--db`
-    /// / `NAGORI_DB_PATH` store). Daemon callers pass the resolved path;
-    /// library callers (desktop) leave it unset and the report omits the
-    /// `db` row.
+    /// Database path threaded into the runtime so the IPC `Doctor` and
+    /// `Health` reports can echo which store this instance is holding (it
+    /// may be a non-default `--db` / `NAGORI_DB_PATH` store). Hosts that own
+    /// a store — the daemon and the desktop app — pass the path they opened;
+    /// the CLI relies on it to refuse routing a write to an instance that
+    /// holds a different store.
     pub db_path: Option<PathBuf>,
     /// Override the AI engine. When `None`, the host default is wired: an
     /// Apple Foundation Models engine on macOS, and no engine elsewhere
