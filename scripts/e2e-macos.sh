@@ -364,7 +364,13 @@ guard CommandLine.arguments.count == 2 else {
 let url = URL(fileURLWithPath: CommandLine.arguments[1])
 let pb = NSPasteboard.general
 pb.clearContents()
-exit(pb.writeObjects([url as NSURL]) ? 0 : 1)
+let ok = pb.writeObjects([url as NSURL])
+// The pasteboard server commits the write asynchronously: exiting right
+// after `writeObjects` can bump the changeCount while the item never lands,
+// leaving the daemon an empty pasteboard it silently re-polls until the
+// deadline. Stay alive briefly so the write is committed before exit.
+Thread.sleep(forTimeInterval: 0.2)
+exit(ok ? 0 : 1)
 SWIFT
 if ! swift "${PUSH_FURL_SWIFT}" "${URI_FILE}" >/dev/null 2>&1; then
   echo "failed to push file URL onto NSPasteboard via swift" >&2
@@ -441,6 +447,9 @@ let html = CommandLine.arguments[1]
 let plain = CommandLine.arguments[2]
 let okHtml = pb.setString(html, forType: .html)
 let okString = pb.setString(plain, forType: .string)
+// Same asynchronous commit as the file-URL helper above: don't exit before
+// the pasteboard server has taken the write.
+Thread.sleep(forTimeInterval: 0.2)
 exit(okHtml && okString ? 0 : 1)
 SWIFT
 if ! swift "${PUSH_MULTI_SWIFT}" "${MULTI_HTML}" "${MULTI_TEXT}" >/dev/null 2>&1; then
