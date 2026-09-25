@@ -235,6 +235,15 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // an idle writer can leave a multi-GiB WAL after a burst of
     // captures, which surprises users inspecting the data dir.
     //
+    // `journal_size_limit = 16 MiB` is what actually shrinks the file back:
+    // a checkpoint (passive or not) only rewinds the WAL to its start and
+    // leaves the sidecar at its high-water mark, so without a limit one
+    // 64 MiB image capture or a whole-file `VACUUM` leaves a sidecar that
+    // large for the life of the process. With the limit SQLite truncates
+    // the WAL back to 16 MiB each time it resets it after a full
+    // checkpoint. 16 MiB is 4× the autocheckpoint target, so ordinary
+    // capture traffic never pays a truncate-then-regrow cycle.
+    //
     // `mmap_size = 64 MiB` lets read-heavy paths (substring scan, FTS
     // candidate fetch) skip the page-cache copy on macOS where mmap is
     // cheap. 64 MiB is small enough that we don't fight other tenants
@@ -269,6 +278,7 @@ fn configure_connection(conn: &Connection) -> Result<()> {
          PRAGMA secure_delete = ON;
          PRAGMA temp_store = MEMORY;
          PRAGMA wal_autocheckpoint = 1000;
+         PRAGMA journal_size_limit = 16777216;
          PRAGMA mmap_size = 67108864;",
     )
     .map_err(storage_err)

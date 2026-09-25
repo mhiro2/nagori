@@ -733,7 +733,12 @@ from the freelist, and the explicit purge paths (`clear_non_pinned`,
 `clear_older_than`, `purge_deleted`, `hard_delete_entry`) follow up with
 `wal_checkpoint(TRUNCATE)` so the pre-deletion bytes do not survive in
 historical WAL frames. This is residue reduction inside the file, **not**
-encryption — see [section 19](#19-security-notes).
+encryption — see [section 19](#19-security-notes). The maintenance `VACUUM`
+ends with the same truncate, since it writes every page it moves through the
+WAL. Outside those paths `journal_size_limit` (16 MiB) bounds the sidecar: a
+checkpoint alone only rewinds the WAL and leaves the file at its high-water
+mark, so without the limit one large image capture would pin a sidecar that
+size for the life of the process.
 
 **At-rest protection:** the database file mode is forced to `0600` and
 the parent directory to `0700` on creation. The DB itself is **not**

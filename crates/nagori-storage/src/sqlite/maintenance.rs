@@ -47,8 +47,14 @@ pub(super) fn checkpoint_truncate_after_purge(conn: &rusqlite::Connection, delet
     if deleted == 0 {
         return;
     }
+    checkpoint_truncate(conn);
+}
+
+/// Best-effort `wal_checkpoint(TRUNCATE)`: the caller's write already
+/// committed, so a failed truncate is logged rather than surfaced.
+fn checkpoint_truncate(conn: &rusqlite::Connection) {
     if let Err(err) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-        tracing::warn!(error = %err, "wal_checkpoint_truncate_after_purge_failed");
+        tracing::warn!(error = %err, "wal_checkpoint_truncate_failed");
     }
 }
 
@@ -423,6 +429,13 @@ impl SqliteStore {
         self.run_blocking(|store| {
             let conn = store.conn()?;
             conn.execute_batch("VACUUM").map_err(storage_err)?;
+            // In WAL mode `VACUUM` writes every page of the rebuilt file
+            // through the WAL, so the sidecar ends the rewrite as large as the
+            // database itself. The autocheckpoint copies those frames back but
+            // leaves the file at that size, still holding pre-rewrite page
+            // images. Truncate it here instead of waiting for
+            // `journal_size_limit` to trim it on the next write.
+            checkpoint_truncate(&conn);
             Ok(())
         })
         .await
