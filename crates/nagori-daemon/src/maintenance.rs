@@ -35,11 +35,12 @@ pub struct MaintenanceReport {
 }
 
 /// Minimum number of rows that must have been deleted in a maintenance run
-/// before we arm a `VACUUM`. `SQLite` VACUUM rewrites the entire database
-/// file, which is expensive and stalls writers; running it for every TTL'd
-/// row burns CPU and disk for negligible space gains. Wait until the deletion
-/// is large enough that reclaiming pages actually matters — and then run it on
-/// the *following* sweep, see `vacuum_pending`.
+/// before we arm a vacuum. Even the chunked incremental reclaim takes the
+/// writer once per chunk, and a database that predates incremental mode pays
+/// a one-time full rebuild; running either for every TTL'd row burns CPU and
+/// disk for negligible space gains. Wait until the deletion is large enough
+/// that reclaiming pages actually matters — and then run it on the
+/// *following* sweep, see `vacuum_pending`.
 const VACUUM_DELETION_THRESHOLD: usize = 256;
 
 /// Age past which audit events are trimmed by the maintenance sweep.
@@ -157,13 +158,14 @@ impl MaintenanceService {
             Err(err) => warn!(error = %err, "audit_log_trim_failed"),
         }
         let total_deleted = deleted_by_age + deleted_by_count + deleted_by_size + purged_deleted;
-        // `VACUUM` rewrites the whole database file and holds the single
-        // writer for the duration, so it is deferred one sweep rather than run
-        // by the sweep that earned it. The motivating case is *Clear history*:
-        // it kicks a sweep the moment the user clears, and vacuuming a
-        // multi-GB file right then would block captures past their
-        // `busy_timeout` — losing copies — immediately after an explicit user
-        // action. Carrying the flag to the next sweep still shrinks the file
+        // The vacuum is deferred one sweep rather than run by the sweep that
+        // earned it. It normally releases free pages in short chunks, but on a
+        // database that predates incremental mode it is a one-time full
+        // rewrite that holds the single writer for the duration. The
+        // motivating case is *Clear history*: it kicks a sweep the moment the
+        // user clears, and rewriting a multi-GB file right then would block
+        // captures past their `busy_timeout` — losing copies — immediately
+        // after an explicit user action. Carrying the flag to the next sweep still shrinks the file
         // (within the periodic interval, typically while the app is idle)
         // without stalling the writer at the worst possible moment. The flag
         // lives in memory: a worker restart in between simply drops it and the

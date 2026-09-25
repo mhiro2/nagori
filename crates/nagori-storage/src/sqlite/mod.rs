@@ -226,9 +226,11 @@ impl Drop for ProgressGuard<'_> {
 fn configure_connection(conn: &Connection) -> Result<()> {
     // `temp_store = MEMORY` keeps SQLite scratch (sorter spill, transient
     // indices) off the on-disk temp files that would otherwise land in
-    // `$TMPDIR` with default umask permissions — the DB file itself is
-    // chmod 0o600, but the temp sidecar isn't, so this prevents a
-    // narrow class of disclosure under multi-user macOS.
+    // `$TMPDIR`. Those files are `0600` and unlinked on open, but their
+    // freed blocks are not covered by `secure_delete`, so keeping scratch
+    // in RAM avoids leaving clipboard fragments on the temp volume. The
+    // one exception is the full-file `VACUUM`, whose temporary copy is as
+    // large as the database; see `maintenance::rebuild_as_incremental`.
     //
     // `wal_autocheckpoint = 1000` (pages, ~4 MiB at the default 4 KiB
     // page size) bounds WAL growth on a long-running daemon. Without it
@@ -269,8 +271,17 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     // up with `wal_checkpoint(TRUNCATE)` to drop the historical WAL frames
     // that still hold the pre-deletion content; see ARCHITECTURE.md §19
     // for the at-rest posture and why app-level encryption is deferred.
+    //
+    // `auto_vacuum = INCREMENTAL` comes first because it only takes effect
+    // while the file is still empty — once `journal_mode = WAL` has written
+    // the header it is fixed until a `VACUUM`. It lets the maintenance
+    // sweep hand free pages back to the filesystem in small chunks
+    // (`incremental_vacuum`) instead of rebuilding the whole file. On an
+    // existing `NONE` database the statement changes nothing on disk;
+    // `SqliteStore::vacuum` converts it with a one-time rebuild.
     conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
+        "PRAGMA auto_vacuum = INCREMENTAL;
+         PRAGMA foreign_keys = ON;
          PRAGMA recursive_triggers = ON;
          PRAGMA busy_timeout = 5000;
          PRAGMA journal_mode = WAL;
