@@ -1,5 +1,5 @@
 //! GUI fallback window shown when the main `AppState` cannot initialise
-//! (Linux compositor without `wl_data_control`, corrupted DB, denied
+//! (Linux compositor without a data-control protocol, corrupted DB, denied
 //! data directory, etc.). The fallback surfaces the same wording the
 //! CLI's `nagori doctor` / `annotate_linux_clipboard_error` already
 //! print so the user does not have to drop to a terminal to learn what

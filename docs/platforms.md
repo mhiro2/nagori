@@ -108,6 +108,12 @@ Known limitations:
   Pressing Enter copies the entry and the user pastes manually. Set
   `NAGORI_LINUX_AUTO_PASTE=1` in the daemon / desktop environment to
   opt in; that also requires the `wtype` binary on `$PATH`.
+- Nagori notices new clips from the compositor's selection events and
+  requests each clip's contents once, when it captures it; an unchanged
+  clipboard is never re-read. That single request still counts against
+  a copy that can be pasted only once (`wl-copy --paste-once`), as it
+  does for any Wayland clipboard manager, so such a copy is used up by
+  the capture. Pause capture first if you need the one paste yourself.
 - Global-shortcut registration is X11-only upstream; pure Wayland
   sessions cannot bind hotkeys and the failure is surfaced in the UI.
 - `WindowBehavior::frontmost_app()` returns `None` because Wayland has

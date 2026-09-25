@@ -15,15 +15,19 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-mult
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-hex.workspace = true
 image.workspace = true
 # `poll(2)` on the wl-clipboard pipe lets us bound a hung publisher
 # without spinning a tokio worker forever. The Linux platform crate
 # already gates on `target_os = "linux"`, so libc is only pulled in for
 # the real host build, not for the inert macOS/Windows stubs.
 libc = "0.2"
-sha2.workspace = true
 url.workspace = true
+# The selection watcher speaks the data-control protocols directly (a
+# persistent connection `wl-clipboard-rs` does not expose); these are the
+# same versions `wl-clipboard-rs` already pulls in.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 
 [lints]

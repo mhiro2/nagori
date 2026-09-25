@@ -94,14 +94,14 @@ domain code. This leads to four design rules:
 | `nagori-platform` | Cross-platform traits: clipboard read/write, paste, hotkey, permissions, frontmost window |
 | `nagori-platform-macos` | NSPasteboard capture, Cmd+V auto-paste, Accessibility checks, frontmost-app metadata |
 | `nagori-platform-windows` | Win32 clipboard capture (`GetClipboardSequenceNumber` + arboard text + arboard image RGBA → PNG re-encode with a CF_DIBV5 / CF_DIB / registered-PNG availability probe + `CF_HDROP` file lists), text + image + file-list copy-back (PNG → RGBA via arboard, file paths packed into a hand-rolled `DROPFILES` + `SetClipboardData(CF_HDROP)`), `SendInput` Ctrl+V auto-paste, `GetForegroundWindow` frontmost-app probe; hotkey registration delegated to Tauri shell |
-| `nagori-platform-linux` | Wayland-only Linux adapter — `wl-clipboard-rs` clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback) with multi-MIME enumeration (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste that is off by default (`LinuxAutoPaste`; the paste target cannot be verified on Wayland, opt in with `NAGORI_LINUX_AUTO_PASTE=1`), frontmost-app probe unsupported (no Wayland API exposes it), reported as the `Experimental` tier; hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
+| `nagori-platform-linux` | Wayland-only Linux adapter — clipboard over `wlr_data_control` / `ext_data_control` (no X11 fallback): a persistent connection follows `selection` events and numbers them as the clipboard sequence, captures read the announced offer's MIME set (text, image PNG/JPEG/GIF/WebP/TIFF, `text/uri-list` file lists), text + image + file-list copy-back (`image::guess_format` → `copy::MimeType::Specific`, RFC-2483 URI-list serialisation via `url::Url::from_file_path`) and a `copy::copy_multi` Preserve transaction that offers text / HTML / image / `text/uri-list` simultaneously, `wtype` Ctrl+V auto-paste that is off by default (`LinuxAutoPaste`; the paste target cannot be verified on Wayland, opt in with `NAGORI_LINUX_AUTO_PASTE=1`), frontmost-app probe unsupported (no Wayland API exposes it), reported as the `Experimental` tier; hotkey registration is delegated to the Tauri `tauri-plugin-global-shortcut` shell (X11-only — fails with `Unsupported` on a pure Wayland session) |
 | `nagori-platform-native` | Per-OS adapter wiring shared by `nagori-cli` (daemon + direct copy/paste) and `apps/desktop`. `build_native_runtime(store, options)` returns a `NagoriRuntime` plus the auxiliary clipboard reader / window handles, picking the right concrete `nagori-platform-{macos,windows,linux}` adapter at compile time. Centralises the Linux Wayland error annotation so both call sites surface the same compositor-requirement hint. |
 | `nagori-ai` | Cross-platform AI engine: the `AiActionEngine` trait + `AiEngine`, the `(action, provider) → backend` resolver, the `TextGenerator` / `Translator` / `Embedder` backend traits, a deterministic `MockBackend`, the rule-based quick-action runner, and the redactor. No platform deps |
 | `nagori-ai-apple` | macOS-only Apple on-device AI bridge. Isolates the Swift / FoundationModels / Translation / NaturalLanguage build/link deps behind a Swift static library: `AppleFoundationBackend` (a `nagori-ai` `TextGenerator` that streams on-device text — summaries, rewrites, Markdown reformatting, task extraction, code explanations — via `SystemLanguageModel`), `AppleTranslateBackend` (a `Translator` over `TranslationSession` with `NLLanguageRecognizer` source detection), `AppleEmbedderBackend` (an `Embedder` over `NLContextualEmbedding` for semantic search), Apple Intelligence availability probe (with cross-platform mock fixtures), longest-common-prefix delta-isation of partial snapshots, and a Tokio-mpsc stream with cancellation |
 | `nagori-ipc` | Newline-delimited JSON over a per-platform transport (Unix domain socket on Unix, Win32 named pipe on Windows); auth-token handshake, request/response DTOs |
 | `nagori-daemon` | `NagoriRuntime` façade, capture loop, maintenance jobs, the background semantic-index worker, IPC server, in-memory search cache |
 | `nagori-cli` | `nagori` binary; clap commands, plain/JSON/JSONL output, IPC client + read-only DB fallback |
-| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-`wl_data_control` hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
+| `apps/desktop` | Tauri 2 shell + Svelte 5 frontend; thin command layer over `NagoriRuntime`. `AppState::build` delegates platform adapter selection to `nagori-platform-native::build_native_runtime`, so the Linux Wayland missing-data-control hint is shared with the CLI daemon path. The system tray (macOS menu bar / Windows notification area / Linux StatusNotifierItem), palette commands, autostart, global-shortcut registration and updater plugin are wired on every OS; capabilities that genuinely cannot exist off macOS (secure-input detection, sleep/wake pasteboard-sequence handling, X11-only global hotkeys on a pure Wayland session) remain `Unsupported` and surface to the UI as such. |
 
 Repository layout (abbreviated):
 
@@ -301,8 +301,8 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   benign cost is an unchanged copy-back still on the clipboard across a sleep
   being re-captured on wake). Windows' `GetClipboardSequenceNumber` is stable
   across host pauses; macOS `changeCount` is used only while the wake-gap flag
-  is clear, because it can lap across sleep. The Wayland adapter's content-hash
-  sequence is not wired and keeps the default (no suppression).
+  is clear, because it can lap across sleep. The Wayland adapter does not
+  record its writes yet and keeps the default (no suppression).
 - Frontmost app metadata is captured **before** the clipboard body so
   `Cmd+C → Cmd+Tab → paste` flows still attribute the source correctly
   to the password manager / denylisted app.
@@ -352,8 +352,8 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
     `IsClipboardFormatAvailable` before `get_text` (each its own short
     clipboard session, no handle ever locked).
   - **Linux (Wayland)** treats KDE's `x-kde-passwordManagerHint` offer in
-    the enumerated MIME set as the marker, short-circuiting before any
-    `get_contents`.
+    the selection offer's MIME set as the marker, short-circuiting before
+    any body is requested.
 
   Both non-macOS conventions are presence-only secret markers with no
   transient analogue, so they surface as `Concealed`; like macOS they are
@@ -1087,25 +1087,47 @@ Implementations:
   the same switch so the UI never advertises a paste the controller
   refuses. Wired for the
   daemon (`nagori daemon run` and `nagori-cli` in-process mode). The
-  clipboard adapter talks directly to `wl-clipboard-rs` over the
-  `wlr_data_control` / `ext_data_control` protocols; arboard is
-  deliberately not used because its Linux backend silently falls back
-  to X11 when the Wayland feature is missing or initialisation fails.
-  Construction probes the data-control globals eagerly via
-  `paste::get_mime_types` and refuses to start if neither protocol is
-  exposed or no Wayland connection is reachable; `WAYLAND_DISPLAY` is
-  the supported signalling channel because `wayland-client` consumes
-  the inherited `WAYLAND_SOCKET` fd on first connect (the eager probe
-  would burn it before the capture loop could reuse it). There is no
-  X11 code path inside this crate. The capture path enumerates the
-  offer's MIME types via `paste::get_mime_types` and reads each
-  representation it cares about (image PNG/JPEG/GIF/WebP/TIFF in that
-  priority order — mirroring the `nagori-core` factory allowlist —
-  `text/uri-list` file lists, and text via the wl-clipboard-rs text
-  fallback) through a shared SHA-256 hasher with per-rep MIME framing
-  so the resulting sequence is unambiguous about the rep layout, not
-  just the concatenated bodies. The cumulative hash also fixes the
-  per-rep race window. Copy-back routes through `write_entry`, which
+  clipboard adapter speaks the `wlr_data_control` / `ext_data_control`
+  protocols directly (reads) and through `wl-clipboard-rs` (writes);
+  arboard is deliberately not used because its Linux backend silently
+  falls back to X11 when the Wayland feature is missing or
+  initialisation fails. Construction starts a selection watcher: one
+  persistent Wayland connection, dispatched on its own thread, that
+  binds the data-control manager (ext preferred) and the first seat and
+  follows the device's `selection` events. It refuses to start if
+  neither protocol is exposed or no Wayland connection is reachable;
+  `WAYLAND_DISPLAY` is the supported signalling channel because
+  `wayland-client` consumes the inherited `WAYLAND_SOCKET` fd on first
+  connect (the watcher would take it from the writes, which open their
+  own connections). There is no X11 code path inside this crate. Each
+  `selection` event carries a fresh offer object whose MIME types were
+  announced just before it, and the watcher numbers them with a
+  monotonic generation — the adapter's `ClipboardSequence::Native`.
+  `current_sequence()` returns that generation without asking the
+  clipboard owner for anything, so an unchanged clipboard costs no
+  transfer per poll, a `wl-copy --paste-once` offer is not spent on
+  change detection, owners that encode on demand (GIMP, Krita) are not
+  woken every tick, and re-copying identical bytes still reads as a
+  change. The capture path reads the representations it cares about
+  (image PNG/JPEG/GIF/WebP/TIFF in that priority order — mirroring the
+  `nagori-core` factory allowlist — `text/uri-list` file lists, and a
+  plain-text MIME: `text/plain;charset=utf-8`, `UTF8_STRING`,
+  `text/plain`, the X11 `STRING` / `TEXT` atoms, else another
+  `text/plain` spelling, never markup such as `text/html`) by calling
+  `receive` on the offer the generation names, so one pass can never
+  stitch two clips. If the generation moves on while the pass is
+  reading, the replaced owner may have stopped writing early, so the
+  result is discarded and the read retried against the new offer
+  (bounded by `SNAPSHOT_CAPTURE_MAX_RETRIES`, and no retry starts once
+  3 s have elapsed; after that the pass reports an empty clip and the next tick reads the
+  newer generation). If the watcher's connection drops (compositor
+  restart), reads error until a replacement watcher connects (at most
+  one attempt per 5 s); the replacement continues the generation count
+  so the clip on the clipboard at reconnect reads as a change. Each
+  representation is gated against its kind budget while streaming and
+  the pipe is closed as soon as one crosses it; a per-MIME 3 s read
+  deadline bounds an owner that stops writing, and both surface as
+  `Oversized` anchored to that generation. Copy-back routes through `write_entry`, which
   publishes the matching MIME via `copy::MimeType::Specific` (selected
   with `image::guess_format` so the offer label matches the bytes) for
   image rows, serialises `text/uri-list` payloads from
@@ -1116,15 +1138,11 @@ Implementations:
   hands a single `copy::copy_multi` batch (text/plain, text/html,
   application/rtf, image/png|jpeg|gif|webp|tiff, text/uri-list) to the
   compositor so a paste target receives every advertised MIME alongside
-  the plain-text fallback in one offer. Because Wayland exposes no equivalent of
-  `GetClipboardSequenceNumber`, `current_sequence()` reuses the same
-  multi-rep streaming hasher up to the configured byte ceiling;
-  oversized transfers close the pipe immediately and use a
-  ceiling/prefix-keyed sentinel sequence so the owner cannot hold a
-  blocking worker by streaming past the limit. The source app participates in
-  each transfer per the data-control protocol, so the capture interval
-  (`AppSettings::poll_interval_ms`) directly trades off responsiveness
-  against source-app wakeups. Auto-paste shells out
+  the plain-text fallback in one offer. The source app participates in
+  every body transfer per the data-control protocol, so one capture of a
+  clip is one request per captured MIME; the capture interval
+  (`AppSettings::poll_interval_ms`) only paces how soon a new
+  generation is noticed. Auto-paste shells out
   to `wtype -M ctrl v -m ctrl`, which drives `zwp_virtual_keyboard_v1`;
   if the binary is missing or the compositor refuses the protocol the
   controller returns an error — the same shape as macOS when
@@ -1138,7 +1156,7 @@ Implementations:
   registration on the daemon side is `Unsupported`. The Tauri desktop
   shell now wires the same `LinuxClipboard` + `LinuxPasteController` +
   `LinuxPermissionChecker` adapters through `AppState::build` and runs
-  the in-process capture loop against them; a missing `wl_data_control`
+  the in-process capture loop against them; a missing data-control
   protocol surfaces at startup as an `AppError::Platform` with an
   explicit Wayland/X11 hint instead of silently degrading to a no-op
   runtime. The Tauri plugin surface — tray (via the StatusNotifierItem /
@@ -1390,8 +1408,9 @@ the pair one serialised operation:
   the hide → refocus → delay window. `ClipboardReader::self_write_tracking`
   describes whether the adapter is `Untracked`, `Stable` (Windows
   `GetClipboardSequenceNumber`), or `MayLapAfterHostPause` (macOS
-  `changeCount`); the Wayland content-hash fallback and any host without a
-  wired reader report *unverifiable* and the paste proceeds as before. A macOS
+  `changeCount`); the Wayland adapter (which does not record its writes) and
+  any host without a wired reader report *unverifiable* and the paste
+  proceeds as before. A macOS
   publish whose wall-clock age reaches the same 30 s host-pause threshold used
   by capture is refused even when its sequence still matches: `changeCount` can
   lap across sleep and make a foreign post-wake clip look like the pre-sleep
@@ -2569,7 +2588,7 @@ change.
   so an already-granted cold start does not flash a spurious
   confirmation. No-op silently if notification permission is not granted.
 - **Startup fallback window** — when `AppState::try_new()` fails in
-  `setup()` (Linux session whose compositor lacks `wl_data_control` /
+  `setup()` (Linux session whose compositor lacks `wlr_data_control` /
   `ext_data_control`, denied data directory, corrupted SQLite file),
   the setup closure builds a small `WebviewWindow` labelled `fallback`
   whose contents are an inline `data:text/html;base64,...` document

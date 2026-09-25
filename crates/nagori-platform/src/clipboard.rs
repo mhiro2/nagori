@@ -107,10 +107,10 @@ pub enum CapturedSnapshot {
 /// sleep/wake cycle, so consumers apply host-pause defences before trusting
 /// it: capture re-reads the body while its wake-gap resync flag is armed, and
 /// auto-paste refuses a publish old enough to have crossed that same gap.
-/// Adapters whose "sequence" is a content hash (the
-/// Wayland fallback) would need to clear the marker once the clipboard moves
-/// on, to avoid suppressing an identical clip the user later copies from
-/// another app; they are not wired yet and keep the default.
+/// The Wayland adapter's generation sequence is monotonic too, but it cannot
+/// sample the generation of its own write (the selection event for it arrives
+/// asynchronously on the watcher's connection); it is not wired yet and keeps
+/// the default.
 ///
 /// `record` samples the sequence the OS reports *after* the write; no OS
 /// exposes an atomic write-and-return-sequence, so the marker is set a few
@@ -175,10 +175,10 @@ pub trait ClipboardReader: Send + Sync {
     /// synthesises a paste, that the clipboard still holds the clip it just
     /// published — `current_sequence` + `matches_self_write`. That check is
     /// only meaningful where the adapter both maintains a
-    /// [`SelfWriteTracker`] and reports a native sequence. Adapters whose
-    /// sequence is a content hash (the Wayland fallback) keep the
-    /// [`SelfWriteTracking::Untracked`] default: they never record self-writes,
-    /// so the check would report "changed" for every paste and degrade
+    /// [`SelfWriteTracker`] and reports a native sequence. Adapters that do
+    /// not record their writes (Wayland) keep the
+    /// [`SelfWriteTracking::Untracked`] default: without a recorded self-write
+    /// the check would report "changed" for every paste and degrade
     /// auto-paste to copy-only. The coordinator treats that state as
     /// *unverifiable* and pastes anyway, preserving today's behaviour there.
     ///
