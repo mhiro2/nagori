@@ -598,32 +598,12 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     let updated_at = format_time(entry.metadata.updated_at)?;
     let created_at = format_time(entry.metadata.created_at)?;
     let mut doc = entry.search.clone();
-    // Extract image bytes before serialising. `pending_bytes` is
-    // `#[serde(skip)]` so the JSON body never grows by the blob size —
-    // image bytes live in `entry_representations.payload_blob` and are
-    // fetched lazily by the preview command. For non-image entries the
-    // representation row carries the plain text in `text_content`.
-    let (content_for_storage, primary_payload) = match &entry.content {
-        ClipboardContent::Image(img) => {
-            let bytes = img.pending_bytes.clone();
-            let mime = img.mime_type.clone();
-            let mut stripped = img.clone();
-            stripped.pending_bytes = None;
-            let payload = bytes.map(|bytes| PrimaryPayload::Bytes {
-                mime: mime
-                    .clone()
-                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
-                bytes,
-            });
-            (ClipboardContent::Image(stripped), payload)
-        }
-        other => (
-            other.clone(),
-            other
-                .plain_text()
-                .map(|text| PrimaryPayload::Text(text.to_owned())),
-        ),
-    };
+    // `pending_bytes` is `#[serde(skip)]`, so serialising the content as-is
+    // never grows the JSON body by the blob size — image bytes live in
+    // `entry_representations.payload_blob` and are fetched lazily by the
+    // preview command. Serialising by reference also avoids cloning the
+    // content (and, for text, the body) just to write it.
+    let content_json = serde_json::to_string(&entry.content).map_err(json_err)?;
     let mut conn = store.conn()?;
     // `BEGIN IMMEDIATE` so the dedupe SELECT and the follow-up INSERT/UPDATE run
     // under the write lock from the start. With a `DEFERRED` transaction two
@@ -753,7 +733,7 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
             params![
                 requested_id.to_string(),
                 kind_to_str(entry.content_kind()),
-                serde_json::to_string(&content_for_storage).map_err(json_err)?,
+                content_json,
                 entry
                     .metadata
                     .source
@@ -792,8 +772,8 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
         // leaking around redaction).
         let entry_id_str = requested_id.to_string();
         if entry.pending_representations.is_empty() {
-            if let Some(payload) = primary_payload.as_ref() {
-                insert_primary_representation(&tx, &entry_id_str, payload, &created_at)?;
+            if let Some(payload) = PrimaryPayload::of(&entry.content) {
+                insert_primary_representation(&tx, &entry_id_str, &payload, &created_at)?;
             }
         } else {
             insert_pending_representations(
@@ -817,18 +797,33 @@ fn insert_entry_blocking(store: &SqliteStore, entry: &ClipboardEntry) -> Result<
     Ok(stored_id)
 }
 
-enum PrimaryPayload {
-    Text(String),
-    Bytes {
-        mime: String,
-        bytes: nagori_core::Bytes,
-    },
+/// The primary-only representation row for entries without a
+/// `pending_representations` set. Borrows from the entry so the image
+/// bytes / text body are bound straight into the INSERT without a copy.
+enum PrimaryPayload<'a> {
+    Text(&'a str),
+    Bytes { mime: &'a str, bytes: &'a [u8] },
+}
+
+impl<'a> PrimaryPayload<'a> {
+    fn of(content: &'a ClipboardContent) -> Option<Self> {
+        match content {
+            ClipboardContent::Image(img) => img.pending_bytes.as_deref().map(|bytes| Self::Bytes {
+                mime: img
+                    .mime_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream"),
+                bytes,
+            }),
+            other => other.plain_text().map(Self::Text),
+        }
+    }
 }
 
 fn insert_primary_representation(
     tx: &rusqlite::Transaction<'_>,
     entry_id: &str,
-    payload: &PrimaryPayload,
+    payload: &PrimaryPayload<'_>,
     created_at: &str,
 ) -> Result<()> {
     let representation_id = format!("{entry_id}#primary");
@@ -865,7 +860,7 @@ fn insert_primary_representation(
                     representation_id,
                     entry_id,
                     mime,
-                    &bytes[..],
+                    bytes,
                     byte_count,
                     created_at
                 ],
