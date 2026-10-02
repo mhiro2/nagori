@@ -100,13 +100,26 @@ import {
   startAiAction,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
-import type { SearchResultDto } from '../lib/types';
+import type { EntryDto, SearchResultDto } from '../lib/types';
 import { aiActionsSupported } from '../stores/capabilities.svelte';
 import { sampleSearchResult } from '../test-helpers/fixtures';
 import ActionInspector from './ActionInspector.svelte';
 
 const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
   sampleSearchResult({ id: 'entry-id', preview: 'value', rankReasons: [], ...overrides });
+
+const sampleEntry = (overrides: Partial<EntryDto> = {}): EntryDto => ({
+  id: 'saved-1',
+  kind: 'text',
+  preview: 'result body',
+  createdAt: '2026-05-05T00:00:00Z',
+  updatedAt: '2026-05-05T00:00:00Z',
+  useCount: 0,
+  pinned: false,
+  sensitivity: 'Public',
+  representationSummary: [],
+  ...overrides,
+});
 
 // The streaming text actions the inspector surfaces (Translate is CLI-only).
 const TEXT_ACTIONS: AiActionId[] = [
@@ -587,17 +600,7 @@ describe('ActionInspector', () => {
   it('forwards the result body to saveAiResult on save', async () => {
     const user = userEvent.setup();
     vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
-    vi.mocked(saveAiResult).mockResolvedValue({
-      id: 'saved-1',
-      kind: 'text',
-      preview: 'result body',
-      createdAt: '2026-05-05T00:00:00Z',
-      updatedAt: '2026-05-05T00:00:00Z',
-      useCount: 0,
-      pinned: false,
-      sensitivity: 'Public',
-      representationSummary: [],
-    });
+    vi.mocked(saveAiResult).mockResolvedValue(sampleEntry());
 
     const { findByText, getByTestId, getByText } = render(ActionInspector, {
       props: { open: true, target: sample(), onClose: () => {} },
@@ -606,5 +609,168 @@ describe('ActionInspector', () => {
     await findByText('result body');
     await user.click(getByText('Save as new entry'));
     expect(saveAiResult).toHaveBeenCalledWith('result body');
+  });
+
+  it('keeps the result visible after a copy failure and clears the error when retried', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    writeText.mockRejectedValueOnce(new Error('Clipboard access denied'));
+    writeText.mockResolvedValueOnce(undefined);
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+
+    const { getByTestId, getByRole, findByRole, queryByRole } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+
+    expect((await findByRole('alert')).textContent).toBe(
+      'Could not copy the result. Clipboard access denied',
+    );
+    expect(getByTestId('action-result').textContent).toBe('result body');
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+
+    expect(await findByRole('button', { name: /^Copied$/ })).toBeTruthy();
+    expect(queryByRole('alert')).toBeNull();
+    expect(writeText).toHaveBeenLastCalledWith('result body');
+  });
+
+  it('keeps the result visible after a save failure and allows saving it again', async () => {
+    const user = userEvent.setup();
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+    vi.mocked(saveAiResult).mockRejectedValueOnce(new Error('Storage unavailable'));
+    vi.mocked(saveAiResult).mockResolvedValueOnce(sampleEntry({ id: 'saved' }));
+
+    const { getByTestId, getByRole, findByRole, queryByRole } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: 'Save as new entry' }));
+
+    expect((await findByRole('alert')).textContent).toBe(
+      'Could not save the result. Storage unavailable',
+    );
+    expect(getByTestId('action-result').textContent).toBe('result body');
+    const save = getByRole('button', { name: 'Save as new entry' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await user.click(save);
+
+    expect(await findByRole('button', { name: /^Saved$/ })).toBeTruthy();
+    expect(queryByRole('alert')).toBeNull();
+    expect(saveAiResult).toHaveBeenLastCalledWith('result body');
+  });
+
+  it.each(['quick-FormatJson', 'ai-Summarize'])(
+    'clears result errors when starting %s',
+    async (action) => {
+      const user = userEvent.setup();
+      vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+      vi.mocked(saveAiResult).mockRejectedValueOnce(new Error('Storage unavailable'));
+      vi.mocked(startAiAction).mockResolvedValue('next-run');
+
+      const { getByTestId, getByRole, findByRole, queryByRole } = render(ActionInspector, {
+        props: { open: true, target: sample(), onClose: () => {} },
+      });
+      await user.click(getByTestId('quick-FormatJson'));
+      await user.click(getByRole('button', { name: 'Save as new entry' }));
+      await findByRole('alert');
+      await user.click(getByTestId(action));
+
+      expect(queryByRole('alert')).toBeNull();
+    },
+  );
+
+  it.each(['retarget', 'reopen'])('ignores an old copy failure after %s', async (transition) => {
+    const user = userEvent.setup();
+    let rejectCopy: ((reason: Error) => void) | undefined;
+    vi.spyOn(navigator.clipboard, 'writeText').mockReturnValueOnce(
+      new Promise<void>((_, reject) => {
+        rejectCopy = reject;
+      }),
+    );
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+
+    const { getByTestId, getByRole, queryByRole, rerender } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    if (transition === 'reopen') {
+      await rerender({ open: false, target: sample({ id: 'a' }), onClose: () => {} });
+    }
+    await rerender({
+      open: true,
+      target: sample({ id: transition === 'retarget' ? 'b' : 'a' }),
+      onClose: () => {},
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    rejectCopy?.(new Error('Stale clipboard failure'));
+    await flush();
+
+    expect(queryByRole('alert')).toBeNull();
+    expect(getByTestId('action-result').textContent).toBe('result body');
+  });
+
+  it('does not replace a successful copy retry with an older failure', async () => {
+    const user = userEvent.setup();
+    let rejectCopy: ((reason: Error) => void) | undefined;
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    writeText.mockReturnValueOnce(
+      new Promise<void>((_, reject) => {
+        rejectCopy = reject;
+      }),
+    );
+    writeText.mockResolvedValueOnce(undefined);
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+
+    const { getByTestId, getByRole, findByRole, queryByRole } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    await findByRole('button', { name: /^Copied$/ });
+    rejectCopy?.(new Error('Stale clipboard failure'));
+    await flush();
+
+    expect(queryByRole('alert')).toBeNull();
+    expect(getByRole('button', { name: /^Copied$/ })).toBeTruthy();
+  });
+
+  it('does not let an old save completion unlock a save for a newer result', async () => {
+    const user = userEvent.setup();
+    let resolveOldSave: ((value: EntryDto) => void) | undefined;
+    let rejectNewSave: ((reason: Error) => void) | undefined;
+    vi.mocked(saveAiResult).mockReturnValueOnce(
+      new Promise<EntryDto>((resolve) => {
+        resolveOldSave = resolve;
+      }),
+    );
+    vi.mocked(saveAiResult).mockReturnValueOnce(
+      new Promise<EntryDto>((_, reject) => {
+        rejectNewSave = reject;
+      }),
+    );
+    vi.mocked(runQuickAction).mockResolvedValueOnce({ text: 'old result', warnings: [] });
+    vi.mocked(runQuickAction).mockResolvedValueOnce({ text: 'new result', warnings: [] });
+
+    const { getByTestId, getByRole, findByRole, queryByRole } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: 'Save as new entry' }));
+    await user.click(getByTestId('quick-FormatJson'));
+    const save = getByRole('button', { name: 'Save as new entry' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await user.click(save);
+    resolveOldSave?.(sampleEntry({ id: 'saved-old' }));
+    await flush();
+
+    expect(save.disabled).toBe(true);
+    expect(queryByRole('button', { name: /^Saved$/ })).toBeNull();
+    expect(getByTestId('action-result').textContent).toBe('new result');
+    rejectNewSave?.(new Error('Current save failed'));
+    expect((await findByRole('alert')).textContent).toContain('Current save failed');
+    expect(save.disabled).toBe(false);
   });
 });

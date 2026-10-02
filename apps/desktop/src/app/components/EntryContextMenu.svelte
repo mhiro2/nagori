@@ -12,6 +12,7 @@
     pasteEntryById,
     togglePinEntry,
   } from '../stores/searchActions';
+  import { settingsState } from '../stores/settings.svelte';
 
   type Props = {
     // Opening the action inspector docks a right-panel that lives in `Palette`
@@ -23,6 +24,7 @@
   const { onOpenActions }: Props = $props();
 
   const t = $derived(messages());
+  const autoPaste = $derived(settingsState.settings?.autoPasteEnabled !== false);
 
   type MenuRow =
     | { kind: 'separator'; key: string }
@@ -61,7 +63,7 @@
       {
         kind: 'item',
         key: 'paste',
-        label: t.contextMenu.paste,
+        label: autoPaste ? t.contextMenu.paste : t.contextMenu.copyAndReturn,
         run: () => void pasteEntryById(id),
       },
       { kind: 'item', key: 'copy', label: t.contextMenu.copy, run: () => void copyEntryById(id) },
@@ -73,7 +75,7 @@
       single.push({
         kind: 'item',
         key: 'pasteAs',
-        label: t.contextMenu.pasteAs,
+        label: autoPaste ? t.contextMenu.pasteAs : t.contextMenu.copyAs,
         run: () => void openPasteFormatPickerFor(id),
       });
     }

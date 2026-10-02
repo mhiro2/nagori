@@ -78,8 +78,7 @@ describe('confirmSelection', () => {
   it('pastes the current selection through the palette command (honouring auto-paste)', async () => {
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmSelection();
-    // Plain Enter does not force synthesis — `forcePaste` is false.
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, false);
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined);
   });
 
   it('records an errorMessage when the paste command rejects', async () => {
@@ -114,13 +113,12 @@ describe('confirmSelectionWithAlternateFormat', () => {
     expect(pasteEntryFromPalette).not.toHaveBeenCalled();
   });
 
-  it('falls back to the plain alternate paste (forced) when there is no real choice', async () => {
+  it('uses the same auto-paste policy for the alternate format when there is no real choice', async () => {
     vi.mocked(listPasteOptions).mockResolvedValue([pasteOption('text/plain', 'plainText')]);
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmSelectionWithAlternateFormat();
     expect(pasteFormatPickerState.open).toBe(false);
-    // The chord is a deliberate paste, so the direct fallback forces synthesis.
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, true);
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined);
   });
 
   it('falls back to the plain alternate paste when listing options fails', async () => {
@@ -155,9 +153,8 @@ describe('confirmPasteFormat', () => {
   it('pastes the explicit Preserve format and closes the picker for "keep original"', async () => {
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await confirmPasteFormat(undefined);
-    // "Keep original" re-offers every representation (explicit 'preserve') and,
-    // as a deliberate paste, forces synthesis even when auto-paste is off.
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', 'preserve', true);
+    // "Keep original" changes only the format; the backend applies auto-paste settings.
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', 'preserve');
     expect(pasteEntryRepresentationFromPalette).not.toHaveBeenCalled();
     expect(pasteFormatPickerState.open).toBe(false);
   });
@@ -411,7 +408,7 @@ describe('explicit-target context-menu wrappers', () => {
   it('pasteEntryById pastes the given id honouring auto-paste (no forced synthesis)', async () => {
     vi.mocked(pasteEntryFromPalette).mockResolvedValue();
     await pasteEntryById('r1');
-    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined, false);
+    expect(pasteEntryFromPalette).toHaveBeenCalledWith('r1', undefined);
   });
 
   it('openPasteFormatPickerFor opens the picker against the given id', async () => {

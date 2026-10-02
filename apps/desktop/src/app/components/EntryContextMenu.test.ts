@@ -1,5 +1,6 @@
 import { cleanup, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
+import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Spy on the action wrappers so the tests assert the menu's wiring, not the
@@ -28,11 +29,16 @@ import {
   pasteEntryById,
   togglePinEntry,
 } from '../stores/searchActions';
+import { settingsState } from '../stores/settings.svelte';
 import EntryContextMenu from './EntryContextMenu.svelte';
 
 afterEach(() => {
   cleanup();
   closeEntryContextMenu();
+});
+
+beforeEach(() => {
+  settingsState.settings = undefined;
 });
 
 describe('EntryContextMenu (single target)', () => {
@@ -53,16 +59,49 @@ describe('EntryContextMenu (single target)', () => {
     }
   });
 
+  it('updates copy labels when auto-paste is turned off while the menu is open', async () => {
+    const user = userEvent.setup();
+    const { getByRole, queryByRole } = render(EntryContextMenu, {
+      props: { onOpenActions: vi.fn() },
+    });
+    expect(getByRole('menuitem', { name: 'Paste' })).toBeTruthy();
+    expect(getByRole('menuitem', { name: 'Paste as…' })).toBeTruthy();
+    settingsState.settings = { autoPasteEnabled: false } as NonNullable<
+      typeof settingsState.settings
+    >;
+    await tick();
+    expect(queryByRole('menuitem', { name: 'Paste' })).toBeNull();
+    expect(queryByRole('menuitem', { name: 'Paste as…' })).toBeNull();
+    expect(getByRole('menuitem', { name: 'Copy as…' })).toBeTruthy();
+    expect(getByRole('menuitem', { name: 'Copy' })).toBeTruthy();
+    await user.click(getByRole('menuitem', { name: 'Copy and return' }));
+    expect(pasteEntryById).toHaveBeenCalledWith('r1');
+    expect(copyEntryById).not.toHaveBeenCalled();
+  });
+
+  it('opens the same format picker from Copy as when auto-paste is off', async () => {
+    const user = userEvent.setup();
+    settingsState.settings = { autoPasteEnabled: false } as NonNullable<
+      typeof settingsState.settings
+    >;
+    const { getByRole } = render(EntryContextMenu, { props: { onOpenActions: vi.fn() } });
+    await user.click(getByRole('menuitem', { name: 'Copy as…' }));
+    expect(openPasteFormatPickerFor).toHaveBeenCalledWith('r1');
+    expect(pasteEntryById).not.toHaveBeenCalled();
+  });
+
   it('focuses the first item on open so the keyboard owns the menu', () => {
     const { getByTestId } = render(EntryContextMenu, { props: { onOpenActions: vi.fn() } });
     expect(document.activeElement).toBe(getByTestId('context-menu-paste'));
   });
 
-  it('copy dispatches copyEntryById with the captured id and closes', async () => {
+  it.each([true, false])('copy retains its action with auto-paste=%s', async (autoPasteEnabled) => {
     const user = userEvent.setup();
+    settingsState.settings = { autoPasteEnabled } as NonNullable<typeof settingsState.settings>;
     const { getByTestId } = render(EntryContextMenu, { props: { onOpenActions: vi.fn() } });
     await user.click(getByTestId('context-menu-copy'));
     expect(copyEntryById).toHaveBeenCalledWith('r1');
+    expect(pasteEntryById).not.toHaveBeenCalled();
     expect(entryContextMenuState.open).toBe(false);
   });
 

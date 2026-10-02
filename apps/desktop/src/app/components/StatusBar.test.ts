@@ -14,6 +14,7 @@ import {
   openSettingsWindow,
   setCaptureEnabled,
 } from '../lib/commands';
+import { buildBindings } from '../lib/keybindings';
 import type { AppSettings, PermissionStatus, PlatformCapabilities } from '../lib/types';
 import { capabilitiesState } from '../stores/capabilities.svelte';
 import {
@@ -228,32 +229,6 @@ describe('StatusBar', () => {
     expect(onTogglePin).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps Enter on the pin hint from bubbling to the window key handler', async () => {
-    // The palette's keydown handler is on `window`; Enter on a focused footer
-    // button must not bubble there or it would paste on top of the button's
-    // own activation. Arrows still bubble for global list navigation.
-    const windowKeydown = vi.fn();
-    window.addEventListener('keydown', windowKeydown);
-    try {
-      const { getByTestId } = render(StatusBar, {
-        props: {
-          entryCount: 1,
-          elapsedMs: undefined,
-          loading: false,
-          errorMessage: undefined,
-          onTogglePin: vi.fn(),
-        },
-      });
-      const button = getByTestId('status-toggle-pin');
-      await fireEvent.keyDown(button, { key: 'Enter' });
-      expect(windowKeydown).not.toHaveBeenCalled();
-      await fireEvent.keyDown(button, { key: 'ArrowDown' });
-      expect(windowKeydown).toHaveBeenCalledTimes(1);
-    } finally {
-      window.removeEventListener('keydown', windowKeydown);
-    }
-  });
-
   it('renders the preview hint as a button that toggles the expanded preview', async () => {
     const onOpenPreview = vi.fn();
     const { getByTestId } = render(StatusBar, {
@@ -270,13 +245,14 @@ describe('StatusBar', () => {
   });
 
   it('shows the preview hint as static text (with its accelerator) when not wired', () => {
+    capabilitiesState.capabilities = capabilities('macos');
     const { queryByTestId, container } = render(StatusBar, {
       props: {
         entryCount: 3,
         elapsedMs: undefined,
         loading: false,
         errorMessage: undefined,
-        previewHint: '⌘E',
+        bindings: buildBindings({}, 'macos'),
       },
     });
     expect(queryByTestId('status-open-preview')).toBeNull();
@@ -338,6 +314,59 @@ describe('StatusBar', () => {
   });
 });
 
+describe('StatusBar action hints', () => {
+  const props = { entryCount: 5, elapsedMs: undefined, loading: false, errorMessage: undefined };
+
+  it('tracks the current confirm behavior across settings, multi-selection, and URL preview', async () => {
+    settingsState.settings = baseSettings();
+    const { getByTestId, rerender } = render(StatusBar, { props });
+    expect(getByTestId('status-confirm-hint').textContent).toContain('Paste');
+
+    settingsState.settings = baseSettings({ autoPasteEnabled: false });
+    await vi.waitFor(() =>
+      expect(getByTestId('status-confirm-hint').textContent).toContain('Copy'),
+    );
+    expect(getByTestId('status-confirm-hint').textContent).not.toContain('Paste');
+
+    await rerender({ ...props, selectedCount: 2 });
+    expect(getByTestId('status-confirm-hint').textContent).toContain('Copy combined');
+
+    await rerender({ ...props, selectedCount: 2, enterOpensUrl: true });
+    expect(getByTestId('status-confirm-hint').textContent).toContain('Open');
+    expect(getByTestId('status-confirm-hint').textContent).not.toContain('Copy');
+  });
+
+  it.each(['macos', 'windows'] as const)(
+    'removes shortcut hints displaced by remaps on %s while keeping mouse actions',
+    (platform) => {
+      capabilitiesState.capabilities = capabilities(platform);
+      const bindings = buildBindings(
+        { pin: 'CmdOrCtrl+K', 'open-preview': 'CmdOrCtrl+,', 'copy-without-paste': 'Enter' },
+        platform,
+      );
+      const { getByTestId, queryByTestId } = render(StatusBar, {
+        props: {
+          ...props,
+          bindings,
+          onTogglePin: vi.fn(),
+          onOpenPreview: vi.fn(),
+          onOpenActions: vi.fn(),
+          onOpenSettings: vi.fn(),
+        },
+      });
+      expect(getByTestId('status-toggle-pin').querySelector('kbd')?.textContent).toBe(
+        platform === 'macos' ? '⌘K' : 'Ctrl+K',
+      );
+      expect(getByTestId('status-open-preview').querySelector('kbd')?.textContent).toBe(
+        platform === 'macos' ? '⌘,' : 'Ctrl+,',
+      );
+      expect(getByTestId('status-open-actions').querySelector('kbd')).toBeNull();
+      expect(getByTestId('status-open-settings').querySelector('kbd')).toBeNull();
+      expect(queryByTestId('status-confirm-hint')).toBeNull();
+    },
+  );
+});
+
 describe('StatusBar accessibility indicator', () => {
   const props = { entryCount: 0, elapsedMs: undefined, loading: false, errorMessage: undefined };
 
@@ -385,10 +414,12 @@ describe('StatusBar accessibility indicator', () => {
     expect(queryByRole('button', { name: /Accessibility permission required/ })).toBeNull();
   });
 
-  it('drops the keyboard hints while the warning chip is showing', () => {
+  it('keeps the primary hint and Settings available while permission is missing', () => {
     seedAccessibility({ kind: 'accessibility', state: 'notDetermined' });
-    const { container } = render(StatusBar, { props });
-    expect(container.querySelector('.hints')).toBeNull();
+    const onOpenSettings = vi.fn();
+    const { getByTestId } = render(StatusBar, { props: { ...props, onOpenSettings } });
+    expect(getByTestId('status-confirm-hint')).toBeTruthy();
+    expect(getByTestId('status-open-settings')).toBeTruthy();
   });
 
   it('opens the Settings window on the Setup tab when the chip is clicked', async () => {
@@ -411,18 +442,41 @@ describe('StatusBar paste diagnostic', () => {
     expect(chip.getAttribute('title')).toMatch(/wtype/);
   });
 
-  it('dismisses the diagnostic when the chip is clicked', async () => {
+  it('expands the diagnostic without dismissing it and offers Settings', async () => {
     recordPasteFailure({ reason: 'timeout', message: 'timed out' });
-    const { getByTestId, queryByTestId } = render(StatusBar, { props });
+    const { getByTestId, getByText, getByRole } = render(StatusBar, { props });
     await fireEvent.click(getByTestId('paste-diagnostic-chip'));
+    expect(pasteDiagnosticsState.failure?.reason).toBe('timeout');
+    expect(getByTestId('paste-diagnostic-chip').getAttribute('aria-expanded')).toBe('true');
+    expect(getByText(/Auto-paste timed out/)).toBeTruthy();
+    await fireEvent.click(getByRole('button', { name: 'Settings' }));
+    expect(openSettingsWindow).toHaveBeenCalledWith('setup');
+  });
+
+  it('dismisses a diagnostic only through its explicit dismiss control', async () => {
+    recordPasteFailure({ reason: 'timeout', message: 'timed out' });
+    const { getByRole, queryByTestId } = render(StatusBar, { props });
+    await fireEvent.click(getByRole('button', { name: /Dismiss:.*Auto-paste failed/ }));
     expect(pasteDiagnosticsState.failure).toBeNull();
     expect(queryByTestId('paste-diagnostic-chip')).toBeNull();
   });
 
-  it('drops the keyboard hints while the diagnostic chip is showing', () => {
+  it('closes expanded details when a new failure replaces the old one', async () => {
+    recordPasteFailure({ reason: 'timeout', message: 'timed out' });
+    const { getByTestId } = render(StatusBar, { props });
+    await fireEvent.click(getByTestId('paste-diagnostic-chip'));
+    recordPasteFailure({ reason: 'previousAppLost', message: 'target gone' });
+    await vi.waitFor(() =>
+      expect(getByTestId('paste-diagnostic-chip').getAttribute('aria-expanded')).toBe('false'),
+    );
+  });
+
+  it('keeps the primary hint and Settings available while a paste diagnostic is showing', () => {
     recordPasteFailure({ reason: 'unknown', message: 'failed' });
-    const { container } = render(StatusBar, { props });
-    expect(container.querySelector('.hints')).toBeNull();
+    const onOpenSettings = vi.fn();
+    const { getByTestId } = render(StatusBar, { props: { ...props, onOpenSettings } });
+    expect(getByTestId('status-confirm-hint')).toBeTruthy();
+    expect(getByTestId('status-open-settings')).toBeTruthy();
   });
 
   it('folds an accessibilityMissing failure into the accessibility chip (no second chip)', () => {
@@ -458,10 +512,21 @@ describe('StatusBar capture-skip notice', () => {
     expect(chip.getAttribute('title')).toMatch(/classified as a secret/);
   });
 
-  it('dismisses the notice when the chip is clicked', async () => {
+  it('expands the notice without dismissing it and offers privacy settings', async () => {
     recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
-    const { getByTestId, queryByTestId } = render(StatusBar, { props });
+    const { getByTestId, getByText, getByRole } = render(StatusBar, { props });
     await fireEvent.click(getByTestId('capture-skip-chip'));
+    expect(captureSkippedState.notice?.kind).toBe('secret_blocked');
+    expect(getByTestId('capture-skip-chip').getAttribute('aria-expanded')).toBe('true');
+    expect(getByText(/last copy was classified as a secret/)).toBeTruthy();
+    await fireEvent.click(getByRole('button', { name: 'Privacy' }));
+    expect(openSettingsWindow).toHaveBeenCalledWith('privacy');
+  });
+
+  it('dismisses a capture notice only through its explicit dismiss control', async () => {
+    recordCaptureSkip({ kind: 'secret_blocked', reasons: [] });
+    const { getByRole, queryByTestId } = render(StatusBar, { props });
+    await fireEvent.click(getByRole('button', { name: /Dismiss:.*Copy not saved/ }));
     expect(captureSkippedState.notice).toBeNull();
     expect(queryByTestId('capture-skip-chip')).toBeNull();
   });

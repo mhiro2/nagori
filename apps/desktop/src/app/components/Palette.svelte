@@ -6,13 +6,12 @@
   import { messages } from '../lib/i18n/index.svelte';
   import {
     buildBindings,
-    formatBinding,
     isImeComposing,
     isPrimaryModifierHeld,
     resolveAction,
+    yieldsToControlActivation,
     yieldsToTextField,
   } from '../lib/keybindings';
-  import type { Binding } from '../lib/keybindings';
   import { offersPasteFormatChoice } from '../lib/representations';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import {
@@ -34,6 +33,7 @@
     togglePinAt,
     togglePinSelection,
   } from '../stores/searchActions';
+  import { clearFilters, hasActiveFilters } from '../stores/searchFilters.svelte';
   import {
     clearMultiSelect,
     multiSelectState,
@@ -46,6 +46,7 @@
     cancelPendingQuery,
     refreshCurrent,
     refreshRecent,
+    runQuery,
     scheduleQuery,
     searchState,
   } from '../stores/searchQuery.svelte';
@@ -57,7 +58,7 @@
     selectNext,
     selectPrev,
   } from '../stores/searchSelection';
-  import { refreshSettings, settingsState } from '../stores/settings.svelte';
+  import { captureEnabled, refreshSettings, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
   import ActionInspector from './ActionInspector.svelte';
   import ClearHistoryConfirmDialog from './ClearHistoryConfirmDialog.svelte';
@@ -67,6 +68,7 @@
   import PreviewPane from './PreviewPane.svelte';
   import ResultList from './ResultList.svelte';
   import SearchBox from './SearchBox.svelte';
+  import SearchEmptyState from './SearchEmptyState.svelte';
   import StatusBar from './StatusBar.svelte';
 
   // The action inspector is a docked right-panel rather than a modal: when
@@ -199,6 +201,14 @@
     scheduleQuery(next);
   };
 
+  let searchBox: { focus: () => void } | undefined = $state();
+
+  const clearSearch = (): void => {
+    clearFilters();
+    void runQuery('');
+    searchBox?.focus();
+  };
+
   const handleConfirm = (index: number, event?: MouseEvent): void => {
     // While the action inspector owns the column the list is a read-only
     // reference surface, so a click does nothing — matching the frozen hover.
@@ -221,7 +231,9 @@
       }
     }
     if (multiSelectState.selected.size > 0) {
-      void copyMultiSelection();
+      // A plain click leaves bulk mode and selects its own row. Executing the
+      // old selection here would copy entries unrelated to the clicked target.
+      clearMultiSelect();
       return;
     }
     void confirmSelection();
@@ -313,17 +325,6 @@
       capabilitiesState.capabilities?.platform,
     ),
   );
-  // Status-bar hint accelerators: render the *effective* binding from
-  // `paletteBindings`, not the raw setting — so if a remap clobbered an action's
-  // shortcut (collision → `buildBindings` drops it) the hint shows the surviving
-  // key (or `undefined`, which hides the kbd) instead of a key that now does
-  // something else. Both the pin and the expand-preview hints go through this.
-  const hintAccelerator = (action: Binding['action']): string | undefined => {
-    const binding = paletteBindings.find((b) => b.action === action);
-    return binding ? formatBinding(binding, capabilitiesState.capabilities?.platform) : undefined;
-  };
-  const pinHint = $derived(hintAccelerator('toggle-pin'));
-  const previewHint = $derived(hintAccelerator('open-preview'));
   let previewExpanded = $state(false);
   // Set by PreviewPane while a plain Enter in the expanded preview will open
   // the highlighted URL. We then suppress the palette's own Enter-to-paste so
@@ -383,11 +384,22 @@
     // through in the frame before its focus lands.
     if (entryContextMenuState.open) return;
     if (confirmDialogOpen) return;
+    if (yieldsToControlActivation(event)) return;
     // Editing keys typed into the search box (Ctrl+Backspace word delete on
     // Windows/Linux, Home / End caret moves) edit the query rather than firing
     // the palette action that shares the chord.
     if (yieldsToTextField(event, capabilitiesState.capabilities?.platform)) return;
-    const action = resolveAction(event, paletteBindings);
+    // Space activates a focused result just like Enter, without consuming
+    // literal spaces typed into the search input.
+    const resultSpace =
+      event.key === ' ' &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.target instanceof Element &&
+      event.target.closest('.result-item[role="option"]') !== null;
+    const action = resultSpace ? 'confirm' : resolveAction(event, paletteBindings);
     if (!action) return;
     event.preventDefault();
     switch (action) {
@@ -493,7 +505,7 @@
 </script>
 
 <section class="palette" style="--palette-row-count: {paletteRowCount}">
-  <SearchBox value={searchState.query} onInput={handleInput} />
+  <SearchBox bind:this={searchBox} value={searchState.query} onInput={handleInput} />
   <FilterChips />
   <div
     class="body"
@@ -501,17 +513,29 @@
     class:preview-only={previewExpanded}
   >
     {#if !previewExpanded}
-      <ResultList
-        items={searchState.results}
-        selectedIndex={searchState.selectedIndex}
-        appliedQuery={searchState.appliedQuery}
-        multiSelected={multiSelectState.selected}
-        locked={actionsOpen}
-        onSelect={handleSelect}
-        onConfirm={handleConfirm}
-        onTogglePin={handleTogglePin}
-        onContextMenu={handleContextMenu}
-      />
+      {#if searchState.results.length === 0}
+        <SearchEmptyState
+          query={searchState.query}
+          filtered={hasActiveFilters()}
+          loading={searchState.loading}
+          errorMessage={searchState.errorMessage}
+          capturePaused={!captureEnabled()}
+          onRetry={() => void refreshCurrent()}
+          onClearSearch={clearSearch}
+        />
+      {:else}
+        <ResultList
+          items={searchState.results}
+          selectedIndex={searchState.selectedIndex}
+          appliedQuery={searchState.appliedQuery}
+          multiSelected={multiSelectState.selected}
+          locked={actionsOpen}
+          onSelect={handleSelect}
+          onConfirm={handleConfirm}
+          onTogglePin={handleTogglePin}
+          onContextMenu={handleContextMenu}
+        />
+      {/if}
     {/if}
     <!-- Right column. The inspector wins the slot whenever it is open; the
          preview pane returns the moment it closes. -->
@@ -560,8 +584,8 @@
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}
-    {pinHint}
-    {previewHint}
+    bindings={paletteBindings}
+    enterOpensUrl={previewExpanded && previewEnterOpensUrl}
     {previewExpanded}
     onTogglePin={() => void togglePinSelection()}
     onOpenActions={openActions}

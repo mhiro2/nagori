@@ -13,6 +13,8 @@
 
   let inputEl: HTMLInputElement | undefined = $state();
 
+  export const focus = (): void => inputEl?.focus();
+
   $effect(() => {
     inputEl?.focus();
   });

@@ -8,6 +8,7 @@ import {
   isImeComposing,
   isPrimaryModifierHeld,
   resolveAction,
+  yieldsToControlActivation,
   yieldsToTextField,
 } from './keybindings';
 
@@ -109,6 +110,32 @@ const searchInput = (value: string): HTMLInputElement => {
   input.value = value;
   return input;
 };
+
+describe('yieldsToControlActivation', () => {
+  it.each(['button', 'select', 'textarea', 'summary'])('preserves activation on %s', (tag) => {
+    const control = document.createElement(tag);
+    expect(yieldsToControlActivation(keyOn(control, { key: 'Enter' }))).toBe(true);
+    expect(yieldsToControlActivation(keyOn(control, { key: ' ' }))).toBe(true);
+    expect(yieldsToControlActivation(keyOn(control, { key: 'Enter', metaKey: true }))).toBe(false);
+    expect(yieldsToControlActivation(keyOn(control, { key: 'ArrowDown' }))).toBe(false);
+  });
+
+  it('recognizes a button through its nested label', () => {
+    const button = document.createElement('button');
+    const label = document.createElement('span');
+    button.append(label);
+    expect(yieldsToControlActivation(keyOn(label, { key: 'Enter' }))).toBe(true);
+  });
+
+  it('keeps search and enabled result confirmation with the palette', () => {
+    expect(yieldsToControlActivation(keyOn(searchInput('query'), { key: 'Enter' }))).toBe(false);
+    const row = document.createElement('button');
+    row.setAttribute('role', 'option');
+    expect(yieldsToControlActivation(keyOn(row, { key: 'Enter' }))).toBe(false);
+    row.disabled = true;
+    expect(yieldsToControlActivation(keyOn(row, { key: 'Enter' }))).toBe(true);
+  });
+});
 
 describe('yieldsToTextField', () => {
   it('leaves Ctrl+Backspace to a non-empty search box on Windows/Linux', () => {

@@ -88,8 +88,8 @@ prompt, the filesystem outside the database, or the network.
 | Command | Window | Notes |
 | --- | --- | --- |
 | `paste_entry` | internal | Copy, then synthesize ⌘V into the foreground app. |
-| `paste_entry_from_palette` | palette | Copy, restore source focus, synthesize ⌘V. |
-| `paste_entry_representation_from_palette` | palette | Copy a chosen MIME type, then synthesize ⌘V. |
+| `paste_entry_from_palette` | palette | Copy the default or chosen output format, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
+| `paste_entry_representation_from_palette` | palette | Copy a chosen MIME type, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
 | `repaste_last` | internal | Re-synthesize the most recent paste. |
 | `open_url_external` | palette | Open a `Public` URL entry in the default browser (scheme allowlist + sensitivity gate). |
 | `preview_entry` | palette | Open OS-native Quick Look (macOS only, `Public` only); writes a temp preview file. |

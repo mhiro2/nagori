@@ -30,14 +30,9 @@ export const searchClipboard = (request: SearchRequest): Promise<SearchResponse>
 
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
-// `forcePaste` makes the backend synthesise ⌘/Ctrl+V even when auto-paste is
-// off — used by the deliberate alternate-format chord; plain Enter omits it so
-// it keeps honouring the user's auto-paste setting.
-export const pasteEntryFromPalette = (
-  entryId: string,
-  format?: PasteFormat,
-  forcePaste?: boolean,
-): Promise<void> => invoke('paste_entry_from_palette', { entryId, format, forcePaste });
+// Every palette format respects the user's auto-paste setting.
+export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Promise<void> =>
+  invoke('paste_entry_from_palette', { entryId, format });
 
 // Paste exactly one chosen representation of an entry (the "paste as PNG /
 // plain text / files" picker). `mime` must be one returned by

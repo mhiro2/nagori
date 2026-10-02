@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import userEvent from '@testing-library/user-event';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -23,6 +24,8 @@ vi.mock('../stores/searchActions', () => ({
   confirmSelection: vi.fn(async () => undefined),
   confirmSelectionWithAlternateFormat: vi.fn(async () => undefined),
   copySelection: vi.fn(async () => undefined),
+  copyMultiSelection: vi.fn(async () => undefined),
+  deleteMultiSelection: vi.fn(async () => undefined),
   togglePinSelection: vi.fn(async () => undefined),
   togglePinAt: vi.fn(async () => undefined),
   deleteSelection: vi.fn(async () => undefined),
@@ -57,6 +60,7 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   refreshCurrent: vi.fn(async () => undefined),
   refreshRecent: vi.fn(async () => undefined),
   scheduleQuery: vi.fn(),
+  runQuery: vi.fn(async () => undefined),
   cancelPendingQuery: vi.fn(),
   searchState: {
     query: '',
@@ -106,14 +110,21 @@ import { captureSkippedState, recordCaptureSkip } from '../stores/captureSkipped
 import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
+  copyMultiSelection,
   copySelection,
   deleteSelection,
   previewSelection,
   togglePinAt,
   togglePinSelection,
 } from '../stores/searchActions';
+import { clearFilters, filterState, setDatePreset } from '../stores/searchFilters.svelte';
+import {
+  clearMultiSelect,
+  multiSelectState,
+  toggleMultiSelect,
+} from '../stores/searchMultiSelect.svelte';
 import { previewState } from '../stores/searchPreview.svelte';
-import { refreshCurrent, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
+import { refreshCurrent, runQuery, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
 import {
   currentSelection,
   selectByIndex,
@@ -182,6 +193,9 @@ beforeEach(() => {
   // implementation a prior test installed, so re-pin the defaults the
   // selection-dependent tests below override per-case.
   vi.mocked(currentSelection).mockReturnValue(undefined);
+  vi.mocked(selectByIndex).mockReset();
+  clearMultiSelect();
+  clearFilters();
   previewState.entryId = undefined;
   previewState.preview = undefined;
   previewState.loading = false;
@@ -189,6 +203,9 @@ beforeEach(() => {
   previewState.errorMessage = undefined;
   searchState.results = [];
   searchState.selectedIndex = 0;
+  searchState.query = '';
+  searchState.loading = false;
+  searchState.errorMessage = undefined;
   settingsState.settings = undefined;
   capabilitiesState.capabilities = undefined;
 });
@@ -196,6 +213,32 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Palette', () => {
+  it('clears both search and filters from an empty search without pasting', async () => {
+    searchState.query = 'missing';
+    setDatePreset('today');
+    const user = userEvent.setup();
+    const { getByRole, getByText } = render(Palette);
+    expect(getByText('No entries match this search.')).toBeTruthy();
+    const clear = getByRole('button', { name: 'Clear search and filters' });
+    clear.focus();
+    await user.keyboard('{Enter}');
+    expect(filterState.datePreset).toBe('none');
+    expect(runQuery).toHaveBeenCalledWith('');
+    expect(confirmSelection).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(getByRole('textbox'));
+  });
+
+  it('retries an empty failed search without clearing its conditions', async () => {
+    searchState.query = 'keep this';
+    searchState.errorMessage = 'Search unavailable';
+    setDatePreset('today');
+    const { getByRole } = render(Palette);
+    await fireEvent.click(getByRole('button', { name: 'Try again' }));
+    expect(refreshCurrent).toHaveBeenCalledOnce();
+    expect(filterState.datePreset).toBe('today');
+    expect(searchState.query).toBe('keep this');
+  });
+
   it('renders the palette frame with the search box', () => {
     const { container } = render(Palette);
     expect(container.querySelector('.palette')).toBeTruthy();
@@ -210,6 +253,82 @@ describe('Palette', () => {
       await fireEvent.input(input, { target: { value: 'q' } });
     }
     expect(scheduleQuery).toHaveBeenCalledWith('q');
+  });
+
+  it('activates a focused date filter with Enter without pasting', async () => {
+    const user = userEvent.setup();
+    const { getByRole } = render(Palette);
+    const filter = getByRole('button', { name: 'Today' });
+    filter.focus();
+    await user.keyboard('{Enter}');
+    expect(filter.getAttribute('aria-pressed')).toBe('true');
+    expect(runQuery).toHaveBeenCalledTimes(1);
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
+
+  it('activates focused settings and capture controls without pasting', async () => {
+    const user = userEvent.setup();
+    const { container, getByTestId } = render(Palette);
+    getByTestId('status-open-settings').focus();
+    await user.keyboard('{Enter}');
+    expect(showSettings).toHaveBeenCalledTimes(1);
+    const capture = container.querySelector<HTMLButtonElement>('.capture-chip')!;
+    capture.focus();
+    await user.keyboard('{Enter}');
+    expect(capture.getAttribute('aria-pressed')).toBe('false');
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
+
+  it('opens actions from a focused footer button without pasting', async () => {
+    const user = userEvent.setup();
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByTestId } = render(Palette);
+    getByTestId('status-open-actions').focus();
+    await user.keyboard('{Enter}');
+    expect(getByTestId('action-inspector')).toBeTruthy();
+    expect(confirmSelection).not.toHaveBeenCalled();
+  });
+
+  it.each(['{Enter}', ' '])('confirms the focused result with %s', async (key) => {
+    const user = userEvent.setup();
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    vi.mocked(selectByIndex).mockImplementation((index) => {
+      searchState.selectedIndex = index;
+    });
+    const { getAllByRole } = render(Palette);
+    getAllByRole('option')[1]!.focus();
+    expect(searchState.selectedIndex).toBe(1);
+    await user.keyboard(key);
+    expect(searchState.selectedIndex).toBe(1);
+    expect(confirmSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves bulk mode on a plain row click without copying either selection', async () => {
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    toggleMultiSelect('a');
+    const { getAllByRole } = render(Palette);
+    await fireEvent.click(getAllByRole('option')[1]!);
+    expect(selectByIndex).toHaveBeenLastCalledWith(1);
+    expect(multiSelectState.selected.size).toBe(0);
+    expect(copyMultiSelection).not.toHaveBeenCalled();
+    expect(confirmSelection).not.toHaveBeenCalled();
+    await fireEvent.click(getAllByRole('option')[1]!);
+    expect(confirmSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['{Enter}', ' '])('keeps %s as combined copy from a focused bulk result', async (key) => {
+    const user = userEvent.setup();
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    toggleMultiSelect('a');
+    toggleMultiSelect('b');
+    const { getAllByRole } = render(Palette);
+    getAllByRole('option')[1]!.focus();
+    await user.keyboard(key);
+    expect(copyMultiSelection).toHaveBeenCalledTimes(1);
+    expect(confirmSelection).not.toHaveBeenCalled();
+    expect(multiSelectState.selected.size).toBe(2);
   });
 
   it('refreshes the active query when capture stores a new entry', () => {

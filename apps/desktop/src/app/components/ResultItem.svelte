@@ -75,6 +75,18 @@
   }: Props = $props();
 
   const t = $derived(messages());
+  let itemEl: HTMLButtonElement | undefined = $state();
+
+  // Arrow navigation must move DOM focus with the selection once the user
+  // enters the list. Keep search-input focus untouched while typing.
+  $effect(() => {
+    if (!selected || locked || !itemEl) return;
+    const focused = document.activeElement;
+    const list = itemEl.closest('[role="listbox"]');
+    if (focused?.matches('.result-item[role="option"]') && list?.contains(focused)) {
+      itemEl.focus({ preventScroll: true });
+    }
+  });
   const previewText = $derived(truncatePreview(collapseWhitespace(item.preview)));
   const timeLabel = $derived(formatRelativeTime(item.createdAt));
   const url = $derived(item.kind === 'url' ? safeUrl(item.preview) : undefined);
@@ -157,6 +169,7 @@
   oncontextmenu={(event) => onContextMenu(index, event)}
 >
   <button
+    bind:this={itemEl}
     type="button"
     class="result-item"
     class:selected
@@ -166,6 +179,8 @@
     aria-label={fileAria}
     data-kind={item.kind}
     data-sensitivity={item.sensitivity}
+    disabled={locked}
+    onfocus={() => onSelect(index)}
     onmouseenter={() => onSelect(index)}
     onclick={(event) => onConfirm(index, event)}
   >
@@ -236,6 +251,7 @@
     class="pin-toggle"
     class:active={item.pinned}
     class:visible={selected && !item.pinned}
+    disabled={locked}
     tabindex="-1"
     aria-pressed={item.pinned}
     aria-label={t.keybindings.togglePin}
