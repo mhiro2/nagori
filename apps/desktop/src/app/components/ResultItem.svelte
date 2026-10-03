@@ -272,8 +272,8 @@
     /* Smooth the recede when the action inspector opens/closes. */
     transition: opacity 0.12s ease;
     /* Skip layout/paint for rows scrolled out of view so a long result set
-       (the palette caps the search limit at 50 today, but ResultList is
-       reused for larger lists) stays smooth under arrow-key navigation.
+       (the palette pages results up to the 200-row backend cap) stays
+       smooth under arrow-key navigation.
        `contain-intrinsic-size` gives the browser a ~3rem placeholder height
        so the scrollbar and `scrollIntoView` math stay correct before an
        off-screen row is rendered. See ARCHITECTURE.md §12 for why we use this

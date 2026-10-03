@@ -17,6 +17,13 @@ export const zhHans: Messages = {
     },
     fallback: '(Tauri 运行时未启动) 最近复制的项目将在此处显示。',
     screenshotBadge: '截图',
+    resultLimit: {
+      showing: (count: number): string => `正在显示前 ${count.toLocaleString('zh-Hans')} 条。`,
+      showMore: '显示更多',
+      reached: (count: number): string =>
+        `最多显示前 ${count.toLocaleString('zh-Hans')} 条。如需查找更早的条目，请调整搜索词或使用筛选。`,
+      allShown: (count: number): string => `已显示全部 ${count.toLocaleString('zh-Hans')} 条。`,
+    },
     hints: {
       navigate: '导航',
       paste: '粘贴',

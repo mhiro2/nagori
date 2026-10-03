@@ -8,7 +8,7 @@ import { searchClipboard } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
-import type { SearchRequest, SearchResultDto } from '../lib/types';
+import type { SearchFilters, SearchRequest, SearchResultDto } from '../lib/types';
 import { currentFilters, recordSourceApps } from './searchFilters.svelte';
 import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
@@ -26,6 +26,15 @@ const fallbackFixture = (): SearchResultDto[] => [
   },
 ];
 
+// The palette fetches results a page at a time: the first search for a query
+// asks for one page, and each "show more" grows the limit by another page up to
+// the backend's hard cap (`MAX_RESULT_LIMIT` in nagori-core, mirrored by the
+// Tauri command's clamp). The backend has no offset, so a larger page re-runs
+// the same search with a bigger limit; ranking is deterministic, so the rows
+// already on screen keep their order and the new ones append below.
+export const RESULT_PAGE_SIZE = 50;
+export const MAX_RESULT_LIMIT = 200;
+
 type SearchState = {
   query: string;
   // The query that the entries currently in `results` were produced for. Unlike
@@ -36,6 +45,10 @@ type SearchState = {
   // (leave the scroll position alone) without racing the debounce.
   appliedQuery: string;
   results: SearchResultDto[];
+  // The `limit` the on-screen `results` were requested with. A result set that
+  // fills it may have more matches behind it, which is what the "show more"
+  // footer keys off.
+  resultLimit: number;
   selectedIndex: number;
   loading: boolean;
   errorMessage: string | undefined;
@@ -46,6 +59,7 @@ export const searchState = $state<SearchState>({
   query: '',
   appliedQuery: '',
   results: [],
+  resultLimit: RESULT_PAGE_SIZE,
   selectedIndex: 0,
   loading: false,
   errorMessage: undefined,
@@ -112,6 +126,54 @@ const applyResults = (results: SearchResultDto[], query: string): void => {
   reconcileMultiSelect(results.map((r) => r.id));
 };
 
+// The expanded limit applies only to the query + filter combination it was
+// requested for. Typing a new query or changing a filter starts a fresh result
+// set at one page (and drops the expansion, so coming back to the old query
+// starts at one page too), while same-scope refreshes (a capture landing, a pin
+// toggle, a delete) keep the rows the user already paged in.
+let expandedLimit: { scope: string; limit: number } | undefined;
+// Scope of the result set on screen, recorded when a search applies, so paging
+// always extends the list the footer was shown for rather than whatever the
+// filters say by the time the button is pressed.
+let appliedScope = '';
+
+const limitScope = (query: string, filters: SearchFilters | undefined): string =>
+  `${query}\0${JSON.stringify(filters ?? null)}`;
+
+const limitFor = (query: string): number => {
+  if (expandedLimit?.scope === limitScope(query, currentFilters())) return expandedLimit.limit;
+  expandedLimit = undefined;
+  return RESULT_PAGE_SIZE;
+};
+
+/// Whether the on-screen result set filled its limit and the backend could
+/// still return more rows for it.
+export const canLoadMoreResults = (): boolean =>
+  searchState.results.length >= searchState.resultLimit &&
+  searchState.resultLimit < MAX_RESULT_LIMIT;
+
+/// Whether the on-screen result set is truncated at the backend's hard cap, so
+/// the only way to reach older matches is to narrow the search.
+export const resultLimitReached = (): boolean => searchState.results.length >= MAX_RESULT_LIMIT;
+
+/// Whether the on-screen result set was requested with more than one page.
+export const resultsPaged = (): boolean => searchState.resultLimit > RESULT_PAGE_SIZE;
+
+/// Grow the current result set by another page and re-run the search. A larger
+/// limit also widens the backend's candidate pool, so the re-ranked list is not
+/// strictly the old one with rows appended; the cursor follows the highlighted
+/// entry by id like any same-query refresh. Ignored while a newer search is
+/// pending or in flight: the footer then belongs to a list about to be replaced.
+export const loadMoreResults = async (): Promise<void> => {
+  if (!canLoadMoreResults()) return;
+  if (pendingQueryTimer !== undefined || searchRunning || appliedTicket !== inflight) return;
+  expandedLimit = {
+    scope: appliedScope,
+    limit: Math.min(searchState.resultLimit + RESULT_PAGE_SIZE, MAX_RESULT_LIMIT),
+  };
+  await runQuery(searchState.query);
+};
+
 const setQuery = (raw: string): void => {
   // Skip the assignment when nothing changed so downstream `$derived` /
   // `$effect` chains don't re-run on every keystroke that didn't actually
@@ -159,6 +221,8 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     // on the wrong list before the queued search overwrites it.
     if (isFreshest(ticket)) {
       applyResults(response.results, request.query);
+      searchState.resultLimit = request.limit ?? RESULT_PAGE_SIZE;
+      appliedScope = limitScope(request.query, filters);
       appliedTicket = ticket;
       searchState.lastElapsedMs = response.totalElapsedMs;
       // Feed the source-app dropdown. When this search was itself app-filtered
@@ -190,7 +254,7 @@ export const refreshRecent = async (): Promise<void> => {
     applyResults(fallbackFixture(), '');
     return;
   }
-  await runSearch({ query: '', mode: 'Recent', limit: 50 });
+  await runSearch({ query: '', mode: 'Recent', limit: limitFor('') });
 };
 
 /// Debounced entry point used by the search input. Cancels any pending
@@ -284,7 +348,7 @@ export const runQuery = async (raw: string): Promise<void> => {
     );
     return;
   }
-  await runSearch({ query: raw, mode: 'Auto', limit: 50 });
+  await runSearch({ query: raw, mode: 'Auto', limit: limitFor(raw) });
 };
 
 export const refreshCurrent = async (): Promise<void> => {
@@ -304,4 +368,6 @@ export const resetSearchRuntimeForTest = (): void => {
   appliedTicket = 0;
   searchRunning = false;
   queuedSearch = undefined;
+  expandedLimit = undefined;
+  appliedScope = '';
 };

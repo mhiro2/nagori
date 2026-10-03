@@ -174,4 +174,110 @@ describe('ResultList', () => {
     expect(onSelect).toHaveBeenCalledWith(180);
     spy.mockRestore();
   });
+
+  it('offers to load more rows when the page filled up', async () => {
+    const items = [sample({ id: 'a' }), sample({ id: 'b' })];
+    const onLoadMore = vi.fn();
+    const { getByRole, getByText } = render(ResultList, {
+      props: {
+        items,
+        selectedIndex: 0,
+        onSelect: () => {},
+        onConfirm: () => {},
+        canLoadMore: true,
+        onLoadMore,
+      },
+    });
+    expect(getByText('Showing the top 2 entries.')).toBeTruthy();
+    // The footer sits outside the listbox so the listbox only owns options.
+    const button = getByRole('button', { name: 'Show more' });
+    expect(within(getByRole('listbox')).queryByRole('button', { name: 'Show more' })).toBeNull();
+    await fireEvent.click(button);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it('suggests narrowing the search once the cap is reached', () => {
+    const { getByText, queryByRole } = render(ResultList, {
+      props: {
+        items: [sample({ id: 'a' })],
+        selectedIndex: 0,
+        onSelect: () => {},
+        onConfirm: () => {},
+        limitReached: true,
+      },
+    });
+    expect(getByText(/Refine the search or use filters/)).toBeTruthy();
+    expect(queryByRole('button', { name: 'Show more' })).toBeNull();
+  });
+
+  it('hides the footer while every match fits on the page', () => {
+    const { queryByText } = render(ResultList, {
+      props: {
+        items: [sample({ id: 'a' })],
+        selectedIndex: 0,
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
+    });
+    expect(queryByText(/Showing the top/)).toBeNull();
+  });
+
+  it('moves focus to the first new row when the last page removes Show more', async () => {
+    const page = (count: number) =>
+      Array.from({ length: count }, (_, i) => sample({ id: `id-${i}`, preview: `row ${i}` }));
+    const base = { selectedIndex: 0, onSelect: () => {}, onConfirm: () => {} };
+    const { getByRole, getAllByRole, rerender } = render(ResultList, {
+      props: { ...base, items: page(2), canLoadMore: true, onLoadMore: () => {} },
+    });
+    const button = getByRole('button', { name: 'Show more' });
+    button.focus();
+    await fireEvent.click(button);
+    await rerender({ ...base, items: page(3), canLoadMore: false, limitReached: false });
+    expect(document.activeElement).toBe(getAllByRole('option')[2]);
+  });
+
+  it('announces the page count through a live region', () => {
+    const { getByRole } = render(ResultList, {
+      props: {
+        items: [sample({ id: 'a' })],
+        selectedIndex: 0,
+        onSelect: () => {},
+        onConfirm: () => {},
+        canLoadMore: true,
+      },
+    });
+    expect(getByRole('status').textContent).toContain('Showing the top 1 entries.');
+  });
+
+  it('focuses a new row even when the re-rank inserts it above the old end', async () => {
+    const base = { selectedIndex: 0, onSelect: () => {}, onConfirm: () => {} };
+    const before = [sample({ id: 'a' }), sample({ id: 'b' })];
+    const { getByRole, getAllByRole, rerender } = render(ResultList, {
+      props: { ...base, items: before, canLoadMore: true, onLoadMore: () => {} },
+    });
+    const button = getByRole('button', { name: 'Show more' });
+    button.focus();
+    await fireEvent.click(button);
+    const after = [
+      sample({ id: 'a' }),
+      sample({ id: 'new', preview: 'fresh' }),
+      sample({ id: 'b' }),
+    ];
+    await rerender({ ...base, items: after, canLoadMore: false, paged: true });
+    expect(document.activeElement).toBe(getAllByRole('option')[1]);
+  });
+
+  it('announces the final count when the last page comes back short', () => {
+    const { getByRole, queryByRole } = render(ResultList, {
+      props: {
+        items: [sample({ id: 'a' }), sample({ id: 'b' })],
+        selectedIndex: 0,
+        onSelect: () => {},
+        onConfirm: () => {},
+        paged: true,
+      },
+    });
+    expect(getByRole('status').textContent).toContain('Showing all 2 entries.');
+    expect(queryByRole('button', { name: 'Show more' })).toBeNull();
+  });
 });
