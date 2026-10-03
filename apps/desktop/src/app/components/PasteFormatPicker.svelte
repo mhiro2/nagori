@@ -3,8 +3,12 @@
   import type { PasteOption } from '../lib/types';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import { cancelPasteFormat, confirmPasteFormat } from '../stores/searchActions';
+  import { settingsState } from '../stores/settings.svelte';
 
   const t = $derived(messages());
+  const title = $derived(
+    settingsState.settings?.autoPasteEnabled === false ? t.contextMenu.copyAs : t.pastePicker.title,
+  );
 
   // One row per choice: a leading "keep original" (the default Preserve paste)
   // followed by each pasteable representation in canonical order. `option`
@@ -111,11 +115,11 @@
     class="picker"
     role="dialog"
     aria-modal="true"
-    aria-label={t.pastePicker.title}
+    aria-label={title}
     tabindex="-1"
     onkeydown={onKeydown}
   >
-    <p class="title" id="paste-picker-title">{t.pastePicker.title}</p>
+    <p class="title" id="paste-picker-title">{title}</p>
     <div class="rows" role="menu" aria-labelledby="paste-picker-title">
       {#each rows as row (row.key)}
         <button

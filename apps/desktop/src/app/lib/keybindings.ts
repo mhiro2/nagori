@@ -359,6 +359,31 @@ export const buildBindings = (
 export const isImeComposing = (event: KeyboardEvent): boolean =>
   event.isComposing || event.keyCode === 229;
 
+// Plain activation belongs to the focused control, not a window shortcut.
+// Search inputs and result options deliberately retain palette confirmation.
+export const yieldsToControlActivation = (event: KeyboardEvent): boolean => {
+  if (event.key !== 'Enter' && event.key !== ' ') return false;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+  if (!(event.target instanceof Element)) return false;
+  const control = event.target.closest(
+    'button, a[href], input, select, textarea, summary, [contenteditable]',
+  );
+  if (
+    control instanceof HTMLInputElement &&
+    (control.type === 'text' || control.type === 'search')
+  ) {
+    return false;
+  }
+  if (
+    control instanceof HTMLButtonElement &&
+    control.getAttribute('role') === 'option' &&
+    !control.disabled
+  ) {
+    return false;
+  }
+  return control !== null;
+};
+
 // Text-editing keystrokes the search box owns while it holds text. Palette
 // bindings are matched at the window level (see `Palette.svelte`), so without
 // this guard a chord that doubles as an editing gesture fires the palette

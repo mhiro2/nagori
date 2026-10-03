@@ -33,15 +33,14 @@ const oppositeFormat = (): PasteFormat | undefined => {
 // Paste a specific entry id, sharing the hide-on-return + diagnostics contract.
 // Callers capture the id up front so an async step (or the picker) can never let
 // the live selection drift onto a different entry before the paste lands.
-// `force` makes the backend synthesise the keystroke even with auto-paste off —
-// set by the deliberate alternate-format chord, cleared for plain Enter.
-const pasteEntryId = async (id: string, format?: PasteFormat, force = false): Promise<void> => {
+// Changing format never changes the user's auto-paste policy.
+const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => {
   // The Tauri command hides the palette on its way out; drop any pending
   // debounced search so a keystroke typed within the 80 ms window before
   // the paste doesn't land a runQuery against the now-hidden webview.
   cancelPendingQuery();
   try {
-    await pasteEntryCmd(id, format, force);
+    await pasteEntryCmd(id, format);
     // A clean paste makes any prior failure diagnostic stale — drop the
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
@@ -89,9 +88,7 @@ const offerAlternateFormat = async (id: string): Promise<void> => {
     openPasteFormatPicker(id, options);
   } else {
     // No real choice — paste the *captured* entry in the alternate format.
-    // This is a deliberate paste, so force synthesis regardless of the
-    // auto-paste setting (consistent with selecting a format in the picker).
-    await pasteEntryId(id, oppositeFormat(), true);
+    await pasteEntryId(id, oppositeFormat());
   }
 };
 
@@ -115,8 +112,7 @@ export const confirmPasteFormat = async (option: PasteOption | undefined): Promi
   closePasteFormatPicker();
   if (targetId === undefined || !isTauri()) return;
   if (option === undefined) {
-    // Picking from the picker is a deliberate paste, so force synthesis.
-    await pasteEntryId(targetId, 'preserve', true);
+    await pasteEntryId(targetId, 'preserve');
     return;
   }
   cancelPendingQuery();

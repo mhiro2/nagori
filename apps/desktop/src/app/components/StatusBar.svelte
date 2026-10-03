@@ -2,12 +2,15 @@
   import { openSettingsWindow, setCaptureEnabled } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
-  import { formatAccelerator } from '../lib/keybindings';
+  import { buildBindings, formatBinding } from '../lib/keybindings';
+  import type { Binding, PaletteAction } from '../lib/keybindings';
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
   import { captureSkippedState, clearCaptureSkip } from '../stores/captureSkipped.svelte';
+  import type { CaptureSkipNotice } from '../stores/captureSkipped.svelte';
   import { clearPasteDiagnostics, pasteDiagnosticsState } from '../stores/pasteDiagnostics.svelte';
+  import type { PasteDiagnostic } from '../stores/pasteDiagnostics.svelte';
   import { accessibilityState, captureEnabled, settingsState } from '../stores/settings.svelte';
   import { showSettings } from '../stores/view.svelte';
 
@@ -17,15 +20,12 @@
     loading: boolean;
     errorMessage: string | undefined;
     selectedCount?: number;
+    bindings?: readonly Binding[];
+    enterOpensUrl?: boolean;
     // Toggles the pin state of the current selection. When provided, the ⌘P
     // hint becomes a button so pinning is reachable (and discoverable) by
     // mouse, not only via the keyboard shortcut.
     onTogglePin?: () => void;
-    // The pin shortcut, already rendered for the host platform from the
-    // *effective* binding (same contract as `previewHint`): the palette
-    // resolves it so a remap that collided and got dropped surfaces the
-    // surviving key, or `undefined` to drop the glyph. Display string.
-    pinHint?: string | undefined;
     // Opens the action inspector. When provided, the ⌘K hint becomes a button
     // so the actions are reachable by mouse, not only the keyboard shortcut.
     onOpenActions?: () => void;
@@ -40,11 +40,6 @@
     // Whether the expanded preview is currently open, surfaced as the button's
     // `aria-expanded` so assistive tech announces the toggle state.
     previewExpanded?: boolean;
-    // The expanded-preview shortcut, already rendered for the host platform
-    // from the *effective* binding (the palette resolves it so a remap that
-    // clobbered the default surfaces the surviving key, or `undefined` to drop
-    // the glyph). Display string, not a wire accelerator.
-    previewHint?: string | undefined;
   };
 
   const {
@@ -53,24 +48,39 @@
     loading,
     errorMessage,
     selectedCount = 0,
+    bindings,
+    enterOpensUrl = false,
     onTogglePin,
-    pinHint,
     onOpenActions,
     onOpenSettings,
     onOpenPreview,
     previewExpanded = false,
-    previewHint,
   }: Props = $props();
   const t = $derived(messages());
 
-  // Hint glyphs follow the host platform — `⌘K` / `⌘,` on macOS, `Ctrl+K`
-  // / `Ctrl+,` on Windows/Linux — so the row matches the modifier the
-  // user actually presses. `formatAccelerator` does the per-OS render
-  // (mac contiguous glyphs vs the `Ctrl+...` join the rest of the OS
-  // chrome uses) and folds CmdOrCtrl to the correct primary key.
   const platform = $derived(capabilitiesState.capabilities?.platform);
-  const hintActions = $derived(formatAccelerator('CmdOrCtrl+K', platform));
-  const hintSettings = $derived(formatAccelerator('CmdOrCtrl+,', platform));
+  // Every shortcut comes from the same resolved set as the palette matcher,
+  // including defaults removed by a user's conflicting remap.
+  const effectiveBindings = $derived(
+    bindings ?? buildBindings(settingsState.settings?.paletteHotkeys ?? {}, platform),
+  );
+  const shortcut = (action: PaletteAction): string | undefined => {
+    const binding = effectiveBindings.find((candidate) => candidate.action === action);
+    return binding ? formatBinding(binding, platform) : undefined;
+  };
+  const navigateHint = $derived(
+    [shortcut('select-prev'), shortcut('select-next')].filter(Boolean).join(' '),
+  );
+  const confirmHint = $derived(shortcut('confirm'));
+  const confirmLabel = $derived(
+    enterOpensUrl
+      ? t.preview.url.confirm
+      : selectedCount > 0
+        ? t.palette.hints.copyCombined
+        : settingsState.settings?.autoPasteEnabled === false
+          ? t.contextMenu.copyAndReturn
+          : t.palette.hints.paste,
+  );
   // The expanded-preview label (clearer than the bare "Preview" pill text)
   // doubles as the button's aria-label.
   const previewLabel = $derived(t.settings.hotkeys.paletteActions['open-preview']);
@@ -164,6 +174,36 @@
       : t.status.captureSkipped.secret;
   });
 
+  const notice = $derived(
+    showPasteDiagnostic
+      ? {
+          source: pasteFailure,
+          label: t.status.pasteDiagnostics.label,
+          hint: pasteHint,
+          testId: 'paste-diagnostic-chip',
+          route: 'setup',
+          dismiss: clearPasteDiagnostics,
+        }
+      : showCaptureSkip
+        ? {
+            source: captureSkip,
+            label: t.status.captureSkipped.label,
+            hint: captureSkipHint,
+            testId: 'capture-skip-chip',
+            route: 'privacy',
+            dismiss: clearCaptureSkip,
+          }
+        : undefined,
+  );
+  // Anchor expansion to the actual notice so a later failure starts closed.
+  let expandedNotice = $state<PasteDiagnostic | CaptureSkipNotice | null>(null);
+  const noticeExpanded = $derived(expandedNotice !== null && expandedNotice === notice?.source);
+  const noticeDetailsId = $props.id();
+  const openNoticeSettings = (): void => {
+    if (isTauri()) void openSettingsWindow(notice?.route);
+    else showSettings();
+  };
+
   const openSetup = (): void => {
     // Standalone Settings window under Tauri (own decorations, no
     // always-on-top). The `'setup'` route hint asks SettingsView to land
@@ -201,78 +241,88 @@
   };
 </script>
 
+{#snippet actionHint(
+  action: PaletteAction,
+  label: string,
+  onClick: (() => void) | undefined,
+  testId: string,
+  accessibleLabel = label,
+  expanded: boolean | undefined = undefined,
+)}
+  {@const hint = shortcut(action)}
+  {#if onClick}
+    <button
+      type="button"
+      class="hint-button"
+      data-testid={testId}
+      aria-label={accessibleLabel}
+      aria-expanded={expanded}
+      onclick={onClick}
+    >
+      {#if hint}<kbd>{hint}</kbd>{/if}{label}
+    </button>
+  {:else}
+    <span class="hint"
+      >{#if hint}<kbd>{hint}</kbd>{/if}{label}</span
+    >
+  {/if}
+{/snippet}
+
 <footer class="status">
-  <span class="left">
-    <!-- Only the volatile summary text truncates under pressure; the warning
-         chip stays whole (its own `flex: 0 0 auto`) so the focus ring and
-         border are never clipped. -->
-    <span class="summary">
-      {#if errorMessage}
-        <span class="error">{errorMessage}</span>
-      {:else if loading}
-        <span>{t.palette.searching}</span>
-      {:else}
-        <span>{t.status.entryCount(entryCount)}</span>
-        {#if elapsedMs !== undefined}
-          <span class="dot">·</span>
-          <span>{t.palette.elapsed(elapsedMs)}</span>
+  <div class="status-row">
+    <span class="left">
+      <span class="summary">
+        {#if errorMessage}
+          <span class="error">{errorMessage}</span>
+        {:else if loading}
+          <span>{t.palette.searching}</span>
+        {:else}
+          <span>{t.status.entryCount(entryCount)}</span>
+          {#if elapsedMs !== undefined}
+            <span class="dot">·</span>
+            <span>{t.palette.elapsed(elapsedMs)}</span>
+          {/if}
+          {#if selectedCount > 0}
+            <span class="dot">·</span>
+            <span class="multi">{t.status.selectedCount(selectedCount)}</span>
+          {/if}
         {/if}
-        {#if selectedCount > 0}
-          <span class="dot">·</span>
-          <span class="multi">{t.status.selectedCount(selectedCount)}</span>
-          <!-- Bulk copy joins the selection and writes it to the clipboard, but
-               also keeps it as a new history entry. Surface that here so the
-               extra row doesn't look like a stray capture (there is no
-               self-write suppression — see copy_entries_combined). -->
-          <span class="dot">·</span>
-          <span class="combined-hint">{t.status.combinedCopyHint}</span>
-        {/if}
+      </span>
+      {#if notice}
+        <span class="notice-controls">
+          <button
+            type="button"
+            class="chip warning-chip"
+            data-testid={notice.testId}
+            data-reason={showPasteDiagnostic ? pasteFailure?.reason : undefined}
+            data-kind={showCaptureSkip ? captureSkip?.kind : undefined}
+            title={notice.hint}
+            aria-label={`${notice.label}: ${notice.hint}`}
+            aria-expanded={noticeExpanded}
+            aria-controls={noticeExpanded ? noticeDetailsId : undefined}
+            onclick={() => (expandedNotice = noticeExpanded ? null : notice.source)}
+          >
+            {notice.label}
+          </button>
+          <button
+            type="button"
+            class="dismiss-button"
+            aria-label={`${t.toasts.dismiss}: ${notice.label}`}
+            onclick={notice.dismiss}>×</button
+          >
+        </span>
+      {:else if showAccessibilityWarning}
+        <button
+          type="button"
+          class="chip warning-chip"
+          title={t.status.autoPasteOff}
+          aria-label={t.status.autoPasteOffSetupAria}
+          onclick={openSetup}
+        >
+          {t.status.autoPasteOffShort}
+        </button>
       {/if}
     </span>
-    {#if showPasteDiagnostic}
-      <!-- Highest-priority left-column chip: a real auto-paste failure the
-           user just hit. Click dismisses it; the localized hint (incl. the
-           remediation for a missing tool) rides in the title. -->
-      <button
-        type="button"
-        class="chip warning-chip"
-        data-testid="paste-diagnostic-chip"
-        data-reason={pasteFailure?.reason}
-        title={pasteHint}
-        aria-label={`${t.status.pasteDiagnostics.label}: ${pasteHint}`}
-        onclick={clearPasteDiagnostics}
-      >
-        {t.status.pasteDiagnostics.label}
-      </button>
-    {:else if showAccessibilityWarning}
-      <button
-        type="button"
-        class="chip warning-chip"
-        title={t.status.autoPasteOff}
-        aria-label={t.status.autoPasteOffSetupAria}
-        onclick={openSetup}
-      >
-        {t.status.autoPasteOffShort}
-      </button>
-    {:else if showCaptureSkip}
-      <!-- Lowest-priority left-column chip: a privacy notice that the most
-           recent copy was dropped by the secret policy. Click dismisses it;
-           the localized (OTP-specific or generic) explanation rides in the
-           title, and the chip clears itself on the next real capture. -->
-      <button
-        type="button"
-        class="chip warning-chip"
-        data-testid="capture-skip-chip"
-        data-kind={captureSkip?.kind}
-        title={captureSkipHint}
-        aria-label={`${t.status.captureSkipped.label}: ${captureSkipHint}`}
-        onclick={clearCaptureSkip}
-      >
-        {t.status.captureSkipped.label}
-      </button>
-    {/if}
-  </span>
-  <span class="right">
     <button
       type="button"
       class="chip capture-chip"
@@ -285,117 +335,78 @@
       <span class="dot-icon" aria-hidden="true"></span>
       {capture ? t.status.captureOn : t.status.capturePaused}
     </button>
-    <!-- Keyboard hints are the lowest-priority row content: drop them while
-         a left-column warning chip (paste diagnostic, accessibility, or the
-         capture-skip privacy notice) is present so the bar never wraps on a
-         narrow palette
-         (priority: paste/accessibility warning > capture-skip notice > capture > summary > hints). -->
-    {#if !showAccessibilityWarning && !showPasteDiagnostic && !showCaptureSkip}
-      <span class="hints">
-        <kbd>↑↓</kbd>{t.palette.hints.navigate}
-        <kbd>Enter</kbd>{t.palette.hints.paste}
-        {#if onOpenPreview}
-          <button
-            type="button"
-            class="hint-button"
-            data-testid="status-open-preview"
-            aria-label={previewLabel}
-            aria-expanded={previewExpanded}
-            onclick={onOpenPreview}
-            onkeydown={(event) => {
-              // Keep Enter/Space activation local (the palette's window handler
-              // would otherwise read them as confirm/paste); arrows/Escape still
-              // bubble for global navigation. Mirrors the pin button above.
-              if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
-            }}
-          >
-            {#if previewHint}<kbd>{previewHint}</kbd>{/if}{t.palette.hints.preview}
-          </button>
-        {:else}
-          {#if previewHint}<kbd>{previewHint}</kbd>{/if}{t.palette.hints.preview}
-        {/if}
-        {#if onTogglePin}
-          <button
-            type="button"
-            class="hint-button"
-            data-testid="status-toggle-pin"
-            aria-label={t.palette.hints.pin}
-            onclick={onTogglePin}
-            onkeydown={(event) => {
-              // The palette's keydown handler lives on `window`, so an Enter/Space
-              // press while this button has focus would bubble up and be read as
-              // `confirm` (paste) on top of the button's own activation. Keep the
-              // activation keys local to the button; arrows/Escape still bubble
-              // for global navigation.
-              if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
-            }}
-          >
-            {#if pinHint}<kbd>{pinHint}</kbd>{/if}{t.palette.hints.pin}
-          </button>
-        {:else}
-          {#if pinHint}<kbd>{pinHint}</kbd>{/if}{t.palette.hints.pin}
-        {/if}
-        {#if onOpenActions}
-          <button
-            type="button"
-            class="hint-button"
-            data-testid="status-open-actions"
-            aria-label={t.actionMenu.title}
-            onclick={onOpenActions}
-          >
-            <kbd>{hintActions}</kbd>{t.palette.hints.actions}
-          </button>
-        {:else}
-          <kbd>{hintActions}</kbd>{t.palette.hints.actions}
-        {/if}
-        {#if onOpenSettings}
-          <button
-            type="button"
-            class="hint-button"
-            data-testid="status-open-settings"
-            aria-label={t.palette.hints.settings}
-            onclick={onOpenSettings}
-          >
-            <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
-          </button>
-        {:else}
-          <kbd>{hintSettings}</kbd>{t.palette.hints.settings}
-        {/if}
+  </div>
+  {#if notice && noticeExpanded}
+    <div class="notice-details" id={noticeDetailsId}>
+      <p>{notice.hint}</p>
+      <button type="button" class="hint-button" onclick={openNoticeSettings}>
+        {showCaptureSkip ? t.settings.tabs.privacy : t.toasts.openSettings}
+      </button>
+    </div>
+  {/if}
+  {#if selectedCount > 0}
+    <p class="combined-hint">{t.status.combinedCopyHint}</p>
+  {/if}
+  <div class="hints">
+    {#if navigateHint}
+      <span class="hint navigation-hint"><kbd>{navigateHint}</kbd>{t.palette.hints.navigate}</span>
+    {/if}
+    {#if confirmHint}
+      <span class="hint primary-hint" data-testid="status-confirm-hint">
+        <kbd>{confirmHint}</kbd>{confirmLabel}
       </span>
     {/if}
-  </span>
+    {@render actionHint(
+      'open-preview',
+      t.palette.hints.preview,
+      onOpenPreview,
+      'status-open-preview',
+      previewLabel,
+      previewExpanded,
+    )}
+    {@render actionHint('toggle-pin', t.palette.hints.pin, onTogglePin, 'status-toggle-pin')}
+    {@render actionHint(
+      'open-actions',
+      t.palette.hints.actions,
+      onOpenActions,
+      'status-open-actions',
+      t.actionMenu.title,
+    )}
+    {@render actionHint(
+      'open-settings',
+      t.palette.hints.settings,
+      onOpenSettings,
+      'status-open-settings',
+    )}
+  </div>
 </footer>
 
 <style>
   .status {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
+    gap: 0.35rem;
     padding: 0.4rem 1rem;
     border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
     background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
   }
+  .status-row,
   .left,
-  .right {
+  .notice-controls {
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
-  /* The left column gives way under pressure (so its summary truncates),
-     while the right column holds its intrinsic width and never wraps. */
+  .status-row,
+  .left {
+    flex-wrap: wrap;
+  }
   .left {
     flex: 1 1 auto;
     min-width: 0;
   }
-  .right {
-    flex: 0 0 auto;
-  }
-  /* Summary is the only shrinkable piece: it ellipsis-truncates when the
-     warning chip needs room, instead of pushing the chips onto a new line.
-     It must stay block-level (not flex) for `text-overflow: ellipsis` to
-     apply to its inline run of count/dot/elapsed spans. */
   .summary {
     flex: 0 1 auto;
     min-width: 0;
@@ -451,6 +462,26 @@
   .warning-chip:focus-visible {
     outline-color: var(--warning, #f59e0b);
   }
+  .notice-controls {
+    gap: 0.15rem;
+    max-width: 100%;
+  }
+  .warning-chip {
+    flex-shrink: 1;
+    white-space: normal;
+    text-align: left;
+  }
+  .notice-details {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .notice-details p {
+    margin: 0 0 0.25rem;
+    color: var(--fg, #f5f5f5);
+  }
   .dot-icon {
     width: 0.4rem;
     height: 0.4rem;
@@ -470,13 +501,23 @@
   /* Secondary to the count: the consequence of acting on the selection, not a
      status of its own, so it reads muted rather than competing with `.multi`. */
   .combined-hint {
+    margin: 0;
     color: var(--muted, rgba(255, 255, 255, 0.5));
   }
   .hints {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
-    margin-left: 0.25rem;
+    gap: 0.2rem 0.5rem;
+  }
+  .hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.1rem 0;
+  }
+  .primary-hint {
+    color: var(--fg, #f5f5f5);
   }
   kbd {
     padding: 0.05rem 0.35rem;
@@ -485,12 +526,11 @@
     font-family: inherit;
     font-size: 0.7rem;
   }
-  /* The ⌘K hint, but clickable: a transparent wrapper that keeps the same
-     glyph+label rhythm as the static hints and only lights up on hover/focus. */
-  .hint-button {
+  .hint-button,
+  .dismiss-button {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem;
     padding: 0.1rem 0.25rem;
     border: none;
     border-radius: 6px;
@@ -500,10 +540,17 @@
     letter-spacing: inherit;
     cursor: pointer;
   }
-  .hint-button:hover {
+  .dismiss-button {
+    flex-shrink: 0;
+    padding: 0.1rem 0.35rem;
+    font-size: 1rem;
+  }
+  .hint-button:hover,
+  .dismiss-button:hover {
     background: color-mix(in srgb, var(--fg, #f5f5f5) 8%, transparent);
   }
-  .hint-button:focus-visible {
+  .hint-button:focus-visible,
+  .dismiss-button:focus-visible {
     outline: 2px solid var(--accent, #6c8dff);
     outline-offset: 1px;
   }

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SearchResultDto } from '../lib/types';
 import { sampleSearchResult } from '../test-helpers/fixtures';
 import ResultItem from './ResultItem.svelte';
+import ResultList from './ResultList.svelte';
 
 const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
   sampleSearchResult({ id: 'id-1', preview: 'value', rankReasons: [], ...overrides });
@@ -11,6 +12,56 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
 afterEach(cleanup);
 
 describe('ResultItem', () => {
+  it('selects the row when keyboard focus enters it', () => {
+    const onSelect = vi.fn();
+    const { getByRole } = render(ResultItem, {
+      props: { item: sample(), index: 3, selected: false, onSelect, onConfirm: vi.fn() },
+    });
+    getByRole('option').focus();
+    expect(onSelect).toHaveBeenCalledWith(3);
+  });
+
+  it('moves list focus with the selection without focusing the old row again', async () => {
+    const items = [sample({ id: 'a' }), sample({ id: 'b' })];
+    const onSelect = vi.fn();
+    const props = { items, selectedIndex: 0, onSelect, onConfirm: vi.fn() };
+    const { getAllByRole, rerender } = render(ResultList, { props });
+    const rows = getAllByRole('option');
+    rows[0]!.focus();
+    onSelect.mockClear();
+    await rerender({ ...props, selectedIndex: 1 });
+    expect(document.activeElement).toBe(rows[1]);
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it('keeps selection changes from stealing focus outside the results', async () => {
+    const onConfirm = vi.fn();
+    const onSelect = vi.fn();
+    const props = { item: sample(), index: 0, selected: false, onSelect, onConfirm };
+    const { rerender } = render(ResultItem, { props });
+    const before = document.activeElement;
+    await rerender({ ...props, selected: true });
+    expect(document.activeElement).toBe(before);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('disables result and pin activation while actions own the list', () => {
+    const { getByRole } = render(ResultItem, {
+      props: {
+        item: sample(),
+        index: 0,
+        selected: true,
+        locked: true,
+        onSelect: vi.fn(),
+        onConfirm: vi.fn(),
+      },
+    });
+    expect((getByRole('option') as HTMLButtonElement).disabled).toBe(true);
+    expect((getByRole('button') as HTMLButtonElement).disabled).toBe(true);
+    getByRole('option').focus();
+    expect(document.activeElement).not.toBe(getByRole('option'));
+  });
+
   it('forwards onConfirm with the row index when clicked', async () => {
     const onConfirm = vi.fn();
     const { getByRole } = render(ResultItem, {

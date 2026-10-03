@@ -1337,15 +1337,16 @@ chord's opposite-format fallback — so it can never try to paste a single-forma
 entry (an image, say) as plain text. Choosing one runs `copy_entry_representation`,
 which re-reads the representation set (so a concurrent eviction can't make
 the picker's snapshot stale), resolves the MIME to its single canonical row,
-and publishes it through `write_representation_exact`. The whole chord
-(picker rows and the direct fallback alike) is a deliberate paste, so it
-runs with `PasteSynthesis::Force`: the ⌘/Ctrl+V keystroke fires even when
-`auto_paste_enabled` is off (plain Enter still honours the setting), and a
-synthesis failure surfaces the usual "copy succeeded — paste manually"
-diagnostic rather than degrading silently to a copy. Sensitivity is unchanged
-from Preserve — `Blocked` is refused and the chosen rep is a subset of what
-Preserve already offers — and the wire contract stays desktop-local (the
-IPC/CLI search result keeps its flat `preview`).
+and publishes it through `write_representation_exact`. Default output,
+picker rows, and the alternate-format fallback all honour
+`auto_paste_enabled`: they copy, hide the palette, and restore source focus,
+then synthesise ⌘/Ctrl+V only when the setting is enabled. With auto-paste
+disabled, the menu and picker describe copying instead, and the user pastes
+manually. A synthesis failure surfaces the usual "copy succeeded — paste
+manually" diagnostic. Sensitivity is unchanged from Preserve — `Blocked` is
+refused and the chosen rep is a subset of what Preserve already offers — and
+the wire contract stays desktop-local (the IPC/CLI search result keeps its flat
+`preview`).
 
 **Publish-then-paste atomicity.** Putting an entry on the clipboard and
 synthesising ⌘/Ctrl+V are two side effects on shared OS state, and the
@@ -1673,13 +1674,11 @@ focus, not domain logic:
   before the palette stole focus, so Cmd+V lands in the right window.
   The palette-confirm path runs this **regardless of the `auto_paste`
   setting**: with auto-paste on, focus must return before the synthesised
-  Cmd+V; with auto-paste off, plain Enter leaves the user to paste manually,
-  and restoring focus means their next Cmd+V hits the source window without
-  first clicking to re-activate it. (The explicit "paste as" chord forces the
-  synthesised Cmd+V even when auto-paste is off — see the paste-as section in
-  §10 — so focus restoration is required there too.) (Linux Wayland captures no
+  Cmd+V; with auto-paste off, every palette output format leaves the user to
+  paste manually, and restoring focus means their next Cmd+V hits the source
+  window without first clicking to re-activate it. Linux Wayland captures no
   frontmost handle, so this is a no-op there and the compositor's own post-hide
-  focus handoff returns focus to the source surface.)
+  focus handoff returns focus to the source surface.
 - `request_accessibility(prompt: bool) -> PermissionStatus` — on macOS
   calls `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt:
   prompt)`. When `prompt = true` the runtime stamps
@@ -1720,6 +1719,19 @@ not duplicate runtime logic.
   and an auto-repeated deletion chord never does, so holding Ctrl+Backspace
   to wipe the query cannot roll on into deleting entries. ⌘⌫ on macOS stays
   a palette chord even while typing, matching the Finder / Maccy convention.
+  Plain Enter / Space on a focused native control belong to that control
+  (`yieldsToControlActivation`), so activating a filter, disclosure, or settings
+  button cannot also confirm a result. The search input and enabled result
+  options retain palette confirmation; Space confirms a focused result without
+  consuming spaces typed into search. During multi-selection a plain row click
+  clears the group and selects the clicked row without executing it; explicit
+  confirm / copy bindings keep the combined-copy behavior.
+- `SearchEmptyState.svelte` — replaces an empty result list with distinct
+  loading, search-error, no-query-match, no-filter-match, paused-capture, and
+  first-capture guidance. Search errors offer retry; query/filter misses offer
+  one reset that clears both the query and filters and returns focus to search.
+  Loading and guidance use
+  `role="status"`, while a settled error uses `role="alert"`.
 - `FilterChips.svelte` — single-line quick-filter row directly under the
   search input. Composite filters that compose freely, split by cardinality:
   the low-churn axes stay as one-click chips — a single-select date window
@@ -1748,25 +1760,28 @@ not duplicate runtime logic.
   the window level, so an un-stopped menu keystroke would otherwise move the
   result selection or dismiss the palette (mirrors `ActionInspector`). Escape
   closes only the menu; a click outside dismisses it.
-- `StatusBar.svelte` — entry count, last-search elapsed time, capture
-  badge, AI badge, keyboard hints. Also hosts a one-row Accessibility
-  indicator: when the OS grant that auto-paste needs is missing it
-  surfaces a warning plus a *Setup* CTA that opens the Settings window
-  on the Setup tab (`open_settings` with a `route` hint →
-  `nagori://navigate`). The row resolves the shared 5-state
-  `resolvePermissionUiState`, so it hides once the grant lands and on
-  `Unavailable` platforms (Windows, Wayland sans `wtype`) where there is
-  nothing to chase. It replaces the former `OnboardingBanner` card. It
-  also hosts a persistent auto-paste **diagnostic chip** driven by the
-  `pasteDiagnostics` store: when a paste fails, the chip carries the
-  localized per-reason remediation in its `title` and outlives the toast
-  (priority paste-diagnostic > accessibility warning > hints; an
-  `accessibilityMissing` reason folds into the accessibility chip so the
-  two never stack). Clicking it dismisses the diagnostic.
+- `StatusBar.svelte` — entry count, last-search elapsed time, capture toggle,
+  diagnostic notices, and a separate persistent action row. Shortcut hints use
+  the same effective `buildBindings` result as the palette matcher, including
+  remaps and collision removal. The confirmation verb follows the current
+  behavior: paste, copy and return, combined copy, or opening a URL confirmation.
+  Preview, pin, actions, and settings remain available while warnings are shown.
+  The Accessibility indicator opens Settings on the Setup tab (`open_settings`
+  with a `route` hint → `nagori://navigate`). It uses the shared 5-state
+  `resolvePermissionUiState`, hiding once the grant lands and on `Unavailable`
+  platforms where there is no grant to request. Persistent paste-failure and
+  capture-skipped notices expand to show their localized reason and a settings
+  link; a separate × button dismisses them. Paste diagnostics take priority over
+  Accessibility warnings, followed by capture-skipped notices; an
+  `accessibilityMissing` failure folds into the Accessibility indicator. Warnings
+  never replace the action row.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise the
   domain and add a strong-brand badge (GitHub / YouTube / …) derived from
-  the hostname alone (`lib/urlCategory`, no network). Code rows show a
-  language badge sourced from the backend `language` (the same canonical
+  the hostname alone (`lib/urlCategory`, no network). Focusing a row selects it;
+  arrow navigation moves DOM focus with the selection once focus is inside the
+  result list, while navigation from search retains input focus. Rows and pin
+  buttons are disabled while the action inspector locks the list. Code rows show
+  a language badge sourced from the backend `language` (the same canonical
   id the preview highlighter uses), falling back to a client-side sniff
   (`lib/codeLanguage`) only for legacy rows that predate detection. Image
   rows — which carry no body text — surface the probed `width×height`
@@ -1907,6 +1922,11 @@ not duplicate runtime logic.
   open path, so the entry gesture matches the mouse-driven action
   selection. The result shows *Copy* (uses
   `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
+  Copy/save failures appear as separate inline `role="alert"` messages while
+  the result and its buttons stay available for retry. Retrying clears that
+  operation's error; starting another quick/AI action, changing target, or
+  closing the panel clears the feedback. Run and attempt tokens prevent late
+  copy/save completions or success timers from changing a newer result's state.
   Clearing the whole history is not offered here — that destructive action
   lives on the tray menu and the palette's own `clear-history` chord, both
   behind the confirmation dialog described below.
@@ -1934,6 +1954,8 @@ not duplicate runtime logic.
   outside right-click can immediately re-open the menu on another row). While the
   action inspector owns the column the list is a read-only reference surface, so a
   right-click there is suppressed entirely (mirrors the frozen hover / click).
+  With auto-paste disabled, the output labels become *Copy and return* and
+  *Copy as…*; both keep the same format-selection behavior and respect the setting.
 - `ClearHistoryConfirmDialog.svelte` — the confirmation in front of *Clear
   history*, the palette's one irreversible bulk action. Reached by the ⌘⌥⌫
   chord (the single-row ⌘⌫ delete plus a modifier) and by the tray item, which
@@ -2572,11 +2594,11 @@ change.
   `Platform` detail); the desktop command layer adds `PreviousAppLost`
   for a focus-restore failure that lives above the adapter. App.svelte
   records every failure in the `pasteDiagnostics` store so the StatusBar
-  can leave a persistent diagnostic chip whose `title` is the localized
-  per-reason remediation (e.g. "install `wtype`"); the chip is cleared on
-  the next successful paste, on an Accessibility grant, or by manual
-  dismiss, and an `accessibilityMissing` reason folds into the dedicated
-  accessibility chip rather than stacking a second one. The
+  can leave a persistent diagnostic chip that expands to show localized
+  per-reason remediation (e.g. "install `wtype`") and a settings link. A
+  separate × button dismisses it; the chip is also cleared on the next successful
+  paste or an Accessibility grant. An `accessibilityMissing` reason folds into
+  the dedicated accessibility chip rather than stacking a second one. The
   palette suppresses the *toast* only for an `accessibilityMissing`
   failure in the not-yet-granted states the StatusBar accessibility chip
   already explains (`NotRequested` / `PromptShownNotGranted`); every other

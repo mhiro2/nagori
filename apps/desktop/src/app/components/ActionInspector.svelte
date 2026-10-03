@@ -75,6 +75,8 @@
   let runError: string | undefined = $state(undefined);
   let copyOk = $state(false);
   let saveOk = $state(false);
+  let copyError = $state<string | undefined>(undefined);
+  let saveError = $state<string | undefined>(undefined);
   let saving = $state(false);
   let panelEl: HTMLElement | undefined = $state();
 
@@ -116,6 +118,18 @@
   type FlashTimer = ReturnType<typeof setTimeout> | undefined;
   let copyFlashTimer: FlashTimer = undefined;
   let saveFlashTimer: FlashTimer = undefined;
+
+  const resetResultFeedback = (): void => {
+    copyOk = false;
+    saveOk = false;
+    copyError = undefined;
+    saveError = undefined;
+    saving = false;
+    if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
+    if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
+    copyFlashTimer = undefined;
+    saveFlashTimer = undefined;
+  };
 
   // A run is in flight whenever a quick action or an AI stream is active; the
   // whole picker disables so a second action can't race the first. The picker
@@ -240,8 +254,7 @@
     if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
     lastResult = undefined;
     runError = undefined;
-    copyOk = false;
-    saveOk = false;
+    resetResultFeedback();
     pending = undefined;
     aiText = '';
     aiStreaming = false;
@@ -264,8 +277,7 @@
     const token = ++runToken;
     pending = id;
     runError = undefined;
-    copyOk = false;
-    saveOk = false;
+    resetResultFeedback();
     // Arm the delayed running indicator; a fast resolve clears it first.
     if (quickRunningTimer !== undefined) clearTimeout(quickRunningTimer);
     quickRunningVisible = false;
@@ -305,6 +317,7 @@
     // resolves after any of those can detect it lost the race.
     const token = ++runToken;
     runError = undefined;
+    resetResultFeedback();
     lastResult = undefined;
     aiText = '';
     aiStreaming = true;
@@ -394,28 +407,42 @@
     }),
   ]);
 
-  // Reset feedback after a beat so repeated actions still flash visibly.
-  // Each flag owns its own timer so a quick second click doesn't let the
-  // first run's lingering timeout flip the freshly-set `true` back to `false`.
+  // Copy/save failures keep the result intact and can be retried independently.
+  // Fence feedback by both run and attempt so a late completion cannot update
+  // another entry, a newer result, or a newer retry of the same operation.
   const flashOk = async (
     setOk: (value: boolean) => void,
-    timerRef: { value: FlashTimer },
+    setError: (value: string | undefined) => void,
+    timerRef: { value: FlashTimer; attempt: number },
     fn: () => Promise<void>,
   ): Promise<void> => {
+    const token = runToken;
+    const targetId = target?.id;
+    const attempt = ++timerRef.attempt;
+    const isCurrent = (): boolean =>
+      open && token === runToken && target?.id === targetId && attempt === timerRef.attempt;
+    if (timerRef.value !== undefined) clearTimeout(timerRef.value);
+    timerRef.value = undefined;
+    setOk(false);
+    setError(undefined);
     try {
       await fn();
+      if (!isCurrent()) return;
       setOk(true);
-      if (timerRef.value !== undefined) clearTimeout(timerRef.value);
       timerRef.value = setTimeout(() => {
+        if (!isCurrent()) return;
         timerRef.value = undefined;
         setOk(false);
       }, FLASH_MS);
-    } catch {
+    } catch (err) {
+      if (!isCurrent()) return;
       setOk(false);
+      setError(describeError(err));
     }
   };
 
   const copyTimerRef = {
+    attempt: 0,
     get value() {
       return copyFlashTimer;
     },
@@ -424,6 +451,7 @@
     },
   };
   const saveTimerRef = {
+    attempt: 0,
     get value() {
       return saveFlashTimer;
     },
@@ -437,6 +465,7 @@
     if (text === undefined) return Promise.resolve();
     return flashOk(
       (v) => (copyOk = v),
+      (v) => (copyError = v),
       copyTimerRef,
       () => navigator.clipboard.writeText(text),
     );
@@ -444,18 +473,20 @@
 
   const saveResult = async (): Promise<void> => {
     const text = lastResult;
-    if (text === undefined || !isTauri()) return;
+    if (text === undefined || !isTauri() || saving) return;
+    const token = runToken;
     saving = true;
     try {
       await flashOk(
         (v) => (saveOk = v),
+        (v) => (saveError = v),
         saveTimerRef,
         async () => {
           await saveAiResult(text);
         },
       );
     } finally {
-      saving = false;
+      if (token === runToken) saving = false;
     }
   };
 
@@ -639,6 +670,7 @@
   // into a component that no longer has a consumer.
   $effect(() => {
     return () => {
+      runToken += 1;
       if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
       if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
       if (quickRunningTimer !== undefined) clearTimeout(quickRunningTimer);
@@ -707,6 +739,13 @@
         <p class="ai-reason">{aiUnavailableReason}</p>
       {/if}
     </div>
+
+    {#if copyError !== undefined}
+      <p class="result-error" role="alert">{t.actionMenu.copyFailed} {copyError}</p>
+    {/if}
+    {#if saveError !== undefined}
+      <p class="result-error" role="alert">{t.actionMenu.saveFailed} {saveError}</p>
+    {/if}
 
     <ActionRunPanel
       {phase}
@@ -805,6 +844,18 @@
     margin: 0;
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.75rem;
+  }
+  .result-error {
+    flex: none;
+    max-height: 5rem;
+    overflow: auto;
+    margin: 0;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--danger, #f87171) 14%, transparent);
+    color: var(--danger, #f87171);
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
   }
   .hint {
     margin: 0;

@@ -117,6 +117,18 @@ compatibility matrix and troubleshooting.
    if something feels off; the desktop app mirrors the same capability matrix
    under **Settings → Advanced → Platform capabilities**.
 
+With auto-paste disabled, every format choice copies the entry and returns to
+the previous window for manual paste. The palette's action labels and shortcut
+hints reflect the current mode and your configured keys. During multi-selection,
+a plain row click clears the group and selects that row without copying it;
+Enter explicitly copies the selected group.
+
+Paste-failure and skipped-capture notices expand to show recovery guidance while
+the palette's actions and settings stay available. Empty states distinguish
+first use, no matches, paused capture, and search errors, with reset or retry
+where appropriate. If copying or saving an action result fails, the result
+stays visible so you can retry the same button.
+
 The CLI talks to the running app, so writes such as `nagori add` or
 `nagori paste` show up in the palette immediately (toggle under
 **Settings → CLI**).

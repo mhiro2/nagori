@@ -1,4 +1,5 @@
 import { cleanup, render } from '@testing-library/svelte';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { FileEntry } from '../lib/types';
@@ -343,6 +344,34 @@ describe('PreviewPane', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await Promise.resolve();
     expect(container.querySelector('[data-testid="preview-url-confirm"]')).not.toBeNull();
+  });
+
+  it('activates the focused actions button instead of opening the expanded URL', async () => {
+    const user = userEvent.setup();
+    const onOpenActions = vi.fn();
+    const { getByTestId, queryByTestId } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ kind: 'url', sensitivity: 'Public' }),
+        preview: samplePreview({
+          kind: 'url',
+          body: {
+            type: 'url',
+            url: 'https://example.com/',
+            scheme: 'https',
+            hostDisplay: 'example.com',
+            pathAndQuery: '/',
+          },
+        }),
+        loading: false,
+        errorMessage: undefined,
+        expanded: true,
+        onOpenActions,
+      },
+    });
+    getByTestId('preview-open-actions').focus();
+    await user.keyboard('{Enter}');
+    expect(onOpenActions).toHaveBeenCalledTimes(1);
+    expect(queryByTestId('preview-url-confirm')).toBeNull();
   });
 
   it('hides the open trigger and Enter hint for non-Public URL entries', () => {

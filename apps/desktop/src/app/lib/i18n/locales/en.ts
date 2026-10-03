@@ -10,6 +10,14 @@ export type Messages = {
     resultCount: CountFormatter;
     elapsed: (ms: number) => string;
     empty: string;
+    emptyStates: {
+      start: string;
+      noMatches: string;
+      noFilterMatches: string;
+      capturePaused: string;
+      retry: string;
+      clearSearch: string;
+    };
     fallback: string;
     // Compact badge on image result rows whose source app is a screenshot
     // tool, so "the screenshot I just took" is scannable in the list.
@@ -17,6 +25,7 @@ export type Messages = {
     hints: {
       navigate: string;
       paste: string;
+      copyCombined: string;
       pin: string;
       actions: string;
       settings: string;
@@ -261,6 +270,8 @@ export type Messages = {
     done: string;
     resultTitle: string;
     copyResult: string;
+    copyFailed: string;
+    saveFailed: string;
     copied: string;
     saveResult: string;
     saved: string;
@@ -290,6 +301,8 @@ export type Messages = {
     // "Paste as" — opens the representation picker (≥2 formats) or pastes in
     // the alternate format; same flow as the alternate-format chord.
     pasteAs: string;
+    copyAndReturn: string;
+    copyAs: string;
     pin: string;
     unpin: string;
     // Opens the action inspector (quick / AI transforms) for the entry.
@@ -645,11 +658,20 @@ export const en: Messages = {
     resultCount: (count) => (count === 1 ? '1 result' : `${count.toLocaleString('en')} results`),
     elapsed: (ms) => `${ms.toFixed(0)} ms`,
     empty: 'No history yet.',
+    emptyStates: {
+      start: 'Copy some text to start your history.',
+      noMatches: 'No entries match this search.',
+      noFilterMatches: 'No entries match these filters.',
+      capturePaused: 'Capture is paused. Resume capture below to save new entries.',
+      retry: 'Try again',
+      clearSearch: 'Clear search and filters',
+    },
     fallback: '(Tauri runtime not started) Recently copied items will appear here.',
     screenshotBadge: 'Screenshot',
     hints: {
       navigate: 'Navigate',
       paste: 'Paste',
+      copyCombined: 'Copy combined',
       pin: 'Pin',
       actions: 'Actions',
       settings: 'Settings',
@@ -832,6 +854,8 @@ export const en: Messages = {
     done: 'Done',
     resultTitle: 'Result',
     copyResult: 'Copy',
+    copyFailed: 'Could not copy the result.',
+    saveFailed: 'Could not save the result.',
     copied: 'Copied',
     saveResult: 'Save as new entry',
     saved: 'Saved',
@@ -852,6 +876,8 @@ export const en: Messages = {
     paste: 'Paste',
     copy: 'Copy',
     pasteAs: 'Paste as…',
+    copyAndReturn: 'Copy and return',
+    copyAs: 'Copy as…',
     pin: 'Pin',
     unpin: 'Unpin',
     actions: 'Actions…',

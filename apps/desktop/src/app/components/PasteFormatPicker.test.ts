@@ -1,5 +1,6 @@
 import { cleanup, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
+import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Spy on the action handlers so the test asserts the picker's wiring, not the
@@ -11,6 +12,7 @@ vi.mock('../stores/searchActions', () => ({
 
 import { closePasteFormatPicker, openPasteFormatPicker } from '../stores/pasteFormatPicker.svelte';
 import { cancelPasteFormat, confirmPasteFormat } from '../stores/searchActions';
+import { settingsState } from '../stores/settings.svelte';
 import PasteFormatPicker from './PasteFormatPicker.svelte';
 
 afterEach(() => {
@@ -19,6 +21,7 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  settingsState.settings = undefined;
   openPasteFormatPicker('e1', [
     { mime: 'text/uri-list', category: 'files' },
     { mime: 'image/png', category: 'image' },
@@ -26,6 +29,20 @@ beforeEach(() => {
 });
 
 describe('PasteFormatPicker', () => {
+  it('updates its title and accessible name for copy-only mode', async () => {
+    const user = userEvent.setup();
+    const { getByRole } = render(PasteFormatPicker);
+    expect(getByRole('dialog', { name: 'Paste as' })).toBeTruthy();
+    settingsState.settings = { autoPasteEnabled: false } as NonNullable<
+      typeof settingsState.settings
+    >;
+    await tick();
+    const dialog = getByRole('dialog', { name: 'Copy as…' });
+    expect(dialog.querySelector('.title')?.textContent).toBe('Copy as…');
+    await user.click(getByRole('menuitem', { name: 'Image (PNG)' }));
+    expect(confirmPasteFormat).toHaveBeenCalledWith({ mime: 'image/png', category: 'image' });
+  });
+
   it('renders a keep-original row plus a row per option, with image subtype disambiguated', () => {
     const { getByRole } = render(PasteFormatPicker);
     expect(getByRole('menuitem', { name: 'Keep original format' })).toBeTruthy();
