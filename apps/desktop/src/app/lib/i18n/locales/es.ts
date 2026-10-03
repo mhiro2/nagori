@@ -19,6 +19,14 @@ export const es: Messages = {
     fallback:
       '(Runtime de Tauri no iniciado) Los elementos copiados recientemente aparecerán aquí.',
     screenshotBadge: 'Captura',
+    resultLimit: {
+      showing: (count: number): string =>
+        `Mostrando las ${count.toLocaleString('es')} primeras entradas.`,
+      showMore: 'Mostrar más',
+      reached: (count: number): string =>
+        `Mostrando las ${count.toLocaleString('es')} primeras entradas. Refina la búsqueda o usa filtros para llegar a entradas más antiguas.`,
+      allShown: (count: number): string => `Mostrando las ${count.toLocaleString('es')} entradas.`,
+    },
     hints: {
       navigate: 'Navegar',
       paste: 'Pegar',

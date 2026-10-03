@@ -17,6 +17,13 @@ export const zhHant: Messages = {
     },
     fallback: '(Tauri 執行階段未啟動) 最近複製的項目將在此顯示。',
     screenshotBadge: '螢幕截圖',
+    resultLimit: {
+      showing: (count: number): string => `正在顯示前 ${count.toLocaleString('zh-Hant')} 筆。`,
+      showMore: '顯示更多',
+      reached: (count: number): string =>
+        `最多顯示前 ${count.toLocaleString('zh-Hant')} 筆。如需尋找更早的項目，請調整搜尋詞或使用篩選。`,
+      allShown: (count: number): string => `已顯示全部 ${count.toLocaleString('zh-Hant')} 筆。`,
+    },
     hints: {
       navigate: '瀏覽',
       paste: '貼上',

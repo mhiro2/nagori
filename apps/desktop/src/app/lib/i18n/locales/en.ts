@@ -22,6 +22,16 @@ export type Messages = {
     // Compact badge on image result rows whose source app is a screenshot
     // tool, so "the screenshot I just took" is scannable in the list.
     screenshotBadge: string;
+    // Footer under a result list that filled its page: `showing` labels the
+    // page with a "show more" button, `reached` replaces both once the backend
+    // cap is hit and suggests narrowing the search instead.
+    resultLimit: {
+      showing: CountFormatter;
+      showMore: string;
+      reached: CountFormatter;
+      // The last page came back short: every match is on screen.
+      allShown: CountFormatter;
+    };
     hints: {
       navigate: string;
       paste: string;
@@ -668,6 +678,13 @@ export const en: Messages = {
     },
     fallback: '(Tauri runtime not started) Recently copied items will appear here.',
     screenshotBadge: 'Screenshot',
+    resultLimit: {
+      showing: (count) => `Showing the top ${count.toLocaleString('en')} entries.`,
+      showMore: 'Show more',
+      reached: (count) =>
+        `Showing the top ${count.toLocaleString('en')} entries. Refine the search or use filters to reach older entries.`,
+      allShown: (count) => `Showing all ${count.toLocaleString('en')} entries.`,
+    },
     hints: {
       navigate: 'Navigate',
       paste: 'Paste',

@@ -19,6 +19,15 @@ export const de: Messages = {
     },
     fallback: '(Tauri-Laufzeit nicht gestartet) Zuletzt kopierte Einträge erscheinen hier.',
     screenshotBadge: 'Screenshot',
+    resultLimit: {
+      showing: (count: number): string =>
+        `Die ersten ${count.toLocaleString('de')} Einträge werden angezeigt.`,
+      showMore: 'Mehr anzeigen',
+      reached: (count: number): string =>
+        `Die ersten ${count.toLocaleString('de')} Einträge werden angezeigt. Verfeinere die Suche oder nutze Filter, um ältere Einträge zu finden.`,
+      allShown: (count: number): string =>
+        `Alle ${count.toLocaleString('de')} Einträge werden angezeigt.`,
+    },
     hints: {
       navigate: 'Navigieren',
       paste: 'Einfügen',
