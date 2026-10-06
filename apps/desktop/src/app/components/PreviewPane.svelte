@@ -227,23 +227,23 @@
   // default; the palette stands down its confirm binding (see
   // `enterOpensUrl`) so this window-scoped listener is the sole Enter
   // handler while expanded.
+  const onUrlEnterKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter') return;
+    // The Enter that commits an IME 変換 belongs to the focused search input,
+    // not to opening the previewed URL.
+    if (isImeComposing(event)) return;
+    if (yieldsToControlActivation(event)) return;
+    // Leave modified Enter to the palette's copy / paste-as-plain bindings.
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (confirmOpenUrl) return;
+    event.preventDefault();
+    confirmOpenUrl = true;
+  };
   $effect(() => {
     if (!expanded || !urlCanOpen) return;
     if (typeof window === 'undefined') return;
-    const handler = (event: KeyboardEvent): void => {
-      if (event.key !== 'Enter') return;
-      // The Enter that commits an IME 変換 belongs to the focused search input,
-      // not to opening the previewed URL.
-      if (isImeComposing(event)) return;
-      if (yieldsToControlActivation(event)) return;
-      // Leave modified Enter to the palette's copy / paste-as-plain bindings.
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      if (confirmOpenUrl) return;
-      event.preventDefault();
-      confirmOpenUrl = true;
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', onUrlEnterKeydown);
+    return () => window.removeEventListener('keydown', onUrlEnterKeydown);
   });
 </script>
 

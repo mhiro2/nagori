@@ -198,17 +198,17 @@
   // outside right-click closes this menu and the row handler immediately
   // re-opens it at the new spot. Inside clicks are ignored so item buttons
   // still activate.
+  const onDocPointerDown = (event: PointerEvent): void => {
+    if (panelEl && event.target instanceof Node && panelEl.contains(event.target)) return;
+    closeEntryContextMenu();
+  };
+  const onDocContextMenu = (event: MouseEvent): void => {
+    // Suppress the native webview menu for as long as ours is open.
+    event.preventDefault();
+    if (panelEl && event.target instanceof Node && panelEl.contains(event.target)) return;
+    closeEntryContextMenu();
+  };
   onMount(() => {
-    const onDocPointerDown = (event: PointerEvent): void => {
-      if (panelEl && event.target instanceof Node && panelEl.contains(event.target)) return;
-      closeEntryContextMenu();
-    };
-    const onDocContextMenu = (event: MouseEvent): void => {
-      // Suppress the native webview menu for as long as ours is open.
-      event.preventDefault();
-      if (panelEl && event.target instanceof Node && panelEl.contains(event.target)) return;
-      closeEntryContextMenu();
-    };
     document.addEventListener('pointerdown', onDocPointerDown, true);
     document.addEventListener('contextmenu', onDocContextMenu, true);
     return () => {

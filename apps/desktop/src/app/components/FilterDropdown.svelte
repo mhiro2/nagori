@@ -142,13 +142,13 @@
   // Dismiss on a click outside the wrapper. pointerdown (capture) so it lands
   // before a click on a sibling trigger re-opens, and the wrapper test keeps
   // clicks inside the panel from self-closing.
+  const onOutsidePointerDown = (event: PointerEvent): void => {
+    if (wrapperEl && !wrapperEl.contains(event.target as Node)) closeMenu(false);
+  };
   $effect(() => {
     if (!open) return;
-    const onPointerDown = (event: PointerEvent): void => {
-      if (wrapperEl && !wrapperEl.contains(event.target as Node)) closeMenu(false);
-    };
-    window.addEventListener('pointerdown', onPointerDown, true);
-    return () => window.removeEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointerdown', onOutsidePointerDown, true);
+    return () => window.removeEventListener('pointerdown', onOutsidePointerDown, true);
   });
 </script>
 

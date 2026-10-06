@@ -178,39 +178,39 @@
   // zoom hotkeys disabled, so ⌘/Ctrl +/-/0 reach us instead of resizing the
   // whole UI; `preventDefault` guards the rest. The listener only exists while
   // an image is expanded (the component unmounts for every other kind).
+  const onZoomChordKeydown = (event: KeyboardEvent): void => {
+    if (isImeComposing(event)) return;
+    if (!isPrimaryModifierHeld(event, platform)) return;
+    if (event.altKey) return;
+    // Yield to the palette: if this chord is bound to a palette action (e.g.
+    // a user remapped `delete` onto `Cmd+=`), let that action own it rather
+    // than also zooming — both handlers sit on `window`, so `preventDefault`
+    // can't stop the other. Fall back to the platform's default bindings so
+    // the check stays correct (Ctrl-shaped on Windows/Linux) if a caller
+    // omits `bindings`.
+    if (resolveAction(event, bindings ?? paletteBindingsFor(platform))) return;
+    switch (event.key) {
+      case '+':
+      case '=':
+        zoomIn();
+        break;
+      case '-':
+      case '_':
+        zoomOut();
+        break;
+      case '0':
+        resetZoom();
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  };
   $effect(() => {
     if (!expanded) return;
     if (typeof window === 'undefined') return;
-    const handler = (event: KeyboardEvent): void => {
-      if (isImeComposing(event)) return;
-      if (!isPrimaryModifierHeld(event, platform)) return;
-      if (event.altKey) return;
-      // Yield to the palette: if this chord is bound to a palette action (e.g.
-      // a user remapped `delete` onto `Cmd+=`), let that action own it rather
-      // than also zooming — both handlers sit on `window`, so `preventDefault`
-      // can't stop the other. Fall back to the platform's default bindings so
-      // the check stays correct (Ctrl-shaped on Windows/Linux) if a caller
-      // omits `bindings`.
-      if (resolveAction(event, bindings ?? paletteBindingsFor(platform))) return;
-      switch (event.key) {
-        case '+':
-        case '=':
-          zoomIn();
-          break;
-        case '-':
-        case '_':
-          zoomOut();
-          break;
-        case '0':
-          resetZoom();
-          break;
-        default:
-          return;
-      }
-      event.preventDefault();
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', onZoomChordKeydown);
+    return () => window.removeEventListener('keydown', onZoomChordKeydown);
   });
 
   // Pointer zoom on the expanded image. Three gestures, all scoped to the
@@ -228,15 +228,19 @@
   //   • double-click — toggles fit ↔ 2×.
   // `passive: false` lets us `preventDefault` so the gesture zooms the image
   // instead of the page.
+  const onFrameWheel = (event: WheelEvent): void => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    void applyZoom(zoom * Math.pow(1.0015, -event.deltaY), event.clientX, event.clientY);
+  };
+  const onFrameDoubleClick = (event: MouseEvent): void => {
+    event.preventDefault();
+    toggleZoom(event.clientX, event.clientY);
+  };
   $effect(() => {
     if (!expanded || !frameEl) return;
     const el = frameEl;
     let pinchBase = ZOOM_MIN;
-    const onWheel = (event: WheelEvent): void => {
-      if (!event.ctrlKey && !event.metaKey) return;
-      event.preventDefault();
-      void applyZoom(zoom * Math.pow(1.0015, -event.deltaY), event.clientX, event.clientY);
-    };
     const onGestureStart = (event: Event): void => {
       event.preventDefault();
       pinchBase = zoom;
@@ -246,19 +250,15 @@
       const gesture = event as unknown as { scale?: number; clientX?: number; clientY?: number };
       void applyZoom(pinchBase * (gesture.scale ?? 1), gesture.clientX, gesture.clientY);
     };
-    const onDoubleClick = (event: MouseEvent): void => {
-      event.preventDefault();
-      toggleZoom(event.clientX, event.clientY);
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('wheel', onFrameWheel, { passive: false });
     el.addEventListener('gesturestart', onGestureStart, { passive: false });
     el.addEventListener('gesturechange', onGestureChange, { passive: false });
-    el.addEventListener('dblclick', onDoubleClick);
+    el.addEventListener('dblclick', onFrameDoubleClick);
     return () => {
-      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('wheel', onFrameWheel);
       el.removeEventListener('gesturestart', onGestureStart);
       el.removeEventListener('gesturechange', onGestureChange);
-      el.removeEventListener('dblclick', onDoubleClick);
+      el.removeEventListener('dblclick', onFrameDoubleClick);
     };
   });
 
