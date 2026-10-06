@@ -30,8 +30,9 @@ const fallbackFixture = (): SearchResultDto[] => [
 // asks for one page, and each "show more" grows the limit by another page up to
 // the backend's hard cap (`MAX_RESULT_LIMIT` in nagori-core, mirrored by the
 // Tauri command's clamp). The backend has no offset, so a larger page re-runs
-// the same search with a bigger limit; ranking is deterministic, so the rows
-// already on screen keep their order and the new ones append below.
+// the same search with a bigger limit. That also widens the backend's candidate
+// pool, so the re-ranked list is not strictly the old one with rows appended;
+// see `loadMoreResults` for how the cursor and focus cope with that.
 export const RESULT_PAGE_SIZE = 50;
 export const MAX_RESULT_LIMIT = 200;
 
