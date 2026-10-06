@@ -36,6 +36,14 @@
     })();
   });
 
+  const refreshSemanticStatus = async (): Promise<void> => {
+    try {
+      semanticStatus = await getSemanticIndexStatus();
+    } catch {
+      semanticStatus = undefined;
+    }
+  };
+
   // Poll the semantic index status while the index is enabled so the progress
   // line tracks the background worker as it embeds the backlog.
   $effect(() => {
@@ -43,15 +51,8 @@
       semanticStatus = undefined;
       return;
     }
-    const refresh = async (): Promise<void> => {
-      try {
-        semanticStatus = await getSemanticIndexStatus();
-      } catch {
-        semanticStatus = undefined;
-      }
-    };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 2000);
+    void refreshSemanticStatus();
+    const timer = setInterval(() => void refreshSemanticStatus(), 2000);
     return () => clearInterval(timer);
   });
 

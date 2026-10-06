@@ -542,15 +542,16 @@
     })();
   });
 
+  // `aiRequestId` is the id returned by `startAiAction` — authoritative and
+  // scoped to *this* run, so we never adopt a stray `started` from another
+  // run/window. `runAiAction` waits on `aiListenersReady` before starting, so
+  // even the fastest terminal event lands after every listener has attached.
+  const isActiveRequest = (id: string): boolean => aiRequestId !== undefined && id === aiRequestId;
+
   // Subscribe to the request-scoped streaming events while the inspector is
   // open. Events whose `requestId` does not match the active run are discarded.
   $effect(() => {
     if (!open || !isTauri()) return;
-    // `aiRequestId` is the id returned by `startAiAction` — authoritative and
-    // scoped to *this* run, so we never adopt a stray `started` from another
-    // run/window. `runAiAction` waits on `aiListenersReady` before starting, so
-    // even the fastest terminal event lands after every listener has attached.
-    const matches = (id: string): boolean => aiRequestId !== undefined && id === aiRequestId;
     // Arm the ready gate: resolve once every subscription's underlying
     // `listen()` has attached so a run started afterward can't miss an event,
     // or reject if any attach fails so a run fails closed instead of starting
@@ -583,7 +584,7 @@
       subscribe<AiDeltaEvent>(
         TAURI_EVENTS.aiDelta,
         (payload) => {
-          if (matches(payload.requestId)) aiText += payload.text;
+          if (isActiveRequest(payload.requestId)) aiText += payload.text;
         },
         markAttached,
         markFailed,
@@ -591,7 +592,7 @@
       subscribe<AiReplaceEvent>(
         TAURI_EVENTS.aiReplace,
         (payload) => {
-          if (matches(payload.requestId)) aiText = payload.text;
+          if (isActiveRequest(payload.requestId)) aiText = payload.text;
         },
         markAttached,
         markFailed,
@@ -599,7 +600,7 @@
       subscribe<AiDoneEvent>(
         TAURI_EVENTS.aiDone,
         (payload) => {
-          if (!matches(payload.requestId)) return;
+          if (!isActiveRequest(payload.requestId)) return;
           aiText = payload.finalText;
           lastResult = payload.finalText;
           aiStreaming = false;
@@ -613,7 +614,7 @@
       subscribe<AiErrorEvent>(
         TAURI_EVENTS.aiError,
         (payload) => {
-          if (!matches(payload.requestId)) return;
+          if (!isActiveRequest(payload.requestId)) return;
           runError = payload.message;
           aiStreaming = false;
           aiRequestId = undefined;
@@ -625,7 +626,7 @@
       subscribe<{ requestId: string }>(
         TAURI_EVENTS.aiCancelled,
         (payload) => {
-          if (!matches(payload.requestId)) return;
+          if (!isActiveRequest(payload.requestId)) return;
           aiStreaming = false;
           aiRequestId = undefined;
           aiPendingAction = undefined;
