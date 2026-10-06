@@ -14,6 +14,9 @@ beforeAll(() => {
 const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
   sampleSearchResult({ id: 'id-1', preview: 'value', rankReasons: [], ...overrides });
 
+const rows = (count: number): SearchResultDto[] =>
+  Array.from({ length: count }, (_, i) => sample({ id: `id-${i}`, preview: `row ${i}` }));
+
 afterEach(cleanup);
 
 describe('ResultList', () => {
@@ -223,16 +226,14 @@ describe('ResultList', () => {
   });
 
   it('moves focus to the first new row when the last page removes Show more', async () => {
-    const page = (count: number) =>
-      Array.from({ length: count }, (_, i) => sample({ id: `id-${i}`, preview: `row ${i}` }));
     const base = { selectedIndex: 0, onSelect: () => {}, onConfirm: () => {} };
     const { getByRole, getAllByRole, rerender } = render(ResultList, {
-      props: { ...base, items: page(2), canLoadMore: true, onLoadMore: () => {} },
+      props: { ...base, items: rows(2), canLoadMore: true, onLoadMore: () => {} },
     });
     const button = getByRole('button', { name: 'Show more' });
     button.focus();
     await fireEvent.click(button);
-    await rerender({ ...base, items: page(3), canLoadMore: false, limitReached: false });
+    await rerender({ ...base, items: rows(3), canLoadMore: false, limitReached: false });
     expect(document.activeElement).toBe(getAllByRole('option')[2]);
   });
 

@@ -39,6 +39,17 @@ const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({
   ...overrides,
 });
 
+const page = (count: number): SearchResultDto[] =>
+  Array.from({ length: count }, (_, i) => result(`r${i}`));
+
+// Answer every search with exactly as many rows as it asked for, the way a
+// history larger than the cap would.
+const fillEveryLimit = (): void => {
+  vi.mocked(searchClipboard).mockImplementation(async (request) =>
+    response({ results: page(request.limit ?? RESULT_PAGE_SIZE) }),
+  );
+};
+
 // A promise whose resolution the test drives, so we can hold a backend search
 // "in flight" and observe how concurrent requests coalesce around it.
 const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => {
@@ -286,17 +297,6 @@ describe('latest-only search queue', () => {
 });
 
 describe('result paging', () => {
-  const page = (count: number, prefix = 'r'): SearchResultDto[] =>
-    Array.from({ length: count }, (_, i) => result(`${prefix}${i}`));
-
-  // Answer every search with exactly as many rows as it asked for, the way a
-  // history larger than the cap would.
-  const fillEveryLimit = (): void => {
-    vi.mocked(searchClipboard).mockImplementation(async (request) =>
-      response({ results: page(request.limit ?? RESULT_PAGE_SIZE) }),
-    );
-  };
-
   it('offers more rows only when the page filled up', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: page(3) }));
     await runQuery('foo');
