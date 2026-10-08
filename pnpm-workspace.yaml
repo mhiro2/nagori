@@ -34,6 +34,14 @@ catalogs:
 # Keep the root TypeScript 7 devDependency from satisfying peer ranges in
 # apps/*, so the svelte-check override above stays in effect.
 resolvePeersFromWorkspaceRoot: false
+# pnpm 12 otherwise prepends an environment document (packageManagerDependencies)
+# to pnpm-lock.yaml, and GitHub's dependency graph reads only that first
+# document, which drops every npm dependency from Dependabot alerts.
+# `ignore` is the only value that keeps the single-document lockfile; the
+# trade-off is that pnpm no longer switches to the `packageManager` pin locally
+# (CI still pins via pnpm/setup). Remove once this is fixed:
+# https://github.com/dependabot/dependabot-core/issues/15904
+pmOnFail: ignore
 blockExoticSubdeps: true
 minimumReleaseAge: 10080
 strictDepBuilds: true
