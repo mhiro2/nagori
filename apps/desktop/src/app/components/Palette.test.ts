@@ -111,7 +111,7 @@ vi.mock('../stores/view.svelte', () => ({
   viewState: { current: 'palette' as const },
 }));
 
-import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+import { clearHistory, closePalette, fitPaletteHeight, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
 import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../lib/types';
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
@@ -467,6 +467,33 @@ describe('Palette', () => {
     expect(getByRole('button', { name: 'Date' })).toBeTruthy();
     await fireEvent.click(getByRole('button', { name: 'Toggle expanded preview' }));
     expect(container.querySelector('.preview-pane')).toBeTruthy();
+  });
+
+  it('sizes the window to show the configured number of rows', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    const heights = new Map([
+      ['palette', 600],
+      ['body', 400],
+    ]);
+    const offsetHeight = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        for (const [cls, height] of heights) if (this.classList.contains(cls)) return height;
+        return 0;
+      });
+    try {
+      settingsState.settings = {
+        paletteRowCount: 12,
+        paletteHotkeys: {},
+      } as unknown as NonNullable<typeof settingsState.settings>;
+      render(Palette);
+      await tick();
+      // 200px of search box, filters and status bar, plus 12 rows of 3rem.
+      expect(fitPaletteHeight).toHaveBeenLastCalledWith(200 + 12 * 48);
+    } finally {
+      offsetHeight.mockRestore();
+      vi.mocked(isTauri).mockReturnValue(false);
+    }
   });
 
   it('refreshes the active query when capture stores a new entry', () => {

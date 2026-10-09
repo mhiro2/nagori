@@ -50,6 +50,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   searchClipboard: vi.fn(),
   listSourceApps: vi.fn(async () => []),
   closePalette: vi.fn(),
+  fitPaletteHeight: vi.fn(async () => undefined),
   pasteEntryFromPalette: vi.fn(),
   pasteEntryRepresentationFromPalette: vi.fn(),
   listPasteOptions: vi.fn(),

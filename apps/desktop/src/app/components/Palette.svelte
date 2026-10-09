@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+  import {
+    clearHistory,
+    closePalette,
+    fitPaletteHeight,
+    openSettingsWindow,
+  } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
   import {
@@ -403,9 +408,29 @@
   // which keeps the wide layout.
   const NARROW_PALETTE_WIDTH = 680;
   let paletteWidth = $state(0);
+  let paletteEl: HTMLElement | undefined = $state();
+  let bodyEl: HTMLDivElement | undefined = $state();
   const narrow = $derived(paletteWidth > 0 && paletteWidth < NARROW_PALETTE_WIDTH);
   const showPreviewPane = $derived((settingsState.settings?.showPreviewPane ?? true) && !narrow);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
+  // The "visible rows" setting is a height: the window grows or shrinks so the
+  // list shows that many rows (3rem each, matching `.result-list`'s cap) under
+  // the search box, filters and status bar. The backend clamps the request to
+  // the monitor's work area, so a tall setting on a small screen still fits.
+  // Fitted when the palette mounts and when the setting changes, not on every
+  // layout shift, so a notice appearing in the status bar does not resize it.
+  const ROW_HEIGHT_REM = 3;
+  let fittedRowCount: number | undefined;
+  $effect(() => {
+    const rows = paletteRowCount;
+    if (!isTauri() || !paletteEl || !bodyEl || rows === fittedRowCount) return;
+    const chrome = paletteEl.offsetHeight - bodyEl.offsetHeight;
+    if (chrome <= 0) return;
+    fittedRowCount = rows;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    void fitPaletteHeight(chrome + rows * ROW_HEIGHT_REM * rem);
+  });
+
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
   // wire format from AppSettings) bind to the right physical modifier — Cmd on
   // macOS, Ctrl on Windows/Linux. Falls back to macOS semantics until the
@@ -632,6 +657,7 @@
   class:narrow
   style="--palette-row-count: {paletteRowCount}"
   bind:clientWidth={paletteWidth}
+  bind:this={paletteEl}
 >
   <SearchBox
     bind:this={searchBox}
@@ -642,6 +668,7 @@
   />
   <FilterChips compactDates={narrow} />
   <div
+    bind:this={bodyEl}
     class="body"
     class:single-column={!showPreviewPane && !previewExpanded && !actionsOpen}
     class:preview-only={previewExpanded}

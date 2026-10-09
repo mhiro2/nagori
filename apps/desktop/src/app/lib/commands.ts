@@ -33,6 +33,11 @@ export const listSourceApps = (): Promise<string[]> => invoke('list_source_apps'
 
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
+// Size the palette window to `height` logical pixels within its monitor's work
+// area (the backend clamps and re-centres).
+export const fitPaletteHeight = (height: number): Promise<void> =>
+  invoke('fit_palette_height', { height });
+
 // Every palette format respects the user's auto-paste setting.
 export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Promise<void> =>
   invoke('paste_entry_from_palette', { entryId, format });

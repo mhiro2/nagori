@@ -1873,6 +1873,20 @@ not duplicate runtime logic.
   shows a selection bar with the count, an explicit *Copy combined* button and
   *Clear selection*, and the footer hints offer the multi-select toggle so the
   mode is discoverable by mouse.
+- Placement and size (`commands/window_commands.rs`, `Palette.svelte`). Each
+  open centres the palette on the monitor under the cursor — not the active
+  window's: that needs per-platform window-list access (and Wayland withholds
+  it), while the cursor is where the user's attention is when they press the
+  hotkey, and the two agree in the common case. It centres within the
+  monitor's *work area* (`Monitor::work_area`), so it never opens under the
+  menu bar, the Dock or a taskbar, and shrinks to fit a work area smaller than
+  the window (`fit_centered`, unit-tested). The *Visible rows* setting is a
+  height: on mount and whenever the setting changes the palette measures its
+  chrome (search box, filters, status bar) and asks `fit_palette_height` for
+  that plus `rows × 3rem`; the backend clamps it to the work area and
+  re-centres, so the configured rows show without scrolling where the screen
+  has room, and a tall setting on a small screen still fits. A notice
+  appearing in the status bar does not re-fit the window.
 - Narrow layout (`Palette.svelte`, `FilterChips.svelte`). The window can be
   as narrow as 480px while the side preview pane alone is 320px, so below a
   measured palette width of 680px (`bind:clientWidth`) the list takes the
