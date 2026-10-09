@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { hidePalette, openSettingsWindow } from './lib/commands';
+  import { hidePalette, notifyPasteFailure, openSettingsWindow } from './lib/commands';
   import { messages, setLocale } from './lib/i18n/index.svelte';
   import { isImeComposing } from './lib/keybindings';
+  import { pasteFailureHint, pasteFailureTitle } from './lib/pasteFailureHint';
   import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
   import { applyAppearance } from './lib/theme';
@@ -154,11 +155,23 @@
         // toast (so the hidden palette's error still surfaces) but leave no
         // chip, since "copy succeeded — paste manually" would be wrong there.
         if (payload?.reason !== undefined) {
-          recordPasteFailure({
+          const failure = {
             reason,
             message,
             ...(payload?.tool !== undefined ? { tool: payload.tool } : {}),
-          });
+          };
+          recordPasteFailure(failure);
+          // The palette has usually hidden by now (it hides before the
+          // synthesised keystroke), so a chip or toast would wait for the next
+          // open. An OS notification reaches the user where they are without
+          // taking focus from the app they were pasting into.
+          if (!document.hasFocus()) {
+            const status = messages().status;
+            void notifyPasteFailure(
+              pasteFailureTitle(failure, status),
+              pasteFailureHint(failure, status),
+            ).catch(() => {});
+          }
         }
         if (shouldSuppressPasteToast(reason)) return;
         pasteFailureMessage = message;

@@ -2767,6 +2767,14 @@ change.
   separate × button dismisses it; the chip is also cleared on the next successful
   paste or an Accessibility grant. An `accessibilityMissing` reason folds into
   the dedicated accessibility chip rather than stacking a second one. The
+  palette has usually hidden by the time a synthesis failure arrives (it
+  hides before the keystroke), so when its window does not have focus the
+  palette also raises an OS notification through `notify_paste_failure`,
+  composed from the same localized per-reason hint. Notifications never take
+  focus from the app the user is pasting into. The title separates the two
+  outcomes: *Copied, but not pasted* (the clip landed, a manual paste works)
+  versus *Nothing was pasted* (`clipboardChanged`: the clipboard holds
+  something else now). The command caps the title and body length. The
   palette suppresses the *toast* only for an `accessibilityMissing`
   failure in the not-yet-granted states the StatusBar accessibility chip
   already explains (`NotRequested` / `PromptShownNotGranted`); every other

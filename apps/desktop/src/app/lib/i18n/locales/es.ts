@@ -212,6 +212,10 @@ export const es: Messages = {
     pasteDiagnostics: {
       label: '⚠ Falló el pegado automático',
       toolFallback: 'la herramienta de pegado',
+      notice: {
+        copiedNotPasted: 'Copiado, pero no pegado',
+        nothingPasted: 'No se pegó nada',
+      },
       hint: {
         accessibilityMissing:
           'Falló el pegado automático: se requiere permiso de Accesibilidad. Copiado — pega manualmente.',

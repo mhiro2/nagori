@@ -190,6 +190,10 @@ export const zhHans: Messages = {
     pasteDiagnostics: {
       label: '⚠ 自动粘贴失败',
       toolFallback: '粘贴工具',
+      notice: {
+        copiedNotPasted: '已复制，但未粘贴',
+        nothingPasted: '未粘贴任何内容',
+      },
       hint: {
         accessibilityMissing: '自动粘贴失败：需要 Accessibility 权限。已复制 — 请手动粘贴。',
         toolMissing: ({ tool }) =>

@@ -214,6 +214,10 @@ export const fr: Messages = {
     pasteDiagnostics: {
       label: '⚠ Échec du collage automatique',
       toolFallback: "l'outil de collage",
+      notice: {
+        copiedNotPasted: 'Copié, mais pas collé',
+        nothingPasted: 'Rien n’a été collé',
+      },
       hint: {
         accessibilityMissing:
           'Échec du collage automatique : autorisation Accessibilité requise. Copié — collez manuellement.',

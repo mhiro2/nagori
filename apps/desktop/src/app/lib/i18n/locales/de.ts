@@ -213,6 +213,10 @@ export const de: Messages = {
     pasteDiagnostics: {
       label: '⚠ Auto-Einfügen fehlgeschlagen',
       toolFallback: 'das Einfüge-Tool',
+      notice: {
+        copiedNotPasted: 'Kopiert, aber nicht eingefügt',
+        nothingPasted: 'Es wurde nichts eingefügt',
+      },
       hint: {
         accessibilityMissing:
           'Auto-Einfügen fehlgeschlagen: Accessibility-Berechtigung erforderlich. Kopiert — manuell einfügen.',

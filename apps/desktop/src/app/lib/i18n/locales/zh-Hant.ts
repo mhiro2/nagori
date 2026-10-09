@@ -190,6 +190,10 @@ export const zhHant: Messages = {
     pasteDiagnostics: {
       label: '⚠ 自動貼上失敗',
       toolFallback: '貼上工具',
+      notice: {
+        copiedNotPasted: '已複製，但未貼上',
+        nothingPasted: '未貼上任何內容',
+      },
       hint: {
         accessibilityMissing: '自動貼上失敗：需要 Accessibility 權限。已複製 — 請手動貼上。',
         toolMissing: ({ tool }) =>

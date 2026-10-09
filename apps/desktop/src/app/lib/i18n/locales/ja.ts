@@ -199,6 +199,10 @@ export const ja: Messages = {
     pasteDiagnostics: {
       label: '⚠ 自動ペースト失敗',
       toolFallback: 'ペーストツール',
+      notice: {
+        copiedNotPasted: 'コピーしましたが、ペーストできませんでした',
+        nothingPasted: '何もペーストされませんでした',
+      },
       hint: {
         accessibilityMissing:
           '自動ペースト失敗: Accessibility の許可が必要です。コピー済み — 手動で貼り付けてください。',

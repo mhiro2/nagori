@@ -33,6 +33,12 @@ export const listSourceApps = (): Promise<string[]> => invoke('list_source_apps'
 
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
+// Raise an OS notification for an auto-paste failure that happened while the
+// palette was hidden. Notifications never take focus from the app the user is
+// in.
+export const notifyPasteFailure = (title: string, body: string): Promise<void> =>
+  invoke('notify_paste_failure', { title, body });
+
 // Size the palette window to `height` logical pixels within its monitor's work
 // area (the backend clamps and re-centres).
 export const fitPaletteHeight = (height: number): Promise<void> =>

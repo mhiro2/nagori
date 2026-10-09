@@ -199,6 +199,10 @@ export const ko: Messages = {
     pasteDiagnostics: {
       label: '⚠ 자동 붙여넣기 실패',
       toolFallback: '붙여넣기 도구',
+      notice: {
+        copiedNotPasted: '복사했지만 붙여넣지 못했습니다',
+        nothingPasted: '붙여넣은 내용이 없습니다',
+      },
       hint: {
         accessibilityMissing:
           '자동 붙여넣기 실패: Accessibility 권한이 필요합니다. 복사됨 — 수동으로 붙여넣으세요.',

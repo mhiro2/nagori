@@ -260,6 +260,13 @@ export type Messages = {
     pasteDiagnostics: {
       label: string;
       toolFallback: string;
+      // Titles of the OS notification raised while the palette is hidden:
+      // the copy landed but the keystroke did not, or nothing of ours was
+      // pasted because the clipboard changed underneath.
+      notice: {
+        copiedNotPasted: string;
+        nothingPasted: string;
+      };
       hint: {
         accessibilityMissing: string;
         toolMissing: (params: { tool: string }) => string;
@@ -913,6 +920,10 @@ export const en: Messages = {
     pasteDiagnostics: {
       label: '⚠ Auto-paste failed',
       toolFallback: 'the paste tool',
+      notice: {
+        copiedNotPasted: 'Copied, but not pasted',
+        nothingPasted: 'Nothing was pasted',
+      },
       hint: {
         accessibilityMissing:
           'Auto-paste failed: Accessibility permission required. Copied — paste manually.',
