@@ -1867,6 +1867,21 @@ not duplicate runtime logic.
   shows a selection bar with the count, an explicit *Copy combined* button and
   *Clear selection*, and the footer hints offer the multi-select toggle so the
   mode is discoverable by mouse.
+- Reopen behaviour (`stores/paletteSession`, `Palette.svelte`). The palette
+  window hides on blur, so a window `focus` means it was shown again, and how
+  the previous showing ended decides what the new one does. One that ended
+  with an action that hides the palette (a paste or copy of an entry or a
+  representation, or pasting an action result — the IPCs run through
+  `runSessionEndingAction`) starts a new paste: the query, filters, and
+  multi-selection are cleared, the inspector and expanded preview close, and
+  the recent list shows. One dismissed without acting (Escape, clicking away,
+  the hotkey) resumes: the query, filters, and selection are kept, and the
+  query text is selected so typing starts a new search while ↑/↓ and Enter
+  continue the kept one. Active filters that survive a resume get a *Kept
+  from last time* note beside the clear control until a filter changes. An
+  action that fails while the palette is still focused does not count as an
+  ending; one that fails after the palette hid (an auto-paste that failed
+  after the copy landed) does. Either way focus lands in the search box.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are

@@ -59,6 +59,7 @@ export const zhHans: Messages = {
       searchApps: '搜索应用',
       noAppMatches: '没有匹配的应用',
       clear: '清除筛选',
+      retained: '沿用上次的条件',
     },
     clearHistory: {
       title: '要清除历史记录吗？',

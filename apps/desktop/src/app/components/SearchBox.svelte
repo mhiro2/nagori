@@ -21,6 +21,13 @@
 
   export const focus = (): void => inputEl?.focus();
 
+  // Focus with the query selected, so typing starts a new search while the
+  // arrows and Enter still act on the results of the kept one.
+  export const focusAndSelect = (): void => {
+    inputEl?.focus();
+    inputEl?.select();
+  };
+
   $effect(() => {
     inputEl?.focus();
   });

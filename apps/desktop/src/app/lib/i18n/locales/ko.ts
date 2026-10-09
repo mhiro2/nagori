@@ -62,6 +62,7 @@ export const ko: Messages = {
       searchApps: '앱 검색',
       noAppMatches: '일치하는 앱 없음',
       clear: '필터 지우기',
+      retained: '지난번 조건 유지 중',
     },
     clearHistory: {
       title: '기록을 지울까요?',

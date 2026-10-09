@@ -1,6 +1,7 @@
 <script lang="ts">
   import { messages } from '../lib/i18n/index.svelte';
   import type { ContentKind } from '../lib/types';
+  import { paletteSessionState, setFiltersRetained } from '../stores/paletteSession.svelte';
   import {
     clearFilters,
     type DatePreset,
@@ -105,7 +106,12 @@
 
   // Re-run the active query so a filter change takes effect right away. An empty
   // query falls through to refreshRecent, which honours the same filter set.
-  const rerun = (): Promise<void> => runQuery(searchState.query);
+  // Touching a filter also retires the "kept from last time" note: the set on
+  // screen is now the user's current choice.
+  const rerun = (): Promise<void> => {
+    setFiltersRetained(false);
+    return runQuery(searchState.query);
+  };
 
   const onDate = async (key: DatePreset): Promise<void> => {
     setDatePreset(key);
@@ -180,6 +186,11 @@
   </div>
 
   {#if hasActiveFilters()}
+    {#if paletteSessionState.filtersRetained}
+      <span class="retained" role="status" data-testid="filters-retained"
+        >{t.palette.filters.retained}</span
+      >
+    {/if}
     <button type="button" class="chip clear" aria-label={t.palette.filters.clear} onclick={onClear}>
       <span aria-hidden="true">✕</span>
     </button>
@@ -204,6 +215,19 @@
     display: inline-flex;
     flex-wrap: nowrap;
     gap: 0.375rem;
+  }
+  /* The "kept from last time" note sits just before the clear button, which it
+     pushes to the far end of the row along with itself. */
+  .retained {
+    margin-left: auto;
+    overflow: hidden;
+    color: var(--accent, #6c8dff);
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .retained + .clear {
+    margin-left: 0;
   }
   /* The clear button is pushed to the far end of the row. */
   .clear {

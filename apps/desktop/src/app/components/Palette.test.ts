@@ -117,6 +117,10 @@ import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
 import { captureSkippedState, recordCaptureSkip } from '../stores/captureSkipped.svelte';
 import {
+  resetPaletteSessionForTest,
+  runSessionEndingAction,
+} from '../stores/paletteSession.svelte';
+import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
   copyMultiSelection,
@@ -205,6 +209,7 @@ const urlPreview = (id: string, url: string): EntryPreviewDto =>
   });
 
 beforeEach(() => {
+  resetPaletteSessionForTest();
   // Vitest clears call history before each test but keeps any `mockReturnValue`
   // implementation a prior test installed, so re-pin the defaults the
   // selection-dependent tests below override per-case.
@@ -413,6 +418,36 @@ describe('Palette', () => {
     clearMultiSelect();
     await tick();
     expect(announcer.textContent).toBe('Selection cleared');
+  });
+
+  it('resumes a dismissed search on reopen with the query selected and kept filters noted', async () => {
+    searchState.query = 'invoice';
+    setDatePreset('today');
+    const { getByRole, getByTestId } = render(Palette);
+    const input = getByRole('combobox') as HTMLInputElement;
+    input.value = 'invoice';
+    input.blur();
+    window.dispatchEvent(new Event('focus'));
+    await tick();
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe('invoice'.length);
+    expect(filterState.datePreset).toBe('today');
+    expect(getByTestId('filters-retained').textContent).toBe('Kept from last time');
+    expect(runQuery).not.toHaveBeenCalled();
+  });
+
+  it('starts a new paste on reopen after the last showing ended with a paste', async () => {
+    searchState.query = 'invoice';
+    setDatePreset('today');
+    const { getByRole, queryByTestId } = render(Palette);
+    await runSessionEndingAction(async () => undefined);
+    window.dispatchEvent(new Event('focus'));
+    await tick();
+    expect(filterState.datePreset).toBe('none');
+    expect(runQuery).toHaveBeenCalledWith('');
+    expect(queryByTestId('filters-retained')).toBeNull();
+    expect(document.activeElement).toBe(getByRole('combobox'));
   });
 
   it('refreshes the active query when capture stores a new entry', () => {

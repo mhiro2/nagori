@@ -59,6 +59,7 @@ export const zhHant: Messages = {
       searchApps: '搜尋 App',
       noAppMatches: '沒有符合的 App',
       clear: '清除篩選',
+      retained: '沿用上次的條件',
     },
     clearHistory: {
       title: '要清除歷史記錄嗎？',

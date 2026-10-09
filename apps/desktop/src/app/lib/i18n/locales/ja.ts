@@ -61,6 +61,7 @@ export const ja: Messages = {
       searchApps: 'アプリを検索',
       noAppMatches: '一致するアプリはありません',
       clear: 'フィルタをクリア',
+      retained: '前回の条件を保持中',
     },
     clearHistory: {
       title: '履歴を消去しますか？',

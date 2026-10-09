@@ -21,6 +21,7 @@
   } from '../stores/capabilities.svelte';
   import { clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
+  import { setFiltersRetained, takeReopenMode } from '../stores/paletteSession.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
@@ -257,7 +258,7 @@
     scheduleQuery(next);
   };
 
-  let searchBox: { focus: () => void } | undefined = $state();
+  let searchBox: { focus: () => void; focusAndSelect: () => void } | undefined = $state();
 
   const clearSearch = (): void => {
     clearFilters();
@@ -594,6 +595,26 @@
   onMount(() => {
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
+  });
+
+  // The palette window hides on blur, so gaining focus means it was shown
+  // again. See `stores/paletteSession` for the fresh-vs-resume rule.
+  const handleShown = (): void => {
+    if (takeReopenMode() === 'fresh') {
+      clearFilters();
+      clearMultiSelect();
+      setFiltersRetained(false);
+      actionsOpen = false;
+      previewExpanded = false;
+      void runQuery('');
+    } else {
+      setFiltersRetained(hasActiveFilters());
+    }
+    searchBox?.focusAndSelect();
+  };
+  onMount(() => {
+    window.addEventListener('focus', handleShown);
+    return () => window.removeEventListener('focus', handleShown);
   });
 </script>
 

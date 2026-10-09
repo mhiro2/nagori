@@ -64,6 +64,7 @@ export const de: Messages = {
       searchApps: 'Apps durchsuchen',
       noAppMatches: 'Keine passenden Apps',
       clear: 'Filter löschen',
+      retained: 'Vom letzten Mal übernommen',
     },
     clearHistory: {
       title: 'Verlauf löschen?',

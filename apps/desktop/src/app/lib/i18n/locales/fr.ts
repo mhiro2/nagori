@@ -63,6 +63,7 @@ export const fr: Messages = {
       searchApps: 'Rechercher des apps',
       noAppMatches: 'Aucune app correspondante',
       clear: 'Effacer les filtres',
+      retained: 'Conservés de la dernière fois',
     },
     clearHistory: {
       title: 'Effacer l’historique ?',

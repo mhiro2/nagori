@@ -25,6 +25,7 @@
   } from '../lib/types';
   import { rememberActionResult, rememberedActionResult } from '../stores/actionResult.svelte';
   import { aiActionsSupported } from '../stores/capabilities.svelte';
+  import { runSessionEndingAction } from '../stores/paletteSession.svelte';
   import ActionPicker from './ActionPicker.svelte';
   import ActionRunPanel from './ActionRunPanel.svelte';
   import CompactPreview from './CompactPreview.svelte';
@@ -543,7 +544,7 @@
     const token = runToken;
     pasteError = undefined;
     try {
-      await pasteTextFromPalette(text);
+      await runSessionEndingAction(() => pasteTextFromPalette(text));
     } catch (err) {
       if (token === runToken && open) pasteError = describeError(err);
     }

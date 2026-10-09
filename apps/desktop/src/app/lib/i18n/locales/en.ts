@@ -80,6 +80,8 @@ export type Messages = {
       noAppMatches: string;
       // Clears every active filter (shown only when some filter is active).
       clear: string;
+      // Shown beside active filters that survived a reopen, until one changes.
+      retained: string;
     };
     // Clear-history confirmation dialog. Shown by the palette chord and by the
     // tray item, which defers to this dialog rather than acting on the click.
@@ -781,6 +783,7 @@ export const en: Messages = {
       searchApps: 'Search apps',
       noAppMatches: 'No matching apps',
       clear: 'Clear filters',
+      retained: 'Kept from last time',
     },
     clearHistory: {
       title: 'Clear history?',
