@@ -265,8 +265,16 @@ export const ko: Messages = {
       files: '파일',
       image: '이미지',
       plainText: '일반 텍스트',
-      html: 'HTML',
-      richText: '서식 있는 텍스트',
+      html: '서식 있는 텍스트 (HTML)',
+      richText: '서식 있는 텍스트 (RTF)',
+    },
+    descriptions: {
+      original: '복사할 때의 모든 형식. 붙여넣을 앱이 지원하는 형식을 고릅니다.',
+      files: '파일 자체. 파일 관리자에서 끌어온 것과 같습니다.',
+      image: '이미지로. 이미지 편집기, 채팅, 문서용입니다.',
+      plainText: '글자만. 글꼴, 링크, 레이아웃은 빠집니다.',
+      html: '웹 서식을 받는 앱에서 링크, 굵게, 목록을 유지합니다.',
+      richText: '워드 프로세서용으로 글꼴과 스타일을 유지합니다.',
     },
   },
   contextMenu: {

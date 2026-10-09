@@ -1343,7 +1343,14 @@ alternate-format paste. The result-row right-click menu
 gated the same way (the row appears only for ≥2 formats, via
 `offersPasteFormatChoice`) but **always** opening the picker rather than the
 chord's opposite-format fallback — so it can never try to paste a single-format
-entry (an image, say) as plain text. Choosing one runs `copy_entry_representation`,
+entry (an image, say) as plain text. The picker names the entry it acts on
+under its title and gives each row a one-line description of what lands in
+the target app (every original format, the files themselves, the picture,
+text only, or formatted text as HTML / RTF), exposed through
+`aria-describedby` so the accessible name stays the short label. It owns the
+keyboard while open: focus starts on the first row, arrows and Tab /
+Shift+Tab cycle the rows without leaving the picker, and closing it without a
+choice returns focus to where it was. Choosing one runs `copy_entry_representation`,
 which re-reads the representation set (so a concurrent eviction can't make
 the picker's snapshot stale), resolves the MIME to its single canonical row,
 and publishes it through `write_representation_exact`. Default output,

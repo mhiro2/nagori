@@ -265,8 +265,16 @@ export const ja: Messages = {
       files: 'ファイル',
       image: '画像',
       plainText: 'プレーンテキスト',
-      html: 'HTML',
-      richText: 'リッチテキスト',
+      html: '書式付きテキスト (HTML)',
+      richText: '書式付きテキスト (RTF)',
+    },
+    descriptions: {
+      original: 'コピー時のすべての形式。貼り付け先が対応する形式を選びます。',
+      files: 'ファイルそのもの。ファイルマネージャーからドラッグしたのと同じです。',
+      image: '画像として。画像編集アプリやチャット、文書向けです。',
+      plainText: '文字だけ。フォント、リンク、レイアウトは含みません。',
+      html: 'Web の書式に対応するアプリで、リンク・太字・リストを保ちます。',
+      richText: 'ワープロ向けに、フォントやスタイルを保ちます。',
     },
   },
   contextMenu: {

@@ -255,8 +255,16 @@ export const zhHant: Messages = {
       files: '檔案',
       image: '圖片',
       plainText: '純文字',
-      html: 'HTML',
-      richText: '格式化文字',
+      html: '格式化文字 (HTML)',
+      richText: '格式化文字 (RTF)',
+    },
+    descriptions: {
+      original: '複製時的所有格式，由目標 App 選擇其支援的格式。',
+      files: '檔案本身，就像從檔案管理器拖出。',
+      image: '圖片，適用於影像編輯器、聊天與文件。',
+      plainText: '僅文字，不含字型、連結或版面。',
+      html: '在接受網頁格式的 App 中保留連結、粗體與清單。',
+      richText: '為文書處理軟體保留字型與樣式。',
     },
   },
   contextMenu: {

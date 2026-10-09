@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
+
+  import { collapseWhitespace } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
   import type { PasteOption } from '../lib/types';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import { cancelPasteFormat, confirmPasteFormat } from '../stores/searchActions';
+  import { searchState } from '../stores/searchQuery.svelte';
   import { settingsState } from '../stores/settings.svelte';
 
   const t = $derived(messages());
@@ -13,7 +17,7 @@
   // One row per choice: a leading "keep original" (the default Preserve paste)
   // followed by each pasteable representation in canonical order. `option`
   // is `undefined` for the original row.
-  type Row = { key: string; label: string; option: PasteOption | undefined };
+  type Row = { key: string; label: string; description: string; option: PasteOption | undefined };
 
   // Image is the only category that can repeat (PNG + JPEG, say), so append
   // the concrete subtype there to keep the rows distinguishable; every other
@@ -26,13 +30,35 @@
   };
 
   const rows = $derived<Row[]>([
-    { key: 'original', label: t.pastePicker.keepOriginal, option: undefined },
+    {
+      key: 'original',
+      label: t.pastePicker.keepOriginal,
+      description: t.pastePicker.descriptions.original,
+      option: undefined,
+    },
     ...pasteFormatPickerState.options.map((option) => ({
       key: option.mime,
       label: labelFor(option),
+      description: t.pastePicker.descriptions[option.category],
       option,
     })),
   ]);
+
+  // The entry the choice applies to, so the picker says what is being pasted
+  // and not only how. Navigation is frozen while it is open, so the row stays
+  // in the result list.
+  const targetPreview = $derived.by((): string | undefined => {
+    const target = searchState.results.find((r) => r.id === pasteFormatPickerState.targetId);
+    return target ? collapseWhitespace(target.preview) : undefined;
+  });
+
+  // Hand focus back to where it was (the search box or the result row) when
+  // the picker closes without pasting, rather than leaving it on the body.
+  const returnFocusTo =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  onDestroy(() => {
+    if (returnFocusTo?.isConnected) returnFocusTo.focus({ preventScroll: true });
+  });
 
   let panelEl: HTMLDivElement | undefined = $state();
 
@@ -85,6 +111,13 @@
         event.stopPropagation();
         focusRow(els.length - 1);
         break;
+      case 'Tab':
+        // Keep Tab inside the picker: it owns the keyboard until a choice is
+        // made or it is cancelled, so focus must not wander to the palette.
+        event.preventDefault();
+        event.stopPropagation();
+        focusRow(current + (event.shiftKey ? -1 : 1));
+        break;
       case 'Escape':
         event.preventDefault();
         event.stopPropagation();
@@ -116,10 +149,14 @@
     role="dialog"
     aria-modal="true"
     aria-label={title}
+    aria-describedby={targetPreview !== undefined ? 'paste-picker-target' : undefined}
     tabindex="-1"
     onkeydown={onKeydown}
   >
     <p class="title" id="paste-picker-title">{title}</p>
+    {#if targetPreview !== undefined}
+      <p class="target" id="paste-picker-target" title={targetPreview}>{targetPreview}</p>
+    {/if}
     <div class="rows" role="menu" aria-labelledby="paste-picker-title">
       {#each rows as row (row.key)}
         <button
@@ -127,9 +164,12 @@
           class="row"
           role="menuitem"
           data-testid={`paste-format-${row.key}`}
+          aria-label={row.label}
+          aria-describedby={`paste-format-desc-${row.key}`}
           onclick={() => void confirmPasteFormat(row.option)}
         >
-          {row.label}
+          <span class="row-label">{row.label}</span>
+          <span class="row-description" id={`paste-format-desc-${row.key}`}>{row.description}</span>
         </button>
       {/each}
     </div>
@@ -154,7 +194,7 @@
     flex-direction: column;
     gap: 0.4rem;
     min-width: 14rem;
-    max-width: 22rem;
+    max-width: 24rem;
     max-height: 80%;
     overflow-y: auto;
     padding: 0.75rem;
@@ -173,6 +213,25 @@
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--fg, #f5f5f5);
+  }
+  .target {
+    margin: 0 0 0.25rem;
+    padding: 0 0.3rem;
+    overflow: hidden;
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-label {
+    display: block;
+  }
+  .row-description {
+    display: block;
+    margin-top: 0.1rem;
+    color: var(--muted, rgba(255, 255, 255, 0.55));
+    font-size: 0.72rem;
+    line-height: 1.35;
   }
   .rows {
     display: flex;

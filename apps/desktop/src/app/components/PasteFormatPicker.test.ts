@@ -12,7 +12,9 @@ vi.mock('../stores/searchActions', () => ({
 
 import { closePasteFormatPicker, openPasteFormatPicker } from '../stores/pasteFormatPicker.svelte';
 import { cancelPasteFormat, confirmPasteFormat } from '../stores/searchActions';
+import { searchState } from '../stores/searchQuery.svelte';
 import { settingsState } from '../stores/settings.svelte';
+import { sampleSearchResult } from '../test-helpers/fixtures';
 import PasteFormatPicker from './PasteFormatPicker.svelte';
 
 afterEach(() => {
@@ -87,5 +89,34 @@ describe('PasteFormatPicker', () => {
     render(PasteFormatPicker);
     await user.keyboard('{Escape}');
     expect(cancelPasteFormat).toHaveBeenCalledTimes(1);
+  });
+
+  it('describes what each format pastes and names the target entry', () => {
+    searchState.results = [sampleSearchResult({ id: 'e1', preview: 'quarterly   report.pdf' })];
+    const { getByRole } = render(PasteFormatPicker);
+    const files = getByRole('menuitem', { name: 'Files' });
+    expect(files.getAttribute('aria-describedby')).toBe('paste-format-desc-text/uri-list');
+    expect(document.getElementById('paste-format-desc-text/uri-list')?.textContent).toBe(
+      'The files themselves, as if dragged from the file manager.',
+    );
+    const dialog = getByRole('dialog', { name: 'Paste as' });
+    expect(dialog.getAttribute('aria-describedby')).toBe('paste-picker-target');
+    expect(dialog.querySelector('.target')?.textContent).toBe('quarterly report.pdf');
+    searchState.results = [];
+  });
+
+  it('keeps Tab inside the picker and returns focus when it closes', async () => {
+    const user = userEvent.setup();
+    const outside = document.createElement('input');
+    document.body.append(outside);
+    outside.focus();
+    const { getByRole, unmount } = render(PasteFormatPicker);
+    await user.keyboard('{Shift>}{Tab}{/Shift}');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Image (PNG)' }));
+    await user.keyboard('{Tab}');
+    expect(document.activeElement).toBe(getByRole('menuitem', { name: 'Keep original format' }));
+    unmount();
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
   });
 });

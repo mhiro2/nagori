@@ -278,8 +278,16 @@ export const de: Messages = {
       files: 'Dateien',
       image: 'Bild',
       plainText: 'Nur Text',
-      html: 'HTML',
-      richText: 'Formatierter Text',
+      html: 'Formatierter Text (HTML)',
+      richText: 'Formatierter Text (RTF)',
+    },
+    descriptions: {
+      original: 'Alle Formate der Kopie; die App wählt, was sie unterstützt.',
+      files: 'Die Dateien selbst, wie aus dem Dateimanager gezogen.',
+      image: 'Das Bild, für Bildbearbeitung, Chats und Dokumente.',
+      plainText: 'Nur Text, ohne Schriften, Links oder Layout.',
+      html: 'Behält Links, Fettschrift und Listen, wo die App Web-Formatierung annimmt.',
+      richText: 'Behält Schriften und Stile für Textverarbeitungen.',
     },
   },
   contextMenu: {

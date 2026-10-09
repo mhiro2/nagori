@@ -255,8 +255,16 @@ export const zhHans: Messages = {
       files: '文件',
       image: '图像',
       plainText: '纯文本',
-      html: 'HTML',
-      richText: '富文本',
+      html: '带格式文本 (HTML)',
+      richText: '带格式文本 (RTF)',
+    },
+    descriptions: {
+      original: '复制时的全部格式，由目标应用选择它支持的格式。',
+      files: '文件本身，如同从文件管理器拖出。',
+      image: '图片，适用于图像编辑器、聊天和文档。',
+      plainText: '仅文字，不含字体、链接或排版。',
+      html: '在接受网页格式的应用中保留链接、粗体和列表。',
+      richText: '为文字处理软件保留字体和样式。',
     },
   },
   contextMenu: {

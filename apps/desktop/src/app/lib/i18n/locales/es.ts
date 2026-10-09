@@ -276,8 +276,16 @@ export const es: Messages = {
       files: 'Archivos',
       image: 'Imagen',
       plainText: 'Texto sin formato',
-      html: 'HTML',
-      richText: 'Texto enriquecido',
+      html: 'Texto con formato (HTML)',
+      richText: 'Texto con formato (RTF)',
+    },
+    descriptions: {
+      original: 'Todos los formatos con los que se copió; la app elige el que admite.',
+      files: 'Los archivos en sí, como si los arrastraras desde el gestor de archivos.',
+      image: 'La imagen, para editores de imágenes, chats y documentos.',
+      plainText: 'Solo texto, sin fuentes, enlaces ni diseño.',
+      html: 'Conserva enlaces, negritas y listas donde la app acepta formato web.',
+      richText: 'Conserva fuentes y estilos para procesadores de texto.',
     },
   },
   contextMenu: {

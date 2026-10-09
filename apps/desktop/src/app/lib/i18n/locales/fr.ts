@@ -278,8 +278,16 @@ export const fr: Messages = {
       files: 'Fichiers',
       image: 'Image',
       plainText: 'Texte brut',
-      html: 'HTML',
-      richText: 'Texte enrichi',
+      html: 'Texte mis en forme (HTML)',
+      richText: 'Texte mis en forme (RTF)',
+    },
+    descriptions: {
+      original: 'Tous les formats de la copie ; l’app choisit celui qu’elle prend en charge.',
+      files: 'Les fichiers eux-mêmes, comme glissés depuis le gestionnaire de fichiers.',
+      image: 'L’image, pour les éditeurs d’images, les discussions et les documents.',
+      plainText: 'Le texte seul, sans polices, liens ni mise en page.',
+      html: 'Conserve liens, gras et listes là où l’app accepte la mise en forme web.',
+      richText: 'Conserve polices et styles pour les traitements de texte.',
     },
   },
   contextMenu: {

@@ -344,6 +344,16 @@ export type Messages = {
       html: string;
       richText: string;
     };
+    // One line per row on what lands in the target app, keyed like
+    // `categories` plus `original` for the keep-original row.
+    descriptions: {
+      original: string;
+      files: string;
+      image: string;
+      plainText: string;
+      html: string;
+      richText: string;
+    };
   };
   // Per-row right-click context menu.
   contextMenu: {
@@ -956,8 +966,16 @@ export const en: Messages = {
       files: 'Files',
       image: 'Image',
       plainText: 'Plain text',
-      html: 'HTML',
-      richText: 'Rich text',
+      html: 'Formatted text (HTML)',
+      richText: 'Formatted text (RTF)',
+    },
+    descriptions: {
+      original: 'Every format it was copied with; the app picks what it supports.',
+      files: 'The files themselves, as if dragged from the file manager.',
+      image: 'The picture, for image editors, chats and documents.',
+      plainText: 'Text only, without fonts, links or layout.',
+      html: 'Keeps links, bold and lists where the app accepts web formatting.',
+      richText: 'Keeps fonts and styles for word processors.',
     },
   },
   contextMenu: {
