@@ -78,6 +78,14 @@ export const zhHant: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '已遮蔽',
+      description: '包含機密資訊：預覽會將其遮蔽，刪除時會立即徹底清除。',
+    },
+    private: { label: '私密', description: '視為私密：預覽會被遮蔽，圖片不產生縮圖。' },
+    blocked: { label: '已隱藏', description: '遭隱私規則封鎖：內容已隱藏，無法貼上。' },
+  },
   rankReason: {
     exact: '精確',
     prefix: '前綴',

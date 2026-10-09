@@ -105,6 +105,13 @@ export type Messages = {
       rowAria: (parts: { total: number; names: string; location: string | null }) => string;
     };
   };
+  // What a sensitivity classification means for the user (masked preview,
+  // hidden content, no paste), shown instead of the raw classifier name.
+  privacyOutcome: {
+    secret: { label: string; description: string };
+    private: { label: string; description: string };
+    blocked: { label: string; description: string };
+  };
   // Short labels for `RankReason` variants. Shared by the per-row reason chip
   // (ResultItem) and the full labelled list in the preview footer.
   rankReason: {
@@ -792,6 +799,21 @@ export const en: Messages = {
         const head = total === 1 ? names : `${total.toLocaleString('en')} files: ${names}`;
         return location ? `${head}, in ${location}` : head;
       },
+    },
+  },
+  privacyOutcome: {
+    secret: {
+      label: 'Masked',
+      description:
+        'Contains a secret: the preview masks it, and deleting the item erases it right away.',
+    },
+    private: {
+      label: 'Private',
+      description: 'Treated as private: the preview is masked and images get no thumbnail.',
+    },
+    blocked: {
+      label: 'Hidden',
+      description: "Blocked by a privacy rule: the content is hidden and can't be pasted.",
     },
   },
   rankReason: {

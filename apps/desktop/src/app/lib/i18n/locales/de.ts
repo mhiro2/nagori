@@ -84,6 +84,23 @@ export const de: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Maskiert',
+      description:
+        'Enthält ein Geheimnis: Die Vorschau maskiert es, und Löschen entfernt den Eintrag sofort endgültig.',
+    },
+    private: {
+      label: 'Privat',
+      description:
+        'Als privat behandelt: Die Vorschau ist maskiert, Bilder erhalten keine Miniatur.',
+    },
+    blocked: {
+      label: 'Verborgen',
+      description:
+        'Durch eine Datenschutzregel blockiert: Der Inhalt ist verborgen und kann nicht eingefügt werden.',
+    },
+  },
   rankReason: {
     exact: 'Exakt',
     prefix: 'Präfix',

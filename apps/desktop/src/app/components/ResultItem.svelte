@@ -35,6 +35,7 @@
     truncatePreview,
   } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { privacyOutcome } from '../lib/privacyOutcome';
   import { primaryRankReason, rankReasonLabel } from '../lib/rankReason';
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
@@ -128,6 +129,14 @@
     const primary = item.representationSummary.find((rep) => rep.role === 'primary');
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
+  // Secret / Blocked rows carry a chip naming the consequence (masked,
+  // hidden) rather than the classifier's name; Private rows explain theirs in
+  // the preview only, to keep the row for the content.
+  const privacy = $derived(
+    item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'
+      ? privacyOutcome(item.sensitivity, t.privacyOutcome)
+      : undefined,
+  );
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
   // Consecutive screenshots share a source, size and age, so a tiny thumbnail
   // is the only quick way to tell them apart. The thumbnail endpoint refuses
@@ -274,8 +283,8 @@
           data-reason={rankReason}
           title={t.preview.fields.rank}>{rankChip}</span
         >{/if}
-      {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-        <span class="sens">{item.sensitivity}</span>
+      {#if privacy}
+        <span class="sens" title={privacy.description}>{privacy.label}</span>
       {/if}
       {#if item.sourceAppName && !compact}<span class="source">{item.sourceAppName}</span>{/if}
       <span class="time">{timeLabel}</span>

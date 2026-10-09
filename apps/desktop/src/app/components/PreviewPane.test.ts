@@ -1421,11 +1421,36 @@ describe('PreviewPane', () => {
     expect(container.querySelector('.foot')?.textContent).not.toMatch(/Additional clipboard data/);
   });
 
+  it('explains the privacy outcome of a sensitive entry under the header', () => {
+    const { getByTestId, unmount } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ sensitivity: 'Private' }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(getByTestId('preview-privacy').textContent).toBe(
+      'Treated as private: the preview is masked and images get no thumbnail.',
+    );
+    unmount();
+    const { queryByTestId } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ sensitivity: 'Public' }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(queryByTestId('preview-privacy')).toBeNull();
+  });
+
   it('shows a resting sensitivity badge only for Secret/Blocked entries', () => {
     // Secret/Blocked get a warning chip at rest (matching the palette row);
     // every other value stays badge-less — including Private, which the palette
     // also leaves un-chipped — so the badge's absence never doubles as a
     // "Public" claim. The full value still lives in Details for every entry.
+    const labels = { Secret: 'Masked', Blocked: 'Hidden' } as const;
     for (const sensitivity of ['Secret', 'Blocked'] as const) {
       const { container, unmount } = render(PreviewPane, {
         props: {
@@ -1436,7 +1461,9 @@ describe('PreviewPane', () => {
         },
       });
       const badge = container.querySelector('[data-testid="preview-sensitivity"]');
-      expect(badge?.textContent).toBe(sensitivity);
+      // The chip names the consequence, not the classifier's raw value.
+      expect(badge?.textContent).toBe(labels[sensitivity]);
+      expect(badge?.getAttribute('title')).toBeTruthy();
       // Still recorded in the collapsed diagnostics regardless of the badge.
       expect(container.querySelector('.foot details')?.textContent).toContain(sensitivity);
       unmount();

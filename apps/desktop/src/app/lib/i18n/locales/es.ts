@@ -83,6 +83,23 @@ export const es: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Oculto',
+      description:
+        'Contiene un secreto: la vista previa lo oculta y al eliminar el elemento se borra de inmediato.',
+    },
+    private: {
+      label: 'Privado',
+      description:
+        'Se trata como privado: la vista previa está oculta y las imágenes no tienen miniatura.',
+    },
+    blocked: {
+      label: 'Bloqueado',
+      description:
+        'Bloqueado por una regla de privacidad: el contenido está oculto y no se puede pegar.',
+    },
+  },
   rankReason: {
     exact: 'Exacto',
     prefix: 'Prefijo',

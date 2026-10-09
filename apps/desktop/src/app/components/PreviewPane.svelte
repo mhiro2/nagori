@@ -6,6 +6,7 @@
   import { messages } from '../lib/i18n/index.svelte';
   import { isImeComposing, yieldsToControlActivation } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
+  import { privacyOutcome } from '../lib/privacyOutcome';
   import { primaryRankReason, rankReasonLabel, rankReasonLabels } from '../lib/rankReason';
   import { additionalClipboardCategories, hasAccompanyingImage } from '../lib/representations';
   import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
@@ -103,6 +104,10 @@
     const reason = item ? primaryRankReason(item.rankReasons) : undefined;
     return reason !== undefined ? rankReasonLabel(reason, t.rankReason) : undefined;
   });
+
+  // The consequence of the entry's sensitivity (masked preview, hidden
+  // content, no paste), explained in words under the header.
+  const privacy = $derived(item ? privacyOutcome(item.sensitivity, t.privacyOutcome) : undefined);
 
   // Host platform for the expanded image's keyboard zoom chord (Cmd on macOS,
   // Ctrl elsewhere); pinch / Ctrl-wheel / double-click need no platform input.
@@ -299,15 +304,12 @@
     <header class="head">
       <span class="kind">{preview?.title ?? item.kind}</span>
       <span class="head-right">
-        {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-          <!-- Resting privacy warning, mirroring the palette row's Secret/Blocked
-               cue. The full sensitivity value (including Public/Unknown/Private)
-               still lives in Details; the absence of this badge is deliberately
-               not a "Public" claim. -->
-          <span
-            class="sens-badge"
-            data-testid="preview-sensitivity"
-            title={t.preview.fields.sensitivity}>{item.sensitivity}</span
+        {#if privacy && (item.sensitivity === 'Secret' || item.sensitivity === 'Blocked')}
+          <!-- Resting privacy warning, mirroring the palette row's chip. The raw
+               sensitivity value still lives in Details; the absence of this
+               badge is deliberately not a "Public" claim. -->
+          <span class="sens-badge" data-testid="preview-sensitivity" title={privacy.description}
+            >{privacy.label}</span
           >
         {/if}
         {#if onOpenActions}
@@ -325,6 +327,9 @@
         <span class="time">{formatRelativeTime(item.createdAt)}</span>
       </span>
     </header>
+    {#if privacy}
+      <p class="privacy-note" data-testid="preview-privacy">{privacy.description}</p>
+    {/if}
     {#if item.kind !== 'url'}
       <!-- Reserve the chip's line whenever the kind will carry one (every
            non-URL body), so the lines·bytes summary fades into pre-allocated
@@ -542,6 +547,13 @@
     color: var(--warning, #f59e0b);
     font-size: 0.65rem;
     letter-spacing: 0.04em;
+  }
+  .privacy-note {
+    margin: 0;
+    padding: 0 0.75rem 0.4rem;
+    color: var(--warning, #f59e0b);
+    font-size: 0.75rem;
+    line-height: 1.4;
   }
   .actions {
     /* A mouse path to the inspector that mirrors the ⌘K shortcut. Sits in the

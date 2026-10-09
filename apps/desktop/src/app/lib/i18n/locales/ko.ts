@@ -81,6 +81,20 @@ export const ko: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '가려짐',
+      description: '비밀 정보가 있습니다. 미리 보기에서 가려지며, 삭제하면 즉시 완전히 지워집니다.',
+    },
+    private: {
+      label: '비공개',
+      description: '비공개로 취급합니다. 미리 보기가 가려지고 이미지 썸네일도 표시하지 않습니다.',
+    },
+    blocked: {
+      label: '숨김',
+      description: '개인정보 규칙으로 차단되었습니다. 내용이 숨겨지며 붙여넣을 수 없습니다.',
+    },
+  },
   rankReason: {
     exact: '정확',
     prefix: '접두',

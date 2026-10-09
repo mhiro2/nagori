@@ -271,7 +271,7 @@ describe('ResultItem', () => {
     expect(container.textContent).toContain('512 B');
   });
 
-  it('annotates Secret sensitivity in the meta strip', () => {
+  it('annotates Secret sensitivity in the meta strip with its consequence', () => {
     const { getByText } = render(ResultItem, {
       props: {
         item: sample({ sensitivity: 'Secret' }),
@@ -281,7 +281,9 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    expect(getByText('Secret')).toBeTruthy();
+    expect(getByText('Masked').getAttribute('title')).toBe(
+      'Contains a secret: the preview masks it, and deleting the item erases it right away.',
+    );
   });
 
   it('shows the strongest match reason as a chip for query-driven rows', () => {
@@ -655,7 +657,7 @@ describe('ResultItem layout', () => {
     const { container } = render(ResultItem, {
       props: { ...props, item: sample({ sensitivity: 'Secret' }), compact: true },
     });
-    expect(container.querySelector('.sens')?.textContent).toBe('Secret');
+    expect(container.querySelector('.sens')?.textContent).toBe('Masked');
   });
 
   it('reserves the check-mark column only while a multi-selection exists', async () => {

@@ -84,6 +84,22 @@ export const fr: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Masqué',
+      description:
+        'Contient un secret : l’aperçu le masque et la suppression l’efface immédiatement.',
+    },
+    private: {
+      label: 'Privé',
+      description: 'Traité comme privé : l’aperçu est masqué et les images n’ont pas de miniature.',
+    },
+    blocked: {
+      label: 'Bloqué',
+      description:
+        'Bloqué par une règle de confidentialité : le contenu est caché et ne peut pas être collé.',
+    },
+  },
   rankReason: {
     exact: 'Exact',
     prefix: 'Préfixe',

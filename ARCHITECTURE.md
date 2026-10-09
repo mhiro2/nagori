@@ -1976,7 +1976,13 @@ not duplicate runtime logic.
   row is informational, not a paste-format picker affordance — the ⇧⌘⏎ picker
   opens only for ≥2 pasteable formats. The header carries a resting privacy
   badge for `Secret` / `Blocked` entries, mirroring the row chip; its absence
-  is deliberately not a "Public" claim. The remaining technical fields — id,
+  is deliberately not a "Public" claim. Neither chip shows the classifier's
+  raw name: `lib/privacyOutcome` maps the sensitivity to what it means for
+  the user — *Masked* (a secret: the preview masks it and deleting erases it
+  at once), *Private* (masked preview, no image thumbnail), *Hidden* (blocked:
+  the content is hidden and cannot be pasted) — with the sentence as the
+  chip's tooltip and, in the preview, as a note under the header (Private
+  entries get the note without a row chip, keeping the row for content). The remaining technical fields — id,
   sensitivity (the full value, every entry), size, and *rank* (the entry's
   `RankReason`s as localised labels, the same vocabulary as the row chip, so
   the full "why it matched / why it ranked here" set including the recency /

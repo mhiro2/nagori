@@ -78,6 +78,14 @@ export const zhHans: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '已遮蔽',
+      description: '包含机密信息：预览会将其遮蔽，删除时会立即彻底清除。',
+    },
+    private: { label: '私密', description: '按私密处理：预览被遮蔽，图片不生成缩略图。' },
+    blocked: { label: '已隐藏', description: '被隐私规则拦截：内容已隐藏，无法粘贴。' },
+  },
   rankReason: {
     exact: '精确',
     prefix: '前缀',

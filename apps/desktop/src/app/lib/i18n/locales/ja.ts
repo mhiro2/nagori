@@ -80,6 +80,21 @@ export const ja: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'マスク済み',
+      description: '秘密情報を含みます。プレビューでは隠され、削除するとすぐに完全に消去されます。',
+    },
+    private: {
+      label: '非公開',
+      description: '非公開として扱います。プレビューは隠され、画像のサムネイルも表示しません。',
+    },
+    blocked: {
+      label: '非表示',
+      description:
+        'プライバシールールでブロックされました。内容は表示されず、ペーストもできません。',
+    },
+  },
   rankReason: {
     exact: '完全一致',
     prefix: '前方一致',
