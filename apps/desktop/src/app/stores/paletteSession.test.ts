@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  noteActionEndedAfterHide,
   resetPaletteSessionForTest,
   runSessionEndingAction,
   takeReopenMode,
@@ -8,7 +9,6 @@ import {
 
 afterEach(() => {
   resetPaletteSessionForTest();
-  vi.restoreAllMocks();
 });
 
 describe('palette session', () => {
@@ -20,8 +20,7 @@ describe('palette session', () => {
     expect(takeReopenMode()).toBe('resume');
   });
 
-  it('keeps resuming when the action fails while the palette is still up', async () => {
-    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+  it('keeps resuming when the action fails without the backend reporting a hide', async () => {
     await expect(
       runSessionEndingAction(async () => {
         throw new Error('copy failed');
@@ -30,13 +29,19 @@ describe('palette session', () => {
     expect(takeReopenMode()).toBe('resume');
   });
 
-  it('still starts fresh when the failure arrives after the palette hid', async () => {
-    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+  it('starts fresh when the backend reports a failure after the palette hid', async () => {
     await expect(
       runSessionEndingAction(async () => {
+        // The `paste_failed` event lands before the command's rejection.
+        noteActionEndedAfterHide();
         throw new Error('auto-paste failed');
       }),
     ).rejects.toThrow('auto-paste failed');
     expect(takeReopenMode()).toBe('fresh');
+  });
+
+  it('ignores a paste failure that no palette action is waiting on', () => {
+    noteActionEndedAfterHide();
+    expect(takeReopenMode()).toBe('resume');
   });
 });

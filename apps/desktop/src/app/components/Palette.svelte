@@ -421,14 +421,21 @@
   // layout shift, so a notice appearing in the status bar does not resize it.
   const ROW_HEIGHT_REM = 3;
   let fittedRowCount: number | undefined;
-  $effect(() => {
-    const rows = paletteRowCount;
-    if (!isTauri() || !paletteEl || !bodyEl || rows === fittedRowCount) return;
+  // `force` re-requests the same row count: every show does, because the
+  // backend clamps the request to the current monitor's work area, so a window
+  // shrunk on a small screen grows back on a larger one.
+  const fitToRows = (rows: number, force = false): void => {
+    if (!isTauri() || !paletteEl || !bodyEl || (!force && rows === fittedRowCount)) return;
     const chrome = paletteEl.offsetHeight - bodyEl.offsetHeight;
+    // A palette that has not been laid out yet (its window starts hidden)
+    // measures nothing; the next show retries.
     if (chrome <= 0) return;
     fittedRowCount = rows;
     const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     void fitPaletteHeight(chrome + rows * ROW_HEIGHT_REM * rem);
+  };
+  $effect(() => {
+    fitToRows(paletteRowCount);
   });
 
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
@@ -638,17 +645,28 @@
       clearFilters();
       clearMultiSelect();
       setFiltersRetained(false);
-      actionsOpen = false;
       previewExpanded = false;
       void runQuery('');
     } else {
       setFiltersRetained(hasActiveFilters());
     }
     searchBox?.focusAndSelect();
+    fitToRows(paletteRowCount, true);
+  };
+  // Hiding ends the palette session, and with it any action-inspector run:
+  // closing the inspector cancels a stream, fences a pending quick action, and
+  // clears its work area, so a result from this session cannot reappear (or be
+  // remembered late) after the user dismissed the palette.
+  const handleHidden = (): void => {
+    actionsOpen = false;
   };
   onMount(() => {
     window.addEventListener('focus', handleShown);
-    return () => window.removeEventListener('focus', handleShown);
+    window.addEventListener('blur', handleHidden);
+    return () => {
+      window.removeEventListener('focus', handleShown);
+      window.removeEventListener('blur', handleHidden);
+    };
   });
 </script>
 

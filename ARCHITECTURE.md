@@ -1881,11 +1881,12 @@ not duplicate runtime logic.
   monitor's *work area* (`Monitor::work_area`), so it never opens under the
   menu bar, the Dock or a taskbar, and shrinks to fit a work area smaller than
   the window (`fit_centered`, unit-tested). The *Visible rows* setting is a
-  height: on mount and whenever the setting changes the palette measures its
-  chrome (search box, filters, status bar) and asks `fit_palette_height` for
-  that plus `rows × 3rem`; the backend clamps it to the work area and
-  re-centres, so the configured rows show without scrolling where the screen
-  has room, and a tall setting on a small screen still fits. A notice
+  height: on mount, whenever the setting changes, and on every show the
+  palette measures its chrome (search box, filters, status bar) and asks
+  `fit_palette_height` for that plus `rows × 3rem`; the backend clamps it to
+  the work area and re-centres, so the configured rows show without scrolling
+  where the screen has room, a tall setting on a small screen still fits, and
+  a window shrunk on a small screen grows back on a larger one. A notice
   appearing in the status bar does not re-fit the window.
 - Narrow layout (`Palette.svelte`, `FilterChips.svelte`). The window can be
   as narrow as 480px while the side preview pane alone is 320px, so below a
@@ -1909,9 +1910,13 @@ not duplicate runtime logic.
   query text is selected so typing starts a new search while ↑/↓ and Enter
   continue the kept one. Active filters that survive a resume get a *Kept
   from last time* note beside the clear control until a filter changes. An
-  action that fails while the palette is still focused does not count as an
-  ending; one that fails after the palette hid (an auto-paste that failed
-  after the copy landed) does. Either way focus lands in the search box.
+  action counts as an ending once its IPC succeeds, or when the backend's
+  `paste_failed` event — sent only after the palette hid and the copy landed —
+  arrives while one is in flight; a bare rejection (a copy that failed before
+  the hide, or one the user clicked away from) does not, so it resumes. Either
+  way focus lands in the search box, and every hide closes the action
+  inspector, cancelling its run, so nothing from the dismissed session comes
+  back.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are
@@ -1951,8 +1956,9 @@ not duplicate runtime logic.
   body longer than 20 lines, a stepper (*N matches*, ↑ / ↓ buttons with a
   polite position readout) scrolls to the previous / next match and styles
   it as current. A failed preview fetch shows its error with *Try again*
-  (`retryPreview`, since `hydratePreview` otherwise keeps a settled error
-  for the same entry + query). When a search query matches text
+  (`retryPreview`, which forces `hydratePreview` past its settled-state
+  guard — a failed query-only refetch keeps the old body on screen, which the
+  guard would otherwise treat as done). When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
   warning. For Public text entries the truncation notice offers *Show full
   body*, which fetches the body up to 1 MiB via `get_entry_preview_full`;

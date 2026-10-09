@@ -14,23 +14,36 @@
 export type ReopenMode = 'fresh' | 'resume';
 
 let endedWithAction = false;
+// Session-ending IPCs still awaiting their result.
+let inFlight = 0;
 
 export const paletteSessionState = $state<{ filtersRetained: boolean }>({
   filtersRetained: false,
 });
 
 /// Run an IPC that hides the palette on success, recording that the session
-/// ended with an action. A failure that leaves the palette on screen (it still
-/// has focus) is not an ending; one reported after the palette hid — an
-/// auto-paste that failed once the copy had landed — still is.
+/// ended with an action once it succeeds. A rejection alone proves nothing
+/// either way — a copy can fail before the palette hides, or the user can have
+/// clicked away meanwhile — so failures that happen *after* the hide are
+/// reported separately by the backend's `paste_failed` event
+/// (`noteActionEndedAfterHide`).
 export const runSessionEndingAction = async <T>(action: () => Promise<T>): Promise<T> => {
-  endedWithAction = true;
+  inFlight += 1;
   try {
-    return await action();
-  } catch (err) {
-    if (document.hasFocus()) endedWithAction = false;
-    throw err;
+    const result = await action();
+    endedWithAction = true;
+    return result;
+  } finally {
+    inFlight -= 1;
   }
+};
+
+/// The backend reported an auto-paste failure, which it only does after the
+/// palette hid and the copy landed. Counts as an ending when it belongs to an
+/// action this palette started (a hotkey re-paste with the palette closed does
+/// not).
+export const noteActionEndedAfterHide = (): void => {
+  if (inFlight > 0) endedWithAction = true;
 };
 
 /// Called when the palette is shown again: which kind of reopen this is.
@@ -47,5 +60,6 @@ export const setFiltersRetained = (retained: boolean): void => {
 /// Test-only reset of the module-private flag.
 export const resetPaletteSessionForTest = (): void => {
   endedWithAction = false;
+  inFlight = 0;
   paletteSessionState.filtersRetained = false;
 };

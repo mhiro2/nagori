@@ -438,6 +438,18 @@ describe('Palette', () => {
     expect(runQuery).not.toHaveBeenCalled();
   });
 
+  it('closes the action inspector when the palette hides', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByTestId, queryByTestId } = render(Palette);
+    await fireEvent.click(getByTestId('status-open-actions'));
+    expect(getByTestId('action-inspector')).toBeTruthy();
+    window.dispatchEvent(new Event('blur'));
+    await tick();
+    expect(queryByTestId('action-inspector')).toBeNull();
+  });
+
   it('starts a new paste on reopen after the last showing ended with a paste', async () => {
     searchState.query = 'invoice';
     setDatePreset('today');
@@ -490,6 +502,11 @@ describe('Palette', () => {
       await tick();
       // 200px of search box, filters and status bar, plus 12 rows of 3rem.
       expect(fitPaletteHeight).toHaveBeenLastCalledWith(200 + 12 * 48);
+      // Every show asks again, so a window shrunk to fit a small screen grows
+      // back once the palette opens on a larger one.
+      vi.mocked(fitPaletteHeight).mockClear();
+      window.dispatchEvent(new Event('focus'));
+      expect(fitPaletteHeight).toHaveBeenCalledWith(200 + 12 * 48);
     } finally {
       offsetHeight.mockRestore();
       vi.mocked(isTauri).mockReturnValue(false);

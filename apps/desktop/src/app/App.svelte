@@ -20,6 +20,7 @@
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
+  import { noteActionEndedAfterHide } from './stores/paletteSession.svelte';
   import {
     clearPasteDiagnostics,
     normalizePasteReason,
@@ -161,6 +162,7 @@
             ...(payload?.tool !== undefined ? { tool: payload.tool } : {}),
           };
           recordPasteFailure(failure);
+          noteActionEndedAfterHide();
           // The palette has usually hidden by now (it hides before the
           // synthesised keystroke), so a chip or toast would wait for the next
           // open. An OS notification reaches the user where they are without
