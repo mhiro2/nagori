@@ -1787,6 +1787,14 @@ not duplicate runtime logic.
   rows — which carry no body text — surface the probed `width×height`
   dimensions, the primary payload's byte size, and a *Screenshot* badge
   when the source app looks like a screenshot tool (`lib/screenshotSource`).
+  Public / Unknown image rows also replace the `IMG` badge with a small
+  cropped thumbnail from the same `/thumb/<id>` endpoint the preview uses
+  (`EntryThumbnail.svelte`, shared with the file-list preview): consecutive
+  screenshots share a source, size and age, so the picture is the quickest
+  way to tell them apart. The image is lazy-loaded, so only rows scrolled
+  into view request (and, on a cache miss, generate) a thumbnail; it retries
+  the endpoint's 503 a couple of times and falls back to the text badge.
+  Other sensitivities keep the badge, since the endpoint refuses them.
   A small reason chip surfaces the strongest *match* signal (*Exact* /
   *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*) for query-driven
   rows; recent-listing rows stay chip-free since their only reason is

@@ -665,4 +665,42 @@ describe('ResultItem layout', () => {
     await rerender({ ...props, item, multiActive: true, marked: true });
     expect(container.querySelector('.multi-mark')?.textContent).toBe('✓');
   });
+
+  it('shows a thumbnail for public image rows and the text badge otherwise', () => {
+    const image = sample({ id: 'img-1', kind: 'image', sensitivity: 'Public' });
+    const { getByTestId, unmount } = render(ResultItem, { props: { ...props, item: image } });
+    const thumb = getByTestId('result-thumb') as HTMLImageElement;
+    expect(thumb.src).toContain('thumb/img-1');
+    // Decorative: the row's own text names the entry.
+    expect(thumb.getAttribute('alt')).toBe('');
+    unmount();
+
+    const { container } = render(ResultItem, {
+      props: { ...props, item: { ...image, sensitivity: 'Private' } },
+    });
+    expect(container.querySelector('[data-testid="result-thumb"]')).toBeNull();
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('IMG');
+  });
+
+  it('falls back to the text badge when the thumbnail cannot be loaded', async () => {
+    vi.useFakeTimers();
+    try {
+      const image = sample({ id: 'img-2', kind: 'image', sensitivity: 'Public' });
+      const { container } = render(ResultItem, { props: { ...props, item: image } });
+      // Two 503 retries, then the final failure drops the image.
+      const failOnce = async (): Promise<void> => {
+        const thumb = container.querySelector('[data-testid="result-thumb"]');
+        expect(thumb).toBeTruthy();
+        await fireEvent.error(thumb!);
+        await vi.advanceTimersByTimeAsync(1000);
+      };
+      await failOnce();
+      await failOnce();
+      await failOnce();
+      expect(container.querySelector('[data-testid="result-thumb"]')).toBeNull();
+      expect(container.querySelector('.kind-badge')?.textContent).toBe('IMG');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -39,6 +39,7 @@
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
   import { domainCategory } from '../lib/urlCategory';
+  import EntryThumbnail from './EntryThumbnail.svelte';
   import HighlightedText from './HighlightedText.svelte';
 
   type Props = {
@@ -128,6 +129,13 @@
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
+  // Consecutive screenshots share a source, size and age, so a tiny thumbnail
+  // is the only quick way to tell them apart. The thumbnail endpoint refuses
+  // anything beyond Public / Unknown, so other rows keep the text badge
+  // rather than issuing requests that can only fail.
+  const showThumbnail = $derived(
+    item.kind === 'image' && (item.sensitivity === 'Public' || item.sensitivity === 'Unknown'),
+  );
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
   const rankReason = $derived(primaryRankReason(item.rankReasons));
@@ -202,7 +210,22 @@
     {#if multiActive}
       <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
     {/if}
-    <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {#snippet kindBadge()}
+      <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {/snippet}
+    {#if showThumbnail}
+      <span class="kind-thumb">
+        <EntryThumbnail
+          entryId={item.id}
+          alt=""
+          variant="row"
+          testId="result-thumb"
+          fallback={kindBadge}
+        />
+      </span>
+    {:else}
+      {@render kindBadge()}
+    {/if}
 
     {#if url}
       <span class="preview url">
@@ -399,6 +422,13 @@
     color: var(--accent, #6c8dff);
     font-size: 0.85rem;
     font-weight: 600;
+  }
+  /* Same fixed width as the text badge, so image rows line up with the rest. */
+  .kind-thumb {
+    flex: none;
+    display: flex;
+    align-items: center;
+    width: 2.25rem;
   }
   .kind-badge {
     flex: none;

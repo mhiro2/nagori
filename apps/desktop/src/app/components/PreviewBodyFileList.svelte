@@ -1,7 +1,7 @@
 <script lang="ts">
   import { categoryForExtension, type FileCategory } from '../lib/filePath';
   import type { FileEntry } from '../lib/types';
-  import PreviewFileThumbnail from './PreviewFileThumbnail.svelte';
+  import EntryThumbnail from './EntryThumbnail.svelte';
 
   type Props = {
     // Basename-first file rows, already split and home-folded by the backend.
@@ -83,7 +83,7 @@
 </script>
 
 {#if hasImage}
-  <PreviewFileThumbnail {entryId} alt={thumbnailAlt} />
+  <EntryThumbnail {entryId} alt={thumbnailAlt} variant="preview" testId="preview-files-thumb" />
 {/if}
 {#if single}
   <div class="single-file" data-testid="preview-files-single">
