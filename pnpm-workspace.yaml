@@ -14,8 +14,8 @@ catalogs:
     svelte-check: 4.7.6
     vite: 8.3.1
   tauri:
-    "@tauri-apps/api": 2.11.1
-    "@tauri-apps/cli": 2.11.5
+    "@tauri-apps/api": 2.12.1
+    "@tauri-apps/cli": 2.12.1
   testing:
     "@testing-library/jest-dom": 7.0.1
     "@testing-library/svelte": 5.4.2
