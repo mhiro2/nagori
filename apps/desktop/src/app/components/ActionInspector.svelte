@@ -3,7 +3,9 @@
 
   import {
     cancelAiAction,
+    copyTextFromPalette,
     getAiAvailability,
+    pasteTextFromPalette,
     runQuickAction,
     saveAiResult,
     startAiAction,
@@ -21,6 +23,7 @@
     QuickActionId,
     SearchResultDto,
   } from '../lib/types';
+  import { rememberActionResult, rememberedActionResult } from '../stores/actionResult.svelte';
   import { aiActionsSupported } from '../stores/capabilities.svelte';
   import ActionPicker from './ActionPicker.svelte';
   import ActionRunPanel from './ActionRunPanel.svelte';
@@ -78,6 +81,10 @@
   let copyError = $state<string | undefined>(undefined);
   let saveError = $state<string | undefined>(undefined);
   let saving = $state(false);
+  // The work area shows a result kept from earlier in this palette session
+  // (see `stores/actionResult`) rather than one just produced.
+  let restored = $state(false);
+  let pasteError = $state<string | undefined>(undefined);
   let panelEl: HTMLElement | undefined = $state();
 
   let quickRunningVisible = $state(false);
@@ -124,6 +131,7 @@
     saveOk = false;
     copyError = undefined;
     saveError = undefined;
+    pasteError = undefined;
     saving = false;
     if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
     if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
@@ -253,6 +261,7 @@
     cancelRequested = false;
     if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
     lastResult = undefined;
+    restored = false;
     runError = undefined;
     resetResultFeedback();
     pending = undefined;
@@ -272,9 +281,20 @@
     }
   };
 
+  // Bring back the result this session last produced for the target, when the
+  // work area is otherwise empty.
+  const restoreRememberedResult = (): void => {
+    const text = rememberedActionResult(target?.id);
+    if (text === undefined || phase !== 'idle') return;
+    lastResult = text;
+    restored = true;
+  };
+
   const run = async (id: QuickActionId): Promise<void> => {
     if (!target || !isTauri() || busy) return;
     const token = ++runToken;
+    const entryId = target.id;
+    restored = false;
     pending = id;
     runError = undefined;
     resetResultFeedback();
@@ -291,6 +311,7 @@
       // IPC was in flight, so a stale result can't land in a reopened menu.
       if (token !== runToken) return;
       lastResult = result.text;
+      rememberActionResult(entryId, result.text);
     } catch (err) {
       if (token !== runToken) return;
       runError = describeError(err);
@@ -319,6 +340,7 @@
     runError = undefined;
     resetResultFeedback();
     lastResult = undefined;
+    restored = false;
     aiText = '';
     aiStreaming = true;
     aiPendingAction = action;
@@ -467,8 +489,25 @@
       (v) => (copyOk = v),
       (v) => (copyError = v),
       copyTimerRef,
-      () => navigator.clipboard.writeText(text),
+      // Through the app's own clipboard path rather than the webview's, so the
+      // capture loop recognises the write and the result stays out of the
+      // history until the user saves it.
+      () => (isTauri() ? copyTextFromPalette(text) : navigator.clipboard.writeText(text)),
     );
+  };
+
+  // Paste the result straight into the app the palette was opened from. The
+  // palette hides on success; a failure before that point stays visible here.
+  const pasteResult = async (): Promise<void> => {
+    const text = lastResult;
+    if (text === undefined || !isTauri()) return;
+    const token = runToken;
+    pasteError = undefined;
+    try {
+      await pasteTextFromPalette(text);
+    } catch (err) {
+      if (token === runToken && open) pasteError = describeError(err);
+    }
   };
 
   const saveResult = async (): Promise<void> => {
@@ -502,6 +541,7 @@
   // is released rather than streaming on to no one.
   $effect(() => {
     if (!open) resetRun();
+    else untrack(() => restoreRememberedResult());
   });
 
   // Because the inspector is docked (not a modal), the user can re-target it
@@ -524,7 +564,10 @@
     }
     if (id === lastSeenTargetId) return;
     lastSeenTargetId = id;
-    untrack(() => resetRun());
+    untrack(() => {
+      resetRun();
+      restoreRememberedResult();
+    });
   });
 
   // Probe AI availability each time the inspector opens so the AI buttons
@@ -603,6 +646,9 @@
           if (!isActiveRequest(payload.requestId)) return;
           aiText = payload.finalText;
           lastResult = payload.finalText;
+          // Re-targeting cancels a stream, so a run that finishes belongs to
+          // the current target.
+          if (target) rememberActionResult(target.id, payload.finalText);
           aiStreaming = false;
           aiRequestId = undefined;
           aiPendingAction = undefined;
@@ -747,6 +793,9 @@
     {#if saveError !== undefined}
       <p class="result-error" role="alert">{t.actionMenu.saveFailed} {saveError}</p>
     {/if}
+    {#if pasteError !== undefined}
+      <p class="result-error" role="alert">{t.actionMenu.pasteFailed} {pasteError}</p>
+    {/if}
 
     <ActionRunPanel
       {phase}
@@ -763,12 +812,17 @@
         saved: t.actionMenu.saved,
         cancel: t.actionMenu.aiCancel,
         done: t.actionMenu.done,
+        previousResult: t.actionMenu.previousResult,
+        paste: t.actionMenu.pasteResult,
       }}
+      {restored}
       {copyOk}
       {saveOk}
       {saving}
       canSave={isTauri()}
+      canPaste={isTauri()}
       onCopy={() => void copyResult()}
+      onPaste={() => void pasteResult()}
       onSave={() => void saveResult()}
       onCancel={cancelAi}
     />

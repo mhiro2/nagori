@@ -316,6 +316,11 @@ export type Messages = {
     copied: string;
     saveResult: string;
     saved: string;
+    // Heading for a result kept from earlier in the palette session.
+    previousResult: string;
+    // Pastes the result into the source app without storing it.
+    pasteResult: string;
+    pasteFailed: string;
   };
   // The "paste as <format>" picker, surfaced from the alternate-format chord
   // when the selected entry offers more than one pasteable representation.
@@ -929,6 +934,9 @@ export const en: Messages = {
     copied: 'Copied',
     saveResult: 'Save as new entry',
     saved: 'Saved',
+    previousResult: 'Previous result',
+    pasteResult: 'Paste',
+    pasteFailed: 'Could not paste the result.',
   },
   pastePicker: {
     title: 'Paste as',

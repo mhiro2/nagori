@@ -250,6 +250,9 @@ export const ko: Messages = {
     copied: '복사됨',
     saveResult: '새 항목으로 저장',
     saved: '저장됨',
+    previousResult: '이전 결과',
+    pasteResult: '붙여넣기',
+    pasteFailed: '결과를 붙여넣지 못했습니다.',
   },
   pastePicker: {
     title: '붙여넣기 형식',

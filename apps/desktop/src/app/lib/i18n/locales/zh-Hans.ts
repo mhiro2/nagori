@@ -240,6 +240,9 @@ export const zhHans: Messages = {
     copied: '已复制',
     saveResult: '保存为新条目',
     saved: '已保存',
+    previousResult: '上次的结果',
+    pasteResult: '粘贴',
+    pasteFailed: '无法粘贴结果。',
   },
   pastePicker: {
     title: '粘贴格式',

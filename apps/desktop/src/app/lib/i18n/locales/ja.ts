@@ -250,6 +250,9 @@ export const ja: Messages = {
     copied: 'コピーしました',
     saveResult: '新しいエントリとして保存',
     saved: '保存しました',
+    previousResult: '前回の結果',
+    pasteResult: 'ペースト',
+    pasteFailed: '結果をペーストできませんでした。',
   },
   pastePicker: {
     title: 'ペースト形式',

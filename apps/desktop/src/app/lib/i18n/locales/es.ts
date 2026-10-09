@@ -261,6 +261,9 @@ export const es: Messages = {
     copied: 'Copiado',
     saveResult: 'Guardar como nueva entrada',
     saved: 'Guardado',
+    previousResult: 'Resultado anterior',
+    pasteResult: 'Pegar',
+    pasteFailed: 'No se pudo pegar el resultado.',
   },
   pastePicker: {
     title: 'Pegar como',

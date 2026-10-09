@@ -240,6 +240,9 @@ export const zhHant: Messages = {
     copied: '已複製',
     saveResult: '另存為新項目',
     saved: '已儲存',
+    previousResult: '上次的結果',
+    pasteResult: '貼上',
+    pasteFailed: '無法貼上結果。',
   },
   pastePicker: {
     title: '貼上格式',

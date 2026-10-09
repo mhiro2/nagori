@@ -263,6 +263,9 @@ export const de: Messages = {
     copied: 'Kopiert',
     saveResult: 'Als neuen Eintrag speichern',
     saved: 'Gespeichert',
+    previousResult: 'Vorheriges Ergebnis',
+    pasteResult: 'Einfügen',
+    pasteFailed: 'Das Ergebnis konnte nicht eingefügt werden.',
   },
   pastePicker: {
     title: 'Einfügen als',

@@ -50,6 +50,12 @@ export const pasteEntryRepresentationFromPalette = (entryId: string, mime: strin
 export const listPasteOptions = (entryId: string): Promise<PasteOption[]> =>
   invoke('list_paste_options', { entryId });
 
+// Copy / paste a quick-action result without adding it to the history.
+export const copyTextFromPalette = (text: string): Promise<void> =>
+  invoke('copy_text_from_palette', { text });
+export const pasteTextFromPalette = (text: string): Promise<void> =>
+  invoke('paste_text_from_palette', { text });
+
 export const copyEntryFromPalette = (entryId: string): Promise<void> =>
   invoke('copy_entry_from_palette', { entryId });
 

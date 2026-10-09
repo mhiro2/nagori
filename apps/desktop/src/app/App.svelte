@@ -10,6 +10,7 @@
   import type { AppSettings } from './lib/types';
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
+  import { forgetActionResult } from './stores/actionResult.svelte';
   import { capabilitiesState } from './stores/capabilities.svelte';
   import { recordCaptureSkip } from './stores/captureSkipped.svelte';
   import { closeEntryContextMenu, entryContextMenuState } from './stores/entryContextMenu.svelte';
@@ -75,6 +76,7 @@
     // A paste-format picker open at hide time must not survive into the next
     // invocation — it would re-render against a stale, now-unselected entry.
     closePasteFormatPicker();
+    forgetActionResult();
     void hidePalette();
   };
 
@@ -88,6 +90,9 @@
     // palette — either would reappear (against a stale target) on the next show.
     closePasteFormatPicker();
     closeEntryContextMenu();
+    // The palette session ends here (every hide, including the one after a
+    // paste, blurs the window), so a kept action result goes with it.
+    forgetActionResult();
     void hidePalette();
   };
 

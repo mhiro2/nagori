@@ -2008,8 +2008,20 @@ not duplicate runtime logic.
   Opening is not keyboard-only: the *Actions* button in the preview-pane
   header and the clickable ⌘K hint in the status bar both call the same
   open path, so the entry gesture matches the mouse-driven action
-  selection. The result shows *Copy* (uses
-  `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
+  selection. The result shows *Paste*, *Copy* and *Save as new entry*.
+  *Paste* (`paste_text_from_palette`) and *Copy* (`copy_text_from_palette`)
+  publish the text through the daemon's clipboard lease
+  (`ClipboardLease::publish_text`) instead of `navigator.clipboard`: the
+  write goes through the adapter, whose self-write tracking makes the
+  capture loop skip it, so the result reaches the clipboard (and, for
+  *Paste*, the source app via the palette's hide → restore-focus →
+  auto-paste path) without becoming a history row. *Save as new entry*
+  (`save_ai_result`) stays the one way to keep it. On Wayland, where the
+  adapter does not track its own writes, the capture loop still records
+  the copied result. The last result of the palette session is kept
+  (`stores/actionResult`): closing the inspector or stepping to another row
+  and back restores it under a *Previous result* heading, and the palette
+  forgets it when it hides.
   Copy/save failures appear as separate inline `role="alert"` messages while
   the result and its buttons stay available for retry. Retrying clears that
   operation's error; starting another quick/AI action, changing target, or
@@ -2461,7 +2473,9 @@ surface for redaction (see [section 9](#9-sensitivity-and-redaction)).
 Tauri command which writes
 the text via `runtime.add_text()` and returns the resulting `EntryDto`. The
 persistence is intentionally a second user-driven step rather than a side effect
-of the action.
+of the action. Copying or pasting a result does not store it either (see the
+`ActionInspector.svelte` bullet in
+[section 12](#12-tauri-boundary-and-frontend)).
 
 ---
 

@@ -94,13 +94,16 @@ vi.mock('../stores/capabilities.svelte', () => ({
 
 import {
   cancelAiAction,
+  copyTextFromPalette,
   getAiAvailability,
+  pasteTextFromPalette,
   runQuickAction,
   saveAiResult,
   startAiAction,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { EntryDto, SearchResultDto } from '../lib/types';
+import { forgetActionResult } from '../stores/actionResult.svelte';
 import { aiActionsSupported } from '../stores/capabilities.svelte';
 import { sampleSearchResult } from '../test-helpers/fixtures';
 import ActionInspector from './ActionInspector.svelte';
@@ -147,6 +150,7 @@ const availability = (actionsAvailable: boolean): AiAvailability => ({
 });
 
 beforeEach(() => {
+  forgetActionResult();
   for (const key of Object.keys(handlers)) delete handlers[key];
   readyState.auto = true;
   readyState.fail = false;
@@ -613,7 +617,7 @@ describe('ActionInspector', () => {
 
   it('keeps the result visible after a copy failure and clears the error when retried', async () => {
     const user = userEvent.setup();
-    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    const writeText = vi.mocked(copyTextFromPalette);
     writeText.mockRejectedValueOnce(new Error('Clipboard access denied'));
     writeText.mockResolvedValueOnce(undefined);
     vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
@@ -683,7 +687,7 @@ describe('ActionInspector', () => {
   it.each(['retarget', 'reopen'])('ignores an old copy failure after %s', async (transition) => {
     const user = userEvent.setup();
     let rejectCopy: ((reason: Error) => void) | undefined;
-    vi.spyOn(navigator.clipboard, 'writeText').mockReturnValueOnce(
+    vi.mocked(copyTextFromPalette).mockReturnValueOnce(
       new Promise<void>((_, reject) => {
         rejectCopy = reject;
       }),
@@ -714,7 +718,7 @@ describe('ActionInspector', () => {
   it('does not replace a successful copy retry with an older failure', async () => {
     const user = userEvent.setup();
     let rejectCopy: ((reason: Error) => void) | undefined;
-    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    const writeText = vi.mocked(copyTextFromPalette);
     writeText.mockReturnValueOnce(
       new Promise<void>((_, reject) => {
         rejectCopy = reject;
@@ -735,6 +739,48 @@ describe('ActionInspector', () => {
 
     expect(queryByRole('alert')).toBeNull();
     expect(getByRole('button', { name: /^Copied$/ })).toBeTruthy();
+  });
+
+  it('keeps the last result for the session and copies or pastes it without saving', async () => {
+    const user = userEvent.setup();
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+    const props = { open: true, target: sample({ id: 'a' }), onClose: () => {} };
+    const { getByTestId, getByRole, findByText, rerender, queryByTestId } = render(
+      ActionInspector,
+      { props },
+    );
+    await user.click(getByTestId('quick-FormatJson'));
+    await findByText('result body');
+
+    // Closing and reopening on the same entry brings the result back...
+    await rerender({ ...props, open: false });
+    await rerender(props);
+    expect(getByTestId('action-result').textContent).toBe('result body');
+    expect(getByTestId('action-result-status').textContent).toBe('Previous result');
+    // ...another entry starts clean, and stepping back restores it again.
+    await rerender({ ...props, target: sample({ id: 'b' }) });
+    expect(queryByTestId('action-result')).toBeNull();
+    await rerender(props);
+    expect(getByTestId('action-result').textContent).toBe('result body');
+
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    expect(copyTextFromPalette).toHaveBeenLastCalledWith('result body');
+    await user.click(getByRole('button', { name: /^Paste$/ }));
+    expect(pasteTextFromPalette).toHaveBeenLastCalledWith('result body');
+    expect(saveAiResult).not.toHaveBeenCalled();
+  });
+
+  it('shows a paste failure next to the result', async () => {
+    const user = userEvent.setup();
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+    vi.mocked(pasteTextFromPalette).mockRejectedValueOnce(new Error('focus lost'));
+    const { getByTestId, getByRole, findByRole } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: /^Paste$/ }));
+    expect((await findByRole('alert')).textContent).toBe('Could not paste the result. focus lost');
+    expect(getByTestId('action-result').textContent).toBe('result body');
   });
 
   it('does not let an old save completion unlock a save for a newer result', async () => {

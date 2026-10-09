@@ -54,6 +54,8 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   pasteEntryRepresentationFromPalette: vi.fn(),
   listPasteOptions: vi.fn(),
   copyEntryFromPalette: vi.fn(),
+  copyTextFromPalette: vi.fn(async () => undefined),
+  pasteTextFromPalette: vi.fn(async () => undefined),
   getEntryPreview: vi.fn(),
   getEntryPreviewFull: vi.fn(),
   addEntry: vi.fn(),
