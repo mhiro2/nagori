@@ -36,6 +36,8 @@ export type Messages = {
       navigate: string;
       paste: string;
       copyCombined: string;
+      // Toggles the highlighted row into the multi-selection.
+      multiSelect: string;
       pin: string;
       actions: string;
       settings: string;
@@ -196,6 +198,8 @@ export type Messages = {
     // joined text to the clipboard *and* keeps it as a new history entry, so
     // the bulk copy doesn't look like a silent extra capture.
     combinedCopyHint: string;
+    // Selection-bar button that leaves multi-select mode.
+    clearSelection: string;
     // Compact accessibility indicator surfaced in the palette StatusBar
     // when the OS permission required to drive auto-paste is missing. The
     // indicator is a single clickable chip that opens the Setup tab:
@@ -689,6 +693,7 @@ export const en: Messages = {
       navigate: 'Navigate',
       paste: 'Paste',
       copyCombined: 'Copy combined',
+      multiSelect: 'Select',
       pin: 'Pin',
       actions: 'Actions',
       settings: 'Settings',
@@ -804,6 +809,7 @@ export const en: Messages = {
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
     combinedCopyHint: 'Combined copy is saved as a new item',
+    clearSelection: 'Clear selection',
     autoPasteOff: 'Auto-paste off — Accessibility not granted',
     autoPasteOffShort: '⚠ Auto-paste off',
     autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',

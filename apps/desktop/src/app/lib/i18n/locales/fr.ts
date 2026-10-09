@@ -31,6 +31,7 @@ export const fr: Messages = {
       navigate: 'Naviguer',
       paste: 'Coller',
       copyCombined: 'Copier ensemble',
+      multiSelect: 'Sélectionner',
       pin: 'Épingler',
       actions: 'Actions',
       settings: 'Paramètres',
@@ -166,6 +167,7 @@ export const fr: Messages = {
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
     combinedCopyHint: 'La copie combinée est enregistrée comme nouvel élément',
+    clearSelection: 'Effacer la sélection',
     autoPasteOff: 'Collage automatique désactivé — Accessibilité non accordée',
     autoPasteOffShort: '⚠ Collage automatique désactivé',
     autoPasteOffSetupAria:

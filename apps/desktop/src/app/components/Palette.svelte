@@ -243,6 +243,23 @@
     void confirmSelection();
   };
 
+  // Selection-bar actions. Both buttons unmount once the selection is gone, so
+  // focus goes back to the search box instead of dropping to the document body
+  // (where a following Enter would act on whatever row is highlighted).
+  const copySelectionFromBar = async (): Promise<void> => {
+    await copyMultiSelection();
+    if (multiSelectState.selected.size === 0) searchBox?.focus();
+  };
+  const clearSelectionFromBar = (): void => {
+    clearMultiSelect();
+    searchBox?.focus();
+  };
+  const toggleMultiSelectCurrent = (): void => {
+    if (actionsOpen) return;
+    const id = currentSelection()?.id;
+    if (id !== undefined) toggleMultiSelect(id);
+  };
+
   const handleSelect = (index: number): void => {
     // While the action inspector owns the right column the preview pane is
     // hidden (see the body markup below), so a hovered row has nothing to feed
@@ -467,11 +484,9 @@
       case 'open-settings':
         openSettings();
         break;
-      case 'multi-toggle': {
-        const id = currentSelection()?.id;
-        if (id !== undefined) toggleMultiSelect(id);
+      case 'multi-toggle':
+        toggleMultiSelectCurrent();
         break;
-      }
       case 'multi-select-all':
         selectAllMulti(resultIds);
         break;
@@ -599,6 +614,9 @@
     onOpenActions={openActions}
     onOpenSettings={openSettings}
     onOpenPreview={() => (previewExpanded = !previewExpanded)}
+    onCopySelection={() => void copySelectionFromBar()}
+    onClearSelection={clearSelectionFromBar}
+    onToggleMultiSelect={toggleMultiSelectCurrent}
   />
 </section>
 

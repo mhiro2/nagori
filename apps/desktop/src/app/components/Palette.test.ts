@@ -336,6 +336,36 @@ describe('Palette', () => {
     expect(multiSelectState.selected.size).toBe(2);
   });
 
+  it('offers bulk copy and clear-selection buttons while rows are selected', async () => {
+    const user = userEvent.setup();
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    toggleMultiSelect('a');
+    toggleMultiSelect('b');
+    const { getByRole, getByTestId, queryByTestId } = render(Palette);
+    expect(getByTestId('status-selected-count').textContent).toContain('2 selected');
+
+    getByTestId('status-copy-selection').focus();
+    await user.keyboard('{Enter}');
+    expect(copyMultiSelection).toHaveBeenCalledTimes(1);
+    expect(confirmSelection).not.toHaveBeenCalled();
+
+    await user.click(getByTestId('status-clear-selection'));
+    expect(multiSelectState.selected.size).toBe(0);
+    expect(queryByTestId('status-clear-selection')).toBeNull();
+    // The bar unmounts with the selection; focus returns to the search box
+    // rather than dropping to the body where Enter would paste.
+    expect(document.activeElement).toBe(getByRole('textbox'));
+  });
+
+  it('toggles the highlighted row into the selection from the footer hint', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByTestId } = render(Palette);
+    await fireEvent.click(getByTestId('status-multi-toggle'));
+    expect(multiSelectState.selected.has('a')).toBe(true);
+  });
+
   it('refreshes the active query when capture stores a new entry', () => {
     let handler: ((payload: { entryId: string }) => void) | undefined;
     vi.mocked(subscribe).mockImplementation((event, next) => {

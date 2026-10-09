@@ -31,6 +31,7 @@ export const es: Messages = {
       navigate: 'Navegar',
       paste: 'Pegar',
       copyCombined: 'Copiar juntos',
+      multiSelect: 'Seleccionar',
       pin: 'Fijar',
       actions: 'Acciones',
       settings: 'Ajustes',
@@ -163,6 +164,7 @@ export const es: Messages = {
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
     combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
+    clearSelection: 'Borrar selección',
     autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:
