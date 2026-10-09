@@ -37,6 +37,7 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "search_clipboard",
             "list_recent_entries",
+            "list_source_apps",
             "list_pinned_entries",
             "get_entry",
             "copy_entry",
