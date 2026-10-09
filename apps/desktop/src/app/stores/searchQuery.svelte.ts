@@ -8,7 +8,7 @@ import { searchClipboard } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
-import type { SearchFilters, SearchRequest, SearchResultDto } from '../lib/types';
+import type { SearchFilters, SearchMode, SearchRequest, SearchResultDto } from '../lib/types';
 import { currentFilters } from './searchFilters.svelte';
 import { reconcileMultiSelect } from './searchMultiSelect.svelte';
 
@@ -54,6 +54,9 @@ type SearchState = {
   loading: boolean;
   errorMessage: string | undefined;
   lastElapsedMs: number | undefined;
+  // The on-screen results came from the full-history search the empty state
+  // offers when the fast search finds nothing.
+  fullHistory: boolean;
   // Bumped whenever a result set for a different query or filter set is
   // applied. Background refreshes and paging keep it, so the palette can
   // announce a new result count without re-announcing every capture.
@@ -69,6 +72,7 @@ export const searchState = $state<SearchState>({
   loading: false,
   errorMessage: undefined,
   lastElapsedMs: undefined,
+  fullHistory: false,
   resultScopeVersion: 0,
 });
 
@@ -146,6 +150,20 @@ let appliedScope = '';
 const limitScope = (query: string, filters: SearchFilters | undefined): string =>
   `${query}\0${JSON.stringify(filters ?? null)}`;
 
+// The fast `Auto` search only substring-scans the newest entries (FTS and the
+// CJK n-gram index cover the rest), so an older entry matched by an identifier
+// fragment, a cut-off URL path or a single kana can be missed. When that search
+// comes back empty the palette offers `Exact`, an unbounded substring scan of
+// the whole history. Like the expanded limit, the choice is scoped to the query
+// + filter set it was made for: refreshes keep it, a new query drops it.
+let fullHistoryScope: string | undefined;
+
+const modeFor = (query: string): SearchMode => {
+  if (fullHistoryScope === limitScope(query, currentFilters())) return 'Exact';
+  fullHistoryScope = undefined;
+  return 'Auto';
+};
+
 const limitFor = (query: string): number => {
   if (expandedLimit?.scope === limitScope(query, currentFilters())) return expandedLimit.limit;
   expandedLimit = undefined;
@@ -177,6 +195,24 @@ export const loadMoreResults = async (): Promise<void> => {
     scope: appliedScope,
     limit: Math.min(searchState.resultLimit + RESULT_PAGE_SIZE, MAX_RESULT_LIMIT),
   };
+  await runQuery(searchState.query);
+};
+
+/// Whether the empty result set on screen came from the fast search and a
+/// full-history search could still find something.
+export const canSearchFullHistory = (): boolean =>
+  searchState.appliedQuery.trim() !== '' &&
+  !searchState.fullHistory &&
+  searchState.results.length === 0 &&
+  searchState.errorMessage === undefined;
+
+/// Re-run the current query as an unbounded substring scan of the whole
+/// history. Ignored unless the fast search for the list on screen came back
+/// empty and no newer search is pending.
+export const searchFullHistory = async (): Promise<void> => {
+  if (!canSearchFullHistory()) return;
+  if (pendingQueryTimer !== undefined || searchRunning || appliedTicket !== inflight) return;
+  fullHistoryScope = appliedScope;
   await runQuery(searchState.query);
 };
 
@@ -228,6 +264,7 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     if (isFreshest(ticket)) {
       applyResults(response.results, request.query);
       searchState.resultLimit = request.limit ?? RESULT_PAGE_SIZE;
+      searchState.fullHistory = request.mode === 'Exact';
       const scope = limitScope(request.query, filters);
       if (scope !== appliedScope) searchState.resultScopeVersion += 1;
       appliedScope = scope;
@@ -349,7 +386,7 @@ export const runQuery = async (raw: string): Promise<void> => {
     );
     return;
   }
-  await runSearch({ query: raw, mode: 'Auto', limit: limitFor(raw) });
+  await runSearch({ query: raw, mode: modeFor(raw), limit: limitFor(raw) });
 };
 
 export const refreshCurrent = async (): Promise<void> => {
@@ -370,5 +407,6 @@ export const resetSearchRuntimeForTest = (): void => {
   searchRunning = false;
   queuedSearch = undefined;
   expandedLimit = undefined;
+  fullHistoryScope = undefined;
   appliedScope = '';
 };

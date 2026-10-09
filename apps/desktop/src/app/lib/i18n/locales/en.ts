@@ -16,6 +16,11 @@ export type Messages = {
     emptyStates: {
       start: string;
       noMatches: string;
+      // The fast search found nothing; a full-history search is offered.
+      noQuickMatches: string;
+      searchFullHistory: string;
+      // The full-history search found nothing either.
+      noFullHistoryMatches: string;
       noFilterMatches: string;
       capturePaused: string;
       retry: string;
@@ -202,6 +207,8 @@ export type Messages = {
     capturePaused: string;
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
+    // Marks results that came from the full-history search.
+    fullHistorySearch: string;
     // Shown beside the multi-select count: combining the selection writes the
     // joined text to the clipboard *and* keeps it as a new history entry, so
     // the bulk copy doesn't look like a silent extra capture.
@@ -687,6 +694,10 @@ export const en: Messages = {
     emptyStates: {
       start: 'Copy some text to start your history.',
       noMatches: 'No entries match this search.',
+      noQuickMatches:
+        'The quick search found nothing. Search all history to also look inside older entries.',
+      searchFullHistory: 'Search all history',
+      noFullHistoryMatches: 'No entries contain this text.',
       noFilterMatches: 'No entries match these filters.',
       capturePaused: 'Capture is paused. Resume capture below to save new entries.',
       retry: 'Try again',
@@ -823,6 +834,7 @@ export const en: Messages = {
     capturePaused: 'Capture paused',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
+    fullHistorySearch: 'Full-history search',
     combinedCopyHint: 'Combined copy is saved as a new item',
     clearSelection: 'Clear selection',
     selectionCleared: 'Selection cleared',

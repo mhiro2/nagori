@@ -48,6 +48,7 @@
   import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
   import {
     canLoadMoreResults,
+    canSearchFullHistory,
     cancelPendingQuery,
     loadMoreResults,
     refreshCurrent,
@@ -56,6 +57,7 @@
     resultsPaged,
     runQuery,
     scheduleQuery,
+    searchFullHistory,
     searchState,
   } from '../stores/searchQuery.svelte';
   import {
@@ -597,8 +599,11 @@
           loading={searchState.loading}
           errorMessage={searchState.errorMessage}
           capturePaused={!captureEnabled()}
+          canSearchFullHistory={canSearchFullHistory()}
+          fullHistory={searchState.fullHistory}
           onRetry={() => void refreshCurrent()}
           onClearSearch={clearSearch}
+          onSearchFullHistory={() => void searchFullHistory()}
         />
       {:else}
         <ResultList
@@ -665,6 +670,7 @@
   <StatusBar
     entryCount={searchState.results.length}
     elapsedMs={searchState.lastElapsedMs}
+    fullHistory={searchState.fullHistory && searchState.results.length > 0}
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}

@@ -12,6 +12,9 @@ export const zhHans: Messages = {
     emptyStates: {
       start: '复制文本即可开始记录历史。',
       noMatches: '没有符合搜索条件的条目。',
+      noQuickMatches: '快速搜索未找到结果。搜索全部历史即可同时查找较早的项目。',
+      searchFullHistory: '搜索全部历史',
+      noFullHistoryMatches: '没有项目包含此文本。',
       noFilterMatches: '没有符合筛选条件的条目。',
       capturePaused: '捕获已暂停。请在下方恢复以保存新条目。',
       retry: '重试',
@@ -158,6 +161,7 @@ export const zhHans: Messages = {
     capturePaused: '捕获已暂停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hans')} 项`,
     selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
+    fullHistorySearch: '全部历史搜索',
     combinedCopyHint: '合并复制会保存为新项目',
     clearSelection: '取消选择',
     selectionCleared: '已取消选择',

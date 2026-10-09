@@ -20,6 +20,8 @@
     loading: boolean;
     errorMessage: string | undefined;
     selectedCount?: number;
+    // The results on screen came from the full-history search.
+    fullHistory?: boolean;
     bindings?: readonly Binding[];
     enterOpensUrl?: boolean;
     // Toggles the pin state of the current selection. When provided, the ⌘P
@@ -57,6 +59,7 @@
     loading,
     errorMessage,
     selectedCount = 0,
+    fullHistory = false,
     bindings,
     enterOpensUrl = false,
     onTogglePin,
@@ -293,6 +296,10 @@
           {#if elapsedMs !== undefined}
             <span class="dot">·</span>
             <span>{t.palette.elapsed(elapsedMs)}</span>
+          {/if}
+          {#if fullHistory}
+            <span class="dot">·</span>
+            <span data-testid="status-full-history">{t.status.fullHistorySearch}</span>
           {/if}
         {/if}
       </span>

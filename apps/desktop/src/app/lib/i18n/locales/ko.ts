@@ -12,6 +12,10 @@ export const ko: Messages = {
     emptyStates: {
       start: '텍스트를 복사하면 기록에 표시됩니다.',
       noMatches: '검색과 일치하는 항목이 없습니다.',
+      noQuickMatches:
+        '빠른 검색으로 찾지 못했습니다. 오래된 항목까지 찾으려면 전체 기록을 검색하세요.',
+      searchFullHistory: '전체 기록 검색',
+      noFullHistoryMatches: '이 텍스트를 포함한 항목이 없습니다.',
       noFilterMatches: '필터와 일치하는 항목이 없습니다.',
       capturePaused: '캡처가 일시 중지되었습니다. 아래에서 다시 시작하세요.',
       retry: '다시 시도',
@@ -160,6 +164,7 @@ export const ko: Messages = {
     capturePaused: '캡처 일시 중지',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
+    fullHistorySearch: '전체 기록 검색',
     combinedCopyHint: '결합 복사는 새 항목으로 저장됩니다',
     clearSelection: '선택 해제',
     selectionCleared: '선택 해제됨',

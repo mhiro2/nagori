@@ -13,6 +13,10 @@ export const es: Messages = {
     emptyStates: {
       start: 'Copia texto para empezar el historial.',
       noMatches: 'No hay entradas que coincidan con esta búsqueda.',
+      noQuickMatches:
+        'La búsqueda rápida no encontró nada. Busca en todo el historial para revisar también los elementos antiguos.',
+      searchFullHistory: 'Buscar en todo el historial',
+      noFullHistoryMatches: 'Ningún elemento contiene este texto.',
       noFilterMatches: 'No hay entradas que coincidan con estos filtros.',
       capturePaused: 'La captura está pausada. Reanúdala abajo para guardar nuevas entradas.',
       retry: 'Reintentar',
@@ -168,6 +172,7 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
+    fullHistorySearch: 'Búsqueda en todo el historial',
     combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
     clearSelection: 'Borrar selección',
     selectionCleared: 'Selección borrada',

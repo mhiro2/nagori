@@ -7,12 +7,27 @@
     loading: boolean;
     errorMessage: string | undefined;
     capturePaused: boolean;
+    // The fast search came back empty and a full-history search is available.
+    canSearchFullHistory?: boolean;
+    // The empty result came from the full-history search itself.
+    fullHistory?: boolean;
     onRetry: () => void;
     onClearSearch: () => void;
+    onSearchFullHistory?: () => void;
   };
 
-  const { query, filtered, loading, errorMessage, capturePaused, onRetry, onClearSearch }: Props =
-    $props();
+  const {
+    query,
+    filtered,
+    loading,
+    errorMessage,
+    capturePaused,
+    canSearchFullHistory = false,
+    fullHistory = false,
+    onRetry,
+    onClearSearch,
+    onSearchFullHistory,
+  }: Props = $props();
   const t = $derived(messages());
   const searching = $derived(query.trim().length > 0);
   const message = $derived(
@@ -20,7 +35,11 @@
       ? t.palette.searching
       : (errorMessage ??
           (searching
-            ? t.palette.emptyStates.noMatches
+            ? fullHistory
+              ? t.palette.emptyStates.noFullHistoryMatches
+              : canSearchFullHistory
+                ? t.palette.emptyStates.noQuickMatches
+                : t.palette.emptyStates.noMatches
             : filtered
               ? t.palette.emptyStates.noFilterMatches
               : capturePaused
@@ -35,7 +54,14 @@
     {#if errorMessage}
       <button type="button" onclick={onRetry}>{t.palette.emptyStates.retry}</button>
     {:else if searching || filtered}
-      <button type="button" onclick={onClearSearch}>{t.palette.emptyStates.clearSearch}</button>
+      <div class="actions">
+        {#if searching && canSearchFullHistory && onSearchFullHistory}
+          <button type="button" class="primary" onclick={onSearchFullHistory}
+            >{t.palette.emptyStates.searchFullHistory}</button
+          >
+        {/if}
+        <button type="button" onclick={onClearSearch}>{t.palette.emptyStates.clearSearch}</button>
+      </div>
     {/if}
   {/if}
 </div>
@@ -52,6 +78,15 @@
   p {
     margin: 0 0 0.75rem;
     overflow-wrap: anywhere;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+  .primary {
+    border-color: var(--accent);
   }
   button {
     padding: 0.4rem 0.65rem;

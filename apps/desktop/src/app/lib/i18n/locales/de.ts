@@ -13,6 +13,10 @@ export const de: Messages = {
     emptyStates: {
       start: 'Kopieren Sie Text, um den Verlauf zu beginnen.',
       noMatches: 'Keine Einträge entsprechen dieser Suche.',
+      noQuickMatches:
+        'Die Schnellsuche hat nichts gefunden. Durchsuche den gesamten Verlauf, um auch ältere Einträge zu prüfen.',
+      searchFullHistory: 'Gesamten Verlauf durchsuchen',
+      noFullHistoryMatches: 'Kein Eintrag enthält diesen Text.',
       noFilterMatches: 'Keine Einträge entsprechen diesen Filtern.',
       capturePaused:
         'Die Erfassung ist pausiert. Setzen Sie sie unten fort, um neue Einträge zu speichern.',
@@ -169,6 +173,7 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
+    fullHistorySearch: 'Suche im gesamten Verlauf',
     combinedCopyHint: 'Kombiniertes Kopieren wird als neuer Eintrag gespeichert',
     clearSelection: 'Auswahl aufheben',
     selectionCleared: 'Auswahl aufgehoben',

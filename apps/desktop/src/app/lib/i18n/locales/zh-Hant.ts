@@ -12,6 +12,9 @@ export const zhHant: Messages = {
     emptyStates: {
       start: '複製文字即可開始記錄歷史。',
       noMatches: '沒有符合搜尋條件的項目。',
+      noQuickMatches: '快速搜尋找不到結果。搜尋全部紀錄即可一併查找較舊的項目。',
+      searchFullHistory: '搜尋全部紀錄',
+      noFullHistoryMatches: '沒有項目包含此文字。',
       noFilterMatches: '沒有符合篩選條件的項目。',
       capturePaused: '擷取已暫停。請在下方恢復以儲存新項目。',
       retry: '重試',
@@ -158,6 +161,7 @@ export const zhHant: Messages = {
     capturePaused: '擷取已暫停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hant')} 項`,
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
+    fullHistorySearch: '全部紀錄搜尋',
     combinedCopyHint: '合併複製會儲存為新項目',
     clearSelection: '取消選取',
     selectionCleared: '已取消選取',

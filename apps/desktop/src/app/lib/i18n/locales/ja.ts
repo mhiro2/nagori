@@ -12,6 +12,10 @@ export const ja: Messages = {
     emptyStates: {
       start: 'テキストをコピーすると履歴に表示されます。',
       noMatches: '検索に一致する項目がありません。',
+      noQuickMatches:
+        'クイック検索では見つかりませんでした。古い項目の中まで探すには、すべての履歴を検索してください。',
+      searchFullHistory: 'すべての履歴を検索',
+      noFullHistoryMatches: 'この文字列を含む項目はありません。',
       noFilterMatches: 'フィルタに一致する項目がありません。',
       capturePaused: '取り込みは一時停止中です。下のボタンで再開できます。',
       retry: '再試行',
@@ -159,6 +163,7 @@ export const ja: Messages = {
     capturePaused: '取り込み一時停止',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
+    fullHistorySearch: '全履歴を検索',
     combinedCopyHint: '結合コピーは新しい項目として保存されます',
     clearSelection: '選択を解除',
     selectionCleared: '選択を解除しました',

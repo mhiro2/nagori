@@ -854,6 +854,15 @@ so tail latency for typical typing-driven searches stays roughly
 constant as the history grows. `SearchMode::Exact` and
 `SearchMode::Fuzzy` deliberately scan the full corpus — they exist for
 explicit lookups where completeness beats latency.
+`exact_search_recalls_old_entries_that_auto_misses` pins what the window
+costs for entries older than it: Auto still recalls whole identifiers,
+`::` paths, whole URL path segments, `?q=` fragments and multi-character
+CJK, but misses the tail of a `snake_case` identifier (`order_tot`), the
+middle of a camelCase one (`UserProfile`), a cut-off URL path
+(`github.com/acme/wid`) and a single kana, all of which `Exact` recalls.
+The palette therefore offers a full-history `Exact` search when Auto comes
+back empty (see the full-history bullet in
+[section 12](#12-tauri-boundary-and-frontend)).
 
 **Recent-search cache.** A bounded LRU
 (`nagori-daemon::search_cache::RecentSearchCache`, default capacity 32)
@@ -1868,6 +1877,15 @@ not duplicate runtime logic.
   *Show more*, focus moves to the first newly loaded row (found by id, since
   the re-rank may place it above the old end). At the 200-row cap the footer drops the
   button and suggests narrowing with the query or filters.
+- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`).
+  When the fast Auto search for a non-empty query returns nothing, the
+  empty state says the quick search found nothing and offers *Search all
+  history*, which re-runs the query as `SearchMode::Exact` — an unbounded
+  substring scan that also finds fragments the bounded window misses. The
+  choice is scoped like the expanded limit: same-scope refreshes keep the
+  wider search, a new query or filter change returns to Auto. The status
+  bar marks results that came from it, and an empty full-history result
+  says no entry contains the text instead of offering the search again.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax

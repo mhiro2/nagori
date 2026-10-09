@@ -66,6 +66,8 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   resultLimitReached: vi.fn(() => false),
   resultsPaged: vi.fn(() => false),
   loadMoreResults: vi.fn(async () => undefined),
+  canSearchFullHistory: vi.fn(() => false),
+  searchFullHistory: vi.fn(async () => undefined),
   searchState: {
     query: '',
     appliedQuery: '',
@@ -75,6 +77,7 @@ vi.mock('../stores/searchQuery.svelte', () => ({
     loading: false,
     errorMessage: undefined,
     lastElapsedMs: undefined,
+    fullHistory: false,
     resultScopeVersion: 0,
   },
 }));
@@ -130,7 +133,14 @@ import {
   toggleMultiSelect,
 } from '../stores/searchMultiSelect.svelte';
 import { previewState } from '../stores/searchPreview.svelte';
-import { refreshCurrent, runQuery, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
+import {
+  canSearchFullHistory,
+  refreshCurrent,
+  runQuery,
+  scheduleQuery,
+  searchFullHistory,
+  searchState,
+} from '../stores/searchQuery.svelte';
 import {
   currentSelection,
   selectByIndex,
@@ -232,6 +242,15 @@ describe('Palette', () => {
     expect(runQuery).toHaveBeenCalledWith('');
     expect(confirmSelection).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it('offers the full-history search from an empty quick search', async () => {
+    searchState.query = 'order_tot';
+    vi.mocked(canSearchFullHistory).mockReturnValue(true);
+    const { getByRole } = render(Palette);
+    await fireEvent.click(getByRole('button', { name: 'Search all history' }));
+    expect(searchFullHistory).toHaveBeenCalledOnce();
+    vi.mocked(canSearchFullHistory).mockReturnValue(false);
   });
 
   it('retries an empty failed search without clearing its conditions', async () => {

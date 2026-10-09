@@ -13,6 +13,10 @@ export const fr: Messages = {
     emptyStates: {
       start: 'Copiez du texte pour commencer votre historique.',
       noMatches: 'Aucune entrée ne correspond à cette recherche.',
+      noQuickMatches:
+        'La recherche rapide n’a rien trouvé. Cherchez dans tout l’historique pour inclure aussi les éléments plus anciens.',
+      searchFullHistory: 'Chercher dans tout l’historique',
+      noFullHistoryMatches: 'Aucun élément ne contient ce texte.',
       noFilterMatches: 'Aucune entrée ne correspond à ces filtres.',
       capturePaused:
         'La capture est en pause. Reprenez-la ci-dessous pour enregistrer de nouvelles entrées.',
@@ -171,6 +175,7 @@ export const fr: Messages = {
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
+    fullHistorySearch: 'Recherche dans tout l’historique',
     combinedCopyHint: 'La copie combinée est enregistrée comme nouvel élément',
     clearSelection: 'Effacer la sélection',
     selectionCleared: 'Sélection effacée',
