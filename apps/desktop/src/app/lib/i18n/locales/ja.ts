@@ -105,6 +105,7 @@ export const ja: Messages = {
       source: '送信元',
       size: 'サイズ',
       rank: 'ランク',
+      match: '一致',
     },
     additionalData: 'その他のクリップボードデータ',
     clipboardCategory: { image: '画像', text: 'テキスト', files: 'ファイル' },

@@ -1280,6 +1280,23 @@ describe('PreviewPane', () => {
     const foot = container.querySelector('.foot')?.textContent ?? '';
     expect(foot).toMatch(/Exact, Recent/);
     expect(foot).not.toMatch(/ExactMatch/);
+    // The strongest match reason rests outside Details, since compact result
+    // rows no longer carry their reason chip.
+    expect(
+      container.querySelector('.foot .primary [data-testid="preview-match"]')?.textContent,
+    ).toBe('Exact');
+  });
+
+  it('omits the match row for the recent listing', () => {
+    const { container } = render(PreviewPane, {
+      props: {
+        item: sampleItem({ rankReasons: ['Recent'] }),
+        preview: samplePreview(),
+        loading: false,
+        errorMessage: undefined,
+      },
+    });
+    expect(container.querySelector('[data-testid="preview-match"]')).toBeNull();
   });
 
   it('folds the technical fields into a Details disclosure, keeping source outside it', () => {

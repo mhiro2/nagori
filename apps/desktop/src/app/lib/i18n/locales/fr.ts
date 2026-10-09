@@ -109,6 +109,7 @@ export const fr: Messages = {
       source: 'source',
       size: 'taille',
       rank: 'rang',
+      match: 'correspondance',
     },
     additionalData: 'Autres données du presse-papiers',
     clipboardCategory: { image: 'Image', text: 'Texte', files: 'Fichiers' },

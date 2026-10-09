@@ -106,6 +106,7 @@ export const ko: Messages = {
       source: '출처',
       size: '크기',
       rank: '순위',
+      match: '일치',
     },
     additionalData: '추가 클립보드 데이터',
     clipboardCategory: { image: '이미지', text: '텍스트', files: '파일' },

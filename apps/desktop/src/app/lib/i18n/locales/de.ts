@@ -109,6 +109,7 @@ export const de: Messages = {
       source: 'Quelle',
       size: 'Größe',
       rank: 'Rang',
+      match: 'Treffer',
     },
     additionalData: 'Weitere Daten in der Zwischenablage',
     clipboardCategory: { image: 'Bild', text: 'Text', files: 'Dateien' },

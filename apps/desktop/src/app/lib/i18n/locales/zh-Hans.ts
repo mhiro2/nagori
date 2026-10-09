@@ -104,6 +104,7 @@ export const zhHans: Messages = {
       source: '来源',
       size: '大小',
       rank: '排名',
+      match: '匹配',
     },
     additionalData: '其他剪贴板数据',
     clipboardCategory: { image: '图像', text: '文本', files: '文件' },

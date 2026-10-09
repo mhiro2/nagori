@@ -634,3 +634,35 @@ describe('ResultItem', () => {
     expect(onContextMenu).toHaveBeenCalledWith(6, expect.any(MouseEvent));
   });
 });
+
+describe('ResultItem layout', () => {
+  const props = { index: 0, selected: false, onSelect: vi.fn(), onConfirm: vi.fn() };
+
+  it('leaves the source app and match reason to the preview pane in compact rows', async () => {
+    const item = sample({ sourceAppName: 'Safari', rankReasons: ['ExactMatch'] });
+    const { container, rerender } = render(ResultItem, { props: { ...props, item } });
+    expect(container.querySelector('.source')?.textContent).toBe('Safari');
+    expect(container.querySelector('.rank-chip')).toBeTruthy();
+
+    await rerender({ ...props, item, compact: true });
+    expect(container.querySelector('.source')).toBeNull();
+    expect(container.querySelector('.rank-chip')).toBeNull();
+    // The age stays on the row: it is how a recent copy is picked out.
+    expect(container.querySelector('.time')).toBeTruthy();
+  });
+
+  it('keeps the privacy marker on compact rows', () => {
+    const { container } = render(ResultItem, {
+      props: { ...props, item: sample({ sensitivity: 'Secret' }), compact: true },
+    });
+    expect(container.querySelector('.sens')?.textContent).toBe('Secret');
+  });
+
+  it('reserves the check-mark column only while a multi-selection exists', async () => {
+    const item = sample();
+    const { container, rerender } = render(ResultItem, { props: { ...props, item } });
+    expect(container.querySelector('.multi-mark')).toBeNull();
+    await rerender({ ...props, item, multiActive: true, marked: true });
+    expect(container.querySelector('.multi-mark')?.textContent).toBe('✓');
+  });
+});

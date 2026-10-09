@@ -63,6 +63,13 @@
     // and the rest recede. Visual only — `onSelect` still fires on hover; the
     // palette decides whether to honour it.
     locked?: boolean | undefined;
+    // The preview pane is showing, so the row keeps to the content plus the
+    // cues needed to pick an entry (privacy marker, age) and leaves the source
+    // app and match reason to the pane instead of shrinking the content.
+    compact?: boolean | undefined;
+    // Some row is multi-selected. Only then does the row reserve the leading
+    // check-mark column, so the content gets that width back otherwise.
+    multiActive?: boolean | undefined;
   };
 
   const {
@@ -76,6 +83,8 @@
     onTogglePin = () => {},
     onContextMenu = () => {},
     locked = false,
+    compact = false,
+    multiActive = false,
   }: Props = $props();
 
   const t = $derived(messages());
@@ -190,7 +199,9 @@
     onmouseenter={() => onSelect(index)}
     onclick={(event) => onConfirm(index, event)}
   >
-    <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
+    {#if multiActive}
+      <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
+    {/if}
     <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
 
     {#if url}
@@ -235,13 +246,15 @@
     {/if}
 
     <span class="meta">
-      {#if rankChip}<span class="rank-chip" data-reason={rankReason} title={t.preview.fields.rank}
-          >{rankChip}</span
+      {#if rankChip && !compact}<span
+          class="rank-chip"
+          data-reason={rankReason}
+          title={t.preview.fields.rank}>{rankChip}</span
         >{/if}
       {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
         <span class="sens">{item.sensitivity}</span>
       {/if}
-      {#if item.sourceAppName}<span class="source">{item.sourceAppName}</span>{/if}
+      {#if item.sourceAppName && !compact}<span class="source">{item.sourceAppName}</span>{/if}
       <span class="time">{timeLabel}</span>
     </span>
   </button>

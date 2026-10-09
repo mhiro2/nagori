@@ -1791,7 +1791,16 @@ not duplicate runtime logic.
   *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*) for query-driven
   rows; recent-listing rows stay chip-free since their only reason is
   recency. Semantic / fuzzy hits get a distinct hue so they read as a
-  deliberate match type rather than a weaker one. The row's preview text
+  deliberate match type rather than a weaker one. Rows stay one line and
+  give the width to the content: while the preview pane is showing they are
+  *compact*, keeping only the privacy marker and the age in the trailing
+  metadata, and the source app and match reason rest in the pane's footer
+  instead (both return to the row when the pane is turned off). The leading
+  check-mark column is reserved only while a multi-selection exists. A
+  selected row that grows to two lines was considered and rejected: the rows
+  below would shift under a stationary pointer (and hover selects), the list
+  height is sized from a fixed per-row height, and the pane already shows
+  the extra detail for the highlighted row. The row's preview text
   is run through the shared `lib/highlightQuery` helper — a
   case-insensitive raw-substring scan (one pass per whitespace term,
   overlapping ranges merged) — so exact / substring / CJK hits are marked

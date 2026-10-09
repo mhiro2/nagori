@@ -35,6 +35,8 @@
     onLoadMore?: () => void;
     // DOM id of the listbox, referenced by the search combobox.
     listboxId?: string;
+    // Forwarded to every row: see `ResultItem`'s `compact`.
+    compact?: boolean;
   };
 
   const {
@@ -53,6 +55,7 @@
     paged = false,
     onLoadMore,
     listboxId,
+    compact = false,
   }: Props = $props();
 
   const t = $derived(messages());
@@ -135,6 +138,8 @@
           {index}
           selected={index === selectedIndex}
           marked={multiSelected?.has(item.id) ?? false}
+          multiActive={(multiSelected?.size ?? 0) > 0}
+          {compact}
           query={appliedQuery}
           {locked}
           {onSelect}

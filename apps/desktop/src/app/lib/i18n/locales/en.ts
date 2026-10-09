@@ -135,6 +135,8 @@ export type Messages = {
       source: string;
       size: string;
       rank: string;
+      // Strongest match reason, shown in the resting footer for search hits.
+      match: string;
     };
     // Label + coarse value categories for the "extra formats this clip kept
     // beyond its primary kind" row in the resting footer (e.g. "Additional
@@ -773,6 +775,7 @@ export const en: Messages = {
       source: 'source',
       size: 'size',
       rank: 'rank',
+      match: 'match',
     },
     additionalData: 'Additional clipboard data',
     clipboardCategory: { image: 'Image', text: 'Text', files: 'Files' },

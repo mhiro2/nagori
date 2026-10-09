@@ -3,7 +3,7 @@
   import { messages } from '../lib/i18n/index.svelte';
   import { isImeComposing, yieldsToControlActivation } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
-  import { rankReasonLabels } from '../lib/rankReason';
+  import { primaryRankReason, rankReasonLabel, rankReasonLabels } from '../lib/rankReason';
   import { additionalClipboardCategories, hasAccompanyingImage } from '../lib/representations';
   import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
   import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -87,6 +87,14 @@
   const rankLabel = $derived(
     item ? rankReasonLabels(item.rankReasons, t.rankReason).join(', ') : '',
   );
+
+  // Strongest match reason for a search hit (undefined for the recent
+  // listing). Result rows drop their reason chip while this pane is showing,
+  // so it rests here next to the source app.
+  const matchLabel = $derived.by((): string | undefined => {
+    const reason = item ? primaryRankReason(item.rankReasons) : undefined;
+    return reason !== undefined ? rankReasonLabel(reason, t.rankReason) : undefined;
+  });
 
   // Host platform for the expanded image's keyboard zoom chord (Cmd on macOS,
   // Ctrl elsewhere); pinch / Ctrl-wheel / double-click need no platform input.
@@ -364,10 +372,11 @@
           {t.preview.url.openHint}
         </p>
       {/if}
-      {#if item.sourceAppName || additionalData.length > 0}
+      {#if item.sourceAppName || matchLabel || additionalData.length > 0}
         <!-- Resting provenance worth surfacing without opening Details: the
-             source app, and (when the clip kept more than its primary kind) the
-             extra-format categories. The latter is informational — it reports
+             source app, the strongest match reason for a search hit, and (when
+             the clip kept more than its primary kind) the extra-format
+             categories. The latter is informational — it reports
              what the clip carried, not that a paste-format picker will open (the
              ⇧⌘⏎ picker appears only for ≥2 pasteable formats). Raw diagnostics
              still fold away below. -->
@@ -375,6 +384,10 @@
           {#if item.sourceAppName}
             <dt>{t.preview.fields.source}</dt>
             <dd>{item.sourceAppName}</dd>
+          {/if}
+          {#if matchLabel}
+            <dt>{t.preview.fields.match}</dt>
+            <dd data-testid="preview-match">{matchLabel}</dd>
           {/if}
           {#if additionalData.length > 0}
             <dt>{t.preview.additionalData}</dt>

@@ -607,6 +607,7 @@
           paged={resultsPaged()}
           onLoadMore={() => void loadMoreResults()}
           listboxId={RESULT_LISTBOX_ID}
+          compact={showPreviewPane}
         />
       {/if}
     {/if}
