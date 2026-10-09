@@ -44,6 +44,7 @@ fn main() {
             "paste_entry",
             "open_palette",
             "close_palette",
+            "fit_palette_height",
             "paste_entry_from_palette",
             "paste_entry_representation_from_palette",
             "list_paste_options",

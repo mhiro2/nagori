@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fit-palette-height"
+description = "Enables the fit_palette_height command without any pre-configured scope."
+commands.allow = ["fit_palette_height"]
+
+[[permission]]
+identifier = "deny-fit-palette-height"
+description = "Denies the fit_palette_height command without any pre-configured scope."
+commands.deny = ["fit_palette_height"]

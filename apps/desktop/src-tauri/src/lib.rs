@@ -249,6 +249,7 @@ pub fn run() {
             commands::paste_commands::paste_entry,
             commands::window_commands::open_palette,
             commands::window_commands::close_palette,
+            commands::window_commands::fit_palette_height,
             commands::paste_commands::paste_entry_from_palette,
             commands::paste_commands::paste_entry_representation_from_palette,
             commands::paste_commands::list_paste_options,

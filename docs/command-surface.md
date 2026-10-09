@@ -108,6 +108,7 @@ Shows, hides, or focuses a window. No data effect.
 | --- | --- | --- |
 | `open_palette` | internal | Snapshot the frontmost app, show/focus the palette. |
 | `close_palette` | palette | Hide the palette, clear the frontmost snapshot. |
+| `fit_palette_height` | palette | Size the palette to the height its content asks for at the configured number of visible rows, clamped to the monitor's work area, and re-centre it. |
 | `toggle_palette` | internal | Toggle palette visibility (hotkey / tray). |
 | `hide_palette` | palette | Hide the palette, clear the frontmost snapshot. |
 | `open_settings` | palette | Show the settings window on a route. |

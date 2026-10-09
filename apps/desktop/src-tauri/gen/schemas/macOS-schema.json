@@ -261,6 +261,12 @@
           "markdownDescription": "Enables the delete_entry command without any pre-configured scope."
         },
         {
+          "description": "Enables the fit_palette_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-fit-palette-height",
+          "markdownDescription": "Enables the fit_palette_height command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_ai_availability command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-ai-availability",
@@ -565,6 +571,12 @@
           "type": "string",
           "const": "deny-delete-entry",
           "markdownDescription": "Denies the delete_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fit_palette_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-fit-palette-height",
+          "markdownDescription": "Denies the fit_palette_height command without any pre-configured scope."
         },
         {
           "description": "Denies the get_ai_availability command without any pre-configured scope.",
