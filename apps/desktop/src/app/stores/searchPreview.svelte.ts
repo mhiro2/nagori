@@ -61,10 +61,13 @@ const clearLoadingDelay = (): void => {
 export const hydratePreview = async (
   entryId: string | undefined,
   query?: string,
+  // Fetch even when this entry + query already settled (an explicit retry).
+  { force = false }: { force?: boolean } = {},
 ): Promise<void> => {
   const sameEntry = previewState.entryId === entryId;
   const sameQuery = previewState.query === query;
   if (
+    !force &&
     sameEntry &&
     sameQuery &&
     (previewState.preview || previewState.loading || previewState.errorMessage)
@@ -135,7 +138,9 @@ export const hydratePreview = async (
 export const retryPreview = async (): Promise<void> => {
   if (previewState.errorMessage === undefined || previewState.loading) return;
   previewState.errorMessage = undefined;
-  await hydratePreview(previewState.entryId, previewState.query);
+  // A failed query-only refetch leaves the previous body on screen, which the
+  // same-entry + same-query guard would treat as settled; force past it.
+  await hydratePreview(previewState.entryId, previewState.query, { force: true });
 };
 
 /// Replace the current standard-cap preview with the expanded 1 MiB body.

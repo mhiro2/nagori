@@ -157,4 +157,19 @@ describe('retryPreview', () => {
     expect(previewState.errorMessage).toBeUndefined();
     expect(previewState.preview?.id).toBe('retry-1');
   });
+
+  it('retries a failed query-only refetch even though the old body is still shown', async () => {
+    vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('retry-2'));
+    await hydratePreview('retry-2', 'a');
+    vi.mocked(getEntryPreview).mockRejectedValueOnce(new Error('busy'));
+    await hydratePreview('retry-2', 'ab');
+    expect(previewState.preview?.id).toBe('retry-2');
+    expect(previewState.errorMessage).toBeDefined();
+    vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('retry-2'));
+    const calls = vi.mocked(getEntryPreview).mock.calls.length;
+    await retryPreview();
+    expect(vi.mocked(getEntryPreview).mock.calls.length).toBe(calls + 1);
+    expect(vi.mocked(getEntryPreview)).toHaveBeenLastCalledWith('retry-2', 'ab');
+    expect(previewState.errorMessage).toBeUndefined();
+  });
 });
