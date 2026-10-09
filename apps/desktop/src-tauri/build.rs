@@ -48,6 +48,8 @@ fn main() {
             "paste_entry_representation_from_palette",
             "list_paste_options",
             "copy_entry_from_palette",
+            "copy_text_from_palette",
+            "paste_text_from_palette",
             "get_entry_preview",
             "get_entry_preview_full",
             "preview_entry",

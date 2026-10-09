@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-paste-text-from-palette"
+description = "Enables the paste_text_from_palette command without any pre-configured scope."
+commands.allow = ["paste_text_from_palette"]
+
+[[permission]]
+identifier = "deny-paste-text-from-palette"
+description = "Denies the paste_text_from_palette command without any pre-configured scope."
+commands.deny = ["paste_text_from_palette"]

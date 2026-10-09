@@ -227,10 +227,12 @@ pub(crate) fn paste_failure_reason(err: &AppError) -> PasteFailureReason {
 /// paste (Preserve copy-back of the publishable set, or plain text); the
 /// `Option` resolves to the user's `paste_format_default` when absent.
 /// `Representation` is the "paste as <format>" picker, publishing exactly the
-/// chosen MIME.
+/// chosen MIME. `Text` is a quick-action result: published as plain text and
+/// never stored, so it has no entry to record as the last paste.
 enum PaletteCopyTarget {
-    Format(Option<PasteFormat>),
-    Representation(String),
+    Format(EntryId, Option<PasteFormat>),
+    Representation(EntryId, String),
+    Text(String),
 }
 
 #[tauri::command]
@@ -244,8 +246,7 @@ pub async fn paste_entry_from_palette(
     run_palette_paste(
         &app,
         &state,
-        entry_id,
-        PaletteCopyTarget::Format(format.map(Into::into)),
+        PaletteCopyTarget::Format(entry_id, format.map(Into::into)),
     )
     .await
 }
@@ -265,10 +266,30 @@ pub async fn paste_entry_representation_from_palette(
     run_palette_paste(
         &app,
         &state,
-        entry_id,
-        PaletteCopyTarget::Representation(mime),
+        PaletteCopyTarget::Representation(entry_id, mime),
     )
     .await
+}
+
+/// Paste a quick-action result into the app the palette was opened from,
+/// through the same hide → restore-focus → auto-paste path as an entry. The
+/// result is not added to the history; keeping it stays the explicit
+/// "save" action.
+#[tauri::command]
+pub async fn paste_text_from_palette(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> CommandResult<()> {
+    run_palette_paste(&app, &state, PaletteCopyTarget::Text(text)).await
+}
+
+/// Copy a quick-action result to the clipboard without adding it to the
+/// history. The palette stays open so the result can still be saved.
+#[tauri::command]
+pub async fn copy_text_from_palette(state: State<'_, AppState>, text: String) -> CommandResult<()> {
+    state.runtime.copy_text(text).await?;
+    Ok(())
 }
 
 /// List the distinct representations the selected entry can be pasted as,
@@ -293,7 +314,6 @@ pub async fn list_paste_options(
 async fn run_palette_paste(
     app: &AppHandle,
     state: &AppState,
-    entry_id: EntryId,
     copy: PaletteCopyTarget,
 ) -> CommandResult<()> {
     let settings = match state.runtime.get_settings().await {
@@ -309,15 +329,18 @@ async fn run_palette_paste(
     // authorises the synthesis below to act on this clip — see
     // `nagori_daemon::ClipboardLease`.
     let mut lease = state.runtime.clipboard_lease().await;
-    let publish = match copy {
-        PaletteCopyTarget::Format(format) => {
+    let (publish, entry_id) = match copy {
+        PaletteCopyTarget::Format(entry_id, format) => (
             lease
                 .copy_entry_with_format(entry_id, format.unwrap_or(settings.paste_format_default))
-                .await?
-        }
-        PaletteCopyTarget::Representation(mime) => {
-            lease.copy_entry_representation(entry_id, &mime).await?
-        }
+                .await?,
+            Some(entry_id),
+        ),
+        PaletteCopyTarget::Representation(entry_id, mime) => (
+            lease.copy_entry_representation(entry_id, &mime).await?,
+            Some(entry_id),
+        ),
+        PaletteCopyTarget::Text(text) => (lease.publish_text(text).await?, None),
     };
     hide_main_palette(app)?;
 
@@ -411,7 +434,9 @@ async fn run_palette_paste(
         emit_paste_failed_with_reason(app, &message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
-    state.record_last_pasted(entry_id);
+    if let Some(entry_id) = entry_id {
+        state.record_last_pasted(entry_id);
+    }
     Ok(())
 }
 

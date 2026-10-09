@@ -67,6 +67,7 @@ Mutates local state — the clipboard, history rows, pins, or settings.
 | `set_capture_enabled` | palette | Persist the capture pause/resume toggle. |
 | `update_settings` | settings | Persist settings (compare-and-swap on the revision token). |
 | `save_ai_result` | palette | Promote a generated AI result to a new history entry. |
+| `copy_text_from_palette` | palette | Copy a quick-action / AI result as plain text **without** adding it to the history (the adapter's self-write tracking keeps the capture loop from recording it). |
 | `rebuild_semantic_index` | settings | Signal the worker to re-embed the corpus. |
 
 ## Destructive
@@ -90,6 +91,7 @@ prompt, the filesystem outside the database, or the network.
 | --- | --- | --- |
 | `paste_entry` | internal | Copy, then synthesize ⌘V into the foreground app. |
 | `paste_entry_from_palette` | palette | Copy the default or chosen output format, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
+| `paste_text_from_palette` | palette | Paste a quick-action / AI result through the same hide → restore-focus → auto-paste path as `paste_entry_from_palette`, without storing it. |
 | `paste_entry_representation_from_palette` | palette | Copy a chosen MIME type, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
 | `repaste_last` | internal | Re-synthesize the most recent paste. |
 | `open_url_external` | palette | Open a `Public` URL entry in the default browser (scheme allowlist + sensitivity gate). |
