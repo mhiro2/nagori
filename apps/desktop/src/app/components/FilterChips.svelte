@@ -18,6 +18,14 @@
   import { runQuery, searchState } from '../stores/searchQuery.svelte';
   import FilterDropdown from './FilterDropdown.svelte';
 
+  type Props = {
+    // A narrow palette folds the date presets into one dropdown so the row
+    // keeps to a single line, even with long translations.
+    compactDates?: boolean;
+  };
+
+  const { compactDates = false }: Props = $props();
+
   const t = $derived(messages());
 
   const datePresets: { key: DatePreset; label: () => string }[] = [
@@ -73,6 +81,26 @@
   });
   const appLabel = $derived(filterState.sourceApp ?? t.palette.filters.sourceShort);
 
+  // Sentinel for the compact date menu's leading "Any time" reset row.
+  const ANY_TIME = '__nagori_any_time__';
+  const dateLabel = $derived(
+    datePresets.find((preset) => preset.key === filterState.datePreset)?.label() ??
+      t.palette.filters.dateGroup,
+  );
+  const dateItems = $derived([
+    {
+      value: ANY_TIME,
+      label: t.palette.filters.anyTime,
+      selected: filterState.datePreset === 'none',
+      alwaysShown: true,
+    },
+    ...datePresets.map(({ key, label }) => ({
+      value: key,
+      label: label(),
+      selected: filterState.datePreset === key,
+    })),
+  ]);
+
   const typeItems = $derived(
     FILTERABLE_KINDS.map((kind) => ({
       value: kind,
@@ -117,6 +145,14 @@
     setDatePreset(key);
     await rerun();
   };
+  // The compact menu picks rather than toggles (radio semantics), so the
+  // active preset stays on when its row is chosen again.
+  const onDateMenu = async (value: string): Promise<void> => {
+    const next = value === ANY_TIME ? 'none' : (value as DatePreset);
+    if (next === filterState.datePreset) return;
+    setDatePreset(next === 'none' ? filterState.datePreset : next);
+    await rerun();
+  };
   const onKind = async (value: string): Promise<void> => {
     toggleKind(value as ContentKind);
     await rerun();
@@ -137,19 +173,30 @@
 </script>
 
 <div class="filter-chips" role="toolbar" aria-label={t.palette.filters.toolbarLabel}>
-  <div class="group" role="group" aria-label={t.palette.filters.dateGroup}>
-    {#each datePresets as { key, label } (key)}
-      <button
-        type="button"
-        class="chip"
-        class:active={filterState.datePreset === key}
-        aria-pressed={filterState.datePreset === key}
-        onclick={() => onDate(key)}
-      >
-        {label()}
-      </button>
-    {/each}
-  </div>
+  {#if compactDates}
+    <FilterDropdown
+      label={dateLabel}
+      active={filterState.datePreset !== 'none'}
+      menuLabel={t.palette.filters.dateGroup}
+      items={dateItems}
+      multi={false}
+      onSelect={onDateMenu}
+    />
+  {:else}
+    <div class="group" role="group" aria-label={t.palette.filters.dateGroup}>
+      {#each datePresets as { key, label } (key)}
+        <button
+          type="button"
+          class="chip"
+          class:active={filterState.datePreset === key}
+          aria-pressed={filterState.datePreset === key}
+          onclick={() => onDate(key)}
+        >
+          {label()}
+        </button>
+      {/each}
+    </div>
+  {/if}
 
   <button
     type="button"
@@ -219,6 +266,10 @@
   /* The "kept from last time" note sits just before the clear button, which it
      pushes to the far end of the row along with itself. */
   .retained {
+    /* Yields first when a long translation fills the row: it shrinks to an
+       ellipsis rather than pushing the chips out of the window. */
+    flex: 0 1 auto;
+    min-width: 0;
     margin-left: auto;
     overflow: hidden;
     color: var(--accent, #6c8dff);

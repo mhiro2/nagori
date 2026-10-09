@@ -1873,6 +1873,16 @@ not duplicate runtime logic.
   shows a selection bar with the count, an explicit *Copy combined* button and
   *Clear selection*, and the footer hints offer the multi-select toggle so the
   mode is discoverable by mouse.
+- Narrow layout (`Palette.svelte`, `FilterChips.svelte`). The window can be
+  as narrow as 480px while the side preview pane alone is 320px, so below a
+  measured palette width of 680px (`bind:clientWidth`) the list takes the
+  full width: the side preview steps aside (the expanded preview stays one
+  deliberate toggle away — the `open-preview` chord or the status-bar
+  *Preview* button) and the four date chips fold into one *Date* menu with an
+  *Any time* reset, which keeps the filter row on one line in the longer
+  translations (German / French date labels). The *Kept from last time* note
+  is the first thing to shrink when the row is full. An unmeasured width (0)
+  keeps the wide layout.
 - Reopen behaviour (`stores/paletteSession`, `Palette.svelte`). The palette
   window hides on blur, so a window `focus` means it was shown again, and how
   the previous showing ended decides what the new one does. One that ended

@@ -49,6 +49,7 @@ export const es: Messages = {
       yesterday: 'Ayer',
       last7days: 'Últimos 7 días',
       last30days: 'Últimos 30 días',
+      anyTime: 'Cualquier fecha',
       pinned: 'Fijados',
       kindText: 'Texto',
       kindUrl: 'URL',

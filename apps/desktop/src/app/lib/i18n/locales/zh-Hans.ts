@@ -45,6 +45,7 @@ export const zhHans: Messages = {
       yesterday: '昨天',
       last7days: '近 7 天',
       last30days: '近 30 天',
+      anyTime: '任何时间',
       pinned: '已置顶',
       kindText: '文本',
       kindUrl: 'URL',

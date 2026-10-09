@@ -50,6 +50,7 @@ export const de: Messages = {
       yesterday: 'Gestern',
       last7days: 'Letzte 7 Tage',
       last30days: 'Letzte 30 Tage',
+      anyTime: 'Beliebiger Zeitraum',
       pinned: 'Angeheftet',
       kindText: 'Text',
       kindUrl: 'URL',

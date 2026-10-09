@@ -47,6 +47,7 @@ export const ja: Messages = {
       yesterday: '昨日',
       last7days: '過去7日',
       last30days: '過去30日',
+      anyTime: 'すべての期間',
       pinned: 'ピン留め',
       kindText: 'テキスト',
       kindUrl: 'URL',

@@ -49,6 +49,7 @@ export const fr: Messages = {
       yesterday: 'Hier',
       last7days: '7 derniers jours',
       last30days: '30 derniers jours',
+      anyTime: 'Toute période',
       pinned: 'Épinglés',
       kindText: 'Texte',
       kindUrl: 'URL',

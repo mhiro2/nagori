@@ -156,6 +156,7 @@ import {
 import { settingsState } from '../stores/settings.svelte';
 import { showSettings } from '../stores/view.svelte';
 import { sampleEntryPreview, sampleSearchResult } from '../test-helpers/fixtures';
+import { resizeElement } from '../test-helpers/resize';
 import Palette from './Palette.svelte';
 
 const dispatch = (init: KeyboardEventInit): KeyboardEvent => {
@@ -448,6 +449,24 @@ describe('Palette', () => {
     expect(runQuery).toHaveBeenCalledWith('');
     expect(queryByTestId('filters-retained')).toBeNull();
     expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it('gives a narrow palette to the list and folds the date presets into a menu', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { container, getByRole, queryByRole } = render(Palette);
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
+    expect(getByRole('button', { name: 'Today' })).toBeTruthy();
+
+    resizeElement(container.querySelector('.palette') as HTMLElement, 480);
+    await tick();
+    // The side preview steps aside; the expanded preview stays a toggle away.
+    expect(container.querySelector('.preview-pane')).toBeNull();
+    expect(queryByRole('button', { name: 'Today' })).toBeNull();
+    expect(getByRole('button', { name: 'Date' })).toBeTruthy();
+    await fireEvent.click(getByRole('button', { name: 'Toggle expanded preview' }));
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
   });
 
   it('refreshes the active query when capture stores a new entry', () => {

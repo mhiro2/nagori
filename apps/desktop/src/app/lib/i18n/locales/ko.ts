@@ -48,6 +48,7 @@ export const ko: Messages = {
       yesterday: '어제',
       last7days: '최근 7일',
       last30days: '최근 30일',
+      anyTime: '전체 기간',
       pinned: '고정됨',
       kindText: '텍스트',
       kindUrl: 'URL',

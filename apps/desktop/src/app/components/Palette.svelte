@@ -395,7 +395,16 @@
     openActions();
   };
 
-  const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
+  // Below this palette width the side-by-side preview would squeeze the list
+  // to a sliver (the pane alone is 320px and the window can be 480px), so the
+  // list takes the full width and the preview is reached through the
+  // deliberate expanded-preview toggle instead. The filter row collapses its
+  // date presets at the same point. `0` means "not measured yet" (and jsdom),
+  // which keeps the wide layout.
+  const NARROW_PALETTE_WIDTH = 680;
+  let paletteWidth = $state(0);
+  const narrow = $derived(paletteWidth > 0 && paletteWidth < NARROW_PALETTE_WIDTH);
+  const showPreviewPane = $derived((settingsState.settings?.showPreviewPane ?? true) && !narrow);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
   // wire format from AppSettings) bind to the right physical modifier — Cmd on
@@ -618,7 +627,12 @@
   });
 </script>
 
-<section class="palette" style="--palette-row-count: {paletteRowCount}">
+<section
+  class="palette"
+  class:narrow
+  style="--palette-row-count: {paletteRowCount}"
+  bind:clientWidth={paletteWidth}
+>
   <SearchBox
     bind:this={searchBox}
     value={searchState.query}
@@ -626,7 +640,7 @@
     listboxId={RESULT_LISTBOX_ID}
     {activeDescendantId}
   />
-  <FilterChips />
+  <FilterChips compactDates={narrow} />
   <div
     class="body"
     class:single-column={!showPreviewPane && !previewExpanded && !actionsOpen}

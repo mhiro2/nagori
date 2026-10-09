@@ -45,6 +45,7 @@ export const zhHant: Messages = {
       yesterday: '昨天',
       last7days: '近 7 天',
       last30days: '近 30 天',
+      anyTime: '任何時間',
       pinned: '已釘選',
       kindText: '文字',
       kindUrl: 'URL',

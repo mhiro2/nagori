@@ -58,6 +58,8 @@ export type Messages = {
       yesterday: string;
       last7days: string;
       last30days: string;
+      // Reset row of the date menu a narrow palette shows instead of chips.
+      anyTime: string;
       pinned: string;
       // Content-kind chips (multi-select). Each chip maps to exactly one
       // `ContentKind`; `richText` / `unknown` are intentionally not surfaced.
@@ -769,6 +771,7 @@ export const en: Messages = {
       yesterday: 'Yesterday',
       last7days: 'Last 7 days',
       last30days: 'Last 30 days',
+      anyTime: 'Any time',
       pinned: 'Pinned',
       kindText: 'Text',
       kindUrl: 'URL',
