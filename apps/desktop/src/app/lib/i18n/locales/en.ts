@@ -70,6 +70,9 @@ export type Messages = {
       // Leading "no app filter" option in the source-app dropdown, so a
       // single-select source app can be cleared without an obscure re-click.
       allApps: string;
+      // Search field atop a long source-app menu, and its empty result.
+      searchApps: string;
+      noAppMatches: string;
       // Clears every active filter (shown only when some filter is active).
       clear: string;
     };
@@ -725,6 +728,8 @@ export const en: Messages = {
       sourceGroup: 'Source app',
       sourceShort: 'App',
       allApps: 'All apps',
+      searchApps: 'Search apps',
+      noAppMatches: 'No matching apps',
       clear: 'Clear filters',
     },
     clearHistory: {

@@ -1739,11 +1739,14 @@ not duplicate runtime logic.
   toggle — while the high-cardinality axes collapse into `FilterDropdown`
   menus so the row never wraps: multi-select content kinds (*Text* / *URL* /
   *Code* / *Image* / *Files*, each mapping to one `ContentKind`) and a
-  single-select source app. The source-app options are retained from the last
-  search that was *not* itself source-app-filtered (`recordSourceApps`, capped)
-  rather than read from the live results — otherwise selecting an app would
-  collapse the results, and the menu, to that one app and hide the others; this
-  way the open menu keeps offering every app to switch to. A leading *All apps*
+  single-select source app. The source-app options come from the
+  `list_source_apps` command — every distinct source app in the live
+  (non-blocked) history, most recently seen first, grouped over the partial
+  `idx_entries_source_app_name_live` index — rather than from the result page,
+  which only holds the rows that matched and collapses to the active app once
+  the filter applies. The list loads when the palette mounts and refreshes
+  each time the menu opens; the active app and any app on screen that the last
+  fetch predates are folded in. A leading *All apps*
   row clears the selection, so the single-select axis has a discoverable reset
   instead of an obscure re-click. Each dropdown folds its selection into the
   trigger label (none → axis name, one → that value, many → `<axis> <n>`,
@@ -1759,7 +1762,13 @@ not duplicate runtime logic.
   those keydowns from bubbling — the palette routes arrows / Enter / Escape at
   the window level, so an un-stopped menu keystroke would otherwise move the
   result selection or dismiss the palette (mirrors `ActionInspector`). Escape
-  closes only the menu; a click outside dismisses it.
+  closes only the menu; a click outside dismisses it. A menu longer than eight rows
+  opens with a search field focused (the source-app menu): typing narrows the
+  rows by a case-insensitive substring, rows marked `alwaysShown` (the *All
+  apps* reset) stay listed, ↓ / ↑ move between the field and the rows, and
+  Enter in the field picks the first match. The field stops every keydown so
+  typed characters never reach the palette's window-level shortcuts, and an
+  Enter that commits an IME candidate picks nothing.
 - `StatusBar.svelte` — entry count, last-search elapsed time, capture toggle,
   diagnostic notices, and a separate persistent action row. Shortcut hints use
   the same effective `buildBindings` result as the palette matcher, including

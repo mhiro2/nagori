@@ -56,6 +56,8 @@ export const fr: Messages = {
       sourceGroup: 'Application source',
       sourceShort: 'App',
       allApps: 'Toutes les apps',
+      searchApps: 'Rechercher des apps',
+      noAppMatches: 'Aucune app correspondante',
       clear: 'Effacer les filtres',
     },
     clearHistory: {

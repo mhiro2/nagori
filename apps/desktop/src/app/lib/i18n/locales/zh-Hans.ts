@@ -53,6 +53,8 @@ export const zhHans: Messages = {
       sourceGroup: '来源应用',
       sourceShort: '应用',
       allApps: '所有应用',
+      searchApps: '搜索应用',
+      noAppMatches: '没有匹配的应用',
       clear: '清除筛选',
     },
     clearHistory: {

@@ -1,11 +1,15 @@
 <script lang="ts">
   import { tick } from 'svelte';
 
+  import { isImeComposing } from '../lib/keybindings';
+
   type DropdownItem = {
     value: string;
     // Already-localized text shown in the menu row.
     label: string;
     selected: boolean;
+    // Stays listed while a search narrows the menu (e.g. the "All apps" reset).
+    alwaysShown?: boolean;
   };
 
   type Props = {
@@ -21,9 +25,40 @@
     // radio semantics (selecting commits and closes).
     multi: boolean;
     onSelect: (value: string) => void;
+    // Called each time the menu opens, so the parent can refresh its options.
+    onOpen?: () => void;
+    // Placeholder (and accessible name) of a search field shown at the top of
+    // a long menu. Omit to never offer one.
+    searchLabel?: string;
+    // Shown in place of the rows when the search matches nothing.
+    noMatchesLabel?: string;
   };
 
-  const { label, active, menuLabel, items, multi, onSelect }: Props = $props();
+  const {
+    label,
+    active,
+    menuLabel,
+    items,
+    multi,
+    onSelect,
+    onOpen,
+    searchLabel,
+    noMatchesLabel,
+  }: Props = $props();
+
+  // A short menu is scanned faster than it is searched; the field only appears
+  // once the list grows past what fits without scrolling.
+  const SEARCH_THRESHOLD = 8;
+  const searchable = $derived(searchLabel !== undefined && items.length > SEARCH_THRESHOLD);
+  let filterText = $state('');
+  let searchEl: HTMLInputElement | undefined = $state();
+  const visibleItems = $derived.by(() => {
+    const needle = filterText.trim().toLocaleLowerCase();
+    if (!searchable || needle === '') return items;
+    return items.filter(
+      (item) => item.alwaysShown === true || item.label.toLocaleLowerCase().includes(needle),
+    );
+  });
 
   // The visible trigger label folds in the current selection (e.g. "URL",
   // "Type 2"), so the accessible name must too — a bare `menuLabel` would let
@@ -51,8 +86,14 @@
 
   const openMenu = async (): Promise<void> => {
     if (items.length === 0) return;
+    onOpen?.();
+    filterText = '';
     open = true;
     await tick();
+    if (searchable) {
+      searchEl?.focus();
+      return;
+    }
     // Land on the current choice when re-opening so the highlighted row
     // reflects state; otherwise start at the top.
     const selectedIdx = items.findIndex((it) => it.selected);
@@ -103,7 +144,9 @@
       case 'ArrowUp':
         event.preventDefault();
         event.stopPropagation();
-        focusItem(current - 1);
+        // From the first row, ↑ returns to the search field when there is one.
+        if (current === 0 && searchEl) searchEl.focus();
+        else focusItem(current - 1);
         break;
       case 'Home':
         event.preventDefault();
@@ -128,6 +171,25 @@
         event.stopPropagation();
         closeMenu(false);
         break;
+    }
+  };
+
+  // The search field keeps its own editing keys (Home / End move the caret,
+  // letters type) and hands the list over with ↓. Every keydown is stopped
+  // here: typed characters must not reach the palette's window-level
+  // shortcuts, and Enter while an IME is composing commits the candidate
+  // rather than picking a row.
+  const onSearchKeydown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape' || event.key === 'Tab') return;
+    event.stopPropagation();
+    if (isImeComposing(event)) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      focusItem(0);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const first = visibleItems.find((item) => item.alwaysShown !== true) ?? visibleItems[0];
+      if (first) activate(first.value);
     }
   };
 
@@ -178,7 +240,20 @@
       tabindex="-1"
       onkeydown={onPanelKeydown}
     >
-      {#each items as item (item.value)}
+      {#if searchable}
+        <input
+          bind:this={searchEl}
+          bind:value={filterText}
+          class="search"
+          type="search"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder={searchLabel}
+          aria-label={searchLabel}
+          onkeydown={onSearchKeydown}
+        />
+      {/if}
+      {#each visibleItems as item (item.value)}
         <button
           type="button"
           class="item"
@@ -202,6 +277,9 @@
           <span class="item-label">{item.label}</span>
         </button>
       {/each}
+      {#if searchable && visibleItems.every((item) => item.alwaysShown === true)}
+        <p class="no-matches" role="status">{noMatchesLabel}</p>
+      {/if}
     </div>
   {/if}
 </div>
@@ -287,6 +365,26 @@
     border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.24));
     border-radius: 0.5rem;
     box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.35);
+  }
+  .search {
+    margin: 0 0 0.2rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--fg, #f5f5f5);
+    font: inherit;
+    font-size: 0.8rem;
+  }
+  .search:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: -2px;
+  }
+  .no-matches {
+    margin: 0;
+    padding: 0.32rem 0.5rem;
+    color: var(--muted, rgba(255, 255, 255, 0.55));
+    font-size: 0.8rem;
   }
   .item {
     display: flex;

@@ -54,6 +54,8 @@ export const ja: Messages = {
       sourceGroup: 'コピー元アプリ',
       sourceShort: 'アプリ',
       allApps: 'すべてのアプリ',
+      searchApps: 'アプリを検索',
+      noAppMatches: '一致するアプリはありません',
       clear: 'フィルタをクリア',
     },
     clearHistory: {

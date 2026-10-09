@@ -53,6 +53,8 @@ export const zhHant: Messages = {
       sourceGroup: '來源應用程式',
       sourceShort: '應用程式',
       allApps: '所有應用程式',
+      searchApps: '搜尋 App',
+      noAppMatches: '沒有符合的 App',
       clear: '清除篩選',
     },
     clearHistory: {

@@ -33,7 +33,11 @@
     togglePinAt,
     togglePinSelection,
   } from '../stores/searchActions';
-  import { clearFilters, hasActiveFilters } from '../stores/searchFilters.svelte';
+  import {
+    clearFilters,
+    hasActiveFilters,
+    refreshSourceApps,
+  } from '../stores/searchFilters.svelte';
   import {
     clearMultiSelect,
     multiSelectState,
@@ -93,7 +97,12 @@
     // own `runQuery(searchState.query)` is concurrently issuing. Running it
     // once at mount keeps filter changes the sole responsibility of the chip
     // handler.
-    void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);
+    void Promise.all([
+      refreshRecent(),
+      refreshSettings(),
+      refreshCapabilities(),
+      refreshSourceApps(),
+    ]);
 
     const offClipboardChanged = subscribe<{ entryId: string }>(
       TAURI_EVENTS.clipboardChanged,

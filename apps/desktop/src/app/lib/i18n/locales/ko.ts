@@ -55,6 +55,8 @@ export const ko: Messages = {
       sourceGroup: '출처 앱',
       sourceShort: '앱',
       allApps: '모든 앱',
+      searchApps: '앱 검색',
+      noAppMatches: '일치하는 앱 없음',
       clear: '필터 지우기',
     },
     clearHistory: {

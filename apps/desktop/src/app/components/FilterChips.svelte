@@ -7,7 +7,7 @@
     FILTERABLE_KINDS,
     filterState,
     hasActiveFilters,
-    MAX_SOURCE_OPTIONS,
+    refreshSourceApps,
     setDatePreset,
     setSourceApp,
     sourceAppOptions,
@@ -43,17 +43,14 @@
     }
   };
 
-  // Source-app options for the dropdown, unioned in priority order so the menu
-  // keeps offering every app to switch to even once a source filter narrows the
-  // live results to a single app: the active selection first (so it survives
-  // the cap), then the retained set from the last unfiltered search (see
-  // `recordSourceApps`), then anything new in the current results. Deduped and
-  // capped.
+  // Source-app options for the dropdown: the backend's whole-history list
+  // (`refreshSourceApps`), led by the active selection and followed by any app
+  // on screen that the last fetch predates. Deduped; the backend caps the list.
   const sourceApps = $derived.by((): string[] => {
     const seen = new Set<string>();
     const apps: string[] = [];
     const push = (name: string | undefined): void => {
-      if (name === undefined || seen.has(name) || apps.length >= MAX_SOURCE_OPTIONS) return;
+      if (name === undefined || seen.has(name)) return;
       seen.add(name);
       apps.push(name);
     };
@@ -96,6 +93,7 @@
             value: ALL_APPS,
             label: t.palette.filters.allApps,
             selected: filterState.sourceApp === undefined,
+            alwaysShown: true,
           },
           ...sourceApps.map((app) => ({
             value: app,
@@ -175,6 +173,9 @@
       items={appItems}
       multi={false}
       onSelect={onSource}
+      onOpen={() => void refreshSourceApps()}
+      searchLabel={t.palette.filters.searchApps}
+      noMatchesLabel={t.palette.filters.noAppMatches}
     />
   </div>
 
