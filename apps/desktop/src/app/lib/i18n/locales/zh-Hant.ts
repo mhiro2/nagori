@@ -216,6 +216,10 @@ export const zhHant: Messages = {
     aiBadge: 'AI',
     aiCancel: '取消',
     aiUnavailable: '目前無法使用 AI 操作。',
+    aiChecking: '正在檢查 AI 動作是否可用…',
+    aiDisabled: 'AI 動作已在設定中關閉。',
+    aiPreparing: '裝置端模型仍在準備中，請稍後再試。',
+    aiLanguageUnsupported: 'AI 動作尚不支援此語言。',
     notApplicable: {
       image: '操作不適用於圖片。',
       fileList: '操作不適用於檔案。',

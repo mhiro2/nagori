@@ -783,6 +783,57 @@ describe('ActionInspector', () => {
     expect(getByTestId('action-result').textContent).toBe('result body');
   });
 
+  it('explains AI turned off in Settings when the backend gives no remediation', async () => {
+    const off = availability(false);
+    for (const entry of off.actions) delete entry.remediation;
+    vi.mocked(getAiAvailability).mockResolvedValue(off);
+    const { findByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    expect((await findByTestId('actions-ai-reason')).textContent).toBe(
+      'AI actions are turned off in Settings.',
+    );
+  });
+
+  it('says the AI actions are being checked until the probe answers', async () => {
+    let answer: ((value: AiAvailability) => void) | undefined;
+    vi.mocked(getAiAvailability).mockReturnValue(
+      new Promise<AiAvailability>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const { getByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await flush();
+    expect(getByTestId('ai-Summarize').getAttribute('title')).toBe(
+      'Checking whether AI actions are available…',
+    );
+    answer?.(availability(true));
+    await flush();
+    expect((getByTestId('ai-Summarize') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('lists the actions that apply to the target first', () => {
+    const { getAllByRole } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'url' }), onClose: () => {} },
+    });
+    const actions = getAllByRole('button').filter((b) => b.dataset.testid?.match(/^(quick|ai)-/));
+    // Only Redact secrets runs on a bare URL, so it leads the list.
+    expect(actions[0]?.dataset.testid).toBe('quick-RedactSecrets');
+    expect(actions.slice(1).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  it('says up front when no action applies to the target', () => {
+    const { getByTestId, queryByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'image' }), onClose: () => {} },
+    });
+    expect(getByTestId('actions-none-applicable').textContent).toBe(
+      "Actions don't apply to images.",
+    );
+    expect(queryByTestId('actions-ai-reason')).toBeNull();
+  });
+
   it('does not let an old save completion unlock a save for a newer result', async () => {
     const user = userEvent.setup();
     let resolveOldSave: ((value: EntryDto) => void) | undefined;

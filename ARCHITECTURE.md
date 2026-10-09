@@ -1999,8 +1999,16 @@ not duplicate runtime logic.
   result land in that one area, so the output never jumps position on
   completion; the AI actions stream over the `nagori://ai/*` events, and a
   fast deterministic run skips the running indicator (shown only once it
-  outlives ~120 ms). Each AI button is disabled with a remediation tooltip
-  when its action is unavailable. The panel is a focusable non-modal
+  outlives ~120 ms). Actions that can run on the target come first and the
+  rest follow, still listed with their reason; while the availability probe
+  is in flight the AI buttons read *checking* and keep their place, so the
+  grid does not reshuffle when it answers. Each AI button is disabled with a
+  reason when its action is unavailable: the backend's remediation hint
+  when there is one, otherwise one derived from the per-action status (off
+  in Settings, the on-device model still getting ready, an unsupported
+  language, or generally unavailable). When nothing in the list applies to
+  the target's content kind (an image or a file list), a visible note says
+  so instead of leaving it to per-button tooltips. The panel is a focusable non-modal
   `role="dialog"` that stops keydowns from leaking into the palette's
   window handler while focused. Escape cancels an in-flight stream and
   otherwise closes the panel; pressing the `open-actions` chord again

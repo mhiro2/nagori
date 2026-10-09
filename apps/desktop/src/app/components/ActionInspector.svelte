@@ -93,6 +93,9 @@
   // Streaming AI state. `aiRequestId` scopes the `nagori://ai/*` events we
   // accept; `aiText` is the request-local display buffer.
   let availability = $state<AiAvailability | undefined>(undefined);
+  // True while the availability probe for this open is in flight, so the AI
+  // buttons read "checking" rather than "unavailable" until it answers.
+  let availabilityLoading = $state(false);
   let aiRequestId = $state<string | undefined>(undefined);
   let aiText = $state('');
   let aiStreaming = $state(false);
@@ -167,11 +170,26 @@
 
   // The localized "why is this disabled" hint for one action: its remediation
   // key, or a generic fallback. `undefined` when the action is available.
+  // A backend remediation hint wins; otherwise the per-action status says
+  // whether AI is turned off, still getting ready, or not usable here.
   const reasonFor = (entry: AiAvailability['actions'][number] | undefined): string | undefined => {
     if (entry?.available) return undefined;
-    return entry?.remediation
-      ? (t.actionMenu.aiRemediation[entry.remediation] ?? t.actionMenu.aiUnavailable)
-      : t.actionMenu.aiUnavailable;
+    if (entry === undefined && availabilityLoading) return t.actionMenu.aiChecking;
+    const remediation = entry?.remediation
+      ? t.actionMenu.aiRemediation[entry.remediation]
+      : undefined;
+    if (remediation !== undefined) return remediation;
+    switch (entry?.status) {
+      case 'disabled_by_settings':
+      case 'not_configured':
+        return t.actionMenu.aiDisabled;
+      case 'asset_missing':
+        return t.actionMenu.aiPreparing;
+      case 'language_unsupported':
+        return t.actionMenu.aiLanguageUnsupported;
+      default:
+        return t.actionMenu.aiUnavailable;
+    }
   };
 
   // Actions operate on an entry's text representation, so a content kind with
@@ -181,6 +199,8 @@
   // the text transforms would mangle — the lone exception is `RedactSecrets`,
   // which is exactly what you want on a URL holding a token. The daemon also
   // refuses text-less content, so this is UX, not the safety boundary.
+  const actionIdOf = (key: string): string => key.replace(/^(quick|ai)-/, '');
+
   const actionAppliesToKind = (kind: ContentKind, id: string): boolean => {
     switch (kind) {
       case 'image':
@@ -398,9 +418,11 @@
     }
   };
 
-  // One flat list of buttons: deterministic actions first, then AI actions
-  // (each badged). The user scans by intent, not by section.
-  const pickerItems = $derived([
+  // One flat list of buttons (AI ones badged), so the user scans by intent,
+  // not by section. Actions that can run on the target come first; the ones
+  // that cannot — wrong content kind, AI off or unavailable — follow, still
+  // listed with their reason so the full set stays discoverable.
+  const allPickerItems = $derived([
     ...QUICK_ACTION_IDS.map((id) => {
       const applies = !target || actionAppliesToKind(target.kind, id);
       return {
@@ -428,6 +450,23 @@
       };
     }),
   ]);
+  // Ordered only on settled reasons: an AI action still waiting on the
+  // availability probe keeps its place, so the grid does not reshuffle under
+  // the pointer when the probe answers.
+  const sinks = (item: { reason?: string | undefined }): boolean =>
+    item.reason !== undefined && item.reason !== t.actionMenu.aiChecking;
+  const pickerItems = $derived([
+    ...allPickerItems.filter((item) => !sinks(item)),
+    ...allPickerItems.filter((item) => sinks(item)),
+  ]);
+  // Nothing in the list can run on this target's content kind (an image or a
+  // file list): say so up front instead of leaving only per-button tooltips.
+  const noneApplicableReason = $derived(
+    target &&
+      allPickerItems.every((item) => !actionAppliesToKind(target.kind, actionIdOf(item.key)))
+      ? inapplicableReason(target.kind)
+      : undefined,
+  );
 
   // Copy/save failures keep the result intact and can be retried independently.
   // Fence feedback by both run and attempt so a late completion cannot update
@@ -577,10 +616,13 @@
   $effect(() => {
     if (!open || !isTauri() || !aiActionsSupported()) return;
     void (async () => {
+      availabilityLoading = true;
       try {
         availability = await getAiAvailability();
       } catch {
         availability = undefined;
+      } finally {
+        availabilityLoading = false;
       }
     })();
   });
@@ -782,8 +824,10 @@
 
       <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
 
-      {#if aiUnavailableReason}
-        <p class="ai-reason">{aiUnavailableReason}</p>
+      {#if noneApplicableReason}
+        <p class="ai-reason" data-testid="actions-none-applicable">{noneApplicableReason}</p>
+      {:else if aiUnavailableReason}
+        <p class="ai-reason" data-testid="actions-ai-reason">{aiUnavailableReason}</p>
       {/if}
     </div>
 

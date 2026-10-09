@@ -237,6 +237,10 @@ export const fr: Messages = {
     aiBadge: 'IA',
     aiCancel: 'Annuler',
     aiUnavailable: 'Les actions IA sont indisponibles pour le moment.',
+    aiChecking: 'Vérification de la disponibilité des actions IA…',
+    aiDisabled: 'Les actions IA sont désactivées dans les réglages.',
+    aiPreparing: 'Le modèle sur l’appareil est encore en préparation. Réessayez bientôt.',
+    aiLanguageUnsupported: 'Les actions IA ne prennent pas encore en charge cette langue.',
     notApplicable: {
       image: 'Les actions ne s’appliquent pas aux images.',
       fileList: 'Les actions ne s’appliquent pas aux fichiers.',

@@ -235,6 +235,10 @@ export const de: Messages = {
     aiBadge: 'KI',
     aiCancel: 'Abbrechen',
     aiUnavailable: 'KI-Aktionen sind derzeit nicht verfügbar.',
+    aiChecking: 'Verfügbarkeit der KI-Aktionen wird geprüft …',
+    aiDisabled: 'KI-Aktionen sind in den Einstellungen deaktiviert.',
+    aiPreparing: 'Das On-Device-Modell wird noch vorbereitet. Versuche es gleich noch einmal.',
+    aiLanguageUnsupported: 'KI-Aktionen unterstützen diese Sprache noch nicht.',
     notApplicable: {
       image: 'Aktionen sind für Bilder nicht verfügbar.',
       fileList: 'Aktionen sind für Dateien nicht verfügbar.',

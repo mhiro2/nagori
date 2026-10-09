@@ -224,6 +224,10 @@ export const ko: Messages = {
     aiBadge: 'AI',
     aiCancel: '취소',
     aiUnavailable: '지금은 AI 작업을 사용할 수 없습니다.',
+    aiChecking: 'AI 작업을 사용할 수 있는지 확인하는 중…',
+    aiDisabled: 'AI 작업이 설정에서 꺼져 있습니다.',
+    aiPreparing: '기기 내 모델을 준비하는 중입니다. 잠시 후 다시 시도하세요.',
+    aiLanguageUnsupported: 'AI 작업이 아직 이 언어를 지원하지 않습니다.',
     notApplicable: {
       image: '이미지에는 적용할 수 없습니다.',
       fileList: '파일에는 적용할 수 없습니다.',

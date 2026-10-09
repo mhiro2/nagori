@@ -223,6 +223,10 @@ export const ja: Messages = {
     aiBadge: 'AI',
     aiCancel: 'キャンセル',
     aiUnavailable: '現在 AI アクションは利用できません。',
+    aiChecking: 'AI アクションが使えるか確認しています…',
+    aiDisabled: 'AI アクションは設定でオフになっています。',
+    aiPreparing: 'オンデバイスモデルを準備中です。しばらくしてから再試行してください。',
+    aiLanguageUnsupported: 'AI アクションはこの言語にまだ対応していません。',
     notApplicable: {
       image: '画像には適用できません。',
       fileList: 'ファイルには適用できません。',

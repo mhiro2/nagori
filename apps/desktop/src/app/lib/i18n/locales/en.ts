@@ -292,6 +292,13 @@ export type Messages = {
     aiBadge: string;
     aiCancel: string;
     aiUnavailable: string;
+    // Why the AI actions cannot run, when the backend gave no remediation:
+    // the availability probe is still running, AI is off in Settings, the
+    // model is still getting ready, or the language is unsupported.
+    aiChecking: string;
+    aiDisabled: string;
+    aiPreparing: string;
+    aiLanguageUnsupported: string;
     // Hover hint when an action can't run on the focused entry's content kind:
     // an image carries no text, and file lists / bare URLs only carry incidental
     // text (paths, the URL itself) the text actions would mangle. Keyed by the
@@ -908,6 +915,10 @@ export const en: Messages = {
     aiBadge: 'AI',
     aiCancel: 'Cancel',
     aiUnavailable: 'AI actions are unavailable right now.',
+    aiChecking: 'Checking whether AI actions are available…',
+    aiDisabled: 'AI actions are turned off in Settings.',
+    aiPreparing: 'The on-device model is still getting ready. Try again shortly.',
+    aiLanguageUnsupported: "AI actions don't support this language yet.",
     notApplicable: {
       image: "Actions don't apply to images.",
       fileList: "Actions don't apply to files.",

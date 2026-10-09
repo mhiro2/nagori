@@ -216,6 +216,10 @@ export const zhHans: Messages = {
     aiBadge: 'AI',
     aiCancel: '取消',
     aiUnavailable: '当前无法使用 AI 操作。',
+    aiChecking: '正在检查 AI 操作是否可用…',
+    aiDisabled: 'AI 操作已在设置中关闭。',
+    aiPreparing: '设备端模型仍在准备中，请稍后再试。',
+    aiLanguageUnsupported: 'AI 操作暂不支持此语言。',
     notApplicable: {
       image: '操作不适用于图像。',
       fileList: '操作不适用于文件。',
