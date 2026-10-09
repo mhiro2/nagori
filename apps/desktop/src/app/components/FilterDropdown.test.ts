@@ -149,6 +149,39 @@ describe('FilterDropdown', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it('leaves Escape to an IME conversion in the search field', async () => {
+    const user = userEvent.setup();
+    const items = Array.from({ length: 10 }, (_, i) => ({
+      value: `app-${i}`,
+      label: `App ${i}`,
+      selected: false,
+    }));
+    const { getByRole } = render(FilterDropdown, {
+      props: {
+        label: 'App',
+        active: false,
+        menuLabel: 'App',
+        multi: false,
+        items,
+        onSelect: vi.fn(),
+        searchLabel: 'Search apps',
+      },
+    });
+    await user.click(getByRole('button', { name: 'App' }));
+    const search = getByRole('searchbox', { name: 'Search apps' });
+    const composingEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    search.dispatchEvent(composingEscape);
+    expect(composingEscape.defaultPrevented).toBe(false);
+    expect(getByRole('menu')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(getByRole('button', { name: 'App' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('skips the search field for short menus', async () => {
     const user = userEvent.setup();
     const { getByRole, queryByRole } = render(FilterDropdown, {

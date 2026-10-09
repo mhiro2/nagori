@@ -177,12 +177,16 @@
   // The search field keeps its own editing keys (Home / End move the caret,
   // letters type) and hands the list over with ↓. Every keydown is stopped
   // here: typed characters must not reach the palette's window-level
-  // shortcuts, and Enter while an IME is composing commits the candidate
-  // rather than picking a row.
+  // shortcuts.
   const onSearchKeydown = (event: KeyboardEvent): void => {
+    // While an IME is composing, Escape cancels the conversion and Enter
+    // commits it: leave every key to the field and keep it from the menu.
+    if (isImeComposing(event)) {
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape' || event.key === 'Tab') return;
     event.stopPropagation();
-    if (isImeComposing(event)) return;
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       focusItem(0);
