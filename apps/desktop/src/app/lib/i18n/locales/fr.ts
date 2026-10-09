@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const fr: Messages = {
   palette: {
     placeholder: 'Rechercher dans l’historique…',
+    searchLabel: 'Rechercher dans l’historique du presse-papiers',
+    resultsLabel: 'Historique du presse-papiers',
     searching: 'Recherche…',
     resultCount: (count: number): string =>
       count <= 1 ? `${count} résultat` : `${count.toLocaleString('fr')} résultats`,
@@ -11,6 +13,10 @@ export const fr: Messages = {
     emptyStates: {
       start: 'Copiez du texte pour commencer votre historique.',
       noMatches: 'Aucune entrée ne correspond à cette recherche.',
+      noQuickMatches:
+        'La recherche rapide n’a rien trouvé. Cherchez dans tout l’historique pour inclure aussi les éléments plus anciens.',
+      searchFullHistory: 'Chercher dans tout l’historique',
+      noFullHistoryMatches: 'Aucun élément ne contient ce texte.',
       noFilterMatches: 'Aucune entrée ne correspond à ces filtres.',
       capturePaused:
         'La capture est en pause. Reprenez-la ci-dessous pour enregistrer de nouvelles entrées.',
@@ -31,6 +37,7 @@ export const fr: Messages = {
       navigate: 'Naviguer',
       paste: 'Coller',
       copyCombined: 'Copier ensemble',
+      multiSelect: 'Sélectionner',
       pin: 'Épingler',
       actions: 'Actions',
       settings: 'Paramètres',
@@ -53,6 +60,8 @@ export const fr: Messages = {
       sourceGroup: 'Application source',
       sourceShort: 'App',
       allApps: 'Toutes les apps',
+      searchApps: 'Rechercher des apps',
+      noAppMatches: 'Aucune app correspondante',
       clear: 'Effacer les filtres',
     },
     clearHistory: {
@@ -106,6 +115,7 @@ export const fr: Messages = {
       source: 'source',
       size: 'taille',
       rank: 'rang',
+      match: 'correspondance',
     },
     additionalData: 'Autres données du presse-papiers',
     clipboardCategory: { image: 'Image', text: 'Texte', files: 'Fichiers' },
@@ -165,7 +175,10 @@ export const fr: Messages = {
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
+    fullHistorySearch: 'Recherche dans tout l’historique',
     combinedCopyHint: 'La copie combinée est enregistrée comme nouvel élément',
+    clearSelection: 'Effacer la sélection',
+    selectionCleared: 'Sélection effacée',
     autoPasteOff: 'Collage automatique désactivé — Accessibilité non accordée',
     autoPasteOffShort: '⚠ Collage automatique désactivé',
     autoPasteOffSetupAria:

@@ -634,3 +634,73 @@ describe('ResultItem', () => {
     expect(onContextMenu).toHaveBeenCalledWith(6, expect.any(MouseEvent));
   });
 });
+
+describe('ResultItem layout', () => {
+  const props = { index: 0, selected: false, onSelect: vi.fn(), onConfirm: vi.fn() };
+
+  it('leaves the source app and match reason to the preview pane in compact rows', async () => {
+    const item = sample({ sourceAppName: 'Safari', rankReasons: ['ExactMatch'] });
+    const { container, rerender } = render(ResultItem, { props: { ...props, item } });
+    expect(container.querySelector('.source')?.textContent).toBe('Safari');
+    expect(container.querySelector('.rank-chip')).toBeTruthy();
+
+    await rerender({ ...props, item, compact: true });
+    expect(container.querySelector('.source')).toBeNull();
+    expect(container.querySelector('.rank-chip')).toBeNull();
+    // The age stays on the row: it is how a recent copy is picked out.
+    expect(container.querySelector('.time')).toBeTruthy();
+  });
+
+  it('keeps the privacy marker on compact rows', () => {
+    const { container } = render(ResultItem, {
+      props: { ...props, item: sample({ sensitivity: 'Secret' }), compact: true },
+    });
+    expect(container.querySelector('.sens')?.textContent).toBe('Secret');
+  });
+
+  it('reserves the check-mark column only while a multi-selection exists', async () => {
+    const item = sample();
+    const { container, rerender } = render(ResultItem, { props: { ...props, item } });
+    expect(container.querySelector('.multi-mark')).toBeNull();
+    await rerender({ ...props, item, multiActive: true, marked: true });
+    expect(container.querySelector('.multi-mark')?.textContent).toBe('✓');
+  });
+
+  it('shows a thumbnail for public image rows and the text badge otherwise', () => {
+    const image = sample({ id: 'img-1', kind: 'image', sensitivity: 'Public' });
+    const { getByTestId, unmount } = render(ResultItem, { props: { ...props, item: image } });
+    const thumb = getByTestId('result-thumb') as HTMLImageElement;
+    expect(thumb.src).toContain('thumb/img-1');
+    // Decorative: the row's own text names the entry.
+    expect(thumb.getAttribute('alt')).toBe('');
+    unmount();
+
+    const { container } = render(ResultItem, {
+      props: { ...props, item: { ...image, sensitivity: 'Private' } },
+    });
+    expect(container.querySelector('[data-testid="result-thumb"]')).toBeNull();
+    expect(container.querySelector('.kind-badge')?.textContent).toBe('IMG');
+  });
+
+  it('falls back to the text badge when the thumbnail cannot be loaded', async () => {
+    vi.useFakeTimers();
+    try {
+      const image = sample({ id: 'img-2', kind: 'image', sensitivity: 'Public' });
+      const { container } = render(ResultItem, { props: { ...props, item: image } });
+      // Two 503 retries, then the final failure drops the image.
+      const failOnce = async (): Promise<void> => {
+        const thumb = container.querySelector('[data-testid="result-thumb"]');
+        expect(thumb).toBeTruthy();
+        await fireEvent.error(thumb!);
+        await vi.advanceTimersByTimeAsync(1000);
+      };
+      await failOnce();
+      await failOnce();
+      await failOnce();
+      expect(container.querySelector('[data-testid="result-thumb"]')).toBeNull();
+      expect(container.querySelector('.kind-badge')?.textContent).toBe('IMG');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

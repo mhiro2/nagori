@@ -5,9 +5,15 @@
     value: string;
     placeholder?: string;
     onInput: (next: string) => void;
+    // The result listbox this input drives. The input is a combobox: focus
+    // stays here while typing and ↑/↓ move the highlighted result, exposed
+    // through `aria-activedescendant` so assistive tech follows the cursor
+    // without DOM focus leaving the field.
+    listboxId?: string | undefined;
+    activeDescendantId?: string | undefined;
   };
 
-  const { value, placeholder, onInput }: Props = $props();
+  const { value, placeholder, onInput, listboxId, activeDescendantId }: Props = $props();
 
   const effectivePlaceholder = $derived(placeholder ?? messages().palette.placeholder);
 
@@ -36,6 +42,12 @@
     autocapitalize="off"
     autocorrect="off"
     placeholder={effectivePlaceholder}
+    role="combobox"
+    aria-label={messages().palette.searchLabel}
+    aria-autocomplete="list"
+    aria-expanded={activeDescendantId !== undefined}
+    aria-controls={listboxId}
+    aria-activedescendant={activeDescendantId}
     {value}
     oninput={handleInput}
   />

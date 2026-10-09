@@ -66,6 +66,8 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   resultLimitReached: vi.fn(() => false),
   resultsPaged: vi.fn(() => false),
   loadMoreResults: vi.fn(async () => undefined),
+  canSearchFullHistory: vi.fn(() => false),
+  searchFullHistory: vi.fn(async () => undefined),
   searchState: {
     query: '',
     appliedQuery: '',
@@ -75,6 +77,8 @@ vi.mock('../stores/searchQuery.svelte', () => ({
     loading: false,
     errorMessage: undefined,
     lastElapsedMs: undefined,
+    fullHistory: false,
+    resultScopeVersion: 0,
   },
 }));
 
@@ -129,7 +133,14 @@ import {
   toggleMultiSelect,
 } from '../stores/searchMultiSelect.svelte';
 import { previewState } from '../stores/searchPreview.svelte';
-import { refreshCurrent, runQuery, scheduleQuery, searchState } from '../stores/searchQuery.svelte';
+import {
+  canSearchFullHistory,
+  refreshCurrent,
+  runQuery,
+  scheduleQuery,
+  searchFullHistory,
+  searchState,
+} from '../stores/searchQuery.svelte';
 import {
   currentSelection,
   selectByIndex,
@@ -230,7 +241,19 @@ describe('Palette', () => {
     expect(filterState.datePreset).toBe('none');
     expect(runQuery).toHaveBeenCalledWith('');
     expect(confirmSelection).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(getByRole('textbox'));
+    expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it('offers the full-history search from an empty quick search', async () => {
+    searchState.query = 'order_tot';
+    vi.mocked(canSearchFullHistory).mockReturnValue(true);
+    const { getByRole } = render(Palette);
+    await fireEvent.click(getByRole('button', { name: 'Search all history' }));
+    expect(searchFullHistory).toHaveBeenCalledOnce();
+    // The button unmounts while the wider search loads; focus waits in the
+    // search box rather than dropping to the body.
+    expect(document.activeElement).toBe(getByRole('combobox'));
+    vi.mocked(canSearchFullHistory).mockReturnValue(false);
   });
 
   it('retries an empty failed search without clearing its conditions', async () => {
@@ -334,6 +357,62 @@ describe('Palette', () => {
     expect(copyMultiSelection).toHaveBeenCalledTimes(1);
     expect(confirmSelection).not.toHaveBeenCalled();
     expect(multiSelectState.selected.size).toBe(2);
+  });
+
+  it('offers bulk copy and clear-selection buttons while rows are selected', async () => {
+    const user = userEvent.setup();
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    toggleMultiSelect('a');
+    toggleMultiSelect('b');
+    const { getByRole, getByTestId, queryByTestId } = render(Palette);
+    expect(getByTestId('status-selected-count').textContent).toContain('2 selected');
+
+    getByTestId('status-copy-selection').focus();
+    await user.keyboard('{Enter}');
+    expect(copyMultiSelection).toHaveBeenCalledTimes(1);
+    expect(confirmSelection).not.toHaveBeenCalled();
+
+    await user.click(getByTestId('status-clear-selection'));
+    expect(multiSelectState.selected.size).toBe(0);
+    expect(queryByTestId('status-clear-selection')).toBeNull();
+    // The bar unmounts with the selection; focus returns to the search box
+    // rather than dropping to the body where Enter would paste.
+    expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it('toggles the highlighted row into the selection from the footer hint', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByTestId } = render(Palette);
+    await fireEvent.click(getByTestId('status-multi-toggle'));
+    expect(multiSelectState.selected.has('a')).toBe(true);
+  });
+
+  it('exposes the search box as a combobox driving the labelled result list', () => {
+    const item = resultRow('b', 'bravo');
+    searchState.results = [resultRow('a', 'alpha'), item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByRole } = render(Palette);
+    const combobox = getByRole('combobox', { name: 'Search clipboard history' });
+    const listbox = getByRole('listbox', { name: 'Clipboard history' });
+    expect(combobox.getAttribute('aria-controls')).toBe(listbox.id);
+    expect(combobox.getAttribute('aria-expanded')).toBe('true');
+    expect(combobox.getAttribute('aria-activedescendant')).toBe('result-option-b');
+  });
+
+  it('announces multi-selection changes through the polite live region', async () => {
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'bravo')];
+    const { getByTestId } = render(Palette);
+    const announcer = getByTestId('palette-announcer');
+    expect(announcer.getAttribute('role')).toBe('status');
+    expect(announcer.textContent).toBe('');
+    toggleMultiSelect('a');
+    await tick();
+    expect(announcer.textContent).toBe('1 selected');
+    clearMultiSelect();
+    await tick();
+    expect(announcer.textContent).toBe('Selection cleared');
   });
 
   it('refreshes the active query when capture stores a new entry', () => {

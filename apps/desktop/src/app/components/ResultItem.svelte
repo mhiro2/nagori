@@ -12,6 +12,10 @@
   };
   const badge = (kind: string): string => KIND_BADGE[kind] ?? '?';
 
+  // DOM id of a result option, referenced by the search combobox's
+  // `aria-activedescendant`. Keyed by entry id so it survives re-ranking.
+  export const resultOptionId = (entryId: string): string => `result-option-${entryId}`;
+
   const safeUrl = (raw: string): URL | undefined => {
     try {
       return new URL(raw.trim());
@@ -35,6 +39,7 @@
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
   import { domainCategory } from '../lib/urlCategory';
+  import EntryThumbnail from './EntryThumbnail.svelte';
   import HighlightedText from './HighlightedText.svelte';
 
   type Props = {
@@ -59,6 +64,13 @@
     // and the rest recede. Visual only — `onSelect` still fires on hover; the
     // palette decides whether to honour it.
     locked?: boolean | undefined;
+    // The preview pane is showing, so the row keeps to the content plus the
+    // cues needed to pick an entry (privacy marker, age) and leaves the source
+    // app and match reason to the pane instead of shrinking the content.
+    compact?: boolean | undefined;
+    // Some row is multi-selected. Only then does the row reserve the leading
+    // check-mark column, so the content gets that width back otherwise.
+    multiActive?: boolean | undefined;
   };
 
   const {
@@ -72,6 +84,8 @@
     onTogglePin = () => {},
     onContextMenu = () => {},
     locked = false,
+    compact = false,
+    multiActive = false,
   }: Props = $props();
 
   const t = $derived(messages());
@@ -115,6 +129,13 @@
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
+  // Consecutive screenshots share a source, size and age, so a tiny thumbnail
+  // is the only quick way to tell them apart. The thumbnail endpoint refuses
+  // anything beyond Public / Unknown, so other rows keep the text badge
+  // rather than issuing requests that can only fail.
+  const showThumbnail = $derived(
+    item.kind === 'image' && (item.sensitivity === 'Public' || item.sensitivity === 'Unknown'),
+  );
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
   const rankReason = $derived(primaryRankReason(item.rankReasons));
@@ -174,9 +195,11 @@
     class="result-item"
     class:selected
     class:marked
+    id={resultOptionId(item.id)}
     role="option"
-    aria-selected={selected}
+    aria-selected={marked}
     aria-label={fileAria}
+    tabindex={selected ? 0 : -1}
     data-kind={item.kind}
     data-sensitivity={item.sensitivity}
     disabled={locked}
@@ -184,8 +207,25 @@
     onmouseenter={() => onSelect(index)}
     onclick={(event) => onConfirm(index, event)}
   >
-    <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
-    <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {#if multiActive}
+      <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
+    {/if}
+    {#snippet kindBadge()}
+      <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {/snippet}
+    {#if showThumbnail}
+      <span class="kind-thumb">
+        <EntryThumbnail
+          entryId={item.id}
+          alt=""
+          variant="row"
+          testId="result-thumb"
+          fallback={kindBadge}
+        />
+      </span>
+    {:else}
+      {@render kindBadge()}
+    {/if}
 
     {#if url}
       <span class="preview url">
@@ -229,13 +269,15 @@
     {/if}
 
     <span class="meta">
-      {#if rankChip}<span class="rank-chip" data-reason={rankReason} title={t.preview.fields.rank}
-          >{rankChip}</span
+      {#if rankChip && !compact}<span
+          class="rank-chip"
+          data-reason={rankReason}
+          title={t.preview.fields.rank}>{rankChip}</span
         >{/if}
       {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
         <span class="sens">{item.sensitivity}</span>
       {/if}
-      {#if item.sourceAppName}<span class="source">{item.sourceAppName}</span>{/if}
+      {#if item.sourceAppName && !compact}<span class="source">{item.sourceAppName}</span>{/if}
       <span class="time">{timeLabel}</span>
     </span>
   </button>
@@ -380,6 +422,13 @@
     color: var(--accent, #6c8dff);
     font-size: 0.85rem;
     font-weight: 600;
+  }
+  /* Same fixed width as the text badge, so image rows line up with the rest. */
+  .kind-thumb {
+    flex: none;
+    display: flex;
+    align-items: center;
+    width: 2.25rem;
   }
   .kind-badge {
     flex: none;

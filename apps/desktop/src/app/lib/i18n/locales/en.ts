@@ -6,6 +6,9 @@ export type CountFormatter = (count: number) => string;
 export type Messages = {
   palette: {
     placeholder: string;
+    // Accessible names for the search combobox and the result listbox.
+    searchLabel: string;
+    resultsLabel: string;
     searching: string;
     resultCount: CountFormatter;
     elapsed: (ms: number) => string;
@@ -13,6 +16,11 @@ export type Messages = {
     emptyStates: {
       start: string;
       noMatches: string;
+      // The fast search found nothing; a full-history search is offered.
+      noQuickMatches: string;
+      searchFullHistory: string;
+      // The full-history search found nothing either.
+      noFullHistoryMatches: string;
       noFilterMatches: string;
       capturePaused: string;
       retry: string;
@@ -36,6 +44,8 @@ export type Messages = {
       navigate: string;
       paste: string;
       copyCombined: string;
+      // Toggles the highlighted row into the multi-selection.
+      multiSelect: string;
       pin: string;
       actions: string;
       settings: string;
@@ -65,6 +75,9 @@ export type Messages = {
       // Leading "no app filter" option in the source-app dropdown, so a
       // single-select source app can be cleared without an obscure re-click.
       allApps: string;
+      // Search field atop a long source-app menu, and its empty result.
+      searchApps: string;
+      noAppMatches: string;
       // Clears every active filter (shown only when some filter is active).
       clear: string;
     };
@@ -130,6 +143,8 @@ export type Messages = {
       source: string;
       size: string;
       rank: string;
+      // Strongest match reason, shown in the resting footer for search hits.
+      match: string;
     };
     // Label + coarse value categories for the "extra formats this clip kept
     // beyond its primary kind" row in the resting footer (e.g. "Additional
@@ -192,10 +207,16 @@ export type Messages = {
     capturePaused: string;
     entryCount: CountFormatter;
     selectedCount: CountFormatter;
+    // Marks results that came from the full-history search.
+    fullHistorySearch: string;
     // Shown beside the multi-select count: combining the selection writes the
     // joined text to the clipboard *and* keeps it as a new history entry, so
     // the bulk copy doesn't look like a silent extra capture.
     combinedCopyHint: string;
+    // Selection-bar button that leaves multi-select mode.
+    clearSelection: string;
+    // Announced when the multi-selection is emptied.
+    selectionCleared: string;
     // Compact accessibility indicator surfaced in the palette StatusBar
     // when the OS permission required to drive auto-paste is missing. The
     // indicator is a single clickable chip that opens the Setup tab:
@@ -664,6 +685,8 @@ export type Messages = {
 export const en: Messages = {
   palette: {
     placeholder: 'Search history…',
+    searchLabel: 'Search clipboard history',
+    resultsLabel: 'Clipboard history',
     searching: 'Searching…',
     resultCount: (count) => (count === 1 ? '1 result' : `${count.toLocaleString('en')} results`),
     elapsed: (ms) => `${ms.toFixed(0)} ms`,
@@ -671,6 +694,10 @@ export const en: Messages = {
     emptyStates: {
       start: 'Copy some text to start your history.',
       noMatches: 'No entries match this search.',
+      noQuickMatches:
+        'The quick search found nothing. Search all history to also look inside older entries.',
+      searchFullHistory: 'Search all history',
+      noFullHistoryMatches: 'No entries contain this text.',
       noFilterMatches: 'No entries match these filters.',
       capturePaused: 'Capture is paused. Resume capture below to save new entries.',
       retry: 'Try again',
@@ -689,6 +716,7 @@ export const en: Messages = {
       navigate: 'Navigate',
       paste: 'Paste',
       copyCombined: 'Copy combined',
+      multiSelect: 'Select',
       pin: 'Pin',
       actions: 'Actions',
       settings: 'Settings',
@@ -711,6 +739,8 @@ export const en: Messages = {
       sourceGroup: 'Source app',
       sourceShort: 'App',
       allApps: 'All apps',
+      searchApps: 'Search apps',
+      noAppMatches: 'No matching apps',
       clear: 'Clear filters',
     },
     clearHistory: {
@@ -761,6 +791,7 @@ export const en: Messages = {
       source: 'source',
       size: 'size',
       rank: 'rank',
+      match: 'match',
     },
     additionalData: 'Additional clipboard data',
     clipboardCategory: { image: 'Image', text: 'Text', files: 'Files' },
@@ -803,7 +834,10 @@ export const en: Messages = {
     capturePaused: 'Capture paused',
     entryCount: (n) => (n === 1 ? '1 item' : `${n.toLocaleString('en')} items`),
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
+    fullHistorySearch: 'Full-history search',
     combinedCopyHint: 'Combined copy is saved as a new item',
+    clearSelection: 'Clear selection',
+    selectionCleared: 'Selection cleared',
     autoPasteOff: 'Auto-paste off — Accessibility not granted',
     autoPasteOffShort: '⚠ Auto-paste off',
     autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',

@@ -1337,3 +1337,58 @@ async fn enforce_total_bytes_includes_representation_payload() {
     );
     let _ = big_image_bytes;
 }
+
+async fn insert_from_app(store: &SqliteStore, text: &str, app: &str) -> nagori_core::EntryId {
+    let mut entry = EntryFactory::from_text(text);
+    entry.search.normalized_text = normalize_text(entry.plain_text().unwrap());
+    entry.metadata.source = Some(nagori_core::SourceApp {
+        bundle_id: None,
+        name: Some(app.to_owned()),
+        executable_path: None,
+    });
+    store.insert(entry).await.unwrap()
+}
+
+#[tokio::test]
+async fn list_source_apps_covers_the_whole_history_most_recent_first() {
+    let store = SqliteStore::open_memory().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let old_editor = insert_from_app(&store, "old editor clip", "Editor").await;
+    let terminal = insert_from_app(&store, "terminal clip", "Terminal").await;
+    let new_editor = insert_from_app(&store, "new editor clip", "Editor").await;
+    let browser = insert_from_app(&store, "browser clip", "Browser").await;
+    let _unknown_source = insert_text(&store, "no source app").await;
+    backdate_entry(&store, old_editor, now - time::Duration::days(400));
+    backdate_entry(&store, terminal, now - time::Duration::days(90));
+    backdate_entry(&store, new_editor, now - time::Duration::hours(1));
+    backdate_entry(&store, browser, now - time::Duration::days(2));
+
+    // Grouped by name and ordered by the newest entry from each app, however
+    // old the app's other entries are.
+    assert_eq!(
+        store.list_source_apps(10).await.unwrap(),
+        vec!["Editor", "Browser", "Terminal"]
+    );
+    assert_eq!(
+        store.list_source_apps(2).await.unwrap(),
+        vec!["Editor", "Browser"]
+    );
+}
+
+#[tokio::test]
+async fn list_source_apps_skips_deleted_and_blocked_rows() {
+    let store = SqliteStore::open_memory().unwrap();
+    let deleted = insert_from_app(&store, "deleted clip", "Gone").await;
+    let blocked = insert_from_app(&store, "blocked clip", "Vault").await;
+    let _kept = insert_from_app(&store, "kept clip", "Kept").await;
+    store.mark_deleted(deleted).await.unwrap();
+    {
+        let conn = store.conn().unwrap();
+        conn.execute(
+            "UPDATE entries SET sensitivity = 'blocked' WHERE id = ?1",
+            params![blocked.to_string()],
+        )
+        .unwrap();
+    }
+    assert_eq!(store.list_source_apps(10).await.unwrap(), vec!["Kept"]);
+}

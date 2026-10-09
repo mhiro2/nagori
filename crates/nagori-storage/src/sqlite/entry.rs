@@ -42,6 +42,38 @@ impl SqliteStore {
         .await
     }
 
+    /// Distinct source-app names across the whole live history, most recently
+    /// seen first, capped at `limit` (clamped to the read ceiling).
+    ///
+    /// Feeds the palette's source-app filter so its options do not depend on
+    /// which rows the current result page happens to hold. Blocked rows are
+    /// left out, matching the partial `idx_entries_source_app_name_live`
+    /// index the grouping scans.
+    pub async fn list_source_apps(&self, limit: usize) -> Result<Vec<String>> {
+        let limit = i64::try_from(clamp_read_limit(limit)).unwrap_or(i64::MAX);
+        self.run_blocking(move |store| {
+            let conn = store.conn()?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_app_name FROM entries
+                     WHERE deleted_at IS NULL
+                       AND sensitivity != 'blocked'
+                       AND source_app_name IS NOT NULL
+                       AND source_app_name != ''
+                     GROUP BY source_app_name
+                     ORDER BY MAX(created_at) DESC, source_app_name
+                     LIMIT ?1",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![limit], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage_err)
+        })
+        .await
+    }
+
     pub async fn increment_use_count(&self, id: EntryId) -> Result<()> {
         self.run_blocking(move |store| {
             let now = format_time(OffsetDateTime::now_utc())?;

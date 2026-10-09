@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const ko: Messages = {
   palette: {
     placeholder: '기록 검색…',
+    searchLabel: '클립보드 기록 검색',
+    resultsLabel: '클립보드 기록',
     searching: '검색 중…',
     resultCount: (count: number): string => `${count.toLocaleString('ko')}건`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -10,6 +12,10 @@ export const ko: Messages = {
     emptyStates: {
       start: '텍스트를 복사하면 기록에 표시됩니다.',
       noMatches: '검색과 일치하는 항목이 없습니다.',
+      noQuickMatches:
+        '빠른 검색으로 찾지 못했습니다. 오래된 항목까지 찾으려면 전체 기록을 검색하세요.',
+      searchFullHistory: '전체 기록 검색',
+      noFullHistoryMatches: '이 텍스트를 포함한 항목이 없습니다.',
       noFilterMatches: '필터와 일치하는 항목이 없습니다.',
       capturePaused: '캡처가 일시 중지되었습니다. 아래에서 다시 시작하세요.',
       retry: '다시 시도',
@@ -30,6 +36,7 @@ export const ko: Messages = {
       navigate: '이동',
       paste: '붙여넣기',
       copyCombined: '합쳐서 복사',
+      multiSelect: '여러 개 선택',
       pin: '고정',
       actions: '동작',
       settings: '설정',
@@ -52,6 +59,8 @@ export const ko: Messages = {
       sourceGroup: '출처 앱',
       sourceShort: '앱',
       allApps: '모든 앱',
+      searchApps: '앱 검색',
+      noAppMatches: '일치하는 앱 없음',
       clear: '필터 지우기',
     },
     clearHistory: {
@@ -103,6 +112,7 @@ export const ko: Messages = {
       source: '출처',
       size: '크기',
       rank: '순위',
+      match: '일치',
     },
     additionalData: '추가 클립보드 데이터',
     clipboardCategory: { image: '이미지', text: '텍스트', files: '파일' },
@@ -154,7 +164,10 @@ export const ko: Messages = {
     capturePaused: '캡처 일시 중지',
     entryCount: (n: number): string => `${n.toLocaleString('ko')}개`,
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
+    fullHistorySearch: '전체 기록 검색',
     combinedCopyHint: '결합 복사는 새 항목으로 저장됩니다',
+    clearSelection: '선택 해제',
+    selectionCleared: '선택 해제됨',
     autoPasteOff: '자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
     autoPasteOffShort: '⚠ 자동 붙여넣기 꺼짐',
     autoPasteOffSetupAria: '자동 붙여넣기 꺼짐: Accessibility 권한이 필요합니다. 설정 열기.',

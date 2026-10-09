@@ -100,6 +100,22 @@ fn millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Upper bound on the source-app list. Far above the number of apps anyone
+/// copies from, so the cap only guards against a pathological history.
+const SOURCE_APP_LIMIT: usize = 200;
+
+/// Every app the live history was copied from, most recently seen first. The
+/// palette's source-app filter offers these, so switching apps does not depend
+/// on which rows the current result page holds.
+#[tauri::command]
+pub async fn list_source_apps(state: State<'_, AppState>) -> CommandResult<Vec<String>> {
+    Ok(state
+        .runtime
+        .store()
+        .list_source_apps(SOURCE_APP_LIMIT)
+        .await?)
+}
+
 #[tauri::command]
 pub async fn list_recent_entries(
     state: State<'_, AppState>,

@@ -854,6 +854,15 @@ so tail latency for typical typing-driven searches stays roughly
 constant as the history grows. `SearchMode::Exact` and
 `SearchMode::Fuzzy` deliberately scan the full corpus — they exist for
 explicit lookups where completeness beats latency.
+`exact_search_recalls_old_entries_that_auto_misses` pins what the window
+costs for entries older than it: Auto still recalls whole identifiers,
+`::` paths, whole URL path segments, `?q=` fragments and multi-character
+CJK, but misses the tail of a `snake_case` identifier (`order_tot`), the
+middle of a camelCase one (`UserProfile`), a cut-off URL path
+(`github.com/acme/wid`) and a single kana, all of which `Exact` recalls.
+The palette therefore offers a full-history `Exact` search when Auto comes
+back empty (see the full-history bullet in
+[section 12](#12-tauri-boundary-and-frontend)).
 
 **Recent-search cache.** A bounded LRU
 (`nagori-daemon::search_cache::RecentSearchCache`, default capacity 32)
@@ -1739,11 +1748,14 @@ not duplicate runtime logic.
   toggle — while the high-cardinality axes collapse into `FilterDropdown`
   menus so the row never wraps: multi-select content kinds (*Text* / *URL* /
   *Code* / *Image* / *Files*, each mapping to one `ContentKind`) and a
-  single-select source app. The source-app options are retained from the last
-  search that was *not* itself source-app-filtered (`recordSourceApps`, capped)
-  rather than read from the live results — otherwise selecting an app would
-  collapse the results, and the menu, to that one app and hide the others; this
-  way the open menu keeps offering every app to switch to. A leading *All apps*
+  single-select source app. The source-app options come from the
+  `list_source_apps` command — every distinct source app in the live
+  (non-blocked) history, most recently seen first, grouped over the partial
+  `idx_entries_source_app_name_live` index — rather than from the result page,
+  which only holds the rows that matched and collapses to the active app once
+  the filter applies. The list loads when the palette mounts and refreshes
+  each time the menu opens; the active app and any app on screen that the last
+  fetch predates are folded in. A leading *All apps*
   row clears the selection, so the single-select axis has a discoverable reset
   instead of an obscure re-click. Each dropdown folds its selection into the
   trigger label (none → axis name, one → that value, many → `<axis> <n>`,
@@ -1759,7 +1771,13 @@ not duplicate runtime logic.
   those keydowns from bubbling — the palette routes arrows / Enter / Escape at
   the window level, so an un-stopped menu keystroke would otherwise move the
   result selection or dismiss the palette (mirrors `ActionInspector`). Escape
-  closes only the menu; a click outside dismisses it.
+  closes only the menu; a click outside dismisses it. A menu longer than eight rows
+  opens with a search field focused (the source-app menu): typing narrows the
+  rows by a case-insensitive substring, rows marked `alwaysShown` (the *All
+  apps* reset) stay listed, ↓ / ↑ move between the field and the rows, and
+  Enter in the field picks the first match. The field stops every keydown so
+  typed characters never reach the palette's window-level shortcuts, and an
+  Enter that commits an IME candidate picks nothing.
 - `StatusBar.svelte` — entry count, last-search elapsed time, capture toggle,
   diagnostic notices, and a separate persistent action row. Shortcut hints use
   the same effective `buildBindings` result as the palette matcher, including
@@ -1787,11 +1805,28 @@ not duplicate runtime logic.
   rows — which carry no body text — surface the probed `width×height`
   dimensions, the primary payload's byte size, and a *Screenshot* badge
   when the source app looks like a screenshot tool (`lib/screenshotSource`).
+  Public / Unknown image rows also replace the `IMG` badge with a small
+  cropped thumbnail from the same `/thumb/<id>` endpoint the preview uses
+  (`EntryThumbnail.svelte`, shared with the file-list preview): consecutive
+  screenshots share a source, size and age, so the picture is the quickest
+  way to tell them apart. The image is lazy-loaded, so only rows scrolled
+  into view request (and, on a cache miss, generate) a thumbnail; it retries
+  the endpoint's 503 a couple of times and falls back to the text badge.
+  Other sensitivities keep the badge, since the endpoint refuses them.
   A small reason chip surfaces the strongest *match* signal (*Exact* /
   *Prefix* / *Match* / *Text* / *Fuzzy* / *Semantic*) for query-driven
   rows; recent-listing rows stay chip-free since their only reason is
   recency. Semantic / fuzzy hits get a distinct hue so they read as a
-  deliberate match type rather than a weaker one. The row's preview text
+  deliberate match type rather than a weaker one. Rows stay one line and
+  give the width to the content: while the preview pane is showing they are
+  *compact*, keeping only the privacy marker and the age in the trailing
+  metadata, and the source app and match reason rest in the pane's footer
+  instead (both return to the row when the pane is turned off). The leading
+  check-mark column is reserved only while a multi-selection exists. A
+  selected row that grows to two lines was considered and rejected: the rows
+  below would shift under a stationary pointer (and hover selects), the list
+  height is sized from a fixed per-row height, and the pane already shows
+  the extra detail for the highlighted row. The row's preview text
   is run through the shared `lib/highlightQuery` helper — a
   case-insensitive raw-substring scan (one pass per whitespace term,
   overlapping ranges merged) — so exact / substring / CJK hits are marked
@@ -1807,6 +1842,24 @@ not duplicate runtime logic.
   windowing would carry against `ResultList`'s carefully-tuned scroll effect.
   If a future surface raises the result limit beyond that cap, revisit
   windowing then; the row-level containment is the low-risk first step.
+- Palette focus model (`Palette.svelte`, `SearchBox.svelte`,
+  `ResultList.svelte`). The search input is a labelled `combobox` that keeps
+  focus while typing; ↑/↓ move the highlighted result, which the input exposes
+  through `aria-activedescendant` (the option ids are keyed by entry id so they
+  survive re-ranking). The result list is a labelled, `aria-multiselectable`
+  listbox. Only the highlighted row is tabbable (roving `tabindex`), so Tab
+  moves from the search box and filters into the list in one step, and arrows
+  then carry DOM focus with the cursor. `aria-selected` reports the
+  multi-selection only, never the cursor, so a screen reader does not hear
+  every highlighted row as selected. A single visually hidden polite live
+  region announces the result count when a new query or filter set lands
+  (`searchState.resultScopeVersion`; background refreshes and paging keep the
+  version and stay silent) and multi-selection changes. Empty results are left
+  to the empty state's own status message, and paging to the list footer, so
+  no change is announced twice. While rows are multi-selected, the status bar
+  shows a selection bar with the count, an explicit *Copy combined* button and
+  *Clear selection*, and the footer hints offer the multi-select toggle so the
+  mode is discoverable by mouse.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are
@@ -1824,6 +1877,15 @@ not duplicate runtime logic.
   *Show more*, focus moves to the first newly loaded row (found by id, since
   the re-rank may place it above the old end). At the 200-row cap the footer drops the
   button and suggests narrowing with the query or filters.
+- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`).
+  When the fast Auto search for a non-empty query returns nothing, the
+  empty state says the quick search found nothing and offers *Search all
+  history*, which re-runs the query as `SearchMode::Exact` — an unbounded
+  substring scan that also finds fragments the bounded window misses. The
+  choice is scoped like the expanded limit: same-scope refreshes keep the
+  wider search, a new query or filter change returns to Auto. The status
+  bar marks results that came from it, and an empty full-history result
+  says no entry contains the text instead of offering the search again.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax

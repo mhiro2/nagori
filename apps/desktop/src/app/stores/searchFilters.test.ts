@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
+vi.mock('../lib/commands', async () =>
+  (await import('../test-helpers/moduleMocks')).commandsMock(),
+);
+
+import { listSourceApps } from '../lib/commands';
+import { isTauri } from '../lib/tauri';
 import {
   clearFilters,
   currentFilters,
   filterState,
   hasActiveFilters,
-  recordSourceApps,
+  refreshSourceApps,
   setDatePreset,
   setSourceApp,
   sourceAppOptions,
@@ -56,30 +63,23 @@ describe('setSourceApp', () => {
   });
 });
 
-describe('recordSourceApps', () => {
+describe('refreshSourceApps', () => {
   beforeEach(() => {
     sourceAppOptions.apps = [];
+    vi.mocked(isTauri).mockReturnValue(true);
   });
 
-  it('captures deduped apps from an unfiltered search', () => {
-    recordSourceApps(['Chrome', 'Slack', 'Chrome', undefined], false);
-    expect(sourceAppOptions.apps).toEqual(['Chrome', 'Slack']);
+  it('loads the whole-history app list from the backend', async () => {
+    vi.mocked(listSourceApps).mockResolvedValueOnce(['Chrome', 'Slack', 'Notes']);
+    await refreshSourceApps();
+    expect(sourceAppOptions.apps).toEqual(['Chrome', 'Slack', 'Notes']);
   });
 
-  it('retains the full set when a search is source-app filtered', () => {
-    recordSourceApps(['Chrome', 'Slack'], false);
-    setSourceApp('Chrome');
-    // A filtered search only returns the active app; the menu must keep the
-    // others so the user can switch without clearing first.
-    recordSourceApps(['Chrome'], true);
-    expect(sourceAppOptions.apps).toEqual(['Chrome', 'Slack']);
-  });
-
-  it('adds an active app missing from the retained set on a filtered search', () => {
-    recordSourceApps(['Chrome', 'Slack'], false);
-    setSourceApp('Notes');
-    recordSourceApps(['Notes'], true);
-    expect(sourceAppOptions.apps).toEqual(['Notes', 'Chrome', 'Slack']);
+  it('keeps the previous list when the fetch fails', async () => {
+    sourceAppOptions.apps = ['Chrome'];
+    vi.mocked(listSourceApps).mockRejectedValueOnce(new Error('backend gone'));
+    await refreshSourceApps();
+    expect(sourceAppOptions.apps).toEqual(['Chrome']);
   });
 });
 

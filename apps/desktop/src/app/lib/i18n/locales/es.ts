@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const es: Messages = {
   palette: {
     placeholder: 'Buscar en el historial…',
+    searchLabel: 'Buscar en el historial del portapapeles',
+    resultsLabel: 'Historial del portapapeles',
     searching: 'Buscando…',
     resultCount: (count: number): string =>
       count === 1 ? '1 resultado' : `${count.toLocaleString('es')} resultados`,
@@ -11,6 +13,10 @@ export const es: Messages = {
     emptyStates: {
       start: 'Copia texto para empezar el historial.',
       noMatches: 'No hay entradas que coincidan con esta búsqueda.',
+      noQuickMatches:
+        'La búsqueda rápida no encontró nada. Busca en todo el historial para revisar también los elementos antiguos.',
+      searchFullHistory: 'Buscar en todo el historial',
+      noFullHistoryMatches: 'Ningún elemento contiene este texto.',
       noFilterMatches: 'No hay entradas que coincidan con estos filtros.',
       capturePaused: 'La captura está pausada. Reanúdala abajo para guardar nuevas entradas.',
       retry: 'Reintentar',
@@ -31,6 +37,7 @@ export const es: Messages = {
       navigate: 'Navegar',
       paste: 'Pegar',
       copyCombined: 'Copiar juntos',
+      multiSelect: 'Seleccionar',
       pin: 'Fijar',
       actions: 'Acciones',
       settings: 'Ajustes',
@@ -53,6 +60,8 @@ export const es: Messages = {
       sourceGroup: 'App de origen',
       sourceShort: 'App',
       allApps: 'Todas las apps',
+      searchApps: 'Buscar apps',
+      noAppMatches: 'No hay apps coincidentes',
       clear: 'Borrar filtros',
     },
     clearHistory: {
@@ -105,6 +114,7 @@ export const es: Messages = {
       source: 'origen',
       size: 'tamaño',
       rank: 'rango',
+      match: 'coincidencia',
     },
     additionalData: 'Otros datos del portapapeles',
     clipboardCategory: { image: 'Imagen', text: 'Texto', files: 'Archivos' },
@@ -162,7 +172,10 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
+    fullHistorySearch: 'Búsqueda en todo el historial',
     combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
+    clearSelection: 'Borrar selección',
+    selectionCleared: 'Selección borrada',
     autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:

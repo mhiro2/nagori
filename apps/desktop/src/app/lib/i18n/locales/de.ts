@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const de: Messages = {
   palette: {
     placeholder: 'Verlauf durchsuchen …',
+    searchLabel: 'Zwischenablage-Verlauf durchsuchen',
+    resultsLabel: 'Zwischenablage-Verlauf',
     searching: 'Suchen …',
     resultCount: (count: number): string =>
       count === 1 ? '1 Ergebnis' : `${count.toLocaleString('de')} Ergebnisse`,
@@ -11,6 +13,10 @@ export const de: Messages = {
     emptyStates: {
       start: 'Kopieren Sie Text, um den Verlauf zu beginnen.',
       noMatches: 'Keine Einträge entsprechen dieser Suche.',
+      noQuickMatches:
+        'Die Schnellsuche hat nichts gefunden. Durchsuche den gesamten Verlauf, um auch ältere Einträge zu prüfen.',
+      searchFullHistory: 'Gesamten Verlauf durchsuchen',
+      noFullHistoryMatches: 'Kein Eintrag enthält diesen Text.',
       noFilterMatches: 'Keine Einträge entsprechen diesen Filtern.',
       capturePaused:
         'Die Erfassung ist pausiert. Setzen Sie sie unten fort, um neue Einträge zu speichern.',
@@ -32,6 +38,7 @@ export const de: Messages = {
       navigate: 'Navigieren',
       paste: 'Einfügen',
       copyCombined: 'Zusammen kopieren',
+      multiSelect: 'Auswählen',
       pin: 'Anheften',
       actions: 'Aktionen',
       settings: 'Einstellungen',
@@ -54,6 +61,8 @@ export const de: Messages = {
       sourceGroup: 'Quell-App',
       sourceShort: 'App',
       allApps: 'Alle Apps',
+      searchApps: 'Apps durchsuchen',
+      noAppMatches: 'Keine passenden Apps',
       clear: 'Filter löschen',
     },
     clearHistory: {
@@ -106,6 +115,7 @@ export const de: Messages = {
       source: 'Quelle',
       size: 'Größe',
       rank: 'Rang',
+      match: 'Treffer',
     },
     additionalData: 'Weitere Daten in der Zwischenablage',
     clipboardCategory: { image: 'Bild', text: 'Text', files: 'Dateien' },
@@ -163,7 +173,10 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
+    fullHistorySearch: 'Suche im gesamten Verlauf',
     combinedCopyHint: 'Kombiniertes Kopieren wird als neuer Eintrag gespeichert',
+    clearSelection: 'Auswahl aufheben',
+    selectionCleared: 'Auswahl aufgehoben',
     autoPasteOff: 'Auto-Einfügen aus — Accessibility nicht erteilt',
     autoPasteOffShort: '⚠ Auto-Einfügen aus',
     autoPasteOffSetupAria:

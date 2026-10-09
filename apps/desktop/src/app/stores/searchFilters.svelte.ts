@@ -1,3 +1,5 @@
+import { listSourceApps } from '../lib/commands';
+import { isTauri } from '../lib/tauri';
 import type { ContentKind, SearchFilters } from '../lib/types';
 
 // Date filtering is single-select (one window at a time); the other axes
@@ -53,42 +55,24 @@ export const setSourceApp = (app: string | undefined): void => {
   filterState.sourceApp = app;
 };
 
-// Capacity for the source-app dropdown so a noisy result set can't make the
-// menu unwieldy.
-export const MAX_SOURCE_OPTIONS = 8;
-
-// Candidate source apps for the dropdown. The live result set collapses to the
-// single selected app once a source filter is applied, which would hide every
-// other app and force a clear-then-reselect round trip just to switch apps. We
-// instead remember the apps from the most recent search that was NOT
-// source-app filtered — the complete set for the current query/date/kind — so
-// the open menu keeps offering every app to switch to.
+// Candidate source apps for the dropdown: every app in the live history, most
+// recently seen first, fetched from the backend rather than read off the result
+// page. The page only holds the rows that matched (and, once a source filter
+// applies, only the active app), so deriving the options from it would hide
+// apps whose entries are older or outside the current query.
 export const sourceAppOptions = $state<{ apps: string[] }>({ apps: [] });
 
-// Record the apps seen in a completed search. A source-app-filtered search only
-// returns the active app, so keep the previously-recorded set (just ensuring
-// the active app is present) instead of shrinking the menu; an unfiltered
-// search refreshes the full set. Dedupes in first-seen order and caps the list.
-export const recordSourceApps = (
-  resultApps: readonly (string | undefined)[],
-  appFiltered: boolean,
-): void => {
-  if (appFiltered) {
-    const active = filterState.sourceApp;
-    if (active !== undefined && !sourceAppOptions.apps.includes(active)) {
-      sourceAppOptions.apps = [active, ...sourceAppOptions.apps].slice(0, MAX_SOURCE_OPTIONS);
-    }
-    return;
+// Refresh the app list. Called when the palette mounts and again whenever the
+// dropdown opens, so apps first seen since mount show up without a restart. A
+// failed fetch keeps the previous list: the dropdown also folds in the apps on
+// screen, so it degrades to that instead of emptying.
+export const refreshSourceApps = async (): Promise<void> => {
+  if (!isTauri()) return;
+  try {
+    sourceAppOptions.apps = await listSourceApps();
+  } catch {
+    // Keep the last known list.
   }
-  const seen = new Set<string>();
-  const apps: string[] = [];
-  for (const name of resultApps) {
-    if (name === undefined || seen.has(name)) continue;
-    seen.add(name);
-    apps.push(name);
-    if (apps.length >= MAX_SOURCE_OPTIONS) break;
-  }
-  sourceAppOptions.apps = apps;
 };
 
 export const togglePinnedOnly = (): void => {

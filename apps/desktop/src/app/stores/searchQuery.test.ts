@@ -13,6 +13,7 @@ import { sampleSearchResult } from '../test-helpers/fixtures';
 import { clearFilters, togglePinnedOnly } from './searchFilters.svelte';
 import {
   canLoadMoreResults,
+  canSearchFullHistory,
   cancelPendingQuery,
   loadMoreResults,
   MAX_RESULT_LIMIT,
@@ -23,6 +24,7 @@ import {
   resultsPaged,
   runQuery,
   scheduleQuery,
+  searchFullHistory,
   searchState,
 } from './searchQuery.svelte';
 
@@ -71,6 +73,7 @@ beforeEach(() => {
   searchState.loading = false;
   searchState.errorMessage = undefined;
   searchState.lastElapsedMs = undefined;
+  searchState.fullHistory = false;
 });
 
 afterEach(() => {
@@ -408,5 +411,104 @@ describe('result paging', () => {
     searchState.selectedIndex = 42;
     await loadMoreResults();
     expect(searchState.results[searchState.selectedIndex]?.id).toBe('r42');
+  });
+});
+
+describe('result scope version', () => {
+  it('advances on a new query or filter set but not on refreshes or paging', async () => {
+    fillEveryLimit();
+    const start = searchState.resultScopeVersion;
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(start + 1);
+
+    // A same-scope refresh (a capture landing) and paging keep the version, so
+    // the palette does not re-announce the count on every background change.
+    await runQuery('foo');
+    await loadMoreResults();
+    expect(searchState.resultScopeVersion).toBe(start + 1);
+
+    togglePinnedOnly();
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(start + 2);
+    await runQuery('bar');
+    expect(searchState.resultScopeVersion).toBe(start + 3);
+  });
+});
+
+const lastMode = () => vi.mocked(searchClipboard).mock.lastCall?.[0].mode;
+
+describe('full-history search', () => {
+  it('re-runs an empty quick search over the whole history, scoped to its query', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('order_tot');
+    expect(lastMode()).toBe('Auto');
+    expect(canSearchFullHistory()).toBe(true);
+
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('old')] }));
+    await searchFullHistory();
+    expect(lastMode()).toBe('Exact');
+    expect(searchState.fullHistory).toBe(true);
+    expect(searchState.results.map((r) => r.id)).toEqual(['old']);
+
+    // A same-scope refresh (a capture landing) keeps the wider search.
+    await runQuery('order_tot');
+    expect(lastMode()).toBe('Exact');
+
+    // A new query goes back to the quick search, and so does returning to the
+    // old one.
+    await runQuery('order_total');
+    expect(lastMode()).toBe('Auto');
+    expect(searchState.fullHistory).toBe(false);
+    await runQuery('order_tot');
+    expect(lastMode()).toBe('Auto');
+  });
+
+  it('is not offered for a non-empty result, the recent listing or a failed search', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a')] }));
+    await runQuery('foo');
+    expect(canSearchFullHistory()).toBe(false);
+    const calls = vi.mocked(searchClipboard).mock.calls.length;
+    await searchFullHistory();
+    expect(vi.mocked(searchClipboard).mock.calls.length).toBe(calls);
+
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('');
+    expect(canSearchFullHistory()).toBe(false);
+
+    vi.mocked(searchClipboard).mockRejectedValue(new Error('backend gone'));
+    await runQuery('bar');
+    expect(canSearchFullHistory()).toBe(false);
+  });
+
+  it('returns to the quick search after the query is cleared and retyped', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('foo');
+    await searchFullHistory();
+    expect(lastMode()).toBe('Exact');
+    await runQuery('');
+    await runQuery('foo');
+    expect(lastMode()).toBe('Auto');
+  });
+
+  it('counts widening the same query as a new result set', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('foo');
+    const version = searchState.resultScopeVersion;
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('old')] }));
+    await searchFullHistory();
+    expect(searchState.resultScopeVersion).toBe(version + 1);
+    // A refresh of the widened results stays silent.
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(version + 1);
+  });
+
+  it('drops the wider search when the filters change', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('foo');
+    await searchFullHistory();
+    expect(lastMode()).toBe('Exact');
+    togglePinnedOnly();
+    await runQuery('foo');
+    expect(lastMode()).toBe('Auto');
   });
 });

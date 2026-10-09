@@ -28,6 +28,9 @@ import type {
 export const searchClipboard = (request: SearchRequest): Promise<SearchResponse> =>
   invoke('search_clipboard', { request });
 
+// Every app the live history was copied from, most recently seen first.
+export const listSourceApps = (): Promise<string[]> => invoke('list_source_apps');
+
 export const closePalette = (): Promise<void> => invoke('close_palette');
 
 // Every palette format respects the user's auto-paste setting.
