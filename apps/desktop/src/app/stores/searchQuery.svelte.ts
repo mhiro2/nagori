@@ -54,6 +54,10 @@ type SearchState = {
   loading: boolean;
   errorMessage: string | undefined;
   lastElapsedMs: number | undefined;
+  // Bumped whenever a result set for a different query or filter set is
+  // applied. Background refreshes and paging keep it, so the palette can
+  // announce a new result count without re-announcing every capture.
+  resultScopeVersion: number;
 };
 
 export const searchState = $state<SearchState>({
@@ -65,6 +69,7 @@ export const searchState = $state<SearchState>({
   loading: false,
   errorMessage: undefined,
   lastElapsedMs: undefined,
+  resultScopeVersion: 0,
 });
 
 // Latest-only search queue. The palette fires a backend search per debounced
@@ -223,7 +228,9 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     if (isFreshest(ticket)) {
       applyResults(response.results, request.query);
       searchState.resultLimit = request.limit ?? RESULT_PAGE_SIZE;
-      appliedScope = limitScope(request.query, filters);
+      const scope = limitScope(request.query, filters);
+      if (scope !== appliedScope) searchState.resultScopeVersion += 1;
+      appliedScope = scope;
       appliedTicket = ticket;
       searchState.lastElapsedMs = response.totalElapsedMs;
       // Feed the source-app dropdown. When this search was itself app-filtered

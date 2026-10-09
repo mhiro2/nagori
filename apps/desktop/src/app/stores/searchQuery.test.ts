@@ -410,3 +410,24 @@ describe('result paging', () => {
     expect(searchState.results[searchState.selectedIndex]?.id).toBe('r42');
   });
 });
+
+describe('result scope version', () => {
+  it('advances on a new query or filter set but not on refreshes or paging', async () => {
+    fillEveryLimit();
+    const start = searchState.resultScopeVersion;
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(start + 1);
+
+    // A same-scope refresh (a capture landing) and paging keep the version, so
+    // the palette does not re-announce the count on every background change.
+    await runQuery('foo');
+    await loadMoreResults();
+    expect(searchState.resultScopeVersion).toBe(start + 1);
+
+    togglePinnedOnly();
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(start + 2);
+    await runQuery('bar');
+    expect(searchState.resultScopeVersion).toBe(start + 3);
+  });
+});

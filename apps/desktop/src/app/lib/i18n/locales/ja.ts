@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const ja: Messages = {
   palette: {
     placeholder: '履歴を検索…',
+    searchLabel: 'クリップボード履歴を検索',
+    resultsLabel: 'クリップボード履歴',
     searching: '検索中…',
     resultCount: (count: number): string => `${count.toLocaleString('ja')} 件`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -156,6 +158,7 @@ export const ja: Messages = {
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
     combinedCopyHint: '結合コピーは新しい項目として保存されます',
     clearSelection: '選択を解除',
+    selectionCleared: '選択を解除しました',
     autoPasteOff: '自動ペースト OFF — Accessibility 未許可',
     autoPasteOffShort: '⚠ 自動ペースト OFF',
     autoPasteOffSetupAria: '自動ペースト OFF: Accessibility の許可が必要です。セットアップを開く。',

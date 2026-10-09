@@ -6,6 +6,9 @@ export type CountFormatter = (count: number) => string;
 export type Messages = {
   palette: {
     placeholder: string;
+    // Accessible names for the search combobox and the result listbox.
+    searchLabel: string;
+    resultsLabel: string;
     searching: string;
     resultCount: CountFormatter;
     elapsed: (ms: number) => string;
@@ -200,6 +203,8 @@ export type Messages = {
     combinedCopyHint: string;
     // Selection-bar button that leaves multi-select mode.
     clearSelection: string;
+    // Announced when the multi-selection is emptied.
+    selectionCleared: string;
     // Compact accessibility indicator surfaced in the palette StatusBar
     // when the OS permission required to drive auto-paste is missing. The
     // indicator is a single clickable chip that opens the Setup tab:
@@ -668,6 +673,8 @@ export type Messages = {
 export const en: Messages = {
   palette: {
     placeholder: 'Search history…',
+    searchLabel: 'Search clipboard history',
+    resultsLabel: 'Clipboard history',
     searching: 'Searching…',
     resultCount: (count) => (count === 1 ? '1 result' : `${count.toLocaleString('en')} results`),
     elapsed: (ms) => `${ms.toFixed(0)} ms`,
@@ -810,6 +817,7 @@ export const en: Messages = {
     selectedCount: (n) => (n === 1 ? '1 selected' : `${n.toLocaleString('en')} selected`),
     combinedCopyHint: 'Combined copy is saved as a new item',
     clearSelection: 'Clear selection',
+    selectionCleared: 'Selection cleared',
     autoPasteOff: 'Auto-paste off — Accessibility not granted',
     autoPasteOffShort: '⚠ Auto-paste off',
     autoPasteOffSetupAria: 'Auto-paste off: Accessibility permission required. Open Setup.',

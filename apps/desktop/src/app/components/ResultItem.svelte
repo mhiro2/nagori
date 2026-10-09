@@ -12,6 +12,10 @@
   };
   const badge = (kind: string): string => KIND_BADGE[kind] ?? '?';
 
+  // DOM id of a result option, referenced by the search combobox's
+  // `aria-activedescendant`. Keyed by entry id so it survives re-ranking.
+  export const resultOptionId = (entryId: string): string => `result-option-${entryId}`;
+
   const safeUrl = (raw: string): URL | undefined => {
     try {
       return new URL(raw.trim());
@@ -174,9 +178,11 @@
     class="result-item"
     class:selected
     class:marked
+    id={resultOptionId(item.id)}
     role="option"
-    aria-selected={selected}
+    aria-selected={marked}
     aria-label={fileAria}
+    tabindex={selected ? 0 : -1}
     data-kind={item.kind}
     data-sensitivity={item.sensitivity}
     disabled={locked}

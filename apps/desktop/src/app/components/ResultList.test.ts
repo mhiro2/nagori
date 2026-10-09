@@ -75,17 +75,28 @@ describe('ResultList', () => {
     expect(container.querySelectorAll('.result-row.locked')).toHaveLength(2);
   });
 
-  it('exposes a listbox containing options with aria-selected reflecting selectedIndex', () => {
+  it('keeps the cursor and the multi-selection on separate attributes', () => {
     const items = [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })];
     const { getByRole, getAllByRole } = render(ResultList, {
-      props: { items, selectedIndex: 1, onSelect: () => {}, onConfirm: () => {} },
+      props: {
+        items,
+        selectedIndex: 1,
+        multiSelected: new Set(['c']),
+        listboxId: 'results',
+        onSelect: () => {},
+        onConfirm: () => {},
+      },
     });
-    // Verifies the WAI-ARIA contract: a listbox MUST own role="option" children
-    // and only the active row should report aria-selected="true". Without this
-    // the screen-reader announces "button" instead of "option N of 3".
-    expect(getByRole('listbox')).toBeTruthy();
+    const listbox = getByRole('listbox', { name: 'Clipboard history' });
+    expect(listbox.id).toBe('results');
+    expect(listbox.getAttribute('aria-multiselectable')).toBe('true');
     const options = getAllByRole('option');
-    expect(options.map((o) => o.getAttribute('aria-selected'))).toEqual(['false', 'true', 'false']);
+    // `aria-selected` reports the multi-selection only; the highlighted row is
+    // the single tab stop (roving tabindex) and the combobox's active
+    // descendant, so a screen reader never hears the cursor as "selected".
+    expect(options.map((o) => o.getAttribute('aria-selected'))).toEqual(['false', 'false', 'true']);
+    expect(options.map((o) => o.getAttribute('tabindex'))).toEqual(['-1', '0', '-1']);
+    expect(options[1]?.id).toBe('result-option-b');
   });
 
   it('auto-scrolls for navigation, new queries, and a moved selection on refresh', async () => {
@@ -170,7 +181,7 @@ describe('ResultList', () => {
     // Arrow far down the list: same array, cursor moved -> scroll into view.
     await rerender({ items, selectedIndex: 150, appliedQuery: 'q', onSelect, onConfirm: () => {} });
     expect(spy).toHaveBeenCalled();
-    expect(container.querySelector('[aria-selected="true"]')?.textContent).toContain('row 150');
+    expect(container.querySelector('.result-item.selected')?.textContent).toContain('row 150');
 
     // Hovering any row (even far down) still drives selection through onSelect.
     await fireEvent.mouseEnter(getAllByRole('option')[180] as Element);

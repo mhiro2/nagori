@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const de: Messages = {
   palette: {
     placeholder: 'Verlauf durchsuchen …',
+    searchLabel: 'Zwischenablage-Verlauf durchsuchen',
+    resultsLabel: 'Zwischenablage-Verlauf',
     searching: 'Suchen …',
     resultCount: (count: number): string =>
       count === 1 ? '1 Ergebnis' : `${count.toLocaleString('de')} Ergebnisse`,
@@ -166,6 +168,7 @@ export const de: Messages = {
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
     combinedCopyHint: 'Kombiniertes Kopieren wird als neuer Eintrag gespeichert',
     clearSelection: 'Auswahl aufheben',
+    selectionCleared: 'Auswahl aufgehoben',
     autoPasteOff: 'Auto-Einfügen aus — Accessibility nicht erteilt',
     autoPasteOffShort: '⚠ Auto-Einfügen aus',
     autoPasteOffSetupAria:

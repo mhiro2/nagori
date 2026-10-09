@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const fr: Messages = {
   palette: {
     placeholder: 'Rechercher dans l’historique…',
+    searchLabel: 'Rechercher dans l’historique du presse-papiers',
+    resultsLabel: 'Historique du presse-papiers',
     searching: 'Recherche…',
     resultCount: (count: number): string =>
       count <= 1 ? `${count} résultat` : `${count.toLocaleString('fr')} résultats`,
@@ -168,6 +170,7 @@ export const fr: Messages = {
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
     combinedCopyHint: 'La copie combinée est enregistrée comme nouvel élément',
     clearSelection: 'Effacer la sélection',
+    selectionCleared: 'Sélection effacée',
     autoPasteOff: 'Collage automatique désactivé — Accessibilité non accordée',
     autoPasteOffShort: '⚠ Collage automatique désactivé',
     autoPasteOffSetupAria:

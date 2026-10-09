@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const es: Messages = {
   palette: {
     placeholder: 'Buscar en el historial…',
+    searchLabel: 'Buscar en el historial del portapapeles',
+    resultsLabel: 'Historial del portapapeles',
     searching: 'Buscando…',
     resultCount: (count: number): string =>
       count === 1 ? '1 resultado' : `${count.toLocaleString('es')} resultados`,
@@ -165,6 +167,7 @@ export const es: Messages = {
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
     combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
     clearSelection: 'Borrar selección',
+    selectionCleared: 'Selección borrada',
     autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:

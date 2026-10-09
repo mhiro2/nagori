@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const zhHant: Messages = {
   palette: {
     placeholder: '搜尋歷史紀錄…',
+    searchLabel: '搜尋剪貼簿紀錄',
+    resultsLabel: '剪貼簿紀錄',
     searching: '搜尋中…',
     resultCount: (count: number): string => `${count.toLocaleString('zh-Hant')} 筆`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -155,6 +157,7 @@ export const zhHant: Messages = {
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
     combinedCopyHint: '合併複製會儲存為新項目',
     clearSelection: '取消選取',
+    selectionCleared: '已取消選取',
     autoPasteOff: '自動貼上已關閉 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自動貼上已關閉',
     autoPasteOffSetupAria: '自動貼上已關閉：需要 Accessibility 權限。開啟設定。',

@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const zhHans: Messages = {
   palette: {
     placeholder: '搜索历史记录…',
+    searchLabel: '搜索剪贴板历史',
+    resultsLabel: '剪贴板历史',
     searching: '搜索中…',
     resultCount: (count: number): string => `${count.toLocaleString('zh-Hans')} 条`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -155,6 +157,7 @@ export const zhHans: Messages = {
     selectedCount: (n: number): string => `已选 ${n.toLocaleString('zh-Hans')} 项`,
     combinedCopyHint: '合并复制会保存为新项目',
     clearSelection: '取消选择',
+    selectionCleared: '已取消选择',
     autoPasteOff: '自动粘贴已关闭 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自动粘贴已关闭',
     autoPasteOffSetupAria: '自动粘贴已关闭：需要 Accessibility 权限。打开设置。',

@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const ko: Messages = {
   palette: {
     placeholder: '기록 검색…',
+    searchLabel: '클립보드 기록 검색',
+    resultsLabel: '클립보드 기록',
     searching: '검색 중…',
     resultCount: (count: number): string => `${count.toLocaleString('ko')}건`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -157,6 +159,7 @@ export const ko: Messages = {
     selectedCount: (n: number): string => `${n.toLocaleString('ko')}개 선택됨`,
     combinedCopyHint: '결합 복사는 새 항목으로 저장됩니다',
     clearSelection: '선택 해제',
+    selectionCleared: '선택 해제됨',
     autoPasteOff: '자동 붙여넣기 꺼짐 — Accessibility 권한 없음',
     autoPasteOffShort: '⚠ 자동 붙여넣기 꺼짐',
     autoPasteOffSetupAria: '자동 붙여넣기 꺼짐: Accessibility 권한이 필요합니다. 설정 열기.',

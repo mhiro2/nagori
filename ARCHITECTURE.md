@@ -1807,6 +1807,24 @@ not duplicate runtime logic.
   windowing would carry against `ResultList`'s carefully-tuned scroll effect.
   If a future surface raises the result limit beyond that cap, revisit
   windowing then; the row-level containment is the low-risk first step.
+- Palette focus model (`Palette.svelte`, `SearchBox.svelte`,
+  `ResultList.svelte`). The search input is a labelled `combobox` that keeps
+  focus while typing; ↑/↓ move the highlighted result, which the input exposes
+  through `aria-activedescendant` (the option ids are keyed by entry id so they
+  survive re-ranking). The result list is a labelled, `aria-multiselectable`
+  listbox. Only the highlighted row is tabbable (roving `tabindex`), so Tab
+  moves from the search box and filters into the list in one step, and arrows
+  then carry DOM focus with the cursor. `aria-selected` reports the
+  multi-selection only, never the cursor, so a screen reader does not hear
+  every highlighted row as selected. A single visually hidden polite live
+  region announces the result count when a new query or filter set lands
+  (`searchState.resultScopeVersion`; background refreshes and paging keep the
+  version and stay silent) and multi-selection changes. Empty results are left
+  to the empty state's own status message, and paging to the list footer, so
+  no change is announced twice. While rows are multi-selected, the status bar
+  shows a selection bar with the count, an explicit *Copy combined* button and
+  *Clear selection*, and the footer hints offer the multi-select toggle so the
+  mode is discoverable by mouse.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are
