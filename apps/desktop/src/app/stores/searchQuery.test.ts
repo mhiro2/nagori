@@ -480,6 +480,28 @@ describe('full-history search', () => {
     expect(canSearchFullHistory()).toBe(false);
   });
 
+  it('returns to the quick search after the query is cleared and retyped', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('foo');
+    await searchFullHistory();
+    expect(lastMode()).toBe('Exact');
+    await runQuery('');
+    await runQuery('foo');
+    expect(lastMode()).toBe('Auto');
+  });
+
+  it('counts widening the same query as a new result set', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
+    await runQuery('foo');
+    const version = searchState.resultScopeVersion;
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('old')] }));
+    await searchFullHistory();
+    expect(searchState.resultScopeVersion).toBe(version + 1);
+    // A refresh of the widened results stays silent.
+    await runQuery('foo');
+    expect(searchState.resultScopeVersion).toBe(version + 1);
+  });
+
   it('drops the wider search when the filters change', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
     await runQuery('foo');

@@ -260,6 +260,14 @@
     searchBox?.focus();
   };
 
+  // The empty state (and its button) unmounts while the wider search loads,
+  // so hand focus to the search box first: otherwise it drops to the body and
+  // the next Enter would act on whichever row the new results highlight.
+  const startFullHistorySearch = (): void => {
+    searchBox?.focus();
+    void searchFullHistory();
+  };
+
   const handleConfirm = (index: number, event?: MouseEvent): void => {
     // While the action inspector owns the column the list is a read-only
     // reference surface, so a click does nothing — matching the frozen hover.
@@ -603,7 +611,7 @@
           fullHistory={searchState.fullHistory}
           onRetry={() => void refreshCurrent()}
           onClearSearch={clearSearch}
-          onSearchFullHistory={() => void searchFullHistory()}
+          onSearchFullHistory={startFullHistorySearch}
         />
       {:else}
         <ResultList

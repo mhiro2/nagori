@@ -250,6 +250,9 @@ describe('Palette', () => {
     const { getByRole } = render(Palette);
     await fireEvent.click(getByRole('button', { name: 'Search all history' }));
     expect(searchFullHistory).toHaveBeenCalledOnce();
+    // The button unmounts while the wider search loads; focus waits in the
+    // search box rather than dropping to the body.
+    expect(document.activeElement).toBe(getByRole('combobox'));
     vi.mocked(canSearchFullHistory).mockReturnValue(false);
   });
 

@@ -264,9 +264,14 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     if (isFreshest(ticket)) {
       applyResults(response.results, request.query);
       searchState.resultLimit = request.limit ?? RESULT_PAGE_SIZE;
-      searchState.fullHistory = request.mode === 'Exact';
+      // Widening to the full history replaces the result set for the same
+      // query + filters, so it counts as a new result set too.
+      const fullHistory = request.mode === 'Exact';
       const scope = limitScope(request.query, filters);
-      if (scope !== appliedScope) searchState.resultScopeVersion += 1;
+      if (scope !== appliedScope || fullHistory !== searchState.fullHistory) {
+        searchState.resultScopeVersion += 1;
+      }
+      searchState.fullHistory = fullHistory;
       appliedScope = scope;
       appliedTicket = ticket;
       searchState.lastElapsedMs = response.totalElapsedMs;
@@ -375,6 +380,9 @@ export const runQuery = async (raw: string): Promise<void> => {
   }
   setQuery(raw);
   if (raw.trim() === '') {
+    // The recent listing never widens, and leaving the query ends the wider
+    // search: typing the same query again starts with the quick search.
+    fullHistoryScope = undefined;
     await refreshRecent();
     return;
   }
