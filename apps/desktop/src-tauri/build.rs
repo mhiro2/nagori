@@ -51,6 +51,7 @@ fn main() {
             "copy_entry_from_palette",
             "copy_text_from_palette",
             "paste_text_from_palette",
+            "notify_paste_failure",
             "get_entry_preview",
             "get_entry_preview_full",
             "preview_entry",

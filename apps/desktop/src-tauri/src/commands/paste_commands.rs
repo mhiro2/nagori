@@ -190,6 +190,35 @@ pub(crate) fn emit_paste_failed_with_reason(
     let _ = app.emit_to("main", crate::PASTE_FAILED_EVENT, payload);
 }
 
+/// Longest notification title / body the palette may raise. Generous for any
+/// localized paste-failure wording, small enough that a misbehaving webview
+/// cannot push a wall of text into the OS notification centre.
+const MAX_NOTICE_TITLE_CHARS: usize = 120;
+const MAX_NOTICE_BODY_CHARS: usize = 500;
+
+/// Raise an OS notification for an auto-paste failure that happened while the
+/// palette was hidden. The palette composes the localized wording (it already
+/// owns the per-reason hints); notifications never take focus from the app the
+/// user is in. Best-effort like every other notification here: without
+/// permission (or a Linux notification daemon) it silently does nothing.
+// Tauri injects `AppHandle` by value into command parameters.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn notify_paste_failure(app: AppHandle, title: String, body: String) -> CommandResult<()> {
+    use tauri_plugin_notification::NotificationExt;
+
+    if title.trim().is_empty()
+        || title.chars().count() > MAX_NOTICE_TITLE_CHARS
+        || body.chars().count() > MAX_NOTICE_BODY_CHARS
+    {
+        return Err(CommandError::invalid_input(
+            "paste failure notice must have a short, non-empty title and body",
+        ));
+    }
+    let _ = app.notification().builder().title(title).body(body).show();
+    Ok(())
+}
+
 /// The user-facing message for a failed paste synthesis.
 ///
 /// Every reason but one shares the "copy succeeded, paste manually" framing —

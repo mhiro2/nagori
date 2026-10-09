@@ -256,6 +256,7 @@ pub fn run() {
             commands::paste_commands::copy_entry_from_palette,
             commands::paste_commands::copy_text_from_palette,
             commands::paste_commands::paste_text_from_palette,
+            commands::paste_commands::notify_paste_failure,
             commands::preview::get_entry_preview,
             commands::preview::get_entry_preview_full,
             commands::preview::preview_entry,

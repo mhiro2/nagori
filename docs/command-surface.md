@@ -92,6 +92,7 @@ prompt, the filesystem outside the database, or the network.
 | `paste_entry` | internal | Copy, then synthesize ⌘V into the foreground app. |
 | `paste_entry_from_palette` | palette | Copy the default or chosen output format, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
 | `paste_text_from_palette` | palette | Paste a quick-action / AI result through the same hide → restore-focus → auto-paste path as `paste_entry_from_palette`, without storing it. |
+| `notify_paste_failure` | palette | Raise an OS notification (never takes focus) for an auto-paste failure that landed while the palette was hidden; title and body are length-capped. |
 | `paste_entry_representation_from_palette` | palette | Copy a chosen MIME type, hide the palette, restore source focus, and synthesize ⌘/Ctrl+V only when `auto_paste_enabled` is on. |
 | `repaste_last` | internal | Re-synthesize the most recent paste. |
 | `open_url_external` | palette | Open a `Public` URL entry in the default browser (scheme allowlist + sensitivity gate). |

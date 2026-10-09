@@ -357,6 +357,12 @@
           "markdownDescription": "Enables the list_source_apps command without any pre-configured scope."
         },
         {
+          "description": "Enables the notify_paste_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-notify-paste-failure",
+          "markdownDescription": "Enables the notify_paste_failure command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_palette command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-palette",
@@ -667,6 +673,12 @@
           "type": "string",
           "const": "deny-list-source-apps",
           "markdownDescription": "Denies the list_source_apps command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the notify_paste_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-notify-paste-failure",
+          "markdownDescription": "Denies the notify_paste_failure command without any pre-configured scope."
         },
         {
           "description": "Denies the open_palette command without any pre-configured scope.",
