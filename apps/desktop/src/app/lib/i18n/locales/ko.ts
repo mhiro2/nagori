@@ -95,6 +95,15 @@ export const ko: Messages = {
   preview: {
     empty: '미리 볼 항목을 선택하세요.',
     loading: '미리보기 불러오는 중…',
+    retry: '다시 시도',
+    matches: {
+      label: '검색 일치',
+      count: (count: number): string => `${count.toLocaleString('ko')}개 일치`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('ko')} / ${total.toLocaleString('ko')}`,
+      previous: '이전 일치',
+      next: '다음 일치',
+    },
     details: '세부 정보',
     truncated: '미리보기가 잘렸습니다.',
     truncation: {

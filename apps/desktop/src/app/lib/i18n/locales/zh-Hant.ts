@@ -92,6 +92,15 @@ export const zhHant: Messages = {
   preview: {
     empty: '請選擇一個項目進行預覽。',
     loading: '正在載入預覽…',
+    retry: '重試',
+    matches: {
+      label: '搜尋符合',
+      count: (count: number): string => `${count.toLocaleString('zh-Hant')} 處符合`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')}`,
+      previous: '上一個符合',
+      next: '下一個符合',
+    },
     details: '詳細資訊',
     truncated: '預覽已截斷。',
     truncation: {

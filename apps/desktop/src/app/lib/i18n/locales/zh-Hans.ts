@@ -92,6 +92,15 @@ export const zhHans: Messages = {
   preview: {
     empty: '选择一个项目进行预览。',
     loading: '正在加载预览…',
+    retry: '重试',
+    matches: {
+      label: '搜索匹配',
+      count: (count: number): string => `${count.toLocaleString('zh-Hans')} 处匹配`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')}`,
+      previous: '上一个匹配',
+      next: '下一个匹配',
+    },
     details: '详细信息',
     truncated: '预览已截断。',
     truncation: {

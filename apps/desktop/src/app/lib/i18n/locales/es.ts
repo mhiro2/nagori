@@ -97,6 +97,16 @@ export const es: Messages = {
   preview: {
     empty: 'Selecciona un elemento para previsualizar.',
     loading: 'Cargando vista previa…',
+    retry: 'Reintentar',
+    matches: {
+      label: 'Coincidencias',
+      count: (count: number): string =>
+        count === 1 ? '1 coincidencia' : `${count.toLocaleString('es')} coincidencias`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('es')} / ${total.toLocaleString('es')}`,
+      previous: 'Coincidencia anterior',
+      next: 'Coincidencia siguiente',
+    },
     details: 'Detalles',
     truncated: 'Vista previa recortada.',
     truncation: {

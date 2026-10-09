@@ -98,6 +98,16 @@ export const de: Messages = {
   preview: {
     empty: 'Eintrag auswählen, um eine Vorschau anzuzeigen.',
     loading: 'Vorschau wird geladen …',
+    retry: 'Erneut versuchen',
+    matches: {
+      label: 'Suchtreffer',
+      count: (count: number): string =>
+        count === 1 ? '1 Treffer' : `${count.toLocaleString('de')} Treffer`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('de')} / ${total.toLocaleString('de')}`,
+      previous: 'Vorheriger Treffer',
+      next: 'Nächster Treffer',
+    },
     details: 'Details',
     truncated: 'Vorschau gekürzt.',
     truncation: {

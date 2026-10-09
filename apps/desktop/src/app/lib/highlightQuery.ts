@@ -14,7 +14,12 @@
 export type HighlightSegment = {
   text: string;
   match: boolean;
+  // Ordinal of the match range a marked segment belongs to, so the preview
+  // can step between matches. Absent on unmatched segments.
+  matchIndex?: number;
 };
+
+export type MatchRange = readonly [start: number, end: number];
 
 // Past this many UTF-16 code units we stop scanning for matches and emit the
 // remainder as one unmatched segment. Row previews are already truncated
@@ -29,23 +34,22 @@ const MAX_HIGHLIGHT_CHARS = 32 * 1024;
 const MAX_MATCH_RANGES = 500;
 
 /**
- * Split `text` into alternating matched / unmatched segments for the given
- * `query`. Returns a single unmatched segment when the query is empty or no
- * term occurs in the text. The concatenation of every segment's `text` always
- * reconstitutes the original `text` verbatim, so callers can render each
- * segment with plain text interpolation (never `@html`) and stay XSS-safe.
+ * Merged, ordered `[start, end)` ranges where any whitespace-separated term of
+ * `query` occurs in `text` (case-insensitive raw substring). Empty when the
+ * query is blank or nothing matches. Only the first `MAX_HIGHLIGHT_CHARS`
+ * code units are scanned and at most `MAX_MATCH_RANGES` hits are collected.
  */
-export const highlightQuery = (text: string, query: string | undefined): HighlightSegment[] => {
+export const matchRanges = (text: string, query: string | undefined): MatchRange[] => {
   if (text.length === 0) return [];
   const trimmed = query?.trim().toLowerCase() ?? '';
-  if (trimmed === '') return [{ text, match: false }];
+  if (trimmed === '') return [];
   // Dedupe so a repeated term ("foo foo") doesn't do redundant scans; the
   // longest-first order makes overlapping terms merge into the widest span
   // rather than nest.
   const terms = [...new Set(trimmed.split(/\s+/).filter((term) => term.length > 0))].toSorted(
     (a, b) => b.length - a.length,
   );
-  if (terms.length === 0) return [{ text, match: false }];
+  if (terms.length === 0) return [];
 
   const scanLimit = Math.min(text.length, MAX_HIGHLIGHT_CHARS);
   const original = text.slice(0, scanLimit);
@@ -55,7 +59,7 @@ export const highlightQuery = (text: string, query: string | undefined): Highlig
   // misalign the indices we slice back out of `text`. Rather than risk a
   // garbled or surrogate-split render, skip highlighting entirely in that rare
   // case.
-  if (haystack.length !== original.length) return [{ text, match: false }];
+  if (haystack.length !== original.length) return [];
 
   const ranges: Array<[number, number]> = [];
   outer: for (const term of terms) {
@@ -68,7 +72,6 @@ export const highlightQuery = (text: string, query: string | undefined): Highlig
       if (ranges.length >= MAX_MATCH_RANGES) break outer;
     }
   }
-  if (ranges.length === 0) return [{ text, match: false }];
 
   // Merge overlapping / touching ranges so we never emit nested or adjacent
   // marks.
@@ -82,16 +85,70 @@ export const highlightQuery = (text: string, query: string | undefined): Highlig
       merged.push([start, end]);
     }
   }
+  return merged;
+};
 
+/**
+ * Split `text` into alternating matched / unmatched segments for the given
+ * `query`. Returns a single unmatched segment when the query is empty or no
+ * term occurs in the text. The concatenation of every segment's `text` always
+ * reconstitutes the original `text` verbatim, so callers can render each
+ * segment with plain text interpolation (never `@html`) and stay XSS-safe.
+ */
+export const highlightQuery = (text: string, query: string | undefined): HighlightSegment[] => {
+  if (text.length === 0) return [];
+  const ranges = matchRanges(text, query);
+  if (ranges.length === 0) return [{ text, match: false }];
   // Build segments over the FULL text so anything past the scan limit is kept
   // verbatim as a trailing unmatched segment.
   const segments: HighlightSegment[] = [];
   let cursor = 0;
-  for (const [start, end] of merged) {
+  ranges.forEach(([start, end], matchIndex) => {
     if (start > cursor) segments.push({ text: text.slice(cursor, start), match: false });
-    segments.push({ text: text.slice(start, end), match: true });
+    segments.push({ text: text.slice(start, end), match: true, matchIndex });
     cursor = end;
-  }
+  });
   if (cursor < text.length) segments.push({ text: text.slice(cursor), match: false });
   return segments;
+};
+
+/**
+ * Overlay match `ranges` onto a run of styled spans whose texts concatenate
+ * to the matched text (the syntax tokenizer's output), splitting a span
+ * wherever a match starts or ends. Each piece keeps its span's fields, so a
+ * code body keeps its grammar colouring inside and around the marks.
+ */
+export const markSpans = <S extends { text: string }>(
+  spans: readonly S[],
+  ranges: readonly MatchRange[],
+): Array<S & { matchIndex?: number }> => {
+  if (ranges.length === 0) return [...spans];
+  const out: Array<S & { matchIndex?: number }> = [];
+  let offset = 0;
+  let rangeIdx = 0;
+  for (const span of spans) {
+    const spanEnd = offset + span.text.length;
+    let cursor = offset;
+    while (cursor < spanEnd) {
+      while (rangeIdx < ranges.length && ranges[rangeIdx]![1] <= cursor) rangeIdx += 1;
+      const range = ranges[rangeIdx];
+      if (range === undefined || range[0] >= spanEnd) {
+        out.push({ ...span, text: span.text.slice(cursor - offset) });
+        cursor = spanEnd;
+      } else if (range[0] > cursor) {
+        out.push({ ...span, text: span.text.slice(cursor - offset, range[0] - offset) });
+        cursor = range[0];
+      } else {
+        const end = Math.min(range[1], spanEnd);
+        out.push({
+          ...span,
+          text: span.text.slice(cursor - offset, end - offset),
+          matchIndex: rangeIdx,
+        });
+        cursor = end;
+      }
+    }
+    offset = spanEnd;
+  }
+  return out;
 };

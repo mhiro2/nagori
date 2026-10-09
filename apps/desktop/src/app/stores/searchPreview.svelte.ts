@@ -129,6 +129,15 @@ export const hydratePreview = async (
   }
 };
 
+/// Re-fetch the preview whose fetch failed. `hydratePreview` keeps a settled
+/// error for the same entry + query (so arrow-key churn doesn't hammer a
+/// failing backend); this clears it and asks again.
+export const retryPreview = async (): Promise<void> => {
+  if (previewState.errorMessage === undefined || previewState.loading) return;
+  previewState.errorMessage = undefined;
+  await hydratePreview(previewState.entryId, previewState.query);
+};
+
 /// Replace the current standard-cap preview with the expanded 1 MiB body.
 /// No-op when the entry id no longer matches the active selection, when
 /// the backend is unavailable, or when the body was not truncated in the

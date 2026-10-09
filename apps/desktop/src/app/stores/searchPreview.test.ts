@@ -9,7 +9,7 @@ vi.mock('../lib/commands', async () =>
 import { getEntryPreview } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { EntryPreviewDto } from '../lib/types';
-import { hydratePreview, previewState } from './searchPreview.svelte';
+import { hydratePreview, previewState, retryPreview } from './searchPreview.svelte';
 
 const preview = (id: string): EntryPreviewDto => ({
   id,
@@ -139,5 +139,22 @@ describe('hydratePreview', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('retryPreview', () => {
+  it('re-fetches a failed preview for the same entry and query', async () => {
+    vi.mocked(getEntryPreview).mockRejectedValueOnce(new Error('busy'));
+    await hydratePreview('retry-1', 'q');
+    expect(previewState.errorMessage).toBeDefined();
+    // A plain re-hydrate keeps the settled error...
+    await hydratePreview('retry-1', 'q');
+    expect(vi.mocked(getEntryPreview)).toHaveBeenCalledTimes(1);
+    // ...while an explicit retry asks again.
+    vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('retry-1'));
+    await retryPreview();
+    expect(vi.mocked(getEntryPreview)).toHaveBeenLastCalledWith('retry-1', 'q');
+    expect(previewState.errorMessage).toBeUndefined();
+    expect(previewState.preview?.id).toBe('retry-1');
   });
 });

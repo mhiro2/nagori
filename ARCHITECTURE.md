@@ -1889,15 +1889,24 @@ not duplicate runtime logic.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
-  highlighter for `code` kinds; non-code bodies (text / richText /
-  unknown) instead run through the shared `lib/highlightQuery` helper so
-  the same query match the result row marks is visible in the full body
-  (the helper caps its own scan at 32 KiB so a large body stays bounded).
-  When a search query matches text
+  highlighter for `code` kinds. The same query match the result row marks
+  is visible in the full body: `lib/highlightQuery` computes the match
+  ranges (capping its own scan at 32 KiB so a large body stays bounded),
+  non-code bodies render them directly, and code bodies overlay them on the
+  token stream (`markSpans` splits tokens at match edges), so a match inside
+  a keyword or string keeps its grammar colour under the mark. Every mark
+  carries its match ordinal; when there are several matches, or one in a
+  body longer than 20 lines, a stepper (*N matches*, ↑ / ↓ buttons with a
+  polite position readout) scrolls to the previous / next match and styles
+  it as current. A failed preview fetch shows its error with *Try again*
+  (`retryPreview`, since `hydratePreview` otherwise keeps a settled error
+  for the same entry + query). When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
-  warning. For Public text entries the pane offers an "expand" button that
-  fetches the body up to 1 MiB via `get_entry_preview_full`; non-Public
-  entries hide the affordance because the IPC enforces the same gate.
+  warning. For Public text entries the truncation notice offers *Show full
+  body*, which fetches the body up to 1 MiB via `get_entry_preview_full`;
+  used from the side pane it also opens the full-width preview, where a
+  body that size is readable. Non-Public entries hide the affordance
+  because the IPC enforces the same gate.
   URL entries use a dedicated three-tier layout (`host_display` on top,
   `scheme` + `path_and_query` muted below) sourced from the
   `PreviewBodyDto::Url` fields populated via `url::Url::parse` +

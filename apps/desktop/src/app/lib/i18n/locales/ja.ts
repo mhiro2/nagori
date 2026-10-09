@@ -94,6 +94,15 @@ export const ja: Messages = {
   preview: {
     empty: 'プレビューする項目を選択してください。',
     loading: 'プレビューを読み込み中…',
+    retry: '再試行',
+    matches: {
+      label: '検索一致',
+      count: (count: number): string => `${count.toLocaleString('ja')} 件の一致`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('ja')} / ${total.toLocaleString('ja')}`,
+      previous: '前の一致',
+      next: '次の一致',
+    },
     details: '詳細',
     truncated: 'プレビューは途中まで表示しています。',
     truncation: {

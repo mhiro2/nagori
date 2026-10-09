@@ -98,6 +98,16 @@ export const fr: Messages = {
   preview: {
     empty: 'Sélectionnez un élément à prévisualiser.',
     loading: 'Chargement de l’aperçu…',
+    retry: 'Réessayer',
+    matches: {
+      label: 'Correspondances',
+      count: (count: number): string =>
+        count <= 1 ? `${count} correspondance` : `${count.toLocaleString('fr')} correspondances`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('fr')} / ${total.toLocaleString('fr')}`,
+      previous: 'Correspondance précédente',
+      next: 'Correspondance suivante',
+    },
     details: 'Détails',
     truncated: 'Aperçu tronqué.',
     truncation: {

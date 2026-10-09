@@ -45,7 +45,12 @@
     selectAllMulti,
     toggleMultiSelect,
   } from '../stores/searchMultiSelect.svelte';
-  import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
+  import {
+    expandPreview,
+    hydratePreview,
+    previewState,
+    retryPreview,
+  } from '../stores/searchPreview.svelte';
   import {
     canLoadMoreResults,
     canSearchFullHistory,
@@ -426,6 +431,13 @@
       (previewUrlConfirmOpen && (showPreviewPane || previewExpanded) && !actionsOpen),
   );
 
+  // The whole body of a truncated preview is read in the full-width preview,
+  // so loading it from the side pane opens that view as well.
+  const openFullBody = (id: string): void => {
+    previewExpanded = true;
+    void expandPreview(id);
+  };
+
   // The single entry point that docks the inspector — shared by the keyboard
   // chord and the mouse affordances (the preview-pane header button and the
   // status-bar hint). Collapse the full-width preview first: the inspector
@@ -644,7 +656,8 @@
         expanded={previewExpanded}
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
-        onExpandBody={(id) => void expandPreview(id)}
+        onExpandBody={openFullBody}
+        onRetry={() => void retryPreview()}
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
         bind:urlConfirmOpen={previewUrlConfirmOpen}

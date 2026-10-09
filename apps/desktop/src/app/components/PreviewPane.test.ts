@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -1102,7 +1102,7 @@ describe('PreviewPane', () => {
     expect(container.querySelector('[data-testid="preview-elided-match"]')).toBeNull();
   });
 
-  it('renders the expand button only when expanded mode is active and body is text-bearing', () => {
+  it('offers the full body straight from the truncation notice in either view', async () => {
     const truncated = {
       byteCount: 2_500_000,
       charCount: 2_500_000,
@@ -1112,28 +1112,79 @@ describe('PreviewPane', () => {
       fullContentAvailable: true,
       truncation: { kind: 'headAndTail' as const, elidedBytes: 2_300_000 },
     };
-    // Compact (default) view hides the expand button even when eligible.
-    const compact = render(PreviewPane, {
+    const clickExpand = async (expanded: boolean): Promise<void> => {
+      const onExpandBody = vi.fn();
+      const { getByTestId } = render(PreviewPane, {
+        props: {
+          item: sampleItem(),
+          preview: samplePreview({ metadata: truncated }),
+          loading: false,
+          errorMessage: undefined,
+          expanded,
+          onExpandBody,
+        },
+      });
+      await fireEvent.click(getByTestId('preview-expand-button'));
+      expect(onExpandBody).toHaveBeenCalledOnce();
+      cleanup();
+    };
+    // The side pane no longer hides the button: the palette opens the
+    // full-width view when it is used from there.
+    await clickExpand(false);
+    await clickExpand(true);
+  });
+
+  it('offers a retry after the preview fetch fails', async () => {
+    const onRetry = vi.fn();
+    const { getByRole } = render(PreviewPane, {
       props: {
         item: sampleItem(),
-        preview: samplePreview({ metadata: truncated }),
+        preview: undefined,
         loading: false,
-        errorMessage: undefined,
+        errorMessage: 'preview unavailable',
+        onRetry,
       },
     });
-    expect(compact.container.querySelector('[data-testid="preview-expand-button"]')).toBeNull();
-    cleanup();
-    // Expanded view shows the button when the entry is Public + truncated + text-bearing.
-    const expanded = render(PreviewPane, {
+    expect(getByRole('alert').textContent).toContain('preview unavailable');
+    await fireEvent.click(getByRole('button', { name: 'Try again' }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it('steps between search matches in a long body and marks the current one', async () => {
+    const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {});
+    const text = ['alpha needle', 'beta', 'gamma needle', 'delta needle'].join('\n');
+    const { getByRole, getByTestId, container } = render(PreviewPane, {
       props: {
         item: sampleItem(),
-        preview: samplePreview({ metadata: truncated }),
+        preview: samplePreview({ previewText: text }),
         loading: false,
         errorMessage: undefined,
-        expanded: true,
+        query: 'needle',
       },
     });
-    expect(expanded.container.querySelector('[data-testid="preview-expand-button"]')).toBeTruthy();
+    expect(getByTestId('preview-match-position').textContent).toBe('3 matches');
+    await fireEvent.click(getByRole('button', { name: 'Next match' }));
+    expect(getByTestId('preview-match-position').textContent).toBe('1 / 3');
+    expect(container.querySelector('mark.current')?.getAttribute('data-match')).toBe('0');
+    await fireEvent.click(getByRole('button', { name: 'Previous match' }));
+    // Wraps from the first match to the last.
+    expect(getByTestId('preview-match-position').textContent).toBe('3 / 3');
+    expect(container.querySelector('mark.current')?.getAttribute('data-match')).toBe('2');
+    expect(scroll).toHaveBeenCalled();
+    scroll.mockRestore();
+  });
+
+  it('skips the match stepper for a short body with a single match', () => {
+    const { queryByTestId } = render(PreviewPane, {
+      props: {
+        item: sampleItem(),
+        preview: samplePreview({ previewText: 'one needle' }),
+        loading: false,
+        errorMessage: undefined,
+        query: 'needle',
+      },
+    });
+    expect(queryByTestId('preview-match-position')).toBeNull();
   });
 
   it('hides the expand button when fullContentAvailable is false (Sensitive / non-Public)', () => {

@@ -121,6 +121,16 @@ export type Messages = {
   preview: {
     empty: string;
     loading: string;
+    // Offered after a preview fetch fails.
+    retry: string;
+    // Stepper over the search matches in a text / code body.
+    matches: {
+      label: string;
+      count: CountFormatter;
+      position: (current: number, total: number) => string;
+      previous: string;
+      next: string;
+    };
     // Summary label for the collapsible holding the technical fields
     // (id / sensitivity / size / rank).
     details: string;
@@ -776,6 +786,15 @@ export const en: Messages = {
   preview: {
     empty: 'Select an item to preview.',
     loading: 'Loading preview…',
+    retry: 'Try again',
+    matches: {
+      label: 'Search matches',
+      count: (count) => (count === 1 ? '1 match' : `${count.toLocaleString('en')} matches`),
+      position: (current, total) =>
+        `${current.toLocaleString('en')} / ${total.toLocaleString('en')}`,
+      previous: 'Previous match',
+      next: 'Next match',
+    },
     details: 'Details',
     truncated: 'Preview truncated.',
     truncation: {
