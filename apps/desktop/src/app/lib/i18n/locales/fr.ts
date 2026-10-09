@@ -19,6 +19,14 @@ export const fr: Messages = {
     },
     fallback: '(Runtime Tauri non démarré) Les éléments récemment copiés apparaîtront ici.',
     screenshotBadge: 'Capture',
+    resultLimit: {
+      showing: (count: number): string =>
+        `Affichage des ${count.toLocaleString('fr')} premières entrées.`,
+      showMore: 'Afficher plus',
+      reached: (count: number): string =>
+        `Affichage des ${count.toLocaleString('fr')} premières entrées. Affinez la recherche ou utilisez des filtres pour atteindre les entrées plus anciennes.`,
+      allShown: (count: number): string => `Affichage des ${count.toLocaleString('fr')} entrées.`,
+    },
     hints: {
       navigate: 'Naviguer',
       paste: 'Coller',

@@ -18,6 +18,8 @@
 //! * `NAGORI_BENCH_ITERS=N` — timed samples per query (default 200).
 //! * `NAGORI_BENCH_SIZES=10000,100000` — override corpus sizes.
 //! * `NAGORI_BENCH_DATASETS=text,url` — restrict to named datasets.
+//! * `NAGORI_BENCH_LIMITS=50,200` — result limits to time each query at
+//!   (default 50, the palette's first page; 200 is the cap it can page up to).
 
 use std::io::Write;
 use std::path::Path;
@@ -384,9 +386,9 @@ fn populate(store: &SqliteStore, dataset: &Dataset, n: usize, rt: &Runtime) {
     });
 }
 
-fn run_once(store: &SqliteStore, case: &QueryCase, rt: &Runtime) {
+fn run_once(store: &SqliteStore, case: &QueryCase, limit: usize, rt: &Runtime) {
     rt.block_on(async {
-        let mut q = SearchQuery::new(case.raw, normalize_text(case.raw), 50);
+        let mut q = SearchQuery::new(case.raw, normalize_text(case.raw), limit);
         q.mode = case.mode;
         let _ = store.search(q).await.expect("search");
     });
@@ -424,15 +426,22 @@ const fn target_p95_ms(kind: QueryKind, size: usize) -> Option<f64> {
     }
 }
 
-fn measure(store: &SqliteStore, case: &QueryCase, size: usize, iters: usize, rt: &Runtime) {
+fn measure(
+    store: &SqliteStore,
+    case: &QueryCase,
+    size: usize,
+    iters: usize,
+    limit: usize,
+    rt: &Runtime,
+) {
     // Warm caches / prepared statements before timing.
     for _ in 0..10 {
-        run_once(store, case, rt);
+        run_once(store, case, limit, rt);
     }
     let mut samples = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        run_once(store, case, rt);
+        run_once(store, case, limit, rt);
         samples.push(start.elapsed());
     }
     samples.sort_unstable();
@@ -440,13 +449,19 @@ fn measure(store: &SqliteStore, case: &QueryCase, size: usize, iters: usize, rt:
     let p50 = percentile(&samples, 50.0);
     let p95 = percentile(&samples, 95.0);
     let max = *samples.last().unwrap();
-    let marker = match target_p95_ms(case.kind, size) {
+    // Acceptance targets are stated for the palette's first page only.
+    let target = if limit == DEFAULT_LIMIT {
+        target_p95_ms(case.kind, size)
+    } else {
+        None
+    };
+    let marker = match target {
         Some(target) if ms(p95) <= target => format!("[OK <{target:.0}ms]"),
         Some(target) => format!("[OVER >{target:.0}ms]"),
         None => String::new(),
     };
     println!(
-        "  {:<14} {:>4}  p50={:>8.3}ms  p95={:>8.3}ms  max={:>8.3}ms  {}",
+        "  {:<14} {:>4} limit={limit:>3}  p50={:>8.3}ms  p95={:>8.3}ms  max={:>8.3}ms  {}",
         case.name,
         iters,
         ms(p50),
@@ -470,6 +485,29 @@ fn dataset_filter() -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .collect();
     (!names.is_empty()).then_some(names)
+}
+
+/// The palette's first-page size, and the only limit the acceptance targets
+/// are stated for.
+const DEFAULT_LIMIT: usize = 50;
+
+/// Optional `NAGORI_BENCH_LIMITS=50,200` list of result limits; defaults to the
+/// palette's first page.
+fn parse_limits() -> Vec<usize> {
+    let limits: Vec<usize> = std::env::var("NAGORI_BENCH_LIMITS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .filter(|&n| n > 0)
+                .collect()
+        })
+        .unwrap_or_default();
+    if limits.is_empty() {
+        vec![DEFAULT_LIMIT]
+    } else {
+        limits
+    }
 }
 
 fn parse_sizes() -> Vec<usize> {
@@ -584,6 +622,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(200);
     let sizes = parse_sizes();
+    let limits = parse_limits();
     let only = dataset_filter();
     let combos: Vec<_> = plan(&sizes, full)
         .into_iter()
@@ -594,7 +633,7 @@ fn main() {
         .collect();
 
     println!(
-        "search latency harness — iters={iters} full={full} sizes={sizes:?} datasets={} (set NAGORI_BENCH_FULL=1 for the full matrix)",
+        "search latency harness — iters={iters} full={full} sizes={sizes:?} limits={limits:?} datasets={} (set NAGORI_BENCH_FULL=1 for the full matrix)",
         only.as_ref()
             .map_or_else(|| "all".to_owned(), |n| n.join(",")),
     );
@@ -612,7 +651,9 @@ fn main() {
 
         println!("\ndataset={} size={size}", dataset.name);
         for case in dataset.queries {
-            measure(&store, case, size, iters, &rt);
+            for &limit in &limits {
+                measure(&store, case, size, iters, limit, &rt);
+            }
         }
 
         let ngram_rows = ngram_row_count(&db_path);

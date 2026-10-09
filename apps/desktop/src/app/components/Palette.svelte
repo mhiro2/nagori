@@ -43,9 +43,13 @@
   } from '../stores/searchMultiSelect.svelte';
   import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
   import {
+    canLoadMoreResults,
     cancelPendingQuery,
+    loadMoreResults,
     refreshCurrent,
     refreshRecent,
+    resultLimitReached,
+    resultsPaged,
     runQuery,
     scheduleQuery,
     searchState,
@@ -164,7 +168,7 @@
   // the pane falls back to that row's own list snippet (`item.preview`).
   const previewMatchesSelection = $derived(previewState.entryId === selected?.id);
 
-  // Debounce so rapid arrow-key navigation across a 50-row list doesn't fire
+  // Debounce so rapid arrow-key navigation across a long result list doesn't fire
   // a `get_entry_preview` IPC per row. Only the row the user settles on
   // crosses the bridge.
   //
@@ -534,6 +538,10 @@
           onConfirm={handleConfirm}
           onTogglePin={handleTogglePin}
           onContextMenu={handleContextMenu}
+          canLoadMore={canLoadMoreResults()}
+          limitReached={resultLimitReached()}
+          paged={resultsPaged()}
+          onLoadMore={() => void loadMoreResults()}
         />
       {/if}
     {/if}

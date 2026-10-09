@@ -17,6 +17,14 @@ export const ja: Messages = {
     },
     fallback: '（Tauri ランタイム未起動）ここに最近コピーした項目が並びます。',
     screenshotBadge: 'スクショ',
+    resultLimit: {
+      showing: (count: number): string => `上位 ${count.toLocaleString('ja')} 件を表示しています。`,
+      showMore: 'さらに表示',
+      reached: (count: number): string =>
+        `上位 ${count.toLocaleString('ja')} 件まで表示しています。古い項目は検索語やフィルタで絞り込んでください。`,
+      allShown: (count: number): string =>
+        `該当する ${count.toLocaleString('ja')} 件をすべて表示しています。`,
+    },
     hints: {
       navigate: '選択',
       paste: 'ペースト',

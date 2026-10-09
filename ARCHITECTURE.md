@@ -1801,12 +1801,29 @@ not duplicate runtime logic.
   produced for), threaded through `ResultList`, and the same helper marks
   the preview pane body, so list and preview stay in lockstep. Rows carry
   `content-visibility: auto` + `contain-intrinsic-size` so off-screen
-  rows skip layout/paint: with the search limit at 50 (palette row cap
-  64) this keeps arrow-key navigation cheap **without** the keyboard-nav /
-  `scrollIntoView` / hover-selection regression risk that true windowing
-  would carry against `ResultList`'s carefully-tuned scroll effect. If a
-  future surface raises the result limit into the hundreds, revisit
+  rows skip layout/paint: with at most 200 rows (the backend
+  `MAX_RESULT_LIMIT`) this keeps arrow-key navigation cheap **without** the
+  keyboard-nav / `scrollIntoView` / hover-selection regression risk that true
+  windowing would carry against `ResultList`'s carefully-tuned scroll effect.
+  If a future surface raises the result limit beyond that cap, revisit
   windowing then; the row-level containment is the low-risk first step.
+- Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
+  search asks for 50 rows; when a page fills, a footer below the listbox
+  (outside it, so the listbox only owns options) says how many entries are
+  shown and offers *Show more*, which re-runs the same query with the limit
+  grown by 50. The backend has no offset, so paging re-runs the search with
+  a bigger limit; that also widens the candidate pool (`limit` ×
+  oversample), so the re-ranked list is not strictly the old one with rows
+  appended, and the cursor follows the highlighted entry by id like any
+  same-query refresh. The expanded limit is scoped to the query + filter set
+  of the list on screen — same-scope refreshes (a capture, a pin toggle, a
+  delete) keep it, a new query or filter change drops it, and *Show more* is
+  ignored while a replacement search is pending. The page count lives in a
+  live region that stays mounted once the list was paged, so a short last
+  page still announces *Showing all N entries*; when that removes a focused
+  *Show more*, focus moves to the first newly loaded row (found by id, since
+  the re-rank may place it above the old end). At the 200-row cap the footer drops the
+  button and suggests narrowing with the query or filters.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax

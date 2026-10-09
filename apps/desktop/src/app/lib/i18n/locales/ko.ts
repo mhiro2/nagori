@@ -17,6 +17,15 @@ export const ko: Messages = {
     },
     fallback: '(Tauri 런타임이 시작되지 않음) 최근에 복사한 항목이 여기에 표시됩니다.',
     screenshotBadge: '스크린샷',
+    resultLimit: {
+      showing: (count: number): string =>
+        `상위 ${count.toLocaleString('ko')}개 항목을 표시 중입니다.`,
+      showMore: '더 보기',
+      reached: (count: number): string =>
+        `상위 ${count.toLocaleString('ko')}개 항목까지 표시합니다. 이전 항목은 검색어나 필터로 범위를 좁혀 찾으세요.`,
+      allShown: (count: number): string =>
+        `${count.toLocaleString('ko')}개 항목을 모두 표시했습니다.`,
+    },
     hints: {
       navigate: '이동',
       paste: '붙여넣기',

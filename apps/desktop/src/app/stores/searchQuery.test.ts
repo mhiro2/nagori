@@ -10,9 +10,17 @@ import { searchClipboard } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { SearchResponse, SearchResultDto } from '../lib/types';
 import { sampleSearchResult } from '../test-helpers/fixtures';
+import { clearFilters, togglePinnedOnly } from './searchFilters.svelte';
 import {
+  canLoadMoreResults,
   cancelPendingQuery,
+  loadMoreResults,
+  MAX_RESULT_LIMIT,
+  RESULT_PAGE_SIZE,
   refreshRecent,
+  resetSearchRuntimeForTest,
+  resultLimitReached,
+  resultsPaged,
   runQuery,
   scheduleQuery,
   searchState,
@@ -31,6 +39,17 @@ const response = (overrides: Partial<SearchResponse> = {}): SearchResponse => ({
   ...overrides,
 });
 
+const page = (count: number): SearchResultDto[] =>
+  Array.from({ length: count }, (_, i) => result(`r${i}`));
+
+// Answer every search with exactly as many rows as it asked for, the way a
+// history larger than the cap would.
+const fillEveryLimit = (): void => {
+  vi.mocked(searchClipboard).mockImplementation(async (request) =>
+    response({ results: page(request.limit ?? RESULT_PAGE_SIZE) }),
+  );
+};
+
 // A promise whose resolution the test drives, so we can hold a backend search
 // "in flight" and observe how concurrent requests coalesce around it.
 const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => {
@@ -47,6 +66,7 @@ beforeEach(() => {
   searchState.query = '';
   searchState.appliedQuery = '';
   searchState.results = [];
+  searchState.resultLimit = RESULT_PAGE_SIZE;
   searchState.selectedIndex = 0;
   searchState.loading = false;
   searchState.errorMessage = undefined;
@@ -55,6 +75,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  resetSearchRuntimeForTest();
+  clearFilters();
 });
 
 describe('refreshRecent', () => {
@@ -271,5 +293,120 @@ describe('latest-only search queue', () => {
     expect(searchState.results).toHaveLength(1);
     expect(searchState.results[0]?.id).toBe('fresh');
     expect(searchState.appliedQuery).toBe('new');
+  });
+});
+
+describe('result paging', () => {
+  it('offers more rows only when the page filled up', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: page(3) }));
+    await runQuery('foo');
+    expect(canLoadMoreResults()).toBe(false);
+    expect(resultLimitReached()).toBe(false);
+
+    fillEveryLimit();
+    await runQuery('foo');
+    expect(searchState.resultLimit).toBe(RESULT_PAGE_SIZE);
+    expect(canLoadMoreResults()).toBe(true);
+  });
+
+  it('grows the limit a page at a time up to the backend cap', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    const limits: number[] = [];
+    for (const _ of [1, 2, 3]) {
+      expect(canLoadMoreResults()).toBe(true);
+      // Each page depends on the previous one having applied.
+      // oxlint-disable-next-line no-await-in-loop
+      await loadMoreResults();
+      limits.push(vi.mocked(searchClipboard).mock.lastCall?.[0].limit ?? 0);
+    }
+    expect(canLoadMoreResults()).toBe(false);
+    expect(limits).toEqual([100, 150, MAX_RESULT_LIMIT]);
+    expect(searchState.results).toHaveLength(MAX_RESULT_LIMIT);
+    expect(resultLimitReached()).toBe(true);
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0]).toMatchObject({
+      query: 'foo',
+      mode: 'Auto',
+    });
+  });
+
+  it('reports a paged list once more than one page was requested', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    expect(resultsPaged()).toBe(false);
+    // The second page comes back short: nothing more to load, but still paged.
+    vi.mocked(searchClipboard).mockResolvedValueOnce(response({ results: page(70) }));
+    await loadMoreResults();
+    expect(canLoadMoreResults()).toBe(false);
+    expect(resultsPaged()).toBe(true);
+  });
+
+  it('pages the recent listing when the query is empty', async () => {
+    fillEveryLimit();
+    await refreshRecent();
+    await loadMoreResults();
+    expect(searchClipboard).toHaveBeenLastCalledWith({ query: '', mode: 'Recent', limit: 100 });
+  });
+
+  it('keeps the expanded limit across same-query refreshes', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    await loadMoreResults();
+    // A capture landing or a pin toggle re-runs the same query.
+    await runQuery('foo');
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0].limit).toBe(100);
+  });
+
+  it('starts a new query or filter set back at one page', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    await loadMoreResults();
+
+    await runQuery('bar');
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0].limit).toBe(RESULT_PAGE_SIZE);
+
+    await loadMoreResults();
+    togglePinnedOnly();
+    await runQuery('bar');
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0].limit).toBe(RESULT_PAGE_SIZE);
+  });
+
+  it('starts back at one page when returning to a previously expanded query', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    await loadMoreResults();
+    await runQuery('bar');
+    await runQuery('foo');
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0].limit).toBe(RESULT_PAGE_SIZE);
+  });
+
+  it('ignores Show more while a newer search is still in flight', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    await loadMoreResults();
+    expect(searchState.resultLimit).toBe(100);
+
+    // A filter change starts a replacement search; until it lands the footer
+    // still describes the old list, and paging must not apply its expanded
+    // limit to the new filter set.
+    const held = deferred<SearchResponse>();
+    vi.mocked(searchClipboard).mockReturnValueOnce(held.promise);
+    togglePinnedOnly();
+    const replacement = runQuery('foo');
+    const callsBefore = vi.mocked(searchClipboard).mock.calls.length;
+    await loadMoreResults();
+    expect(vi.mocked(searchClipboard).mock.calls.length).toBe(callsBefore);
+    expect(vi.mocked(searchClipboard).mock.lastCall?.[0].limit).toBe(RESULT_PAGE_SIZE);
+    held.resolve(response({ results: page(RESULT_PAGE_SIZE) }));
+    await replacement;
+    expect(searchState.resultLimit).toBe(RESULT_PAGE_SIZE);
+  });
+
+  it('keeps the cursor on the highlighted entry when it survives the re-rank', async () => {
+    fillEveryLimit();
+    await runQuery('foo');
+    searchState.selectedIndex = 42;
+    await loadMoreResults();
+    expect(searchState.results[searchState.selectedIndex]?.id).toBe('r42');
   });
 });
