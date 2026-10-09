@@ -60,6 +60,19 @@
 
   const t = $derived(messages());
 
+  // Hover selects a row only when the pointer really moves over it. Engines
+  // dispatch a synthetic mousemove at the old screen position when content
+  // scrolls under a resting pointer (an arrow-key scroll, a capture landing at
+  // the top), and acting on it would swap the keyboard's selection for
+  // whatever row happens to sit under the cursor.
+  let lastPointer: string | undefined;
+  const handleHover = (index: number, event: MouseEvent): void => {
+    const at = `${event.screenX},${event.screenY}`;
+    if (at === lastPointer) return;
+    lastPointer = at;
+    if (index !== selectedIndex) onSelect(index);
+  };
+
   const effectiveEmpty = $derived(emptyMessage ?? t.palette.empty);
 
   let listEl: HTMLDivElement | undefined = $state();
@@ -143,6 +156,7 @@
           query={appliedQuery}
           {locked}
           {onSelect}
+          onHover={handleHover}
           {onConfirm}
           {onTogglePin}
           {onContextMenu}

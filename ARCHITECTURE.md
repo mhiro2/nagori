@@ -1802,7 +1802,13 @@ not duplicate runtime logic.
   never replace the action row.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise the
   domain and add a strong-brand badge (GitHub / YouTube / …) derived from
-  the hostname alone (`lib/urlCategory`, no network). Focusing a row selects it;
+  the hostname alone (`lib/urlCategory`, no network). Hover selects a row only
+  when the pointer actually moves over it (`mousemove`, de-duplicated on screen
+  position in `ResultList`), never on `mouseenter`: engines dispatch a
+  synthetic move at the unchanged position when content scrolls under a
+  resting pointer, so an arrow-key scroll or a capture landing at the top
+  would otherwise hand the selection to whatever row sits under the cursor.
+  Focusing a row selects it;
   arrow navigation moves DOM focus with the selection once focus is inside the
   result list, while navigation from search retains input focus. Rows and pin
   buttons are disabled while the action inspector locks the list. Code rows show

@@ -184,7 +184,7 @@ describe('ResultList', () => {
     expect(container.querySelector('.result-item.selected')?.textContent).toContain('row 150');
 
     // Hovering any row (even far down) still drives selection through onSelect.
-    await fireEvent.mouseEnter(getAllByRole('option')[180] as Element);
+    await fireEvent.mouseMove(getAllByRole('option')[180] as Element, { screenX: 10, screenY: 20 });
     expect(onSelect).toHaveBeenCalledWith(180);
     spy.mockRestore();
   });
@@ -291,5 +291,31 @@ describe('ResultList', () => {
     });
     expect(getByRole('status').textContent).toContain('Showing all 2 entries.');
     expect(queryByRole('button', { name: 'Show more' })).toBeNull();
+  });
+});
+
+describe('ResultList hover selection', () => {
+  it('ignores pointer events that arrive without the pointer moving', async () => {
+    const items = [sample({ id: 'a' }), sample({ id: 'b' }), sample({ id: 'c' })];
+    const onSelect = vi.fn();
+    const { getAllByRole, rerender } = render(ResultList, {
+      props: { items, selectedIndex: 0, onSelect, onConfirm: () => {} },
+    });
+    const options = getAllByRole('option');
+    await fireEvent.mouseMove(options[1] as Element, { screenX: 100, screenY: 200 });
+    expect(onSelect).toHaveBeenLastCalledWith(1);
+    await rerender({ items, selectedIndex: 1, onSelect, onConfirm: () => {} });
+
+    // The keyboard moves the selection on and the list scrolls under the
+    // resting pointer: the engine's synthetic move at the same position must
+    // not pull the selection back to the row now under the cursor.
+    await rerender({ items, selectedIndex: 2, onSelect, onConfirm: () => {} });
+    onSelect.mockClear();
+    await fireEvent.mouseMove(options[0] as Element, { screenX: 100, screenY: 200 });
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // A real move selects again.
+    await fireEvent.mouseMove(options[0] as Element, { screenX: 100, screenY: 230 });
+    expect(onSelect).toHaveBeenCalledWith(0);
   });
 });

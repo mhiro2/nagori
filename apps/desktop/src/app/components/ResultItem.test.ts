@@ -92,13 +92,13 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    await fireEvent.mouseEnter(getByRole('option'));
+    await fireEvent.mouseMove(getByRole('option'));
     expect(onSelect).toHaveBeenCalledWith(3);
   });
 
   it('also selects the row when the cursor enters the pin column', async () => {
     // The pin button is a sibling of the row button, so without its own
-    // mouse-enter, hovering the pin column would not select the row — leaving
+    // mouse-move handler, hovering the pin column would not select the row — leaving
     // the pin reveal keyed off a different (or no) selected row.
     const onSelect = vi.fn();
     const { container } = render(ResultItem, {
@@ -112,7 +112,7 @@ describe('ResultItem', () => {
     });
     const toggle = container.querySelector('.pin-toggle');
     expect(toggle).toBeTruthy();
-    await fireEvent.mouseEnter(toggle as Element);
+    await fireEvent.mouseMove(toggle as Element);
     expect(onSelect).toHaveBeenCalledWith(6);
   });
 
@@ -380,7 +380,7 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    await fireEvent.mouseEnter(getByRole('option'));
+    await fireEvent.mouseMove(getByRole('option'));
     expect(onSelect).toHaveBeenCalledWith(2);
   });
 

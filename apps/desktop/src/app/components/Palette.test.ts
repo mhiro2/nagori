@@ -807,7 +807,7 @@ describe('Palette', () => {
     vi.mocked(selectByIndex).mockClear();
     const rows = container.querySelectorAll('[role="option"]');
     expect(rows.length).toBe(2);
-    await fireEvent.mouseEnter(rows[1] as Element);
+    await fireEvent.mouseMove(rows[1] as Element, { screenX: 5, screenY: 5 });
     expect(selectByIndex).not.toHaveBeenCalled();
   });
 
@@ -820,7 +820,7 @@ describe('Palette', () => {
     const { container } = render(Palette);
     const rows = container.querySelectorAll('[role="option"]');
     vi.mocked(selectByIndex).mockClear();
-    await fireEvent.mouseEnter(rows[1] as Element);
+    await fireEvent.mouseMove(rows[1] as Element, { screenX: 5, screenY: 5 });
     expect(selectByIndex).toHaveBeenCalledWith(1);
   });
 

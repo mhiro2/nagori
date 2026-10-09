@@ -53,6 +53,12 @@
     // undefined for the recent listing so those rows render plain.
     query?: string | undefined;
     onSelect: (index: number) => void;
+    // The pointer moved over the row. Hover selection keys off real movement,
+    // not `mouseenter`: a row scrolled under a resting pointer (keyboard
+    // navigation, a background refresh) would otherwise steal the selection.
+    // The list owns the "did the pointer actually move" check; standalone,
+    // the row falls back to selecting itself.
+    onHover?: ((index: number, event: MouseEvent) => void) | undefined;
     onConfirm: (index: number, event?: MouseEvent) => void;
     // `| undefined` is explicit so ResultList can forward its own optional
     // prop straight through under `exactOptionalPropertyTypes`.
@@ -81,6 +87,7 @@
     index,
     query,
     onSelect,
+    onHover = (hovered: number) => onSelect(hovered),
     onConfirm,
     onTogglePin = () => {},
     onContextMenu = () => {},
@@ -213,7 +220,7 @@
     data-sensitivity={item.sensitivity}
     disabled={locked}
     onfocus={() => onSelect(index)}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={(event) => onConfirm(index, event)}
   >
     {#if multiActive}
@@ -295,7 +302,7 @@
        child so it stays a real <button> (no button-in-button), and clicking it
        toggles the pin without bubbling into the row's paste handler. Hidden
        until the row is hovered/selected (hover selects the row via the button's
-       onmouseenter), shown solid once pinned — so the affordance is discoverable
+       onmousemove), shown solid once pinned — so the affordance is discoverable
        by mouse, not only via the ⌘P shortcut. -->
   <button
     type="button"
@@ -307,7 +314,7 @@
     aria-pressed={item.pinned}
     aria-label={t.keybindings.togglePin}
     title={t.keybindings.togglePin}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={() => onTogglePin(index)}>📌</button
   >
 </div>
