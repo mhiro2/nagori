@@ -1343,7 +1343,14 @@ alternate-format paste. The result-row right-click menu
 gated the same way (the row appears only for ≥2 formats, via
 `offersPasteFormatChoice`) but **always** opening the picker rather than the
 chord's opposite-format fallback — so it can never try to paste a single-format
-entry (an image, say) as plain text. Choosing one runs `copy_entry_representation`,
+entry (an image, say) as plain text. The picker names the entry it acts on
+under its title and gives each row a one-line description of what lands in
+the target app (every original format, the files themselves, the picture,
+text only, or formatted text as HTML / RTF), exposed through
+`aria-describedby` so the accessible name stays the short label. It owns the
+keyboard while open: focus starts on the first row, arrows and Tab /
+Shift+Tab cycle the rows without leaving the picker, and closing it without a
+choice returns focus to where it was. Choosing one runs `copy_entry_representation`,
 which re-reads the representation set (so a concurrent eviction can't make
 the picker's snapshot stale), resolves the MIME to its single canonical row,
 and publishes it through `write_representation_exact`. Default output,
@@ -1795,7 +1802,13 @@ not duplicate runtime logic.
   never replace the action row.
 - `ResultItem.svelte` — kind-aware row renderer. URL rows emphasise the
   domain and add a strong-brand badge (GitHub / YouTube / …) derived from
-  the hostname alone (`lib/urlCategory`, no network). Focusing a row selects it;
+  the hostname alone (`lib/urlCategory`, no network). Hover selects a row only
+  when the pointer actually moves over it (`mousemove`, de-duplicated on screen
+  position in `ResultList`), never on `mouseenter`: engines dispatch a
+  synthetic move at the unchanged position when content scrolls under a
+  resting pointer, so an arrow-key scroll or a capture landing at the top
+  would otherwise hand the selection to whatever row sits under the cursor.
+  Focusing a row selects it;
   arrow navigation moves DOM focus with the selection once focus is inside the
   result list, while navigation from search retains input focus. Rows and pin
   buttons are disabled while the action inspector locks the list. Code rows show
@@ -1860,6 +1873,50 @@ not duplicate runtime logic.
   shows a selection bar with the count, an explicit *Copy combined* button and
   *Clear selection*, and the footer hints offer the multi-select toggle so the
   mode is discoverable by mouse.
+- Placement and size (`commands/window_commands.rs`, `Palette.svelte`). Each
+  open centres the palette on the monitor under the cursor — not the active
+  window's: that needs per-platform window-list access (and Wayland withholds
+  it), while the cursor is where the user's attention is when they press the
+  hotkey, and the two agree in the common case. It centres within the
+  monitor's *work area* (`Monitor::work_area`), so it never opens under the
+  menu bar, the Dock or a taskbar, and shrinks to fit a work area smaller than
+  the window (`fit_centered`, unit-tested). The *Visible rows* setting is a
+  height: on mount, whenever the setting changes, and on every show the
+  palette measures its chrome (search box, filters, status bar) and asks
+  `fit_palette_height` for that plus `rows × 3rem`; the backend clamps it to
+  the work area and re-centres, so the configured rows show without scrolling
+  where the screen has room, a tall setting on a small screen still fits, and
+  a window shrunk on a small screen grows back on a larger one. A notice
+  appearing in the status bar does not re-fit the window.
+- Narrow layout (`Palette.svelte`, `FilterChips.svelte`). The window can be
+  as narrow as 480px while the side preview pane alone is 320px, so below a
+  measured palette width of 680px (`bind:clientWidth`) the list takes the
+  full width: the side preview steps aside (the expanded preview stays one
+  deliberate toggle away — the `open-preview` chord or the status-bar
+  *Preview* button) and the four date chips fold into one *Date* menu with an
+  *Any time* reset, which keeps the filter row on one line in the longer
+  translations (German / French date labels). The *Kept from last time* note
+  is the first thing to shrink when the row is full. An unmeasured width (0)
+  keeps the wide layout.
+- Reopen behaviour (`stores/paletteSession`, `Palette.svelte`). The palette
+  window hides on blur, so a window `focus` means it was shown again, and how
+  the previous showing ended decides what the new one does. One that ended
+  with an action that hides the palette (a paste or copy of an entry or a
+  representation, or pasting an action result — the IPCs run through
+  `runSessionEndingAction`) starts a new paste: the query, filters, and
+  multi-selection are cleared, the inspector and expanded preview close, and
+  the recent list shows. One dismissed without acting (Escape, clicking away,
+  the hotkey) resumes: the query, filters, and selection are kept, and the
+  query text is selected so typing starts a new search while ↑/↓ and Enter
+  continue the kept one. Active filters that survive a resume get a *Kept
+  from last time* note beside the clear control until a filter changes. An
+  action counts as an ending once its IPC succeeds, or when the backend's
+  `paste_failed` event — sent only after the palette hid and the copy landed —
+  arrives while one is in flight; a bare rejection (a copy that failed before
+  the hide, or one the user clicked away from) does not, so it resumes. Either
+  way focus lands in the search box, and every hide closes the action
+  inspector, cancelling its run, so nothing from the dismissed session comes
+  back.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are
@@ -1889,15 +1946,25 @@ not duplicate runtime logic.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
-  highlighter for `code` kinds; non-code bodies (text / richText /
-  unknown) instead run through the shared `lib/highlightQuery` helper so
-  the same query match the result row marks is visible in the full body
-  (the helper caps its own scan at 32 KiB so a large body stays bounded).
-  When a search query matches text
+  highlighter for `code` kinds. The same query match the result row marks
+  is visible in the full body: `lib/highlightQuery` computes the match
+  ranges (capping its own scan at 32 KiB so a large body stays bounded),
+  non-code bodies render them directly, and code bodies overlay them on the
+  token stream (`markSpans` splits tokens at match edges), so a match inside
+  a keyword or string keeps its grammar colour under the mark. Every mark
+  carries its match ordinal; when there are several matches, or one in a
+  body longer than 20 lines, a stepper (*N matches*, ↑ / ↓ buttons with a
+  polite position readout) scrolls to the previous / next match and styles
+  it as current. A failed preview fetch shows its error with *Try again*
+  (`retryPreview`, which forces `hydratePreview` past its settled-state
+  guard — a failed query-only refetch keeps the old body on screen, which the
+  guard would otherwise treat as done). When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
-  warning. For Public text entries the pane offers an "expand" button that
-  fetches the body up to 1 MiB via `get_entry_preview_full`; non-Public
-  entries hide the affordance because the IPC enforces the same gate.
+  warning. For Public text entries the truncation notice offers *Show full
+  body*, which fetches the body up to 1 MiB via `get_entry_preview_full`;
+  used from the side pane it also opens the full-width preview, where a
+  body that size is readable. Non-Public entries hide the affordance
+  because the IPC enforces the same gate.
   URL entries use a dedicated three-tier layout (`host_display` on top,
   `scheme` + `path_and_query` muted below) sourced from the
   `PreviewBodyDto::Url` fields populated via `url::Url::parse` +
@@ -1960,7 +2027,13 @@ not duplicate runtime logic.
   row is informational, not a paste-format picker affordance — the ⇧⌘⏎ picker
   opens only for ≥2 pasteable formats. The header carries a resting privacy
   badge for `Secret` / `Blocked` entries, mirroring the row chip; its absence
-  is deliberately not a "Public" claim. The remaining technical fields — id,
+  is deliberately not a "Public" claim. Neither chip shows the classifier's
+  raw name: `lib/privacyOutcome` maps the sensitivity to what it means for
+  the user — *Masked* (a secret: the preview masks it and deleting erases it
+  at once), *Private* (masked preview, no image thumbnail), *Hidden* (blocked:
+  the content is hidden and cannot be pasted) — with the sentence as the
+  chip's tooltip and, in the preview, as a note under the header (Private
+  entries get the note without a row chip, keeping the row for content). The remaining technical fields — id,
   sensitivity (the full value, every entry), size, and *rank* (the entry's
   `RankReason`s as localised labels, the same vocabulary as the row chip, so
   the full "why it matched / why it ranked here" set including the recency /
@@ -1990,8 +2063,16 @@ not duplicate runtime logic.
   result land in that one area, so the output never jumps position on
   completion; the AI actions stream over the `nagori://ai/*` events, and a
   fast deterministic run skips the running indicator (shown only once it
-  outlives ~120 ms). Each AI button is disabled with a remediation tooltip
-  when its action is unavailable. The panel is a focusable non-modal
+  outlives ~120 ms). Actions that can run on the target come first and the
+  rest follow, still listed with their reason; while the availability probe
+  is in flight the AI buttons read *checking* and keep their place, so the
+  grid does not reshuffle when it answers. Each AI button is disabled with a
+  reason when its action is unavailable: the backend's remediation hint
+  when there is one, otherwise one derived from the per-action status (off
+  in Settings, the on-device model still getting ready, an unsupported
+  language, or generally unavailable). When nothing in the list applies to
+  the target's content kind (an image or a file list), a visible note says
+  so instead of leaving it to per-button tooltips. The panel is a focusable non-modal
   `role="dialog"` that stops keydowns from leaking into the palette's
   window handler while focused. Escape cancels an in-flight stream and
   otherwise closes the panel; pressing the `open-actions` chord again
@@ -1999,8 +2080,20 @@ not duplicate runtime logic.
   Opening is not keyboard-only: the *Actions* button in the preview-pane
   header and the clickable ⌘K hint in the status bar both call the same
   open path, so the entry gesture matches the mouse-driven action
-  selection. The result shows *Copy* (uses
-  `navigator.clipboard`) and *Save as new entry* (calls `save_ai_result`).
+  selection. The result shows *Paste*, *Copy* and *Save as new entry*.
+  *Paste* (`paste_text_from_palette`) and *Copy* (`copy_text_from_palette`)
+  publish the text through the daemon's clipboard lease
+  (`ClipboardLease::publish_text`) instead of `navigator.clipboard`: the
+  write goes through the adapter, whose self-write tracking makes the
+  capture loop skip it, so the result reaches the clipboard (and, for
+  *Paste*, the source app via the palette's hide → restore-focus →
+  auto-paste path) without becoming a history row. *Save as new entry*
+  (`save_ai_result`) stays the one way to keep it. On Wayland, where the
+  adapter does not track its own writes, the capture loop still records
+  the copied result. The last result of the palette session is kept
+  (`stores/actionResult`): closing the inspector or stepping to another row
+  and back restores it under a *Previous result* heading, and the palette
+  forgets it when it hides.
   Copy/save failures appear as separate inline `role="alert"` messages while
   the result and its buttons stay available for retry. Retrying clears that
   operation's error; starting another quick/AI action, changing target, or
@@ -2452,7 +2545,9 @@ surface for redaction (see [section 9](#9-sensitivity-and-redaction)).
 Tauri command which writes
 the text via `runtime.add_text()` and returns the resulting `EntryDto`. The
 persistence is intentionally a second user-driven step rather than a side effect
-of the action.
+of the action. Copying or pasting a result does not store it either (see the
+`ActionInspector.svelte` bullet in
+[section 12](#12-tauri-boundary-and-frontend)).
 
 ---
 
@@ -2678,6 +2773,14 @@ change.
   separate × button dismisses it; the chip is also cleared on the next successful
   paste or an Accessibility grant. An `accessibilityMissing` reason folds into
   the dedicated accessibility chip rather than stacking a second one. The
+  palette has usually hidden by the time a synthesis failure arrives (it
+  hides before the keystroke), so when its window does not have focus the
+  palette also raises an OS notification through `notify_paste_failure`,
+  composed from the same localized per-reason hint. Notifications never take
+  focus from the app the user is pasting into. The title separates the two
+  outcomes: *Copied, but not pasted* (the clip landed, a manual paste works)
+  versus *Nothing was pasted* (`clipboardChanged`: the clipboard holds
+  something else now). The command caps the title and body length. The
   palette suppresses the *toast* only for an `accessibilityMissing`
   failure in the not-yet-granted states the StatusBar accessibility chip
   already explains (`NotRequested` / `PromptShownNotGranted`); every other

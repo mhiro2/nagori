@@ -12,7 +12,13 @@ vi.mock('../lib/commands', async () =>
 );
 
 import type { SearchResultDto } from '../lib/types';
-import { clearFilters, filterState, sourceAppOptions } from '../stores/searchFilters.svelte';
+import { setFiltersRetained } from '../stores/paletteSession.svelte';
+import {
+  clearFilters,
+  filterState,
+  setDatePreset,
+  sourceAppOptions,
+} from '../stores/searchFilters.svelte';
 import { searchState } from '../stores/searchQuery.svelte';
 import FilterChips from './FilterChips.svelte';
 
@@ -172,5 +178,31 @@ describe('FilterChips', () => {
     await user.click(clear);
     expect(filterState.pinnedOnly).toBe(false);
     expect(queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+
+  it('notes filters kept from last time until one changes', async () => {
+    const user = userEvent.setup();
+    setDatePreset('today');
+    setFiltersRetained(true);
+    const { getByRole, getByTestId, queryByTestId } = render(FilterChips);
+    expect(getByTestId('filters-retained').textContent).toBe('Kept from last time');
+    await user.click(getByRole('button', { name: 'Pinned' }));
+    expect(queryByTestId('filters-retained')).toBeNull();
+  });
+
+  it('folds the date presets into a menu when asked to stay compact', async () => {
+    const user = userEvent.setup();
+    const { getByRole, queryByRole } = render(FilterChips, { props: { compactDates: true } });
+    expect(queryByRole('button', { name: 'Today' })).toBeNull();
+    await user.click(getByRole('button', { name: 'Date' }));
+    await user.click(getByRole('menuitemradio', { name: 'Last 7 days' }));
+    expect(filterState.datePreset).toBe('last7days');
+    // Re-picking the active preset keeps it; "Any time" is the reset.
+    await user.click(getByRole('button', { name: 'Date: Last 7 days' }));
+    await user.click(getByRole('menuitemradio', { name: 'Last 7 days' }));
+    expect(filterState.datePreset).toBe('last7days');
+    await user.click(getByRole('button', { name: 'Date: Last 7 days' }));
+    await user.click(getByRole('menuitemradio', { name: 'Any time' }));
+    expect(filterState.datePreset).toBe('none');
   });
 });

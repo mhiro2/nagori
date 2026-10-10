@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
   import { formatByteCount, formatRelativeTime } from '../lib/formatting';
+  import { matchRanges } from '../lib/highlightQuery';
   import { messages } from '../lib/i18n/index.svelte';
   import { isImeComposing, yieldsToControlActivation } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
+  import { privacyOutcome } from '../lib/privacyOutcome';
   import { primaryRankReason, rankReasonLabel, rankReasonLabels } from '../lib/rankReason';
   import { additionalClipboardCategories, hasAccompanyingImage } from '../lib/representations';
   import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
@@ -39,7 +43,11 @@
     expanded?: boolean;
     expandedLoading?: boolean;
     expandedErrorMessage?: string | undefined;
+    // Loads the whole body of a truncated preview. The palette also opens the
+    // full-width preview for it, so the button works from the side pane too.
     onExpandBody?: (entryId: string) => void;
+    // Re-fetches a preview whose fetch failed.
+    onRetry?: () => void;
     // Opens the action inspector for the previewed entry. When provided, the
     // header gains an "Actions" button so the quick actions are reachable by
     // mouse, not just the keyboard shortcut. Omitted (so the button is hidden)
@@ -69,6 +77,7 @@
     expandedLoading = false,
     expandedErrorMessage = undefined,
     onExpandBody,
+    onRetry,
     onOpenActions,
     enterOpensUrl = $bindable(false),
     urlConfirmOpen = $bindable(false),
@@ -95,6 +104,10 @@
     const reason = item ? primaryRankReason(item.rankReasons) : undefined;
     return reason !== undefined ? rankReasonLabel(reason, t.rankReason) : undefined;
   });
+
+  // The consequence of the entry's sensitivity (masked preview, hidden
+  // content, no paste), explained in words under the header.
+  const privacy = $derived(item ? privacyOutcome(item.sensitivity, t.privacyOutcome) : undefined);
 
   // Host platform for the expanded image's keyboard zoom chord (Cmd on macOS,
   // Ctrl elsewhere); pinch / Ctrl-wheel / double-click need no platform input.
@@ -209,6 +222,37 @@
       : null,
   );
 
+  // Search-match stepping for text and code bodies. The marks carry their
+  // match ordinal (`data-match`), so stepping only has to scroll the first
+  // piece of the target match into view; the body styles it as current. The
+  // stepper appears when there is somewhere to step to: several matches, or a
+  // single one in a body long enough to scroll past it.
+  const textBodyShown = $derived(
+    bodyKind !== 'url' && bodyKind !== 'image' && bodyKind !== 'fileList',
+  );
+  const matchCount = $derived(textBodyShown ? matchRanges(bodyText, query).length : 0);
+  const LONG_BODY_LINES = 20;
+  const showMatchNav = $derived(
+    matchCount > 1 || (matchCount === 1 && (preview?.metadata.lineCount ?? 0) > LONG_BODY_LINES),
+  );
+  let currentMatch = $state<number | undefined>(undefined);
+  let bodyWrapEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    void bodyText;
+    void query;
+    currentMatch = undefined;
+  });
+  const stepMatch = async (step: 1 | -1): Promise<void> => {
+    if (matchCount === 0) return;
+    const from = currentMatch ?? (step === 1 ? -1 : 0);
+    const next = (from + step + matchCount) % matchCount;
+    currentMatch = next;
+    await tick();
+    bodyWrapEl
+      ?.querySelector(`[data-match="${next}"]`)
+      ?.scrollIntoView({ block: 'center', inline: 'nearest' });
+  };
+
   // Confirm modal state. The renderer pops a curated dialog whose body
   // names the host so a renderer compromise can't silently re-direct
   // the user to an attacker URL while the dialog reads "example.com".
@@ -260,15 +304,12 @@
     <header class="head">
       <span class="kind">{preview?.title ?? item.kind}</span>
       <span class="head-right">
-        {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-          <!-- Resting privacy warning, mirroring the palette row's Secret/Blocked
-               cue. The full sensitivity value (including Public/Unknown/Private)
-               still lives in Details; the absence of this badge is deliberately
-               not a "Public" claim. -->
-          <span
-            class="sens-badge"
-            data-testid="preview-sensitivity"
-            title={t.preview.fields.sensitivity}>{item.sensitivity}</span
+        {#if privacy && (item.sensitivity === 'Secret' || item.sensitivity === 'Blocked')}
+          <!-- Resting privacy warning, mirroring the palette row's chip. The raw
+               sensitivity value still lives in Details; the absence of this
+               badge is deliberately not a "Public" claim. -->
+          <span class="sens-badge" data-testid="preview-sensitivity" title={privacy.description}
+            >{privacy.label}</span
           >
         {/if}
         {#if onOpenActions}
@@ -286,6 +327,9 @@
         <span class="time">{formatRelativeTime(item.createdAt)}</span>
       </span>
     </header>
+    {#if privacy}
+      <p class="privacy-note" data-testid="preview-privacy">{privacy.description}</p>
+    {/if}
     {#if item.kind !== 'url'}
       <!-- Reserve the chip's line whenever the kind will carry one (every
            non-URL body), so the lines·bytes summary fades into pre-allocated
@@ -295,11 +339,37 @@
         {summaryChip ?? ''}
       </p>
     {/if}
-    <div class="body-wrap">
+    {#if showMatchNav && !loading && !errorMessage}
+      <div class="match-nav" role="group" aria-label={t.preview.matches.label}>
+        <span class="match-position" role="status" data-testid="preview-match-position"
+          >{currentMatch === undefined
+            ? t.preview.matches.count(matchCount)
+            : t.preview.matches.position(currentMatch + 1, matchCount)}</span
+        >
+        <button
+          type="button"
+          aria-label={t.preview.matches.previous}
+          title={t.preview.matches.previous}
+          onclick={() => void stepMatch(-1)}>↑</button
+        >
+        <button
+          type="button"
+          aria-label={t.preview.matches.next}
+          title={t.preview.matches.next}
+          onclick={() => void stepMatch(1)}>↓</button
+        >
+      </div>
+    {/if}
+    <div class="body-wrap" bind:this={bodyWrapEl}>
       {#if loading}
         <p class="state">{t.preview.loading}</p>
       {:else if errorMessage}
-        <p class="state error">{errorMessage}</p>
+        <div class="state error" role="alert">
+          <p>{errorMessage}</p>
+          {#if onRetry}
+            <button type="button" class="retry" onclick={onRetry}>{t.preview.retry}</button>
+          {/if}
+        </div>
       {:else if urlBody}
         <PreviewBodyUrl
           body={urlBody}
@@ -338,7 +408,13 @@
           thumbnailAlt={t.preview.fileList.thumbnailAlt}
         />
       {:else}
-        <PreviewBodyText text={bodyText} language={codeLanguage} isCode={isCodeBody} {query} />
+        <PreviewBodyText
+          text={bodyText}
+          language={codeLanguage}
+          isCode={isCodeBody}
+          {query}
+          {currentMatch}
+        />
       {/if}
     </div>
     {#if preview && truncationNote}
@@ -349,7 +425,7 @@
             ⚠ {t.preview.truncation.elidedMatch}
           </p>
         {/if}
-        {#if expanded && canExpandBody}
+        {#if canExpandBody}
           <button
             type="button"
             class="expand"
@@ -472,6 +548,13 @@
     font-size: 0.65rem;
     letter-spacing: 0.04em;
   }
+  .privacy-note {
+    margin: 0;
+    padding: 0 0.75rem 0.4rem;
+    color: var(--warning, #f59e0b);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
   .actions {
     /* A mouse path to the inspector that mirrors the ⌘K shortcut. Sits in the
        uppercase head row but renders as a normal-case pill so it reads as an
@@ -534,8 +617,24 @@
     flex-direction: column;
     gap: 0.25rem;
   }
+  .state.error p {
+    margin: 0 0 0.5rem;
+  }
+  .match-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0 0.75rem 0.25rem;
+    color: var(--muted, rgba(255, 255, 255, 0.55));
+    font-size: 0.75rem;
+  }
+  .match-position {
+    margin-right: 0.25rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .match-nav button,
+  .retry,
   .truncation .expand {
-    align-self: flex-start;
     padding: 0.25rem 0.6rem;
     border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
     border-radius: 4px;
@@ -544,6 +643,18 @@
     font: inherit;
     font-size: 0.75rem;
     cursor: pointer;
+  }
+  .match-nav button {
+    padding: 0.1rem 0.45rem;
+  }
+  .match-nav button:focus-visible,
+  .retry:focus-visible,
+  .truncation .expand:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
+  }
+  .truncation .expand {
+    align-self: flex-start;
   }
   .truncation .expand:disabled {
     opacity: 0.5;

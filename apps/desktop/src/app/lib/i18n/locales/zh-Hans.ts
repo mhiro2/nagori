@@ -45,6 +45,7 @@ export const zhHans: Messages = {
       yesterday: '昨天',
       last7days: '近 7 天',
       last30days: '近 30 天',
+      anyTime: '任何时间',
       pinned: '已置顶',
       kindText: '文本',
       kindUrl: 'URL',
@@ -59,6 +60,7 @@ export const zhHans: Messages = {
       searchApps: '搜索应用',
       noAppMatches: '没有匹配的应用',
       clear: '清除筛选',
+      retained: '沿用上次的条件',
     },
     clearHistory: {
       title: '要清除历史记录吗？',
@@ -78,6 +80,14 @@ export const zhHans: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '已遮蔽',
+      description: '包含机密信息：预览会将其遮蔽，删除时会立即彻底清除。',
+    },
+    private: { label: '私密', description: '按私密处理：预览被遮蔽，图片不生成缩略图。' },
+    blocked: { label: '已隐藏', description: '被隐私规则拦截：内容已隐藏，无法粘贴。' },
+  },
   rankReason: {
     exact: '精确',
     prefix: '前缀',
@@ -92,6 +102,15 @@ export const zhHans: Messages = {
   preview: {
     empty: '选择一个项目进行预览。',
     loading: '正在加载预览…',
+    retry: '重试',
+    matches: {
+      label: '搜索匹配',
+      count: (count: number): string => `${count.toLocaleString('zh-Hans')} 处匹配`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('zh-Hans')} / ${total.toLocaleString('zh-Hans')}`,
+      previous: '上一个匹配',
+      next: '下一个匹配',
+    },
     details: '详细信息',
     truncated: '预览已截断。',
     truncation: {
@@ -171,6 +190,10 @@ export const zhHans: Messages = {
     pasteDiagnostics: {
       label: '⚠ 自动粘贴失败',
       toolFallback: '粘贴工具',
+      notice: {
+        copiedNotPasted: '已复制，但未粘贴',
+        nothingPasted: '未粘贴任何内容',
+      },
       hint: {
         accessibilityMissing: '自动粘贴失败：需要 Accessibility 权限。已复制 — 请手动粘贴。',
         toolMissing: ({ tool }) =>
@@ -207,6 +230,10 @@ export const zhHans: Messages = {
     aiBadge: 'AI',
     aiCancel: '取消',
     aiUnavailable: '当前无法使用 AI 操作。',
+    aiChecking: '正在检查 AI 操作是否可用…',
+    aiDisabled: 'AI 操作已在设置中关闭。',
+    aiPreparing: '设备端模型仍在准备中，请稍后再试。',
+    aiLanguageUnsupported: 'AI 操作暂不支持此语言。',
     notApplicable: {
       image: '操作不适用于图像。',
       fileList: '操作不适用于文件。',
@@ -231,6 +258,9 @@ export const zhHans: Messages = {
     copied: '已复制',
     saveResult: '保存为新条目',
     saved: '已保存',
+    previousResult: '上次的结果',
+    pasteResult: '粘贴',
+    pasteFailed: '无法粘贴结果。',
   },
   pastePicker: {
     title: '粘贴格式',
@@ -239,8 +269,16 @@ export const zhHans: Messages = {
       files: '文件',
       image: '图像',
       plainText: '纯文本',
-      html: 'HTML',
-      richText: '富文本',
+      html: '带格式文本 (HTML)',
+      richText: '带格式文本 (RTF)',
+    },
+    descriptions: {
+      original: '复制时的全部格式，由目标应用选择它支持的格式。',
+      files: '文件本身，如同从文件管理器拖出。',
+      image: '图片，适用于图像编辑器、聊天和文档。',
+      plainText: '仅文字，不含字体、链接或排版。',
+      html: '在接受网页格式的应用中保留链接、粗体和列表。',
+      richText: '为文字处理软件保留字体和样式。',
     },
   },
   contextMenu: {

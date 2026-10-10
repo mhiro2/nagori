@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+  import {
+    clearHistory,
+    closePalette,
+    fitPaletteHeight,
+    openSettingsWindow,
+  } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
   import {
@@ -21,6 +26,7 @@
   } from '../stores/capabilities.svelte';
   import { clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
+  import { setFiltersRetained, takeReopenMode } from '../stores/paletteSession.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
@@ -45,7 +51,12 @@
     selectAllMulti,
     toggleMultiSelect,
   } from '../stores/searchMultiSelect.svelte';
-  import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
+  import {
+    expandPreview,
+    hydratePreview,
+    previewState,
+    retryPreview,
+  } from '../stores/searchPreview.svelte';
   import {
     canLoadMoreResults,
     canSearchFullHistory,
@@ -252,7 +263,7 @@
     scheduleQuery(next);
   };
 
-  let searchBox: { focus: () => void } | undefined = $state();
+  let searchBox: { focus: () => void; focusAndSelect: () => void } | undefined = $state();
 
   const clearSearch = (): void => {
     clearFilters();
@@ -389,8 +400,44 @@
     openActions();
   };
 
-  const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
+  // Below this palette width the side-by-side preview would squeeze the list
+  // to a sliver (the pane alone is 320px and the window can be 480px), so the
+  // list takes the full width and the preview is reached through the
+  // deliberate expanded-preview toggle instead. The filter row collapses its
+  // date presets at the same point. `0` means "not measured yet" (and jsdom),
+  // which keeps the wide layout.
+  const NARROW_PALETTE_WIDTH = 680;
+  let paletteWidth = $state(0);
+  let paletteEl: HTMLElement | undefined = $state();
+  let bodyEl: HTMLDivElement | undefined = $state();
+  const narrow = $derived(paletteWidth > 0 && paletteWidth < NARROW_PALETTE_WIDTH);
+  const showPreviewPane = $derived((settingsState.settings?.showPreviewPane ?? true) && !narrow);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
+  // The "visible rows" setting is a height: the window grows or shrinks so the
+  // list shows that many rows (3rem each, matching `.result-list`'s cap) under
+  // the search box, filters and status bar. The backend clamps the request to
+  // the monitor's work area, so a tall setting on a small screen still fits.
+  // Fitted when the palette mounts and when the setting changes, not on every
+  // layout shift, so a notice appearing in the status bar does not resize it.
+  const ROW_HEIGHT_REM = 3;
+  let fittedRowCount: number | undefined;
+  // `force` re-requests the same row count: every show does, because the
+  // backend clamps the request to the current monitor's work area, so a window
+  // shrunk on a small screen grows back on a larger one.
+  const fitToRows = (rows: number, force = false): void => {
+    if (!isTauri() || !paletteEl || !bodyEl || (!force && rows === fittedRowCount)) return;
+    const chrome = paletteEl.offsetHeight - bodyEl.offsetHeight;
+    // A palette that has not been laid out yet (its window starts hidden)
+    // measures nothing; the next show retries.
+    if (chrome <= 0) return;
+    fittedRowCount = rows;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    void fitPaletteHeight(chrome + rows * ROW_HEIGHT_REM * rem);
+  };
+  $effect(() => {
+    fitToRows(paletteRowCount);
+  });
+
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
   // wire format from AppSettings) bind to the right physical modifier — Cmd on
   // macOS, Ctrl on Windows/Linux. Falls back to macOS semantics until the
@@ -425,6 +472,13 @@
     clearConfirmOpen ||
       (previewUrlConfirmOpen && (showPreviewPane || previewExpanded) && !actionsOpen),
   );
+
+  // The whole body of a truncated preview is read in the full-width preview,
+  // so loading it from the side pane opens that view as well.
+  const openFullBody = (id: string): void => {
+    previewExpanded = true;
+    void expandPreview(id);
+  };
 
   // The single entry point that docks the inspector — shared by the keyboard
   // chord and the mouse affordances (the preview-pane header button and the
@@ -583,9 +637,46 @@
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
   });
+
+  // The palette window hides on blur, so gaining focus means it was shown
+  // again. See `stores/paletteSession` for the fresh-vs-resume rule.
+  const handleShown = (): void => {
+    if (takeReopenMode() === 'fresh') {
+      clearFilters();
+      clearMultiSelect();
+      setFiltersRetained(false);
+      previewExpanded = false;
+      void runQuery('');
+    } else {
+      setFiltersRetained(hasActiveFilters());
+    }
+    searchBox?.focusAndSelect();
+    fitToRows(paletteRowCount, true);
+  };
+  // Hiding ends the palette session, and with it any action-inspector run:
+  // closing the inspector cancels a stream, fences a pending quick action, and
+  // clears its work area, so a result from this session cannot reappear (or be
+  // remembered late) after the user dismissed the palette.
+  const handleHidden = (): void => {
+    actionsOpen = false;
+  };
+  onMount(() => {
+    window.addEventListener('focus', handleShown);
+    window.addEventListener('blur', handleHidden);
+    return () => {
+      window.removeEventListener('focus', handleShown);
+      window.removeEventListener('blur', handleHidden);
+    };
+  });
 </script>
 
-<section class="palette" style="--palette-row-count: {paletteRowCount}">
+<section
+  class="palette"
+  class:narrow
+  style="--palette-row-count: {paletteRowCount}"
+  bind:clientWidth={paletteWidth}
+  bind:this={paletteEl}
+>
   <SearchBox
     bind:this={searchBox}
     value={searchState.query}
@@ -593,8 +684,9 @@
     listboxId={RESULT_LISTBOX_ID}
     {activeDescendantId}
   />
-  <FilterChips />
+  <FilterChips compactDates={narrow} />
   <div
+    bind:this={bodyEl}
     class="body"
     class:single-column={!showPreviewPane && !previewExpanded && !actionsOpen}
     class:preview-only={previewExpanded}
@@ -644,7 +736,8 @@
         expanded={previewExpanded}
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
-        onExpandBody={(id) => void expandPreview(id)}
+        onExpandBody={openFullBody}
+        onRetry={() => void retryPreview()}
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
         bind:urlConfirmOpen={previewUrlConfirmOpen}

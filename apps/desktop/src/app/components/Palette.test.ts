@@ -111,11 +111,15 @@ vi.mock('../stores/view.svelte', () => ({
   viewState: { current: 'palette' as const },
 }));
 
-import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+import { clearHistory, closePalette, fitPaletteHeight, openSettingsWindow } from '../lib/commands';
 import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
 import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../lib/types';
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
 import { captureSkippedState, recordCaptureSkip } from '../stores/captureSkipped.svelte';
+import {
+  resetPaletteSessionForTest,
+  runSessionEndingAction,
+} from '../stores/paletteSession.svelte';
 import {
   confirmSelection,
   confirmSelectionWithAlternateFormat,
@@ -152,6 +156,7 @@ import {
 import { settingsState } from '../stores/settings.svelte';
 import { showSettings } from '../stores/view.svelte';
 import { sampleEntryPreview, sampleSearchResult } from '../test-helpers/fixtures';
+import { resizeElement } from '../test-helpers/resize';
 import Palette from './Palette.svelte';
 
 const dispatch = (init: KeyboardEventInit): KeyboardEvent => {
@@ -205,6 +210,7 @@ const urlPreview = (id: string, url: string): EntryPreviewDto =>
   });
 
 beforeEach(() => {
+  resetPaletteSessionForTest();
   // Vitest clears call history before each test but keeps any `mockReturnValue`
   // implementation a prior test installed, so re-pin the defaults the
   // selection-dependent tests below override per-case.
@@ -413,6 +419,98 @@ describe('Palette', () => {
     clearMultiSelect();
     await tick();
     expect(announcer.textContent).toBe('Selection cleared');
+  });
+
+  it('resumes a dismissed search on reopen with the query selected and kept filters noted', async () => {
+    searchState.query = 'invoice';
+    setDatePreset('today');
+    const { getByRole, getByTestId } = render(Palette);
+    const input = getByRole('combobox') as HTMLInputElement;
+    input.value = 'invoice';
+    input.blur();
+    window.dispatchEvent(new Event('focus'));
+    await tick();
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe('invoice'.length);
+    expect(filterState.datePreset).toBe('today');
+    expect(getByTestId('filters-retained').textContent).toBe('Kept from last time');
+    expect(runQuery).not.toHaveBeenCalled();
+  });
+
+  it('closes the action inspector when the palette hides', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { getByTestId, queryByTestId } = render(Palette);
+    await fireEvent.click(getByTestId('status-open-actions'));
+    expect(getByTestId('action-inspector')).toBeTruthy();
+    window.dispatchEvent(new Event('blur'));
+    await tick();
+    expect(queryByTestId('action-inspector')).toBeNull();
+  });
+
+  it('starts a new paste on reopen after the last showing ended with a paste', async () => {
+    searchState.query = 'invoice';
+    setDatePreset('today');
+    const { getByRole, queryByTestId } = render(Palette);
+    await runSessionEndingAction(async () => undefined);
+    window.dispatchEvent(new Event('focus'));
+    await tick();
+    expect(filterState.datePreset).toBe('none');
+    expect(runQuery).toHaveBeenCalledWith('');
+    expect(queryByTestId('filters-retained')).toBeNull();
+    expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it('gives a narrow palette to the list and folds the date presets into a menu', async () => {
+    const item = resultRow('a', 'alpha');
+    searchState.results = [item];
+    vi.mocked(currentSelection).mockReturnValue(item);
+    const { container, getByRole, queryByRole } = render(Palette);
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
+    expect(getByRole('button', { name: 'Today' })).toBeTruthy();
+
+    resizeElement(container.querySelector('.palette') as HTMLElement, 480);
+    await tick();
+    // The side preview steps aside; the expanded preview stays a toggle away.
+    expect(container.querySelector('.preview-pane')).toBeNull();
+    expect(queryByRole('button', { name: 'Today' })).toBeNull();
+    expect(getByRole('button', { name: 'Date' })).toBeTruthy();
+    await fireEvent.click(getByRole('button', { name: 'Toggle expanded preview' }));
+    expect(container.querySelector('.preview-pane')).toBeTruthy();
+  });
+
+  it('sizes the window to show the configured number of rows', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    const heights = new Map([
+      ['palette', 600],
+      ['body', 400],
+    ]);
+    const offsetHeight = vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        for (const [cls, height] of heights) if (this.classList.contains(cls)) return height;
+        return 0;
+      });
+    try {
+      settingsState.settings = {
+        paletteRowCount: 12,
+        paletteHotkeys: {},
+      } as unknown as NonNullable<typeof settingsState.settings>;
+      render(Palette);
+      await tick();
+      // 200px of search box, filters and status bar, plus 12 rows of 3rem.
+      expect(fitPaletteHeight).toHaveBeenLastCalledWith(200 + 12 * 48);
+      // Every show asks again, so a window shrunk to fit a small screen grows
+      // back once the palette opens on a larger one.
+      vi.mocked(fitPaletteHeight).mockClear();
+      window.dispatchEvent(new Event('focus'));
+      expect(fitPaletteHeight).toHaveBeenCalledWith(200 + 12 * 48);
+    } finally {
+      offsetHeight.mockRestore();
+      vi.mocked(isTauri).mockReturnValue(false);
+    }
   });
 
   it('refreshes the active query when capture stores a new entry', () => {
@@ -772,7 +870,7 @@ describe('Palette', () => {
     vi.mocked(selectByIndex).mockClear();
     const rows = container.querySelectorAll('[role="option"]');
     expect(rows.length).toBe(2);
-    await fireEvent.mouseEnter(rows[1] as Element);
+    await fireEvent.mouseMove(rows[1] as Element, { screenX: 5, screenY: 5 });
     expect(selectByIndex).not.toHaveBeenCalled();
   });
 
@@ -785,7 +883,7 @@ describe('Palette', () => {
     const { container } = render(Palette);
     const rows = container.querySelectorAll('[role="option"]');
     vi.mocked(selectByIndex).mockClear();
-    await fireEvent.mouseEnter(rows[1] as Element);
+    await fireEvent.mouseMove(rows[1] as Element, { screenX: 5, screenY: 5 });
     expect(selectByIndex).toHaveBeenCalledWith(1);
   });
 

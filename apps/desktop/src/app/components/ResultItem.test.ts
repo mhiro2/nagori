@@ -92,13 +92,13 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    await fireEvent.mouseEnter(getByRole('option'));
+    await fireEvent.mouseMove(getByRole('option'));
     expect(onSelect).toHaveBeenCalledWith(3);
   });
 
   it('also selects the row when the cursor enters the pin column', async () => {
     // The pin button is a sibling of the row button, so without its own
-    // mouse-enter, hovering the pin column would not select the row — leaving
+    // mouse-move handler, hovering the pin column would not select the row — leaving
     // the pin reveal keyed off a different (or no) selected row.
     const onSelect = vi.fn();
     const { container } = render(ResultItem, {
@@ -112,7 +112,7 @@ describe('ResultItem', () => {
     });
     const toggle = container.querySelector('.pin-toggle');
     expect(toggle).toBeTruthy();
-    await fireEvent.mouseEnter(toggle as Element);
+    await fireEvent.mouseMove(toggle as Element);
     expect(onSelect).toHaveBeenCalledWith(6);
   });
 
@@ -271,7 +271,7 @@ describe('ResultItem', () => {
     expect(container.textContent).toContain('512 B');
   });
 
-  it('annotates Secret sensitivity in the meta strip', () => {
+  it('annotates Secret sensitivity in the meta strip with its consequence', () => {
     const { getByText } = render(ResultItem, {
       props: {
         item: sample({ sensitivity: 'Secret' }),
@@ -281,7 +281,9 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    expect(getByText('Secret')).toBeTruthy();
+    expect(getByText('Masked').getAttribute('title')).toBe(
+      'Contains a secret: the preview masks it, and deleting the item erases it right away.',
+    );
   });
 
   it('shows the strongest match reason as a chip for query-driven rows', () => {
@@ -378,7 +380,7 @@ describe('ResultItem', () => {
         onConfirm: () => {},
       },
     });
-    await fireEvent.mouseEnter(getByRole('option'));
+    await fireEvent.mouseMove(getByRole('option'));
     expect(onSelect).toHaveBeenCalledWith(2);
   });
 
@@ -655,7 +657,7 @@ describe('ResultItem layout', () => {
     const { container } = render(ResultItem, {
       props: { ...props, item: sample({ sensitivity: 'Secret' }), compact: true },
     });
-    expect(container.querySelector('.sens')?.textContent).toBe('Secret');
+    expect(container.querySelector('.sens')?.textContent).toBe('Masked');
   });
 
   it('reserves the check-mark column only while a multi-selection exists', async () => {

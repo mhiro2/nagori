@@ -77,9 +77,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use nagori_core::{
-    AppError, ClipboardContent, ClipboardEntry, EntryId, EntryRepository,
-    MAX_COMBINED_COPY_ENTRIES, MAX_ENTRY_TEXT_WIRE_BYTES, PasteFailureReason, PasteFormat, Result,
-    Sensitivity, SettingsRepository, StoredClipboardRepresentation,
+    AppError, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
+    MAX_COMBINED_COPY_ENTRIES, MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES, PasteFailureReason,
+    PasteFormat, Result, Sensitivity, SettingsRepository, StoredClipboardRepresentation,
     is_text_safe_for_default_output, json_escaped_len, select_representation,
 };
 use nagori_platform::{PreparedClipboardWrite, SelfWriteTracking};
@@ -293,6 +293,33 @@ impl ClipboardLease {
             }
             other => other,
         }
+    }
+
+    /// Publish text that is not a history entry, such as a quick-action
+    /// result, as plain text.
+    ///
+    /// Nothing is stored: the write goes through the adapter like every
+    /// copy-back, so the capture loop recognises it as the app's own write and
+    /// skips it (on adapters that track self-writes; see
+    /// `nagori_platform::SelfWriteTracker`). Keeping a result in the history
+    /// stays an explicit, separate action.
+    pub async fn publish_text(&mut self, text: String) -> Result<ClipboardPublish> {
+        if text.is_empty() {
+            return Err(AppError::InvalidInput("nothing to copy".to_owned()));
+        }
+        if text.len() > MAX_ENTRY_SIZE_BYTES {
+            return Err(AppError::InvalidInput(format!(
+                "text exceeds the {MAX_ENTRY_SIZE_BYTES}-byte clipboard limit"
+            )));
+        }
+        let entry = EntryFactory::from_text(text);
+        let write = self
+            .runtime
+            .prepare_clipboard_write(PreparedPublish::Plain(entry))
+            .await?;
+        let write_started_at = SystemTime::now();
+        self.guarded(move |_, _| write.publish()).await?;
+        self.record_publish(write_started_at)
     }
 
     /// Synthesise the paste keystroke for `publish`.

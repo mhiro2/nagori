@@ -48,6 +48,7 @@ export const ko: Messages = {
       yesterday: '어제',
       last7days: '최근 7일',
       last30days: '최근 30일',
+      anyTime: '전체 기간',
       pinned: '고정됨',
       kindText: '텍스트',
       kindUrl: 'URL',
@@ -62,6 +63,7 @@ export const ko: Messages = {
       searchApps: '앱 검색',
       noAppMatches: '일치하는 앱 없음',
       clear: '필터 지우기',
+      retained: '지난번 조건 유지 중',
     },
     clearHistory: {
       title: '기록을 지울까요?',
@@ -81,6 +83,20 @@ export const ko: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '가려짐',
+      description: '비밀 정보가 있습니다. 미리 보기에서 가려지며, 삭제하면 즉시 완전히 지워집니다.',
+    },
+    private: {
+      label: '비공개',
+      description: '비공개로 취급합니다. 미리 보기가 가려지고 이미지 썸네일도 표시하지 않습니다.',
+    },
+    blocked: {
+      label: '숨김',
+      description: '개인정보 규칙으로 차단되었습니다. 내용이 숨겨지며 붙여넣을 수 없습니다.',
+    },
+  },
   rankReason: {
     exact: '정확',
     prefix: '접두',
@@ -95,6 +111,15 @@ export const ko: Messages = {
   preview: {
     empty: '미리 볼 항목을 선택하세요.',
     loading: '미리보기 불러오는 중…',
+    retry: '다시 시도',
+    matches: {
+      label: '검색 일치',
+      count: (count: number): string => `${count.toLocaleString('ko')}개 일치`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('ko')} / ${total.toLocaleString('ko')}`,
+      previous: '이전 일치',
+      next: '다음 일치',
+    },
     details: '세부 정보',
     truncated: '미리보기가 잘렸습니다.',
     truncation: {
@@ -174,6 +199,10 @@ export const ko: Messages = {
     pasteDiagnostics: {
       label: '⚠ 자동 붙여넣기 실패',
       toolFallback: '붙여넣기 도구',
+      notice: {
+        copiedNotPasted: '복사했지만 붙여넣지 못했습니다',
+        nothingPasted: '붙여넣은 내용이 없습니다',
+      },
       hint: {
         accessibilityMissing:
           '자동 붙여넣기 실패: Accessibility 권한이 필요합니다. 복사됨 — 수동으로 붙여넣으세요.',
@@ -215,6 +244,10 @@ export const ko: Messages = {
     aiBadge: 'AI',
     aiCancel: '취소',
     aiUnavailable: '지금은 AI 작업을 사용할 수 없습니다.',
+    aiChecking: 'AI 작업을 사용할 수 있는지 확인하는 중…',
+    aiDisabled: 'AI 작업이 설정에서 꺼져 있습니다.',
+    aiPreparing: '기기 내 모델을 준비하는 중입니다. 잠시 후 다시 시도하세요.',
+    aiLanguageUnsupported: 'AI 작업이 아직 이 언어를 지원하지 않습니다.',
     notApplicable: {
       image: '이미지에는 적용할 수 없습니다.',
       fileList: '파일에는 적용할 수 없습니다.',
@@ -241,6 +274,9 @@ export const ko: Messages = {
     copied: '복사됨',
     saveResult: '새 항목으로 저장',
     saved: '저장됨',
+    previousResult: '이전 결과',
+    pasteResult: '붙여넣기',
+    pasteFailed: '결과를 붙여넣지 못했습니다.',
   },
   pastePicker: {
     title: '붙여넣기 형식',
@@ -249,8 +285,16 @@ export const ko: Messages = {
       files: '파일',
       image: '이미지',
       plainText: '일반 텍스트',
-      html: 'HTML',
-      richText: '서식 있는 텍스트',
+      html: '서식 있는 텍스트 (HTML)',
+      richText: '서식 있는 텍스트 (RTF)',
+    },
+    descriptions: {
+      original: '복사할 때의 모든 형식. 붙여넣을 앱이 지원하는 형식을 고릅니다.',
+      files: '파일 자체. 파일 관리자에서 끌어온 것과 같습니다.',
+      image: '이미지로. 이미지 편집기, 채팅, 문서용입니다.',
+      plainText: '글자만. 글꼴, 링크, 레이아웃은 빠집니다.',
+      html: '웹 서식을 받는 앱에서 링크, 굵게, 목록을 유지합니다.',
+      richText: '워드 프로세서용으로 글꼴과 스타일을 유지합니다.',
     },
   },
   contextMenu: {

@@ -4,6 +4,7 @@
   import { messages } from '../lib/i18n/index.svelte';
   import { buildBindings, formatBinding } from '../lib/keybindings';
   import type { Binding, PaletteAction } from '../lib/keybindings';
+  import { pasteFailureHint } from '../lib/pasteFailureHint';
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -145,28 +146,7 @@
   const showPasteDiagnostic = $derived(
     pasteFailure !== null && pasteFailure.reason !== 'accessibilityMissing',
   );
-  const pasteHint = $derived.by((): string => {
-    if (!pasteFailure) return '';
-    const hint = t.status.pasteDiagnostics.hint;
-    switch (pasteFailure.reason) {
-      case 'toolMissing':
-        return hint.toolMissing({
-          tool: pasteFailure.tool ?? t.status.pasteDiagnostics.toolFallback,
-        });
-      case 'timeout':
-        return hint.timeout;
-      case 'synthUnsupported':
-        return hint.synthUnsupported;
-      case 'previousAppLost':
-        return hint.previousAppLost;
-      case 'clipboardChanged':
-        return hint.clipboardChanged;
-      case 'accessibilityMissing':
-        return hint.accessibilityMissing;
-      default:
-        return hint.unknown;
-    }
-  });
+  const pasteHint = $derived(pasteFailure ? pasteFailureHint(pasteFailure, t.status) : '');
 
   // Privacy notice: the daemon *dropped* the most recent copy because the
   // built-in secret policy refused to store it (an OTP / fully-redacted body

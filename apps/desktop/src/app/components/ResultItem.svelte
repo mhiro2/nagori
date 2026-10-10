@@ -35,6 +35,7 @@
     truncatePreview,
   } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { privacyOutcome } from '../lib/privacyOutcome';
   import { primaryRankReason, rankReasonLabel } from '../lib/rankReason';
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
@@ -52,6 +53,12 @@
     // undefined for the recent listing so those rows render plain.
     query?: string | undefined;
     onSelect: (index: number) => void;
+    // The pointer moved over the row. Hover selection keys off real movement,
+    // not `mouseenter`: a row scrolled under a resting pointer (keyboard
+    // navigation, a background refresh) would otherwise steal the selection.
+    // The list owns the "did the pointer actually move" check; standalone,
+    // the row falls back to selecting itself.
+    onHover?: ((index: number, event: MouseEvent) => void) | undefined;
     onConfirm: (index: number, event?: MouseEvent) => void;
     // `| undefined` is explicit so ResultList can forward its own optional
     // prop straight through under `exactOptionalPropertyTypes`.
@@ -80,6 +87,7 @@
     index,
     query,
     onSelect,
+    onHover = (hovered: number) => onSelect(hovered),
     onConfirm,
     onTogglePin = () => {},
     onContextMenu = () => {},
@@ -128,6 +136,14 @@
     const primary = item.representationSummary.find((rep) => rep.role === 'primary');
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
+  // Secret / Blocked rows carry a chip naming the consequence (masked,
+  // hidden) rather than the classifier's name; Private rows explain theirs in
+  // the preview only, to keep the row for the content.
+  const privacy = $derived(
+    item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'
+      ? privacyOutcome(item.sensitivity, t.privacyOutcome)
+      : undefined,
+  );
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
   // Consecutive screenshots share a source, size and age, so a tiny thumbnail
   // is the only quick way to tell them apart. The thumbnail endpoint refuses
@@ -204,7 +220,7 @@
     data-sensitivity={item.sensitivity}
     disabled={locked}
     onfocus={() => onSelect(index)}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={(event) => onConfirm(index, event)}
   >
     {#if multiActive}
@@ -274,8 +290,8 @@
           data-reason={rankReason}
           title={t.preview.fields.rank}>{rankChip}</span
         >{/if}
-      {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-        <span class="sens">{item.sensitivity}</span>
+      {#if privacy}
+        <span class="sens" title={privacy.description}>{privacy.label}</span>
       {/if}
       {#if item.sourceAppName && !compact}<span class="source">{item.sourceAppName}</span>{/if}
       <span class="time">{timeLabel}</span>
@@ -286,7 +302,7 @@
        child so it stays a real <button> (no button-in-button), and clicking it
        toggles the pin without bubbling into the row's paste handler. Hidden
        until the row is hovered/selected (hover selects the row via the button's
-       onmouseenter), shown solid once pinned — so the affordance is discoverable
+       onmousemove), shown solid once pinned — so the affordance is discoverable
        by mouse, not only via the ⌘P shortcut. -->
   <button
     type="button"
@@ -298,7 +314,7 @@
     aria-pressed={item.pinned}
     aria-label={t.keybindings.togglePin}
     title={t.keybindings.togglePin}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={() => onTogglePin(index)}>📌</button
   >
 </div>

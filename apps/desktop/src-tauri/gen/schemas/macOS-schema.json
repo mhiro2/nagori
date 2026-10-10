@@ -237,6 +237,12 @@
           "markdownDescription": "Enables the copy_entry_from_palette command without any pre-configured scope."
         },
         {
+          "description": "Enables the copy_text_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-copy-text-from-palette",
+          "markdownDescription": "Enables the copy_text_from_palette command without any pre-configured scope."
+        },
+        {
           "description": "Enables the data_dir_sync_warning command without any pre-configured scope.",
           "type": "string",
           "const": "allow-data-dir-sync-warning",
@@ -253,6 +259,12 @@
           "type": "string",
           "const": "allow-delete-entry",
           "markdownDescription": "Enables the delete_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the fit_palette_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-fit-palette-height",
+          "markdownDescription": "Enables the fit_palette_height command without any pre-configured scope."
         },
         {
           "description": "Enables the get_ai_availability command without any pre-configured scope.",
@@ -345,6 +357,12 @@
           "markdownDescription": "Enables the list_source_apps command without any pre-configured scope."
         },
         {
+          "description": "Enables the notify_paste_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-notify-paste-failure",
+          "markdownDescription": "Enables the notify_paste_failure command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_palette command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-palette",
@@ -385,6 +403,12 @@
           "type": "string",
           "const": "allow-paste-entry-representation-from-palette",
           "markdownDescription": "Enables the paste_entry_representation_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the paste_text_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-paste-text-from-palette",
+          "markdownDescription": "Enables the paste_text_from_palette command without any pre-configured scope."
         },
         {
           "description": "Enables the pin_entry command without any pre-configured scope.",
@@ -531,6 +555,12 @@
           "markdownDescription": "Denies the copy_entry_from_palette command without any pre-configured scope."
         },
         {
+          "description": "Denies the copy_text_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-copy-text-from-palette",
+          "markdownDescription": "Denies the copy_text_from_palette command without any pre-configured scope."
+        },
+        {
           "description": "Denies the data_dir_sync_warning command without any pre-configured scope.",
           "type": "string",
           "const": "deny-data-dir-sync-warning",
@@ -547,6 +577,12 @@
           "type": "string",
           "const": "deny-delete-entry",
           "markdownDescription": "Denies the delete_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fit_palette_height command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-fit-palette-height",
+          "markdownDescription": "Denies the fit_palette_height command without any pre-configured scope."
         },
         {
           "description": "Denies the get_ai_availability command without any pre-configured scope.",
@@ -639,6 +675,12 @@
           "markdownDescription": "Denies the list_source_apps command without any pre-configured scope."
         },
         {
+          "description": "Denies the notify_paste_failure command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-notify-paste-failure",
+          "markdownDescription": "Denies the notify_paste_failure command without any pre-configured scope."
+        },
+        {
           "description": "Denies the open_palette command without any pre-configured scope.",
           "type": "string",
           "const": "deny-open-palette",
@@ -679,6 +721,12 @@
           "type": "string",
           "const": "deny-paste-entry-representation-from-palette",
           "markdownDescription": "Denies the paste_entry_representation_from_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the paste_text_from_palette command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-paste-text-from-palette",
+          "markdownDescription": "Denies the paste_text_from_palette command without any pre-configured scope."
         },
         {
           "description": "Denies the pin_entry command without any pre-configured scope.",

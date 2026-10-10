@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { highlightQuery, type HighlightSegment } from './highlightQuery';
+import { highlightQuery, type HighlightSegment, markSpans, matchRanges } from './highlightQuery';
 
 // Convenience: the matched substrings, in order.
 const matches = (segments: HighlightSegment[]): string[] =>
@@ -29,7 +29,7 @@ describe('highlightQuery', () => {
     // The mark preserves the original casing of the body, not the query.
     expect(segments).toEqual([
       { text: 'The ', match: false },
-      { text: 'Needle', match: true },
+      { text: 'Needle', match: true, matchIndex: 0 },
       { text: ' here', match: false },
     ]);
   });
@@ -96,5 +96,38 @@ describe('highlightQuery', () => {
     expect(matches(segments)).toEqual(['needle']);
     expect(rebuilt(segments)).toBe(head);
     expect(segments.at(-1)?.match).toBe(false);
+  });
+});
+
+describe('matchRanges / markSpans', () => {
+  it('numbers each merged match range in order', () => {
+    const segments = highlightQuery('foo bar foo', 'foo');
+    expect(segments.filter((s) => s.match).map((s) => s.matchIndex)).toEqual([0, 1]);
+    expect(matchRanges('foo bar foo', 'foo')).toEqual([
+      [0, 3],
+      [8, 11],
+    ]);
+  });
+
+  it('splits styled spans at match edges and keeps their styling', () => {
+    const spans = [
+      { kind: 'kw', text: 'let' },
+      { kind: 'text', text: ' ' },
+      { kind: 'text', text: 'order_total' },
+      { kind: 'punct', text: ';' },
+    ];
+    // One match sits inside a span, the other crosses into the punctuation.
+    const marked = markSpans(spans, matchRanges('let order_total;', 'ord al;'));
+    expect(marked.map((s) => s.text).join('')).toBe('let order_total;');
+    expect(marked.filter((s) => s.matchIndex !== undefined)).toEqual([
+      { kind: 'text', text: 'ord', matchIndex: 0 },
+      { kind: 'text', text: 'al', matchIndex: 1 },
+      { kind: 'punct', text: ';', matchIndex: 1 },
+    ]);
+  });
+
+  it('returns the spans untouched without matches', () => {
+    const spans = [{ kind: 'text', text: 'abc' }];
+    expect(markSpans(spans, [])).toEqual(spans);
   });
 });

@@ -58,6 +58,8 @@ export type Messages = {
       yesterday: string;
       last7days: string;
       last30days: string;
+      // Reset row of the date menu a narrow palette shows instead of chips.
+      anyTime: string;
       pinned: string;
       // Content-kind chips (multi-select). Each chip maps to exactly one
       // `ContentKind`; `richText` / `unknown` are intentionally not surfaced.
@@ -80,6 +82,8 @@ export type Messages = {
       noAppMatches: string;
       // Clears every active filter (shown only when some filter is active).
       clear: string;
+      // Shown beside active filters that survived a reopen, until one changes.
+      retained: string;
     };
     // Clear-history confirmation dialog. Shown by the palette chord and by the
     // tray item, which defers to this dialog rather than acting on the click.
@@ -105,6 +109,13 @@ export type Messages = {
       rowAria: (parts: { total: number; names: string; location: string | null }) => string;
     };
   };
+  // What a sensitivity classification means for the user (masked preview,
+  // hidden content, no paste), shown instead of the raw classifier name.
+  privacyOutcome: {
+    secret: { label: string; description: string };
+    private: { label: string; description: string };
+    blocked: { label: string; description: string };
+  };
   // Short labels for `RankReason` variants. Shared by the per-row reason chip
   // (ResultItem) and the full labelled list in the preview footer.
   rankReason: {
@@ -121,6 +132,16 @@ export type Messages = {
   preview: {
     empty: string;
     loading: string;
+    // Offered after a preview fetch fails.
+    retry: string;
+    // Stepper over the search matches in a text / code body.
+    matches: {
+      label: string;
+      count: CountFormatter;
+      position: (current: number, total: number) => string;
+      previous: string;
+      next: string;
+    };
     // Summary label for the collapsible holding the technical fields
     // (id / sensitivity / size / rank).
     details: string;
@@ -239,6 +260,13 @@ export type Messages = {
     pasteDiagnostics: {
       label: string;
       toolFallback: string;
+      // Titles of the OS notification raised while the palette is hidden:
+      // the copy landed but the keystroke did not, or nothing of ours was
+      // pasted because the clipboard changed underneath.
+      notice: {
+        copiedNotPasted: string;
+        nothingPasted: string;
+      };
       hint: {
         accessibilityMissing: string;
         toolMissing: (params: { tool: string }) => string;
@@ -282,6 +310,13 @@ export type Messages = {
     aiBadge: string;
     aiCancel: string;
     aiUnavailable: string;
+    // Why the AI actions cannot run, when the backend gave no remediation:
+    // the availability probe is still running, AI is off in Settings, the
+    // model is still getting ready, or the language is unsupported.
+    aiChecking: string;
+    aiDisabled: string;
+    aiPreparing: string;
+    aiLanguageUnsupported: string;
     // Hover hint when an action can't run on the focused entry's content kind:
     // an image carries no text, and file lists / bare URLs only carry incidental
     // text (paths, the URL itself) the text actions would mangle. Keyed by the
@@ -306,6 +341,11 @@ export type Messages = {
     copied: string;
     saveResult: string;
     saved: string;
+    // Heading for a result kept from earlier in the palette session.
+    previousResult: string;
+    // Pastes the result into the source app without storing it.
+    pasteResult: string;
+    pasteFailed: string;
   };
   // The "paste as <format>" picker, surfaced from the alternate-format chord
   // when the selected entry offers more than one pasteable representation.
@@ -316,6 +356,16 @@ export type Messages = {
     keepOriginal: string;
     // Row labels keyed by the representation's category token.
     categories: {
+      files: string;
+      image: string;
+      plainText: string;
+      html: string;
+      richText: string;
+    };
+    // One line per row on what lands in the target app, keyed like
+    // `categories` plus `original` for the keep-original row.
+    descriptions: {
+      original: string;
       files: string;
       image: string;
       plainText: string;
@@ -728,6 +778,7 @@ export const en: Messages = {
       yesterday: 'Yesterday',
       last7days: 'Last 7 days',
       last30days: 'Last 30 days',
+      anyTime: 'Any time',
       pinned: 'Pinned',
       kindText: 'Text',
       kindUrl: 'URL',
@@ -742,6 +793,7 @@ export const en: Messages = {
       searchApps: 'Search apps',
       noAppMatches: 'No matching apps',
       clear: 'Clear filters',
+      retained: 'Kept from last time',
     },
     clearHistory: {
       title: 'Clear history?',
@@ -762,6 +814,21 @@ export const en: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Masked',
+      description:
+        'Contains a secret: the preview masks it, and deleting the item erases it right away.',
+    },
+    private: {
+      label: 'Private',
+      description: 'Treated as private: the preview is masked and images get no thumbnail.',
+    },
+    blocked: {
+      label: 'Hidden',
+      description: "Blocked by a privacy rule: the content is hidden and can't be pasted.",
+    },
+  },
   rankReason: {
     exact: 'Exact',
     prefix: 'Prefix',
@@ -776,6 +843,15 @@ export const en: Messages = {
   preview: {
     empty: 'Select an item to preview.',
     loading: 'Loading preview…',
+    retry: 'Try again',
+    matches: {
+      label: 'Search matches',
+      count: (count) => (count === 1 ? '1 match' : `${count.toLocaleString('en')} matches`),
+      position: (current, total) =>
+        `${current.toLocaleString('en')} / ${total.toLocaleString('en')}`,
+      previous: 'Previous match',
+      next: 'Next match',
+    },
     details: 'Details',
     truncated: 'Preview truncated.',
     truncation: {
@@ -844,6 +920,10 @@ export const en: Messages = {
     pasteDiagnostics: {
       label: '⚠ Auto-paste failed',
       toolFallback: 'the paste tool',
+      notice: {
+        copiedNotPasted: 'Copied, but not pasted',
+        nothingPasted: 'Nothing was pasted',
+      },
       hint: {
         accessibilityMissing:
           'Auto-paste failed: Accessibility permission required. Copied — paste manually.',
@@ -884,6 +964,10 @@ export const en: Messages = {
     aiBadge: 'AI',
     aiCancel: 'Cancel',
     aiUnavailable: 'AI actions are unavailable right now.',
+    aiChecking: 'Checking whether AI actions are available…',
+    aiDisabled: 'AI actions are turned off in Settings.',
+    aiPreparing: 'The on-device model is still getting ready. Try again shortly.',
+    aiLanguageUnsupported: "AI actions don't support this language yet.",
     notApplicable: {
       image: "Actions don't apply to images.",
       fileList: "Actions don't apply to files.",
@@ -910,6 +994,9 @@ export const en: Messages = {
     copied: 'Copied',
     saveResult: 'Save as new entry',
     saved: 'Saved',
+    previousResult: 'Previous result',
+    pasteResult: 'Paste',
+    pasteFailed: 'Could not paste the result.',
   },
   pastePicker: {
     title: 'Paste as',
@@ -918,8 +1005,16 @@ export const en: Messages = {
       files: 'Files',
       image: 'Image',
       plainText: 'Plain text',
-      html: 'HTML',
-      richText: 'Rich text',
+      html: 'Formatted text (HTML)',
+      richText: 'Formatted text (RTF)',
+    },
+    descriptions: {
+      original: 'Every format it was copied with; the app picks what it supports.',
+      files: 'The files themselves, as if dragged from the file manager.',
+      image: 'The picture, for image editors, chats and documents.',
+      plainText: 'Text only, without fonts, links or layout.',
+      html: 'Keeps links, bold and lists where the app accepts web formatting.',
+      richText: 'Keeps fonts and styles for word processors.',
     },
   },
   contextMenu: {

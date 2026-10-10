@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { markSpans, matchRanges } from '../lib/highlightQuery';
   import HighlightedText from './HighlightedText.svelte';
   import { tokenize, type Span } from './tokenize';
+
+  type MarkedSpan = Span & { matchIndex?: number };
 
   type Props = {
     text: string;
@@ -10,34 +13,38 @@
     // the query-match highlight.
     isCode: boolean;
     // The query the preview belongs to (searchState.appliedQuery), so the
-    // body marks the same hits the result row does. Applied to non-code bodies
-    // only; code bodies keep their grammar colouring instead. `highlightQuery`
-    // caps its own scan, so a large body stays bounded.
+    // body marks the same hits the result row does. Code bodies overlay the
+    // marks on their grammar colouring rather than replacing it. The match
+    // scan caps itself, so a large body stays bounded.
     query?: string | undefined;
+    // Ordinal of the match the pane has stepped to (see PreviewPane).
+    currentMatch?: number | undefined;
   };
 
-  let { text, language, isCode, query }: Props = $props();
+  let { text, language, isCode, query, currentMatch }: Props = $props();
 
-  const tokens = $derived(isCode ? tokenize(text, language) : []);
+  const tokens = $derived<MarkedSpan[]>(
+    isCode ? markSpans(tokenize(text, language), matchRanges(text, query)) : [],
+  );
   // Line numbers only make sense for the multi-line code body. The url body
   // shares the highlighter for inline URL colouring but stays single-line.
   const showLineNumbers = $derived(isCode && tokens.length > 0);
-  const tokenLines = $derived<Span[][]>(showLineNumbers ? splitTokensByLine(tokens) : []);
+  const tokenLines = $derived<MarkedSpan[][]>(showLineNumbers ? splitTokensByLine(tokens) : []);
 
   // Walk the token stream and break each token at every `\n`. Newlines become
   // line boundaries (dropped from the rendered span text — the `display:block`
   // on `.line` paints the break). Tokens that span multiple lines (block
   // comments, multi-line strings) emit one span per line with the same kind
   // so colouring is preserved across the gutter.
-  function splitTokensByLine(allTokens: Span[]): Span[][] {
-    const lines: Span[][] = [[]];
+  function splitTokensByLine(allTokens: MarkedSpan[]): MarkedSpan[][] {
+    const lines: MarkedSpan[][] = [[]];
     for (const tok of allTokens) {
       const parts = tok.text.split('\n');
       for (let idx = 0; idx < parts.length; idx += 1) {
         if (idx > 0) lines.push([]);
         const part = parts[idx];
         if (part && part.length > 0) {
-          lines[lines.length - 1]!.push({ kind: tok.kind, text: part });
+          lines[lines.length - 1]!.push({ ...tok, text: part });
         }
       }
     }
@@ -45,20 +52,27 @@
   }
 </script>
 
+<!-- A matched piece of a token renders as a <mark> carrying the token's
+     grammar class, so the colour survives under the match wash. -->
+{#snippet token(tok: MarkedSpan)}{#if tok.matchIndex !== undefined}<mark
+      class="match {tok.kind}"
+      class:current={tok.matchIndex === currentMatch}
+      data-match={tok.matchIndex}>{tok.text}</mark
+    >{:else}<span class={tok.kind}>{tok.text}</span>{/if}{/snippet}
+
 {#if showLineNumbers}
   <pre class="body code with-lines"><code
       >{#each tokenLines as line, lineIdx (lineIdx)}<span class="line"
-          ><span class="lineno" aria-hidden="true"></span>{#each line as tok, idx (idx)}<span
-              class={tok.kind}>{tok.text}</span
-            >{/each}</span
+          ><span class="lineno" aria-hidden="true"
+          ></span>{#each line as tok, idx (idx)}{@render token(tok)}{/each}</span
         >{/each}</code
     ></pre>
 {:else if isCode}
   <pre class="body code"><code
-      >{#each tokens as tok, idx (idx)}<span class={tok.kind}>{tok.text}</span>{/each}</code
+      >{#each tokens as tok, idx (idx)}{@render token(tok)}{/each}</code
     ></pre>
 {:else}
-  <pre class="body"><HighlightedText {text} {query} /></pre>
+  <pre class="body"><HighlightedText {text} {query} {currentMatch} /></pre>
 {/if}
 
 <style>
@@ -78,6 +92,20 @@
   }
   .body.code code {
     font: inherit;
+  }
+  /* Same wash as HighlightedText's marks. `:where` keeps this at the
+     specificity of the grammar rules below, which come later and so win:
+     keywords / strings keep their colour inside a match, and plain text
+     inherits instead of taking the UA's black `mark` colour. */
+  .body.code :where(mark.match) {
+    padding: 0 0.05em;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--accent, #6c8dff) 32%, transparent);
+    color: inherit;
+  }
+  .body.code :where(mark.match.current) {
+    background: color-mix(in srgb, var(--accent, #6c8dff) 60%, transparent);
+    outline: 1px solid var(--accent, #6c8dff);
   }
   .body :global(.kw) {
     color: var(--syntax-kw, #c08bff);
