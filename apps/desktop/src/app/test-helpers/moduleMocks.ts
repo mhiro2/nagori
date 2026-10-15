@@ -48,6 +48,7 @@ export const tauriMock = (overrides: Record<string, unknown> = {}): Record<strin
 // `vi.mocked(...).mockResolvedValue(...)`.
 export const commandsMock = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   searchClipboard: vi.fn(),
+  cancelSearch: vi.fn(async () => undefined),
   listSourceApps: vi.fn(async () => []),
   closePalette: vi.fn(),
   fitPaletteHeight: vi.fn(async () => undefined),

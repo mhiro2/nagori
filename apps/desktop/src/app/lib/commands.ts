@@ -28,6 +28,11 @@ import type {
 export const searchClipboard = (request: SearchRequest): Promise<SearchResponse> =>
   invoke('search_clipboard', { request });
 
+// Abort the in-flight search tagged with `requestId`. A no-op once that search
+// has finished, so a late cancel never hits the search that replaced it.
+export const cancelSearch = (requestId: number): Promise<void> =>
+  invoke('cancel_search', { requestId });
+
 // Every app the live history was copied from, most recently seen first.
 export const listSourceApps = (): Promise<string[]> => invoke('list_source_apps');
 

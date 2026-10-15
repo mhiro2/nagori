@@ -6,7 +6,7 @@ vi.mock('../lib/commands', async () =>
   (await import('../test-helpers/moduleMocks')).commandsMock(),
 );
 
-import { searchClipboard } from '../lib/commands';
+import { cancelSearch, searchClipboard } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { SearchResponse, SearchResultDto } from '../lib/types';
 import { sampleSearchResult } from '../test-helpers/fixtures';
@@ -94,7 +94,12 @@ describe('refreshRecent', () => {
   it('hydrates results from recent search inside Tauri', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a'), result('b')] }));
     await refreshRecent();
-    expect(searchClipboard).toHaveBeenCalledWith({ query: '', mode: 'Recent', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: '',
+      mode: 'Recent',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.results).toHaveLength(2);
     expect(searchState.results[0]?.id).toBe('a');
     expect(searchState.loading).toBe(false);
@@ -112,7 +117,12 @@ describe('runQuery', () => {
   it('delegates to refreshRecent when the query trims to empty', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('only')] }));
     await runQuery('   ');
-    expect(searchClipboard).toHaveBeenCalledWith({ query: '', mode: 'Recent', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: '',
+      mode: 'Recent',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.results[0]?.id).toBe('only');
   });
 
@@ -121,7 +131,12 @@ describe('runQuery', () => {
       response({ results: [{ ...result('match'), score: 1, rankReasons: ['ExactMatch'] }] }),
     );
     await runQuery('match');
-    expect(searchClipboard).toHaveBeenCalledWith({ query: 'match', mode: 'Auto', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: 'match',
+      mode: 'Auto',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.results[0]?.id).toBe('match');
     expect(searchState.lastElapsedMs).toBe(12);
   });
@@ -209,7 +224,12 @@ describe('scheduleQuery + cancelPendingQuery', () => {
     expect(searchClipboard).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(120);
     expect(searchClipboard).toHaveBeenCalledTimes(1);
-    expect(searchClipboard).toHaveBeenCalledWith({ query: 'hello', mode: 'Auto', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: 'hello',
+      mode: 'Auto',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
   });
 
   it('cancelPendingQuery prevents a scheduled run from firing', async () => {
@@ -230,6 +250,7 @@ describe('scheduleQuery + cancelPendingQuery', () => {
       query: 'explicit',
       mode: 'Auto',
       limit: 50,
+      requestId: expect.any(Number),
     });
   });
 });
@@ -248,7 +269,12 @@ describe('latest-only search queue', () => {
 
     // Only 'a' has reached the backend while it is still in flight.
     expect(searchClipboard).toHaveBeenCalledTimes(1);
-    expect(searchClipboard).toHaveBeenNthCalledWith(1, { query: 'a', mode: 'Auto', limit: 50 });
+    expect(searchClipboard).toHaveBeenNthCalledWith(1, {
+      query: 'a',
+      mode: 'Auto',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
 
     // 'b' was superseded before running, so its promise settles without a call.
     await p2;
@@ -260,7 +286,12 @@ describe('latest-only search queue', () => {
     // Finishing 'a' drains the queued latest ('c'); 'b' never runs, and the UI
     // stays in the loading state across the coalesced run.
     expect(searchClipboard).toHaveBeenCalledTimes(2);
-    expect(searchClipboard).toHaveBeenNthCalledWith(2, { query: 'c', mode: 'Auto', limit: 50 });
+    expect(searchClipboard).toHaveBeenNthCalledWith(2, {
+      query: 'c',
+      mode: 'Auto',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.loading).toBe(true);
     // 'a' resolved while 'c' was queued, so its now-stale results must not be
     // applied — the list stays empty until 'c' completes.
@@ -273,6 +304,34 @@ describe('latest-only search queue', () => {
     expect(searchState.results[0]?.id).toBe('c');
     expect(searchState.appliedQuery).toBe('c');
     expect(searchState.loading).toBe(false);
+  });
+
+  it('cancels the running search when a newer one queues behind it', async () => {
+    let rejectRunning!: (err: unknown) => void;
+    const running = new Promise<SearchResponse>((_, reject) => {
+      rejectRunning = reject;
+    });
+    vi.mocked(searchClipboard)
+      .mockReturnValueOnce(running)
+      .mockResolvedValueOnce(response({ results: [result('new')] }));
+
+    const p1 = runQuery('old');
+    const runningId = vi.mocked(searchClipboard).mock.calls[0]?.[0].requestId;
+    expect(runningId).toEqual(expect.any(Number));
+    expect(cancelSearch).not.toHaveBeenCalled();
+
+    const p2 = runQuery('new');
+    expect(cancelSearch).toHaveBeenCalledExactlyOnceWith(runningId);
+
+    // The backend answers a cancelled search with a `cancelled` error. It is
+    // stale, so it must not surface as an error banner.
+    rejectRunning({ code: 'cancelled', message: 'cancelled', recoverable: true });
+    await Promise.all([p1, p2]);
+
+    expect(searchClipboard).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(searchClipboard).mock.calls[1]?.[0].requestId).not.toBe(runningId);
+    expect(searchState.errorMessage).toBeUndefined();
+    expect(searchState.results[0]?.id).toBe('new');
   });
 
   it('applies only the latest query regardless of backend completion order', async () => {
@@ -348,7 +407,12 @@ describe('result paging', () => {
     fillEveryLimit();
     await refreshRecent();
     await loadMoreResults();
-    expect(searchClipboard).toHaveBeenLastCalledWith({ query: '', mode: 'Recent', limit: 100 });
+    expect(searchClipboard).toHaveBeenLastCalledWith({
+      query: '',
+      mode: 'Recent',
+      limit: 100,
+      requestId: expect.any(Number),
+    });
   });
 
   it('keeps the expanded limit across same-query refreshes', async () => {

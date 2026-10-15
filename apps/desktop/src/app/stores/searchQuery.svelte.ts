@@ -4,7 +4,7 @@
 // is missing — e.g. plain `vite dev` — the store falls back to a local
 // sample fixture so the UI remains demo-able.
 
-import { searchClipboard } from '../lib/commands';
+import { cancelSearch, searchClipboard } from '../lib/commands';
 import { describeError } from '../lib/errors';
 import { messages } from '../lib/i18n/index.svelte';
 import { isTauri } from '../lib/tauri';
@@ -81,7 +81,9 @@ export const searchState = $state<SearchState>({
 // window, so without coalescing a fast typist stacks several concurrent SQLite
 // scans whose results are all discarded but one. We keep at most one search in
 // flight and remember only the most recent request that arrived while it was
-// running — intermediate keystrokes' searches never reach the backend. The
+// running — intermediate keystrokes' searches never reach the backend. When a
+// request queues behind a running search, that search is cancelled on the
+// backend (by its ticket) so a slow query does not hold up the newer one. The
 // `inflight` ticket still tags every run so a late response (e.g. one that
 // resolves after the palette moved on) is dropped as defense-in-depth.
 let inflight = 0;
@@ -238,9 +240,14 @@ const runSearch = (request: SearchRequest): Promise<void> => {
     // Drop the previously queued request: only the newest pending one matters.
     // Resolve its awaiter so a caller blocked on it doesn't hang forever.
     queuedSearch?.resolve();
-    return new Promise<void>((resolve) => {
+    const queued = new Promise<void>((resolve) => {
       queuedSearch = { request, resolve };
     });
+    // The running search is `inflight`: only `executeSearch` advances it. Its
+    // results are already stale, so stop it rather than wait for it. A cancel
+    // that lands after it finished is ignored by the backend.
+    cancelSearch(inflight).catch(() => undefined);
+    return queued;
   }
   return executeSearch(request);
 };
@@ -255,6 +262,7 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
     const response = await searchClipboard({
       ...request,
       ...(filters !== undefined ? { filters } : {}),
+      requestId: ticket,
     });
     // Apply only when this is still the freshest request: the ticket must
     // match *and* no newer request must have been queued behind us while we

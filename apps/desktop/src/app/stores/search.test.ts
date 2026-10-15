@@ -88,7 +88,12 @@ describe('refreshRecent', () => {
 
     await refreshRecent();
 
-    expect(searchClipboard).toHaveBeenCalledWith({ query: '', mode: 'Recent', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: '',
+      mode: 'Recent',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.results).toHaveLength(2);
     expect(searchState.results.at(0)?.id).toBe('a');
     expect(searchState.selectedIndex).toBe(0);
@@ -131,7 +136,12 @@ describe('runQuery', () => {
 
     await runQuery('   ');
 
-    expect(searchClipboard).toHaveBeenCalledWith({ query: '', mode: 'Recent', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: '',
+      mode: 'Recent',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.query).toBe('   ');
   });
 
@@ -164,6 +174,7 @@ describe('runQuery', () => {
       query: 'needle',
       mode: 'Auto',
       limit: 50,
+      requestId: expect.any(Number),
     });
     expect(searchState.results).toHaveLength(1);
     expect(searchState.lastElapsedMs).toBe(12);
@@ -191,7 +202,12 @@ describe('flushPendingQuery', () => {
     // The pending query ran immediately and its results are now applied, so an
     // action reading the selection after the flush sees the typed query's list.
     expect(ready).toBe(true);
-    expect(searchClipboard).toHaveBeenCalledWith({ query: 'needle', mode: 'Auto', limit: 50 });
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: 'needle',
+      mode: 'Auto',
+      limit: 50,
+      requestId: expect.any(Number),
+    });
     expect(searchState.appliedQuery).toBe('needle');
     expect(searchState.results.at(0)?.id).toBe('fresh');
   });

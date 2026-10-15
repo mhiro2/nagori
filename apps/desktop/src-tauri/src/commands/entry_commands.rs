@@ -11,7 +11,7 @@ use nagori_search::normalize_text;
 use tauri::State;
 
 use crate::dto::{EntryDto, FileSummaryDto, SearchRequestDto, SearchResponseDto, SearchResultDto};
-use crate::error::CommandResult;
+use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
 use super::{parse_entry_id, purge_preview_temp_dir, remove_preview_temp_files_for};
@@ -20,9 +20,37 @@ const DEFAULT_SEARCH_LIMIT: usize = 50;
 const DEFAULT_RECENT_LIMIT: usize = 50;
 const MAX_COMMAND_LIMIT: usize = 200;
 
+/// Run a palette search. A request carrying a `request_id` registers as the
+/// in-flight search, so `cancel_search` can abort it once a newer keystroke
+/// queues behind it; dropping the search future interrupts the `SQLite` work
+/// it is waiting on.
 #[tauri::command]
 pub async fn search_clipboard(
     state: State<'_, AppState>,
+    request: SearchRequestDto,
+) -> CommandResult<SearchResponseDto> {
+    let Some(request_id) = request.request_id else {
+        return run_search(&state, request).await;
+    };
+    let registration = state.inflight_search.register(request_id);
+    tokio::select! {
+        biased;
+        () = registration.token().cancelled() => Err(CommandError::cancelled()),
+        response = run_search(&state, request) => response,
+    }
+}
+
+/// Abort the in-flight search registered under `request_id`. A cancel for a
+/// search that already finished is ignored, so it can never hit the request
+/// that replaced it.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn cancel_search(state: State<'_, AppState>, request_id: u64) {
+    state.inflight_search.cancel(request_id);
+}
+
+async fn run_search(
+    state: &AppState,
     request: SearchRequestDto,
 ) -> CommandResult<SearchResponseDto> {
     let limit = request

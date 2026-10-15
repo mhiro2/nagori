@@ -77,6 +77,12 @@ describe('command wrappers', () => {
       args: { request: { query: 'q', limit: 10 } },
     },
     {
+      name: 'cancelSearch',
+      run: () => commands.cancelSearch(3),
+      cmd: 'cancel_search',
+      args: { requestId: 3 },
+    },
+    {
       name: 'closePalette',
       run: () => commands.closePalette(),
       cmd: 'close_palette',
