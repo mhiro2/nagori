@@ -33,6 +33,7 @@ deleted; nothing leaves the machine.
 | Command | Window | Notes |
 | --- | --- | --- |
 | `search_clipboard` | palette | Ranked search over history. |
+| `cancel_search` | palette | Aborts the palette search with the given request id once a newer one queues behind it. |
 | `list_source_apps` | palette | Distinct source apps of the live, non-blocked history, most recently seen first (feeds the source-app filter). |
 | `list_recent_entries` | internal | Recency list (CLI / headless). |
 | `list_pinned_entries` | internal | Pinned list (CLI / headless). |
