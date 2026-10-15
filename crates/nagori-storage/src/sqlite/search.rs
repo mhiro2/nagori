@@ -640,57 +640,234 @@ impl SearchCandidateProvider for SqliteStore {
         let max_count = usize::try_from(limit_i64).unwrap_or(0);
         let max_bytes = budget.max_bytes();
         self.run_search_blocking(cancel, move |conn| {
-            let placeholders = std::iter::repeat_n("?", query_grams.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let columns = candidate_columns(TEXT_MATCH_SQL);
-            let sql = format!(
-                "SELECT {columns},
-                        COUNT(DISTINCT n.gram) AS hits
-                 FROM ngrams n
-                 JOIN entries e ON e.id = n.entry_id
-                 JOIN search_documents d ON d.entry_id = e.id
-                 WHERE n.gram IN ({placeholders})
-                   AND e.deleted_at IS NULL
-                   AND e.sensitivity != 'blocked'
-                   {extra}
-                 GROUP BY e.id
-                 ORDER BY hits DESC, e.created_at DESC
-                 LIMIT ?",
-                extra = filter.sql,
-            );
-            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
-            let mut bound: Vec<&dyn ToSql> = vec![&normalized, &normalized, &normalized];
-            bound.extend(query_grams.iter().map(|g| g as &dyn ToSql));
-            bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
-            bound.push(&limit_i64);
-            #[allow(clippy::cast_precision_loss)]
-            let total = query_grams.len() as f32;
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(bound), |row| {
-                    let hits: i64 = row.get("hits").unwrap_or(0);
-                    let candidate = row_to_candidate(row)?;
-                    Ok((candidate, hits))
-                })
-                .map_err(storage_err)?;
-            let mut out = ByteBoundedVec::new(max_count, max_bytes);
-            for row in rows {
-                let (candidate, hits) = row.map_err(storage_err)?;
-                #[allow(clippy::cast_precision_loss)]
-                let overlap = (hits as f32 / total).clamp(0.0, 1.0);
-                let hit = NgramCandidate {
-                    candidate,
-                    ngram_overlap: overlap,
-                };
-                let owned_bytes = hit.candidate.owned_byte_count();
-                if !out.push(hit, owned_bytes) {
-                    break;
-                }
+            let query = NgramSql {
+                grams: &query_grams,
+                filter: &filter,
+                normalized: &normalized,
+                limit: limit_i64,
+                max_count,
+                max_bytes,
+                dense_min_postings: DENSE_GRAM_POSTINGS,
+                dense_window: DENSE_SCAN_WINDOW,
+            };
+            if let Some(found) = newest_full_overlap_candidates(conn, &query)? {
+                return Ok(found);
             }
-            Ok(out.into_vec())
+            ranked_ngram_candidates(conn, &query)
         })
         .await
     }
+}
+
+/// Postings a gram needs before the newest-first walk is worth trying. Below
+/// this every gram's posting list is short enough for the ranked aggregate to
+/// stay cheap, and a walk over the history would mostly probe rows without a
+/// match.
+const DENSE_GRAM_POSTINGS: i64 = 2048;
+
+/// Newest live entries the newest-first walk may visit before giving up and
+/// falling back to the ranked aggregate. Bounds the walk when frequent grams
+/// cluster in old history (a batch of Japanese text captured long ago in an
+/// otherwise English history), where it would otherwise probe every newer row.
+const DENSE_SCAN_WINDOW: i64 = 20_000;
+
+/// Inputs shared by the two ngram candidate queries.
+pub(super) struct NgramSql<'a> {
+    pub(super) grams: &'a [String],
+    pub(super) filter: &'a FilterFragment,
+    pub(super) normalized: &'a str,
+    pub(super) limit: i64,
+    pub(super) max_count: usize,
+    pub(super) max_bytes: usize,
+    /// [`DENSE_GRAM_POSTINGS`] outside tests.
+    pub(super) dense_min_postings: i64,
+    /// [`DENSE_SCAN_WINDOW`] outside tests.
+    pub(super) dense_window: i64,
+}
+
+/// Fast path for queries whose grams are all frequent — a common Han
+/// character, a kana run present in most rows. Rows holding every gram rank
+/// first (full overlap), newest first, so when the newest
+/// `dense_window` live entries already contain `limit` such rows they
+/// are exactly the page the ranked aggregate would return. Walking the
+/// recency index and probing each gram's posting by `(gram, entry_id)` stops
+/// after `limit` hits, where the aggregate has to group and sort the whole
+/// posting list. Returns `None` when a gram is rare or the window holds too
+/// few matches, leaving the caller to run the aggregate.
+pub(super) fn newest_full_overlap_candidates(
+    conn: &Connection,
+    query: &NgramSql<'_>,
+) -> Result<Option<Vec<NgramCandidate>>> {
+    let mut count_stmt = conn
+        .prepare_cached("SELECT COUNT(*) FROM (SELECT 1 FROM ngrams WHERE gram = ?1 LIMIT ?2)")
+        .map_err(storage_err)?;
+    for gram in query.grams {
+        let postings: i64 = count_stmt
+            .query_row(params![gram, query.dense_min_postings], |row| row.get(0))
+            .map_err(storage_err)?;
+        if postings < query.dense_min_postings {
+            return Ok(None);
+        }
+    }
+    // Oldest `created_at` inside the window, as an index range bound so the
+    // walk can never run past it. A history smaller than the window has no
+    // bound; every stored timestamp sorts after the empty string.
+    let cutoff: String = conn
+        .prepare_cached(
+            "SELECT created_at FROM entries
+             WHERE deleted_at IS NULL AND sensitivity != 'blocked'
+             ORDER BY created_at DESC
+             LIMIT 1 OFFSET ?1",
+        )
+        .map_err(storage_err)?
+        .query_row(params![query.dense_window - 1], |row| row.get(0))
+        .optional()
+        .map_err(storage_err)?
+        .unwrap_or_default();
+    let probes = "AND EXISTS (SELECT 1 FROM ngrams n WHERE n.gram = ? AND n.entry_id = e.id)\n"
+        .repeat(query.grams.len());
+    let columns = candidate_columns(TEXT_MATCH_SQL);
+    let sql = format!(
+        "WITH newest AS (
+             SELECT e.id AS id, e.created_at AS created_at
+             FROM entries e
+             WHERE e.deleted_at IS NULL
+               AND e.sensitivity != 'blocked'
+               AND e.created_at >= ?
+               {probes}
+               AND EXISTS (SELECT 1 FROM search_documents sd WHERE sd.entry_id = e.id)
+               {extra}
+             ORDER BY e.created_at DESC
+             LIMIT ?
+         )
+         SELECT {columns}, {hits} AS hits
+         FROM newest r
+         JOIN entries e ON e.id = r.id
+         JOIN search_documents d ON d.entry_id = e.id
+         ORDER BY r.created_at DESC",
+        extra = query.filter.sql,
+        hits = query.grams.len(),
+    );
+    let mut bound: Vec<&dyn ToSql> = vec![&cutoff];
+    bound.extend(query.grams.iter().map(|g| g as &dyn ToSql));
+    bound.extend(query.filter.params.iter().map(|p| &**p as &dyn ToSql));
+    bound.push(&query.limit);
+    bound.extend([
+        &query.normalized as &dyn ToSql,
+        &query.normalized,
+        &query.normalized,
+    ]);
+    let collected = collect_ngram_rows(conn, &sql, &bound, query)?;
+    // A page cut short by the byte budget was full at the SQL level; only a
+    // statement that ran dry before `limit` rows falls back.
+    let filled = collected.budget_exhausted
+        || i64::try_from(collected.rows_read).unwrap_or(i64::MAX) >= query.limit;
+    Ok(filled.then_some(collected.candidates))
+}
+
+/// Rank every row holding at least one query gram by overlap, then recency.
+pub(super) fn ranked_ngram_candidates(
+    conn: &Connection,
+    query: &NgramSql<'_>,
+) -> Result<Vec<NgramCandidate>> {
+    let placeholders = std::iter::repeat_n("?", query.grams.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let columns = candidate_columns(TEXT_MATCH_SQL);
+    // Rank on ids first, project afterwards. A frequent gram matches a large
+    // share of the history, and projecting the candidate columns — the `instr`
+    // text match over the full normalized body, the preview window — for every
+    // matching row before `LIMIT` made the cost grow with the posting list
+    // instead of the page. `ranked` keeps only the id, overlap and sort key,
+    // so the heavy projection runs for at most `limit` rows. A subquery with
+    // `LIMIT` is never flattened into the outer join, so the order of work is
+    // fixed.
+    let sql = format!(
+        "WITH matched AS (
+             SELECT entry_id, COUNT(DISTINCT gram) AS hits
+             FROM ngrams
+             WHERE gram IN ({placeholders})
+             GROUP BY entry_id
+         ),
+         ranked AS (
+             SELECT m.entry_id AS id, m.hits AS hits, e.created_at AS created_at
+             FROM matched m
+             JOIN entries e ON e.id = m.entry_id
+             WHERE e.deleted_at IS NULL
+               AND e.sensitivity != 'blocked'
+               AND EXISTS (SELECT 1 FROM search_documents sd WHERE sd.entry_id = e.id)
+               {extra}
+             ORDER BY m.hits DESC, e.created_at DESC
+             LIMIT ?
+         )
+         SELECT {columns}, r.hits AS hits
+         FROM ranked r
+         JOIN entries e ON e.id = r.id
+         JOIN search_documents d ON d.entry_id = e.id
+         ORDER BY r.hits DESC, r.created_at DESC",
+        extra = query.filter.sql,
+    );
+    // Positional parameters bind in textual order: the CTEs' grams, filters
+    // and limit come before the projection's text-match operands.
+    let mut bound: Vec<&dyn ToSql> = query.grams.iter().map(|g| g as &dyn ToSql).collect();
+    bound.extend(query.filter.params.iter().map(|p| &**p as &dyn ToSql));
+    bound.push(&query.limit);
+    bound.extend([
+        &query.normalized as &dyn ToSql,
+        &query.normalized,
+        &query.normalized,
+    ]);
+    Ok(collect_ngram_rows(conn, &sql, &bound, query)?.candidates)
+}
+
+/// Rows of one ngram candidate query, collected under the candidate budget.
+struct CollectedNgramRows {
+    candidates: Vec<NgramCandidate>,
+    /// Rows the statement produced before collection stopped.
+    rows_read: usize,
+    /// Collection stopped at the byte budget rather than at the last row.
+    budget_exhausted: bool,
+}
+
+fn collect_ngram_rows(
+    conn: &Connection,
+    sql: &str,
+    bound: &[&dyn ToSql],
+    query: &NgramSql<'_>,
+) -> Result<CollectedNgramRows> {
+    let mut stmt = conn.prepare_cached(sql).map_err(storage_err)?;
+    #[allow(clippy::cast_precision_loss)]
+    let total = query.grams.len() as f32;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bound), |row| {
+            let hits: i64 = row.get("hits").unwrap_or(0);
+            let candidate = row_to_candidate(row)?;
+            Ok((candidate, hits))
+        })
+        .map_err(storage_err)?;
+    let mut out = ByteBoundedVec::new(query.max_count, query.max_bytes);
+    let mut rows_read = 0;
+    let mut budget_exhausted = false;
+    for row in rows {
+        let (candidate, hits) = row.map_err(storage_err)?;
+        rows_read += 1;
+        #[allow(clippy::cast_precision_loss)]
+        let overlap = (hits as f32 / total).clamp(0.0, 1.0);
+        let hit = NgramCandidate {
+            candidate,
+            ngram_overlap: overlap,
+        };
+        let owned_bytes = hit.candidate.owned_byte_count();
+        if !out.push(hit, owned_bytes) {
+            budget_exhausted = true;
+            break;
+        }
+    }
+    Ok(CollectedNgramRows {
+        candidates: out.into_vec(),
+        rows_read,
+        budget_exhausted,
+    })
 }
 
 pub(super) fn upsert_document_blocking(
