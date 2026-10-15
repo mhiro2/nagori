@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use async_trait::async_trait;
@@ -710,10 +709,16 @@ pub(super) fn newest_full_overlap_candidates(
             return Ok(None);
         }
     }
-    let Some(picked) = walk_newest_full_overlap(conn, query)? else {
+    // The walk and the projection are two statements; one read transaction
+    // pins them to the same snapshot, so a row picked under the filters (still
+    // pinned, still holding every gram) is projected in that same state rather
+    // than after a concurrent writer changed it. Dropping it rolls back, which
+    // for a read-only transaction just ends the snapshot.
+    let snapshot = conn.unchecked_transaction().map_err(storage_err)?;
+    let Some(picked) = walk_newest_full_overlap(&snapshot, query)? else {
         return Ok(None);
     };
-    let collected = project_picked_rows(conn, query, &picked)?;
+    let collected = project_picked_rows(&snapshot, query, &picked)?;
     Ok(Some(collected))
 }
 
@@ -767,51 +772,40 @@ fn walk_newest_full_overlap(
     Ok(Some(picked))
 }
 
-/// Candidate columns for the walked ids, in walk order. A row deleted or
-/// blocked since the walk is dropped.
+/// Candidate columns for the walked ids, in walk order, collected under the
+/// candidate budget like every other branch.
 fn project_picked_rows(
     conn: &Connection,
     query: &NgramSql<'_>,
     picked: &[String],
 ) -> Result<Vec<NgramCandidate>> {
-    let placeholders = std::iter::repeat_n("?", picked.len())
+    let values = std::iter::repeat_n("(?, ?)", picked.len())
         .collect::<Vec<_>>()
         .join(",");
     let columns = candidate_columns(TEXT_MATCH_SQL);
     let sql = format!(
-        "SELECT {columns}
-         FROM entries e
+        "WITH picked(id, ord) AS (VALUES {values})
+         SELECT {columns}, {hits} AS hits
+         FROM picked p
+         JOIN entries e ON e.id = p.id
          JOIN search_documents d ON d.entry_id = e.id
-         WHERE e.id IN ({placeholders})
-           AND e.deleted_at IS NULL
-           AND e.sensitivity != 'blocked'"
+         WHERE e.deleted_at IS NULL
+           AND e.sensitivity != 'blocked'
+         ORDER BY p.ord",
+        hits = query.grams.len(),
     );
-    let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
-    let mut bound: Vec<&dyn ToSql> = vec![&query.normalized, &query.normalized, &query.normalized];
-    bound.extend(picked.iter().map(|id| id as &dyn ToSql));
-    let mut projected: HashMap<String, SearchCandidate> = stmt
-        .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
-        .map_err(storage_err)?
-        .map(|row| {
-            let candidate = row.map_err(storage_err)?;
-            Ok((candidate.entry_id.to_string(), candidate))
-        })
-        .collect::<Result<_>>()?;
-    let mut out = ByteBoundedVec::new(query.max_count, query.max_bytes);
-    for id in picked {
-        let Some(candidate) = projected.remove(id) else {
-            continue;
-        };
-        let owned_bytes = candidate.owned_byte_count();
-        let hit = NgramCandidate {
-            candidate,
-            ngram_overlap: 1.0,
-        };
-        if !out.push(hit, owned_bytes) {
-            break;
-        }
+    let ordinals: Vec<i64> = (0..).take(picked.len()).collect();
+    let mut bound: Vec<&dyn ToSql> = Vec::with_capacity(picked.len() * 2 + 3);
+    for (id, ord) in picked.iter().zip(&ordinals) {
+        bound.push(id);
+        bound.push(ord);
     }
-    Ok(out.into_vec())
+    bound.extend([
+        &query.normalized as &dyn ToSql,
+        &query.normalized,
+        &query.normalized,
+    ]);
+    collect_ngram_rows(conn, &sql, &bound, query)
 }
 
 /// Rank every row holding at least one query gram by overlap, then recency.
