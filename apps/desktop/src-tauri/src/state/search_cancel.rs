@@ -64,7 +64,12 @@ impl InflightSearch {
         let mut slot = self.lock();
         match slot.running.as_ref() {
             Some((id, token)) if *id == request_id => token.cancel(),
-            _ => slot.cancelled_early = Some(request_id),
+            // Request ids only grow, so a held id outranks any older cancel
+            // that arrives late; keeping the larger one means a delayed cancel
+            // for a finished search cannot displace the one still waiting.
+            _ => {
+                slot.cancelled_early = slot.cancelled_early.max(Some(request_id));
+            }
         }
     }
 }
@@ -114,6 +119,15 @@ mod tests {
         let inflight = InflightSearch::default();
         inflight.cancel(3);
         let guard = inflight.register(3);
+        assert!(guard.token().is_cancelled());
+    }
+
+    #[test]
+    fn a_delayed_older_cancel_keeps_the_held_one() {
+        let inflight = InflightSearch::default();
+        inflight.cancel(2);
+        inflight.cancel(1);
+        let guard = inflight.register(2);
         assert!(guard.token().is_cancelled());
     }
 
