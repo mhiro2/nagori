@@ -1068,3 +1068,33 @@ async fn dense_ngram_path_defers_to_the_aggregate_for_rare_or_old_matches() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn dense_ngram_walk_stops_at_the_window_even_across_tied_timestamps() {
+    use super::super::search::{build_filter_fragment, newest_full_overlap_candidates};
+
+    let store = SqliteStore::open_memory().unwrap();
+    // Every row shares one timestamp, so no `created_at` bound can split them:
+    // only the row count may cap the walk.
+    let when = OffsetDateTime::now_utc() - time::Duration::minutes(5);
+    for idx in 0..20 {
+        let text = if idx % 2 == 0 {
+            format!("日本語 {idx}")
+        } else {
+            format!("english {idx}")
+        };
+        let id = insert_text(&store, &text).await;
+        backdate_entry(&store, id, when);
+    }
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    let conn = store.conn().unwrap();
+    // Eight walked rows can hold at most eight matches, short of nine.
+    let query = dense_test_query(&grams, &filter, &normalized, 9, 8);
+    assert!(
+        newest_full_overlap_candidates(&conn, &query)
+            .unwrap()
+            .is_none()
+    );
+}
