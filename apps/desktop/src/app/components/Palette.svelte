@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { clearHistory, closePalette, openSettingsWindow } from '../lib/commands';
+  import {
+    clearHistory,
+    closePalette,
+    fitPaletteHeight,
+    openSettingsWindow,
+  } from '../lib/commands';
   import { describeError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
   import {
@@ -21,6 +26,7 @@
   } from '../stores/capabilities.svelte';
   import { clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
+  import { setFiltersRetained, takeReopenMode } from '../stores/paletteSession.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
@@ -33,7 +39,11 @@
     togglePinAt,
     togglePinSelection,
   } from '../stores/searchActions';
-  import { clearFilters, hasActiveFilters } from '../stores/searchFilters.svelte';
+  import {
+    clearFilters,
+    hasActiveFilters,
+    refreshSourceApps,
+  } from '../stores/searchFilters.svelte';
   import {
     clearMultiSelect,
     multiSelectState,
@@ -41,9 +51,15 @@
     selectAllMulti,
     toggleMultiSelect,
   } from '../stores/searchMultiSelect.svelte';
-  import { expandPreview, hydratePreview, previewState } from '../stores/searchPreview.svelte';
+  import {
+    expandPreview,
+    hydratePreview,
+    previewState,
+    retryPreview,
+  } from '../stores/searchPreview.svelte';
   import {
     canLoadMoreResults,
+    canSearchFullHistory,
     cancelPendingQuery,
     loadMoreResults,
     refreshCurrent,
@@ -52,6 +68,7 @@
     resultsPaged,
     runQuery,
     scheduleQuery,
+    searchFullHistory,
     searchState,
   } from '../stores/searchQuery.svelte';
   import {
@@ -70,6 +87,7 @@
   import FilterChips from './FilterChips.svelte';
   import PasteFormatPicker from './PasteFormatPicker.svelte';
   import PreviewPane from './PreviewPane.svelte';
+  import { resultOptionId } from './ResultItem.svelte';
   import ResultList from './ResultList.svelte';
   import SearchBox from './SearchBox.svelte';
   import SearchEmptyState from './SearchEmptyState.svelte';
@@ -92,7 +110,12 @@
     // own `runQuery(searchState.query)` is concurrently issuing. Running it
     // once at mount keeps filter changes the sole responsibility of the chip
     // handler.
-    void Promise.all([refreshRecent(), refreshSettings(), refreshCapabilities()]);
+    void Promise.all([
+      refreshRecent(),
+      refreshSettings(),
+      refreshCapabilities(),
+      refreshSourceApps(),
+    ]);
 
     const offClipboardChanged = subscribe<{ entryId: string }>(
       TAURI_EVENTS.clipboardChanged,
@@ -159,6 +182,41 @@
   const selected = $derived(currentSelection());
   const resultIds = $derived(searchState.results.map((r) => r.id));
 
+  // Focus model: the search input is a combobox that keeps focus while typing,
+  // and the highlighted result is its active descendant. Tab moves focus into
+  // the list, where only the highlighted row is tabbable (roving tabindex) and
+  // arrows carry DOM focus with the cursor.
+  const RESULT_LISTBOX_ID = 'palette-results';
+
+  // Polite announcements for changes a screen-reader user cannot see happen:
+  // the result count when a new query or filter set lands (not background
+  // refreshes, which would talk over every copy) and multi-selection changes.
+  // Empty result sets are left to the empty state's own status message, and
+  // paging is announced by the list footer.
+  let announcement = $state('');
+  const announce = (message: string): void => {
+    // A repeated message would not change the live region's text, so alternate
+    // a trailing no-break space to make it announce again.
+    announcement = announcement === message ? `${message}\u00a0` : message;
+  };
+  let lastScopeVersion = searchState.resultScopeVersion;
+  $effect(() => {
+    const version = searchState.resultScopeVersion;
+    if (version === lastScopeVersion) return;
+    lastScopeVersion = version;
+    const count = searchState.results.length;
+    if (count > 0) announce(t.palette.resultCount(count));
+  });
+  let lastSelectedCount = 0;
+  $effect(() => {
+    const count = multiSelectState.selected.size;
+    if (count === lastSelectedCount) return;
+    const hadSelection = lastSelectedCount > 0;
+    lastSelectedCount = count;
+    if (count > 0) announce(t.status.selectedCount(count));
+    else if (hadSelection) announce(t.status.selectionCleared);
+  });
+
   // The hydrate below is debounced, so for ~60ms after an arrow press
   // `previewState` still holds the *previously* selected row's fetched body.
   // Rendering it would flash another entry's content in the pane — most
@@ -205,12 +263,20 @@
     scheduleQuery(next);
   };
 
-  let searchBox: { focus: () => void } | undefined = $state();
+  let searchBox: { focus: () => void; focusAndSelect: () => void } | undefined = $state();
 
   const clearSearch = (): void => {
     clearFilters();
     void runQuery('');
     searchBox?.focus();
+  };
+
+  // The empty state (and its button) unmounts while the wider search loads,
+  // so hand focus to the search box first: otherwise it drops to the body and
+  // the next Enter would act on whichever row the new results highlight.
+  const startFullHistorySearch = (): void => {
+    searchBox?.focus();
+    void searchFullHistory();
   };
 
   const handleConfirm = (index: number, event?: MouseEvent): void => {
@@ -241,6 +307,23 @@
       return;
     }
     void confirmSelection();
+  };
+
+  // Selection-bar actions. Both buttons unmount once the selection is gone, so
+  // focus goes back to the search box instead of dropping to the document body
+  // (where a following Enter would act on whatever row is highlighted).
+  const copySelectionFromBar = async (): Promise<void> => {
+    await copyMultiSelection();
+    if (multiSelectState.selected.size === 0) searchBox?.focus();
+  };
+  const clearSelectionFromBar = (): void => {
+    clearMultiSelect();
+    searchBox?.focus();
+  };
+  const toggleMultiSelectCurrent = (): void => {
+    if (actionsOpen) return;
+    const id = currentSelection()?.id;
+    if (id !== undefined) toggleMultiSelect(id);
   };
 
   const handleSelect = (index: number): void => {
@@ -317,8 +400,44 @@
     openActions();
   };
 
-  const showPreviewPane = $derived(settingsState.settings?.showPreviewPane ?? true);
+  // Below this palette width the side-by-side preview would squeeze the list
+  // to a sliver (the pane alone is 320px and the window can be 480px), so the
+  // list takes the full width and the preview is reached through the
+  // deliberate expanded-preview toggle instead. The filter row collapses its
+  // date presets at the same point. `0` means "not measured yet" (and jsdom),
+  // which keeps the wide layout.
+  const NARROW_PALETTE_WIDTH = 680;
+  let paletteWidth = $state(0);
+  let paletteEl: HTMLElement | undefined = $state();
+  let bodyEl: HTMLDivElement | undefined = $state();
+  const narrow = $derived(paletteWidth > 0 && paletteWidth < NARROW_PALETTE_WIDTH);
+  const showPreviewPane = $derived((settingsState.settings?.showPreviewPane ?? true) && !narrow);
   const paletteRowCount = $derived(settingsState.settings?.paletteRowCount ?? 8);
+  // The "visible rows" setting is a height: the window grows or shrinks so the
+  // list shows that many rows (3rem each, matching `.result-list`'s cap) under
+  // the search box, filters and status bar. The backend clamps the request to
+  // the monitor's work area, so a tall setting on a small screen still fits.
+  // Fitted when the palette mounts and when the setting changes, not on every
+  // layout shift, so a notice appearing in the status bar does not resize it.
+  const ROW_HEIGHT_REM = 3;
+  let fittedRowCount: number | undefined;
+  // `force` re-requests the same row count: every show does, because the
+  // backend clamps the request to the current monitor's work area, so a window
+  // shrunk on a small screen grows back on a larger one.
+  const fitToRows = (rows: number, force = false): void => {
+    if (!isTauri() || !paletteEl || !bodyEl || (!force && rows === fittedRowCount)) return;
+    const chrome = paletteEl.offsetHeight - bodyEl.offsetHeight;
+    // A palette that has not been laid out yet (its window starts hidden)
+    // measures nothing; the next show retries.
+    if (chrome <= 0) return;
+    fittedRowCount = rows;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    void fitPaletteHeight(chrome + rows * ROW_HEIGHT_REM * rem);
+  };
+  $effect(() => {
+    fitToRows(paletteRowCount);
+  });
+
   // Pass the platform so user overrides written as `CmdOrCtrl+...` (the canonical
   // wire format from AppSettings) bind to the right physical modifier — Cmd on
   // macOS, Ctrl on Windows/Linux. Falls back to macOS semantics until the
@@ -330,6 +449,13 @@
     ),
   );
   let previewExpanded = $state(false);
+  // The list is unmounted while the preview is expanded or empty, so there is
+  // no option to point at then.
+  const activeDescendantId = $derived(
+    !previewExpanded && selected !== undefined && searchState.results.length > 0
+      ? resultOptionId(selected.id)
+      : undefined,
+  );
   // Set by PreviewPane while a plain Enter in the expanded preview will open
   // the highlighted URL. We then suppress the palette's own Enter-to-paste so
   // a single Enter doesn't both open the URL and paste the entry.
@@ -346,6 +472,13 @@
     clearConfirmOpen ||
       (previewUrlConfirmOpen && (showPreviewPane || previewExpanded) && !actionsOpen),
   );
+
+  // The whole body of a truncated preview is read in the full-width preview,
+  // so loading it from the side pane opens that view as well.
+  const openFullBody = (id: string): void => {
+    previewExpanded = true;
+    void expandPreview(id);
+  };
 
   // The single entry point that docks the inspector — shared by the keyboard
   // chord and the mouse affordances (the preview-pane header button and the
@@ -467,11 +600,9 @@
       case 'open-settings':
         openSettings();
         break;
-      case 'multi-toggle': {
-        const id = currentSelection()?.id;
-        if (id !== undefined) toggleMultiSelect(id);
+      case 'multi-toggle':
+        toggleMultiSelectCurrent();
         break;
-      }
       case 'multi-select-all':
         selectAllMulti(resultIds);
         break;
@@ -506,12 +637,56 @@
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
   });
+
+  // The palette window hides on blur, so gaining focus means it was shown
+  // again. See `stores/paletteSession` for the fresh-vs-resume rule.
+  const handleShown = (): void => {
+    if (takeReopenMode() === 'fresh') {
+      clearFilters();
+      clearMultiSelect();
+      setFiltersRetained(false);
+      previewExpanded = false;
+      void runQuery('');
+    } else {
+      setFiltersRetained(hasActiveFilters());
+    }
+    searchBox?.focusAndSelect();
+    fitToRows(paletteRowCount, true);
+  };
+  // Hiding ends the palette session, and with it any action-inspector run:
+  // closing the inspector cancels a stream, fences a pending quick action, and
+  // clears its work area, so a result from this session cannot reappear (or be
+  // remembered late) after the user dismissed the palette.
+  const handleHidden = (): void => {
+    actionsOpen = false;
+  };
+  onMount(() => {
+    window.addEventListener('focus', handleShown);
+    window.addEventListener('blur', handleHidden);
+    return () => {
+      window.removeEventListener('focus', handleShown);
+      window.removeEventListener('blur', handleHidden);
+    };
+  });
 </script>
 
-<section class="palette" style="--palette-row-count: {paletteRowCount}">
-  <SearchBox bind:this={searchBox} value={searchState.query} onInput={handleInput} />
-  <FilterChips />
+<section
+  class="palette"
+  class:narrow
+  style="--palette-row-count: {paletteRowCount}"
+  bind:clientWidth={paletteWidth}
+  bind:this={paletteEl}
+>
+  <SearchBox
+    bind:this={searchBox}
+    value={searchState.query}
+    onInput={handleInput}
+    listboxId={RESULT_LISTBOX_ID}
+    {activeDescendantId}
+  />
+  <FilterChips compactDates={narrow} />
   <div
+    bind:this={bodyEl}
     class="body"
     class:single-column={!showPreviewPane && !previewExpanded && !actionsOpen}
     class:preview-only={previewExpanded}
@@ -524,8 +699,11 @@
           loading={searchState.loading}
           errorMessage={searchState.errorMessage}
           capturePaused={!captureEnabled()}
+          canSearchFullHistory={canSearchFullHistory()}
+          fullHistory={searchState.fullHistory}
           onRetry={() => void refreshCurrent()}
           onClearSearch={clearSearch}
+          onSearchFullHistory={startFullHistorySearch}
         />
       {:else}
         <ResultList
@@ -542,6 +720,8 @@
           limitReached={resultLimitReached()}
           paged={resultsPaged()}
           onLoadMore={() => void loadMoreResults()}
+          listboxId={RESULT_LISTBOX_ID}
+          compact={showPreviewPane}
         />
       {/if}
     {/if}
@@ -556,7 +736,8 @@
         expanded={previewExpanded}
         expandedLoading={previewState.expandedLoading}
         expandedErrorMessage={previewState.expandedErrorMessage}
-        onExpandBody={(id) => void expandPreview(id)}
+        onExpandBody={openFullBody}
+        onRetry={() => void retryPreview()}
         onOpenActions={openActions}
         bind:enterOpensUrl={previewEnterOpensUrl}
         bind:urlConfirmOpen={previewUrlConfirmOpen}
@@ -586,9 +767,11 @@
   {#if entryContextMenuState.open}
     <EntryContextMenu onOpenActions={openActionsForEntry} />
   {/if}
+  <p class="sr-only" role="status" data-testid="palette-announcer">{announcement}</p>
   <StatusBar
     entryCount={searchState.results.length}
     elapsedMs={searchState.lastElapsedMs}
+    fullHistory={searchState.fullHistory && searchState.results.length > 0}
     loading={searchState.loading}
     errorMessage={searchState.errorMessage ?? settingsState.errorMessage}
     selectedCount={multiSelectState.selected.size}
@@ -599,6 +782,9 @@
     onOpenActions={openActions}
     onOpenSettings={openSettings}
     onOpenPreview={() => (previewExpanded = !previewExpanded)}
+    onCopySelection={() => void copySelectionFromBar()}
+    onClearSelection={clearSelectionFromBar}
+    onToggleMultiSelect={toggleMultiSelectCurrent}
   />
 </section>
 
@@ -621,5 +807,16 @@
   .body.preview-only :global(.preview-pane) {
     flex: 1;
     width: auto;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

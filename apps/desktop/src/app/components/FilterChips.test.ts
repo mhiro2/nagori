@@ -12,7 +12,13 @@ vi.mock('../lib/commands', async () =>
 );
 
 import type { SearchResultDto } from '../lib/types';
-import { clearFilters, filterState } from '../stores/searchFilters.svelte';
+import { setFiltersRetained } from '../stores/paletteSession.svelte';
+import {
+  clearFilters,
+  filterState,
+  setDatePreset,
+  sourceAppOptions,
+} from '../stores/searchFilters.svelte';
 import { searchState } from '../stores/searchQuery.svelte';
 import FilterChips from './FilterChips.svelte';
 
@@ -31,6 +37,7 @@ const result = (id: string, sourceAppName?: string): SearchResultDto => ({
 
 beforeEach(() => {
   clearFilters();
+  sourceAppOptions.apps = [];
   searchState.query = '';
   searchState.results = [];
 });
@@ -100,6 +107,38 @@ describe('FilterChips', () => {
     expect(filterState.sourceApp).toBe('Chrome');
   });
 
+  it('offers apps from the whole history, not just the result page', async () => {
+    // The page only holds Chrome rows; Slack and Notes come from older entries.
+    sourceAppOptions.apps = ['Slack', 'Chrome', 'Notes'];
+    searchState.results = [result('a', 'Chrome')];
+    const user = userEvent.setup();
+    const { getAllByRole, getByRole } = render(FilterChips);
+    await user.click(getByRole('button', { name: 'Source app' }));
+    expect(getAllByRole('menuitemradio').map((item) => item.textContent?.trim())).toEqual([
+      'All apps',
+      'Slack',
+      'Chrome',
+      'Notes',
+    ]);
+  });
+
+  it('searches a long app list and keeps the reset row', async () => {
+    sourceAppOptions.apps = Array.from({ length: 12 }, (_, i) => `App ${i}`).concat('Terminal');
+    const user = userEvent.setup();
+    const { getAllByRole, getByRole } = render(FilterChips);
+    await user.click(getByRole('button', { name: 'Source app' }));
+    const search = getByRole('searchbox', { name: 'Search apps' });
+    expect(document.activeElement).toBe(search);
+    await user.keyboard('term');
+    expect(getAllByRole('menuitemradio').map((item) => item.textContent?.trim())).toEqual([
+      'All apps',
+      'Terminal',
+    ]);
+    // Enter picks the first match rather than the reset row.
+    await user.keyboard('{Enter}');
+    expect(filterState.sourceApp).toBe('Terminal');
+  });
+
   it('clears the source app via the "All apps" option', async () => {
     searchState.results = [result('a', 'Chrome'), result('b', 'Slack')];
     const user = userEvent.setup();
@@ -139,5 +178,31 @@ describe('FilterChips', () => {
     await user.click(clear);
     expect(filterState.pinnedOnly).toBe(false);
     expect(queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+
+  it('notes filters kept from last time until one changes', async () => {
+    const user = userEvent.setup();
+    setDatePreset('today');
+    setFiltersRetained(true);
+    const { getByRole, getByTestId, queryByTestId } = render(FilterChips);
+    expect(getByTestId('filters-retained').textContent).toBe('Kept from last time');
+    await user.click(getByRole('button', { name: 'Pinned' }));
+    expect(queryByTestId('filters-retained')).toBeNull();
+  });
+
+  it('folds the date presets into a menu when asked to stay compact', async () => {
+    const user = userEvent.setup();
+    const { getByRole, queryByRole } = render(FilterChips, { props: { compactDates: true } });
+    expect(queryByRole('button', { name: 'Today' })).toBeNull();
+    await user.click(getByRole('button', { name: 'Date' }));
+    await user.click(getByRole('menuitemradio', { name: 'Last 7 days' }));
+    expect(filterState.datePreset).toBe('last7days');
+    // Re-picking the active preset keeps it; "Any time" is the reset.
+    await user.click(getByRole('button', { name: 'Date: Last 7 days' }));
+    await user.click(getByRole('menuitemradio', { name: 'Last 7 days' }));
+    expect(filterState.datePreset).toBe('last7days');
+    await user.click(getByRole('button', { name: 'Date: Last 7 days' }));
+    await user.click(getByRole('menuitemradio', { name: 'Any time' }));
+    expect(filterState.datePreset).toBe('none');
   });
 });

@@ -149,6 +149,17 @@ impl NagoriRuntime {
             .map(drop)
     }
 
+    /// Copy text that is not a history entry (a quick-action result) to the
+    /// clipboard without storing it. See
+    /// [`crate::runtime::ClipboardLease::publish_text`].
+    pub async fn copy_text(&self, text: String) -> Result<()> {
+        self.clipboard_lease()
+            .await
+            .publish_text(text)
+            .await
+            .map(drop)
+    }
+
     /// Copy a single chosen representation of an entry back to the clipboard
     /// ("paste as PNG / plain text / files").
     ///

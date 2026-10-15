@@ -430,7 +430,6 @@ async fn auto_ascii_prefix_recalls_entry_older_than_substring_window() {
     use nagori_core::SearchCandidateProvider;
     use tokio_util::sync::CancellationToken;
 
-    const NEWER_ENTRY_COUNT: usize = 5_000;
     let store = SqliteStore::open_memory().unwrap();
     let oldest = insert_text(&store, "clipboard archive sentinel").await;
     backdate_entry(
@@ -439,33 +438,7 @@ async fn auto_ascii_prefix_recalls_entry_older_than_substring_window() {
         OffsetDateTime::from_unix_timestamp(0).unwrap(),
     );
 
-    // Fill the complete bounded LIKE window with newer, unrelated rows. Raw
-    // inserts keep this boundary fixture focused on the search indexes rather
-    // than representation serialization, while the search-document trigger
-    // still populates FTS exactly as production writes do.
-    {
-        let mut conn = store.conn().unwrap();
-        let tx = conn.transaction().unwrap();
-        for index in 0..NEWER_ENTRY_COUNT {
-            let id = EntryId::new().to_string();
-            let normalized = format!("unrelated filler {index}");
-            tx.execute(
-                "INSERT INTO entries (
-                    id, content_kind, content_json, content_hash,
-                    representation_set_hash, sensitivity, created_at, updated_at
-                 ) VALUES (?1, 'text', '{}', ?1, ?1, 'public', ?2, ?2)",
-                rusqlite::params![id, "2026-01-01T00:00:00Z"],
-            )
-            .unwrap();
-            tx.execute(
-                "INSERT INTO search_documents (entry_id, preview, normalized_text)
-                 VALUES (?1, ?2, ?2)",
-                rusqlite::params![id, normalized],
-            )
-            .unwrap();
-        }
-        tx.commit().unwrap();
-    }
+    fill_substring_window(&store);
 
     let bounded = store
         .substring_candidates(
@@ -866,4 +839,115 @@ async fn created_after_and_before_filters_clip_window() {
     assert!(before_hits.contains(&ancient));
     assert!(before_hits.contains(&middle));
     assert!(!before_hits.contains(&recent));
+}
+
+/// Push every existing row past the bounded substring window that `Auto`
+/// scans, by inserting a full window of newer unrelated rows. Raw inserts keep
+/// these boundary fixtures focused on the search indexes rather than
+/// representation serialization, while the search-document trigger still
+/// populates FTS exactly as production writes do.
+fn fill_substring_window(store: &SqliteStore) {
+    const NEWER_ENTRY_COUNT: usize = 5_000;
+    let mut conn = store.conn().unwrap();
+    let tx = conn.transaction().unwrap();
+    for index in 0..NEWER_ENTRY_COUNT {
+        let id = EntryId::new().to_string();
+        let normalized = format!("unrelated filler {index}");
+        tx.execute(
+            "INSERT INTO entries (
+                id, content_kind, content_json, content_hash,
+                representation_set_hash, sensitivity, created_at, updated_at
+             ) VALUES (?1, 'text', '{}', ?1, ?1, 'public', ?2, ?2)",
+            rusqlite::params![id, "2026-01-01T00:00:00Z"],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO search_documents (entry_id, preview, normalized_text)
+             VALUES (?1, ?2, ?2)",
+            rusqlite::params![id, normalized],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+/// Recall of entries older than the bounded substring window, for the query
+/// shapes people type to find old snippets. `Auto` misses fragments that are
+/// neither a whole FTS token, an ASCII token prefix, nor a CJK n-gram — the
+/// tail of a `snake_case` identifier, the middle of a camelCase one, a cut-off
+/// URL path, a single kana — and the palette offers a full-history `Exact`
+/// search when `Auto` comes back empty. Pinning both columns keeps that
+/// fallback honest: every case must be recalled by `Exact`.
+#[tokio::test]
+async fn exact_search_recalls_old_entries_that_auto_misses() {
+    // (stored text, query, recalled by Auto)
+    let cases: &[(&str, &str, bool)] = &[
+        (
+            "let total = compute_order_total(cart);",
+            "compute_order_total",
+            true,
+        ),
+        ("let total = compute_order_total(cart);", "order_tot", false),
+        ("const name = fetchUserProfileName();", "fetchUser", true),
+        ("const name = fetchUserProfileName();", "UserProfile", false),
+        (
+            "use nagori_core::search::ranker;",
+            "nagori_core::search",
+            true,
+        ),
+        ("use nagori_core::search::ranker;", "search::rank", true),
+        (
+            "https://github.com/acme/widgets/pull/180",
+            "acme/widgets",
+            true,
+        ),
+        (
+            "https://github.com/acme/widgets/pull/180",
+            "github.com/acme/wid",
+            false,
+        ),
+        (
+            "https://example.com/search?q=sqlite&lang=ja",
+            "q=sqlite",
+            true,
+        ),
+        ("クリップボード履歴の検索を改善する", "履歴の検索", true),
+        ("クリップボード履歴の検索を改善する", "ボ", false),
+        ("会議の議事録を共有します", "議事録", true),
+        ("剪贴板历史记录搜索", "历史记录", true),
+        ("클립보드 기록 검색", "기록", true),
+    ];
+    let store = SqliteStore::open_memory().unwrap();
+    let mut ids = Vec::new();
+    for (text, _, _) in cases {
+        let id = insert_text(&store, text).await;
+        backdate_entry(&store, id, OffsetDateTime::from_unix_timestamp(0).unwrap());
+        ids.push(id);
+    }
+    fill_substring_window(&store);
+
+    for ((text, query, auto_recalls), id) in cases.iter().zip(&ids) {
+        let recalled = |mode: SearchMode| {
+            let mut search = SearchQuery::new(*query, normalize_text(query), 10);
+            search.mode = mode;
+            let store = store.clone();
+            async move {
+                store
+                    .search(search)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|result| result.entry_id == *id)
+            }
+        };
+        assert_eq!(
+            recalled(SearchMode::Auto).await,
+            *auto_recalls,
+            "Auto recall of {query:?} in {text:?}",
+        );
+        assert!(
+            recalled(SearchMode::Exact).await,
+            "Exact must recall {query:?} in {text:?}",
+        );
+    }
 }

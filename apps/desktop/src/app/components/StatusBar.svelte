@@ -4,6 +4,7 @@
   import { messages } from '../lib/i18n/index.svelte';
   import { buildBindings, formatBinding } from '../lib/keybindings';
   import type { Binding, PaletteAction } from '../lib/keybindings';
+  import { pasteFailureHint } from '../lib/pasteFailureHint';
   import { resolvePermissionUiState } from '../lib/permissions';
   import { isTauri } from '../lib/tauri';
   import { capabilitiesState } from '../stores/capabilities.svelte';
@@ -20,6 +21,8 @@
     loading: boolean;
     errorMessage: string | undefined;
     selectedCount?: number;
+    // The results on screen came from the full-history search.
+    fullHistory?: boolean;
     bindings?: readonly Binding[];
     enterOpensUrl?: boolean;
     // Toggles the pin state of the current selection. When provided, the ⌘P
@@ -40,6 +43,15 @@
     // Whether the expanded preview is currently open, surfaced as the button's
     // `aria-expanded` so assistive tech announces the toggle state.
     previewExpanded?: boolean;
+    // Copies the multi-selection as one combined item. Rendered as a button in
+    // the selection bar so bulk copy is an explicit, clickable action rather
+    // than something only the confirm key reveals.
+    onCopySelection?: () => void;
+    // Leaves multi-select mode without acting on the selection.
+    onClearSelection?: () => void;
+    // Toggles the highlighted row in or out of the multi-selection. Turns the
+    // multi-select hint into a button so the mode is discoverable by mouse.
+    onToggleMultiSelect?: () => void;
   };
 
   const {
@@ -48,6 +60,7 @@
     loading,
     errorMessage,
     selectedCount = 0,
+    fullHistory = false,
     bindings,
     enterOpensUrl = false,
     onTogglePin,
@@ -55,6 +68,9 @@
     onOpenSettings,
     onOpenPreview,
     previewExpanded = false,
+    onCopySelection,
+    onClearSelection,
+    onToggleMultiSelect,
   }: Props = $props();
   const t = $derived(messages());
 
@@ -130,28 +146,7 @@
   const showPasteDiagnostic = $derived(
     pasteFailure !== null && pasteFailure.reason !== 'accessibilityMissing',
   );
-  const pasteHint = $derived.by((): string => {
-    if (!pasteFailure) return '';
-    const hint = t.status.pasteDiagnostics.hint;
-    switch (pasteFailure.reason) {
-      case 'toolMissing':
-        return hint.toolMissing({
-          tool: pasteFailure.tool ?? t.status.pasteDiagnostics.toolFallback,
-        });
-      case 'timeout':
-        return hint.timeout;
-      case 'synthUnsupported':
-        return hint.synthUnsupported;
-      case 'previousAppLost':
-        return hint.previousAppLost;
-      case 'clipboardChanged':
-        return hint.clipboardChanged;
-      case 'accessibilityMissing':
-        return hint.accessibilityMissing;
-      default:
-        return hint.unknown;
-    }
-  });
+  const pasteHint = $derived(pasteFailure ? pasteFailureHint(pasteFailure, t.status) : '');
 
   // Privacy notice: the daemon *dropped* the most recent copy because the
   // built-in secret policy refused to store it (an OTP / fully-redacted body
@@ -282,9 +277,9 @@
             <span class="dot">·</span>
             <span>{t.palette.elapsed(elapsedMs)}</span>
           {/if}
-          {#if selectedCount > 0}
+          {#if fullHistory}
             <span class="dot">·</span>
-            <span class="multi">{t.status.selectedCount(selectedCount)}</span>
+            <span data-testid="status-full-history">{t.status.fullHistorySearch}</span>
           {/if}
         {/if}
       </span>
@@ -345,7 +340,35 @@
     </div>
   {/if}
   {#if selectedCount > 0}
-    <p class="combined-hint">{t.status.combinedCopyHint}</p>
+    <!-- Multi-select mode gets its own bar: the count, the bulk copy, and the
+         way out, so the mode is visible and leaving it does not depend on
+         knowing that Escape clears the selection. -->
+    <div class="selection-bar" role="group" aria-label={t.status.selectedCount(selectedCount)}>
+      <span class="multi" data-testid="status-selected-count"
+        >{t.status.selectedCount(selectedCount)}</span
+      >
+      {#if onCopySelection}
+        <button
+          type="button"
+          class="hint-button selection-action"
+          data-testid="status-copy-selection"
+          onclick={onCopySelection}
+        >
+          {#if shortcut('copy')}<kbd>{shortcut('copy')}</kbd>{/if}{t.palette.hints.copyCombined}
+        </button>
+      {/if}
+      {#if onClearSelection}
+        <button
+          type="button"
+          class="hint-button selection-action"
+          data-testid="status-clear-selection"
+          onclick={onClearSelection}
+        >
+          {#if shortcut('close')}<kbd>{shortcut('close')}</kbd>{/if}{t.status.clearSelection}
+        </button>
+      {/if}
+      <span class="combined-hint">{t.status.combinedCopyHint}</span>
+    </div>
   {/if}
   <div class="hints">
     {#if navigateHint}
@@ -365,6 +388,12 @@
       previewExpanded,
     )}
     {@render actionHint('toggle-pin', t.palette.hints.pin, onTogglePin, 'status-toggle-pin')}
+    {@render actionHint(
+      'multi-toggle',
+      t.palette.hints.multiSelect,
+      onToggleMultiSelect,
+      'status-multi-toggle',
+    )}
     {@render actionHint(
       'open-actions',
       t.palette.hints.actions,
@@ -494,14 +523,22 @@
        that `.summary` is block-level for ellipsis. */
     margin: 0 0.4rem;
   }
+  .selection-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.2rem 0.5rem;
+  }
   .multi {
     color: var(--accent, #6c8dff);
     font-weight: 600;
   }
+  .selection-action {
+    color: var(--fg, #f5f5f5);
+  }
   /* Secondary to the count: the consequence of acting on the selection, not a
      status of its own, so it reads muted rather than competing with `.multi`. */
   .combined-hint {
-    margin: 0;
     color: var(--muted, rgba(255, 255, 255, 0.5));
   }
   .hints {

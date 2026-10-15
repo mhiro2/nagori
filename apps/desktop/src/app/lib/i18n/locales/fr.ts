@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const fr: Messages = {
   palette: {
     placeholder: 'Rechercher dans l’historique…',
+    searchLabel: 'Rechercher dans l’historique du presse-papiers',
+    resultsLabel: 'Historique du presse-papiers',
     searching: 'Recherche…',
     resultCount: (count: number): string =>
       count <= 1 ? `${count} résultat` : `${count.toLocaleString('fr')} résultats`,
@@ -11,6 +13,10 @@ export const fr: Messages = {
     emptyStates: {
       start: 'Copiez du texte pour commencer votre historique.',
       noMatches: 'Aucune entrée ne correspond à cette recherche.',
+      noQuickMatches:
+        'La recherche rapide n’a rien trouvé. Cherchez dans tout l’historique pour inclure aussi les éléments plus anciens.',
+      searchFullHistory: 'Chercher dans tout l’historique',
+      noFullHistoryMatches: 'Aucun élément ne contient ce texte.',
       noFilterMatches: 'Aucune entrée ne correspond à ces filtres.',
       capturePaused:
         'La capture est en pause. Reprenez-la ci-dessous pour enregistrer de nouvelles entrées.',
@@ -31,6 +37,7 @@ export const fr: Messages = {
       navigate: 'Naviguer',
       paste: 'Coller',
       copyCombined: 'Copier ensemble',
+      multiSelect: 'Sélectionner',
       pin: 'Épingler',
       actions: 'Actions',
       settings: 'Paramètres',
@@ -42,6 +49,7 @@ export const fr: Messages = {
       yesterday: 'Hier',
       last7days: '7 derniers jours',
       last30days: '30 derniers jours',
+      anyTime: 'Toute période',
       pinned: 'Épinglés',
       kindText: 'Texte',
       kindUrl: 'URL',
@@ -53,7 +61,10 @@ export const fr: Messages = {
       sourceGroup: 'Application source',
       sourceShort: 'App',
       allApps: 'Toutes les apps',
+      searchApps: 'Rechercher des apps',
+      noAppMatches: 'Aucune app correspondante',
       clear: 'Effacer les filtres',
+      retained: 'Conservés de la dernière fois',
     },
     clearHistory: {
       title: 'Effacer l’historique ?',
@@ -75,6 +86,22 @@ export const fr: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Masqué',
+      description:
+        'Contient un secret : l’aperçu le masque et la suppression l’efface immédiatement.',
+    },
+    private: {
+      label: 'Privé',
+      description: 'Traité comme privé : l’aperçu est masqué et les images n’ont pas de miniature.',
+    },
+    blocked: {
+      label: 'Bloqué',
+      description:
+        'Bloqué par une règle de confidentialité : le contenu est caché et ne peut pas être collé.',
+    },
+  },
   rankReason: {
     exact: 'Exact',
     prefix: 'Préfixe',
@@ -89,6 +116,16 @@ export const fr: Messages = {
   preview: {
     empty: 'Sélectionnez un élément à prévisualiser.',
     loading: 'Chargement de l’aperçu…',
+    retry: 'Réessayer',
+    matches: {
+      label: 'Correspondances',
+      count: (count: number): string =>
+        count <= 1 ? `${count} correspondance` : `${count.toLocaleString('fr')} correspondances`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('fr')} / ${total.toLocaleString('fr')}`,
+      previous: 'Correspondance précédente',
+      next: 'Correspondance suivante',
+    },
     details: 'Détails',
     truncated: 'Aperçu tronqué.',
     truncation: {
@@ -106,6 +143,7 @@ export const fr: Messages = {
       source: 'source',
       size: 'taille',
       rank: 'rang',
+      match: 'correspondance',
     },
     additionalData: 'Autres données du presse-papiers',
     clipboardCategory: { image: 'Image', text: 'Texte', files: 'Fichiers' },
@@ -165,7 +203,10 @@ export const fr: Messages = {
       n <= 1 ? `${n} élément` : `${n.toLocaleString('fr')} éléments`,
     selectedCount: (n: number): string =>
       n <= 1 ? `${n} sélectionné` : `${n.toLocaleString('fr')} sélectionnés`,
+    fullHistorySearch: 'Recherche dans tout l’historique',
     combinedCopyHint: 'La copie combinée est enregistrée comme nouvel élément',
+    clearSelection: 'Effacer la sélection',
+    selectionCleared: 'Sélection effacée',
     autoPasteOff: 'Collage automatique désactivé — Accessibilité non accordée',
     autoPasteOffShort: '⚠ Collage automatique désactivé',
     autoPasteOffSetupAria:
@@ -173,6 +214,10 @@ export const fr: Messages = {
     pasteDiagnostics: {
       label: '⚠ Échec du collage automatique',
       toolFallback: "l'outil de collage",
+      notice: {
+        copiedNotPasted: 'Copié, mais pas collé',
+        nothingPasted: 'Rien n’a été collé',
+      },
       hint: {
         accessibilityMissing:
           'Échec du collage automatique : autorisation Accessibilité requise. Copié — collez manuellement.',
@@ -214,6 +259,10 @@ export const fr: Messages = {
     aiBadge: 'IA',
     aiCancel: 'Annuler',
     aiUnavailable: 'Les actions IA sont indisponibles pour le moment.',
+    aiChecking: 'Vérification de la disponibilité des actions IA…',
+    aiDisabled: 'Les actions IA sont désactivées dans les réglages.',
+    aiPreparing: 'Le modèle sur l’appareil est encore en préparation. Réessayez bientôt.',
+    aiLanguageUnsupported: 'Les actions IA ne prennent pas encore en charge cette langue.',
     notApplicable: {
       image: 'Les actions ne s’appliquent pas aux images.',
       fileList: 'Les actions ne s’appliquent pas aux fichiers.',
@@ -240,6 +289,9 @@ export const fr: Messages = {
     copied: 'Copié',
     saveResult: 'Enregistrer comme nouvelle entrée',
     saved: 'Enregistré',
+    previousResult: 'Résultat précédent',
+    pasteResult: 'Coller',
+    pasteFailed: 'Impossible de coller le résultat.',
   },
   pastePicker: {
     title: 'Coller en tant que',
@@ -248,8 +300,16 @@ export const fr: Messages = {
       files: 'Fichiers',
       image: 'Image',
       plainText: 'Texte brut',
-      html: 'HTML',
-      richText: 'Texte enrichi',
+      html: 'Texte mis en forme (HTML)',
+      richText: 'Texte mis en forme (RTF)',
+    },
+    descriptions: {
+      original: 'Tous les formats de la copie ; l’app choisit celui qu’elle prend en charge.',
+      files: 'Les fichiers eux-mêmes, comme glissés depuis le gestionnaire de fichiers.',
+      image: 'L’image, pour les éditeurs d’images, les discussions et les documents.',
+      plainText: 'Le texte seul, sans polices, liens ni mise en page.',
+      html: 'Conserve liens, gras et listes là où l’app accepte la mise en forme web.',
+      richText: 'Conserve polices et styles pour les traitements de texte.',
     },
   },
   contextMenu: {

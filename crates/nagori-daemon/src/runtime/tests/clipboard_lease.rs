@@ -964,3 +964,42 @@ async fn paste_runs_when_the_host_cannot_verify_its_own_write() {
 
     assert_eq!(paste.calls(), 1);
 }
+
+#[tokio::test]
+async fn published_text_is_pasted_without_entering_the_history() {
+    // A quick-action result is published for one paste and must not become a
+    // history row: nothing is inserted, and the adapter records the write as
+    // its own so the capture loop skips it.
+    let (runtime, clipboard, paste) = runtime_with_fake_native();
+    enable_auto_paste(&runtime).await;
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .publish_text("formatted result".to_owned())
+        .await
+        .expect("publish text");
+    let sequence = clipboard.current_sequence().await.expect("sequence");
+    assert!(clipboard.matches_self_write(&sequence));
+    lease.paste_frontmost(publish).await.expect("paste");
+    drop(lease);
+
+    assert_eq!(paste.observed(), vec![Some("formatted result".to_owned())]);
+    assert!(
+        runtime.list_recent(10).await.expect("list").is_empty(),
+        "publishing a result must not store it",
+    );
+}
+
+#[tokio::test]
+async fn copy_text_refuses_empty_text() {
+    let (runtime, clipboard, _paste) = runtime_with_fake_native();
+    assert!(matches!(
+        runtime.copy_text(String::new()).await,
+        Err(AppError::InvalidInput(_))
+    ));
+    assert!(clipboard.writes().is_empty());
+    runtime
+        .copy_text("copied result".to_owned())
+        .await
+        .expect("copy text");
+    assert_eq!(clipboard.current_text().as_deref(), Some("copied result"));
+}

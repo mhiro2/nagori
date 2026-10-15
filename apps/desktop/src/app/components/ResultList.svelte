@@ -33,6 +33,10 @@
     // final count is still announced.
     paged?: boolean;
     onLoadMore?: () => void;
+    // DOM id of the listbox, referenced by the search combobox.
+    listboxId?: string;
+    // Forwarded to every row: see `ResultItem`'s `compact`.
+    compact?: boolean;
   };
 
   const {
@@ -50,9 +54,24 @@
     limitReached = false,
     paged = false,
     onLoadMore,
+    listboxId,
+    compact = false,
   }: Props = $props();
 
   const t = $derived(messages());
+
+  // Hover selects a row only when the pointer really moves over it. Engines
+  // dispatch a synthetic mousemove at the old screen position when content
+  // scrolls under a resting pointer (an arrow-key scroll, a capture landing at
+  // the top), and acting on it would swap the keyboard's selection for
+  // whatever row happens to sit under the cursor.
+  let lastPointer: string | undefined;
+  const handleHover = (index: number, event: MouseEvent): void => {
+    const at = `${event.screenX},${event.screenY}`;
+    if (at === lastPointer) return;
+    lastPointer = at;
+    if (index !== selectedIndex) onSelect(index);
+  };
 
   const effectiveEmpty = $derived(emptyMessage ?? t.palette.empty);
 
@@ -113,7 +132,16 @@
 <!-- The scroll container wraps the listbox so the page-limit footer can sit
      below the last row without becoming a non-option child of the listbox. -->
 <div class="result-list" bind:this={listEl}>
-  <div class="result-options" role="listbox">
+  <!-- The highlighted row (the navigation cursor) is exposed through focus /
+       the combobox's `aria-activedescendant`; `aria-selected` is reserved for
+       the multi-selection, so the two never share one attribute. -->
+  <div
+    class="result-options"
+    id={listboxId}
+    role="listbox"
+    aria-label={t.palette.resultsLabel}
+    aria-multiselectable="true"
+  >
     {#if items.length === 0}
       <p class="empty">{effectiveEmpty}</p>
     {:else}
@@ -123,9 +151,12 @@
           {index}
           selected={index === selectedIndex}
           marked={multiSelected?.has(item.id) ?? false}
+          multiActive={(multiSelected?.size ?? 0) > 0}
+          {compact}
           query={appliedQuery}
           {locked}
           {onSelect}
+          onHover={handleHover}
           {onConfirm}
           {onTogglePin}
           {onContextMenu}

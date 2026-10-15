@@ -112,4 +112,82 @@ describe('FilterDropdown', () => {
     expect(queryByRole('menu')).toBeNull();
     expect(onSelect).not.toHaveBeenCalled();
   });
+
+  it('refreshes its options on open and narrows long menus with a search field', async () => {
+    const onOpen = vi.fn();
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    const items = Array.from({ length: 10 }, (_, i) => ({
+      value: `app-${i}`,
+      label: `App ${i}`,
+      selected: false,
+    }));
+    const { getAllByRole, getByRole, getByText } = render(FilterDropdown, {
+      props: {
+        label: 'App',
+        active: false,
+        menuLabel: 'App',
+        multi: false,
+        items,
+        onSelect,
+        onOpen,
+        searchLabel: 'Search apps',
+        noMatchesLabel: 'No matching apps',
+      },
+    });
+    await user.click(getByRole('button', { name: 'App' }));
+    expect(onOpen).toHaveBeenCalledOnce();
+    await user.keyboard('7');
+    expect(getAllByRole('menuitemradio')).toHaveLength(1);
+    // ↓ hands focus to the first match, ↑ returns to the field.
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(getByRole('menuitemradio', { name: 'App 7' }));
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(getByRole('searchbox', { name: 'Search apps' }));
+    await user.keyboard('x');
+    expect(getByText('No matching apps')).toBeTruthy();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('leaves Escape to an IME conversion in the search field', async () => {
+    const user = userEvent.setup();
+    const items = Array.from({ length: 10 }, (_, i) => ({
+      value: `app-${i}`,
+      label: `App ${i}`,
+      selected: false,
+    }));
+    const { getByRole } = render(FilterDropdown, {
+      props: {
+        label: 'App',
+        active: false,
+        menuLabel: 'App',
+        multi: false,
+        items,
+        onSelect: vi.fn(),
+        searchLabel: 'Search apps',
+      },
+    });
+    await user.click(getByRole('button', { name: 'App' }));
+    const search = getByRole('searchbox', { name: 'Search apps' });
+    const composingEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    search.dispatchEvent(composingEscape);
+    expect(composingEscape.defaultPrevented).toBe(false);
+    expect(getByRole('menu')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(getByRole('button', { name: 'App' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('skips the search field for short menus', async () => {
+    const user = userEvent.setup();
+    const { getByRole, queryByRole } = render(FilterDropdown, {
+      props: { ...multiProps(vi.fn()), searchLabel: 'Search' },
+    });
+    await user.click(getByRole('button', { name: 'Type' }));
+    expect(queryByRole('searchbox')).toBeNull();
+  });
 });

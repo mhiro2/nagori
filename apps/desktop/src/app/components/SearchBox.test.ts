@@ -18,7 +18,7 @@ describe('SearchBox', () => {
       void result.rerender({ value, onInput });
     });
     const result = render(SearchBox, { props: { value, onInput } });
-    const input = result.getByRole('textbox') as HTMLInputElement;
+    const input = result.getByRole('combobox') as HTMLInputElement;
     await user.type(input, 'needle');
     expect(onInput).toHaveBeenLastCalledWith('needle');
   });
@@ -27,14 +27,14 @@ describe('SearchBox', () => {
     const { getByRole } = render(SearchBox, {
       props: { value: '', onInput: () => {} },
     });
-    expect(document.activeElement).toBe(getByRole('textbox'));
+    expect(document.activeElement).toBe(getByRole('combobox'));
   });
 
   it('falls back to the locale placeholder when none is provided', () => {
     const { getByRole } = render(SearchBox, {
       props: { value: '', onInput: () => {} },
     });
-    const input = getByRole('textbox') as HTMLInputElement;
+    const input = getByRole('combobox') as HTMLInputElement;
     expect(input.placeholder.length).toBeGreaterThan(0);
   });
 

@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const zhHant: Messages = {
   palette: {
     placeholder: '搜尋歷史紀錄…',
+    searchLabel: '搜尋剪貼簿紀錄',
+    resultsLabel: '剪貼簿紀錄',
     searching: '搜尋中…',
     resultCount: (count: number): string => `${count.toLocaleString('zh-Hant')} 筆`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -10,6 +12,9 @@ export const zhHant: Messages = {
     emptyStates: {
       start: '複製文字即可開始記錄歷史。',
       noMatches: '沒有符合搜尋條件的項目。',
+      noQuickMatches: '快速搜尋找不到結果。搜尋全部紀錄即可一併查找較舊的項目。',
+      searchFullHistory: '搜尋全部紀錄',
+      noFullHistoryMatches: '沒有項目包含此文字。',
       noFilterMatches: '沒有符合篩選條件的項目。',
       capturePaused: '擷取已暫停。請在下方恢復以儲存新項目。',
       retry: '重試',
@@ -28,6 +33,7 @@ export const zhHant: Messages = {
       navigate: '瀏覽',
       paste: '貼上',
       copyCombined: '合併複製',
+      multiSelect: '多選',
       pin: '釘選',
       actions: '動作',
       settings: '設定',
@@ -39,6 +45,7 @@ export const zhHant: Messages = {
       yesterday: '昨天',
       last7days: '近 7 天',
       last30days: '近 30 天',
+      anyTime: '任何時間',
       pinned: '已釘選',
       kindText: '文字',
       kindUrl: 'URL',
@@ -50,7 +57,10 @@ export const zhHant: Messages = {
       sourceGroup: '來源應用程式',
       sourceShort: '應用程式',
       allApps: '所有應用程式',
+      searchApps: '搜尋 App',
+      noAppMatches: '沒有符合的 App',
       clear: '清除篩選',
+      retained: '沿用上次的條件',
     },
     clearHistory: {
       title: '要清除歷史記錄嗎？',
@@ -70,6 +80,14 @@ export const zhHant: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: '已遮蔽',
+      description: '包含機密資訊：預覽會將其遮蔽，刪除時會立即徹底清除。',
+    },
+    private: { label: '私密', description: '視為私密：預覽會被遮蔽，圖片不產生縮圖。' },
+    blocked: { label: '已隱藏', description: '遭隱私規則封鎖：內容已隱藏，無法貼上。' },
+  },
   rankReason: {
     exact: '精確',
     prefix: '前綴',
@@ -84,6 +102,15 @@ export const zhHant: Messages = {
   preview: {
     empty: '請選擇一個項目進行預覽。',
     loading: '正在載入預覽…',
+    retry: '重試',
+    matches: {
+      label: '搜尋符合',
+      count: (count: number): string => `${count.toLocaleString('zh-Hant')} 處符合`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('zh-Hant')} / ${total.toLocaleString('zh-Hant')}`,
+      previous: '上一個符合',
+      next: '下一個符合',
+    },
     details: '詳細資訊',
     truncated: '預覽已截斷。',
     truncation: {
@@ -101,6 +128,7 @@ export const zhHant: Messages = {
       source: '來源',
       size: '大小',
       rank: '排名',
+      match: '符合',
     },
     additionalData: '其他剪貼簿資料',
     clipboardCategory: { image: '影像', text: '文字', files: '檔案' },
@@ -152,13 +180,20 @@ export const zhHant: Messages = {
     capturePaused: '擷取已暫停',
     entryCount: (n: number): string => `${n.toLocaleString('zh-Hant')} 項`,
     selectedCount: (n: number): string => `已選取 ${n.toLocaleString('zh-Hant')} 項`,
+    fullHistorySearch: '全部紀錄搜尋',
     combinedCopyHint: '合併複製會儲存為新項目',
+    clearSelection: '取消選取',
+    selectionCleared: '已取消選取',
     autoPasteOff: '自動貼上已關閉 — 未授予 Accessibility',
     autoPasteOffShort: '⚠ 自動貼上已關閉',
     autoPasteOffSetupAria: '自動貼上已關閉：需要 Accessibility 權限。開啟設定。',
     pasteDiagnostics: {
       label: '⚠ 自動貼上失敗',
       toolFallback: '貼上工具',
+      notice: {
+        copiedNotPasted: '已複製，但未貼上',
+        nothingPasted: '未貼上任何內容',
+      },
       hint: {
         accessibilityMissing: '自動貼上失敗：需要 Accessibility 權限。已複製 — 請手動貼上。',
         toolMissing: ({ tool }) =>
@@ -195,6 +230,10 @@ export const zhHant: Messages = {
     aiBadge: 'AI',
     aiCancel: '取消',
     aiUnavailable: '目前無法使用 AI 操作。',
+    aiChecking: '正在檢查 AI 動作是否可用…',
+    aiDisabled: 'AI 動作已在設定中關閉。',
+    aiPreparing: '裝置端模型仍在準備中，請稍後再試。',
+    aiLanguageUnsupported: 'AI 動作尚不支援此語言。',
     notApplicable: {
       image: '操作不適用於圖片。',
       fileList: '操作不適用於檔案。',
@@ -219,6 +258,9 @@ export const zhHant: Messages = {
     copied: '已複製',
     saveResult: '另存為新項目',
     saved: '已儲存',
+    previousResult: '上次的結果',
+    pasteResult: '貼上',
+    pasteFailed: '無法貼上結果。',
   },
   pastePicker: {
     title: '貼上格式',
@@ -227,8 +269,16 @@ export const zhHant: Messages = {
       files: '檔案',
       image: '圖片',
       plainText: '純文字',
-      html: 'HTML',
-      richText: '格式化文字',
+      html: '格式化文字 (HTML)',
+      richText: '格式化文字 (RTF)',
+    },
+    descriptions: {
+      original: '複製時的所有格式，由目標 App 選擇其支援的格式。',
+      files: '檔案本身，就像從檔案管理器拖出。',
+      image: '圖片，適用於影像編輯器、聊天與文件。',
+      plainText: '僅文字，不含字型、連結或版面。',
+      html: '在接受網頁格式的 App 中保留連結、粗體與清單。',
+      richText: '為文書處理軟體保留字型與樣式。',
     },
   },
   contextMenu: {

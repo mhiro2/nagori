@@ -98,6 +98,12 @@ fn show_main_palette(app: &AppHandle) -> CommandResult<()> {
 /// current monitor and finally the primary monitor. On Wayland `cursor_position`
 /// is unavailable and `set_position` is a no-op, so the compositor keeps owning
 /// placement regardless.
+///
+/// The cursor's monitor rather than the active window's: the active window's
+/// geometry needs per-platform window-list access (and Wayland withholds it
+/// outright), while the cursor is where the user's attention already is when
+/// they press the hotkey, and the two agree in the common single-app-per-screen
+/// case.
 pub(crate) fn recenter_palette_on_cursor_monitor(window: &WebviewWindow) {
     let Ok(cursor) = window.cursor_position() else {
         return;
@@ -124,9 +130,63 @@ pub(crate) fn recenter_palette_on_cursor_monitor(window: &WebviewWindow) {
         .flatten()
         .or_else(|| window.current_monitor().ok().flatten())
         .or_else(|| window.primary_monitor().ok().flatten());
-    let Some(monitor) = monitor else {
-        return;
-    };
+    if let Some(monitor) = monitor {
+        place_in_work_area(window, &monitor, None);
+    }
+}
+
+/// Size the palette to `height` logical pixels — the height its content asks
+/// for at the configured number of visible rows — within the work area of the
+/// monitor it is on, then re-centre it there. The width is left as is.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn fit_palette_height(window: WebviewWindow, height: f64) -> CommandResult<()> {
+    if !height.is_finite() || height <= 0.0 {
+        return Err(CommandError::invalid_input(
+            "palette height must be a positive number",
+        ));
+    }
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        place_in_work_area(&window, &monitor, Some(height));
+    }
+    Ok(())
+}
+
+/// An axis-aligned rectangle in one coordinate space (logical points on
+/// macOS / GTK, physical pixels on Windows — see
+/// [`recenter_palette_on_cursor_monitor`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Centre a window of `width` x `height` in `area`, shrinking it to fit. The
+/// area is the monitor's *work area*, so the palette never opens under the
+/// menu bar, the Dock or the taskbar, and a palette sized for a larger screen
+/// (or for more rows than this one has room for) still fits whole.
+pub(crate) fn fit_centered(area: Rect, width: f64, height: f64) -> Rect {
+    let width = width.min(area.width).max(0.0);
+    let height = height.min(area.height).max(0.0);
+    Rect {
+        x: area.x + (area.width - width) / 2.0,
+        y: area.y + (area.height - height) / 2.0,
+        width,
+        height,
+    }
+}
+
+/// Fit and centre `window` in `monitor`'s work area. `height` (logical
+/// pixels) replaces the window's current height when given. Best-effort, like
+/// the callers: a failed probe leaves the window as it was.
+fn place_in_work_area(window: &WebviewWindow, monitor: &tauri::Monitor, height: Option<f64>) {
     let Ok(window_size) = window.outer_size() else {
         return;
     };
@@ -137,46 +197,53 @@ pub(crate) fn recenter_palette_on_cursor_monitor(window: &WebviewWindow) {
         // than computing from garbage.
         return;
     }
+    let work_area = monitor.work_area();
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Center in logical points. The window's logical size is invariant
-        // across monitors, so derive it from its current physical size and
-        // scale; the monitor's logical bounds come from its own scale. A
-        // negative offset (window larger than the monitor) still yields a true
-        // center rather than pinning a corner.
+        // Logical points. The window's logical size is invariant across
+        // monitors, so derive it from its current physical size and scale; the
+        // monitor's logical bounds come from its own scale.
         let monitor_scale = monitor.scale_factor();
         let window_scale = window.scale_factor().unwrap_or(monitor_scale);
-        let mon_left = f64::from(monitor.position().x) / monitor_scale;
-        let mon_top = f64::from(monitor.position().y) / monitor_scale;
-        let mon_width = f64::from(monitor.size().width) / monitor_scale;
-        let mon_height = f64::from(monitor.size().height) / monitor_scale;
-        let win_width = f64::from(window_size.width) / window_scale;
-        let win_height = f64::from(window_size.height) / window_scale;
-        let _ = window.set_position(tauri::LogicalPosition::new(
-            mon_left + (mon_width - win_width) / 2.0,
-            mon_top + (mon_height - win_height) / 2.0,
-        ));
+        let area = Rect {
+            x: f64::from(work_area.position.x) / monitor_scale,
+            y: f64::from(work_area.position.y) / monitor_scale,
+            width: f64::from(work_area.size.width) / monitor_scale,
+            height: f64::from(work_area.size.height) / monitor_scale,
+        };
+        let current_width = f64::from(window_size.width) / window_scale;
+        let current_height = f64::from(window_size.height) / window_scale;
+        let target = fit_centered(area, current_width, height.unwrap_or(current_height));
+        if target.width < current_width || (target.height - current_height).abs() >= 1.0 {
+            let _ = window.set_size(tauri::LogicalSize::new(target.width, target.height));
+        }
+        let _ = window.set_position(tauri::LogicalPosition::new(target.x, target.y));
     }
     #[cfg(target_os = "windows")]
     {
-        // Center in physical pixels. Signed math keeps the window centered
-        // (equal overflow on each edge) even when it is larger than the
-        // monitor; `try_from`/`saturating_add` keep the offsets free of `as`
-        // casts so the pedantic cast lints stay quiet.
-        let position = monitor.position();
-        let monitor_size = monitor.size();
-        let monitor_width = i32::try_from(monitor_size.width).unwrap_or(i32::MAX);
-        let monitor_height = i32::try_from(monitor_size.height).unwrap_or(i32::MAX);
-        let window_width = i32::try_from(window_size.width).unwrap_or(0);
-        let window_height = i32::try_from(window_size.height).unwrap_or(0);
+        // Physical pixels end to end; the requested height arrives in logical
+        // pixels and is scaled by the window's factor.
+        let window_scale = window.scale_factor().unwrap_or(1.0);
+        let area = Rect {
+            x: f64::from(work_area.position.x),
+            y: f64::from(work_area.position.y),
+            width: f64::from(work_area.size.width),
+            height: f64::from(work_area.size.height),
+        };
+        let current_width = f64::from(window_size.width);
+        let current_height = f64::from(window_size.height);
+        let wanted_height = height.map_or(current_height, |h| h * window_scale);
+        let target = fit_centered(area, current_width, wanted_height);
+        if target.width < current_width || (target.height - current_height).abs() >= 1.0 {
+            let _ = window.set_size(tauri::PhysicalSize::new(
+                target.width.round(),
+                target.height.round(),
+            ));
+        }
         let _ = window.set_position(tauri::PhysicalPosition::new(
-            position
-                .x
-                .saturating_add((monitor_width - window_width) / 2),
-            position
-                .y
-                .saturating_add((monitor_height - window_height) / 2),
+            target.x.round(),
+            target.y.round(),
         ));
     }
 }
@@ -240,4 +307,55 @@ pub fn open_settings(window: WebviewWindow, route: Option<String>) -> CommandRes
 #[tauri::command]
 pub fn close_settings(window: WebviewWindow) -> CommandResult<()> {
     hide_settings_window(window.app_handle())
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::{Rect, fit_centered};
+
+    const AREA: Rect = Rect {
+        x: 0.0,
+        y: 25.0,
+        width: 1440.0,
+        height: 875.0,
+    };
+
+    #[test]
+    fn centres_inside_the_work_area_not_the_whole_screen() {
+        // A 25pt menu bar at the top: the palette centres below it.
+        let placed = fit_centered(AREA, 720.0, 480.0);
+        assert_eq!(
+            placed,
+            Rect {
+                x: 360.0,
+                y: 222.5,
+                width: 720.0,
+                height: 480.0,
+            }
+        );
+    }
+
+    #[test]
+    fn shrinks_a_palette_larger_than_the_work_area() {
+        // Twenty rows asked for more height than a small screen has.
+        let placed = fit_centered(AREA, 720.0, 1200.0);
+        assert!((placed.height - AREA.height).abs() < f64::EPSILON);
+        assert!((placed.y - AREA.y).abs() < f64::EPSILON);
+        let narrow = fit_centered(AREA, 2000.0, 480.0);
+        assert!((narrow.width - AREA.width).abs() < f64::EPSILON);
+        assert!(narrow.x.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn follows_a_work_area_offset_on_a_secondary_monitor() {
+        let secondary = Rect {
+            x: 1440.0,
+            y: -200.0,
+            width: 1920.0,
+            height: 1040.0,
+        };
+        let placed = fit_centered(secondary, 720.0, 480.0);
+        assert!((placed.x - 2040.0).abs() < f64::EPSILON);
+        assert!((placed.y - 80.0).abs() < f64::EPSILON);
+    }
 }

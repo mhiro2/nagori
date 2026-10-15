@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const ja: Messages = {
   palette: {
     placeholder: '履歴を検索…',
+    searchLabel: 'クリップボード履歴を検索',
+    resultsLabel: 'クリップボード履歴',
     searching: '検索中…',
     resultCount: (count: number): string => `${count.toLocaleString('ja')} 件`,
     elapsed: (ms: number): string => `${ms.toFixed(0)} ms`,
@@ -10,6 +12,10 @@ export const ja: Messages = {
     emptyStates: {
       start: 'テキストをコピーすると履歴に表示されます。',
       noMatches: '検索に一致する項目がありません。',
+      noQuickMatches:
+        'クイック検索では見つかりませんでした。古い項目の中まで探すには、すべての履歴を検索してください。',
+      searchFullHistory: 'すべての履歴を検索',
+      noFullHistoryMatches: 'この文字列を含む項目はありません。',
       noFilterMatches: 'フィルタに一致する項目がありません。',
       capturePaused: '取り込みは一時停止中です。下のボタンで再開できます。',
       retry: '再試行',
@@ -29,6 +35,7 @@ export const ja: Messages = {
       navigate: '選択',
       paste: 'ペースト',
       copyCombined: '結合コピー',
+      multiSelect: '複数選択',
       pin: 'ピン留め',
       actions: 'アクション',
       settings: '設定',
@@ -40,6 +47,7 @@ export const ja: Messages = {
       yesterday: '昨日',
       last7days: '過去7日',
       last30days: '過去30日',
+      anyTime: 'すべての期間',
       pinned: 'ピン留め',
       kindText: 'テキスト',
       kindUrl: 'URL',
@@ -51,7 +59,10 @@ export const ja: Messages = {
       sourceGroup: 'コピー元アプリ',
       sourceShort: 'アプリ',
       allApps: 'すべてのアプリ',
+      searchApps: 'アプリを検索',
+      noAppMatches: '一致するアプリはありません',
       clear: 'フィルタをクリア',
+      retained: '前回の条件を保持中',
     },
     clearHistory: {
       title: '履歴を消去しますか？',
@@ -71,6 +82,21 @@ export const ja: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'マスク済み',
+      description: '秘密情報を含みます。プレビューでは隠され、削除するとすぐに完全に消去されます。',
+    },
+    private: {
+      label: '非公開',
+      description: '非公開として扱います。プレビューは隠され、画像のサムネイルも表示しません。',
+    },
+    blocked: {
+      label: '非表示',
+      description:
+        'プライバシールールでブロックされました。内容は表示されず、ペーストもできません。',
+    },
+  },
   rankReason: {
     exact: '完全一致',
     prefix: '前方一致',
@@ -85,6 +111,15 @@ export const ja: Messages = {
   preview: {
     empty: 'プレビューする項目を選択してください。',
     loading: 'プレビューを読み込み中…',
+    retry: '再試行',
+    matches: {
+      label: '検索一致',
+      count: (count: number): string => `${count.toLocaleString('ja')} 件の一致`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('ja')} / ${total.toLocaleString('ja')}`,
+      previous: '前の一致',
+      next: '次の一致',
+    },
     details: '詳細',
     truncated: 'プレビューは途中まで表示しています。',
     truncation: {
@@ -102,6 +137,7 @@ export const ja: Messages = {
       source: '送信元',
       size: 'サイズ',
       rank: 'ランク',
+      match: '一致',
     },
     additionalData: 'その他のクリップボードデータ',
     clipboardCategory: { image: '画像', text: 'テキスト', files: 'ファイル' },
@@ -153,13 +189,20 @@ export const ja: Messages = {
     capturePaused: '取り込み一時停止',
     entryCount: (n: number): string => `${n.toLocaleString('ja')} 件`,
     selectedCount: (n: number): string => `${n.toLocaleString('ja')} 件選択中`,
+    fullHistorySearch: '全履歴を検索',
     combinedCopyHint: '結合コピーは新しい項目として保存されます',
+    clearSelection: '選択を解除',
+    selectionCleared: '選択を解除しました',
     autoPasteOff: '自動ペースト OFF — Accessibility 未許可',
     autoPasteOffShort: '⚠ 自動ペースト OFF',
     autoPasteOffSetupAria: '自動ペースト OFF: Accessibility の許可が必要です。セットアップを開く。',
     pasteDiagnostics: {
       label: '⚠ 自動ペースト失敗',
       toolFallback: 'ペーストツール',
+      notice: {
+        copiedNotPasted: 'コピーしましたが、ペーストできませんでした',
+        nothingPasted: '何もペーストされませんでした',
+      },
       hint: {
         accessibilityMissing:
           '自動ペースト失敗: Accessibility の許可が必要です。コピー済み — 手動で貼り付けてください。',
@@ -201,6 +244,10 @@ export const ja: Messages = {
     aiBadge: 'AI',
     aiCancel: 'キャンセル',
     aiUnavailable: '現在 AI アクションは利用できません。',
+    aiChecking: 'AI アクションが使えるか確認しています…',
+    aiDisabled: 'AI アクションは設定でオフになっています。',
+    aiPreparing: 'オンデバイスモデルを準備中です。しばらくしてから再試行してください。',
+    aiLanguageUnsupported: 'AI アクションはこの言語にまだ対応していません。',
     notApplicable: {
       image: '画像には適用できません。',
       fileList: 'ファイルには適用できません。',
@@ -228,6 +275,9 @@ export const ja: Messages = {
     copied: 'コピーしました',
     saveResult: '新しいエントリとして保存',
     saved: '保存しました',
+    previousResult: '前回の結果',
+    pasteResult: 'ペースト',
+    pasteFailed: '結果をペーストできませんでした。',
   },
   pastePicker: {
     title: 'ペースト形式',
@@ -236,8 +286,16 @@ export const ja: Messages = {
       files: 'ファイル',
       image: '画像',
       plainText: 'プレーンテキスト',
-      html: 'HTML',
-      richText: 'リッチテキスト',
+      html: '書式付きテキスト (HTML)',
+      richText: '書式付きテキスト (RTF)',
+    },
+    descriptions: {
+      original: 'コピー時のすべての形式。貼り付け先が対応する形式を選びます。',
+      files: 'ファイルそのもの。ファイルマネージャーからドラッグしたのと同じです。',
+      image: '画像として。画像編集アプリやチャット、文書向けです。',
+      plainText: '文字だけ。フォント、リンク、レイアウトは含みません。',
+      html: 'Web の書式に対応するアプリで、リンク・太字・リストを保ちます。',
+      richText: 'ワープロ向けに、フォントやスタイルを保ちます。',
     },
   },
   contextMenu: {

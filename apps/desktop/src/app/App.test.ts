@@ -24,6 +24,7 @@ vi.mock('./lib/commands', () => ({
   lastHotkeyFailure: vi.fn(async () => null),
   getSettings: vi.fn(async () => undefined),
   getPermissions: vi.fn(async () => []),
+  notifyPasteFailure: vi.fn(async () => undefined),
 }));
 
 // The App shell wires keybindings + window blur; the route children are out
@@ -53,7 +54,7 @@ vi.mock('./stores/searchQuery.svelte', () => ({
 }));
 
 import App from './App.svelte';
-import { getPermissions, hidePalette, lastHotkeyFailure } from './lib/commands';
+import { getPermissions, hidePalette, lastHotkeyFailure, notifyPasteFailure } from './lib/commands';
 import { isTauri, subscribe } from './lib/tauri';
 import type { AppSettings, PermissionStatus } from './lib/types';
 import { captureSkippedState, clearCaptureSkip } from './stores/captureSkipped.svelte';
@@ -546,6 +547,37 @@ describe('App auto-paste toast rules', () => {
     fire({ error: 'wtype is not installed', reason: 'toolMissing', tool: 'wtype' });
     await findByText('wtype is not installed');
     expect(pasteDiagnosticsState.failure?.tool).toBe('wtype');
+  });
+
+  it('raises a notification for a failure that lands while the palette is hidden', async () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    try {
+      const { fire } = capturePasteFailedHandler();
+      render(App);
+      fire({ error: 'auto-paste timed out', reason: 'timeout' });
+      expect(notifyPasteFailure).toHaveBeenLastCalledWith(
+        'Copied, but not pasted',
+        'Auto-paste timed out — the compositor may be busy. Copied — paste manually or retry.',
+      );
+      // When the clipboard moved on, nothing of ours was pasted at all.
+      fire({ error: 'clipboard changed', reason: 'clipboardChanged' });
+      expect(vi.mocked(notifyPasteFailure).mock.lastCall?.[0]).toBe('Nothing was pasted');
+    } finally {
+      hasFocus.mockRestore();
+    }
+  });
+
+  it('leaves a failure in a visible palette to the chip and toast', async () => {
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    try {
+      vi.mocked(notifyPasteFailure).mockClear();
+      const { fire } = capturePasteFailedHandler();
+      render(App);
+      fire({ error: 'auto-paste timed out', reason: 'timeout' });
+      expect(notifyPasteFailure).not.toHaveBeenCalled();
+    } finally {
+      hasFocus.mockRestore();
+    }
   });
 
   it('shows the auto-paste toast when the grant is in place (unexpected failure)', async () => {

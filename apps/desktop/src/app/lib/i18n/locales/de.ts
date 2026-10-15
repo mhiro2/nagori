@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const de: Messages = {
   palette: {
     placeholder: 'Verlauf durchsuchen …',
+    searchLabel: 'Zwischenablage-Verlauf durchsuchen',
+    resultsLabel: 'Zwischenablage-Verlauf',
     searching: 'Suchen …',
     resultCount: (count: number): string =>
       count === 1 ? '1 Ergebnis' : `${count.toLocaleString('de')} Ergebnisse`,
@@ -11,6 +13,10 @@ export const de: Messages = {
     emptyStates: {
       start: 'Kopieren Sie Text, um den Verlauf zu beginnen.',
       noMatches: 'Keine Einträge entsprechen dieser Suche.',
+      noQuickMatches:
+        'Die Schnellsuche hat nichts gefunden. Durchsuche den gesamten Verlauf, um auch ältere Einträge zu prüfen.',
+      searchFullHistory: 'Gesamten Verlauf durchsuchen',
+      noFullHistoryMatches: 'Kein Eintrag enthält diesen Text.',
       noFilterMatches: 'Keine Einträge entsprechen diesen Filtern.',
       capturePaused:
         'Die Erfassung ist pausiert. Setzen Sie sie unten fort, um neue Einträge zu speichern.',
@@ -32,6 +38,7 @@ export const de: Messages = {
       navigate: 'Navigieren',
       paste: 'Einfügen',
       copyCombined: 'Zusammen kopieren',
+      multiSelect: 'Auswählen',
       pin: 'Anheften',
       actions: 'Aktionen',
       settings: 'Einstellungen',
@@ -43,6 +50,7 @@ export const de: Messages = {
       yesterday: 'Gestern',
       last7days: 'Letzte 7 Tage',
       last30days: 'Letzte 30 Tage',
+      anyTime: 'Beliebiger Zeitraum',
       pinned: 'Angeheftet',
       kindText: 'Text',
       kindUrl: 'URL',
@@ -54,7 +62,10 @@ export const de: Messages = {
       sourceGroup: 'Quell-App',
       sourceShort: 'App',
       allApps: 'Alle Apps',
+      searchApps: 'Apps durchsuchen',
+      noAppMatches: 'Keine passenden Apps',
       clear: 'Filter löschen',
+      retained: 'Vom letzten Mal übernommen',
     },
     clearHistory: {
       title: 'Verlauf löschen?',
@@ -75,6 +86,23 @@ export const de: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Maskiert',
+      description:
+        'Enthält ein Geheimnis: Die Vorschau maskiert es, und Löschen entfernt den Eintrag sofort endgültig.',
+    },
+    private: {
+      label: 'Privat',
+      description:
+        'Als privat behandelt: Die Vorschau ist maskiert, Bilder erhalten keine Miniatur.',
+    },
+    blocked: {
+      label: 'Verborgen',
+      description:
+        'Durch eine Datenschutzregel blockiert: Der Inhalt ist verborgen und kann nicht eingefügt werden.',
+    },
+  },
   rankReason: {
     exact: 'Exakt',
     prefix: 'Präfix',
@@ -89,6 +117,16 @@ export const de: Messages = {
   preview: {
     empty: 'Eintrag auswählen, um eine Vorschau anzuzeigen.',
     loading: 'Vorschau wird geladen …',
+    retry: 'Erneut versuchen',
+    matches: {
+      label: 'Suchtreffer',
+      count: (count: number): string =>
+        count === 1 ? '1 Treffer' : `${count.toLocaleString('de')} Treffer`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('de')} / ${total.toLocaleString('de')}`,
+      previous: 'Vorheriger Treffer',
+      next: 'Nächster Treffer',
+    },
     details: 'Details',
     truncated: 'Vorschau gekürzt.',
     truncation: {
@@ -106,6 +144,7 @@ export const de: Messages = {
       source: 'Quelle',
       size: 'Größe',
       rank: 'Rang',
+      match: 'Treffer',
     },
     additionalData: 'Weitere Daten in der Zwischenablage',
     clipboardCategory: { image: 'Bild', text: 'Text', files: 'Dateien' },
@@ -163,7 +202,10 @@ export const de: Messages = {
       n === 1 ? '1 Eintrag' : `${n.toLocaleString('de')} Einträge`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 ausgewählt' : `${n.toLocaleString('de')} ausgewählt`,
+    fullHistorySearch: 'Suche im gesamten Verlauf',
     combinedCopyHint: 'Kombiniertes Kopieren wird als neuer Eintrag gespeichert',
+    clearSelection: 'Auswahl aufheben',
+    selectionCleared: 'Auswahl aufgehoben',
     autoPasteOff: 'Auto-Einfügen aus — Accessibility nicht erteilt',
     autoPasteOffShort: '⚠ Auto-Einfügen aus',
     autoPasteOffSetupAria:
@@ -171,6 +213,10 @@ export const de: Messages = {
     pasteDiagnostics: {
       label: '⚠ Auto-Einfügen fehlgeschlagen',
       toolFallback: 'das Einfüge-Tool',
+      notice: {
+        copiedNotPasted: 'Kopiert, aber nicht eingefügt',
+        nothingPasted: 'Es wurde nichts eingefügt',
+      },
       hint: {
         accessibilityMissing:
           'Auto-Einfügen fehlgeschlagen: Accessibility-Berechtigung erforderlich. Kopiert — manuell einfügen.',
@@ -212,6 +258,10 @@ export const de: Messages = {
     aiBadge: 'KI',
     aiCancel: 'Abbrechen',
     aiUnavailable: 'KI-Aktionen sind derzeit nicht verfügbar.',
+    aiChecking: 'Verfügbarkeit der KI-Aktionen wird geprüft …',
+    aiDisabled: 'KI-Aktionen sind in den Einstellungen deaktiviert.',
+    aiPreparing: 'Das On-Device-Modell wird noch vorbereitet. Versuche es gleich noch einmal.',
+    aiLanguageUnsupported: 'KI-Aktionen unterstützen diese Sprache noch nicht.',
     notApplicable: {
       image: 'Aktionen sind für Bilder nicht verfügbar.',
       fileList: 'Aktionen sind für Dateien nicht verfügbar.',
@@ -240,6 +290,9 @@ export const de: Messages = {
     copied: 'Kopiert',
     saveResult: 'Als neuen Eintrag speichern',
     saved: 'Gespeichert',
+    previousResult: 'Vorheriges Ergebnis',
+    pasteResult: 'Einfügen',
+    pasteFailed: 'Das Ergebnis konnte nicht eingefügt werden.',
   },
   pastePicker: {
     title: 'Einfügen als',
@@ -248,8 +301,16 @@ export const de: Messages = {
       files: 'Dateien',
       image: 'Bild',
       plainText: 'Nur Text',
-      html: 'HTML',
-      richText: 'Formatierter Text',
+      html: 'Formatierter Text (HTML)',
+      richText: 'Formatierter Text (RTF)',
+    },
+    descriptions: {
+      original: 'Alle Formate der Kopie; die App wählt, was sie unterstützt.',
+      files: 'Die Dateien selbst, wie aus dem Dateimanager gezogen.',
+      image: 'Das Bild, für Bildbearbeitung, Chats und Dokumente.',
+      plainText: 'Nur Text, ohne Schriften, Links oder Layout.',
+      html: 'Behält Links, Fettschrift und Listen, wo die App Web-Formatierung annimmt.',
+      richText: 'Behält Schriften und Stile für Textverarbeitungen.',
     },
   },
   contextMenu: {

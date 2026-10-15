@@ -1,15 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
 
-  import { hidePalette, openSettingsWindow } from './lib/commands';
+  import { hidePalette, notifyPasteFailure, openSettingsWindow } from './lib/commands';
   import { messages, setLocale } from './lib/i18n/index.svelte';
   import { isImeComposing } from './lib/keybindings';
+  import { pasteFailureHint, pasteFailureTitle } from './lib/pasteFailureHint';
   import { resolvePermissionUiState } from './lib/permissions';
   import { TAURI_EVENTS, currentWindowLabel, isTauri, subscribe } from './lib/tauri';
   import { applyAppearance } from './lib/theme';
   import type { AppSettings } from './lib/types';
   import PaletteRoute from './routes/PaletteRoute.svelte';
   import SettingsRoute from './routes/SettingsRoute.svelte';
+  import { forgetActionResult } from './stores/actionResult.svelte';
   import { capabilitiesState } from './stores/capabilities.svelte';
   import { recordCaptureSkip } from './stores/captureSkipped.svelte';
   import { closeEntryContextMenu, entryContextMenuState } from './stores/entryContextMenu.svelte';
@@ -18,6 +20,7 @@
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
+  import { noteActionEndedAfterHide } from './stores/paletteSession.svelte';
   import {
     clearPasteDiagnostics,
     normalizePasteReason,
@@ -75,6 +78,7 @@
     // A paste-format picker open at hide time must not survive into the next
     // invocation — it would re-render against a stale, now-unselected entry.
     closePasteFormatPicker();
+    forgetActionResult();
     void hidePalette();
   };
 
@@ -88,6 +92,9 @@
     // palette — either would reappear (against a stale target) on the next show.
     closePasteFormatPicker();
     closeEntryContextMenu();
+    // The palette session ends here (every hide, including the one after a
+    // paste, blurs the window), so a kept action result goes with it.
+    forgetActionResult();
     void hidePalette();
   };
 
@@ -149,11 +156,24 @@
         // toast (so the hidden palette's error still surfaces) but leave no
         // chip, since "copy succeeded — paste manually" would be wrong there.
         if (payload?.reason !== undefined) {
-          recordPasteFailure({
+          const failure = {
             reason,
             message,
             ...(payload?.tool !== undefined ? { tool: payload.tool } : {}),
-          });
+          };
+          recordPasteFailure(failure);
+          noteActionEndedAfterHide();
+          // The palette has usually hidden by now (it hides before the
+          // synthesised keystroke), so a chip or toast would wait for the next
+          // open. An OS notification reaches the user where they are without
+          // taking focus from the app they were pasting into.
+          if (!document.hasFocus()) {
+            const status = messages().status;
+            void notifyPasteFailure(
+              pasteFailureTitle(failure, status),
+              pasteFailureHint(failure, status),
+            ).catch(() => {});
+          }
         }
         if (shouldSuppressPasteToast(reason)) return;
         pasteFailureMessage = message;

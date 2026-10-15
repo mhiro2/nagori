@@ -3,7 +3,9 @@
 
   import {
     cancelAiAction,
+    copyTextFromPalette,
     getAiAvailability,
+    pasteTextFromPalette,
     runQuickAction,
     saveAiResult,
     startAiAction,
@@ -21,7 +23,9 @@
     QuickActionId,
     SearchResultDto,
   } from '../lib/types';
+  import { rememberActionResult, rememberedActionResult } from '../stores/actionResult.svelte';
   import { aiActionsSupported } from '../stores/capabilities.svelte';
+  import { runSessionEndingAction } from '../stores/paletteSession.svelte';
   import ActionPicker from './ActionPicker.svelte';
   import ActionRunPanel from './ActionRunPanel.svelte';
   import CompactPreview from './CompactPreview.svelte';
@@ -78,6 +82,10 @@
   let copyError = $state<string | undefined>(undefined);
   let saveError = $state<string | undefined>(undefined);
   let saving = $state(false);
+  // The work area shows a result kept from earlier in this palette session
+  // (see `stores/actionResult`) rather than one just produced.
+  let restored = $state(false);
+  let pasteError = $state<string | undefined>(undefined);
   let panelEl: HTMLElement | undefined = $state();
 
   let quickRunningVisible = $state(false);
@@ -86,6 +94,9 @@
   // Streaming AI state. `aiRequestId` scopes the `nagori://ai/*` events we
   // accept; `aiText` is the request-local display buffer.
   let availability = $state<AiAvailability | undefined>(undefined);
+  // True while the availability probe for this open is in flight, so the AI
+  // buttons read "checking" rather than "unavailable" until it answers.
+  let availabilityLoading = $state(false);
   let aiRequestId = $state<string | undefined>(undefined);
   let aiText = $state('');
   let aiStreaming = $state(false);
@@ -124,6 +135,7 @@
     saveOk = false;
     copyError = undefined;
     saveError = undefined;
+    pasteError = undefined;
     saving = false;
     if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
     if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
@@ -159,11 +171,26 @@
 
   // The localized "why is this disabled" hint for one action: its remediation
   // key, or a generic fallback. `undefined` when the action is available.
+  // A backend remediation hint wins; otherwise the per-action status says
+  // whether AI is turned off, still getting ready, or not usable here.
   const reasonFor = (entry: AiAvailability['actions'][number] | undefined): string | undefined => {
     if (entry?.available) return undefined;
-    return entry?.remediation
-      ? (t.actionMenu.aiRemediation[entry.remediation] ?? t.actionMenu.aiUnavailable)
-      : t.actionMenu.aiUnavailable;
+    if (entry === undefined && availabilityLoading) return t.actionMenu.aiChecking;
+    const remediation = entry?.remediation
+      ? t.actionMenu.aiRemediation[entry.remediation]
+      : undefined;
+    if (remediation !== undefined) return remediation;
+    switch (entry?.status) {
+      case 'disabled_by_settings':
+      case 'not_configured':
+        return t.actionMenu.aiDisabled;
+      case 'asset_missing':
+        return t.actionMenu.aiPreparing;
+      case 'language_unsupported':
+        return t.actionMenu.aiLanguageUnsupported;
+      default:
+        return t.actionMenu.aiUnavailable;
+    }
   };
 
   // Actions operate on an entry's text representation, so a content kind with
@@ -173,6 +200,8 @@
   // the text transforms would mangle — the lone exception is `RedactSecrets`,
   // which is exactly what you want on a URL holding a token. The daemon also
   // refuses text-less content, so this is UX, not the safety boundary.
+  const actionIdOf = (key: string): string => key.replace(/^(quick|ai)-/, '');
+
   const actionAppliesToKind = (kind: ContentKind, id: string): boolean => {
     switch (kind) {
       case 'image':
@@ -253,6 +282,7 @@
     cancelRequested = false;
     if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
     lastResult = undefined;
+    restored = false;
     runError = undefined;
     resetResultFeedback();
     pending = undefined;
@@ -272,9 +302,20 @@
     }
   };
 
+  // Bring back the result this session last produced for the target, when the
+  // work area is otherwise empty.
+  const restoreRememberedResult = (): void => {
+    const text = rememberedActionResult(target?.id);
+    if (text === undefined || phase !== 'idle') return;
+    lastResult = text;
+    restored = true;
+  };
+
   const run = async (id: QuickActionId): Promise<void> => {
     if (!target || !isTauri() || busy) return;
     const token = ++runToken;
+    const entryId = target.id;
+    restored = false;
     pending = id;
     runError = undefined;
     resetResultFeedback();
@@ -291,6 +332,7 @@
       // IPC was in flight, so a stale result can't land in a reopened menu.
       if (token !== runToken) return;
       lastResult = result.text;
+      rememberActionResult(entryId, result.text);
     } catch (err) {
       if (token !== runToken) return;
       runError = describeError(err);
@@ -319,6 +361,7 @@
     runError = undefined;
     resetResultFeedback();
     lastResult = undefined;
+    restored = false;
     aiText = '';
     aiStreaming = true;
     aiPendingAction = action;
@@ -376,9 +419,11 @@
     }
   };
 
-  // One flat list of buttons: deterministic actions first, then AI actions
-  // (each badged). The user scans by intent, not by section.
-  const pickerItems = $derived([
+  // One flat list of buttons (AI ones badged), so the user scans by intent,
+  // not by section. Actions that can run on the target come first; the ones
+  // that cannot — wrong content kind, AI off or unavailable — follow, still
+  // listed with their reason so the full set stays discoverable.
+  const allPickerItems = $derived([
     ...QUICK_ACTION_IDS.map((id) => {
       const applies = !target || actionAppliesToKind(target.kind, id);
       return {
@@ -406,6 +451,23 @@
       };
     }),
   ]);
+  // Ordered only on settled reasons: an AI action still waiting on the
+  // availability probe keeps its place, so the grid does not reshuffle under
+  // the pointer when the probe answers.
+  const sinks = (item: { reason?: string | undefined }): boolean =>
+    item.reason !== undefined && item.reason !== t.actionMenu.aiChecking;
+  const pickerItems = $derived([
+    ...allPickerItems.filter((item) => !sinks(item)),
+    ...allPickerItems.filter((item) => sinks(item)),
+  ]);
+  // Nothing in the list can run on this target's content kind (an image or a
+  // file list): say so up front instead of leaving only per-button tooltips.
+  const noneApplicableReason = $derived(
+    target &&
+      allPickerItems.every((item) => !actionAppliesToKind(target.kind, actionIdOf(item.key)))
+      ? inapplicableReason(target.kind)
+      : undefined,
+  );
 
   // Copy/save failures keep the result intact and can be retried independently.
   // Fence feedback by both run and attempt so a late completion cannot update
@@ -467,8 +529,25 @@
       (v) => (copyOk = v),
       (v) => (copyError = v),
       copyTimerRef,
-      () => navigator.clipboard.writeText(text),
+      // Through the app's own clipboard path rather than the webview's, so the
+      // capture loop recognises the write and the result stays out of the
+      // history until the user saves it.
+      () => (isTauri() ? copyTextFromPalette(text) : navigator.clipboard.writeText(text)),
     );
+  };
+
+  // Paste the result straight into the app the palette was opened from. The
+  // palette hides on success; a failure before that point stays visible here.
+  const pasteResult = async (): Promise<void> => {
+    const text = lastResult;
+    if (text === undefined || !isTauri()) return;
+    const token = runToken;
+    pasteError = undefined;
+    try {
+      await runSessionEndingAction(() => pasteTextFromPalette(text));
+    } catch (err) {
+      if (token === runToken && open) pasteError = describeError(err);
+    }
   };
 
   const saveResult = async (): Promise<void> => {
@@ -502,6 +581,7 @@
   // is released rather than streaming on to no one.
   $effect(() => {
     if (!open) resetRun();
+    else untrack(() => restoreRememberedResult());
   });
 
   // Because the inspector is docked (not a modal), the user can re-target it
@@ -524,7 +604,10 @@
     }
     if (id === lastSeenTargetId) return;
     lastSeenTargetId = id;
-    untrack(() => resetRun());
+    untrack(() => {
+      resetRun();
+      restoreRememberedResult();
+    });
   });
 
   // Probe AI availability each time the inspector opens so the AI buttons
@@ -534,10 +617,13 @@
   $effect(() => {
     if (!open || !isTauri() || !aiActionsSupported()) return;
     void (async () => {
+      availabilityLoading = true;
       try {
         availability = await getAiAvailability();
       } catch {
         availability = undefined;
+      } finally {
+        availabilityLoading = false;
       }
     })();
   });
@@ -603,6 +689,9 @@
           if (!isActiveRequest(payload.requestId)) return;
           aiText = payload.finalText;
           lastResult = payload.finalText;
+          // Re-targeting cancels a stream, so a run that finishes belongs to
+          // the current target.
+          if (target) rememberActionResult(target.id, payload.finalText);
           aiStreaming = false;
           aiRequestId = undefined;
           aiPendingAction = undefined;
@@ -736,8 +825,10 @@
 
       <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
 
-      {#if aiUnavailableReason}
-        <p class="ai-reason">{aiUnavailableReason}</p>
+      {#if noneApplicableReason}
+        <p class="ai-reason" data-testid="actions-none-applicable">{noneApplicableReason}</p>
+      {:else if aiUnavailableReason}
+        <p class="ai-reason" data-testid="actions-ai-reason">{aiUnavailableReason}</p>
       {/if}
     </div>
 
@@ -746,6 +837,9 @@
     {/if}
     {#if saveError !== undefined}
       <p class="result-error" role="alert">{t.actionMenu.saveFailed} {saveError}</p>
+    {/if}
+    {#if pasteError !== undefined}
+      <p class="result-error" role="alert">{t.actionMenu.pasteFailed} {pasteError}</p>
     {/if}
 
     <ActionRunPanel
@@ -763,12 +857,17 @@
         saved: t.actionMenu.saved,
         cancel: t.actionMenu.aiCancel,
         done: t.actionMenu.done,
+        previousResult: t.actionMenu.previousResult,
+        paste: t.actionMenu.pasteResult,
       }}
+      {restored}
       {copyOk}
       {saveOk}
       {saving}
       canSave={isTauri()}
+      canPaste={isTauri()}
       onCopy={() => void copyResult()}
+      onPaste={() => void pasteResult()}
       onSave={() => void saveResult()}
       onCancel={cancelAi}
     />

@@ -13,6 +13,8 @@
     saved: string;
     cancel: string;
     done: string;
+    previousResult: string;
+    paste: string;
   };
 
   type Props = {
@@ -31,9 +33,13 @@
     saveOk: boolean;
     saving: boolean;
     canSave: boolean;
+    // The result was kept from earlier in this palette session.
+    restored?: boolean;
+    canPaste?: boolean;
     onCopy: () => void;
     onSave: () => void;
     onCancel: () => void;
+    onPaste?: () => void;
   };
 
   const {
@@ -48,9 +54,12 @@
     saveOk,
     saving,
     canSave,
+    restored = false,
+    canPaste = false,
     onCopy,
     onSave,
     onCancel,
+    onPaste,
   }: Props = $props();
 </script>
 
@@ -69,8 +78,13 @@
             <button type="button" class="ghost" onclick={onCancel}>{labels.cancel}</button>
           {/if}
         {:else}
-          <span class="status">{doneFlash ? labels.done : labels.result}</span>
+          <span class="status" data-testid="action-result-status"
+            >{doneFlash ? labels.done : restored ? labels.previousResult : labels.result}</span
+          >
           <div class="run-actions">
+            {#if canPaste && onPaste}
+              <button type="button" class="ghost" onclick={onPaste}>{labels.paste}</button>
+            {/if}
             <button type="button" class="ghost" onclick={onCopy}>
               {copyOk ? labels.copied : labels.copy}
             </button>

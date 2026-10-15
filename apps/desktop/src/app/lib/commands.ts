@@ -28,7 +28,21 @@ import type {
 export const searchClipboard = (request: SearchRequest): Promise<SearchResponse> =>
   invoke('search_clipboard', { request });
 
+// Every app the live history was copied from, most recently seen first.
+export const listSourceApps = (): Promise<string[]> => invoke('list_source_apps');
+
 export const closePalette = (): Promise<void> => invoke('close_palette');
+
+// Raise an OS notification for an auto-paste failure that happened while the
+// palette was hidden. Notifications never take focus from the app the user is
+// in.
+export const notifyPasteFailure = (title: string, body: string): Promise<void> =>
+  invoke('notify_paste_failure', { title, body });
+
+// Size the palette window to `height` logical pixels within its monitor's work
+// area (the backend clamps and re-centres).
+export const fitPaletteHeight = (height: number): Promise<void> =>
+  invoke('fit_palette_height', { height });
 
 // Every palette format respects the user's auto-paste setting.
 export const pasteEntryFromPalette = (entryId: string, format?: PasteFormat): Promise<void> =>
@@ -46,6 +60,12 @@ export const pasteEntryRepresentationFromPalette = (entryId: string, mime: strin
 // then falls back to the plain alternate-format paste.
 export const listPasteOptions = (entryId: string): Promise<PasteOption[]> =>
   invoke('list_paste_options', { entryId });
+
+// Copy / paste a quick-action result without adding it to the history.
+export const copyTextFromPalette = (text: string): Promise<void> =>
+  invoke('copy_text_from_palette', { text });
+export const pasteTextFromPalette = (text: string): Promise<void> =>
+  invoke('paste_text_from_palette', { text });
 
 export const copyEntryFromPalette = (entryId: string): Promise<void> =>
   invoke('copy_entry_from_palette', { entryId });

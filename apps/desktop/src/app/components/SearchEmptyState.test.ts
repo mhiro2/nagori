@@ -59,4 +59,24 @@ describe('SearchEmptyState', () => {
     });
     expect(getByRole('status').textContent).toContain('Capture is paused.');
   });
+
+  it('offers a full-history search after the quick search finds nothing', async () => {
+    const onSearchFullHistory = vi.fn();
+    const { getByRole } = render(SearchEmptyState, {
+      props: { ...props(), query: 'order_tot', canSearchFullHistory: true, onSearchFullHistory },
+    });
+    expect(getByRole('status').textContent).toContain('The quick search found nothing.');
+    await fireEvent.click(getByRole('button', { name: 'Search all history' }));
+    expect(onSearchFullHistory).toHaveBeenCalledOnce();
+    // Clearing stays available next to the wider search.
+    expect(getByRole('button', { name: 'Clear search and filters' })).toBeTruthy();
+  });
+
+  it('stops offering the wider search once it has run', () => {
+    const { getByRole, queryByRole } = render(SearchEmptyState, {
+      props: { ...props(), query: 'order_tot', fullHistory: true, onSearchFullHistory: vi.fn() },
+    });
+    expect(getByRole('status').textContent).toContain('No entries contain this text.');
+    expect(queryByRole('button', { name: 'Search all history' })).toBeNull();
+  });
 });

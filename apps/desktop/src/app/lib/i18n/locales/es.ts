@@ -3,6 +3,8 @@ import type { Messages } from './en';
 export const es: Messages = {
   palette: {
     placeholder: 'Buscar en el historial…',
+    searchLabel: 'Buscar en el historial del portapapeles',
+    resultsLabel: 'Historial del portapapeles',
     searching: 'Buscando…',
     resultCount: (count: number): string =>
       count === 1 ? '1 resultado' : `${count.toLocaleString('es')} resultados`,
@@ -11,6 +13,10 @@ export const es: Messages = {
     emptyStates: {
       start: 'Copia texto para empezar el historial.',
       noMatches: 'No hay entradas que coincidan con esta búsqueda.',
+      noQuickMatches:
+        'La búsqueda rápida no encontró nada. Busca en todo el historial para revisar también los elementos antiguos.',
+      searchFullHistory: 'Buscar en todo el historial',
+      noFullHistoryMatches: 'Ningún elemento contiene este texto.',
       noFilterMatches: 'No hay entradas que coincidan con estos filtros.',
       capturePaused: 'La captura está pausada. Reanúdala abajo para guardar nuevas entradas.',
       retry: 'Reintentar',
@@ -31,6 +37,7 @@ export const es: Messages = {
       navigate: 'Navegar',
       paste: 'Pegar',
       copyCombined: 'Copiar juntos',
+      multiSelect: 'Seleccionar',
       pin: 'Fijar',
       actions: 'Acciones',
       settings: 'Ajustes',
@@ -42,6 +49,7 @@ export const es: Messages = {
       yesterday: 'Ayer',
       last7days: 'Últimos 7 días',
       last30days: 'Últimos 30 días',
+      anyTime: 'Cualquier fecha',
       pinned: 'Fijados',
       kindText: 'Texto',
       kindUrl: 'URL',
@@ -53,7 +61,10 @@ export const es: Messages = {
       sourceGroup: 'App de origen',
       sourceShort: 'App',
       allApps: 'Todas las apps',
+      searchApps: 'Buscar apps',
+      noAppMatches: 'No hay apps coincidentes',
       clear: 'Borrar filtros',
+      retained: 'Conservados de la última vez',
     },
     clearHistory: {
       title: '¿Borrar el historial?',
@@ -74,6 +85,23 @@ export const es: Messages = {
       },
     },
   },
+  privacyOutcome: {
+    secret: {
+      label: 'Oculto',
+      description:
+        'Contiene un secreto: la vista previa lo oculta y al eliminar el elemento se borra de inmediato.',
+    },
+    private: {
+      label: 'Privado',
+      description:
+        'Se trata como privado: la vista previa está oculta y las imágenes no tienen miniatura.',
+    },
+    blocked: {
+      label: 'Bloqueado',
+      description:
+        'Bloqueado por una regla de privacidad: el contenido está oculto y no se puede pegar.',
+    },
+  },
   rankReason: {
     exact: 'Exacto',
     prefix: 'Prefijo',
@@ -88,6 +116,16 @@ export const es: Messages = {
   preview: {
     empty: 'Selecciona un elemento para previsualizar.',
     loading: 'Cargando vista previa…',
+    retry: 'Reintentar',
+    matches: {
+      label: 'Coincidencias',
+      count: (count: number): string =>
+        count === 1 ? '1 coincidencia' : `${count.toLocaleString('es')} coincidencias`,
+      position: (current: number, total: number): string =>
+        `${current.toLocaleString('es')} / ${total.toLocaleString('es')}`,
+      previous: 'Coincidencia anterior',
+      next: 'Coincidencia siguiente',
+    },
     details: 'Detalles',
     truncated: 'Vista previa recortada.',
     truncation: {
@@ -105,6 +143,7 @@ export const es: Messages = {
       source: 'origen',
       size: 'tamaño',
       rank: 'rango',
+      match: 'coincidencia',
     },
     additionalData: 'Otros datos del portapapeles',
     clipboardCategory: { image: 'Imagen', text: 'Texto', files: 'Archivos' },
@@ -162,7 +201,10 @@ export const es: Messages = {
       n === 1 ? '1 elemento' : `${n.toLocaleString('es')} elementos`,
     selectedCount: (n: number): string =>
       n === 1 ? '1 seleccionado' : `${n.toLocaleString('es')} seleccionados`,
+    fullHistorySearch: 'Búsqueda en todo el historial',
     combinedCopyHint: 'La copia combinada se guarda como un elemento nuevo',
+    clearSelection: 'Borrar selección',
+    selectionCleared: 'Selección borrada',
     autoPasteOff: 'Pegado automático desactivado — Accesibilidad no autorizada',
     autoPasteOffShort: '⚠ Pegado automático desactivado',
     autoPasteOffSetupAria:
@@ -170,6 +212,10 @@ export const es: Messages = {
     pasteDiagnostics: {
       label: '⚠ Falló el pegado automático',
       toolFallback: 'la herramienta de pegado',
+      notice: {
+        copiedNotPasted: 'Copiado, pero no pegado',
+        nothingPasted: 'No se pegó nada',
+      },
       hint: {
         accessibilityMissing:
           'Falló el pegado automático: se requiere permiso de Accesibilidad. Copiado — pega manualmente.',
@@ -211,6 +257,10 @@ export const es: Messages = {
     aiBadge: 'IA',
     aiCancel: 'Cancelar',
     aiUnavailable: 'Las acciones de IA no están disponibles en este momento.',
+    aiChecking: 'Comprobando si las acciones de IA están disponibles…',
+    aiDisabled: 'Las acciones de IA están desactivadas en Ajustes.',
+    aiPreparing: 'El modelo en el dispositivo aún se está preparando. Inténtalo en breve.',
+    aiLanguageUnsupported: 'Las acciones de IA aún no admiten este idioma.',
     notApplicable: {
       image: 'Las acciones no se aplican a imágenes.',
       fileList: 'Las acciones no se aplican a archivos.',
@@ -238,6 +288,9 @@ export const es: Messages = {
     copied: 'Copiado',
     saveResult: 'Guardar como nueva entrada',
     saved: 'Guardado',
+    previousResult: 'Resultado anterior',
+    pasteResult: 'Pegar',
+    pasteFailed: 'No se pudo pegar el resultado.',
   },
   pastePicker: {
     title: 'Pegar como',
@@ -246,8 +299,16 @@ export const es: Messages = {
       files: 'Archivos',
       image: 'Imagen',
       plainText: 'Texto sin formato',
-      html: 'HTML',
-      richText: 'Texto enriquecido',
+      html: 'Texto con formato (HTML)',
+      richText: 'Texto con formato (RTF)',
+    },
+    descriptions: {
+      original: 'Todos los formatos con los que se copió; la app elige el que admite.',
+      files: 'Los archivos en sí, como si los arrastraras desde el gestor de archivos.',
+      image: 'La imagen, para editores de imágenes, chats y documentos.',
+      plainText: 'Solo texto, sin fuentes, enlaces ni diseño.',
+      html: 'Conserva enlaces, negritas y listas donde la app acepta formato web.',
+      richText: 'Conserva fuentes y estilos para procesadores de texto.',
     },
   },
   contextMenu: {

@@ -12,6 +12,7 @@ import {
 import { describeError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
 import type { PasteFormat, PasteOption } from '../lib/types';
+import { runSessionEndingAction } from './paletteSession.svelte';
 import { clearPasteDiagnostics } from './pasteDiagnostics.svelte';
 import {
   closePasteFormatPicker,
@@ -40,7 +41,7 @@ const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => 
   // the paste doesn't land a runQuery against the now-hidden webview.
   cancelPendingQuery();
   try {
-    await pasteEntryCmd(id, format);
+    await runSessionEndingAction(() => pasteEntryCmd(id, format));
     // A clean paste makes any prior failure diagnostic stale — drop the
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
@@ -117,7 +118,7 @@ export const confirmPasteFormat = async (option: PasteOption | undefined): Promi
   }
   cancelPendingQuery();
   try {
-    await pasteEntryRepresentationCmd(targetId, option.mime);
+    await runSessionEndingAction(() => pasteEntryRepresentationCmd(targetId, option.mime));
     clearPasteDiagnostics();
   } catch (err) {
     searchState.errorMessage = describeError(err);
@@ -140,7 +141,7 @@ export const copySelection = async (): Promise<void> => {
   // the IPC so the debounce can't fire post-hide.
   cancelPendingQuery();
   try {
-    await copyEntryCmd(target.id);
+    await runSessionEndingAction(() => copyEntryCmd(target.id));
   } catch (err) {
     searchState.errorMessage = describeError(err);
   }
@@ -283,7 +284,7 @@ export const copyEntryById = async (id: string): Promise<void> => {
   // before the IPC so it can't fire a query post-hide.
   cancelPendingQuery();
   try {
-    await copyEntryCmd(id);
+    await runSessionEndingAction(() => copyEntryCmd(id));
   } catch (err) {
     searchState.errorMessage = describeError(err);
   }

@@ -12,6 +12,10 @@
   };
   const badge = (kind: string): string => KIND_BADGE[kind] ?? '?';
 
+  // DOM id of a result option, referenced by the search combobox's
+  // `aria-activedescendant`. Keyed by entry id so it survives re-ranking.
+  export const resultOptionId = (entryId: string): string => `result-option-${entryId}`;
+
   const safeUrl = (raw: string): URL | undefined => {
     try {
       return new URL(raw.trim());
@@ -31,10 +35,12 @@
     truncatePreview,
   } from '../lib/formatting';
   import { messages } from '../lib/i18n/index.svelte';
+  import { privacyOutcome } from '../lib/privacyOutcome';
   import { primaryRankReason, rankReasonLabel } from '../lib/rankReason';
   import { isScreenshotSource } from '../lib/screenshotSource';
   import type { SearchResultDto } from '../lib/types';
   import { domainCategory } from '../lib/urlCategory';
+  import EntryThumbnail from './EntryThumbnail.svelte';
   import HighlightedText from './HighlightedText.svelte';
 
   type Props = {
@@ -47,6 +53,12 @@
     // undefined for the recent listing so those rows render plain.
     query?: string | undefined;
     onSelect: (index: number) => void;
+    // The pointer moved over the row. Hover selection keys off real movement,
+    // not `mouseenter`: a row scrolled under a resting pointer (keyboard
+    // navigation, a background refresh) would otherwise steal the selection.
+    // The list owns the "did the pointer actually move" check; standalone,
+    // the row falls back to selecting itself.
+    onHover?: ((index: number, event: MouseEvent) => void) | undefined;
     onConfirm: (index: number, event?: MouseEvent) => void;
     // `| undefined` is explicit so ResultList can forward its own optional
     // prop straight through under `exactOptionalPropertyTypes`.
@@ -59,6 +71,13 @@
     // and the rest recede. Visual only — `onSelect` still fires on hover; the
     // palette decides whether to honour it.
     locked?: boolean | undefined;
+    // The preview pane is showing, so the row keeps to the content plus the
+    // cues needed to pick an entry (privacy marker, age) and leaves the source
+    // app and match reason to the pane instead of shrinking the content.
+    compact?: boolean | undefined;
+    // Some row is multi-selected. Only then does the row reserve the leading
+    // check-mark column, so the content gets that width back otherwise.
+    multiActive?: boolean | undefined;
   };
 
   const {
@@ -68,10 +87,13 @@
     index,
     query,
     onSelect,
+    onHover = (hovered: number) => onSelect(hovered),
     onConfirm,
     onTogglePin = () => {},
     onContextMenu = () => {},
     locked = false,
+    compact = false,
+    multiActive = false,
   }: Props = $props();
 
   const t = $derived(messages());
@@ -114,7 +136,22 @@
     const primary = item.representationSummary.find((rep) => rep.role === 'primary');
     return primary ? formatByteCount(primary.byteCount) : undefined;
   });
+  // Secret / Blocked rows carry a chip naming the consequence (masked,
+  // hidden) rather than the classifier's name; Private rows explain theirs in
+  // the preview only, to keep the row for the content.
+  const privacy = $derived(
+    item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'
+      ? privacyOutcome(item.sensitivity, t.privacyOutcome)
+      : undefined,
+  );
   const isScreenshot = $derived(item.kind === 'image' && isScreenshotSource(item.sourceAppName));
+  // Consecutive screenshots share a source, size and age, so a tiny thumbnail
+  // is the only quick way to tell them apart. The thumbnail endpoint refuses
+  // anything beyond Public / Unknown, so other rows keep the text badge
+  // rather than issuing requests that can only fail.
+  const showThumbnail = $derived(
+    item.kind === 'image' && (item.sensitivity === 'Public' || item.sensitivity === 'Unknown'),
+  );
   // Strongest *match* reason for this row. `undefined` for recent-listing rows
   // (empty query) so they stay chip-free; pinned state has its own 📌 column.
   const rankReason = $derived(primaryRankReason(item.rankReasons));
@@ -174,18 +211,37 @@
     class="result-item"
     class:selected
     class:marked
+    id={resultOptionId(item.id)}
     role="option"
-    aria-selected={selected}
+    aria-selected={marked}
     aria-label={fileAria}
+    tabindex={selected ? 0 : -1}
     data-kind={item.kind}
     data-sensitivity={item.sensitivity}
     disabled={locked}
     onfocus={() => onSelect(index)}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={(event) => onConfirm(index, event)}
   >
-    <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
-    <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {#if multiActive}
+      <span class="multi-mark" aria-hidden="true">{marked ? '✓' : ''}</span>
+    {/if}
+    {#snippet kindBadge()}
+      <span class="kind-badge" aria-hidden="true">{fileBadge ?? badge(item.kind)}</span>
+    {/snippet}
+    {#if showThumbnail}
+      <span class="kind-thumb">
+        <EntryThumbnail
+          entryId={item.id}
+          alt=""
+          variant="row"
+          testId="result-thumb"
+          fallback={kindBadge}
+        />
+      </span>
+    {:else}
+      {@render kindBadge()}
+    {/if}
 
     {#if url}
       <span class="preview url">
@@ -229,13 +285,15 @@
     {/if}
 
     <span class="meta">
-      {#if rankChip}<span class="rank-chip" data-reason={rankReason} title={t.preview.fields.rank}
-          >{rankChip}</span
+      {#if rankChip && !compact}<span
+          class="rank-chip"
+          data-reason={rankReason}
+          title={t.preview.fields.rank}>{rankChip}</span
         >{/if}
-      {#if item.sensitivity === 'Secret' || item.sensitivity === 'Blocked'}
-        <span class="sens">{item.sensitivity}</span>
+      {#if privacy}
+        <span class="sens" title={privacy.description}>{privacy.label}</span>
       {/if}
-      {#if item.sourceAppName}<span class="source">{item.sourceAppName}</span>{/if}
+      {#if item.sourceAppName && !compact}<span class="source">{item.sourceAppName}</span>{/if}
       <span class="time">{timeLabel}</span>
     </span>
   </button>
@@ -244,7 +302,7 @@
        child so it stays a real <button> (no button-in-button), and clicking it
        toggles the pin without bubbling into the row's paste handler. Hidden
        until the row is hovered/selected (hover selects the row via the button's
-       onmouseenter), shown solid once pinned — so the affordance is discoverable
+       onmousemove), shown solid once pinned — so the affordance is discoverable
        by mouse, not only via the ⌘P shortcut. -->
   <button
     type="button"
@@ -256,7 +314,7 @@
     aria-pressed={item.pinned}
     aria-label={t.keybindings.togglePin}
     title={t.keybindings.togglePin}
-    onmouseenter={() => onSelect(index)}
+    onmousemove={(event) => onHover(index, event)}
     onclick={() => onTogglePin(index)}>📌</button
   >
 </div>
@@ -380,6 +438,13 @@
     color: var(--accent, #6c8dff);
     font-size: 0.85rem;
     font-weight: 600;
+  }
+  /* Same fixed width as the text badge, so image rows line up with the rest. */
+  .kind-thumb {
+    flex: none;
+    display: flex;
+    align-items: center;
+    width: 2.25rem;
   }
   .kind-badge {
     flex: none;
