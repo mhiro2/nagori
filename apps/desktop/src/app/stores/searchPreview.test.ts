@@ -11,7 +11,7 @@ import { isTauri } from '../lib/tauri';
 import type { EntryPreviewDto } from '../lib/types';
 import { hydratePreview, previewState, retryPreview } from './searchPreview.svelte';
 
-const preview = (id: string): EntryPreviewDto => ({
+const preview = (id: string, truncated = false): EntryPreviewDto => ({
   id,
   kind: 'text',
   title: 'T',
@@ -21,7 +21,7 @@ const preview = (id: string): EntryPreviewDto => ({
     byteCount: 1,
     charCount: 1,
     lineCount: 1,
-    truncated: false,
+    truncated,
     sensitive: false,
     fullContentAvailable: true,
   },
@@ -76,13 +76,23 @@ describe('hydratePreview', () => {
   });
 
   it('refetches when only the query changes so the elided-match hint stays current', async () => {
-    vi.mocked(getEntryPreview).mockResolvedValue(preview('e4'));
+    vi.mocked(getEntryPreview).mockResolvedValue(preview('e4', true));
     await hydratePreview('e4', 'foo');
     expect(getEntryPreview).toHaveBeenCalledWith('e4', 'foo');
     vi.mocked(getEntryPreview).mockClear();
     await hydratePreview('e4', 'bar');
     expect(getEntryPreview).toHaveBeenCalledWith('e4', 'bar');
     expect(previewState.query).toBe('bar');
+  });
+
+  it('keeps an untruncated body across query-only changes without refetching', async () => {
+    vi.mocked(getEntryPreview).mockResolvedValue(preview('e4b'));
+    await hydratePreview('e4b', 'foo');
+    vi.mocked(getEntryPreview).mockClear();
+    await hydratePreview('e4b', 'bar');
+    expect(getEntryPreview).not.toHaveBeenCalled();
+    expect(previewState.query).toBe('bar');
+    expect(previewState.preview?.id).toBe('e4b');
   });
 
   it('never shows the loading message when the fetch resolves before the delay', async () => {
@@ -159,7 +169,7 @@ describe('retryPreview', () => {
   });
 
   it('retries a failed query-only refetch even though the old body is still shown', async () => {
-    vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('retry-2'));
+    vi.mocked(getEntryPreview).mockResolvedValueOnce(preview('retry-2', true));
     await hydratePreview('retry-2', 'a');
     vi.mocked(getEntryPreview).mockRejectedValueOnce(new Error('busy'));
     await hydratePreview('retry-2', 'ab');

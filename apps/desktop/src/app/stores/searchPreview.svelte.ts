@@ -74,6 +74,19 @@ export const hydratePreview = async (
   ) {
     return;
   }
+  // The query only feeds `elidedContainsMatch`, which is undefined for a body
+  // shown in full. A settled, untruncated preview of the same entry is already
+  // final for any query, so a keystroke must not re-read the entry.
+  if (
+    !force &&
+    sameEntry &&
+    !previewState.loading &&
+    previewState.errorMessage === undefined &&
+    previewState.preview?.metadata.truncated === false
+  ) {
+    previewState.query = query;
+    return;
+  }
   previewState.entryId = entryId;
   previewState.query = query;
   // Keep the existing preview body visible while we refetch on a query-only
