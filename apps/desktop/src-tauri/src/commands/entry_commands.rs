@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use nagori_core::{
-    AppError, EntryRepository, SearchQuery, build_file_summary, is_text_safe_for_default_output,
+    AppError, ContentKind, EntryRepository, SearchQuery, build_file_summary,
+    is_text_safe_for_default_output,
 };
 use nagori_search::normalize_text;
 use tauri::State;
@@ -43,13 +44,23 @@ pub async fn search_clipboard(
     let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
 
     // Hydrate both projections the result rows need (representation summaries
-    // and basename-first file summaries) under one timer. `list_file_path_sets`
-    // gates on the canonical row sensitivity and only returns `FileList` paths,
-    // so the home-folding builder below never sees a sensitive path.
+    // and basename-first file summaries) under one timer. They read different
+    // tables, so they run side by side on separate pooled connections, and the
+    // file lookup only covers `FileList` rows — a page without any skips it.
+    // `list_file_path_sets` gates on the canonical row sensitivity and only
+    // returns `FileList` paths, so the home-folding builder below never sees a
+    // sensitive path.
     let summary_started = Instant::now();
     let store = state.runtime.store();
-    let summaries = store.list_representation_summaries(&ids).await?;
-    let file_path_sets = store.list_file_path_sets(&ids).await?;
+    let file_ids: Vec<_> = results
+        .iter()
+        .filter(|r| r.content_kind == ContentKind::FileList)
+        .map(|r| r.entry_id)
+        .collect();
+    let (summaries, file_path_sets) = tokio::try_join!(
+        store.list_representation_summaries(&ids),
+        store.list_file_path_sets(&file_ids),
+    )?;
     let summary_elapsed = summary_started.elapsed();
 
     // The current user's home directory folds to `~` in location labels. Pure
