@@ -12,25 +12,44 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 
-/// Single slot holding the cancellation token of the registered palette
-/// search. Keyed by the frontend's request id so a late cancel for a search
-/// that already finished can never abort the request that replaced it.
+/// Cancellation state for the palette search, keyed by the frontend's request
+/// id so a late cancel for a search that already finished can never abort the
+/// request that replaced it.
 #[derive(Debug, Default)]
 pub struct InflightSearch {
-    slot: Mutex<Option<(u64, CancellationToken)>>,
+    slot: Mutex<Slot>,
+}
+
+#[derive(Debug, Default)]
+struct Slot {
+    /// The registered search and its token.
+    running: Option<(u64, CancellationToken)>,
+    /// A cancel that named no registered search. `cancel_search` is a separate
+    /// IPC call that can be handled before the `search_clipboard` it targets
+    /// has registered; keeping its id lets that registration start out
+    /// cancelled. The next registration always consumes it, so an id left
+    /// over from a search that already finished never outlives the request
+    /// after it.
+    cancelled_early: Option<u64>,
 }
 
 impl InflightSearch {
-    fn lock(&self) -> MutexGuard<'_, Option<(u64, CancellationToken)>> {
+    fn lock(&self) -> MutexGuard<'_, Slot> {
         self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Register `request_id` as the in-flight search and return the token its
-    /// command should race against. The guard clears the slot on drop, unless
-    /// a newer registration already replaced it.
+    /// command should race against, already cancelled when a cancel for this
+    /// id arrived first. The guard clears the slot on drop, unless a newer
+    /// registration already replaced it.
     pub fn register(&self, request_id: u64) -> InflightSearchGuard<'_> {
         let token = CancellationToken::new();
-        *self.lock() = Some((request_id, token.clone()));
+        let mut slot = self.lock();
+        if slot.cancelled_early.take() == Some(request_id) {
+            token.cancel();
+        }
+        slot.running = Some((request_id, token.clone()));
+        drop(slot);
         InflightSearchGuard {
             owner: self,
             request_id,
@@ -38,17 +57,14 @@ impl InflightSearch {
         }
     }
 
-    /// Cancel the search registered under `request_id`. Returns `false` when
-    /// that search already finished (or never registered), in which case
-    /// nothing is touched.
-    pub fn cancel(&self, request_id: u64) -> bool {
-        let slot = self.lock();
-        match slot.as_ref() {
-            Some((id, token)) if *id == request_id => {
-                token.cancel();
-                true
-            }
-            _ => false,
+    /// Cancel the search registered under `request_id`. A cancel naming no
+    /// registered search is held for the next registration; see
+    /// [`Slot::cancelled_early`].
+    pub fn cancel(&self, request_id: u64) {
+        let mut slot = self.lock();
+        match slot.running.as_ref() {
+            Some((id, token)) if *id == request_id => token.cancel(),
+            _ => slot.cancelled_early = Some(request_id),
         }
     }
 }
@@ -69,8 +85,12 @@ impl InflightSearchGuard<'_> {
 impl Drop for InflightSearchGuard<'_> {
     fn drop(&mut self) {
         let mut slot = self.owner.lock();
-        if slot.as_ref().is_some_and(|(id, _)| *id == self.request_id) {
-            *slot = None;
+        if slot
+            .running
+            .as_ref()
+            .is_some_and(|(id, _)| *id == self.request_id)
+        {
+            slot.running = None;
         }
     }
 }
@@ -83,20 +103,31 @@ mod tests {
     fn cancel_fires_only_the_matching_registration() {
         let inflight = InflightSearch::default();
         let guard = inflight.register(7);
-        assert!(!inflight.cancel(6));
+        inflight.cancel(6);
         assert!(!guard.token().is_cancelled());
-        assert!(inflight.cancel(7));
+        inflight.cancel(7);
         assert!(guard.token().is_cancelled());
     }
 
     #[test]
-    fn late_cancel_after_completion_is_a_no_op() {
+    fn cancel_before_registration_cancels_that_search() {
+        let inflight = InflightSearch::default();
+        inflight.cancel(3);
+        let guard = inflight.register(3);
+        assert!(guard.token().is_cancelled());
+    }
+
+    #[test]
+    fn late_cancel_after_completion_never_hits_the_next_search() {
         let inflight = InflightSearch::default();
         drop(inflight.register(1));
-        assert!(!inflight.cancel(1));
+        inflight.cancel(1);
         let next = inflight.register(2);
-        assert!(!inflight.cancel(1));
         assert!(!next.token().is_cancelled());
+        drop(next);
+        // The leftover id was consumed by the registration in between.
+        let reused = inflight.register(1);
+        assert!(!reused.token().is_cancelled());
     }
 
     #[test]
@@ -105,7 +136,7 @@ mod tests {
         let first = inflight.register(1);
         let second = inflight.register(2);
         drop(first);
-        assert!(inflight.cancel(2));
+        inflight.cancel(2);
         assert!(second.token().is_cancelled());
     }
 }

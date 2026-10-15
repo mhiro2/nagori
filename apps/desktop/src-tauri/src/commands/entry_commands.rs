@@ -40,9 +40,9 @@ pub async fn search_clipboard(
     }
 }
 
-/// Abort the in-flight search registered under `request_id`. A cancel for a
-/// search that already finished is ignored, so it can never hit the request
-/// that replaced it.
+/// Abort the palette search tagged `request_id`, including one whose
+/// `search_clipboard` call has not registered yet. A cancel for a search that
+/// already finished never reaches the request that replaced it.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn cancel_search(state: State<'_, AppState>, request_id: u64) {
