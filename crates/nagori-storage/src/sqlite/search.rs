@@ -779,6 +779,11 @@ fn project_picked_rows(
     query: &NgramSql<'_>,
     picked: &[String],
 ) -> Result<Vec<NgramCandidate>> {
+    // An empty page (a zero candidate budget) would render `VALUES` with no
+    // rows, which is a syntax error.
+    if picked.is_empty() {
+        return Ok(Vec::new());
+    }
     let values = std::iter::repeat_n("(?, ?)", picked.len())
         .collect::<Vec<_>>()
         .join(",");

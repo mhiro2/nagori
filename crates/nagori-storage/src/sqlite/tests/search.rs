@@ -1098,3 +1098,24 @@ async fn dense_ngram_walk_stops_at_the_window_even_across_tied_timestamps() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn dense_ngram_path_handles_a_zero_candidate_budget() {
+    use super::super::search::{build_filter_fragment, newest_full_overlap_candidates};
+
+    let store = SqliteStore::open_memory().unwrap();
+    for minutes in 0..6 {
+        insert_minutes_ago(&store, &format!("日本語 {minutes}"), minutes).await;
+    }
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    let conn = store.conn().unwrap();
+    let query = dense_test_query(&grams, &filter, &normalized, 0, 1_000);
+    assert_eq!(
+        newest_full_overlap_candidates(&conn, &query)
+            .unwrap()
+            .map(|rows| rows.len()),
+        Some(0),
+    );
+}
