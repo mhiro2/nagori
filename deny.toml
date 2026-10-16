@@ -54,6 +54,10 @@ ignore = [
   # Upstream fix is quick-xml >= 0.41.0, but the Tauri dependency chain still pins 0.37/0.39.
   { id = "RUSTSEC-2026-0194", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
   { id = "RUSTSEC-2026-0195", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
+
+  # zip 4.6.1 (yanked): tauri-plugin-updater 2.x requires zip 4, and every 4.x is yanked.
+  # Tracking: https://github.com/tauri-apps/plugins-workspace/pull/3698
+  { crate = "zip@4.6.1", reason = "yanked; pinned by tauri-plugin-updater 2.x" },
 ]
 
 [bans]
