@@ -240,6 +240,15 @@ struct DedupState {
     /// detected wake gap to defend against a potentially lapped pasteboard
     /// `changeCount`.
     force_content_check: bool,
+    /// Sequence of the last clip skipped because a secure field positively
+    /// had focus. Its body was never read, so `last_content_hash` cannot
+    /// recognise it: without this marker a later wake-gap resync (which
+    /// distrusts the sequence and re-reads the body) would capture the
+    /// still-unchanged password once focus had left the field. Every path
+    /// that anchors a different clip retires it, and a rolled-back clip
+    /// restores it, so a stale marker can never claim a later clip whose
+    /// lapped sequence happens to collide with it.
+    secure_skipped_sequence: Option<ClipboardSequence>,
     /// `true` until the loop has observed and acted on its first sequence.
     /// When `capture_initial_clipboard_on_launch` is `false`, the first
     /// observed sequence is recorded as `last_sequence` and the body read is
@@ -295,6 +304,7 @@ struct DedupRollback {
     sequence: Option<ClipboardSequence>,
     content_hash: Option<String>,
     force_content_check: bool,
+    secure_skipped_sequence: Option<ClipboardSequence>,
 }
 
 impl DedupState {
@@ -303,6 +313,7 @@ impl DedupState {
             last_sequence: None,
             last_content_hash: None,
             force_content_check: false,
+            secure_skipped_sequence: None,
             pristine: true,
             reseed_on_resume: false,
         }
@@ -332,6 +343,7 @@ impl DedupState {
             sequence: self.last_sequence.replace(sequence),
             content_hash: self.last_content_hash.clone(),
             force_content_check: force_flag_at_tick_start,
+            secure_skipped_sequence: self.secure_skipped_sequence.take(),
         }
     }
 
@@ -345,6 +357,23 @@ impl DedupState {
         self.last_sequence = saved.sequence;
         self.last_content_hash = saved.content_hash;
         self.force_content_check = saved.force_content_check;
+        self.secure_skipped_sequence = saved.secure_skipped_sequence;
+    }
+
+    /// Anchor `sequence` as a decided clip without capturing it, retiring a
+    /// secure-skip marker that belonged to an earlier clip.
+    fn anchor_decided(&mut self, sequence: ClipboardSequence) {
+        if self.secure_skipped_sequence.as_ref() != Some(&sequence) {
+            self.secure_skipped_sequence = None;
+        }
+        self.last_sequence = Some(sequence);
+    }
+
+    /// Whether `sequence` is the clip a positive secure-field skip anchored
+    /// and nothing has been anchored since.
+    fn is_secure_skipped(&self, sequence: &ClipboardSequence) -> bool {
+        self.secure_skipped_sequence.as_ref() == Some(sequence)
+            && self.last_sequence.as_ref() == Some(sequence)
     }
 }
 
@@ -940,7 +969,7 @@ where
         let budget = ReadBudget::new(MAX_ENTRY_SIZE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES);
         match self.reader.current_snapshot_with_max(budget).await? {
             CapturedSnapshot::Captured(snapshot) => {
-                self.dedup.last_sequence = Some(snapshot.sequence.clone());
+                self.dedup.anchor_decided(snapshot.sequence.clone());
                 self.dedup.last_content_hash = EntryFactory::from_snapshot(snapshot)
                     .map(|entry| effective_dedupe_hash(&entry));
             }
@@ -950,7 +979,7 @@ where
                 // the sequence so the next poll skips it without re-probing;
                 // a later wake-resync re-reads through the bounded steady-state
                 // path, hits the same oversize guard, and skips it again.
-                self.dedup.last_sequence = Some(sequence);
+                self.dedup.anchor_decided(sequence);
                 self.dedup.last_content_hash = None;
             }
             CapturedSnapshot::Excluded { sequence, .. } => {
@@ -958,7 +987,7 @@ where
                 // (concealed / transient), so its body was never read and
                 // there is nothing to hash. Anchor the sequence like the
                 // oversized case so the next poll skips it without re-probing.
-                self.dedup.last_sequence = Some(sequence);
+                self.dedup.anchor_decided(sequence);
                 self.dedup.last_content_hash = None;
             }
         }
@@ -1103,6 +1132,7 @@ where
                     .record("capture_skipped", None, Some("secure_field"))
                     .await;
                 self.dedup.last_sequence = Some(sequence.clone());
+                self.dedup.secure_skipped_sequence = Some(sequence.clone());
                 self.dedup.force_content_check = false;
                 self.dedup.pristine = false;
                 self.secure_recovery = None;
@@ -1199,7 +1229,7 @@ where
         self.note_capture_drop(CaptureEventCategory::Policy);
         self.dedup.force_content_check = false;
         self.dedup.pristine = false;
-        self.dedup.last_sequence = Some(sequence);
+        self.dedup.anchor_decided(sequence);
     }
 
     /// Run the admission gates and policy classification for one
@@ -1380,6 +1410,65 @@ where
     /// "now" used for gap detection. Production callers should use
     /// `capture_once`; tests use this to simulate sleep gaps without driving
     /// real time.
+    /// Decide the tick from the sequence alone, without reading the body.
+    /// Returns `true` when the clip is already decided and the tick ends.
+    fn skip_by_sequence(
+        &mut self,
+        sequence: &ClipboardSequence,
+        force_content_check: bool,
+    ) -> bool {
+        // The cheap dedup and self-write paths are gated on
+        // `!force_content_check`: when a wake-gap resync armed the flag we
+        // deliberately distrust the sequence (a lapped macOS `changeCount` can
+        // collide with a stale value) and fall through to the body read +
+        // content-hash cross-check. A secure-skipped clip is the one exception.
+        if !force_content_check {
+            // Cheap dedup: the clip hasn't changed since the last tick.
+            if self.dedup.last_sequence.as_ref() == Some(sequence) {
+                return true;
+            }
+            // Self-write suppression: this exact clip was just written by the
+            // app itself (a copy-back of an existing history entry on the paste
+            // path), not copied from another app. Re-capturing it would
+            // re-enter the entry as new content — bumping its `created_at` and
+            // so hoisting it to the top of the recency list, or, when the
+            // round-tripped representation set hashes differently from the
+            // stored one, inserting an outright duplicate row. Anchor the dedup
+            // baseline like the other skip paths (so the next poll
+            // short-circuits on sequence equality) and drop the clip without
+            // reading its body. The use-count bump that ranks re-used entries
+            // already happened on the copy path; the capture loop adds nothing.
+            // The probe is non-consuming, so an identical clip the user later
+            // copies from another app lands at a fresh sequence and is
+            // captured. Deliberately *not* run under `force_content_check`: a
+            // post-wake external clip whose lapped sequence collides with our
+            // last self-write must reach the body+hash check rather than
+            // be dropped here as ours. The narrow cost is that an unchanged
+            // copy-back still on the clipboard across a sleep is re-captured
+            // (and re-hoisted) on wake — benign, and far rarer than a lost
+            // foreign clip.
+            if self.reader.matches_self_write(sequence) {
+                info!("capture_skipped reason=self_write");
+                self.dedup.pristine = false;
+                self.dedup.anchor_decided(sequence.clone());
+                return true;
+            }
+        } else if self.dedup.is_secure_skipped(sequence) {
+            // A wake-gap resync distrusts the sequence and would re-read the
+            // body, but the clip still on the clipboard is the one a secure
+            // field positively covered: its body was never hashed, so the
+            // content cross-check could not recognise it and the
+            // password would be captured once focus had left the field. Keep
+            // it decided instead. The narrow cost mirrors the secure skip
+            // itself: a foreign clip whose lapped sequence collides with the
+            // skipped one is dropped rather than leaking the secret.
+            info!("capture_skipped reason=secure_field_resync");
+            self.dedup.force_content_check = false;
+            return true;
+        }
+        false
+    }
+
     pub async fn capture_once_at(&mut self, now: SystemTime) -> Result<Option<EntryId>> {
         // Snapshot settings at the start of the tick. Today the polling
         // loop's `tokio::select!` already serialises `update_settings`
@@ -1442,41 +1531,8 @@ where
         // colliding sequence again. Re-trying with the flag still set is
         // safe because the body-read path is idempotent.
         let force_content_check = self.dedup.force_content_check;
-        // Sequence-only fast paths. Both are gated on `!force_content_check`:
-        // when a wake-gap resync armed the flag we deliberately distrust the
-        // sequence (a lapped macOS `changeCount` can collide with a stale
-        // value) and fall through to the body read + content-hash cross-check.
-        if !force_content_check {
-            // Cheap dedup: the clip hasn't changed since the last tick.
-            if self.dedup.last_sequence.as_ref() == Some(&sequence) {
-                return Ok(None);
-            }
-            // Self-write suppression: this exact clip was just written by the
-            // app itself (a copy-back of an existing history entry on the paste
-            // path), not copied from another app. Re-capturing it would
-            // re-enter the entry as new content — bumping its `created_at` and
-            // so hoisting it to the top of the recency list, or, when the
-            // round-tripped representation set hashes differently from the
-            // stored one, inserting an outright duplicate row. Anchor the dedup
-            // baseline like the other skip paths (so the next poll
-            // short-circuits on sequence equality) and drop the clip without
-            // reading its body. The use-count bump that ranks re-used entries
-            // already happened on the copy path; the capture loop adds nothing.
-            // The probe is non-consuming, so an identical clip the user later
-            // copies from another app lands at a fresh sequence and is
-            // captured. Deliberately *not* run under `force_content_check`: a
-            // post-wake external clip whose lapped sequence collides with our
-            // last self-write must reach the body+hash check below rather than
-            // be dropped here as ours. The narrow cost is that an unchanged
-            // copy-back still on the clipboard across a sleep is re-captured
-            // (and re-hoisted) on wake — benign, and far rarer than a lost
-            // foreign clip.
-            if self.reader.matches_self_write(&sequence) {
-                info!("capture_skipped reason=self_write");
-                self.dedup.pristine = false;
-                self.dedup.last_sequence = Some(sequence);
-                return Ok(None);
-            }
+        if self.skip_by_sequence(&sequence, force_content_check) {
+            return Ok(None);
         }
         // Honour the "skip whatever was on the clipboard before launch" flag
         // by anchoring `last_sequence` (and `last_content_hash`, so a future
@@ -1529,7 +1585,7 @@ where
                 // an oversized pre-read is a decided outcome, never undone.)
                 self.dedup.force_content_check = false;
                 self.dedup.pristine = false;
-                self.dedup.last_sequence = Some(sequence);
+                self.dedup.anchor_decided(sequence);
                 return Ok(None);
             }
             CapturedSnapshot::Excluded { sequence, kind } => {
