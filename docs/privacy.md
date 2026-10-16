@@ -44,7 +44,9 @@ contract.
 
 ## Secret redaction
 
-- A built-in classifier flags API keys, JWTs, PEM private-key
+- A built-in classifier flags API keys, `password` / `token` / `secret` /
+  `api_key` assignments (including quoted JSON or YAML keys such as
+  `{"password": "…"}`), JWTs, PEM private-key
   blocks (BEGIN-only is enough), AWS access keys, GitHub tokens,
   credit-card numbers (13–19 digits with a card network's issuer
   prefix and a valid Luhn check digit, which keeps most timestamps and
