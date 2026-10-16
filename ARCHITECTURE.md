@@ -697,7 +697,18 @@ firing the `search_documents_ad_fts` sync trigger) drops the row's
 representations, blobs, embeddings, thumbnails, and search / ngram
 index in the same transaction. Retention therefore reclaims disk (a
 later vacuum from the maintenance sweep then shrinks the file) rather
-than tombstoning rows that grow it forever. Per-entry deletes
+than tombstoning rows that grow it forever. The count and age sweeps
+commit in `HARD_DELETE_BATCH`-sized transactions and the byte budget in
+`TOTAL_BYTES_EVICTION_BATCH`-sized rounds, each on a freshly checked-out
+connection opened with `BEGIN IMMEDIATE`, and pause for `HARD_DELETE_YIELD`
+(longer than the busy handler's 100 ms retry ceiling) after each full batch
+so a capture waiting on the writer is guaranteed its turn; a batch that fails
+still checkpoints the ones already committed. Shrinking a 20k-entry history
+to one row in a single transaction measured ~25 s and made a concurrent
+capture fail with `database is locked`, losing any clip copied before the
+capture loop's retry. Each batch re-selects from the current table, so a
+capture committed between batches is trimmed or budgeted like any other
+row. Per-entry deletes
 (`delete_entry`) soft-delete by default, but
 `permanent_delete_on_delete` switches that surface to the same immediate
 hard-delete primitive. Secret rows are always hard-deleted immediately, and
@@ -716,7 +727,7 @@ runtime then fires a maintenance kick (a watch channel the maintenance
 supervisor selects on beside its periodic timer) so the deferred
 `purge_deleted` reclaims the rows within seconds rather than at the next
 30-minute tick — and a sweep that *fails* retries in a minute rather than
-leaving those bodies for the full interval. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
+leaving those bodies for the full interval. `purge_deleted` itself commits in `HARD_DELETE_BATCH`-sized
 transactions on freshly checked-out connections, so a 100k backlog cannot hold
 the single writer for the whole reclaim and starve captures behind it. Unlike
 `mark_deleted` — which drops a tombstoned row's search / ngram rows eagerly
