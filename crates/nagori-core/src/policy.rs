@@ -734,7 +734,21 @@ fn sensitive_regexes() -> &'static [Regex] {
             r"github_pat_[A-Za-z0-9_]{20,}",
             r"gh[pousr]_[A-Za-z0-9_]{20,}",
             r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-            r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]{8,}"#,
+            // The optional quote after the key name admits the closing quote
+            // of a JSON / quoted-YAML key (`"password": "…"`), which would
+            // otherwise sit between the name and the separator and keep the
+            // most common serialised form from ever matching. A quoted value
+            // is consumed up to its closing quote, never past the line, so a
+            // space, the other quote character, or an escaped quote inside it
+            // cannot cut the match short and leave the rest of the secret
+            // behind; the closing quote itself is left in place. Escapes
+            // follow the config formats a secret is usually copied from: a
+            // double-quoted value (JSON, YAML, TOML basic strings) honours
+            // backslash escapes, while a single-quoted one (YAML, TOML literal
+            // strings, shell) treats a backslash as a plain character and
+            // `''` as an escaped quote. An unquoted value still runs to the
+            // next quote or whitespace.
+            r#"(?i)(api[_-]?key|token|secret|password)['"]?\s*[:=]\s*(?:"(?:[^"\\\n]|\\.){8,}|'(?:[^'\n]|''){8,}|[^'"\s]{8,})"#,
         ]
         .iter()
         // These are static, test-covered patterns: a compile failure is a
