@@ -814,6 +814,13 @@ The handler is checked for the statement's whole life (closing the race an
 after-the-fact `sqlite3_interrupt` would lose) and an RAII guard removes it
 before the connection returns to the pool — even on a panic — so a later
 borrower of the recycled connection is never aborted by a stale token.
+The palette runs one search at a time and queues only the newest request
+behind it; each `search_clipboard` call carries a request id, and queuing a
+newer request sends `cancel_search` for the running id, so the desktop
+command drops its search future (firing the token above) instead of making
+the newer keystroke wait. A cancel that reaches the backend before the
+search it names has registered is held for that registration, and a late
+cancel for a finished search never matches the next request id.
 
 **Hybrid ngram is CJK-scoped.** In the implicit `Hybrid` (Auto) plan the
 ngram branch only fires for queries that carry a CJK character, and the
@@ -837,6 +844,18 @@ bounded substring window unless they are complete FTS tokens; explicit
 (`NgramQueryMode::Full`; the provider still skips ngram for non-CJK queries
 longer than eight characters, which substring already covers). Explicit
 `FullText` queries keep whole-token FTS semantics.
+
+**Frequent grams stay page-bounded.** A common Han character or a kana run
+present in most rows owns a posting list as large as the history, so the
+ngram branch never projects candidate columns (the `instr` text match over
+the whole normalized body, the preview window) before `LIMIT`: it ranks ids
+by gram overlap and recency first and projects only the returned page. When
+every query gram has at least `DENSE_GRAM_POSTINGS` postings, it first
+walks the recency index over the newest `DENSE_SCAN_WINDOW` live entries,
+probing each gram by `(gram, entry_id)`, and stops as soon as the page holds
+enough rows carrying every gram — those are exactly the rows the overlap
+ranking puts first. A window with too few such rows falls back to the
+ranked aggregate, so the walk costs at most one bounded index scan.
 
 **Semantic plan.** `SearchMode::Semantic` resolves to its own plan but
 needs a query embedding, so `NagoriRuntime::search` routes it ahead of the
@@ -1960,7 +1979,11 @@ not duplicate runtime logic.
   guard — a failed query-only refetch keeps the old body on screen, which the
   guard would otherwise treat as done). When a search query matches text
   inside the elided middle, the DTO's `elidedContainsMatch` flag surfaces a
-  warning. For Public text entries the truncation notice offers *Show full
+  warning. The flag is decided against the entry's stored normalized text
+  (a term is hidden when the whole body holds more of it than the visible
+  head and tail), so only the bounded visible part is normalized per
+  keystroke, and an untruncated preview is kept across query-only changes
+  instead of being fetched again. For Public text entries the truncation notice offers *Show full
   body*, which fetches the body up to 1 MiB via `get_entry_preview_full`;
   used from the side pane it also opens the full-width preview, where a
   body that size is readable. Non-Public entries hide the affordance

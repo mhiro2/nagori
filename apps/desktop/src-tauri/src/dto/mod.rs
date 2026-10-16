@@ -332,6 +332,10 @@ pub struct SearchRequestDto {
     pub limit: Option<usize>,
     #[serde(default)]
     pub filters: Option<SearchFiltersDto>,
+    /// Frontend-assigned id that `cancel_search` can target while this
+    /// search is in flight. `None` leaves the search uncancellable.
+    #[serde(default)]
+    pub request_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

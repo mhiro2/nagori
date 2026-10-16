@@ -41,6 +41,7 @@ tauri-plugin-updater = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 # `log` feature bridges `tracing` events to the `log` facade. The desktop binary
 # installs no `tracing` subscriber, so without it every `tracing::warn!/error!`
 # the desktop and the embedded daemon emit (capture_skipped, command_error, …)

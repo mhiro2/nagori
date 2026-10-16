@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use nagori_core::{
     ClipboardContent, ClipboardEntry, EntryId, Sensitivity, extension_of, find_common_parent,
     fold_home, is_text_safe_for_default_output, normalize_text, parent_for_display,
@@ -252,35 +254,27 @@ impl EntryPreviewDto {
         home: Option<&str>,
     ) -> Self {
         let sensitive = !is_text_safe_for_default_output(entry.sensitivity);
-        let raw_text = if sensitive {
-            safe_preview_for_dto(entry)
+        // Borrow the body instead of copying it: only the bounded preview
+        // window below needs its own allocation.
+        let raw_text: Cow<'_, str> = if sensitive {
+            Cow::Owned(safe_preview_for_dto(entry))
         } else {
-            entry.plain_text().unwrap_or_default().to_owned()
+            Cow::Borrowed(entry.plain_text().unwrap_or_default())
         };
         let truncation_result = truncate_for_preview(&raw_text, byte_cap, MAX_PREVIEW_LINES);
         let preview_text = truncation_result.text;
         let truncation_dto = truncation_result.truncation;
         let truncated = !matches!(truncation_dto, TruncationDto::None);
-        // Apply the same normalizer used by the FTS pipeline (NFKC + lowercase
-        // + whitespace collapse) so the hint matches whether the *search*
-        // would have hit text inside the elided middle. Per-term `all()` keeps
-        // a multi-token query like "foo bar" honest when only some of its
-        // tokens fall in the elided window.
-        let elided_contains_match = match (query, truncation_result.elided_region) {
-            (Some(q), Some((start, end))) if start < end && end <= raw_text.len() => {
-                let normalized_q = normalize_text(q);
-                if normalized_q.is_empty() {
-                    None
-                } else {
-                    let normalized_region = normalize_text(&raw_text[start..end]);
-                    let hit = normalized_q
-                        .split_whitespace()
-                        .all(|term| normalized_region.contains(term));
-                    Some(hit)
-                }
-            }
-            _ => None,
-        };
+        let elided_contains_match = truncation_result.elided_region.and_then(|region| {
+            // The stored normalized body only mirrors the plain text for
+            // non-sensitive rows; a redacted placeholder has none.
+            let normalized_body = if sensitive {
+                ""
+            } else {
+                entry.search.normalized_text.as_str()
+            };
+            elided_match_hint(&raw_text, region, normalized_body, query?)
+        });
         // Mirror the IPC gate on `get_entry_preview_full` (Public-only). If the
         // entry isn't Public, the expand button would just trigger a forbidden
         // response, so we hide it at the source.
@@ -437,6 +431,65 @@ struct TruncationResult {
 /// head + sentinel + tail string with a single elided region in the
 /// middle. Falls back to a head-only cut when the body is small enough
 /// that head+tail would round-trip the entire string anyway.
+/// Search-hit hint for a truncated body: whether `query` matches inside the
+/// elided `raw[start..end]` window. Applies the same normalizer as the FTS
+/// pipeline (NFKC + lowercase + whitespace collapse) so the hint matches
+/// whether the *search* would have hit text inside the elided middle, and
+/// requires every term so a multi-token query like "foo bar" stays honest
+/// when only some of its tokens fall in the window. `None` when the query
+/// normalizes to nothing.
+fn elided_match_hint(
+    raw: &str,
+    (start, end): (usize, usize),
+    normalized_body: &str,
+    query: &str,
+) -> Option<bool> {
+    if start >= end || end > raw.len() {
+        return None;
+    }
+    let normalized_q = normalize_text(query);
+    if normalized_q.is_empty() {
+        return None;
+    }
+    Some(elided_region_matches(
+        raw,
+        (start, end),
+        normalized_body,
+        &normalized_q,
+    ))
+}
+
+/// Whether every term of `normalized_query` occurs in the elided
+/// `raw[start..end]` window.
+///
+/// The window can be most of a multi-megabyte body, and normalizing it on
+/// every keystroke dominated the preview cost. When the stored
+/// `normalized_body` (the search document, `normalize_text` of the same plain
+/// text) is available, the check instead normalizes only the visible head and
+/// tail — bounded by the preview cap — and counts occurrences: a term occurs in
+/// the hidden window when the whole body holds more of it than the visible
+/// parts do. A match straddling a cut counts as hidden, which errs toward
+/// warning. Rows without a search document fall back to normalizing the
+/// window.
+fn elided_region_matches(
+    raw: &str,
+    (start, end): (usize, usize),
+    normalized_body: &str,
+    normalized_query: &str,
+) -> bool {
+    let mut terms = normalized_query.split_whitespace();
+    if normalized_body.is_empty() {
+        let normalized_region = normalize_text(&raw[start..end]);
+        return terms.all(|term| normalized_region.contains(term));
+    }
+    let head = normalize_text(&raw[..start]);
+    let tail = normalize_text(&raw[end..]);
+    terms.all(|term| {
+        let total = normalized_body.matches(term).count();
+        total > 0 && total > head.matches(term).count() + tail.matches(term).count()
+    })
+}
+
 fn truncate_for_preview(value: &str, max_bytes: usize, max_lines: usize) -> TruncationResult {
     if value.len() <= max_bytes && line_count(value) <= max_lines {
         return TruncationResult {
@@ -810,6 +863,42 @@ mod tests {
         assert_eq!(both.metadata.elided_contains_match, Some(true));
         let one_missing = EntryPreviewDto::from_entry_with_query(&entry2, Some("foo qux"), None);
         assert_eq!(one_missing.metadata.elided_contains_match, Some(false));
+    }
+
+    #[test]
+    fn entry_preview_elided_match_ignores_hits_that_stay_visible() {
+        // A term shown in the kept head is not hidden; a second copy in the
+        // elided middle is.
+        let mut visible_only = String::with_capacity(200 * 1024);
+        visible_only.push_str("Marker ");
+        visible_only.push_str(&"x".repeat(100_000));
+        visible_only.push_str(&"y".repeat(100_000));
+        let entry = text_entry(&visible_only);
+        let dto = EntryPreviewDto::from_entry_with_query(&entry, Some("marker"), None);
+        assert!(dto.metadata.truncated);
+        assert_eq!(dto.metadata.elided_contains_match, Some(false));
+
+        let mut also_hidden = visible_only.clone();
+        also_hidden.insert_str(100_000, " MARKER ");
+        let entry = text_entry(&also_hidden);
+        let dto = EntryPreviewDto::from_entry_with_query(&entry, Some("marker"), None);
+        assert_eq!(dto.metadata.elided_contains_match, Some(true));
+    }
+
+    #[test]
+    fn entry_preview_elided_match_falls_back_without_a_search_document() {
+        // Legacy rows without a search document carry an empty normalized
+        // body; the hint then normalizes the elided window itself.
+        let mut body = String::with_capacity(200 * 1024);
+        body.push_str(&"x".repeat(100_000));
+        body.push_str("HiddenKeyword");
+        body.push_str(&"y".repeat(100_000));
+        let mut entry = text_entry(&body);
+        entry.search.normalized_text.clear();
+        let hit = EntryPreviewDto::from_entry_with_query(&entry, Some("hiddenkeyword"), None);
+        assert_eq!(hit.metadata.elided_contains_match, Some(true));
+        let miss = EntryPreviewDto::from_entry_with_query(&entry, Some("absent"), None);
+        assert_eq!(miss.metadata.elided_contains_match, Some(false));
     }
 
     #[test]

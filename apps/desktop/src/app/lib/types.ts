@@ -310,6 +310,8 @@ export type SearchRequest = {
   mode?: SearchMode;
   limit?: number;
   filters?: SearchFilters;
+  // Tags the search so `cancelSearch` can abort it while it is in flight.
+  requestId?: number;
 };
 
 export type SearchResponse = {

@@ -4,13 +4,14 @@
 use std::time::{Duration, Instant};
 
 use nagori_core::{
-    AppError, EntryRepository, SearchQuery, build_file_summary, is_text_safe_for_default_output,
+    AppError, ContentKind, EntryRepository, SearchQuery, build_file_summary,
+    is_text_safe_for_default_output,
 };
 use nagori_search::normalize_text;
 use tauri::State;
 
 use crate::dto::{EntryDto, FileSummaryDto, SearchRequestDto, SearchResponseDto, SearchResultDto};
-use crate::error::CommandResult;
+use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
 use super::{parse_entry_id, purge_preview_temp_dir, remove_preview_temp_files_for};
@@ -19,9 +20,37 @@ const DEFAULT_SEARCH_LIMIT: usize = 50;
 const DEFAULT_RECENT_LIMIT: usize = 50;
 const MAX_COMMAND_LIMIT: usize = 200;
 
+/// Run a palette search. A request carrying a `request_id` registers as the
+/// in-flight search, so `cancel_search` can abort it once a newer keystroke
+/// queues behind it; dropping the search future interrupts the `SQLite` work
+/// it is waiting on.
 #[tauri::command]
 pub async fn search_clipboard(
     state: State<'_, AppState>,
+    request: SearchRequestDto,
+) -> CommandResult<SearchResponseDto> {
+    let Some(request_id) = request.request_id else {
+        return run_search(&state, request).await;
+    };
+    let registration = state.inflight_search.register(request_id);
+    tokio::select! {
+        biased;
+        () = registration.token().cancelled() => Err(CommandError::cancelled()),
+        response = run_search(&state, request) => response,
+    }
+}
+
+/// Abort the palette search tagged `request_id`, including one whose
+/// `search_clipboard` call has not registered yet. A cancel for a search that
+/// already finished never reaches the request that replaced it.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn cancel_search(state: State<'_, AppState>, request_id: u64) {
+    state.inflight_search.cancel(request_id);
+}
+
+async fn run_search(
+    state: &AppState,
     request: SearchRequestDto,
 ) -> CommandResult<SearchResponseDto> {
     let limit = request
@@ -43,13 +72,23 @@ pub async fn search_clipboard(
     let ids: Vec<_> = results.iter().map(|r| r.entry_id).collect();
 
     // Hydrate both projections the result rows need (representation summaries
-    // and basename-first file summaries) under one timer. `list_file_path_sets`
-    // gates on the canonical row sensitivity and only returns `FileList` paths,
-    // so the home-folding builder below never sees a sensitive path.
+    // and basename-first file summaries) under one timer. They read different
+    // tables, so they run side by side on separate pooled connections, and the
+    // file lookup only covers `FileList` rows — a page without any skips it.
+    // `list_file_path_sets` gates on the canonical row sensitivity and only
+    // returns `FileList` paths, so the home-folding builder below never sees a
+    // sensitive path.
     let summary_started = Instant::now();
     let store = state.runtime.store();
-    let summaries = store.list_representation_summaries(&ids).await?;
-    let file_path_sets = store.list_file_path_sets(&ids).await?;
+    let file_ids: Vec<_> = results
+        .iter()
+        .filter(|r| r.content_kind == ContentKind::FileList)
+        .map(|r| r.entry_id)
+        .collect();
+    let (summaries, file_path_sets) = tokio::try_join!(
+        store.list_representation_summaries(&ids),
+        store.list_file_path_sets(&file_ids),
+    )?;
     let summary_elapsed = summary_started.elapsed();
 
     // The current user's home directory folds to `~` in location labels. Pure

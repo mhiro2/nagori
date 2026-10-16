@@ -241,6 +241,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::entry_commands::search_clipboard,
+            commands::entry_commands::cancel_search,
             commands::entry_commands::list_recent_entries,
             commands::entry_commands::list_source_apps,
             commands::entry_commands::list_pinned_entries,

@@ -37,6 +37,17 @@ impl CommandError {
         }
     }
 
+    /// The command was abandoned because the caller asked to cancel it (a
+    /// palette search superseded by a newer keystroke). The caller already
+    /// moved on, so the frontend drops it silently.
+    pub fn cancelled() -> Self {
+        Self {
+            code: "cancelled".to_owned(),
+            message: "cancelled".to_owned(),
+            recoverable: true,
+        }
+    }
+
     /// Reject a command whose target row has a sensitivity tier that the
     /// caller is not permitted to read in full (e.g. expanded preview on
     /// a Secret entry). Surfaces a stable `forbidden` code so the

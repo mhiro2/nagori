@@ -10,12 +10,14 @@ use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
 mod clear_on_quit;
+mod search_cancel;
 mod startup;
 #[cfg(test)]
 mod test_support;
 mod window_focus;
 
 use clear_on_quit::clear_on_quit_marker_path;
+pub use search_cancel::InflightSearch;
 use startup::{BackgroundTasks, SettingsLoadGate};
 pub(crate) use startup::{runtime_shutdown_requires_app_exit, settings_loaded_or_shutdown};
 
@@ -78,6 +80,9 @@ pub struct AppState {
     /// `nagori://hotkey_register_failed` / `_resolved` events for
     /// updates.
     pub last_hotkey_failure: Mutex<HotkeyFailureCache>,
+    /// Cancellation handle for the palette search in flight, so a newer
+    /// keystroke can abort a slow search instead of waiting for its results.
+    pub inflight_search: InflightSearch,
     /// Single-instance lock over the data directory, held for the whole
     /// process lifetime. Two desktop instances (or a desktop instance plus a
     /// standalone daemon) owning the same store would double-capture the
@@ -326,6 +331,7 @@ impl AppState {
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
             last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
+            inflight_search: InflightSearch::default(),
             // Set by `try_new_at` for real launches; `build`-only callers
             // (tests, in-memory stores) own no on-disk directory to lock.
             instance_lock: None,

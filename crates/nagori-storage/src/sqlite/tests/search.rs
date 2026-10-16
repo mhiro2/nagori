@@ -951,3 +951,171 @@ async fn exact_search_recalls_old_entries_that_auto_misses() {
         );
     }
 }
+
+/// Ngram query inputs with dense-path thresholds small enough for a test
+/// history.
+fn dense_test_query<'a>(
+    grams: &'a [String],
+    filter: &'a super::super::search::FilterFragment,
+    normalized: &'a str,
+    limit: i64,
+    dense_window: i64,
+) -> super::super::search::NgramSql<'a> {
+    super::super::search::NgramSql {
+        grams,
+        filter,
+        normalized,
+        limit,
+        max_count: usize::try_from(limit).unwrap(),
+        max_bytes: MAX_SEARCH_CANDIDATE_BYTES,
+        dense_min_postings: 4,
+        dense_window,
+    }
+}
+
+/// Insert `text` once per minute offset, newest last, so `created_at` order
+/// is deterministic.
+async fn insert_minutes_ago(store: &SqliteStore, text: &str, minutes: i64) -> EntryId {
+    let id = insert_text(store, text).await;
+    backdate_entry(
+        store,
+        id,
+        OffsetDateTime::now_utc() - time::Duration::minutes(minutes),
+    );
+    id
+}
+
+#[tokio::test]
+async fn dense_ngram_path_returns_the_ranked_page_for_frequent_grams() {
+    use super::super::search::{
+        build_filter_fragment, newest_full_overlap_candidates, ranked_ngram_candidates,
+    };
+
+    let store = SqliteStore::open_memory().unwrap();
+    // Full-overlap rows interleaved with rows holding only part of the query,
+    // so the ranked aggregate has to put overlap ahead of recency.
+    for minutes in (0..24).rev() {
+        let text = if minutes % 3 == 0 {
+            format!("日本 だけ {minutes}")
+        } else {
+            format!("日本語の文書 {minutes}")
+        };
+        insert_minutes_ago(&store, &text, minutes).await;
+    }
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    assert!(grams.len() > 1, "the query must span several grams");
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let query = dense_test_query(&grams, &filter, &normalized, 5, 1_000);
+
+    let conn = store.conn().unwrap();
+    let dense = newest_full_overlap_candidates(&conn, &query)
+        .unwrap()
+        .expect("frequent grams with enough full-overlap rows take the dense path");
+    let ranked = ranked_ngram_candidates(&conn, &query).unwrap();
+    let ids = |rows: &[nagori_core::NgramCandidate]| {
+        rows.iter()
+            .map(|c| (c.candidate.entry_id, c.ngram_overlap))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&dense), ids(&ranked));
+    assert!(
+        dense
+            .iter()
+            .all(|c| (c.ngram_overlap - 1.0).abs() < f32::EPSILON)
+    );
+}
+
+#[tokio::test]
+async fn dense_ngram_path_defers_to_the_aggregate_for_rare_or_old_matches() {
+    use super::super::search::{build_filter_fragment, newest_full_overlap_candidates};
+
+    let store = SqliteStore::open_memory().unwrap();
+    // Old matches pushed out of a small window by newer rows without them.
+    for minutes in 100..110 {
+        insert_minutes_ago(&store, &format!("日本語 {minutes}"), minutes).await;
+    }
+    for minutes in 0..10 {
+        insert_minutes_ago(&store, &format!("english only {minutes}"), minutes).await;
+    }
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let conn = store.conn().unwrap();
+
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    let narrow = dense_test_query(&grams, &filter, &normalized, 5, 8);
+    assert!(
+        newest_full_overlap_candidates(&conn, &narrow)
+            .unwrap()
+            .is_none(),
+        "a window without enough matches must fall back",
+    );
+    let wide = dense_test_query(&grams, &filter, &normalized, 5, 1_000);
+    assert_eq!(
+        newest_full_overlap_candidates(&conn, &wide)
+            .unwrap()
+            .map(|rows| rows.len()),
+        Some(5),
+    );
+
+    // A gram below the posting threshold never takes the dense path.
+    let rare = normalize_text("語x");
+    let rare_grams = nagori_search::generate_query_ngrams(&rare);
+    let rare_query = dense_test_query(&rare_grams, &filter, &rare, 5, 1_000);
+    assert!(
+        newest_full_overlap_candidates(&conn, &rare_query)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn dense_ngram_walk_stops_at_the_window_even_across_tied_timestamps() {
+    use super::super::search::{build_filter_fragment, newest_full_overlap_candidates};
+
+    let store = SqliteStore::open_memory().unwrap();
+    // Every row shares one timestamp, so no `created_at` bound can split them:
+    // only the row count may cap the walk.
+    let when = OffsetDateTime::now_utc() - time::Duration::minutes(5);
+    for idx in 0..20 {
+        let text = if idx % 2 == 0 {
+            format!("日本語 {idx}")
+        } else {
+            format!("english {idx}")
+        };
+        let id = insert_text(&store, &text).await;
+        backdate_entry(&store, id, when);
+    }
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    let conn = store.conn().unwrap();
+    // Eight walked rows can hold at most eight matches, short of nine.
+    let query = dense_test_query(&grams, &filter, &normalized, 9, 8);
+    assert!(
+        newest_full_overlap_candidates(&conn, &query)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn dense_ngram_path_handles_a_zero_candidate_budget() {
+    use super::super::search::{build_filter_fragment, newest_full_overlap_candidates};
+
+    let store = SqliteStore::open_memory().unwrap();
+    for minutes in 0..6 {
+        insert_minutes_ago(&store, &format!("日本語 {minutes}"), minutes).await;
+    }
+    let filter = build_filter_fragment(&SearchFilters::default()).unwrap();
+    let normalized = normalize_text("日本語");
+    let grams = nagori_search::generate_query_ngrams(&normalized);
+    let conn = store.conn().unwrap();
+    let query = dense_test_query(&grams, &filter, &normalized, 0, 1_000);
+    assert_eq!(
+        newest_full_overlap_candidates(&conn, &query)
+            .unwrap()
+            .map(|rows| rows.len()),
+        Some(0),
+    );
+}

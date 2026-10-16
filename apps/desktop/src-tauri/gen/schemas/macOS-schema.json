@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the cancel_ai_action command without any pre-configured scope."
         },
         {
+          "description": "Enables the cancel_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-search",
+          "markdownDescription": "Enables the cancel_search command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_for_updates command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-for-updates",
@@ -505,6 +511,12 @@
           "type": "string",
           "const": "deny-cancel-ai-action",
           "markdownDescription": "Denies the cancel_ai_action command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-search",
+          "markdownDescription": "Denies the cancel_search command without any pre-configured scope."
         },
         {
           "description": "Denies the check_for_updates command without any pre-configured scope.",
