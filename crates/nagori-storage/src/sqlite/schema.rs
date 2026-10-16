@@ -27,6 +27,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (103, DROP_REDUNDANT_NGRAM_GRAM_INDEX),
     (104, SCOPE_FTS_UPDATE_TRIGGER),
     (105, ADD_SEMANTIC_POLICY_TRACKING),
+    (106, ENABLE_FTS_SECURE_DELETE),
 ];
 
 /// Highest schema version supported by this binary. A DB whose
@@ -561,4 +562,21 @@ CREATE TABLE IF NOT EXISTS semantic_exclusions (
     content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+";
+
+/// Make deletes from the full-text index remove the deleted tokens.
+///
+/// By default FTS5 deletes by appending a delete marker to a new segment and
+/// leaves the original token data in place until an unrelated merge happens
+/// to rewrite it, so a hard-deleted entry's words stayed readable in
+/// `search_fts_data` — through `secure_delete`, `VACUUM`, and a WAL truncate
+/// alike, since those only scrub pages `SQLite` itself freed. The
+/// `secure-delete` option (persisted in `search_fts_config`, so it applies to
+/// every later connection) rewrites the affected segment instead. The
+/// `rebuild` that follows regenerates the index from `search_documents`, which
+/// drops whatever earlier deletes left behind in existing databases; on a
+/// fresh install it runs against an empty table.
+const ENABLE_FTS_SECURE_DELETE: &str = r"
+INSERT INTO search_fts(search_fts, rank) VALUES ('secure-delete', 1);
+INSERT INTO search_fts(search_fts) VALUES ('rebuild');
 ";

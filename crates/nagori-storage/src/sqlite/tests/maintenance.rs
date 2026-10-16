@@ -181,3 +181,113 @@ async fn opening_a_full_auto_vacuum_database_switches_it_in_place() {
 
     assert_eq!(pragma(&store, "auto_vacuum"), AUTO_VACUUM_INCREMENTAL);
 }
+
+const FTS_NEEDLE: &str = "confidentialneedleabcxyz";
+
+fn fts_index_contains(store: &SqliteStore, needle: &str) -> bool {
+    let conn = store.conn().unwrap();
+    let mut stmt = conn.prepare("SELECT block FROM search_fts_data").unwrap();
+    let blocks = stmt
+        .query_map([], |row| row.get::<_, Option<Vec<u8>>>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    blocks.into_iter().flatten().any(|block| {
+        block
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    })
+}
+
+fn file_contains(path: &Path, needle: &str) -> bool {
+    std::fs::read(path)
+        .unwrap()
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// Delete one of three indexed entries and confirm its token is gone from the
+/// full-text index's own storage, not merely unreachable through search.
+async fn index_three_and_delete_needle(store: &SqliteStore) {
+    insert_text(store, "first ordinary clipboard note").await;
+    let target = insert_text(store, &format!("token {FTS_NEEDLE} inside")).await;
+    insert_text(store, "third ordinary clipboard note").await;
+    assert!(
+        fts_index_contains(store, FTS_NEEDLE),
+        "the needle must be indexed for the delete assertion to mean anything"
+    );
+    store.hard_delete_entry(target).await.unwrap();
+}
+
+#[tokio::test]
+async fn hard_delete_removes_tokens_from_the_fts_index_and_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    let store = SqliteStore::open(&db_path).unwrap();
+    index_three_and_delete_needle(&store).await;
+
+    assert!(
+        !fts_index_contains(&store, FTS_NEEDLE),
+        "a hard delete must not leave the token in search_fts_data"
+    );
+    store.vacuum().await.unwrap();
+    drop(store);
+    assert!(
+        !file_contains(&db_path, FTS_NEEDLE),
+        "the deleted token must not survive in the database file"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_purges_tokens_left_by_earlier_deletes() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    {
+        let store = SqliteStore::open(&db_path).unwrap();
+        // Recreate the pre-upgrade shape: FTS5 deletes without rewriting the
+        // segment that holds the token.
+        store
+            .conn()
+            .unwrap()
+            .execute_batch("INSERT INTO search_fts(search_fts, rank) VALUES ('secure-delete', 0);")
+            .unwrap();
+        index_three_and_delete_needle(&store).await;
+        assert!(
+            fts_index_contains(&store, FTS_NEEDLE),
+            "without secure-delete the token must linger for the upgrade to have work"
+        );
+        store
+            .conn()
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 105;")
+            .unwrap();
+    }
+
+    let store = SqliteStore::open(&db_path).unwrap();
+
+    assert!(
+        !fts_index_contains(&store, FTS_NEEDLE),
+        "the upgrade must rebuild the index without the deleted token"
+    );
+    let secure_delete: i64 = store
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT v FROM search_fts_config WHERE k = 'secure-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(secure_delete, 1);
+    // The surviving entries are still searchable after the rebuild.
+    let hits: i64 = store
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'ordinary'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 2);
+}
