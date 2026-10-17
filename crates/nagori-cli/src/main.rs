@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use nagori_core::{AiActionId, AppError, MAX_RETENTION_DAYS, QuickActionId};
 use nagori_daemon::default_socket_path;
 use nagori_ipc::{IpcClient, IpcRequest, IpcResponse, IpcServerConfig};
+use nagori_storage::resolve_db_path;
 
 mod commands;
 mod output;
@@ -484,12 +485,11 @@ async fn run_locally(cli: Cli, holds_store_lock: bool) -> Result<()> {
 /// held lock means writing here would land in `SQLite` without ever
 /// invalidating the owner's search cache or refreshing its palette.
 ///
-/// The lock directory is derived from the *canonicalized* DB path: locking
-/// the lexical parent would let an alias (`--db` through a file or
-/// directory symlink) acquire a different `nagori.lock` than the owner of
-/// the real directory and bypass the gate. A DB that doesn't exist yet
-/// (fresh store) can't be canonicalized itself, so its parent is resolved
-/// instead and the filename re-attached.
+/// The lock directory comes from `nagori_storage::store_lock_dir`, the same
+/// symlink-resolved derivation the desktop and the daemon use: locking the
+/// lexical parent would let an alias (`--db` through a file or directory
+/// symlink) acquire a different `nagori.lock` than the owner of the real
+/// directory and bypass the gate.
 pub(crate) fn try_acquire_direct_write_lock(
     db_path: &Path,
 ) -> Result<Option<nagori_storage::ProcessLock>> {
@@ -499,31 +499,9 @@ pub(crate) fn try_acquire_direct_write_lock(
     };
     nagori_storage::ensure_private_directory(lexical_parent)
         .with_context(|| format!("failed to create {}", lexical_parent.display()))?;
-    let resolved_db = resolve_db_path(db_path);
-    let lock_dir = resolved_db
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
-}
-
-/// Resolve `db_path` through symlinks, the same way a running instance
-/// reports the store it holds. A DB that doesn't exist yet (fresh store)
-/// can't be canonicalized itself, so its parent is resolved instead and the
-/// filename re-attached.
-fn resolve_db_path(db_path: &Path) -> PathBuf {
-    std::fs::canonicalize(db_path).unwrap_or_else(|_| {
-        let lexical_parent = match db_path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        let resolved_parent =
-            std::fs::canonicalize(lexical_parent).unwrap_or_else(|_| lexical_parent.to_path_buf());
-        match db_path.file_name() {
-            Some(name) => resolved_parent.join(name),
-            None => resolved_parent,
-        }
-    })
+    Ok(nagori_storage::ProcessLock::try_acquire(
+        &nagori_storage::store_lock_dir(db_path),
+    )?)
 }
 
 const fn is_write_command(cmd: &Command) -> bool {

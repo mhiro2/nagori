@@ -98,8 +98,9 @@ pub async fn run_server(
     // store, so a second daemon (or the desktop app, which locks the same
     // directory) never runs migrations or a capture loop against a DB this
     // process is about to own. Held until `run_daemon` returns.
-    let instance_lock = nagori_daemon::acquire_data_dir_lock(&data_dir)
-        .context("refusing to start a second daemon")?;
+    let instance_lock =
+        nagori_daemon::acquire_data_dir_lock(&nagori_storage::store_lock_dir(&db_path))
+            .context("refusing to start a second daemon")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
 

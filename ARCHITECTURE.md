@@ -1547,7 +1547,12 @@ rather than co-owning it and double-capturing. (Windows additionally
 gets daemon-vs-daemon exclusion from the named pipe's
 `first_pipe_instance(true)`, but the store-directory lock is the gate
 that also covers the app.) The store lock is the authoritative
-single-instance gate for the **store**.
+single-instance gate for the **store**. Every host — the desktop, the
+daemon, and the CLI's direct writes and clear-on-quit recovery — derives
+the directory from `nagori_storage::store_lock_dir`, the parent of the
+symlink-resolved DB path, so two hosts that reached one store through
+different aliases (a symlinked DB file or data directory) still contend
+for a single `nagori.lock`.
 
 Binding the IPC endpoint is gated by a *second*, independent
 process-lifetime lock keyed on the **endpoint** rather than the store
