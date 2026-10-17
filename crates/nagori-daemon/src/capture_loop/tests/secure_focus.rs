@@ -750,6 +750,101 @@ async fn genuine_secure_field_clip_not_recovered_after_focus_leaves() {
 }
 
 #[tokio::test]
+async fn genuine_secure_field_clip_not_recovered_by_wake_gap_resync() {
+    // A wake-gap resync re-reads the clipboard body regardless of the
+    // sequence. The clip a secure field positively covered was never hashed,
+    // so the resync must not mistake it for new content and capture the
+    // password once focus has moved to an ordinary field.
+    use async_trait::async_trait;
+    use nagori_core::SourceApp;
+    use nagori_platform::{FrontmostApp, WindowBehavior};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    struct ToggleSecure {
+        secure: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl WindowBehavior for ToggleSecure {
+        async fn frontmost_app(&self) -> Result<Option<FrontmostApp>> {
+            Ok(Some(FrontmostApp {
+                source: SourceApp {
+                    bundle_id: Some("com.example.browser".to_owned()),
+                    name: Some("Browser".to_owned()),
+                    executable_path: None,
+                },
+                window_title: None,
+            }))
+        }
+        async fn show_palette(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn hide_palette(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn frontmost_focused_is_secure(&self) -> Result<bool> {
+            Ok(self.secure.load(Ordering::Relaxed))
+        }
+    }
+
+    let secure = Arc::new(AtomicBool::new(true));
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let store = SqliteStore::open_memory().expect("memory store");
+    let mut loop_ = CaptureLoop::new(
+        clipboard.clone(),
+        store.clone(),
+        store.clone(),
+        AppSettings::default(),
+    )
+    .with_window(Arc::new(ToggleSecure {
+        secure: secure.clone(),
+    }));
+
+    let t0 = SystemTime::now();
+    clipboard.write_text("hunter2").await.expect("clipboard");
+    assert!(loop_.capture_once_at(t0).await.unwrap().is_none());
+
+    // Focus moves to an ordinary field; the next regular tick keeps the clip
+    // out of history through the anchored sequence.
+    secure.store(false, Ordering::Relaxed);
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The host sleeps past the resync threshold with the password still on
+    // the clipboard. The forced body re-read must keep it decided.
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_secs(40))
+            .await
+            .unwrap()
+            .is_none(),
+        "a wake-gap resync must not capture a positively-secure clip",
+    );
+    assert!(store.list_recent(10).await.unwrap().is_empty());
+
+    // Capture still works for the next clip the user copies.
+    clipboard
+        .write_text("ordinary note")
+        .await
+        .expect("clipboard");
+    assert!(
+        loop_
+            .capture_once_at(t0 + Duration::from_secs(41))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let rows = store.list_recent(10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].plain_text(), Some("ordinary note"));
+}
+
+#[tokio::test]
 async fn genuine_secure_skip_clears_armed_force_content_check() {
     // A genuine secure skip must clear `force_content_check`, otherwise a clip
     // seen while AX was blind (which armed the flag) and then positively
@@ -1488,5 +1583,43 @@ async fn stale_recovery_cleared_even_when_wake_gap_tick_returns_early() {
             .iter()
             .any(|e| e.plain_text() == Some("from-1password")),
         "an early-returning wake-gap tick must still drop the stale recovery source",
+    );
+}
+
+#[test]
+fn secure_skip_marker_is_retired_by_a_later_clip_and_restored_on_rollback() {
+    // A marker left over from an earlier secure skip must not claim a later
+    // clip whose (lapped) sequence collides with it: anchoring or beginning
+    // a different clip retires it, while rolling that clip back restores it.
+    let secure = ClipboardSequence::native(7);
+    let other = ClipboardSequence::native(8);
+
+    let mut dedup = DedupState::new();
+    dedup.last_sequence = Some(secure.clone());
+    dedup.secure_skipped_sequence = Some(secure.clone());
+    assert!(dedup.is_secure_skipped(&secure));
+
+    let rollback = dedup.begin_clip(other.clone(), false);
+    assert!(dedup.secure_skipped_sequence.is_none());
+    dedup.rollback(rollback);
+    assert!(
+        dedup.is_secure_skipped(&secure),
+        "a rolled-back clip leaves the secure clip decided"
+    );
+
+    let rollback = dedup.begin_clip(other.clone(), false);
+    drop(rollback);
+    // The counter laps back onto the secure clip's value with new content.
+    dedup.last_sequence = Some(secure.clone());
+    assert!(!dedup.is_secure_skipped(&secure));
+
+    let mut dedup = DedupState::new();
+    dedup.last_sequence = Some(secure.clone());
+    dedup.secure_skipped_sequence = Some(secure.clone());
+    dedup.anchor_decided(other);
+    dedup.anchor_decided(secure.clone());
+    assert!(
+        !dedup.is_secure_skipped(&secure),
+        "anchoring another clip retires the marker for good"
     );
 }

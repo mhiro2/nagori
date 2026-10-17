@@ -11,6 +11,73 @@ fn redacts_common_secret_patterns() {
 }
 
 #[test]
+fn redacts_quoted_key_assignments() {
+    // JSON and quoted-key config formats put a closing quote between the key
+    // name and the separator. Each must be both classified as Secret and
+    // stripped of its value, not just one or the other.
+    let cases = [
+        (r#"{"password":"hunter2secret"}"#, "hunter2secret"),
+        (r#"{"api_key":"abcdefghijklmnop"}"#, "abcdefghijklmnop"),
+        (r#"{ "apiKey" : "abcdefghijklmnop" }"#, "abcdefghijklmnop"),
+        (r#"{"client_secret": "s3cr3tvalue99"}"#, "s3cr3tvalue99"),
+        ("'password': 'hunter2secret'", "hunter2secret"),
+        ("api_key = \"abcdefghijklmnop\"", "abcdefghijklmnop"),
+        ("PASSWORD=hunter2secret", "hunter2secret"),
+        ("token: abcdefghijklmnop", "abcdefghijklmnop"),
+        // A quoted value runs to its closing quote: an embedded other-quote,
+        // a space, or an escaped quote must not cut the match short.
+        (r#"{"password":"abcdefgh'ijklmnop"}"#, "ijklmnop"),
+        (r#"{"password":"correct horse battery"}"#, "battery"),
+        (r#"{"password":"abcdefgh\"ijklmnop"}"#, "ijklmnop"),
+        ("secret: 'abcdefgh\"ijklmnop'", "ijklmnop"),
+        ("password: 'abcdefgh''ijklmnop'", "ijklmnop"),
+        ("password: 'abcdefgh\\''tailsecret'", "tailsecret"),
+        ("password: 'C:\\keys\\vault'", "vault"),
+    ];
+    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
+    for (body, secret) in cases {
+        let redacted = redact_text(body);
+        assert!(
+            !redacted.contains(secret),
+            "secret leaked from {body:?}: {redacted:?}",
+        );
+        assert!(redacted.contains("[REDACTED]"), "no marker for {body:?}");
+        let entry = EntryFactory::from_text(body);
+        assert_eq!(
+            classifier.classify(&entry).sensitivity,
+            Sensitivity::Secret,
+            "{body:?} must classify as Secret",
+        );
+    }
+}
+
+#[test]
+fn quoted_value_redaction_stops_at_its_closing_quote() {
+    // Only the value is consumed: the surrounding structure — the closing
+    // quote, sibling keys on the same line, and later lines — survives.
+    assert_eq!(
+        redact_text(r#"{"password":"hunter2secret","user":"alice"}"#),
+        r#"{"[REDACTED]","user":"alice"}"#,
+    );
+    assert_eq!(
+        redact_text("password: \"unterminated value\nnext line"),
+        "[REDACTED]\nnext line",
+    );
+}
+
+#[test]
+fn quoted_key_redaction_keeps_short_or_unrelated_values() {
+    // The value length floor and the key list still bound the pattern: a
+    // short value or an unrelated key stays readable.
+    for body in [
+        r#"{"password":"short"}"#,
+        r#"{"username":"alice-the-admin"}"#,
+    ] {
+        assert_eq!(redact_text(body), body);
+    }
+}
+
+#[test]
 fn redacts_private_key_block() {
     // A PEM block detected by `contains_private_key` must not survive in
     // the redacted body. Regression for the gap where Secret entries

@@ -429,7 +429,10 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   `SECURE_FOCUS_BUNDLE_OVERRIDES` list of system password UIs (e.g.
   `com.apple.SecurityAgent`) whose AX state is deliberately scrubbed —
   drops the clip before the body is even read and anchors the sequence, so
-  password input stays out of history even after focus leaves the field. A
+  password input stays out of history even after focus leaves the field.
+  The skipped sequence is remembered too: its body was never hashed, so a
+  later sleep/wake resync (which distrusts the sequence and re-reads the
+  body) keeps the same clip decided instead of capturing it. A
   single AX error fails open (treated as "not secure") so a transient FFI
   hiccup doesn't stall capture. Sustained errors past
   `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` mean visibility is *lost*, not that
