@@ -140,6 +140,7 @@ pub async fn run_server(
             args.maintenance_interval_min.saturating_mul(60),
         ),
         secure_focus_fail_closed,
+        clear_on_quit_marker: Some(nagori_daemon::ClearOnQuitMarker::for_db(&db_path)),
     };
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
