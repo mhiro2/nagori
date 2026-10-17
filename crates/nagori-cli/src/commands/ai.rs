@@ -87,6 +87,7 @@ async fn run_ai_streaming(
     let mut warnings: Vec<String> = Vec::new();
     let mut final_text = String::new();
     let mut buffer = String::new();
+    let mut streamed = StreamedText::default();
     let stdout = std::io::stdout();
 
     loop {
@@ -113,24 +114,14 @@ async fn run_ai_streaming(
             let mut handle = stdout.lock();
             writeln!(handle, "{}", serde_json::to_string(&event)?)?;
         }
+        if stream && !format.is_json() {
+            let mut handle = stdout.lock();
+            streamed.write_event(&mut handle, &event)?;
+            handle.flush()?;
+        }
         match event {
-            AiEvent::Delta { text, .. } => {
-                buffer.push_str(&text);
-                if stream && !format.is_json() {
-                    let mut handle = stdout.lock();
-                    write!(handle, "{text}")?;
-                    handle.flush()?;
-                }
-            }
-            AiEvent::Replace { text, .. } => {
-                if stream && !format.is_json() {
-                    let mut handle = stdout.lock();
-                    writeln!(handle)?;
-                    write!(handle, "{text}")?;
-                    handle.flush()?;
-                }
-                buffer = text;
-            }
+            AiEvent::Delta { text, .. } => buffer.push_str(&text),
+            AiEvent::Replace { text, .. } => buffer = text,
             AiEvent::Done {
                 final_text: text,
                 warnings: done_warnings,
@@ -159,7 +150,7 @@ async fn run_ai_streaming(
             warnings: warnings.clone(),
         };
         print_ai_output(&output, format)?;
-    } else if !format.is_json() && (!final_text.is_empty() || !buffer.is_empty()) {
+    } else if !format.is_json() && !streamed.is_empty() {
         // Streaming text: terminate the streamed line. Streaming JSON Lines
         // needs nothing more here — each event was already emitted as it
         // arrived in the loop above.
@@ -176,4 +167,140 @@ async fn run_ai_streaming(
         std::process::exit(130);
     }
     Ok(())
+}
+
+/// The text a streaming run has written to stdout so far.
+///
+/// A backend does not always stream: translation and any action run with
+/// `ai.allow_streaming = false` deliver their whole result in the terminal
+/// `Done`, with no `Delta` / `Replace` before it. `Done.final_text` is also the
+/// authoritative result even when deltas were streamed, so on `Done` the
+/// output is reconciled with it — the unseen tail is appended, or the result is
+/// rewritten on a fresh line when it diverges — instead of printing only what
+/// the deltas carried (an empty line for a done-only run).
+#[derive(Debug, Default)]
+struct StreamedText {
+    shown: String,
+}
+
+impl StreamedText {
+    fn write_event(
+        &mut self,
+        out: &mut impl std::io::Write,
+        event: &AiEvent,
+    ) -> std::io::Result<()> {
+        match event {
+            AiEvent::Delta { text, .. } => {
+                write!(out, "{text}")?;
+                self.shown.push_str(text);
+            }
+            AiEvent::Replace { text, .. } => self.replace(out, text)?,
+            // An empty final text carries nothing beyond what was streamed
+            // (the non-streaming path falls back to the deltas the same way).
+            AiEvent::Done { final_text, .. } if final_text.is_empty() => {}
+            AiEvent::Done { final_text, .. } => {
+                if let Some(tail) = final_text.strip_prefix(self.shown.as_str()) {
+                    write!(out, "{tail}")?;
+                    self.shown.push_str(tail);
+                } else {
+                    self.replace(out, final_text)?;
+                }
+            }
+            AiEvent::Cancelled => {}
+        }
+        Ok(())
+    }
+
+    /// Start the full `text` on a fresh line: the streamed prefix no longer
+    /// matches it and cannot be taken back.
+    fn replace(&mut self, out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+        if !self.shown.is_empty() {
+            writeln!(out)?;
+        }
+        write!(out, "{text}")?;
+        text.clone_into(&mut self.shown);
+        Ok(())
+    }
+
+    /// Whether anything has been written, so the caller knows to end the line.
+    const fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(events: &[AiEvent]) -> String {
+        let mut streamed = StreamedText::default();
+        let mut out = Vec::new();
+        for event in events {
+            streamed.write_event(&mut out, event).expect("write");
+        }
+        String::from_utf8(out).expect("utf-8")
+    }
+
+    fn delta(text: &str) -> AiEvent {
+        AiEvent::Delta {
+            seq: 0,
+            text: text.to_owned(),
+        }
+    }
+
+    fn done(text: &str) -> AiEvent {
+        AiEvent::Done {
+            final_text: text.to_owned(),
+            created_entry: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_done_only_result_is_printed() {
+        // Translation (and any action with streaming disabled) delivers its
+        // whole result in `Done`; it must reach stdout, not just a newline.
+        assert_eq!(render(&[done("[ja] hello")]), "[ja] hello");
+    }
+
+    #[test]
+    fn a_fully_streamed_result_is_not_printed_twice() {
+        assert_eq!(
+            render(&[delta("Hello "), delta("world"), done("Hello world")]),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn the_unstreamed_tail_of_the_final_text_is_appended() {
+        assert_eq!(render(&[delta("Hel"), done("Hello")]), "Hello");
+    }
+
+    #[test]
+    fn a_diverging_final_text_is_rewritten_on_a_new_line() {
+        assert_eq!(render(&[delta("draft"), done("final")]), "draft\nfinal");
+    }
+
+    #[test]
+    fn an_empty_final_text_keeps_the_streamed_output() {
+        assert_eq!(render(&[delta("streamed"), done("")]), "streamed");
+    }
+
+    #[test]
+    fn a_replace_before_any_output_starts_without_a_blank_line() {
+        let replace = AiEvent::Replace {
+            seq: 0,
+            text: "whole".to_owned(),
+        };
+        assert_eq!(render(&[replace, done("whole")]), "whole");
+    }
+
+    #[test]
+    fn an_empty_result_prints_nothing() {
+        let mut streamed = StreamedText::default();
+        let mut out = Vec::new();
+        streamed.write_event(&mut out, &done("")).expect("write");
+        assert!(out.is_empty());
+        assert!(streamed.is_empty());
+    }
 }
