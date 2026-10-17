@@ -116,6 +116,34 @@ impl WindowBehavior for WindowsWindowBehavior {
     }
 }
 
+/// Whether the foreground window is still the restore target: the same HWND,
+/// owned by the same process (HWNDs are recycled, so the PID guards against a
+/// different window inheriting the handle value during the paste delay).
+#[cfg(windows)]
+pub(crate) fn foreground_matches_sync(handle: u64, snapshot_pid: Option<u32>) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    // SAFETY: GetForegroundWindow has no parameters and returns a HWND;
+    // GetWindowThreadProcessId writes the owning PID through the out pointer
+    // to our stack-owned `u32`. The HWND round-trips via `usize` like
+    // `capture_restore_target_sync`, so the comparison is exact on both
+    // pointer widths.
+    #[allow(clippy::cast_possible_truncation)]
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() || foreground as usize as u64 != handle {
+            return false;
+        }
+        let Some(expected_pid) = snapshot_pid else {
+            return true;
+        };
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(foreground, &raw mut pid) != 0 && pid == expected_pid
+    }
+}
+
 /// Derive a process display name from its executable path via the file
 /// stem (`C:/Program Files/App/app.exe` → `app`).
 ///

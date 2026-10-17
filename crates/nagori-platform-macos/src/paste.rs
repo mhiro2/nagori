@@ -2,7 +2,7 @@ use async_trait::async_trait;
 #[cfg(target_os = "macos")]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use nagori_core::{AppError, PasteFailureReason, Result};
-use nagori_platform::{PasteController, PasteResult};
+use nagori_platform::{PasteController, PasteResult, RestoreTarget};
 #[cfg(target_os = "macos")]
 use tracing::warn;
 
@@ -13,38 +13,14 @@ pub struct MacosPasteController;
 impl PasteController for MacosPasteController {
     #[cfg(target_os = "macos")]
     async fn paste_frontmost(&self) -> Result<PasteResult> {
-        // enigo synthesises CGEvents to send Cmd+V to the focused app, which
-        // requires the user to grant Accessibility permission to the running
-        // process. Failures usually indicate the permission is missing.
-        //
-        // This is deliberately NOT bounded by a timeout the way focus-restore,
-        // `frontmost_app`, and clipboard writes are. `spawn_blocking` cannot
-        // cancel synthetic input: a timed-out synthesis would still post its
-        // ⌘V once the wedge clears, landing the clipboard content in whatever
-        // app is frontmost by then. A stray paste of (possibly sensitive)
-        // history into an unrelated window is worse than the rare bounded
-        // wait, and — unlike the Linux `wtype` path, which kills its
-        // subprocess on timeout — the in-process `CGEvent` post has no safe
-        // cancellation. Synthesis only runs on an explicit user paste, never
-        // on a hot path, and a wedged WindowServer freezes the whole UI
-        // anyway, so the user cannot move focus mid-wedge.
-        let result = tokio::task::spawn_blocking(synthesize_cmd_v)
-            .await
-            .map_err(|err| AppError::Paste {
-                reason: PasteFailureReason::Unknown,
-                message: format!("auto-paste failed: synthesis task did not run ({err})"),
-            })?;
-        match result {
-            Ok(()) => Ok(PasteResult {
-                pasted: true,
-                message: None,
-            }),
-            // `synthesize_cmd_v` carries the reason so an environment
-            // failure during enigo initialisation is not misreported as a
-            // missing Accessibility grant, while enigo's own permission check
-            // still routes to the Setup card.
-            Err((reason, message)) => Err(AppError::Paste { reason, message }),
-        }
+        synthesize(None).await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn paste_frontmost_into(&self, target: Option<&RestoreTarget>) -> Result<PasteResult> {
+        // macOS restores — and so recognises — the paste target by bundle id.
+        // A target without one carries nothing to compare against.
+        synthesize(target.and_then(|target| target.source.bundle_id.clone())).await
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -53,6 +29,53 @@ impl PasteController for MacosPasteController {
             reason: PasteFailureReason::SynthUnsupported,
             message: "macOS auto-paste is only available on macOS".to_owned(),
         })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn paste_frontmost_into(&self, _target: Option<&RestoreTarget>) -> Result<PasteResult> {
+        self.paste_frontmost().await
+    }
+}
+
+/// Run the ⌘V synthesis on the blocking pool. With `expected_bundle_id` set,
+/// the frontmost app is compared with it inside the same blocking call, after
+/// enigo is ready and right before the key events are posted, so focus moving
+/// at any earlier point stops the paste instead of typing into whatever took
+/// focus.
+#[cfg(target_os = "macos")]
+async fn synthesize(expected_bundle_id: Option<String>) -> Result<PasteResult> {
+    // enigo synthesises CGEvents to send Cmd+V to the focused app, which
+    // requires the user to grant Accessibility permission to the running
+    // process. Failures usually indicate the permission is missing.
+    //
+    // This is deliberately NOT bounded by a timeout the way focus-restore,
+    // `frontmost_app`, and clipboard writes are. `spawn_blocking` cannot
+    // cancel synthetic input: a timed-out synthesis would still post its
+    // ⌘V once the wedge clears, landing the clipboard content in whatever
+    // app is frontmost by then. A stray paste of (possibly sensitive)
+    // history into an unrelated window is worse than the rare bounded
+    // wait, and — unlike the Linux `wtype` path, which kills its
+    // subprocess on timeout — the in-process `CGEvent` post has no safe
+    // cancellation. Synthesis only runs on an explicit user paste, never
+    // on a hot path, and a wedged WindowServer freezes the whole UI
+    // anyway, so the user cannot move focus mid-wedge.
+    let result =
+        tokio::task::spawn_blocking(move || synthesize_cmd_v(expected_bundle_id.as_deref()))
+            .await
+            .map_err(|err| AppError::Paste {
+                reason: PasteFailureReason::Unknown,
+                message: format!("auto-paste failed: synthesis task did not run ({err})"),
+            })?;
+    match result {
+        Ok(()) => Ok(PasteResult {
+            pasted: true,
+            message: None,
+        }),
+        // `synthesize_cmd_v` carries the reason so an environment
+        // failure during enigo initialisation is not misreported as a
+        // missing Accessibility grant, while enigo's own permission check
+        // still routes to the Setup card.
+        Err((reason, message)) => Err(AppError::Paste { reason, message }),
     }
 }
 
@@ -115,7 +138,7 @@ fn init_error(err: &enigo::NewConError) -> SynthError {
 }
 
 #[cfg(target_os = "macos")]
-fn synthesize_cmd_v() -> std::result::Result<(), SynthError> {
+fn synthesize_cmd_v(expected_bundle_id: Option<&str>) -> std::result::Result<(), SynthError> {
     // `kVK_ANSI_V` from `<HIToolbox/Events.h>` — the *physical* keycode for
     // the V key on a US ANSI keyboard. Sent via `Key::Other` so enigo skips
     // its Unicode→keycode lookup, which routes through
@@ -133,6 +156,15 @@ fn synthesize_cmd_v() -> std::result::Result<(), SynthError> {
     // manual ⌘V.
     const KVK_ANSI_V: u32 = 0x09;
     let mut enigo = Enigo::new(&synth_settings()).map_err(|err| init_error(&err))?;
+    // Last check before any key event: the target must still be frontmost.
+    if let Some(expected) = expected_bundle_id
+        && crate::window::frontmost_bundle_id().as_deref() != Some(expected)
+    {
+        return Err((
+            PasteFailureReason::PreviousAppLost,
+            "focus moved away from the paste target; nothing was pasted".to_owned(),
+        ));
+    }
     enigo
         .key(Key::Meta, Direction::Press)
         .map_err(|err| key_post_error(&err))?;
