@@ -289,10 +289,11 @@ impl AppState {
         // Take the single-instance lock *before* opening the store, so a
         // second launch never runs migrations or starts a capture loop
         // against a DB the first instance already owns. The lock lives in the
-        // DB's parent directory, which the daemon also locks on the default
-        // layout, so launching the app while a standalone daemon owns the same
-        // store is refused too.
-        let instance_lock = acquire_instance_lock(lock_dir_for(db_path))?;
+        // DB's (symlink-resolved) parent directory, which the daemon and the
+        // CLI derive the same way, so launching the app while a standalone
+        // daemon owns the same store — even through another alias of it — is
+        // refused too.
+        let instance_lock = acquire_instance_lock(&nagori_storage::store_lock_dir(db_path))?;
         let store = SqliteStore::open(db_path)
             .map_err(|err| annotate_startup_error(err, db_path, StartupStage::OpenDb))?;
         let mut state = Self::build(store, db_path)?;
@@ -421,19 +422,6 @@ fn resolve_default_db_path(
         .unwrap_or_else(|| PathBuf::from("."))
         .join("nagori")
         .join("nagori.sqlite")
-}
-
-/// Directory whose `nagori.lock` the single-instance lock lives in: the DB's
-/// parent, falling back to the current directory for a bare relative DB
-/// filename. Kept in lockstep with the daemon's choice
-/// (`nagori_daemon::serve::acquire_daemon_lock`, keyed on the socket parent)
-/// so that on the default layout — DB and socket share one directory — the
-/// app and a standalone daemon contend for the same lock file.
-fn lock_dir_for(db_path: &Path) -> &Path {
-    match db_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    }
 }
 
 /// Acquire the single-instance lock over `lock_dir`, mapping contention to a

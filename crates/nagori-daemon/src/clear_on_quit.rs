@@ -49,7 +49,7 @@ impl ClearOnQuitMarker {
     /// file name re-attached.
     #[must_use]
     pub fn for_db(db_path: &Path) -> Self {
-        let mut marker = resolve_db_path(db_path).into_os_string();
+        let mut marker = nagori_storage::resolve_db_path(db_path).into_os_string();
         marker.push(".clear-on-quit.pending");
         Self {
             path: PathBuf::from(marker),
@@ -93,21 +93,6 @@ impl ClearOnQuitMarker {
             }
         }
     }
-}
-
-fn resolve_db_path(db_path: &Path) -> PathBuf {
-    std::fs::canonicalize(db_path).unwrap_or_else(|_| {
-        let parent = match db_path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        let resolved_parent =
-            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-        match db_path.file_name() {
-            Some(name) => resolved_parent.join(name),
-            None => resolved_parent,
-        }
-    })
 }
 
 /// Finish a clear-on-quit purge a previous owner of `store` could not complete.
