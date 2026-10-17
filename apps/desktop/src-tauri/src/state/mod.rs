@@ -16,7 +16,6 @@ mod startup;
 mod test_support;
 mod window_focus;
 
-use clear_on_quit::clear_on_quit_marker_path;
 pub use search_cancel::InflightSearch;
 use startup::{BackgroundTasks, SettingsLoadGate};
 pub(crate) use startup::{runtime_shutdown_requires_app_exit, settings_loaded_or_shutdown};
@@ -94,15 +93,13 @@ pub struct AppState {
     /// process exits, at which point the kernel releases it.
     #[allow(dead_code)]
     instance_lock: Option<nagori_storage::ProcessLock>,
-    /// Path to the clear-on-quit purge-pending marker. Set for real launches
-    /// by `try_new_at`; `build`-only callers (tests / in-memory stores) own no
-    /// on-disk directory and leave it `None`. When `clear_on_quit` is enabled,
-    /// `perform_exit_cleanup` writes this sentinel *before* attempting the
-    /// purge and removes it only once the purge completes within the shutdown
-    /// budget. A launch that finds it present finishes the purge fail-closed
-    /// before any window can serve history, so a timed-out / crashed shutdown
-    /// purge can no longer leave behind data the user asked to clear.
-    clear_on_quit_marker: Option<PathBuf>,
+    /// Clear-on-quit purge-pending marker for this launch's DB. Set for real
+    /// launches by `try_new_at`; `build`-only callers (tests / in-memory
+    /// stores) own no on-disk directory and leave it `None`. The exit path
+    /// hands it to `nagori_daemon::clear_history_on_quit`, and a launch that
+    /// finds it pending — left by this app, the daemon, or the CLI — finishes
+    /// the purge fail-closed before any window can serve history.
+    clear_on_quit_marker: Option<nagori_daemon::ClearOnQuitMarker>,
     /// Receiver side of the startup settings-load gate. Cloned by each gated
     /// worker (capture, CLI IPC host, settings subscriber) so they await the
     /// single coordinator load instead of each re-reading the store.
@@ -300,7 +297,7 @@ impl AppState {
             .map_err(|err| annotate_startup_error(err, db_path, StartupStage::OpenDb))?;
         let mut state = Self::build(store, db_path)?;
         state.instance_lock = Some(instance_lock);
-        state.clear_on_quit_marker = Some(clear_on_quit_marker_path(db_path));
+        state.clear_on_quit_marker = Some(nagori_daemon::ClearOnQuitMarker::for_db(db_path));
         // Fail-closed: complete any clear-on-quit purge the previous session
         // could not finish before the state is handed to Tauri. A failure here
         // surfaces the startup fallback window (and leaves the marker) rather
