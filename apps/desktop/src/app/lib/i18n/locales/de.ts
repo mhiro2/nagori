@@ -456,6 +456,10 @@ export const de: Messages = {
       appDenylistPasswordManagers: 'Passwortmanager blockieren',
       appDenylistPasswordManagersHelp:
         'Verwirft Erfassungen aus den mitgelieferten Passwortmanagern (1Password, Bitwarden, KeePassXC, Apple Passwords) anhand exakter App-Identifier. Die Preset-Einträge sind fest und nicht editierbar. Empfohlen — lass die Option an, sofern du nicht aktiv aus einem Passwortmanager über die Zwischenablage einfügen musst.',
+      appDenylistPresetLoading: 'Liste der Passwort-Manager wird geladen …',
+      appDenylistPresetFailed:
+        'Die Liste der Passwort-Manager konnte nicht geladen werden, daher lässt sich dieser Schutz noch nicht einschalten.',
+      appDenylistPresetRetry: 'Erneut versuchen',
       appDenylistPatterns: 'Eigene Muster',
       appDenylistPatternsHelp:
         'Ein Teilstring pro Zeile — Erfassungen werden verworfen, wenn Quell-App-Name, Bundle-ID oder Programmpfad einen Eintrag enthält (case-insensitiv). Nutze diese Liste für Apps außerhalb des Presets, z. B. Dashlane, LastPass oder interne Tools.',

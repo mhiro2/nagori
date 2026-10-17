@@ -504,6 +504,9 @@ export type Messages = {
       legend: string;
       appDenylistPasswordManagers: string;
       appDenylistPasswordManagersHelp: string;
+      appDenylistPresetLoading: string;
+      appDenylistPresetFailed: string;
+      appDenylistPresetRetry: string;
       appDenylistPatterns: string;
       appDenylistPatternsHelp: string;
       appDenylistUnsupported: string;
@@ -1159,6 +1162,10 @@ export const en: Messages = {
       appDenylistPasswordManagers: 'Block password managers',
       appDenylistPasswordManagersHelp:
         'Drops captures from bundled password managers (1Password, Bitwarden, KeePassXC, Apple Passwords) by exact app identifier. The preset is fixed; recommended on unless you actively copy from a password manager via the clipboard.',
+      appDenylistPresetLoading: 'Loading the password manager list…',
+      appDenylistPresetFailed:
+        "Couldn't load the password manager list, so this protection can't be turned on yet.",
+      appDenylistPresetRetry: 'Try again',
       appDenylistPatterns: 'Custom patterns',
       appDenylistPatternsHelp:
         'One substring per line — captures whose source-app name, bundle ID, or executable path contains any of these are dropped (case-insensitive). Use this to cover apps not in the preset above, such as Dashlane, LastPass, or internal tools.',

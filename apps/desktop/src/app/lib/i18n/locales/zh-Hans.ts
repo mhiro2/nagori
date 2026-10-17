@@ -413,6 +413,9 @@ export const zhHans: Messages = {
       appDenylistPasswordManagers: '屏蔽密码管理器',
       appDenylistPasswordManagersHelp:
         '使用精确的应用标识符屏蔽内置预设(1Password、Bitwarden、KeePassXC、Apple Passwords)的复制。预设内容固定,无法编辑。除非你确实需要从密码管理器通过剪贴板粘贴,否则建议保持开启。',
+      appDenylistPresetLoading: '正在加载密码管理器列表…',
+      appDenylistPresetFailed: '无法加载密码管理器列表，因此暂时无法开启此保护。',
+      appDenylistPresetRetry: '重试',
       appDenylistPatterns: '自定义模式',
       appDenylistPatternsHelp:
         '每行填写一个子串。来源应用名、Bundle ID 或可执行文件路径中包含任意一项时不会被捕获(不区分大小写)。可用于屏蔽预设以外的应用,例如 Dashlane、LastPass、公司内部工具等。',

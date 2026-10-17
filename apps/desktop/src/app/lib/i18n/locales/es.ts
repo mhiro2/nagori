@@ -454,6 +454,10 @@ export const es: Messages = {
       appDenylistPasswordManagers: 'Bloquear gestores de contraseñas',
       appDenylistPasswordManagersHelp:
         'Descarta las capturas de los gestores de contraseñas incluidos (1Password, Bitwarden, KeePassXC, Apple Passwords) usando identificadores exactos de app. El preset es fijo y no editable. Recomendado; déjalo activado salvo que necesites pegar activamente desde un gestor de contraseñas vía el portapapeles.',
+      appDenylistPresetLoading: 'Cargando la lista de gestores de contraseñas…',
+      appDenylistPresetFailed:
+        'No se pudo cargar la lista de gestores de contraseñas, así que esta protección aún no se puede activar.',
+      appDenylistPresetRetry: 'Reintentar',
       appDenylistPatterns: 'Patrones personalizados',
       appDenylistPatternsHelp:
         'Una subcadena por línea: se descartan las capturas cuyo nombre de app de origen, bundle ID o ruta de ejecutable contengan alguna (sin distinguir mayúsculas/minúsculas). Usa esta lista para apps fuera del preset, por ejemplo Dashlane, LastPass o herramientas internas.',
