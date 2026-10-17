@@ -454,6 +454,10 @@ export const es: Messages = {
       appDenylistPasswordManagers: 'Bloquear gestores de contraseñas',
       appDenylistPasswordManagersHelp:
         'Descarta las capturas de los gestores de contraseñas incluidos (1Password, Bitwarden, KeePassXC, Apple Passwords) usando identificadores exactos de app. El preset es fijo y no editable. Recomendado; déjalo activado salvo que necesites pegar activamente desde un gestor de contraseñas vía el portapapeles.',
+      appDenylistPresetLoading: 'Cargando la lista de gestores de contraseñas…',
+      appDenylistPresetFailed:
+        'No se pudo cargar la lista de gestores de contraseñas, así que esta protección aún no se puede activar.',
+      appDenylistPresetRetry: 'Reintentar',
       appDenylistPatterns: 'Patrones personalizados',
       appDenylistPatternsHelp:
         'Una subcadena por línea: se descartan las capturas cuyo nombre de app de origen, bundle ID o ruta de ejecutable contengan alguna (sin distinguir mayúsculas/minúsculas). Usa esta lista para apps fuera del preset, por ejemplo Dashlane, LastPass o herramientas internas.',
@@ -562,6 +566,8 @@ export const es: Messages = {
       menuBar: 'Mostrar icono en la bandeja',
       menuBarHelp:
         'Muestra el icono de bandeja de Nagori (macOS: barra de menús, Windows: área de notificación, Linux: indicador de estado). Desactívalo para una experiencia totalmente en segundo plano.',
+      menuBarRequired:
+        'Ahora mismo ningún atajo global puede abrir la paleta, así que el icono de bandeja sigue visible como forma de volver a Nagori. Configura un atajo que funcione para ocultarlo.',
       clearOnQuit: 'Borrar historial no fijado al salir',
       clearOnQuitHelp:
         'Al salir de la aplicación se eliminan todas las entradas no fijadas. Las entradas fijadas se conservan.',

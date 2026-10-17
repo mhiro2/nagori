@@ -54,6 +54,7 @@ pub(crate) fn build_test_state() -> AppState {
         previous_frontmost: Arc::new(Mutex::new(None)),
         last_pasted_id: Mutex::new(None),
         last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
+        palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),
         inflight_search: super::InflightSearch::default(),
         instance_lock: None,
         clear_on_quit_marker: None,

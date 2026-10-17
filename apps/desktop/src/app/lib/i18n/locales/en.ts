@@ -504,6 +504,9 @@ export type Messages = {
       legend: string;
       appDenylistPasswordManagers: string;
       appDenylistPasswordManagersHelp: string;
+      appDenylistPresetLoading: string;
+      appDenylistPresetFailed: string;
+      appDenylistPresetRetry: string;
       appDenylistPatterns: string;
       appDenylistPatternsHelp: string;
       appDenylistUnsupported: string;
@@ -587,6 +590,7 @@ export type Messages = {
       autoLaunchHelp: string;
       menuBar: string;
       menuBarHelp: string;
+      menuBarRequired: string;
       clearOnQuit: string;
       clearOnQuitHelp: string;
       // Whether "Clear history" asks first. The confirmation dialog's
@@ -1158,6 +1162,10 @@ export const en: Messages = {
       appDenylistPasswordManagers: 'Block password managers',
       appDenylistPasswordManagersHelp:
         'Drops captures from bundled password managers (1Password, Bitwarden, KeePassXC, Apple Passwords) by exact app identifier. The preset is fixed; recommended on unless you actively copy from a password manager via the clipboard.',
+      appDenylistPresetLoading: 'Loading the password manager list…',
+      appDenylistPresetFailed:
+        "Couldn't load the password manager list, so this protection can't be turned on yet.",
+      appDenylistPresetRetry: 'Try again',
       appDenylistPatterns: 'Custom patterns',
       appDenylistPatternsHelp:
         'One substring per line — captures whose source-app name, bundle ID, or executable path contains any of these are dropped (case-insensitive). Use this to cover apps not in the preset above, such as Dashlane, LastPass, or internal tools.',
@@ -1263,6 +1271,8 @@ export const en: Messages = {
       menuBar: 'Show tray icon',
       menuBarHelp:
         'Display the Nagori tray icon in the system tray (macOS menu bar, Windows notification area, Linux status indicator). Disable for a fully background experience.',
+      menuBarRequired:
+        'No global shortcut can open the palette right now, so the tray icon stays visible as the way back into Nagori. Set a shortcut that works to hide it.',
       clearOnQuit: 'Clear non-pinned history on quit',
       clearOnQuitHelp:
         'When the app exits, all non-pinned entries are removed. Pinned entries are preserved.',

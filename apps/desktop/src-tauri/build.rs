@@ -80,6 +80,7 @@ fn main() {
             "get_permissions",
             "get_capabilities",
             "last_hotkey_failure",
+            "palette_shortcut_bound",
             "request_accessibility",
             "open_url_external",
             "toggle_palette",

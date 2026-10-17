@@ -23,6 +23,10 @@
     // fire.
     frontmostAppCapability: Capability | undefined;
     appDenylistPresetEnabled: boolean;
+    // Whether the bundled password-manager rules are available to switch the
+    // preset on with.
+    passwordManagerPresetStatus: 'loading' | 'ready' | 'failed';
+    onRetryPasswordManagerPreset: () => Promise<void>;
     appDenylistPatternsText: string;
     regexDenylistText: string;
     regexDenylistErrors: UserRegexError[];
@@ -43,6 +47,8 @@
     t,
     frontmostAppCapability,
     appDenylistPresetEnabled = $bindable(),
+    passwordManagerPresetStatus,
+    onRetryPasswordManagerPreset,
     appDenylistPatternsText = $bindable(),
     regexDenylistText = $bindable(),
     regexDenylistErrors,
@@ -64,6 +70,12 @@
   // Mirror this state in the UI by disabling the controls and showing
   // a banner so the user knows why the section is inert.
   const denylistDisabled = $derived(frontmostAppCapability?.status === 'unsupported');
+  // Turning the preset on needs its rules; until they load (or if loading
+  // failed) the switch stays off rather than turning on in the UI only.
+  // Switching an enabled preset off never needs them.
+  const presetSwitchBlocked = $derived(
+    !appDenylistPresetEnabled && passwordManagerPresetStatus !== 'ready',
+  );
 
   // Warn when the data directory is inside a cloud-sync folder (iCloud
   // Drive / Dropbox / OneDrive / …): the history is plaintext on disk, so
@@ -99,12 +111,24 @@
     <input
       type="checkbox"
       checked={appDenylistPresetEnabled}
-      disabled={denylistDisabled || undefined}
+      disabled={denylistDisabled || presetSwitchBlocked || undefined}
       onchange={(e) => onPasswordManagerPresetToggle((e.target as HTMLInputElement).checked)}
     />
     {t.settings.privacy.appDenylistPasswordManagers}
   </label>
   <span class="help">{t.settings.privacy.appDenylistPasswordManagersHelp}</span>
+  {#if presetSwitchBlocked && passwordManagerPresetStatus === 'failed'}
+    <div class="status warning" role="status" data-testid="password-manager-preset-failed">
+      <p>{t.settings.privacy.appDenylistPresetFailed}</p>
+      <button type="button" onclick={() => void onRetryPasswordManagerPreset()}>
+        {t.settings.privacy.appDenylistPresetRetry}
+      </button>
+    </div>
+  {:else if presetSwitchBlocked}
+    <span class="help" data-testid="password-manager-preset-loading">
+      {t.settings.privacy.appDenylistPresetLoading}
+    </span>
+  {/if}
   <label class="stack">
     {t.settings.privacy.appDenylistPatterns}
     <textarea

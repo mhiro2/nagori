@@ -52,6 +52,11 @@ pub(crate) const CAPTURE_SKIPPED_EVENT: &str = "nagori://capture_skipped";
 /// `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts`.
 const SETTINGS_CHANGED_EVENT: &str = "nagori://settings_changed";
 
+/// Emitted when the palette shortcut becomes bound or unbound. Payload:
+/// `{ "bound": bool }`. Settings uses it to lock the tray toggle while the tray
+/// is the only way back into the app.
+const PALETTE_SHORTCUT_CHANGED_EVENT: &str = "nagori://palette_shortcut_changed";
+
 /// Event used to hand the Settings webview an initial tab / route hint
 /// after `open_settings` shows the window. Payload is the desired
 /// `SettingsView` tab name (currently `"setup"`); the `SettingsView`
@@ -285,6 +290,7 @@ pub fn run() {
             commands::settings_commands::get_permissions,
             commands::settings_commands::get_capabilities,
             commands::settings_commands::last_hotkey_failure,
+            commands::settings_commands::palette_shortcut_bound,
             commands::settings_commands::request_accessibility,
             commands::settings_commands::open_url_external,
             commands::window_commands::toggle_palette,
@@ -459,6 +465,36 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
     });
 }
 
+/// Record whether the palette shortcut is bound and tell Settings when that
+/// changes.
+fn publish_palette_shortcut_bound(app: &tauri::AppHandle, bound: bool) {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state.palette_shortcut_bound.swap(bound, Ordering::SeqCst) != bound {
+        let _ = app.emit(
+            PALETTE_SHORTCUT_CHANGED_EVENT,
+            serde_json::json!({ "bound": bound }),
+        );
+    }
+}
+
+/// Whether the tray icon should be shown.
+///
+/// The tray and the palette shortcut are the only ways back into a running
+/// app once its windows are hidden (the app has no Dock / taskbar presence).
+/// Hiding the tray while the shortcut is not bound — a pure Wayland session
+/// where global shortcuts cannot register, an accelerator another app holds,
+/// or a cleared binding — would leave nothing to reopen the palette or
+/// Settings with, so the tray stays up regardless of `show_in_menu_bar` until
+/// a shortcut binds.
+const fn tray_should_be_visible(show_in_menu_bar: bool, palette_shortcut_bound: bool) -> bool {
+    show_in_menu_bar || !palette_shortcut_bound
+}
+
 /// Spawn background tasks that subscribe to settings changes:
 ///   * keep the global hotkey in sync with `AppSettings.global_hotkey`,
 ///   * keep launch-at-login in sync with `AppSettings.auto_launch`,
@@ -503,8 +539,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         let mut current_show_in_menu_bar = initial.show_in_menu_bar;
         let mut current_secondary: BTreeMap<SecondaryHotkeyAction, String> =
             initial.secondary_hotkeys.clone();
+        // Whether the palette shortcut is bound right now. Together with
+        // `show_in_menu_bar` it decides the tray's visibility — see
+        // `tray_should_be_visible`.
+        let mut primary_hotkey_bound = true;
 
         if let Err(err) = register_primary_hotkey(&app, current_hotkey.as_str()) {
+            primary_hotkey_bound = false;
             tracing::warn!(error = %err, "global_shortcut_register_failed");
             // Surface to the UI so the settings page can prompt the user to
             // pick a different hotkey rather than silently leaving the
@@ -543,7 +584,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         // same accelerator). Tray reconciliation runs on every OS; the
         // underlying `set_visible` is a no-op when the tray failed to
         // install (e.g. an unsupported Linux session).
-        tray::set_visible(&app, current_show_in_menu_bar);
+        publish_palette_shortcut_bound(&app, primary_hotkey_bound);
+        let mut tray_visible =
+            tray_should_be_visible(current_show_in_menu_bar, primary_hotkey_bound);
+        if !current_show_in_menu_bar && tray_visible {
+            tracing::warn!("tray_kept_visible_without_palette_shortcut");
+        }
+        tray::set_visible(&app, tray_visible);
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
         // Startup updater probe. Honours `auto_update_check` — a user
@@ -624,9 +671,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                             previous = %current_hotkey,
                             "global_shortcut_revert_failed"
                         );
+                        primary_hotkey_bound = false;
+                    } else {
+                        primary_hotkey_bound = true;
                     }
                 } else {
                     current_hotkey = next;
+                    primary_hotkey_bound = true;
                     // Successful rebind — drop any cached failure so the
                     // toast/banner does not linger past the resolved
                     // conflict. The accompanying resolved event clears
@@ -677,9 +728,16 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                 }
             }
 
-            if snapshot.show_in_menu_bar != current_show_in_menu_bar {
-                current_show_in_menu_bar = snapshot.show_in_menu_bar;
-                tray::set_visible(&app, current_show_in_menu_bar);
+            publish_palette_shortcut_bound(&app, primary_hotkey_bound);
+            current_show_in_menu_bar = snapshot.show_in_menu_bar;
+            let next_tray_visible =
+                tray_should_be_visible(current_show_in_menu_bar, primary_hotkey_bound);
+            if next_tray_visible != tray_visible {
+                tray_visible = next_tray_visible;
+                if !current_show_in_menu_bar && tray_visible {
+                    tracing::warn!("tray_kept_visible_without_palette_shortcut");
+                }
+                tray::set_visible(&app, tray_visible);
             }
 
             if snapshot.secondary_hotkeys != current_secondary {
@@ -842,4 +900,19 @@ pub(crate) fn show_main_palette(app: &tauri::AppHandle) {
     commands::recenter_palette_on_cursor_monitor(&window);
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tray_should_be_visible;
+
+    #[test]
+    fn tray_stays_visible_while_the_palette_shortcut_is_unbound() {
+        // With a working shortcut the user's choice is honoured.
+        assert!(tray_should_be_visible(true, true));
+        assert!(!tray_should_be_visible(false, true));
+        // Without one the tray is the only way back in, so it stays.
+        assert!(tray_should_be_visible(true, false));
+        assert!(tray_should_be_visible(false, false));
+    }
 }

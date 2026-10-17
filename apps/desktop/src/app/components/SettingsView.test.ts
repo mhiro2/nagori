@@ -20,6 +20,8 @@ import {
   getPermissions,
   getSettings,
   installCli,
+  paletteShortcutBound,
+  passwordManagerPreset,
   updateSettings,
 } from '../lib/commands';
 import { isTauri, subscribe } from '../lib/tauri';
@@ -30,6 +32,7 @@ import type {
   PermissionStatus,
   PlatformCapabilities,
 } from '../lib/types';
+import { setHotkeyFailure } from '../stores/hotkeyFailure.svelte';
 import { settingsState } from '../stores/settings.svelte';
 import SettingsView from './SettingsView.svelte';
 
@@ -212,11 +215,13 @@ beforeEach(() => {
   // already exercises the Advanced tab — has a deterministic stub. The
   // platform-specific tests below override this per-case.
   vi.mocked(getCapabilities).mockResolvedValue(macosCapabilities());
+  vi.mocked(paletteShortcutBound).mockResolvedValue(true);
 });
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  setHotkeyFailure(undefined);
 });
 
 // Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
@@ -1418,6 +1423,130 @@ const readCapabilityTable = (
   });
   return { platform, tier, rows };
 };
+
+const openPrivacy = async () => {
+  const view = render(SettingsView);
+  await view.findByRole('button', { name: 'Back to palette' });
+  await fireEvent.click(await view.findByRole('tab', { name: 'Privacy' }));
+  const toggle = (await view.findByLabelText('Block password managers')) as HTMLInputElement;
+  return { view, toggle };
+};
+
+const trayToggle = async () => {
+  const view = render(SettingsView);
+  await view.findByRole('button', { name: 'Back to palette' });
+  const toggle = (await view.findByLabelText('Show tray icon')) as HTMLInputElement;
+  return { view, toggle };
+};
+
+describe('SettingsView access guards', () => {
+  const presetRules: AppDenyRule[] = [
+    {
+      type: 'source_app',
+      kind: 'macos_bundle_id',
+      value: 'com.1password.1password',
+      label: '1Password',
+      source: 'preset',
+    },
+  ];
+
+  it('keeps the password-manager switch off until its rules arrive, then saves them', async () => {
+    let resolvePreset: ((rules: AppDenyRule[]) => void) | undefined;
+    vi.mocked(passwordManagerPreset).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePreset = resolve;
+      }),
+    );
+    vi.mocked(updateSettings).mockResolvedValue();
+    const { view, toggle } = await openPrivacy();
+
+    // Turning it on now would save an empty preset and show a protection
+    // that is not in effect, so the switch waits for the rules.
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(true);
+    expect(view.getByTestId('password-manager-preset-loading')).toBeTruthy();
+
+    resolvePreset?.(presetRules);
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    await fireEvent.click(toggle);
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+    const sent = vi.mocked(updateSettings).mock.calls.at(-1)?.[0];
+    expect(sent?.appDenylist).toEqual(presetRules);
+  });
+
+  it('shows when the password-manager rules could not be loaded and retries on request', async () => {
+    vi.mocked(passwordManagerPreset).mockRejectedValueOnce(new Error('ipc down'));
+    const { view, toggle } = await openPrivacy();
+
+    await waitFor(() => expect(view.getByTestId('password-manager-preset-failed')).toBeTruthy());
+    expect(toggle.disabled).toBe(true);
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    // Reopening the (hidden, not destroyed) window would not fetch again, so
+    // the retry lives on the message itself.
+    vi.mocked(passwordManagerPreset).mockResolvedValueOnce(presetRules);
+    await fireEvent.click(view.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(view.queryByTestId('password-manager-preset-failed')).toBeNull();
+  });
+
+  it('lets an enabled preset be switched off while the fetch is still pending', async () => {
+    vi.mocked(passwordManagerPreset).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(getSettings).mockResolvedValue({ ...baseSettings(), appDenylist: presetRules });
+    const { toggle } = await openPrivacy();
+
+    // The loaded settings already carry the rules, so nothing blocks it.
+    expect(toggle.checked).toBe(true);
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it('keeps the tray icon on while the palette shortcut is not bound', async () => {
+    vi.mocked(paletteShortcutBound).mockResolvedValue(false);
+    const { view, toggle } = await trayToggle();
+
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+    expect(toggle.checked).toBe(true);
+    expect(view.getByTestId('menu-bar-required')).toBeTruthy();
+  });
+
+  it('follows the palette shortcut as it becomes unbound', async () => {
+    let onShortcutChanged: ((payload: { bound: boolean }) => void) | undefined;
+    vi.mocked(subscribe).mockImplementation((event, handler) => {
+      if (event === 'nagori://palette_shortcut_changed') {
+        onShortcutChanged = handler;
+      }
+      return () => {};
+    });
+    const { toggle } = await trayToggle();
+    await waitFor(() => expect(paletteShortcutBound).toHaveBeenCalled());
+    expect(toggle.disabled).toBe(false);
+
+    onShortcutChanged?.({ bound: false });
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+  });
+
+  it('keeps the tray icon on where global shortcuts are unsupported', async () => {
+    vi.mocked(getCapabilities).mockResolvedValue({
+      ...macosCapabilities(),
+      globalHotkey: { status: 'unsupported', reason: 'pure Wayland session' },
+    });
+    const { toggle } = await trayToggle();
+
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+  });
+
+  it('allows hiding the tray icon when a failed rebind rolled back to a working shortcut', async () => {
+    // The failure for the requested accelerator stays on screen, but the
+    // previous binding still opens the palette.
+    setHotkeyFailure({ hotkey: 'Cmd+Shift+X', error: 'already registered', kind: 'primary' });
+    const { view, toggle } = await trayToggle();
+
+    await waitFor(() => expect(paletteShortcutBound).toHaveBeenCalled());
+    expect(toggle.disabled).toBe(false);
+    expect(view.queryByTestId('menu-bar-required')).toBeNull();
+  });
+});
 
 describe('SettingsView Advanced tab — capability table', () => {
   it('renders macOS capabilities — every cap available except Accessibility-gated auto-paste', async () => {

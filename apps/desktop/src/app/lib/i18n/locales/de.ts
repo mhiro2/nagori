@@ -456,6 +456,10 @@ export const de: Messages = {
       appDenylistPasswordManagers: 'Passwortmanager blockieren',
       appDenylistPasswordManagersHelp:
         'Verwirft Erfassungen aus den mitgelieferten Passwortmanagern (1Password, Bitwarden, KeePassXC, Apple Passwords) anhand exakter App-Identifier. Die Preset-Einträge sind fest und nicht editierbar. Empfohlen — lass die Option an, sofern du nicht aktiv aus einem Passwortmanager über die Zwischenablage einfügen musst.',
+      appDenylistPresetLoading: 'Liste der Passwort-Manager wird geladen …',
+      appDenylistPresetFailed:
+        'Die Liste der Passwort-Manager konnte nicht geladen werden, daher lässt sich dieser Schutz noch nicht einschalten.',
+      appDenylistPresetRetry: 'Erneut versuchen',
       appDenylistPatterns: 'Eigene Muster',
       appDenylistPatternsHelp:
         'Ein Teilstring pro Zeile — Erfassungen werden verworfen, wenn Quell-App-Name, Bundle-ID oder Programmpfad einen Eintrag enthält (case-insensitiv). Nutze diese Liste für Apps außerhalb des Presets, z. B. Dashlane, LastPass oder interne Tools.',
@@ -563,6 +567,8 @@ export const de: Messages = {
       menuBar: 'Tray-Symbol anzeigen',
       menuBarHelp:
         'Zeigt das Nagori-Tray-Symbol im System-Tray an (macOS: Menüleiste, Windows: Infobereich, Linux: Statusanzeige). Deaktivieren für reinen Hintergrundbetrieb.',
+      menuBarRequired:
+        'Derzeit kann kein globales Tastenkürzel die Palette öffnen, daher bleibt das Tray-Symbol als Weg zurück zu Nagori sichtbar. Lege ein funktionierendes Tastenkürzel fest, um es auszublenden.',
       clearOnQuit: 'Nicht angeheftete Einträge beim Beenden löschen',
       clearOnQuitHelp:
         'Beim Beenden werden alle nicht angehefteten Einträge entfernt. Angeheftete Einträge bleiben erhalten.',

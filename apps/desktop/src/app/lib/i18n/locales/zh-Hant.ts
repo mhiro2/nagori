@@ -414,6 +414,9 @@ export const zhHant: Messages = {
       appDenylistPasswordManagers: '封鎖密碼管理器',
       appDenylistPasswordManagersHelp:
         '使用精確的應用程式識別碼封鎖內建預設(1Password、Bitwarden、KeePassXC、Apple Passwords)的複製。預設內容為固定,無法編輯。除非你需要透過剪貼簿從密碼管理器貼上,否則建議保持開啟。',
+      appDenylistPresetLoading: '正在載入密碼管理器清單…',
+      appDenylistPresetFailed: '無法載入密碼管理器清單，因此暫時無法開啟此保護。',
+      appDenylistPresetRetry: '重試',
       appDenylistPatterns: '自訂樣式',
       appDenylistPatternsHelp:
         '每行一個子字串。當來源應用程式名稱、Bundle ID 或執行檔路徑包含其中任一項時不會被擷取(不分大小寫)。可用於封鎖預設之外的應用程式,例如 Dashlane、LastPass、公司內部工具等。',
@@ -514,6 +517,8 @@ export const zhHant: Messages = {
       menuBar: '顯示常駐圖示',
       menuBarHelp:
         '在系統列顯示 Nagori 圖示（macOS：選單列 / Windows：通知區域 / Linux：狀態列）。若僅需背景執行可關閉。',
+      menuBarRequired:
+        '目前沒有可開啟面板的全域快速鍵，因此常駐圖示會保持顯示，作為回到 Nagori 的入口。設定可用的快速鍵後即可隱藏。',
       clearOnQuit: '結束時清除未釘選的歷史',
       clearOnQuitHelp: '結束應用程式時清除所有未釘選的項目。釘選的項目會保留。',
       confirmClearHistory: '清除歷史記錄前先確認',

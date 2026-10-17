@@ -387,6 +387,12 @@
           "markdownDescription": "Enables the open_url_external command without any pre-configured scope."
         },
         {
+          "description": "Enables the palette_shortcut_bound command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-palette-shortcut-bound",
+          "markdownDescription": "Enables the palette_shortcut_bound command without any pre-configured scope."
+        },
+        {
           "description": "Enables the password_manager_preset command without any pre-configured scope.",
           "type": "string",
           "const": "allow-password-manager-preset",
@@ -709,6 +715,12 @@
           "type": "string",
           "const": "deny-open-url-external",
           "markdownDescription": "Denies the open_url_external command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the palette_shortcut_bound command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-palette-shortcut-bound",
+          "markdownDescription": "Denies the palette_shortcut_bound command without any pre-configured scope."
         },
         {
           "description": "Denies the password_manager_preset command without any pre-configured scope.",
