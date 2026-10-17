@@ -2777,20 +2777,33 @@ change.
   by the primary hotkey.
 - **Clear-on-quit** — when `AppSettings.clear_on_quit` is true,
   `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
-  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries and
-  purges the `nagori-preview/` plaintext temp cache before the tokio
-  runtime tears down. Pinned entries are always preserved. The delete is
-  bounded by a 1 s ceiling so a wedged DB cannot freeze the quit path, but
-  the timeout no longer silently loses data: `perform_exit_cleanup` writes
-  a `clear-on-quit.pending` marker (a sentinel file in the DB directory)
-  *before* the delete and removes it only once the purge completes within
-  the budget. On the next launch `complete_pending_clear_on_quit` runs
-  synchronously during `setup` — before any window can show a row — and
-  finishes the purge fail-closed if the marker is still present, so a
-  timed-out / crashed / killed shutdown purge is always completed rather
-  than leaving behind history the user asked to clear. The marker lives on
-  the filesystem (not in the DB) so it survives even when the DB is the
-  contended resource that timed the purge out.
+  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit, or `nagori daemon stop` against the
+  desktop-hosted endpoint) deletes non-pinned entries and purges the
+  `nagori-preview/` plaintext temp cache before the tokio runtime tears
+  down. Pinned entries are always preserved. The lifecycle itself lives in
+  `nagori_daemon::clear_on_quit` and is shared with the standalone daemon
+  and the CLI, so every host that owns the store gives the same guarantee:
+  * **Quit** — `clear_history_on_quit` writes a
+    `<db>.clear-on-quit.pending` marker (a sentinel file beside the DB's
+    symlink-resolved path, so every alias of one store shares it) *before*
+    the delete and removes it only once the purge completes. The desktop
+    bounds the wait at 1 s so a wedged DB cannot freeze the quit path and
+    exits right after; the daemon runs the purge after its workers drain on
+    `daemon stop`, SIGTERM, or Ctrl-C and waits for it while still holding
+    its instance lock, so an abandoned purge can never keep deleting after a
+    new owner has started recording.
+  * **Open** — `finish_pending_clear_on_quit` finishes the purge fail-closed
+    whenever the marker survived (a timed-out / crashed / killed purge),
+    before any history is served or captured and under the single-instance
+    lock: the desktop runs it during `setup` before any window can show a
+    row, `run_daemon` before any worker starts, and the CLI each time it
+    opens the store directly (a read takes the lock just for the purge, and
+    is refused while a running owner holds it, since that owner is the one
+    finishing the purge). Whichever host opens the store next completes the
+    purge, so the cleared history is never shown again and nothing recorded
+    afterwards is swept by a late purge.
+  The marker lives on the filesystem (not in the DB) so it survives even when
+  the DB is the contended resource that timed the purge out.
   `WindowEvent::CloseRequested` is *not* a delete trigger: the same
   handler intercepts it on every OS, calls `prevent_close` and hides the
   main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the
