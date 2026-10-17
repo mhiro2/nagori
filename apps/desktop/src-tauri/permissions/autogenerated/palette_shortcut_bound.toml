@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-palette-shortcut-bound"
+description = "Enables the palette_shortcut_bound command without any pre-configured scope."
+commands.allow = ["palette_shortcut_bound"]
+
+[[permission]]
+identifier = "deny-palette-shortcut-bound"
+description = "Denies the palette_shortcut_bound command without any pre-configured scope."
+commands.deny = ["palette_shortcut_bound"]

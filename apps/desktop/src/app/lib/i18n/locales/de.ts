@@ -563,6 +563,8 @@ export const de: Messages = {
       menuBar: 'Tray-Symbol anzeigen',
       menuBarHelp:
         'Zeigt das Nagori-Tray-Symbol im System-Tray an (macOS: Menüleiste, Windows: Infobereich, Linux: Statusanzeige). Deaktivieren für reinen Hintergrundbetrieb.',
+      menuBarRequired:
+        'Derzeit kann kein globales Tastenkürzel die Palette öffnen, daher bleibt das Tray-Symbol als Weg zurück zu Nagori sichtbar. Lege ein funktionierendes Tastenkürzel fest, um es auszublenden.',
       clearOnQuit: 'Nicht angeheftete Einträge beim Beenden löschen',
       clearOnQuitHelp:
         'Beim Beenden werden alle nicht angehefteten Einträge entfernt. Angeheftete Einträge bleiben erhalten.',

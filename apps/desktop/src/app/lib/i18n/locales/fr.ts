@@ -562,6 +562,8 @@ export const fr: Messages = {
       menuBar: 'Afficher l’icône dans la barre d’état',
       menuBarHelp:
         'Affiche l’icône de Nagori dans la barre d’état système (macOS : barre des menus, Windows : zone de notification, Linux : indicateur d’état). Désactivez pour une exécution entièrement en arrière-plan.',
+      menuBarRequired:
+        'Aucun raccourci global ne peut ouvrir la palette pour le moment : l’icône reste donc affichée pour revenir à Nagori. Définissez un raccourci fonctionnel pour la masquer.',
       clearOnQuit: 'Effacer l’historique non épinglé à la fermeture',
       clearOnQuitHelp:
         'À la fermeture de l’application, toutes les entrées non épinglées sont supprimées. Les épinglées sont conservées.',

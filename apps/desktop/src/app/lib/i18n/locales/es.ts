@@ -562,6 +562,8 @@ export const es: Messages = {
       menuBar: 'Mostrar icono en la bandeja',
       menuBarHelp:
         'Muestra el icono de bandeja de Nagori (macOS: barra de menús, Windows: área de notificación, Linux: indicador de estado). Desactívalo para una experiencia totalmente en segundo plano.',
+      menuBarRequired:
+        'Ahora mismo ningún atajo global puede abrir la paleta, así que el icono de bandeja sigue visible como forma de volver a Nagori. Configura un atajo que funcione para ocultarlo.',
       clearOnQuit: 'Borrar historial no fijado al salir',
       clearOnQuitHelp:
         'Al salir de la aplicación se eliminan todas las entradas no fijadas. Las entradas fijadas se conservan.',

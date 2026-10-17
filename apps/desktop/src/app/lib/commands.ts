@@ -227,3 +227,9 @@ export const installCli = (): Promise<CliInstallResult> => invoke('install_cli')
 // — used by the always-on App-level subscriber on mount to recover from
 // a startup race where the live emit fires before the listener attaches.
 export const lastHotkeyFailure = (): Promise<HotkeyFailure | null> => invoke('last_hotkey_failure');
+
+// Whether the palette shortcut is bound right now (live registration state,
+// unlike the failure cache above, which keeps the requested accelerator's
+// failure after a rollback). Settings follows `paletteShortcutChanged` after
+// this initial read.
+export const paletteShortcutBound = (): Promise<boolean> => invoke('palette_shortcut_bound');

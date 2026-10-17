@@ -18,6 +18,9 @@
     settings: AppSettings;
     capabilities: PlatformCapabilities | null;
     hotkeyError: string | undefined;
+    // The palette shortcut failed to register (a conflict, or a session where
+    // global shortcuts cannot bind at all).
+    paletteHotkeyFailed: boolean;
     t: Messages;
     debounceNumberMs: number;
     paletteHotkeyActions: readonly PaletteHotkeyAction[];
@@ -35,6 +38,7 @@
     settings = $bindable(),
     capabilities,
     hotkeyError,
+    paletteHotkeyFailed,
     t,
     debounceNumberMs,
     paletteHotkeyActions,
@@ -51,6 +55,17 @@
   // Fold the action label into an accessible-name / tooltip template
   // (`Restore default for {action}` etc.) the same way the update strings do.
   const sub = (template: string, action: string): string => template.replace('{action}', action);
+
+  // The tray and the palette shortcut are the only ways back into the app
+  // once its windows are hidden. While no shortcut can open the palette, the
+  // tray toggle cannot be switched off — the backend keeps the tray up in that
+  // state anyway, so an "off" here would only misreport what is on screen.
+  const paletteShortcutUnavailable = $derived(
+    paletteHotkeyFailed ||
+      settings.globalHotkey.trim() === '' ||
+      capabilities?.globalHotkey.status === 'unsupported',
+  );
+  const menuBarLocked = $derived(settings.showInMenuBar && paletteShortcutUnavailable);
 </script>
 
 <fieldset>
@@ -251,10 +266,21 @@
   </label>
   <p class="help">{t.settings.integration.autoLaunchHelp}</p>
   <label>
-    <input type="checkbox" bind:checked={settings.showInMenuBar} onchange={() => scheduleSave(0)} />
+    <input
+      type="checkbox"
+      bind:checked={settings.showInMenuBar}
+      disabled={menuBarLocked || undefined}
+      aria-describedby={menuBarLocked ? 'menu-bar-required' : undefined}
+      onchange={() => scheduleSave(0)}
+    />
     {t.settings.integration.menuBar}
   </label>
   <p class="help">{t.settings.integration.menuBarHelp}</p>
+  {#if paletteShortcutUnavailable}
+    <p class="help" id="menu-bar-required" data-testid="menu-bar-required">
+      {t.settings.integration.menuBarRequired}
+    </p>
+  {/if}
   <label>
     <input type="checkbox" bind:checked={settings.clearOnQuit} onchange={() => scheduleSave(0)} />
     {t.settings.integration.clearOnQuit}
