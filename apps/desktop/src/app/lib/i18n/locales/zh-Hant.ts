@@ -414,6 +414,9 @@ export const zhHant: Messages = {
       appDenylistPasswordManagers: '封鎖密碼管理器',
       appDenylistPasswordManagersHelp:
         '使用精確的應用程式識別碼封鎖內建預設(1Password、Bitwarden、KeePassXC、Apple Passwords)的複製。預設內容為固定,無法編輯。除非你需要透過剪貼簿從密碼管理器貼上,否則建議保持開啟。',
+      appDenylistPresetLoading: '正在載入密碼管理器清單…',
+      appDenylistPresetFailed: '無法載入密碼管理器清單，因此暫時無法開啟此保護。',
+      appDenylistPresetRetry: '重試',
       appDenylistPatterns: '自訂樣式',
       appDenylistPatternsHelp:
         '每行一個子字串。當來源應用程式名稱、Bundle ID 或執行檔路徑包含其中任一項時不會被擷取(不分大小寫)。可用於封鎖預設之外的應用程式,例如 Dashlane、LastPass、公司內部工具等。',

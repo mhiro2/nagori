@@ -439,6 +439,10 @@ export const ja: Messages = {
       appDenylistPasswordManagers: 'パスワードマネージャをブロック',
       appDenylistPasswordManagersHelp:
         '同梱プリセット（1Password / Bitwarden / KeePassXC / Apple Passwords）からのコピーを正確なアプリ識別子で除外します。プリセットの内容は固定で編集できません。クリップボード経由でこれらから貼り付ける必要がない限り、有効のままにしておくことを推奨します。',
+      appDenylistPresetLoading: 'パスワードマネージャーの一覧を読み込んでいます…',
+      appDenylistPresetFailed:
+        'パスワードマネージャーの一覧を読み込めなかったため、この保護をまだオンにできません。',
+      appDenylistPresetRetry: '再試行',
       appDenylistPatterns: 'カスタムパターン',
       appDenylistPatternsHelp:
         '1 行に 1 つ部分文字列を記入してください。送信元アプリ名・バンドル ID・実行ファイルパスのいずれかに含まれる場合は取り込みません（大文字小文字は区別しません）。プリセットに無いアプリ（Dashlane / LastPass / 社内ツール等）をブロックしたい場合にここへ追加してください。',

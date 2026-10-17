@@ -208,10 +208,50 @@
     return out;
   };
 
+  // Fetch the bundled password-manager rules (the fresh-install fallback for
+  // a denylist that carries no preset). Runs from the mount effect, so it must
+  // not read reactive state before its first await (the effect would track it
+  // and re-run on every status change).
+  const loadPasswordManagerPreset = async (): Promise<void> => {
+    try {
+      const fromIpc = await passwordManagerPreset();
+      // Only adopt the IPC result if we don't already have a preset seeded
+      // from the loaded settings — the load path is the canonical source for
+      // the *user's current* preset (they may have removed individual rules).
+      if (passwordManagerPresetRules.length === 0) {
+        passwordManagerPresetRules = fromIpc;
+      }
+      passwordManagerPresetStatus = passwordManagerPresetRules.length > 0 ? 'ready' : 'failed';
+    } catch {
+      // Keep whatever the load seeded. Without any preset rules the
+      // protection cannot be switched on, so say so instead of leaving a
+      // checkbox that would turn on in the UI only.
+      if (passwordManagerPresetRules.length === 0) {
+        passwordManagerPresetStatus = 'failed';
+      }
+    }
+  };
+
+  // Retry from the failure message. The Settings window is hidden rather than
+  // closed, so reopening it does not remount this view and would never fetch
+  // again on its own.
+  const retryPasswordManagerPreset = async (): Promise<void> => {
+    passwordManagerPresetStatus = 'loading';
+    await loadPasswordManagerPreset();
+  };
+
   // Toggle handler for the "Block password managers" checkbox. Flips
   // the boolean and schedules a save; `assembleDenylist` adds/removes
-  // the preset rules accordingly.
+  // the preset rules accordingly. Turning it on needs the preset rules in
+  // hand: assembled without them, the denylist would match what is already
+  // saved, the save would be skipped, and the checkbox would show a
+  // protection that is not in effect. The checkbox is disabled until the
+  // rules arrive; this guard covers a change event that slips through anyway.
   const onPasswordManagerPresetToggle = (next: boolean): void => {
+    if (next && passwordManagerPresetRules.length === 0) {
+      appDenylistPresetEnabled = false;
+      return;
+    }
     appDenylistPresetEnabled = next;
     scheduleSave(0);
   };
@@ -311,6 +351,12 @@
   // until the preset arrives, which the user can fix by toggling
   // again).
   let passwordManagerPresetRules: AppDenyRule[] = [];
+  // Whether the preset rules are available to turn the protection on with:
+  // seeded from the loaded settings when they already carry the preset, or
+  // from `passwordManagerPreset()` otherwise. Until then the checkbox cannot
+  // be switched on, and a failed fetch is shown rather than leaving the
+  // switch looking usable.
+  let passwordManagerPresetStatus: 'loading' | 'ready' | 'failed' = $state('loading');
   let regexDenylistText = $state('');
   // `hydrated` flips true only after `get_settings` resolves *and* the
   // derived textarea state is in sync. Auto-save gates on this flag so
@@ -604,6 +650,7 @@
         const loadedPreset = extractPresetRules(s.appDenylist);
         if (loadedPreset.length > 0) {
           passwordManagerPresetRules = loadedPreset;
+          passwordManagerPresetStatus = 'ready';
         }
         regexDenylistText = s.regexDenylist.join('\n');
         lastValidRegexList = [...s.regexDenylist];
@@ -638,28 +685,7 @@
         // Diagnostic-only surface; ignore failures.
       }
     })();
-    void (async () => {
-      try {
-        const fromIpc = await passwordManagerPreset();
-        // Only adopt the IPC result if we don't already have a preset
-        // seeded from the loaded settings — the load path runs
-        // synchronously after `getSettings` resolves and is the
-        // canonical source for the *user's current* preset (they
-        // may have removed individual rules). The IPC's role is the
-        // fresh-install fallback when the loaded settings have no
-        // preset rules at all.
-        if (passwordManagerPresetRules.length === 0) {
-          passwordManagerPresetRules = fromIpc;
-        }
-      } catch {
-        // Best-effort: when the preset call fails we leave the cache
-        // at whatever the load seeded (possibly empty). Toggling the
-        // preset back on in that state writes an empty preset
-        // section until the next Settings open; logging would just
-        // noise the diagnostics surface for a never-seen failure
-        // mode (the command never touches disk).
-      }
-    })();
+    void loadPasswordManagerPreset();
     // The Settings window is a separate Tauri webview, so the palette's
     // mount-time `refreshSettings` never runs here. Without this fetch the
     // capability table reads `accessibilityGranted() === false` even when
@@ -1129,6 +1155,8 @@
               {t}
               frontmostAppCapability={capabilities?.frontmostApp}
               bind:appDenylistPresetEnabled
+              {passwordManagerPresetStatus}
+              onRetryPasswordManagerPreset={retryPasswordManagerPreset}
               bind:appDenylistPatternsText
               bind:regexDenylistText
               {regexDenylistErrors}

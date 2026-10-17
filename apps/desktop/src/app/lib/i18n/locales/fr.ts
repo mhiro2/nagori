@@ -455,6 +455,10 @@ export const fr: Messages = {
       appDenylistPasswordManagers: 'Bloquer les gestionnaires de mots de passe',
       appDenylistPasswordManagersHelp:
         'Rejette les captures provenant des gestionnaires de mots de passe fournis (1Password, Bitwarden, KeePassXC, Apple Passwords) via des identifiants exacts. Le préréglage est figé et non modifiable. Recommandé ; gardez l’option activée sauf si vous devez réellement coller depuis un gestionnaire de mots de passe via le presse-papiers.',
+      appDenylistPresetLoading: 'Chargement de la liste des gestionnaires de mots de passe…',
+      appDenylistPresetFailed:
+        'Impossible de charger la liste des gestionnaires de mots de passe : cette protection ne peut pas encore être activée.',
+      appDenylistPresetRetry: 'Réessayer',
       appDenylistPatterns: 'Motifs personnalisés',
       appDenylistPatternsHelp:
         'Une sous-chaîne par ligne — toute capture dont le nom d’app source, l’ID de bundle ou le chemin d’exécutable contient l’une d’elles est ignorée (insensible à la casse). Utilisez cette liste pour les apps hors préréglage, par exemple Dashlane, LastPass ou des outils internes.',
