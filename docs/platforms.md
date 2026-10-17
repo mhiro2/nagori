@@ -165,7 +165,9 @@ reports trace back to one of them.
   shell emits `nagori://hotkey_register_failed` so the Settings page
   can prompt the user to pick a different binding (no
   silent-disable, no retry loop). There is no in-app workaround
-  today — use the tray icon to toggle the palette. (Compositor-level
+  today — use the tray icon to toggle the palette. The tray icon stays
+  visible in this state even if **Show tray icon** is off, so the app
+  never ends up with no way back in. (Compositor-level
   keybindings such as sway/Hyprland bindings cannot reach the
   running Nagori process either, since Nagori does not yet expose a
   CLI/IPC entry point for palette toggle.)

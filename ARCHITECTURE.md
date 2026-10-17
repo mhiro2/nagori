@@ -2754,7 +2754,12 @@ change.
   `nagori://navigate` with payload `"settings"`; the frontend listens
   via `@tauri-apps/api/event` and switches its route. Visibility is
   gated by `AppSettings.show_in_menu_bar`; toggling the setting hides
-  or re-shows the tray icon at runtime. Install failures on Linux
+  or re-shows the tray icon at runtime. The tray and the palette shortcut
+  are the only ways back into the app (there is no Dock / taskbar
+  presence), so while the palette shortcut is not bound — a pure Wayland
+  session, an accelerator another app holds, a cleared binding — the tray
+  stays visible regardless of the setting (`tray_should_be_visible`), and
+  Settings locks the toggle with an explanation. Install failures on Linux
   sessions without `StatusNotifierItem` support are logged and the rest
   of the app stays usable through the in-window controls.
 - **macOS activation policy** — when `tray::install` succeeds,
