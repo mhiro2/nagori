@@ -113,6 +113,11 @@ that every byte disappeared immediately:
   eviction are hard-delete paths. They cascade through representations,
   FTS/ngram rows, thumbnails, and semantic embeddings and then truncate the WAL
   when rows were removed.
+- The full-text index deletes with FTS5's `secure-delete` option, so a removed
+  entry's words are rewritten out of the index's own storage rather than left
+  behind a delete marker. Databases created before this option was enabled
+  have their index rebuilt once on upgrade, which drops tokens that earlier
+  deletes had left in place.
 - **Clear history** is two-phase, because a hard delete of a large history takes
   minutes and nothing would leave the palette until it committed. It tombstones
   every non-pinned row (hard-deleting `Secret` rows on the spot) so the history

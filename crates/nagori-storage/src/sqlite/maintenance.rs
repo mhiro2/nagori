@@ -6,22 +6,36 @@ use super::SqliteStore;
 use super::convert::{format_time, storage_err};
 
 /// Rows fetched per eviction round in [`SqliteStore::enforce_total_bytes`].
-/// Bounds the writer transaction's working set; one round usually clears a
-/// typical overshoot, and a pathological backlog just runs more rounds
-/// within the same transaction.
+/// Each round runs in its own transaction, so this also bounds how long one
+/// round holds the writer; a larger overshoot just runs more rounds.
 pub(crate) const TOTAL_BYTES_EVICTION_BATCH: i64 = 64;
 
-/// Rows hard-deleted per transaction in [`SqliteStore::purge_deleted`].
+/// Rows hard-deleted per transaction by the bulk reclaim paths
+/// ([`SqliteStore::purge_deleted`], [`SqliteStore::clear_older_than`],
+/// [`SqliteStore::enforce_retention_count`]).
 ///
-/// The purge cascades into representations, blobs, embeddings, thumbnails, and
-/// the FTS/ngram index, and `secure_delete` zeroes every freed page — clearing
-/// a 100k-row history takes tens of seconds. Doing that in one transaction
-/// holds the single writer for the whole run, so a capture landing meanwhile
-/// blocks behind it. Batching commits every `PURGE_DELETED_BATCH` rows and
-/// returns the pooled connection between batches, which caps the writer-lock
-/// hold at roughly one batch (~100ms at the measured per-row cost) while the
-/// total work stays the same.
-pub(super) const PURGE_DELETED_BATCH: i64 = 256;
+/// A hard delete cascades into representations, blobs, embeddings,
+/// thumbnails, and the FTS/ngram index, and `secure_delete` zeroes every freed
+/// page — trimming a 20k-row history measured ~25s. Doing that in one
+/// transaction holds the single writer for the whole run, so a capture landing
+/// meanwhile waits out `busy_timeout` and fails with `database is locked`, and
+/// any clip copied before the capture loop's retry is lost. Committing every
+/// `HARD_DELETE_BATCH` rows and returning the pooled connection between
+/// batches caps the writer-lock hold at roughly one batch (~100–300ms at the
+/// measured per-row cost) while the total work stays the same.
+pub(super) const HARD_DELETE_BATCH: i64 = 256;
+
+/// Pause after a full hard-delete batch (or eviction round) before the next
+/// one takes the writer again.
+///
+/// Short batches alone do not let a capture in: `SQLite`'s busy handler is a
+/// sleep-and-retry with no hand-off, so a reclaim that re-took the lock the
+/// moment it committed could win every time while the capture slept, and the
+/// capture would still run out its `busy_timeout`. The default busy handler's
+/// back-off tops out at 100ms between retries, so a gap longer than that
+/// guarantees a waiting writer retries — and gets the lock — before the
+/// reclaim's next batch.
+const HARD_DELETE_YIELD: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// `PRAGMA auto_vacuum` value for a database without auto-vacuum (`1` is full,
 /// `2` incremental).
@@ -80,29 +94,29 @@ fn checkpoint_truncate(conn: &rusqlite::Connection) {
 }
 
 impl SqliteStore {
+    /// Physically delete aged-out, non-pinned rows. `ON DELETE CASCADE`
+    /// (plus `recursive_triggers` firing `search_documents_ad_fts`) drops each
+    /// row's representations, image/blob payloads, embeddings, thumbnails, and
+    /// search/ngram index along with it, so the content is gone from the live
+    /// table rather than tombstoned and left on disk indefinitely. No
+    /// `deleted_at` predicate: a hard delete of an already-tombstoned row
+    /// (from a per-entry delete) is just cleanup we want anyway.
+    ///
+    /// Runs in [`HARD_DELETE_BATCH`]-sized transactions so a large backlog
+    /// (the first sweep after shortening the retention window) cannot hold the
+    /// writer long enough to make a concurrent capture fail.
     pub async fn clear_older_than(&self, cutoff: OffsetDateTime) -> Result<usize> {
-        self.run_blocking(move |store| {
-            let cutoff = format_time(cutoff)?;
-            let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
-            // Physically delete aged-out, non-pinned rows. `ON DELETE CASCADE`
-            // (plus `recursive_triggers` firing `search_documents_ad_fts`)
-            // drops each row's representations, image/blob payloads,
-            // embeddings, thumbnails, and search/ngram index along with it, so
-            // the content is gone from the live table rather than tombstoned
-            // and left on disk indefinitely. No `deleted_at` predicate: a hard
-            // delete of an already-tombstoned row (from a per-entry delete) is
-            // just cleanup we want anyway.
-            let changed = tx
-                .execute(
-                    "DELETE FROM entries
-                     WHERE pinned = 0 AND created_at < ?1",
-                    params![cutoff],
-                )
-                .map_err(storage_err)?;
-            tx.commit().map_err(storage_err)?;
-            checkpoint_truncate_after_purge(&conn, changed);
-            Ok(changed)
+        let cutoff = format_time(cutoff)?;
+        self.hard_delete_in_batches(move |tx| {
+            tx.execute(
+                "DELETE FROM entries
+                 WHERE id IN (
+                     SELECT id FROM entries
+                     WHERE pinned = 0 AND created_at < ?1
+                     LIMIT ?2
+                 )",
+                params![cutoff, HARD_DELETE_BATCH],
+            )
         })
         .await
     }
@@ -212,17 +226,65 @@ impl SqliteStore {
     /// the documented purge contract so the pre-deletion cleartext cannot
     /// survive in historical WAL frames.
     ///
-    /// Runs in [`PURGE_DELETED_BATCH`]-sized transactions, each on a freshly
+    /// Runs in [`HARD_DELETE_BATCH`]-sized transactions, each on a freshly
     /// checked-out pooled connection, so a bulk clear's backlog cannot hold the
     /// single writer for the whole reclaim and starve captures behind it.
     pub async fn purge_deleted(&self) -> Result<usize> {
+        self.hard_delete_in_batches(|tx| {
+            tx.execute(
+                "DELETE FROM entries
+                 WHERE id IN (
+                     SELECT id FROM entries WHERE deleted_at IS NOT NULL LIMIT ?1
+                 )",
+                params![HARD_DELETE_BATCH],
+            )
+        })
+        .await
+    }
+
+    /// Run `delete_batch` in its own transaction until it removes no rows,
+    /// then fold the WAL back once if anything was deleted.
+    ///
+    /// `delete_batch` must delete at most [`HARD_DELETE_BATCH`] rows and pick
+    /// them from the *current* table state, so each round sees the effect of
+    /// the previous one and of any capture that committed in between. Every
+    /// round checks out a fresh pooled connection and a full batch is followed
+    /// by [`HARD_DELETE_YIELD`], which is what lets a capture take the writer
+    /// between rounds. A failing round still checkpoints the batches already
+    /// committed before surfacing the error, so their deleted content does
+    /// not linger in the WAL.
+    async fn hard_delete_in_batches<F>(&self, delete_batch: F) -> Result<usize>
+    where
+        F: Fn(&rusqlite::Transaction<'_>) -> rusqlite::Result<usize> + Clone + Send + 'static,
+    {
         let mut total = 0_usize;
         loop {
-            let purged = self.purge_deleted_batch().await?;
-            if purged == 0 {
+            let delete_batch = delete_batch.clone();
+            let round = self
+                .run_blocking(move |store| {
+                    let mut conn = store.conn()?;
+                    // `BEGIN IMMEDIATE` so a round that queues behind a
+                    // capture waits on `busy_timeout` for the writer, rather
+                    // than starting as a reader and failing the upgrade.
+                    let tx = conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .map_err(storage_err)?;
+                    let changed = delete_batch(&tx).map_err(storage_err)?;
+                    tx.commit().map_err(storage_err)?;
+                    Ok(changed)
+                })
+                .await;
+            let removed = match round {
+                Ok(removed) => removed,
+                Err(err) => return Err(self.checkpoint_after_partial_delete(total, err).await),
+            };
+            if removed == 0 {
                 break;
             }
-            total += purged;
+            total += removed;
+            if i64::try_from(removed).is_ok_and(|removed| removed >= HARD_DELETE_BATCH) {
+                tokio::time::sleep(HARD_DELETE_YIELD).await;
+            }
         }
         if total > 0 {
             self.checkpoint_truncate().await;
@@ -230,28 +292,17 @@ impl SqliteStore {
         Ok(total)
     }
 
-    /// One batch of [`Self::purge_deleted`]. Returns the rows reclaimed, or 0
-    /// when the tombstone backlog is drained.
-    async fn purge_deleted_batch(&self) -> Result<usize> {
-        self.run_blocking(move |store| {
-            let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
-            let changed = tx
-                .execute(
-                    "DELETE FROM entries
-                     WHERE id IN (
-                         SELECT id FROM entries WHERE deleted_at IS NOT NULL LIMIT ?1
-                     )",
-                    params![PURGE_DELETED_BATCH],
-                )
-                .map_err(storage_err)?;
-            tx.commit().map_err(storage_err)?;
-            Ok(changed)
-        })
-        .await
+    /// Checkpoint the batches a bulk delete committed before `err` stopped it
+    /// — the rows are gone, so their content must not survive in the WAL —
+    /// then hand `err` back for the caller to surface.
+    async fn checkpoint_after_partial_delete(&self, deleted: usize, err: AppError) -> AppError {
+        if deleted > 0 {
+            self.checkpoint_truncate().await;
+        }
+        err
     }
 
-    /// Fold the WAL back into the main file once a batched purge has drained.
+    /// Fold the WAL back into the main file once a batched delete has drained.
     /// Best-effort for the same reason as
     /// [`checkpoint_truncate_after_purge`]: the rows are already gone, so a
     /// busy checkpoint must not turn a completed purge into an error.
@@ -264,7 +315,7 @@ impl SqliteStore {
             })
             .await;
         if let Err(err) = checkpointed {
-            tracing::warn!(error = %err, "purge_deleted_checkpoint_failed");
+            tracing::warn!(error = %err, "batched_delete_checkpoint_failed");
         }
     }
 
@@ -281,169 +332,61 @@ impl SqliteStore {
                 "history_retention_count {max_entries} exceeds i64 range: {err}"
             ))
         })?;
-        self.run_blocking(move |store| {
-            let mut conn = store.conn()?;
-            let tx = conn.transaction().map_err(storage_err)?;
-            // Physically delete the oldest live, unpinned rows beyond the cap.
-            // The cap bounds *live* history, so the subquery selects from
-            // `deleted_at IS NULL` rows; the cascade drops each evicted row's
-            // representations, blobs, embeddings, thumbnails, and search index
-            // with it, so a retention cap actually reclaims disk instead of
-            // leaving tombstones that grow the file forever.
-            let changed = tx
-                .execute(
-                    "DELETE FROM entries
-                     WHERE id IN (
-                         SELECT id FROM entries
-                         WHERE deleted_at IS NULL AND pinned = 0
-                         ORDER BY created_at DESC
-                         LIMIT -1 OFFSET ?1
-                     )",
-                    params![max_entries_i64],
-                )
-                .map_err(storage_err)?;
-            tx.commit().map_err(storage_err)?;
-            checkpoint_truncate_after_purge(&conn, changed);
-            Ok(changed)
+        // Physically delete the oldest live, unpinned rows beyond the cap.
+        // The cap bounds *live* history, so the subquery selects from
+        // `deleted_at IS NULL` rows; the cascade drops each evicted row's
+        // representations, blobs, embeddings, thumbnails, and search index
+        // with it, so a retention cap actually reclaims disk instead of
+        // leaving tombstones that grow the file forever. Each batch takes the
+        // next rows past the cap, so a capture committed between batches
+        // simply shifts one more old row over it.
+        self.hard_delete_in_batches(move |tx| {
+            tx.execute(
+                "DELETE FROM entries
+                 WHERE id IN (
+                     SELECT id FROM entries
+                     WHERE deleted_at IS NULL AND pinned = 0
+                     ORDER BY created_at DESC
+                     LIMIT ?2 OFFSET ?1
+                 )",
+                params![max_entries_i64, HARD_DELETE_BATCH],
+            )
         })
         .await
     }
 
+    /// Evict the oldest live, unpinned rows until their retained payload fits
+    /// `max_total_bytes`.
+    ///
+    /// Each round of [`TOTAL_BYTES_EVICTION_BATCH`] candidates commits on its
+    /// own (see [`evict_total_bytes_round`]), so shrinking the budget far below
+    /// a large history cannot hold the writer for the whole eviction and make
+    /// a concurrent capture fail. The budget total is re-read every round, so a
+    /// capture that lands between rounds is counted against the budget like
+    /// any other row.
     pub async fn enforce_total_bytes(&self, max_total_bytes: u64) -> Result<usize> {
-        self.run_blocking(move |store| {
-            let mut conn = store.conn()?;
-            // `BEGIN IMMEDIATE`: the sweep reads the budget total and then
-            // deletes. A DEFERRED transaction would upgrade its read snapshot
-            // to a write lock at the first DELETE and fail with
-            // `SQLITE_BUSY_SNAPSHOT` whenever a capture committed in between,
-            // skipping this sweep entirely; taking the write lock up front
-            // waits on `busy_timeout` instead.
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage_err)?;
-            // Budget the retained representation payload only — the
-            // `content_json` envelope is bookkeeping, not user content, and
-            // for text-shaped entries the same text already appears in
-            // `entry_representations.text_content`. Counting both would
-            // double-charge text rows and trigger over-eager eviction.
-            //
-            // `entries.total_byte_count` is materialised by the
-            // `entry_representations_ai/ad/au_total` triggers, so the
-            // budget total is a single-table aggregate.
-            //
-            // Pinned rows are outside the budget, mirroring
-            // `enforce_retention_count`: eviction can never delete them, so
-            // counting their bytes would only let pins crowd out history.
-            // Once the pinned total alone exceeded the cap, every sweep would
-            // evict all unpinned rows (including a clip captured seconds
-            // earlier) and still end over budget.
-            let total_i64: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(total_byte_count), 0)
-                     FROM entries
-                     WHERE deleted_at IS NULL AND pinned = 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(storage_err)?;
-            let mut total = u64::try_from(total_i64).map_err(|err| {
-                AppError::storage(format!("entry size total overflowed u64 conversion: {err}"))
-            })?;
-            if total <= max_total_bytes {
-                tx.commit().map_err(storage_err)?;
-                return Ok(0);
+        let mut deleted = 0;
+        loop {
+            let round = self
+                .run_blocking(move |store| {
+                    let mut conn = store.conn()?;
+                    evict_total_bytes_round(&mut conn, max_total_bytes)
+                })
+                .await;
+            let round = match round {
+                Ok(round) => round,
+                Err(err) => return Err(self.checkpoint_after_partial_delete(deleted, err).await),
+            };
+            deleted += round.removed;
+            if round.done {
+                break;
             }
-
-            // Evict oldest-first in bounded rounds rather than loading every
-            // live, unpinned row into memory up front: a 100k-row history
-            // would otherwise materialise the whole id list inside the write
-            // lock. The `total_byte_count DESC` tie-break keeps same-instant
-            // rows leaving largest-first, so freeing the budget costs as few
-            // rows as before; SQLite holds only the LIMIT-sized top-N while
-            // sorting, so the tie-break no longer forces the full-table Vec
-            // the old implementation paid for it. Each round re-selects from
-            // the live set, so rows deleted by the previous round never
-            // reappear (the DELETE is in this same transaction).
-            let mut deleted = 0;
-            'evict: while total > max_total_bytes {
-                let candidates = {
-                    let mut stmt = tx
-                        .prepare_cached(
-                            "SELECT id, total_byte_count
-                             FROM entries
-                             WHERE deleted_at IS NULL AND pinned = 0
-                             ORDER BY created_at ASC, total_byte_count DESC
-                             LIMIT ?1",
-                        )
-                        .map_err(storage_err)?;
-                    let rows = stmt
-                        .query_map(params![TOTAL_BYTES_EVICTION_BATCH], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                        })
-                        .map_err(storage_err)?;
-                    let rows = rows
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                        .map_err(storage_err)?;
-                    rows.into_iter()
-                        .map(|(id, bytes)| {
-                            u64::try_from(bytes)
-                                .map(|bytes| (id, bytes))
-                                .map_err(|err| {
-                                    AppError::storage(format!(
-                                        "entry size overflowed u64 conversion: {err}"
-                                    ))
-                                })
-                        })
-                        .collect::<Result<Vec<_>>>()?
-                };
-                if candidates.is_empty() {
-                    // Every unpinned row is gone. Only reachable when the
-                    // running total drifted from the live set (the sum and
-                    // the candidates cover the same rows), so stop rather
-                    // than spin.
-                    break;
-                }
-                let mut removed_this_round = 0usize;
-                for (id, bytes) in candidates {
-                    if total <= max_total_bytes {
-                        break 'evict;
-                    }
-                    // Hard-delete (cascade drops representations / blobs /
-                    // embeddings / search index) so trimming to the byte budget
-                    // reclaims real disk. `pinned = 0` is a defensive guard; the
-                    // candidate set is already unpinned and live.
-                    let changed = tx
-                        .execute(
-                            "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
-                            params![id],
-                        )
-                        .map_err(storage_err)?;
-                    if changed > 0 {
-                        deleted += changed;
-                        removed_this_round += changed;
-                        total = total.saturating_sub(bytes);
-                    }
-                }
-                // A non-empty candidate round that removes no rows cannot shrink
-                // the live set, so re-selecting would spin on the same rows.
-                // The candidate DELETE matches every selected (live, unpinned)
-                // row in this same transaction, so this is normally unreachable;
-                // the guard removes the loop's dependence on that invariant
-                // rather than trusting it implicitly. It keys on *rows removed*,
-                // not bytes freed: oldest-first eviction legitimately passes
-                // through zero-byte rows (an entry with no retained
-                // representation payload) before reaching the heavier rows that
-                // actually free the budget, so a "no bytes freed this round"
-                // guard would stop eviction prematurely.
-                if removed_this_round == 0 {
-                    break;
-                }
-            }
-            tx.commit().map_err(storage_err)?;
-            checkpoint_truncate_after_purge(&conn, deleted);
-            Ok(deleted)
-        })
-        .await
+            tokio::time::sleep(HARD_DELETE_YIELD).await;
+        }
+        if deleted > 0 {
+            self.checkpoint_truncate().await;
+        }
+        Ok(deleted)
     }
 
     /// Return the database's free pages to the filesystem.
@@ -481,6 +424,134 @@ impl SqliteStore {
         })
         .await
     }
+}
+
+/// Outcome of one [`evict_total_bytes_round`].
+struct EvictionRound {
+    removed: usize,
+    /// No further round can make progress: the budget is met, or no
+    /// candidate is left to evict.
+    done: bool,
+}
+
+/// One committed round of [`SqliteStore::enforce_total_bytes`].
+fn evict_total_bytes_round(
+    conn: &mut rusqlite::Connection,
+    max_total_bytes: u64,
+) -> Result<EvictionRound> {
+    // `BEGIN IMMEDIATE`: the round reads the budget total and then deletes. A
+    // DEFERRED transaction would upgrade its read snapshot to a write lock at
+    // the first DELETE and fail with `SQLITE_BUSY_SNAPSHOT` whenever a capture
+    // committed in between, skipping the sweep; taking the write lock up front
+    // waits on `busy_timeout` instead.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_err)?;
+    // Budget the retained representation payload only — the `content_json`
+    // envelope is bookkeeping, not user content, and for text-shaped entries
+    // the same text already appears in `entry_representations.text_content`.
+    // Counting both would double-charge text rows and trigger over-eager
+    // eviction.
+    //
+    // `entries.total_byte_count` is materialised by the
+    // `entry_representations_ai/ad/au_total` triggers, so the budget total is
+    // a single-table aggregate.
+    //
+    // Pinned rows are outside the budget, mirroring `enforce_retention_count`:
+    // eviction can never delete them, so counting their bytes would only let
+    // pins crowd out history. Once the pinned total alone exceeded the cap,
+    // every sweep would evict all unpinned rows (including a clip captured
+    // seconds earlier) and still end over budget.
+    let total_i64: i64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(total_byte_count), 0)
+             FROM entries
+             WHERE deleted_at IS NULL AND pinned = 0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(storage_err)?;
+    let mut total = u64::try_from(total_i64).map_err(|err| {
+        AppError::storage(format!("entry size total overflowed u64 conversion: {err}"))
+    })?;
+    if total <= max_total_bytes {
+        tx.commit().map_err(storage_err)?;
+        return Ok(EvictionRound {
+            removed: 0,
+            done: true,
+        });
+    }
+
+    // Evict oldest-first in bounded rounds rather than loading every live,
+    // unpinned row into memory up front: a 100k-row history would otherwise
+    // materialise the whole id list inside the write lock. The
+    // `total_byte_count DESC` tie-break keeps same-instant rows leaving
+    // largest-first, so freeing the budget costs as few rows as possible;
+    // SQLite holds only the LIMIT-sized top-N while sorting. Each round
+    // re-selects from the live set, so rows deleted by the previous round never
+    // reappear.
+    let candidates = {
+        let mut stmt = tx
+            .prepare_cached(
+                "SELECT id, total_byte_count
+                 FROM entries
+                 WHERE deleted_at IS NULL AND pinned = 0
+                 ORDER BY created_at ASC, total_byte_count DESC
+                 LIMIT ?1",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![TOTAL_BYTES_EVICTION_BATCH], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(storage_err)?;
+        let rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_err)?;
+        rows.into_iter()
+            .map(|(id, bytes)| {
+                u64::try_from(bytes)
+                    .map(|bytes| (id, bytes))
+                    .map_err(|err| {
+                        AppError::storage(format!("entry size overflowed u64 conversion: {err}"))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let mut removed = 0usize;
+    for (id, bytes) in &candidates {
+        if total <= max_total_bytes {
+            break;
+        }
+        // Hard-delete (cascade drops representations / blobs / embeddings /
+        // search index) so trimming to the byte budget reclaims real disk.
+        // `pinned = 0` is a defensive guard; the candidate set is already
+        // unpinned and live.
+        let changed = tx
+            .execute(
+                "DELETE FROM entries WHERE id = ?1 AND pinned = 0",
+                params![id],
+            )
+            .map_err(storage_err)?;
+        if changed > 0 {
+            removed += changed;
+            total = total.saturating_sub(*bytes);
+        }
+    }
+    tx.commit().map_err(storage_err)?;
+    // An empty candidate set means every unpinned row is gone — only reachable
+    // when the running total drifted from the live set — so stop rather than
+    // spin. A non-empty round that removed nothing cannot shrink the live set
+    // either: the candidate DELETE matches every selected (live, unpinned)
+    // row, so this is normally unreachable, but the guard keeps the loop from
+    // depending on that invariant. It keys on *rows removed*, not bytes freed:
+    // oldest-first eviction legitimately passes through zero-byte rows (an
+    // entry with no retained representation payload) before reaching the
+    // heavier rows that actually free the budget.
+    Ok(EvictionRound {
+        removed,
+        done: total <= max_total_bytes || removed == 0,
+    })
 }
 
 /// Drain the freelist of an `auto_vacuum = INCREMENTAL` database one chunk at

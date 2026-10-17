@@ -618,7 +618,7 @@ are forward-only; downgrades are not supported.
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
-| `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
+| `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. FTS5's `secure-delete` option is on (persisted in `search_fts_config`), so a delete rewrites the segment holding the removed tokens instead of only appending a delete marker that leaves them readable in `search_fts_data`. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
 | `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. *Clear history* tombstones first and the deferred purge it kicks drops the vector moments later. |
 | `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) and the privacy-policy fingerprint (`policy_hash`, from `AppSettings::semantic_policy_hash`) the stored vectors were produced with, so a model *or policy* change clears the index and triggers a rebuild instead of mixing incompatible spaces or serving vectors the current policy forbids. |
@@ -697,7 +697,18 @@ firing the `search_documents_ad_fts` sync trigger) drops the row's
 representations, blobs, embeddings, thumbnails, and search / ngram
 index in the same transaction. Retention therefore reclaims disk (a
 later vacuum from the maintenance sweep then shrinks the file) rather
-than tombstoning rows that grow it forever. Per-entry deletes
+than tombstoning rows that grow it forever. The count and age sweeps
+commit in `HARD_DELETE_BATCH`-sized transactions and the byte budget in
+`TOTAL_BYTES_EVICTION_BATCH`-sized rounds, each on a freshly checked-out
+connection opened with `BEGIN IMMEDIATE`, and pause for `HARD_DELETE_YIELD`
+(longer than the busy handler's 100 ms retry ceiling) after each full batch
+so a capture waiting on the writer is guaranteed its turn; a batch that fails
+still checkpoints the ones already committed. Shrinking a 20k-entry history
+to one row in a single transaction measured ~25 s and made a concurrent
+capture fail with `database is locked`, losing any clip copied before the
+capture loop's retry. Each batch re-selects from the current table, so a
+capture committed between batches is trimmed or budgeted like any other
+row. Per-entry deletes
 (`delete_entry`) soft-delete by default, but
 `permanent_delete_on_delete` switches that surface to the same immediate
 hard-delete primitive. Secret rows are always hard-deleted immediately, and
@@ -716,7 +727,7 @@ runtime then fires a maintenance kick (a watch channel the maintenance
 supervisor selects on beside its periodic timer) so the deferred
 `purge_deleted` reclaims the rows within seconds rather than at the next
 30-minute tick — and a sweep that *fails* retries in a minute rather than
-leaving those bodies for the full interval. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
+leaving those bodies for the full interval. `purge_deleted` itself commits in `HARD_DELETE_BATCH`-sized
 transactions on freshly checked-out connections, so a 100k backlog cannot hold
 the single writer for the whole reclaim and starve captures behind it. Unlike
 `mark_deleted` — which drops a tombstoned row's search / ngram rows eagerly
