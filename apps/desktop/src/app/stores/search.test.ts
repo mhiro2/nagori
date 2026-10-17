@@ -24,9 +24,11 @@ import {
 } from './searchActions';
 import { hydratePreview, previewState } from './searchPreview.svelte';
 import {
+  cancelPendingQuery,
   resetSearchRuntimeForTest,
   flushPendingQuery,
   refreshRecent,
+  resumePendingQuery,
   runQuery,
   scheduleQuery,
   searchState,
@@ -290,6 +292,129 @@ describe('flushPendingQuery', () => {
     // The stale row must never be pasted when the typed query's results are
     // unavailable.
     expect(pasteEntryCmd).not.toHaveBeenCalled();
+  });
+});
+
+const searchReturning = (id: string) =>
+  vi.mocked(searchClipboard).mockResolvedValue({
+    results: [sampleEntry(id)].map(toResult),
+    totalCandidates: 1,
+    searchElapsedMs: 1,
+    summaryElapsedMs: 0,
+    totalElapsedMs: 1,
+  });
+
+// The palette was showing `old`'s results, the user typed `new`, and the
+// palette hid (Escape / blur) inside the debounce window: the debounce is
+// cancelled but the typed query stays in the box.
+const hideMidDebounce = async (): Promise<void> => {
+  searchReturning('old-hit');
+  await runQuery('old');
+  scheduleQuery('new');
+  cancelPendingQuery();
+};
+
+describe('typing right before the palette hides', () => {
+  it('does not report the previous query results as ready', async () => {
+    await hideMidDebounce();
+    expect(searchState.query).toBe('new');
+    expect(searchState.appliedQuery).toBe('old');
+    searchReturning('new-hit');
+
+    const ready = await flushPendingQuery();
+
+    // The flush searches the typed query instead of acting on `old`'s list.
+    expect(ready).toBe(true);
+    expect(searchState.appliedQuery).toBe('new');
+    expect(searchState.results.at(0)?.id).toBe('new-hit');
+  });
+
+  it('confirmSelection and deleteSelection act on the typed query, not the stale list', async () => {
+    await hideMidDebounce();
+    searchReturning('new-hit');
+
+    await confirmSelection();
+    expect(pasteEntryCmd).toHaveBeenLastCalledWith('new-hit', undefined);
+
+    await hideMidDebounce();
+    searchReturning('new-hit');
+    await deleteSelection();
+    expect(deleteEntryCmd).not.toHaveBeenCalledWith('old-hit');
+  });
+
+  it('a failed re-search keeps actions blocked', async () => {
+    await hideMidDebounce();
+    vi.mocked(searchClipboard).mockRejectedValue({
+      code: 'storage_error',
+      message: 'boom',
+      recoverable: true,
+    });
+
+    expect(await flushPendingQuery()).toBe(false);
+    await confirmSelection();
+    expect(pasteEntryCmd).not.toHaveBeenCalled();
+  });
+
+  it('resuming the palette searches the query left in the box', async () => {
+    await hideMidDebounce();
+    searchReturning('new-hit');
+
+    await resumePendingQuery();
+
+    expect(searchState.appliedQuery).toBe('new');
+    expect(searchState.results.at(0)?.id).toBe('new-hit');
+  });
+
+  it('resuming supersedes an older search still in flight', async () => {
+    // `A` is on screen, a search for `B` starts, the box goes back to `A`,
+    // and the palette hides inside the debounce and reopens before `B`
+    // returns: `B` must not land under the `A` in the box.
+    searchReturning('a-hit');
+    await runQuery('A');
+    let resolveB: ((value: Awaited<ReturnType<typeof searchClipboard>>) => void) | undefined;
+    vi.mocked(searchClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveB = resolve;
+      }),
+    );
+    const searchB = runQuery('B');
+    scheduleQuery('A');
+    cancelPendingQuery();
+    searchReturning('a-again');
+
+    const resumed = resumePendingQuery();
+    resolveB?.({
+      results: [sampleEntry('b-hit')].map(toResult),
+      totalCandidates: 1,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    await Promise.all([searchB, resumed]);
+
+    expect(searchState.query).toBe('A');
+    expect(searchState.appliedQuery).toBe('A');
+    expect(searchState.results.at(0)?.id).toBe('a-again');
+  });
+
+  it('resuming with results already matching the box does not search again', async () => {
+    searchReturning('hit');
+    await runQuery('same');
+    vi.mocked(searchClipboard).mockClear();
+
+    await resumePendingQuery();
+
+    expect(searchClipboard).not.toHaveBeenCalled();
+  });
+
+  it('a blank query in the box counts as applied once the recent list is shown', async () => {
+    searchReturning('recent');
+    await runQuery('   ');
+    vi.mocked(searchClipboard).mockClear();
+
+    expect(await flushPendingQuery()).toBe(true);
+    await resumePendingQuery();
+    expect(searchClipboard).not.toHaveBeenCalled();
   });
 });
 

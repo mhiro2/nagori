@@ -347,12 +347,13 @@ export const scheduleQuery = (raw: string): void => {
 /// path adds no latency.
 export const flushPendingQuery = async (): Promise<boolean> => {
   // Re-run the current query when the displayed list does not already reflect
-  // it: a debounce is armed (`pendingQueryTimer`), a search is mid-flight
-  // (`searchRunning`), or the most recent search never applied
-  // (`appliedTicket !== inflight` — it failed or was superseded). The last case
-  // is what stops a one-off search failure from permanently wedging actions:
-  // each attempt re-issues the search rather than giving up forever.
-  if (pendingQueryTimer !== undefined || searchRunning || appliedTicket !== inflight) {
+  // it (see `resultsSettled`): a debounce is armed, a search is mid-flight, the
+  // most recent search never applied (it failed or was superseded), or the
+  // typed query was never searched at all (its debounce was cancelled by a
+  // hide before it fired). The failure case is what stops a one-off search
+  // failure from permanently wedging actions: each attempt re-issues the
+  // search rather than giving up forever.
+  if (!resultsSettled()) {
     await runQuery(searchState.query);
   }
   // Ready iff nothing is still pending/queued *and* the most recent search
@@ -361,12 +362,34 @@ export const flushPendingQuery = async (): Promise<boolean> => {
   // (same query string) failed and left the old-filter list in place; gating on
   // the applied ticket catches every "results don't reflect current intent"
   // case — failure, supersede, and filter change alike.
-  return (
-    pendingQueryTimer === undefined &&
-    !searchRunning &&
-    queuedSearch === undefined &&
-    appliedTicket === inflight
-  );
+  return resultsSettled();
+};
+
+/// Whether the result set on screen was produced for the query in the box.
+/// A blank query is searched as the recent listing, which applies as `''`.
+const typedQueryApplied = (): boolean =>
+  (searchState.query.trim() === '' ? '' : searchState.query) === searchState.appliedQuery;
+
+/// Whether the results on screen are final for the query in the box: nothing
+/// is debounced, running, or queued, the latest search applied, and it was a
+/// search for that query.
+const resultsSettled = (): boolean =>
+  pendingQueryTimer === undefined &&
+  !searchRunning &&
+  queuedSearch === undefined &&
+  appliedTicket === inflight &&
+  typedQueryApplied();
+
+/// Bring the result set back in line with the query in the box when the
+/// palette is shown again with its previous session kept. Hiding cancels a
+/// debounced search but keeps what was typed, so a keystroke made right before
+/// the hide would otherwise reappear above the previous query's results — and
+/// a search for an older query still in flight would land on top of them.
+/// Re-issuing the box's query makes it the latest request, which supersedes
+/// any such search.
+export const resumePendingQuery = async (): Promise<void> => {
+  if (resultsSettled()) return;
+  await runQuery(searchState.query);
 };
 
 /// Cancel any debounced query without running it. Use when the palette

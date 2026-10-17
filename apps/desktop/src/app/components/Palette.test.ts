@@ -61,6 +61,7 @@ vi.mock('../stores/searchQuery.svelte', () => ({
   refreshRecent: vi.fn(async () => undefined),
   scheduleQuery: vi.fn(),
   runQuery: vi.fn(async () => undefined),
+  resumePendingQuery: vi.fn(async () => undefined),
   cancelPendingQuery: vi.fn(),
   canLoadMoreResults: vi.fn(() => false),
   resultLimitReached: vi.fn(() => false),
@@ -140,6 +141,7 @@ import { previewState } from '../stores/searchPreview.svelte';
 import {
   canSearchFullHistory,
   refreshCurrent,
+  resumePendingQuery,
   runQuery,
   scheduleQuery,
   searchFullHistory,
@@ -436,6 +438,8 @@ describe('Palette', () => {
     expect(filterState.datePreset).toBe('today');
     expect(getByTestId('filters-retained').textContent).toBe('Kept from last time');
     expect(runQuery).not.toHaveBeenCalled();
+    // The kept session still re-checks that its results match the box.
+    expect(resumePendingQuery).toHaveBeenCalled();
   });
 
   it('closes the action inspector when the palette hides', async () => {
