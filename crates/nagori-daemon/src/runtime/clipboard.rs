@@ -82,7 +82,7 @@ use nagori_core::{
     PasteFormat, Result, Sensitivity, SettingsRepository, StoredClipboardRepresentation,
     is_text_safe_for_default_output, json_escaped_len, select_representation,
 };
-use nagori_platform::{PreparedClipboardWrite, SelfWriteTracking};
+use nagori_platform::{PreparedClipboardWrite, RestoreTarget, SelfWriteTracking};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, oneshot};
 
 use crate::capture_loop::RESYNC_GAP_THRESHOLD;
@@ -332,13 +332,31 @@ impl ClipboardLease {
     /// user re-copies; typing the new owner's content into their app is the
     /// one outcome this must never produce.
     pub async fn paste_frontmost(&mut self, publish: ClipboardPublish) -> Result<()> {
+        self.paste_frontmost_into(publish, None).await
+    }
+
+    /// [`Self::paste_frontmost`] into `target`: the window focus was handed
+    /// back to before the paste.
+    ///
+    /// A front-end that restores focus and then waits before pasting cannot
+    /// stop the user (or another app) from moving focus during the wait, and
+    /// the keystroke goes to whatever is in front. The adapter compares
+    /// `target` with the foreground inside the synthesis call itself, after
+    /// every await on this path, and refuses with
+    /// [`PasteFailureReason::PreviousAppLost`] when focus has moved on; the
+    /// copy has already landed, so the user can paste manually.
+    pub async fn paste_frontmost_into(
+        &mut self,
+        publish: ClipboardPublish,
+        target: Option<RestoreTarget>,
+    ) -> Result<()> {
         // Same completion-event wrap as `NagoriRuntime::paste_entry`: the
         // palette drives synthesis through here after its own copy step, and
         // ARCHITECTURE §17's grep recipes need a success signal too.
         // `result_code` collapses to a static label, so the event never
         // carries clipboard content.
         let started = Instant::now();
-        let result = self.paste_frontmost_inner(publish).await;
+        let result = self.paste_frontmost_inner(publish, target).await;
         tracing::debug!(
             result_code = result_code(&result),
             elapsed_ms = elapsed_ms(started),
@@ -347,7 +365,11 @@ impl ClipboardLease {
         result
     }
 
-    async fn paste_frontmost_inner(&mut self, publish: ClipboardPublish) -> Result<()> {
+    async fn paste_frontmost_inner(
+        &mut self,
+        publish: ClipboardPublish,
+        target: Option<RestoreTarget>,
+    ) -> Result<()> {
         let ledger = self.held()?;
         if publish.lease != self.lease || publish.generation != ledger.generation {
             return Err(clipboard_changed(
@@ -400,7 +422,7 @@ impl ClipboardLease {
             }
             let outcome = runtime
                 .paste
-                .paste_frontmost()
+                .paste_frontmost_into(target.as_ref())
                 .await
                 .and_then(ensure_pasted);
             // Keep the lease a beat past the synthesis call, *whatever* it

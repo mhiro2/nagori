@@ -50,8 +50,9 @@ pub async fn paste_entry(
     // whatever window currently holds focus — the self-paste accident. Mirrors
     // `run_palette_paste`; checked at the auto-paste gate so the clipboard write
     // still happens (the user can paste manually).
-    let restored = match state.take_previous_frontmost() {
-        Some(prev) => state.window.activate_restore_target(&prev).await,
+    let restore_target = state.take_previous_frontmost();
+    let restored = match &restore_target {
+        Some(prev) => state.window.activate_restore_target(prev).await,
         None => Ok(()),
     };
     // Give the OS a tick to re-focus the target app before we send the
@@ -127,7 +128,11 @@ pub async fn paste_entry(
             emit_paste_failed_with_reason(&app, &message, &PasteFailureReason::PreviousAppLost);
             return Err(CommandError { message, ..cmd_err });
         }
-        if let Err(err) = lease.paste_frontmost(publish).await {
+        // The settle delay and the copy above leave room for focus to move
+        // on, and the keystroke goes to whatever is in front, so the restored
+        // target is re-checked inside the synthesis call, right before the
+        // key events are posted.
+        if let Err(err) = lease.paste_frontmost_into(publish, restore_target).await {
             tracing::warn!(error = %err, "paste_entry_synth_failed");
             let reason = paste_failure_reason(&err);
             let cmd_err: CommandError = err.into();
@@ -232,6 +237,11 @@ fn synthesis_failure_message(reason: &PasteFailureReason, detail: &str) -> Strin
         format!(
             "auto-paste cancelled: the clipboard changed after the copy, so nothing was pasted. \
              Underlying error: {detail}"
+        )
+    } else if matches!(reason, PasteFailureReason::PreviousAppLost) {
+        format!(
+            "auto-paste skipped: focus moved away from the target app — copy succeeded, paste \
+             manually. Underlying error: {detail}"
         )
     } else {
         format!("auto-paste failed — copy succeeded, paste manually. Underlying error: {detail}")
@@ -388,8 +398,9 @@ async fn run_palette_paste(
     // captured in `native_handle` via `SetForegroundWindow`; Linux Wayland
     // recorded `None`, so this is a no-op and the compositor's own
     // post-hide focus handoff already returns focus to the source surface.
-    let restored = match state.take_previous_frontmost() {
-        Some(prev) => state.window.activate_restore_target(&prev).await,
+    let restore_target = state.take_previous_frontmost();
+    let restored = match &restore_target {
+        Some(prev) => state.window.activate_restore_target(prev).await,
         None => Ok(()),
     };
 
@@ -449,7 +460,12 @@ async fn run_palette_paste(
     // `searchState.errorMessage`. Emit `nagori://paste_failed` so the
     // App-level toast surfaces it on re-open (or in the open Settings
     // window) with the "copy succeeded" framing intact.
-    if let Err(err) = lease.paste_frontmost(publish).await {
+    //
+    // Focus was handed back before the delay, and anything can take it during
+    // the wait — the user clicking another window, an app raising a dialog —
+    // so the synthesis call confirms the restored target is still in front
+    // right before posting the keys and falls back to copy-only otherwise.
+    if let Err(err) = lease.paste_frontmost_into(publish, restore_target).await {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
