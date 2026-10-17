@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use nagori_core::{AppError, EntryId, Sensitivity};
+use nagori_daemon::NagoriRuntime;
 use nagori_platform::PreviewItem;
 use tauri::State;
 
@@ -145,6 +146,14 @@ pub async fn preview_entry(state: State<'_, AppState>, entry_id: String) -> Comm
             "entry has no content to preview",
         ));
     }
+    // The entry may have been deleted elsewhere (CLI over IPC, retention)
+    // while its body was being written out, after the orphan prune for that
+    // delete had already scanned the directory. Re-check now that the file
+    // exists, so a deleted body is not left behind in the temp directory.
+    if state.runtime.get_entry(entry_id).await?.is_none() {
+        remove_preview_temp_files_for(entry_id);
+        return Err(AppError::NotFound.into());
+    }
     state.preview.preview(&items).await?;
     Ok(())
 }
@@ -234,6 +243,66 @@ pub(crate) fn remove_preview_temp_files_for(entry_id: EntryId) {
     remove_preview_temp_files_in(&preview_temp_dir(), entry_id);
 }
 
+/// Remove the preview temp files of entries that are no longer live.
+///
+/// The interactive delete / clear commands drop their entry's file directly,
+/// but history also leaves through paths that never reach them: a CLI
+/// `delete` / `clear` routed over IPC, and the retention sweep. Those only
+/// surface as an IPC mutation or a finished maintenance run, so the desktop
+/// reconciles the cache against the store at both points instead — any file
+/// whose entry is gone (hard-deleted or tombstoned) is removed. Best-effort
+/// like the other cleanup helpers: a store error keeps the file for the next
+/// pass rather than guessing.
+pub(crate) async fn prune_orphaned_preview_temp_files(runtime: &NagoriRuntime) {
+    prune_orphaned_preview_temp_files_in(&preview_temp_dir(), runtime).await;
+}
+
+async fn prune_orphaned_preview_temp_files_in(dir: &Path, runtime: &NagoriRuntime) {
+    for (entry_id, path) in preview_temp_files_in(dir) {
+        match runtime.get_entry(entry_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => remove_preview_temp_file(&path),
+            Err(err) => tracing::debug!(
+                path = %path.display(),
+                error = %err,
+                "preview_temp_file_liveness_check_failed",
+            ),
+        }
+    }
+}
+
+/// Every `<entry_id>.<ext>` file in the preview temp directory, paired with
+/// the entry id its name carries. Files that do not follow that shape are not
+/// ours to judge and are skipped.
+fn preview_temp_files_in(dir: &Path) -> Vec<(EntryId, PathBuf)> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let entry_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<EntryId>().ok())?;
+            Some((entry_id, path))
+        })
+        .collect()
+}
+
+fn remove_preview_temp_file(path: &Path) {
+    if let Err(err) = std::fs::remove_file(path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %err,
+            "preview_temp_file_remove_failed",
+        );
+    }
+}
+
 fn remove_preview_temp_files_in(dir: &Path, entry_id: EntryId) {
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return;
@@ -248,15 +317,8 @@ fn remove_preview_temp_files_in(dir: &Path, entry_id: EntryId) {
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_prefix(&prefix))
             .is_some_and(|rest| rest.starts_with('.'));
-        if matches
-            && let Err(err) = std::fs::remove_file(&path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::debug!(
-                path = %path.display(),
-                error = %err,
-                "preview_temp_file_remove_failed",
-            );
+        if matches {
+            remove_preview_temp_file(&path);
         }
     }
 }
@@ -320,5 +382,51 @@ mod tests {
         // Second call on the now-missing dir must be a silent no-op, matching
         // the best-effort contract (startup runs it before the dir exists).
         purge_preview_temp_dir_in(&dir);
+    }
+
+    #[tokio::test]
+    async fn prune_removes_files_of_entries_deleted_outside_the_desktop() {
+        use nagori_core::{EntryFactory, EntryRepository};
+
+        let store = nagori_storage::SqliteStore::open_memory().expect("memory store");
+        let runtime = NagoriRuntime::builder(store.clone()).build_for_test();
+        let live = store
+            .insert(EntryFactory::from_text("still in history"))
+            .await
+            .expect("insert");
+        let tombstoned = store
+            .insert(EntryFactory::from_text("deleted from the CLI"))
+            .await
+            .expect("insert");
+        let purged = store
+            .insert(EntryFactory::from_text("aged out by retention"))
+            .await
+            .expect("insert");
+        store.mark_deleted(tombstoned).await.expect("tombstone");
+        store.hard_delete_entry(purged).await.expect("hard delete");
+
+        let dir = scratch_preview_dir();
+        let live_file = dir.join(format!("{live}.txt"));
+        let tombstoned_file = dir.join(format!("{tombstoned}.txt"));
+        let purged_file = dir.join(format!("{purged}.png"));
+        let foreign_file = dir.join("not-an-entry.txt");
+        for path in [&live_file, &tombstoned_file, &purged_file, &foreign_file] {
+            std::fs::write(path, b"x").expect("write fixture");
+        }
+
+        prune_orphaned_preview_temp_files_in(&dir, &runtime).await;
+
+        assert!(live_file.exists(), "a live entry keeps its preview file");
+        assert!(
+            !tombstoned_file.exists(),
+            "a deleted entry's file is pruned"
+        );
+        assert!(!purged_file.exists(), "a purged entry's file is pruned");
+        assert!(
+            foreign_file.exists(),
+            "files that are not ours are left alone"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

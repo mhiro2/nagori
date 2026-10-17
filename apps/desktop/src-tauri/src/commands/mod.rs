@@ -20,7 +20,9 @@ pub mod window_commands;
 // sites that use them (clear-history / delete in `entry_commands`) and
 // `lib.rs` (startup wipe, exit cleanup) keep referring to them by their
 // original paths.
-pub(crate) use self::preview::{purge_preview_temp_dir, remove_preview_temp_files_for};
+pub(crate) use self::preview::{
+    prune_orphaned_preview_temp_files, purge_preview_temp_dir, remove_preview_temp_files_for,
+};
 // Helpers invoked from outside their defining submodule (the tray, the global
 // hotkeys, and `lib.rs`) keep their original `commands::*` paths via these
 // re-exports.
