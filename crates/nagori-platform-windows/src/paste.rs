@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use nagori_core::{AppError, PasteFailureReason, Result};
-use nagori_platform::{PasteController, PasteResult};
+use nagori_platform::{PasteController, PasteResult, RestoreTarget};
 
 /// Synthesize Ctrl+V into the foreground window via `SendInput`.
 ///
@@ -16,49 +16,16 @@ pub struct WindowsPasteController;
 impl PasteController for WindowsPasteController {
     #[cfg(windows)]
     async fn paste_frontmost(&self) -> Result<PasteResult> {
-        // Deliberately NOT bounded by a timeout (unlike focus-restore /
-        // `frontmost_app`): `spawn_blocking` cannot cancel `SendInput`, so a
-        // timed-out synthesis would still inject its Ctrl+V once unwedged,
-        // landing the clipboard content in whatever window is foreground by
-        // then. A stray paste of (possibly sensitive) history is worse than
-        // the rare bounded wait, and the in-process `SendInput` has no safe
-        // cancellation the way the Linux `wtype` subprocess does. In practice
-        // `SendInput` queues its events atomically and returns immediately, so
-        // the wedge this would guard against is near-unreachable anyway.
-        let result = tokio::task::spawn_blocking(synthesize_ctrl_v)
-            .await
-            .map_err(|err| AppError::Paste {
-                reason: PasteFailureReason::Unknown,
-                message: format!("auto-paste failed: synthesis task did not run ({err})"),
-            })?;
-        match result {
-            Ok(()) => Ok(PasteResult {
-                pasted: true,
-                message: None,
-            }),
-            Err(SendInputError { reason, cleanup }) => {
-                // `release_ctrl_v` itself uses `SendInput`, so when UIPI or
-                // an elevated foreground window blocks the press batch the
-                // cleanup batch is just as likely to be dropped. In that
-                // case Ctrl stays virtually held down from the OS's point
-                // of view until the user taps it themselves — surface the
-                // hint rather than letting the next keystroke arrive as
-                // Ctrl+<whatever>.
-                let message = match cleanup {
-                    CleanupOutcome::Released => {
-                        format!("auto-paste failed via SendInput: {reason}")
-                    }
-                    CleanupOutcome::Stuck { release_error } => format!(
-                        "auto-paste failed via SendInput: {reason}. Ctrl key may still appear \
-                         held — press Ctrl once to release it. Cleanup error: {release_error}"
-                    ),
-                };
-                Err(AppError::Paste {
-                    reason: PasteFailureReason::Unknown,
-                    message,
-                })
-            }
-        }
+        synthesize(None).await
+    }
+
+    #[cfg(windows)]
+    async fn paste_frontmost_into(&self, target: Option<&RestoreTarget>) -> Result<PasteResult> {
+        synthesize(target.map(|target| ExpectedForeground {
+            handle: target.native_handle,
+            pid: target.snapshot_pid,
+        }))
+        .await
     }
 
     #[cfg(not(windows))]
@@ -68,6 +35,95 @@ impl PasteController for WindowsPasteController {
             message: "Windows auto-paste is only available on Windows".to_owned(),
         })
     }
+
+    #[cfg(not(windows))]
+    async fn paste_frontmost_into(&self, _target: Option<&RestoreTarget>) -> Result<PasteResult> {
+        self.paste_frontmost().await
+    }
+}
+
+/// The window a paste is meant for: its HWND and owning PID (HWNDs are
+/// recycled). A target without a handle cannot be matched, so it never counts
+/// as the foreground window.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ExpectedForeground {
+    handle: Option<u64>,
+    pid: Option<u32>,
+}
+
+/// Run the Ctrl+V synthesis on the blocking pool.
+///
+/// With `expected` set, the foreground window is compared with it inside the
+/// same blocking call, right before `SendInput`, so focus moving at any
+/// earlier point — including while this call waited for a blocking thread —
+/// stops the paste instead of sending the keys to whatever took focus.
+#[cfg(windows)]
+async fn synthesize(expected: Option<ExpectedForeground>) -> Result<PasteResult> {
+    // Deliberately NOT bounded by a timeout (unlike focus-restore /
+    // `frontmost_app`): `spawn_blocking` cannot cancel `SendInput`, so a
+    // timed-out synthesis would still inject its Ctrl+V once unwedged,
+    // landing the clipboard content in whatever window is foreground by
+    // then. A stray paste of (possibly sensitive) history is worse than
+    // the rare bounded wait, and the in-process `SendInput` has no safe
+    // cancellation the way the Linux `wtype` subprocess does. In practice
+    // `SendInput` queues its events atomically and returns immediately, so
+    // the wedge this would guard against is near-unreachable anyway.
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(expected) = expected {
+            let still_foreground = expected
+                .handle
+                .is_some_and(|handle| crate::window::foreground_matches_sync(handle, expected.pid));
+            if !still_foreground {
+                return Err(SynthFailure::TargetLost);
+            }
+        }
+        synthesize_ctrl_v().map_err(SynthFailure::SendInput)
+    })
+    .await
+    .map_err(|err| AppError::Paste {
+        reason: PasteFailureReason::Unknown,
+        message: format!("auto-paste failed: synthesis task did not run ({err})"),
+    })?;
+    match result {
+        Ok(()) => Ok(PasteResult {
+            pasted: true,
+            message: None,
+        }),
+        Err(SynthFailure::TargetLost) => Err(AppError::Paste {
+            reason: PasteFailureReason::PreviousAppLost,
+            message: "focus moved away from the paste target; nothing was pasted".to_owned(),
+        }),
+        Err(SynthFailure::SendInput(SendInputError { reason, cleanup })) => {
+            // `release_ctrl_v` itself uses `SendInput`, so when UIPI or
+            // an elevated foreground window blocks the press batch the
+            // cleanup batch is just as likely to be dropped. In that
+            // case Ctrl stays virtually held down from the OS's point
+            // of view until the user taps it themselves — surface the
+            // hint rather than letting the next keystroke arrive as
+            // Ctrl+<whatever>.
+            let message = match cleanup {
+                CleanupOutcome::Released => {
+                    format!("auto-paste failed via SendInput: {reason}")
+                }
+                CleanupOutcome::Stuck { release_error } => format!(
+                    "auto-paste failed via SendInput: {reason}. Ctrl key may still appear \
+                     held — press Ctrl once to release it. Cleanup error: {release_error}"
+                ),
+            };
+            Err(AppError::Paste {
+                reason: PasteFailureReason::Unknown,
+                message,
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+enum SynthFailure {
+    /// The foreground window was no longer the paste target; no key was sent.
+    TargetLost,
+    SendInput(SendInputError),
 }
 
 /// Outcome of the press-batch attempt, threaded through to the

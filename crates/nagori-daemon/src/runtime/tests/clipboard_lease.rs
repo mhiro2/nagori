@@ -254,6 +254,8 @@ struct ObservingPaste {
     /// Report `pasted: false`, i.e. a synthesis that may already have posted
     /// part of the keystroke before failing.
     fails: AtomicBool,
+    /// The restore target (bundle id) each synthesis was asked to check.
+    targets: Mutex<Vec<Option<String>>>,
 }
 
 impl ObservingPaste {
@@ -267,7 +269,12 @@ impl ObservingPaste {
             release: tokio::sync::Notify::new(),
             gated,
             fails: AtomicBool::new(false),
+            targets: Mutex::new(Vec::new()),
         }
+    }
+
+    fn targets(&self) -> Vec<Option<String>> {
+        self.targets.lock().unwrap().clone()
     }
 
     fn fail_synthesis(&self) {
@@ -306,6 +313,17 @@ impl PasteController for ObservingPaste {
             pasted: !self.fails.load(Ordering::SeqCst),
             message: None,
         })
+    }
+
+    async fn paste_frontmost_into(
+        &self,
+        target: Option<&nagori_platform::RestoreTarget>,
+    ) -> Result<PasteResult> {
+        self.targets
+            .lock()
+            .unwrap()
+            .push(target.and_then(|target| target.source.bundle_id.clone()));
+        self.paste_frontmost().await
     }
 }
 
@@ -1002,4 +1020,52 @@ async fn copy_text_refuses_empty_text() {
         .await
         .expect("copy text");
     assert_eq!(clipboard.current_text().as_deref(), Some("copied result"));
+}
+
+fn restore_target(bundle_id: &str) -> nagori_platform::RestoreTarget {
+    nagori_platform::RestoreTarget {
+        source: nagori_core::SourceApp {
+            bundle_id: Some(bundle_id.to_owned()),
+            name: None,
+            executable_path: None,
+        },
+        native_handle: None,
+        snapshot_pid: None,
+    }
+}
+
+#[tokio::test]
+async fn paste_hands_the_restore_target_to_the_synthesis_call() {
+    // The adapter compares the target with the foreground inside the
+    // synthesis call itself, so the lease must forward it all the way there.
+    let (runtime, _clipboard, paste) = runtime_with_fake_native();
+    enable_auto_paste(&runtime).await;
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .publish_text("for the editor".to_owned())
+        .await
+        .expect("publish text");
+
+    lease
+        .paste_frontmost_into(publish, Some(restore_target("com.example.editor")))
+        .await
+        .expect("paste");
+
+    assert_eq!(paste.targets(), vec![Some("com.example.editor".to_owned())]);
+    assert_eq!(paste.calls(), 1);
+}
+
+#[tokio::test]
+async fn paste_without_a_target_asks_for_no_focus_check() {
+    let (runtime, _clipboard, paste) = runtime_with_fake_native();
+    enable_auto_paste(&runtime).await;
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .publish_text("no target".to_owned())
+        .await
+        .expect("publish text");
+
+    lease.paste_frontmost(publish).await.expect("paste");
+
+    assert_eq!(paste.targets(), vec![None]);
 }

@@ -1413,6 +1413,18 @@ the pair one serialised operation:
   can interleave between a publish and its paste. A front-end that splits the
   two steps — `paste_entry` / `run_palette_paste` in the Tauri layer — holds
   **one** lease across the hide, the focus restore, and the delay.
+- The lease guards the clipboard, not the target window, so the Tauri layer
+  passes the restore target captured at palette open through
+  `ClipboardLease::paste_frontmost_into` to
+  `PasteController::paste_frontmost_into`. The macOS and Windows adapters
+  compare it with the foreground inside the blocking synthesis call itself —
+  the frontmost bundle id on macOS (after enigo is ready), the foreground
+  HWND + owning PID on Windows — right before the key events are posted, so
+  no await or blocking-pool hop sits between the check and the keystroke.
+  If the user or another app moved focus during the delay, the paste stops
+  with a `PreviousAppLost` failure and the copy is kept, rather than typing
+  the clipboard into whatever took focus. Linux Wayland records no restore
+  target and relies on the compositor's own focus handoff.
 - Each publish mints a `ClipboardPublish` token naming both the lease and the
   publish within it, and `ClipboardLease::paste_frontmost(publish)` refuses
   anything else. A caller that copies under one lease and pastes under another
