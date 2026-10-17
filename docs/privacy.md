@@ -113,6 +113,13 @@ that every byte disappeared immediately:
   eviction are hard-delete paths. They cascade through representations,
   FTS/ngram rows, thumbnails, and semantic embeddings and then truncate the WAL
   when rows were removed.
+- Clear-on-quit applies to every process that owns the history: quitting the
+  desktop app, and stopping the standalone daemon (`nagori daemon stop`,
+  SIGTERM, or Ctrl-C). If the purge cannot finish while the process exits —
+  it timed out, or the process was killed — a marker file beside the database
+  records it, and whichever of the app, the daemon, or a direct CLI command
+  opens the history next finishes the purge before showing or recording
+  anything.
 - The full-text index deletes with FTS5's `secure-delete` option, so a removed
   entry's words are rewritten out of the index's own storage rather than left
   behind a delete marker. Databases created before this option was enabled
