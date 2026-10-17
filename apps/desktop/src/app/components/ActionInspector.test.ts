@@ -164,6 +164,18 @@ afterEach(cleanup);
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+// The backend starts streaming before `startAiAction` returns its id, so a
+// fast run can deliver its events — including its only terminal one — first.
+const startAfterEvents = (): ((id: string) => void) => {
+  let resolveStart: ((id: string) => void) | undefined;
+  vi.mocked(startAiAction).mockReturnValue(
+    new Promise<string>((r) => {
+      resolveStart = r;
+    }),
+  );
+  return (id) => resolveStart?.(id);
+};
+
 describe('ActionInspector', () => {
   it('renders nothing when open is false', () => {
     const { container } = render(ActionInspector, {
@@ -474,6 +486,90 @@ describe('ActionInspector', () => {
     resolveStart?.('req-late');
     await flush();
     expect(cancelAiAction).toHaveBeenCalledWith('req-late');
+  });
+
+  it('settles a run whose done event arrives before its start response', async () => {
+    const user = userEvent.setup();
+    const resolveStart = startAfterEvents();
+    const { getByTestId, findByText } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'fast' }), onClose: () => {} },
+    });
+    await flush(); // let the availability probe resolve
+    await user.click(getByTestId('ai-Summarize'));
+
+    handlers[AI_EVENTS.aiDelta]?.({ requestId: 'req-fast', seq: 0, text: 'Quick ' });
+    handlers[AI_EVENTS.aiDone]?.({
+      requestId: 'req-fast',
+      finalText: 'Quick answer',
+      warnings: [],
+    });
+    resolveStart('req-fast');
+    await flush();
+
+    expect(await findByText('Quick answer')).toBeTruthy();
+    // The run is over, so the actions are usable again.
+    expect((getByTestId('ai-Summarize') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('surfaces an error event that arrives before its start response', async () => {
+    const user = userEvent.setup();
+    const resolveStart = startAfterEvents();
+    const { getByTestId, container } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'fails-fast' }), onClose: () => {} },
+    });
+    await flush();
+    await user.click(getByTestId('ai-Summarize'));
+
+    handlers[AI_EVENTS.aiError]?.({
+      requestId: 'req-err',
+      code: 'internal',
+      message: 'model failed',
+    });
+    resolveStart('req-err');
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('model failed');
+    expect((getByTestId('ai-Summarize') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('ignores early events that belong to another request', async () => {
+    const user = userEvent.setup();
+    const resolveStart = startAfterEvents();
+    const { getByTestId, queryByText } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'mine' }), onClose: () => {} },
+    });
+    await flush();
+    await user.click(getByTestId('ai-Summarize'));
+
+    handlers[AI_EVENTS.aiDone]?.({ requestId: 'req-other', finalText: 'not mine', warnings: [] });
+    resolveStart('req-mine');
+    await flush();
+
+    expect(queryByText('not mine')).toBeNull();
+    // Still waiting on its own run.
+    expect((getByTestId('ai-Summarize') as HTMLButtonElement).disabled).toBe(true);
+    handlers[AI_EVENTS.aiDone]?.({ requestId: 'req-mine', finalText: 'mine', warnings: [] });
+    await flush();
+    expect(queryByText('mine')).toBeTruthy();
+  });
+
+  it('drops held events when the inspector closes before the start response', async () => {
+    const user = userEvent.setup();
+    const resolveStart = startAfterEvents();
+    const { getByTestId, queryByText, rerender } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
+    });
+    await flush();
+    await user.click(getByTestId('ai-Summarize'));
+    handlers[AI_EVENTS.aiDone]?.({ requestId: 'req-closed', finalText: 'too late', warnings: [] });
+
+    await rerender({ open: false, target: sample({ id: 'a' }), onClose: () => {} });
+    resolveStart('req-closed');
+    await flush();
+    await rerender({ open: true, target: sample({ id: 'a' }), onClose: () => {} });
+
+    expect(cancelAiAction).toHaveBeenCalledWith('req-closed');
+    expect(queryByText('too late')).toBeNull();
   });
 
   it('does not commit a quick-action result after the inspector has closed', async () => {
