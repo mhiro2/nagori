@@ -14,7 +14,7 @@ pub async fn run(executor: &Executor, args: &AiArgs, format: OutputFormat) -> Re
         // dispatcher's precedence: a missing translate target must surface
         // before id validation on both paths.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let options = ai_options_from_args(args)?;
             let runtime = build_headless_runtime(store)?;
             run_ai_streaming(

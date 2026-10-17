@@ -16,6 +16,9 @@ use super::ipc::{
     CliIpcConfig, InitialIpcState, ensure_ipc_runtime_dirs, spawn_ipc_server, spawn_ipc_supervisor,
 };
 use super::{POST_ABORT_JOIN_TIMEOUT, drain_one};
+use crate::clear_on_quit::{
+    ClearOnQuitMarker, clear_history_on_quit, finish_pending_clear_on_quit,
+};
 use crate::{CaptureLoop, MaintenanceService, NagoriRuntime, ShutdownHandle};
 
 #[derive(Debug, Clone)]
@@ -31,6 +34,11 @@ pub struct DaemonConfig {
     /// Accessibility programmatically flip it to `false`. See
     /// `CaptureLoop::without_secure_focus_fail_closed`.
     pub secure_focus_fail_closed: bool,
+    /// Clear-on-quit purge-pending marker for the store this daemon owns.
+    /// `run_daemon` finishes a purge a previous owner left pending before it
+    /// starts any worker, and writes the marker around its own quit purge.
+    /// `None` for an in-memory store, which has nowhere to keep it.
+    pub clear_on_quit_marker: Option<ClearOnQuitMarker>,
 }
 
 impl Default for DaemonConfig {
@@ -40,6 +48,7 @@ impl Default for DaemonConfig {
             capture_interval: Duration::from_millis(500),
             maintenance_interval: Duration::from_mins(30),
             secure_focus_fail_closed: true,
+            clear_on_quit_marker: None,
         }
     }
 }
@@ -440,6 +449,11 @@ fn spawn_ngram_rebuild_supervisor(
 /// socket inode is known-stale and can be replaced. It is also the
 /// single-instance gate shared with the desktop shell (which locks the same
 /// directory), so a standalone daemon and the app refuse to co-own one store.
+///
+/// With `config.clear_on_quit_marker` set it also carries the clear-on-quit
+/// lifecycle the desktop honours: a purge a previous owner left pending is
+/// finished before any worker starts, and `clear_on_quit` is honoured once the
+/// workers drain on `daemon stop`, SIGTERM, or Ctrl-C.
 #[allow(clippy::too_many_lines)]
 pub async fn run_daemon<R>(
     runtime: NagoriRuntime,
@@ -454,6 +468,12 @@ where
     // Bind the lock to a lifetime-spanning local so it is held until this
     // function returns (and then dropped, releasing it). Never read otherwise.
     let _instance_lock = instance_lock;
+    // Finish a clear-on-quit purge the previous owner of this store left
+    // pending before anything can serve or capture history. Fail-closed: a
+    // purge that cannot complete refuses the start and keeps the marker.
+    if let Some(marker) = &config.clear_on_quit_marker {
+        finish_pending_clear_on_quit(runtime.store(), marker).await?;
+    }
     let shutdown = runtime.shutdown_handle();
     // Fail closed: refuse to start if the persisted settings can't be loaded
     // — running on `Default` means we'd ignore the user's denylist /
@@ -564,6 +584,13 @@ where
         config.ipc.shutdown_grace,
     )
     .await;
+    // Every worker has drained, so nothing is captured behind the purge. No UI
+    // waits on the daemon's exit, so the purge runs to completion while the
+    // instance lock is still held — an abandoned purge would keep deleting
+    // after the lock was released and a new owner could start recording. A
+    // service manager that kills the daemon mid-purge leaves the marker for
+    // the next owner instead.
+    clear_history_on_quit(&runtime, config.clear_on_quit_marker.as_ref(), None).await;
     // The IPC supervisor's shutdown branch calls `stop_ipc_server`, which
     // verifies fingerprints before unlinking the socket / token file. We
     // deliberately do NOT add a final unconditional `cleanup_runtime_files`
@@ -826,6 +853,124 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), shutdown.cancelled())
             .await
             .expect("the failure path must cancel the shared shutdown handle");
+    }
+
+    async fn store_with_history(db_path: &std::path::Path) -> SqliteStore {
+        use nagori_core::{EntryFactory, EntryRepository};
+
+        let store = SqliteStore::open(db_path).expect("store");
+        let pinned = store
+            .insert(EntryFactory::from_text("pinned snippet"))
+            .await
+            .expect("insert");
+        store.set_pinned(pinned, true).await.expect("pin");
+        store
+            .insert(EntryFactory::from_text("history to clear"))
+            .await
+            .expect("insert");
+        store
+    }
+
+    /// A standalone daemon honours `clear_on_quit` on a normal stop, the same
+    /// way the desktop does on quit: unpinned history is purged once the
+    /// workers drain and the purge-pending marker does not outlive it.
+    #[tokio::test]
+    async fn run_daemon_clears_history_on_stop_when_clear_on_quit_is_on() {
+        use nagori_core::{AppSettings, EntryRepository};
+        use nagori_platform::MemoryClipboard;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let db_path = data_dir.join("nagori.sqlite");
+        let store = store_with_history(&db_path).await;
+        let runtime = NagoriRuntime::builder(store.clone()).build_for_test();
+        runtime
+            .save_settings(AppSettings {
+                clear_on_quit: true,
+                ..AppSettings::default()
+            })
+            .await
+            .expect("save settings");
+        let marker = ClearOnQuitMarker::for_db(&db_path);
+        let config = DaemonConfig {
+            ipc: test_ipc_config(temp.path()),
+            clear_on_quit_marker: Some(marker.clone()),
+            ..DaemonConfig::default()
+        };
+        let shutdown = runtime.shutdown_handle();
+        let instance_lock = acquire_data_dir_lock(&data_dir).expect("data dir lock");
+
+        let token_path = config.ipc.token_path.clone();
+        let daemon = tokio::spawn(run_daemon(
+            runtime,
+            MemoryClipboard::new(),
+            config,
+            None,
+            instance_lock,
+        ));
+        // Stop it only once it is serving, so the stop takes the normal path.
+        wait_until(Duration::from_secs(10), || token_path.exists())
+            .await
+            .expect("the daemon should publish its endpoint");
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(10), daemon)
+            .await
+            .expect("the daemon must stop")
+            .expect("no panic")
+            .expect("a normal stop succeeds");
+
+        let left = store.list_recent(10).await.expect("list");
+        assert_eq!(left.len(), 1, "only the pinned entry survives the stop");
+        assert_eq!(left[0].plain_text(), Some("pinned snippet"));
+        assert!(!marker.is_pending());
+    }
+
+    /// A purge another host left pending is finished before the daemon starts
+    /// serving, even with `clear_on_quit` now off.
+    #[tokio::test]
+    async fn run_daemon_finishes_a_pending_purge_before_starting() {
+        use nagori_core::EntryRepository;
+        use nagori_platform::MemoryClipboard;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let db_path = data_dir.join("nagori.sqlite");
+        let store = store_with_history(&db_path).await;
+        let marker = ClearOnQuitMarker::for_db(&db_path);
+        marker.mark_pending().expect("mark");
+        let runtime = NagoriRuntime::builder(store.clone()).build_for_test();
+        let config = DaemonConfig {
+            ipc: test_ipc_config(temp.path()),
+            clear_on_quit_marker: Some(marker.clone()),
+            ..DaemonConfig::default()
+        };
+        let shutdown = runtime.shutdown_handle();
+        let instance_lock = acquire_data_dir_lock(&data_dir).expect("data dir lock");
+
+        let daemon = tokio::spawn(run_daemon(
+            runtime,
+            MemoryClipboard::new(),
+            config,
+            None,
+            instance_lock,
+        ));
+        wait_until(Duration::from_secs(10), || !marker.is_pending())
+            .await
+            .expect("the pending purge runs on start");
+        assert_eq!(store.list_recent(10).await.expect("list").len(), 1);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(10), daemon)
+            .await
+            .expect("the daemon must stop")
+            .expect("no panic")
+            .expect("a normal stop succeeds");
+        assert_eq!(
+            store.list_recent(10).await.expect("list").len(),
+            1,
+            "with clear_on_quit off the stop itself keeps history"
+        );
     }
 
     fn test_ipc_config(dir: &std::path::Path) -> CliIpcConfig {

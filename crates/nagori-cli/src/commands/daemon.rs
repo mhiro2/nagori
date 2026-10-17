@@ -13,7 +13,7 @@ use crate::{DaemonRunArgs, OutputFormat, default_db_path};
 pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let settings = store.get_settings().await?;
             print_status(&ctx.db_path, &settings, format)
         }
@@ -98,8 +98,9 @@ pub async fn run_server(
     // store, so a second daemon (or the desktop app, which locks the same
     // directory) never runs migrations or a capture loop against a DB this
     // process is about to own. Held until `run_daemon` returns.
-    let instance_lock = nagori_daemon::acquire_data_dir_lock(&data_dir)
-        .context("refusing to start a second daemon")?;
+    let instance_lock =
+        nagori_daemon::acquire_data_dir_lock(&nagori_storage::store_lock_dir(&db_path))
+            .context("refusing to start a second daemon")?;
     let store = SqliteStore::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
 
@@ -140,6 +141,7 @@ pub async fn run_server(
             args.maintenance_interval_min.saturating_mul(60),
         ),
         secure_focus_fail_closed,
+        clear_on_quit_marker: Some(nagori_daemon::ClearOnQuitMarker::for_db(&db_path)),
     };
 
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

@@ -284,7 +284,7 @@ Send a shutdown request via IPC. Requires `--ipc <endpoint>`.
 
 The request stops whichever process serves the endpoint: a headless
 daemon exits, and a running desktop app quits as if Quit were chosen
-from the tray (including `clear_on_quit`).
+from the tray. Both honour `clear_on_quit` on the way out.
 
 ### `nagori daemon status`
 

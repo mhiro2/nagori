@@ -745,3 +745,53 @@ fn daemon_status_local_does_not_claim_ok() {
         "the unprobed arm must not claim ok: {record}"
     );
 }
+
+#[test]
+fn direct_read_finishes_a_pending_clear_on_quit_purge() {
+    // A clear-on-quit purge the previous owner (desktop app or daemon) could
+    // not finish leaves a marker beside the DB. A direct CLI command must
+    // complete that purge before it serves anything, rather than showing the
+    // history the user asked to clear.
+    let (_dir, db) = temp_db();
+    nagori(&db)
+        .args(["add", "--text", "history to clear"])
+        .assert()
+        .success();
+    let mut marker = db.as_os_str().to_owned();
+    marker.push(".clear-on-quit.pending");
+    let marker = PathBuf::from(marker);
+    std::fs::write(&marker, b"").expect("write marker");
+
+    let output = nagori(&db).arg("list").output().expect("invoke nagori");
+    assert!(output.status.success(), "exit: {:?}", output.status);
+    assert_eq!(stdout_string(&output), "", "the pending purge runs first");
+    assert!(!marker.exists(), "a finished purge removes its marker");
+}
+
+#[test]
+fn direct_read_defers_a_pending_purge_to_the_running_owner() {
+    // While a running instance holds the store, it is the one finishing its
+    // clear-on-quit purge. A direct read must neither purge behind its back
+    // nor show the history being cleared.
+    let (dir, db) = temp_db();
+    nagori(&db)
+        .args(["add", "--text", "history to clear"])
+        .assert()
+        .success();
+    let mut marker = db.as_os_str().to_owned();
+    marker.push(".clear-on-quit.pending");
+    let marker = PathBuf::from(marker);
+    std::fs::write(&marker, b"").expect("write marker");
+    let lock_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
+    let _owner = nagori_storage::ProcessLock::try_acquire(&lock_dir)
+        .expect("lock")
+        .expect("the test takes the owner's lock");
+
+    let output = nagori(&db).arg("list").output().expect("invoke nagori");
+    assert!(!output.status.success(), "the read must be refused");
+    assert!(!stdout_string(&output).contains("history to clear"));
+    assert!(
+        marker.exists(),
+        "the owner keeps the marker until it finishes"
+    );
+}

@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use nagori_core::{AiActionId, AppError, MAX_RETENTION_DAYS, QuickActionId};
 use nagori_daemon::default_socket_path;
 use nagori_ipc::{IpcClient, IpcRequest, IpcResponse, IpcServerConfig};
+use nagori_storage::resolve_db_path;
 
 mod commands;
 mod output;
@@ -251,7 +252,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "ipc_fallback_to_local_db reason=no_running_instance mode=write-fallback"
             );
             let _write_lock = lock;
-            return run_locally(cli).await;
+            return run_locally(cli, true).await;
         }
         let executor = connect_to_store_owner(&default_socket_path(), &db_path).await?;
         return run_write_on_owner(cli, &executor).await;
@@ -326,7 +327,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
     // Explicit `--db` writes are gated on the same lock; a held lock means
     // a running instance owns that store and the write must not bypass it.
-    let _write_lock = if writes {
+    let write_lock = if writes {
         let db_path = cli.db.clone().unwrap_or_else(default_db_path);
         match try_acquire_direct_write_lock(&db_path)? {
             Some(lock) => Some(lock),
@@ -339,7 +340,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    run_locally(cli).await
+    // Held (when taken) until the command finishes.
+    let holds_store_lock = write_lock.is_some();
+    let result = run_locally(cli, holds_store_lock).await;
+    drop(write_lock);
+    result
 }
 
 /// Connect to the endpoint of the instance that holds the store lock and
@@ -461,9 +466,16 @@ async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
     commands::run_cli(cli, &executor).await
 }
 
-async fn run_locally(cli: Cli) -> Result<()> {
+/// Run `cli` against the local store. `holds_store_lock` says whether this
+/// process already took the single-instance lock for a write; a read leaves
+/// it untaken, and the store opener takes it itself when it has to finish a
+/// pending clear-on-quit purge.
+async fn run_locally(cli: Cli, holds_store_lock: bool) -> Result<()> {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
-    let executor = Executor::Local(LocalContext { db_path });
+    let executor = Executor::Local(LocalContext {
+        db_path,
+        holds_store_lock,
+    });
     commands::run_cli(cli, &executor).await
 }
 
@@ -473,44 +485,23 @@ async fn run_locally(cli: Cli) -> Result<()> {
 /// held lock means writing here would land in `SQLite` without ever
 /// invalidating the owner's search cache or refreshing its palette.
 ///
-/// The lock directory is derived from the *canonicalized* DB path: locking
-/// the lexical parent would let an alias (`--db` through a file or
-/// directory symlink) acquire a different `nagori.lock` than the owner of
-/// the real directory and bypass the gate. A DB that doesn't exist yet
-/// (fresh store) can't be canonicalized itself, so its parent is resolved
-/// instead and the filename re-attached.
-fn try_acquire_direct_write_lock(db_path: &Path) -> Result<Option<nagori_storage::ProcessLock>> {
+/// The lock directory comes from `nagori_storage::store_lock_dir`, the same
+/// symlink-resolved derivation the desktop and the daemon use: locking the
+/// lexical parent would let an alias (`--db` through a file or directory
+/// symlink) acquire a different `nagori.lock` than the owner of the real
+/// directory and bypass the gate.
+pub(crate) fn try_acquire_direct_write_lock(
+    db_path: &Path,
+) -> Result<Option<nagori_storage::ProcessLock>> {
     let lexical_parent = match db_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
     nagori_storage::ensure_private_directory(lexical_parent)
         .with_context(|| format!("failed to create {}", lexical_parent.display()))?;
-    let resolved_db = resolve_db_path(db_path);
-    let lock_dir = resolved_db
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    Ok(nagori_storage::ProcessLock::try_acquire(lock_dir)?)
-}
-
-/// Resolve `db_path` through symlinks, the same way a running instance
-/// reports the store it holds. A DB that doesn't exist yet (fresh store)
-/// can't be canonicalized itself, so its parent is resolved instead and the
-/// filename re-attached.
-fn resolve_db_path(db_path: &Path) -> PathBuf {
-    std::fs::canonicalize(db_path).unwrap_or_else(|_| {
-        let lexical_parent = match db_path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        let resolved_parent =
-            std::fs::canonicalize(lexical_parent).unwrap_or_else(|_| lexical_parent.to_path_buf());
-        match db_path.file_name() {
-            Some(name) => resolved_parent.join(name),
-            None => resolved_parent,
-        }
-    })
+    Ok(nagori_storage::ProcessLock::try_acquire(
+        &nagori_storage::store_lock_dir(db_path),
+    )?)
 }
 
 const fn is_write_command(cmd: &Command) -> bool {
