@@ -1,5 +1,6 @@
 pub mod ai_registry;
 pub mod capture_loop;
+pub mod clear_on_quit;
 pub mod health;
 pub mod ipc_handler;
 pub mod maintenance;
@@ -10,6 +11,7 @@ pub mod serve;
 pub mod thumbnails;
 
 pub use capture_loop::{CaptureLoop, CapturePauseEpoch, CaptureSkipKind, CaptureSkipNotice};
+pub use clear_on_quit::{ClearOnQuitMarker, clear_history_on_quit, finish_pending_clear_on_quit};
 pub use health::{
     CAPTURE_DEGRADED_THRESHOLD, CaptureHealth, MAINTENANCE_DEGRADED_THRESHOLD, MaintenanceHealth,
     StartupHealth,
