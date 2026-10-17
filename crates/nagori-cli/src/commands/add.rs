@@ -15,7 +15,7 @@ pub async fn run(executor: &Executor, args: AddArgs, format: OutputFormat) -> Re
         // order the pre-split dispatcher used — so a broken DB fails fast
         // instead of consuming stdin first.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let text = read_text(args)?;
             let runtime = build_headless_runtime(store.clone())?;
             let id = runtime.add_text(text).await?;

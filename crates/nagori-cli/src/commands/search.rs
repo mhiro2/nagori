@@ -10,7 +10,7 @@ use crate::{OutputFormat, SearchArgs};
 pub async fn run(executor: &Executor, args: SearchArgs, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             // The direct/local search path must not serve stale CJK grams: drain
             // any ngram rebuild left pending by a generator upgrade (kana folding
             // / Han 1-grams) before querying. When a daemon has already rebuilt —

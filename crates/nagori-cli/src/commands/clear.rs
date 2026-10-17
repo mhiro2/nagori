@@ -11,7 +11,7 @@ pub async fn run(executor: &Executor, args: &ClearArgs, format: OutputFormat) ->
     match executor {
         // Store first, args second — the pre-split dispatcher's precedence.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let cutoff = match clear_request_from_args(args)? {
                 ClearRequest::All => OffsetDateTime::now_utc(),
                 ClearRequest::OlderThanDays { days } => days.cutoff(OffsetDateTime::now_utc()),

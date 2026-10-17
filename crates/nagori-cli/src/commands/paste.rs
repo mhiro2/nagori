@@ -10,7 +10,7 @@ pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Re
         // Store first, then id, then the clipboard-backed runtime — the
         // pre-split dispatcher's precedence (see `copy`).
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let id = parse_id(&args.id)?;
             let runtime = build_runtime(store)?;
             runtime.paste_entry(id, None).await?;

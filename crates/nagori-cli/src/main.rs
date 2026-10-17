@@ -251,7 +251,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "ipc_fallback_to_local_db reason=no_running_instance mode=write-fallback"
             );
             let _write_lock = lock;
-            return run_locally(cli).await;
+            return run_locally(cli, true).await;
         }
         let executor = connect_to_store_owner(&default_socket_path(), &db_path).await?;
         return run_write_on_owner(cli, &executor).await;
@@ -326,7 +326,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
     // Explicit `--db` writes are gated on the same lock; a held lock means
     // a running instance owns that store and the write must not bypass it.
-    let _write_lock = if writes {
+    let write_lock = if writes {
         let db_path = cli.db.clone().unwrap_or_else(default_db_path);
         match try_acquire_direct_write_lock(&db_path)? {
             Some(lock) => Some(lock),
@@ -339,7 +339,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    run_locally(cli).await
+    // Held (when taken) until the command finishes.
+    let holds_store_lock = write_lock.is_some();
+    let result = run_locally(cli, holds_store_lock).await;
+    drop(write_lock);
+    result
 }
 
 /// Connect to the endpoint of the instance that holds the store lock and
@@ -461,9 +465,16 @@ async fn run_over_ipc(cli: Cli, socket_path: &Path) -> Result<()> {
     commands::run_cli(cli, &executor).await
 }
 
-async fn run_locally(cli: Cli) -> Result<()> {
+/// Run `cli` against the local store. `holds_store_lock` says whether this
+/// process already took the single-instance lock for a write; a read leaves
+/// it untaken, and the store opener takes it itself when it has to finish a
+/// pending clear-on-quit purge.
+async fn run_locally(cli: Cli, holds_store_lock: bool) -> Result<()> {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
-    let executor = Executor::Local(LocalContext { db_path });
+    let executor = Executor::Local(LocalContext {
+        db_path,
+        holds_store_lock,
+    });
     commands::run_cli(cli, &executor).await
 }
 
@@ -479,7 +490,9 @@ async fn run_locally(cli: Cli) -> Result<()> {
 /// the real directory and bypass the gate. A DB that doesn't exist yet
 /// (fresh store) can't be canonicalized itself, so its parent is resolved
 /// instead and the filename re-attached.
-fn try_acquire_direct_write_lock(db_path: &Path) -> Result<Option<nagori_storage::ProcessLock>> {
+pub(crate) fn try_acquire_direct_write_lock(
+    db_path: &Path,
+) -> Result<Option<nagori_storage::ProcessLock>> {
     let lexical_parent = match db_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),

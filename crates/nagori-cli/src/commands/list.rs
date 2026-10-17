@@ -9,7 +9,7 @@ use crate::{ListArgs, OutputFormat};
 pub async fn run(executor: &Executor, args: &ListArgs, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let entries = if args.pinned {
                 store.list_pinned().await?
             } else {

@@ -13,7 +13,7 @@ use crate::{DaemonRunArgs, OutputFormat, default_db_path};
 pub async fn status(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let settings = store.get_settings().await?;
             print_status(&ctx.db_path, &settings, format)
         }
