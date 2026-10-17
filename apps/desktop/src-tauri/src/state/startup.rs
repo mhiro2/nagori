@@ -408,6 +408,7 @@ fn spawn_ipc_mutation_forwarder(
     // seen — if a mutation somehow predates the subscription, one
     // catch-up refresh fires, which is harmless; swallowing it is not.
     let mut mutations = runtime.external_mutations_subscribe();
+    let runtime = runtime.clone();
     tauri::async_runtime::spawn(async move {
         use tauri::Emitter;
         loop {
@@ -418,6 +419,10 @@ fn spawn_ipc_mutation_forwarder(
                         return;
                     }
                     let _ = app.emit(crate::CLIPBOARD_CHANGED_EVENT, serde_json::json!({}));
+                    // An IPC delete / clear never reaches the desktop's own
+                    // delete commands, so drop the Quick Look files of
+                    // whatever it removed here.
+                    crate::commands::prune_orphaned_preview_temp_files(&runtime).await;
                 }
             }
         }
@@ -461,6 +466,10 @@ fn spawn_maintenance_supervisor(
                         let outcome = maintenance.run(&settings).await;
                         let failed = outcome.is_err();
                         note_maintenance_outcome(&health, &outcome);
+                        // Retention and the tombstone purge remove entries
+                        // without going through the delete commands, so prune
+                        // the Quick Look files they left behind.
+                        crate::commands::prune_orphaned_preview_temp_files(&runtime).await;
                         // A failed sweep has already consumed whatever woke it,
                         // so waiting the full interval would leave a cleared
                         // history's tombstoned bodies on disk for another 30
