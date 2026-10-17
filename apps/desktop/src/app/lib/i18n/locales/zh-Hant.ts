@@ -514,6 +514,8 @@ export const zhHant: Messages = {
       menuBar: '顯示常駐圖示',
       menuBarHelp:
         '在系統列顯示 Nagori 圖示（macOS：選單列 / Windows：通知區域 / Linux：狀態列）。若僅需背景執行可關閉。',
+      menuBarRequired:
+        '目前沒有可開啟面板的全域快速鍵，因此常駐圖示會保持顯示，作為回到 Nagori 的入口。設定可用的快速鍵後即可隱藏。',
       clearOnQuit: '結束時清除未釘選的歷史',
       clearOnQuitHelp: '結束應用程式時清除所有未釘選的項目。釘選的項目會保留。',
       confirmClearHistory: '清除歷史記錄前先確認',

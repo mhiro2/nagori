@@ -11,6 +11,7 @@
     "allow-request-accessibility",
     "allow-get-capabilities",
     "allow-last-hotkey-failure",
+    "allow-palette-shortcut-bound",
     "allow-password-manager-preset",
     "allow-data-dir-sync-warning",
     "allow-get-ai-availability",

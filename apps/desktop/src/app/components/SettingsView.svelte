@@ -7,6 +7,7 @@
     getCapabilities,
     getSettings,
     installCli,
+    paletteShortcutBound as paletteShortcutBoundCmd,
     passwordManagerPreset,
     purgeDeletedEntries,
     updateSettings,
@@ -432,6 +433,22 @@
     if (!failure) return undefined;
     return failure.error || failure.hotkey || undefined;
   });
+  // Live registration state of the palette shortcut, read on mount and kept
+  // current by `paletteShortcutChanged`. The failure store above cannot stand
+  // in for it: a failed rebind that rolled back to the previous binding keeps
+  // its failure while a shortcut still works, and a later secondary failure
+  // replaces a primary one in that single-slot store.
+  let paletteShortcutBound = $state(true);
+  const paletteHotkeyFailed = $derived(!paletteShortcutBound);
+  // A failed read keeps the optimistic default; the backend keeps the tray up
+  // whenever the shortcut is unbound regardless.
+  const readPaletteShortcutBound = async (): Promise<void> => {
+    try {
+      paletteShortcutBound = await paletteShortcutBoundCmd();
+    } catch {
+      // Keep the last known state.
+    }
+  };
 
   let updateChecking = $state(false);
   let updateStatus: string | undefined = $state(undefined);
@@ -963,6 +980,16 @@
     // `hotkeyFailureState`, so opening Settings after a startup-time
     // failure still shows the conflict.
     const offSettings = subscribe<AppSettings>(TAURI_EVENTS.settingsChanged, applyRemoteSettings);
+    // Read now, and again once the listener has attached so a change landing
+    // in between is not lost.
+    void readPaletteShortcutBound();
+    const offShortcut = subscribe<{ bound: boolean }>(
+      TAURI_EVENTS.paletteShortcutChanged,
+      (payload) => {
+        paletteShortcutBound = payload.bound;
+      },
+      () => void readPaletteShortcutBound(),
+    );
     // Tab-hint listener. `open_settings` re-emits its `route` argument
     // on the Settings webview after showing the window so a caller that
     // already knows where the user needs to land (e.g. the Palette
@@ -988,6 +1015,7 @@
     });
     return () => {
       offSettings();
+      offShortcut();
       offNavigate();
     };
   });
@@ -1080,6 +1108,7 @@
               bind:settings
               {capabilities}
               {hotkeyError}
+              {paletteHotkeyFailed}
               {t}
               debounceNumberMs={DEBOUNCE_NUMBER_MS}
               paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}

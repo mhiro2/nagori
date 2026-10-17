@@ -513,6 +513,8 @@ export const zhHans: Messages = {
       menuBar: '显示托盘图标',
       menuBarHelp:
         '在系统托盘显示 Nagori 图标（macOS: 菜单栏 / Windows: 通知区域 / Linux: 状态指示器）。如果只想后台运行，可以关闭。',
+      menuBarRequired:
+        '目前没有可以打开面板的全局快捷键，因此托盘图标会保持显示，作为返回 Nagori 的入口。设置一个可用的快捷键后即可隐藏。',
       clearOnQuit: '退出时清除未固定历史',
       clearOnQuitHelp: '退出应用时清除所有未固定的条目。固定的条目会保留。',
       confirmClearHistory: '清除历史记录前先确认',

@@ -587,6 +587,7 @@ export type Messages = {
       autoLaunchHelp: string;
       menuBar: string;
       menuBarHelp: string;
+      menuBarRequired: string;
       clearOnQuit: string;
       clearOnQuitHelp: string;
       // Whether "Clear history" asks first. The confirmation dialog's
@@ -1263,6 +1264,8 @@ export const en: Messages = {
       menuBar: 'Show tray icon',
       menuBarHelp:
         'Display the Nagori tray icon in the system tray (macOS menu bar, Windows notification area, Linux status indicator). Disable for a fully background experience.',
+      menuBarRequired:
+        'No global shortcut can open the palette right now, so the tray icon stays visible as the way back into Nagori. Set a shortcut that works to hide it.',
       clearOnQuit: 'Clear non-pinned history on quit',
       clearOnQuitHelp:
         'When the app exits, all non-pinned entries are removed. Pinned entries are preserved.',

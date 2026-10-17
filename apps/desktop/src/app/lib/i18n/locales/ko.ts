@@ -541,6 +541,8 @@ export const ko: Messages = {
       menuBar: '트레이 아이콘 표시',
       menuBarHelp:
         '시스템 트레이에 Nagori 아이콘을 표시합니다 (macOS: 메뉴 막대 / Windows: 알림 영역 / Linux: 상태 표시기). 백그라운드 전용으로 사용하려면 비활성화하세요.',
+      menuBarRequired:
+        '지금은 팔레트를 여는 전역 단축키가 없어 Nagori로 돌아오는 방법으로 트레이 아이콘이 계속 표시됩니다. 작동하는 단축키를 설정하면 숨길 수 있습니다.',
       clearOnQuit: '종료 시 고정되지 않은 기록 삭제',
       clearOnQuitHelp:
         '앱이 종료될 때 고정되지 않은 모든 항목을 제거합니다. 고정된 항목은 보존됩니다.',

@@ -79,6 +79,13 @@ pub struct AppState {
     /// `nagori://hotkey_register_failed` / `_resolved` events for
     /// updates.
     pub last_hotkey_failure: Mutex<HotkeyFailureCache>,
+    /// Whether the palette shortcut is bound right now, as the settings
+    /// subscriber last registered it. The failure cache above records what
+    /// went wrong and is keyed to the accelerator the user asked for, so it
+    /// stays set after a rollback to the previous (working) binding; this is
+    /// the live state Settings needs to tell whether the tray is the only way
+    /// back into the app.
+    pub palette_shortcut_bound: std::sync::atomic::AtomicBool,
     /// Cancellation handle for the palette search in flight, so a newer
     /// keystroke can abort a slow search instead of waiting for its results.
     pub inflight_search: InflightSearch,
@@ -329,6 +336,7 @@ impl AppState {
             previous_frontmost: Arc::new(Mutex::new(None)),
             last_pasted_id: Mutex::new(None),
             last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
+            palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),
             inflight_search: InflightSearch::default(),
             // Set by `try_new_at` for real launches; `build`-only callers
             // (tests, in-memory stores) own no on-disk directory to lock.

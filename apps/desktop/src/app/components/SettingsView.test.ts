@@ -20,6 +20,7 @@ import {
   getPermissions,
   getSettings,
   installCli,
+  paletteShortcutBound,
   updateSettings,
 } from '../lib/commands';
 import { isTauri, subscribe } from '../lib/tauri';
@@ -30,6 +31,7 @@ import type {
   PermissionStatus,
   PlatformCapabilities,
 } from '../lib/types';
+import { setHotkeyFailure } from '../stores/hotkeyFailure.svelte';
 import { settingsState } from '../stores/settings.svelte';
 import SettingsView from './SettingsView.svelte';
 
@@ -212,11 +214,13 @@ beforeEach(() => {
   // already exercises the Advanced tab — has a deterministic stub. The
   // platform-specific tests below override this per-case.
   vi.mocked(getCapabilities).mockResolvedValue(macosCapabilities());
+  vi.mocked(paletteShortcutBound).mockResolvedValue(true);
 });
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  setHotkeyFailure(undefined);
 });
 
 // Route the `subscribe` mock so a test can fire a `nagori://settings_changed`
@@ -1418,6 +1422,61 @@ const readCapabilityTable = (
   });
   return { platform, tier, rows };
 };
+
+const trayToggle = async () => {
+  const view = render(SettingsView);
+  await view.findByRole('button', { name: 'Back to palette' });
+  const toggle = (await view.findByLabelText('Show tray icon')) as HTMLInputElement;
+  return { view, toggle };
+};
+
+describe('SettingsView access guards', () => {
+  it('keeps the tray icon on while the palette shortcut is not bound', async () => {
+    vi.mocked(paletteShortcutBound).mockResolvedValue(false);
+    const { view, toggle } = await trayToggle();
+
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+    expect(toggle.checked).toBe(true);
+    expect(view.getByTestId('menu-bar-required')).toBeTruthy();
+  });
+
+  it('follows the palette shortcut as it becomes unbound', async () => {
+    let onShortcutChanged: ((payload: { bound: boolean }) => void) | undefined;
+    vi.mocked(subscribe).mockImplementation((event, handler) => {
+      if (event === 'nagori://palette_shortcut_changed') {
+        onShortcutChanged = handler;
+      }
+      return () => {};
+    });
+    const { toggle } = await trayToggle();
+    await waitFor(() => expect(paletteShortcutBound).toHaveBeenCalled());
+    expect(toggle.disabled).toBe(false);
+
+    onShortcutChanged?.({ bound: false });
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+  });
+
+  it('keeps the tray icon on where global shortcuts are unsupported', async () => {
+    vi.mocked(getCapabilities).mockResolvedValue({
+      ...macosCapabilities(),
+      globalHotkey: { status: 'unsupported', reason: 'pure Wayland session' },
+    });
+    const { toggle } = await trayToggle();
+
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+  });
+
+  it('allows hiding the tray icon when a failed rebind rolled back to a working shortcut', async () => {
+    // The failure for the requested accelerator stays on screen, but the
+    // previous binding still opens the palette.
+    setHotkeyFailure({ hotkey: 'Cmd+Shift+X', error: 'already registered', kind: 'primary' });
+    const { view, toggle } = await trayToggle();
+
+    await waitFor(() => expect(paletteShortcutBound).toHaveBeenCalled());
+    expect(toggle.disabled).toBe(false);
+    expect(view.queryByTestId('menu-bar-required')).toBeNull();
+  });
+});
 
 describe('SettingsView Advanced tab — capability table', () => {
   it('renders macOS capabilities — every cap available except Accessibility-gated auto-paste', async () => {
