@@ -15,7 +15,7 @@ pub async fn run(
     match executor {
         // Store first, id second — the pre-split dispatcher's precedence.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             store.set_pinned(parse_id(&args.id)?, pinned).await?;
         }
         Executor::Ipc(ctx) => {

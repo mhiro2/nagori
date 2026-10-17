@@ -21,7 +21,7 @@ use nagori_platform_windows::WindowsPermissionChecker;
 pub async fn run(executor: &Executor, format: OutputFormat) -> Result<()> {
     match executor {
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             print_local_doctor(&ctx.db_path, &store, format).await
         }
         Executor::Ipc(ctx) => {

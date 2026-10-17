@@ -12,7 +12,7 @@ pub async fn run(executor: &Executor, args: &GetArgs, format: OutputFormat) -> R
         // the pre-split dispatcher used — so a broken DB keeps surfacing as
         // a storage error rather than being shadowed by input validation.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let id = parse_id(&args.id)?;
             let entry = store
                 .get(id)

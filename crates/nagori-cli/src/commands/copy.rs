@@ -11,7 +11,7 @@ pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Re
         // pre-split dispatcher's precedence: an invalid id must fail before
         // the runtime build so the command never needs clipboard access.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             let id = parse_id(&args.id)?;
             let runtime = build_runtime(store)?;
             runtime.copy_entry(id).await?;

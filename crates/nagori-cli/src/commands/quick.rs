@@ -10,7 +10,7 @@ pub async fn run(executor: &Executor, args: &QuickArgs, format: OutputFormat) ->
         // Store, then runtime, then id — the pre-split dispatcher's
         // precedence for this command.
         Executor::Local(ctx) => {
-            let runtime = build_headless_runtime(ctx.open_store()?)?;
+            let runtime = build_headless_runtime(ctx.open_store().await?)?;
             let output = runtime
                 .run_quick_action(parse_id(&args.id)?, args.action)
                 .await?;
