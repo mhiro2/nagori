@@ -55,9 +55,20 @@ ignore = [
   { id = "RUSTSEC-2026-0194", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
   { id = "RUSTSEC-2026-0195", reason = "transitive via Tauri stack -> quick-xml 0.37/0.39; upstream fixed in quick-xml 0.41" },
 
-  # zip 4.6.1 (yanked): tauri-plugin-updater 2.x requires zip 4, and every 4.x is yanked.
+  # zip 4.6.1 (archive extraction: SUID/SGID bits, symlink targets and permissions)
+  # Path: tauri-plugin-updater 2.x -> zip 4. The fix is zip >= 9, which the updater
+  # does not accept yet; it only extracts update bundles whose signature it verified.
   # Tracking: https://github.com/tauri-apps/plugins-workspace/pull/3698
-  { crate = "zip@4.6.1", reason = "yanked; pinned by tauri-plugin-updater 2.x" },
+  { id = "RUSTSEC-2026-0367", reason = "transitive via tauri-plugin-updater -> zip 4; extracts only signature-verified bundles; fixed in zip 9" },
+  { id = "RUSTSEC-2026-0368", reason = "transitive via tauri-plugin-updater -> zip 4; extracts only signature-verified bundles; fixed in zip 9" },
+  { id = "RUSTSEC-2026-0369", reason = "transitive via tauri-plugin-updater -> zip 4; extracts only signature-verified bundles; fixed in zip 9" },
+
+  # zvariant / zbus_names / zvariant_derive (unmaintained as standalone crates)
+  # Path: tauri-plugin-notification -> notify-rust -> zbus 5 (Linux D-Bus notifications).
+  # The crates were folded into zbus upstream; no standalone safe upgrade exists.
+  { id = "RUSTSEC-2026-0370", reason = "transitive via tauri-plugin-notification -> notify-rust -> zbus 5; folded into zbus upstream" },
+  { id = "RUSTSEC-2026-0371", reason = "transitive via tauri-plugin-notification -> notify-rust -> zbus 5; folded into zbus upstream" },
+  { id = "RUSTSEC-2026-0372", reason = "transitive via tauri-plugin-notification -> notify-rust -> zbus 5; folded into zbus upstream" },
 ]
 
 [bans]
