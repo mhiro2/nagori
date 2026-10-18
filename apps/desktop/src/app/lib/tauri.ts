@@ -111,6 +111,10 @@ export const TAURI_EVENTS = {
   // so the store only clears when the resolved side matches the
   // currently displayed failure.
   hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
+  // Emitted when the palette shortcut becomes bound or unbound. Payload:
+  // `{ bound: boolean }`. Keep in lockstep with
+  // `PALETTE_SHORTCUT_CHANGED_EVENT` in `src-tauri/src/lib.rs`.
+  paletteShortcutChanged: 'nagori://palette_shortcut_changed',
   // Broadcast after every persisted settings change. The Settings view
   // subscribes so an external mutation (the tray's "Pause capture"
   // toggle, another window, an IPC client) merges into the in-memory

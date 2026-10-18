@@ -429,7 +429,10 @@ Notes (`crates/nagori-daemon/src/capture_loop.rs`,
   `SECURE_FOCUS_BUNDLE_OVERRIDES` list of system password UIs (e.g.
   `com.apple.SecurityAgent`) whose AX state is deliberately scrubbed —
   drops the clip before the body is even read and anchors the sequence, so
-  password input stays out of history even after focus leaves the field. A
+  password input stays out of history even after focus leaves the field.
+  The skipped sequence is remembered too: its body was never hashed, so a
+  later sleep/wake resync (which distrusts the sequence and re-reads the
+  body) keeps the same clip decided instead of capturing it. A
   single AX error fails open (treated as "not secure") so a transient FFI
   hiccup doesn't stall capture. Sustained errors past
   `SECURE_FOCUS_FAIL_CLOSED_THRESHOLD` mean visibility is *lost*, not that
@@ -615,7 +618,7 @@ are forward-only; downgrades are not supported.
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
-| `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. |
+| `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. FTS5's `secure-delete` option is on (persisted in `search_fts_config`), so a delete rewrites the segment holding the removed tokens instead of only appending a delete marker that leaves them readable in `search_fts_data`. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
 | `entry_embeddings` | On-device semantic-search vectors (`semantic-index` feature). One row per entry: a little-endian float32 `vector` BLOB ranked by `sqlite-vec`'s `vec_distance_cosine`, the runtime `dimension`, and the source `content_hash`. `entry_id` FK with `ON DELETE CASCADE`. A per-entry delete is *soft* (the vector stays in the file, filtered out at query time), while retention sweeps and clear-on-quit *hard-delete* the entry, so the cascade drops its vector in the same transaction. *Clear history* tombstones first and the deferred purge it kicks drops the vector moments later. |
 | `semantic_index_meta` | Singleton row recording the embedding model (`model_identifier` / `revision` / `dimension` / `max_sequence_length` / `index_version`) and the privacy-policy fingerprint (`policy_hash`, from `AppSettings::semantic_policy_hash`) the stored vectors were produced with, so a model *or policy* change clears the index and triggers a rebuild instead of mixing incompatible spaces or serving vectors the current policy forbids. |
@@ -694,7 +697,18 @@ firing the `search_documents_ad_fts` sync trigger) drops the row's
 representations, blobs, embeddings, thumbnails, and search / ngram
 index in the same transaction. Retention therefore reclaims disk (a
 later vacuum from the maintenance sweep then shrinks the file) rather
-than tombstoning rows that grow it forever. Per-entry deletes
+than tombstoning rows that grow it forever. The count and age sweeps
+commit in `HARD_DELETE_BATCH`-sized transactions and the byte budget in
+`TOTAL_BYTES_EVICTION_BATCH`-sized rounds, each on a freshly checked-out
+connection opened with `BEGIN IMMEDIATE`, and pause for `HARD_DELETE_YIELD`
+(longer than the busy handler's 100 ms retry ceiling) after each full batch
+so a capture waiting on the writer is guaranteed its turn; a batch that fails
+still checkpoints the ones already committed. Shrinking a 20k-entry history
+to one row in a single transaction measured ~25 s and made a concurrent
+capture fail with `database is locked`, losing any clip copied before the
+capture loop's retry. Each batch re-selects from the current table, so a
+capture committed between batches is trimmed or budgeted like any other
+row. Per-entry deletes
 (`delete_entry`) soft-delete by default, but
 `permanent_delete_on_delete` switches that surface to the same immediate
 hard-delete primitive. Secret rows are always hard-deleted immediately, and
@@ -713,7 +727,7 @@ runtime then fires a maintenance kick (a watch channel the maintenance
 supervisor selects on beside its periodic timer) so the deferred
 `purge_deleted` reclaims the rows within seconds rather than at the next
 30-minute tick — and a sweep that *fails* retries in a minute rather than
-leaving those bodies for the full interval. `purge_deleted` itself commits in `PURGE_DELETED_BATCH`-sized
+leaving those bodies for the full interval. `purge_deleted` itself commits in `HARD_DELETE_BATCH`-sized
 transactions on freshly checked-out connections, so a 100k backlog cannot hold
 the single writer for the whole reclaim and starve captures behind it. Unlike
 `mark_deleted` — which drops a tombstoned row's search / ngram rows eagerly
@@ -1399,6 +1413,18 @@ the pair one serialised operation:
   can interleave between a publish and its paste. A front-end that splits the
   two steps — `paste_entry` / `run_palette_paste` in the Tauri layer — holds
   **one** lease across the hide, the focus restore, and the delay.
+- The lease guards the clipboard, not the target window, so the Tauri layer
+  passes the restore target captured at palette open through
+  `ClipboardLease::paste_frontmost_into` to
+  `PasteController::paste_frontmost_into`. The macOS and Windows adapters
+  compare it with the foreground inside the blocking synthesis call itself —
+  the frontmost bundle id on macOS (after enigo is ready), the foreground
+  HWND + owning PID on Windows — right before the key events are posted, so
+  no await or blocking-pool hop sits between the check and the keystroke.
+  If the user or another app moved focus during the delay, the paste stops
+  with a `PreviousAppLost` failure and the copy is kept, rather than typing
+  the clipboard into whatever took focus. Linux Wayland records no restore
+  target and relies on the compositor's own focus handoff.
 - Each publish mints a `ClipboardPublish` token naming both the lease and the
   publish within it, and `ClipboardLease::paste_frontmost(publish)` refuses
   anything else. A caller that copies under one lease and pastes under another
@@ -1533,7 +1559,12 @@ rather than co-owning it and double-capturing. (Windows additionally
 gets daemon-vs-daemon exclusion from the named pipe's
 `first_pipe_instance(true)`, but the store-directory lock is the gate
 that also covers the app.) The store lock is the authoritative
-single-instance gate for the **store**.
+single-instance gate for the **store**. Every host — the desktop, the
+daemon, and the CLI's direct writes and clear-on-quit recovery — derives
+the directory from `nagori_storage::store_lock_dir`, the parent of the
+symlink-resolved DB path, so two hosts that reached one store through
+different aliases (a symlinked DB file or data directory) still contend
+for a single `nagori.lock`.
 
 Binding the IPC endpoint is gated by a *second*, independent
 process-lifetime lock keyed on the **endpoint** rather than the store
@@ -2723,7 +2754,12 @@ change.
   `nagori://navigate` with payload `"settings"`; the frontend listens
   via `@tauri-apps/api/event` and switches its route. Visibility is
   gated by `AppSettings.show_in_menu_bar`; toggling the setting hides
-  or re-shows the tray icon at runtime. Install failures on Linux
+  or re-shows the tray icon at runtime. The tray and the palette shortcut
+  are the only ways back into the app (there is no Dock / taskbar
+  presence), so while the palette shortcut is not bound — a pure Wayland
+  session, an accelerator another app holds, a cleared binding — the tray
+  stays visible regardless of the setting (`tray_should_be_visible`), and
+  Settings locks the toggle with an explanation. Install failures on Linux
   sessions without `StatusNotifierItem` support are logged and the rest
   of the app stays usable through the in-window controls.
 - **macOS activation policy** — when `tray::install` succeeds,
@@ -2758,20 +2794,33 @@ change.
   by the primary hotkey.
 - **Clear-on-quit** — when `AppSettings.clear_on_quit` is true,
   `perform_exit_cleanup` (run from `RunEvent::ExitRequested` — i.e. tray
-  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit) deletes non-pinned entries and
-  purges the `nagori-preview/` plaintext temp cache before the tokio
-  runtime tears down. Pinned entries are always preserved. The delete is
-  bounded by a 1 s ceiling so a wedged DB cannot freeze the quit path, but
-  the timeout no longer silently loses data: `perform_exit_cleanup` writes
-  a `clear-on-quit.pending` marker (a sentinel file in the DB directory)
-  *before* the delete and removes it only once the purge completes within
-  the budget. On the next launch `complete_pending_clear_on_quit` runs
-  synchronously during `setup` — before any window can show a row — and
-  finishes the purge fail-closed if the marker is still present, so a
-  timed-out / crashed / killed shutdown purge is always completed rather
-  than leaving behind history the user asked to clear. The marker lives on
-  the filesystem (not in the DB) so it survives even when the DB is the
-  contended resource that timed the purge out.
+  Quit, `Cmd`/`Ctrl+Q`, dock-menu Quit, or `nagori daemon stop` against the
+  desktop-hosted endpoint) deletes non-pinned entries and purges the
+  `nagori-preview/` plaintext temp cache before the tokio runtime tears
+  down. Pinned entries are always preserved. The lifecycle itself lives in
+  `nagori_daemon::clear_on_quit` and is shared with the standalone daemon
+  and the CLI, so every host that owns the store gives the same guarantee:
+  * **Quit** — `clear_history_on_quit` writes a
+    `<db>.clear-on-quit.pending` marker (a sentinel file beside the DB's
+    symlink-resolved path, so every alias of one store shares it) *before*
+    the delete and removes it only once the purge completes. The desktop
+    bounds the wait at 1 s so a wedged DB cannot freeze the quit path and
+    exits right after; the daemon runs the purge after its workers drain on
+    `daemon stop`, SIGTERM, or Ctrl-C and waits for it while still holding
+    its instance lock, so an abandoned purge can never keep deleting after a
+    new owner has started recording.
+  * **Open** — `finish_pending_clear_on_quit` finishes the purge fail-closed
+    whenever the marker survived (a timed-out / crashed / killed purge),
+    before any history is served or captured and under the single-instance
+    lock: the desktop runs it during `setup` before any window can show a
+    row, `run_daemon` before any worker starts, and the CLI each time it
+    opens the store directly (a read takes the lock just for the purge, and
+    is refused while a running owner holds it, since that owner is the one
+    finishing the purge). Whichever host opens the store next completes the
+    purge, so the cleared history is never shown again and nothing recorded
+    afterwards is swept by a late purge.
+  The marker lives on the filesystem (not in the DB) so it survives even when
+  the DB is the contended resource that timed the purge out.
   `WindowEvent::CloseRequested` is *not* a delete trigger: the same
   handler intercepts it on every OS, calls `prevent_close` and hides the
   main window so a `Cmd+W` / `Alt+F4` keystroke keeps the daemon (and the

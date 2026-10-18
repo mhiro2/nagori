@@ -66,6 +66,7 @@
     refreshRecent,
     resultLimitReached,
     resultsPaged,
+    resumePendingQuery,
     runQuery,
     scheduleQuery,
     searchFullHistory,
@@ -649,6 +650,7 @@
       void runQuery('');
     } else {
       setFiltersRetained(hasActiveFilters());
+      void resumePendingQuery();
     }
     searchBox?.focusAndSelect();
     fitToRows(paletteRowCount, true);

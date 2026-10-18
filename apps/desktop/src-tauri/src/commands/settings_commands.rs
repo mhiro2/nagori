@@ -120,6 +120,17 @@ pub async fn last_hotkey_failure(
     Ok(state.current_hotkey_failure().map(Into::into))
 }
 
+/// Whether the palette shortcut is bound right now. Settings reads it on mount
+/// and follows `nagori://palette_shortcut_changed` afterwards, to tell whether
+/// the tray can be hidden (see `tray_should_be_visible`).
+#[allow(clippy::unused_async)]
+#[tauri::command]
+pub async fn palette_shortcut_bound(state: State<'_, AppState>) -> CommandResult<bool> {
+    Ok(state
+        .palette_shortcut_bound
+        .load(std::sync::atomic::Ordering::SeqCst))
+}
+
 /// Toggle `capture_enabled` without round-tripping the entire settings
 /// blob — used by the tray menu's pause/resume entry.
 #[tauri::command]

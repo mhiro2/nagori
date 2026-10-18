@@ -52,6 +52,11 @@ pub(crate) const CAPTURE_SKIPPED_EVENT: &str = "nagori://capture_skipped";
 /// `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts`.
 const SETTINGS_CHANGED_EVENT: &str = "nagori://settings_changed";
 
+/// Emitted when the palette shortcut becomes bound or unbound. Payload:
+/// `{ "bound": bool }`. Settings uses it to lock the tray toggle while the tray
+/// is the only way back into the app.
+const PALETTE_SHORTCUT_CHANGED_EVENT: &str = "nagori://palette_shortcut_changed";
+
 /// Event used to hand the Settings webview an initial tab / route hint
 /// after `open_settings` shows the window. Payload is the desired
 /// `SettingsView` tab name (currently `"setup"`); the `SettingsView`
@@ -285,6 +290,7 @@ pub fn run() {
             commands::settings_commands::get_permissions,
             commands::settings_commands::get_capabilities,
             commands::settings_commands::last_hotkey_failure,
+            commands::settings_commands::palette_shortcut_bound,
             commands::settings_commands::request_accessibility,
             commands::settings_commands::open_url_external,
             commands::window_commands::toggle_palette,
@@ -331,6 +337,10 @@ static EXIT_CLEANUP_FIRED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 const BACKGROUND_TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ceiling on the clear-on-quit purge at exit, so a wedged DB cannot freeze the
+/// quit path; the purge-pending marker finishes the job on the next open.
+const CLEAR_ON_QUIT_PURGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Cross-platform run-event hook. Handles two distinct shutdown surfaces:
 ///
@@ -436,54 +446,53 @@ fn perform_exit_cleanup(handle: &tauri::AppHandle) {
         state
             .shutdown_background_tasks(BACKGROUND_TASK_SHUTDOWN_GRACE)
             .await;
-        if runtime.current_settings().clear_on_quit {
-            // Persist a purge-pending marker *before* the delete so a timeout
-            // (below), crash, or kill mid-purge is completed on the next launch
-            // (fail-closed) instead of silently leaving the history the user
-            // asked to clear.
-            match state.mark_clear_on_quit_pending() {
-                Ok(()) => {
-                    // The marker covers a timeout, so the 1 s ceiling can keep a
-                    // wedged DB from freezing quit: if it elapses (or errors) the
-                    // marker stays and `try_new_at` finishes the job at next
-                    // launch.
-                    let purged = tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        runtime.clear_non_pinned(),
-                    )
-                    .await;
-                    if matches!(purged, Ok(Ok(_))) {
-                        // Only a completed purge removes the marker. A removal
-                        // failure would make the next launch re-purge, so
-                        // surface it; that fail-closed re-purge is harmless
-                        // (idempotent at the start of a session).
-                        if let Err(err) = state.clear_clear_on_quit_pending() {
-                            tracing::warn!(error = %err, "clear_on_quit_marker_remove_failed");
-                        }
-                    } else {
-                        tracing::warn!("clear_on_quit_incomplete_purge_deferred_to_next_launch");
-                    }
-                }
-                Err(err) => {
-                    // No resume marker could be written, so the timeout path
-                    // would be fail-open (a timed-out purge would leave data
-                    // with nothing to finish it on next launch). Await the purge
-                    // to completion instead — honouring clear-on-quit now is the
-                    // only remaining guarantee. A DELETE on the local SQLite file
-                    // does not hang indefinitely; a genuine failure here means a
-                    // broken filesystem we cannot recover from at quit.
-                    tracing::warn!(error = %err, "clear_on_quit_marker_write_failed");
-                    if let Err(err) = runtime.clear_non_pinned().await {
-                        tracing::error!(error = %err, "clear_on_quit_purge_failed_without_marker");
-                    }
-                }
-            }
+        // The marker covers a timeout, so the short ceiling keeps a wedged DB
+        // from freezing quit: an unfinished purge is completed by whichever
+        // host opens the store next. The process exits right after, so an
+        // abandoned purge never outlives the instance lock.
+        let cleared = nagori_daemon::clear_history_on_quit(
+            &runtime,
+            state.clear_on_quit_marker(),
+            Some(CLEAR_ON_QUIT_PURGE_TIMEOUT),
+        )
+        .await;
+        if cleared {
             // `clear_on_quit` promises a clean slate on exit; extend that to
             // the plaintext Quick Look cache so a previewed Public body is not
             // left behind in `/tmp` for the next user of the machine.
             commands::purge_preview_temp_dir();
         }
     });
+}
+
+/// Record whether the palette shortcut is bound and tell Settings when that
+/// changes.
+fn publish_palette_shortcut_bound(app: &tauri::AppHandle, bound: bool) {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state.palette_shortcut_bound.swap(bound, Ordering::SeqCst) != bound {
+        let _ = app.emit(
+            PALETTE_SHORTCUT_CHANGED_EVENT,
+            serde_json::json!({ "bound": bound }),
+        );
+    }
+}
+
+/// Whether the tray icon should be shown.
+///
+/// The tray and the palette shortcut are the only ways back into a running
+/// app once its windows are hidden (the app has no Dock / taskbar presence).
+/// Hiding the tray while the shortcut is not bound — a pure Wayland session
+/// where global shortcuts cannot register, an accelerator another app holds,
+/// or a cleared binding — would leave nothing to reopen the palette or
+/// Settings with, so the tray stays up regardless of `show_in_menu_bar` until
+/// a shortcut binds.
+const fn tray_should_be_visible(show_in_menu_bar: bool, palette_shortcut_bound: bool) -> bool {
+    show_in_menu_bar || !palette_shortcut_bound
 }
 
 /// Spawn background tasks that subscribe to settings changes:
@@ -530,8 +539,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         let mut current_show_in_menu_bar = initial.show_in_menu_bar;
         let mut current_secondary: BTreeMap<SecondaryHotkeyAction, String> =
             initial.secondary_hotkeys.clone();
+        // Whether the palette shortcut is bound right now. Together with
+        // `show_in_menu_bar` it decides the tray's visibility — see
+        // `tray_should_be_visible`.
+        let mut primary_hotkey_bound = true;
 
         if let Err(err) = register_primary_hotkey(&app, current_hotkey.as_str()) {
+            primary_hotkey_bound = false;
             tracing::warn!(error = %err, "global_shortcut_register_failed");
             // Surface to the UI so the settings page can prompt the user to
             // pick a different hotkey rather than silently leaving the
@@ -570,7 +584,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
         // same accelerator). Tray reconciliation runs on every OS; the
         // underlying `set_visible` is a no-op when the tray failed to
         // install (e.g. an unsupported Linux session).
-        tray::set_visible(&app, current_show_in_menu_bar);
+        publish_palette_shortcut_bound(&app, primary_hotkey_bound);
+        let mut tray_visible =
+            tray_should_be_visible(current_show_in_menu_bar, primary_hotkey_bound);
+        if !current_show_in_menu_bar && tray_visible {
+            tracing::warn!("tray_kept_visible_without_palette_shortcut");
+        }
+        tray::set_visible(&app, tray_visible);
         current_secondary = register_secondary_hotkeys(&app, &BTreeMap::new(), &current_secondary);
 
         // Startup updater probe. Honours `auto_update_check` — a user
@@ -651,9 +671,13 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                             previous = %current_hotkey,
                             "global_shortcut_revert_failed"
                         );
+                        primary_hotkey_bound = false;
+                    } else {
+                        primary_hotkey_bound = true;
                     }
                 } else {
                     current_hotkey = next;
+                    primary_hotkey_bound = true;
                     // Successful rebind — drop any cached failure so the
                     // toast/banner does not linger past the resolved
                     // conflict. The accompanying resolved event clears
@@ -704,9 +728,16 @@ fn spawn_settings_subscribers(handle: &tauri::AppHandle) {
                 }
             }
 
-            if snapshot.show_in_menu_bar != current_show_in_menu_bar {
-                current_show_in_menu_bar = snapshot.show_in_menu_bar;
-                tray::set_visible(&app, current_show_in_menu_bar);
+            publish_palette_shortcut_bound(&app, primary_hotkey_bound);
+            current_show_in_menu_bar = snapshot.show_in_menu_bar;
+            let next_tray_visible =
+                tray_should_be_visible(current_show_in_menu_bar, primary_hotkey_bound);
+            if next_tray_visible != tray_visible {
+                tray_visible = next_tray_visible;
+                if !current_show_in_menu_bar && tray_visible {
+                    tracing::warn!("tray_kept_visible_without_palette_shortcut");
+                }
+                tray::set_visible(&app, tray_visible);
             }
 
             if snapshot.secondary_hotkeys != current_secondary {
@@ -869,4 +900,19 @@ pub(crate) fn show_main_palette(app: &tauri::AppHandle) {
     commands::recenter_palette_on_cursor_monitor(&window);
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tray_should_be_visible;
+
+    #[test]
+    fn tray_stays_visible_while_the_palette_shortcut_is_unbound() {
+        // With a working shortcut the user's choice is honoured.
+        assert!(tray_should_be_visible(true, true));
+        assert!(!tray_should_be_visible(false, true));
+        // Without one the tray is the only way back in, so it stays.
+        assert!(tray_should_be_visible(true, false));
+        assert!(tray_should_be_visible(false, false));
+    }
 }

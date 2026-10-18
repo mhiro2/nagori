@@ -437,6 +437,10 @@ export const ko: Messages = {
       appDenylistPasswordManagers: '비밀번호 관리자 차단',
       appDenylistPasswordManagersHelp:
         '번들 프리셋(1Password, Bitwarden, KeePassXC, Apple Passwords)에서의 복사를 정확한 앱 식별자로 차단합니다. 프리셋 내용은 고정되어 편집할 수 없습니다. 비밀번호 관리자에서 클립보드로 붙여넣을 일이 없다면 켜둔 채로 두는 것을 권장합니다.',
+      appDenylistPresetLoading: '비밀번호 관리자 목록을 불러오는 중…',
+      appDenylistPresetFailed:
+        '비밀번호 관리자 목록을 불러오지 못해 아직 이 보호 기능을 켤 수 없습니다.',
+      appDenylistPresetRetry: '다시 시도',
       appDenylistPatterns: '사용자 지정 패턴',
       appDenylistPatternsHelp:
         '한 줄에 부분 문자열 하나씩 입력합니다. 소스 앱 이름, 번들 ID, 실행 파일 경로 중 하나라도 포함되면 캡처되지 않습니다(대소문자 구분 없음). 프리셋에 없는 앱(Dashlane / LastPass / 사내 도구 등)을 차단하고 싶을 때 여기에 추가하세요.',
@@ -541,6 +545,8 @@ export const ko: Messages = {
       menuBar: '트레이 아이콘 표시',
       menuBarHelp:
         '시스템 트레이에 Nagori 아이콘을 표시합니다 (macOS: 메뉴 막대 / Windows: 알림 영역 / Linux: 상태 표시기). 백그라운드 전용으로 사용하려면 비활성화하세요.',
+      menuBarRequired:
+        '지금은 팔레트를 여는 전역 단축키가 없어 Nagori로 돌아오는 방법으로 트레이 아이콘이 계속 표시됩니다. 작동하는 단축키를 설정하면 숨길 수 있습니다.',
       clearOnQuit: '종료 시 고정되지 않은 기록 삭제',
       clearOnQuitHelp:
         '앱이 종료될 때 고정되지 않은 모든 항목을 제거합니다. 고정된 항목은 보존됩니다.',

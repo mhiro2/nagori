@@ -33,6 +33,64 @@ use std::path::{Path, PathBuf};
 
 use nagori_core::{AppError, Result};
 
+/// Resolve `db_path` through symlinks to the store's real path.
+///
+/// Every alias of one store — `--db` pointed at a symlinked file or through a
+/// symlinked directory — maps to the same path. A DB that does not exist yet
+/// (a fresh store) cannot be resolved itself, so its directory is resolved
+/// instead and the file name re-attached.
+#[must_use]
+pub fn resolve_db_path(db_path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(db_path) {
+        return resolved;
+    }
+    // `canonicalize` also fails for a symlink whose target does not exist yet
+    // — an alias created before the store it points at. Follow such links by
+    // hand so the alias still resolves to where `SQLite` will create the DB,
+    // instead of to the alias's own directory.
+    let mut path = db_path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let Ok(target) = std::fs::read_link(&path) else {
+            break;
+        };
+        path = match path.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+    }
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let resolved_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    match path.file_name() {
+        Some(name) => resolved_parent.join(name),
+        None => resolved_parent,
+    }
+}
+
+/// Upper bound on the symlink chain [`resolve_db_path`] follows by hand, so a
+/// link cycle cannot loop forever.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Directory whose [`ProcessLock`] guards the store at `db_path`: the parent
+/// of its symlink-resolved path.
+///
+/// Every owner of a store — the desktop app, the daemon, and the CLI's direct
+/// writes and clear-on-quit recovery — must derive the lock from here. Locking
+/// the lexical parent instead would let two hosts that reached the same store
+/// through different aliases take different `nagori.lock` files and own it at
+/// once. Resolve after the directory exists (the caller creates it first), so
+/// the canonical path is available.
+#[must_use]
+pub fn store_lock_dir(db_path: &Path) -> PathBuf {
+    let resolved = resolve_db_path(db_path);
+    match resolved.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 /// Filename of the lock created inside the guarded directory. Shared by the
 /// desktop and daemon so that, when they point at the same data directory
 /// (the default), they also exclude each other and never double-own the
@@ -136,6 +194,45 @@ fn open_lock_file(path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn store_lock_dir_resolves_file_and_directory_aliases() {
+        // A store reached through a symlinked DB file or a symlinked data
+        // directory must lock the same directory as its real path, or two
+        // owners could hold the store at once.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir(&real_dir).expect("real dir");
+        let real_db = real_dir.join("nagori.sqlite");
+        std::fs::write(&real_db, b"").expect("db file");
+        let other_dir = tmp.path().join("other");
+        std::fs::create_dir(&other_dir).expect("other dir");
+        let file_alias = other_dir.join("alias.sqlite");
+        std::os::unix::fs::symlink(&real_db, &file_alias).expect("file symlink");
+        let dir_alias = tmp.path().join("dir-alias");
+        std::os::unix::fs::symlink(&real_dir, &dir_alias).expect("dir symlink");
+
+        let expected = store_lock_dir(&real_db);
+        assert_eq!(store_lock_dir(&file_alias), expected);
+        assert_eq!(store_lock_dir(&dir_alias.join("nagori.sqlite")), expected);
+        // A store that does not exist yet still resolves through its directory.
+        assert_eq!(
+            store_lock_dir(&dir_alias.join("fresh.sqlite")),
+            store_lock_dir(&real_dir.join("fresh.sqlite"))
+        );
+        // An alias created before the DB it points at resolves to the target's
+        // directory too, so the first owner to create it and a later one
+        // reaching it through the real path take the same lock.
+        let dangling = other_dir.join("pending.sqlite");
+        std::os::unix::fs::symlink(real_dir.join("pending.sqlite"), &dangling)
+            .expect("dangling symlink");
+        assert_eq!(
+            resolve_db_path(&dangling),
+            resolve_db_path(&real_dir.join("pending.sqlite"))
+        );
+        assert_eq!(store_lock_dir(&dangling), expected);
+    }
 
     #[test]
     fn first_acquire_succeeds_and_second_observes_contention() {

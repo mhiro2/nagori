@@ -20,6 +20,7 @@ export const TAURI_EVENTS = {
   pasteFailed: 'nagori://paste_failed',
   hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
   hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
+  paletteShortcutChanged: 'nagori://palette_shortcut_changed',
   settingsChanged: 'nagori://settings_changed',
   aiStarted: 'nagori://ai/started',
   aiDelta: 'nagori://ai/delta',
@@ -91,5 +92,6 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   cliInstallStatus: vi.fn(),
   installCli: vi.fn(),
   lastHotkeyFailure: vi.fn(),
+  paletteShortcutBound: vi.fn(async () => true),
   ...overrides,
 });

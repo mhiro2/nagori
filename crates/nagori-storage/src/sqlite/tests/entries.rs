@@ -455,6 +455,59 @@ async fn enforce_retention_count_drops_oldest_unpinned() {
 }
 
 #[tokio::test]
+async fn enforce_retention_count_drains_a_backlog_larger_than_one_batch() {
+    // Retention commits in batches so a large trim cannot hold the writer for
+    // its whole run; the loop must still bring history down to the cap.
+    let store = SqliteStore::open_memory().unwrap();
+    let batch = usize::try_from(super::super::maintenance::HARD_DELETE_BATCH).unwrap();
+    let total = batch * 2 + 5;
+    let now = OffsetDateTime::now_utc();
+    let mut newest = Vec::new();
+    for idx in 0..total {
+        let id = insert_text(&store, &format!("retention backlog {idx}")).await;
+        let age = i64::try_from(total - idx).unwrap();
+        backdate_entry(&store, id, now - time::Duration::seconds(age));
+        if idx >= total - 3 {
+            newest.push(id);
+        }
+    }
+
+    assert_eq!(store.enforce_retention_count(3).await.unwrap(), total - 3);
+    assert_eq!(count_active(&store), 3);
+    let surviving = store
+        .list_recent(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    for id in newest {
+        assert!(surviving.contains(&id), "the newest rows must be kept");
+    }
+}
+
+#[tokio::test]
+async fn clear_older_than_drains_a_backlog_larger_than_one_batch() {
+    let store = SqliteStore::open_memory().unwrap();
+    let batch = usize::try_from(super::super::maintenance::HARD_DELETE_BATCH).unwrap();
+    let total = batch + 5;
+    let now = OffsetDateTime::now_utc();
+    for idx in 0..total {
+        let id = insert_text(&store, &format!("aged backlog {idx}")).await;
+        backdate_entry(&store, id, now - time::Duration::days(10));
+    }
+    let recent = insert_text(&store, "recent survivor").await;
+
+    let removed = store
+        .clear_older_than(now - time::Duration::days(1))
+        .await
+        .unwrap();
+    assert_eq!(removed, total);
+    assert_eq!(count_total(&store), 1);
+    assert!(store.get(recent).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn enforce_retention_count_hard_deletes_evicted_rows() {
     // Retention eviction must *physically* remove the row — and its
     // representations / search index via `ON DELETE CASCADE` — rather than
@@ -721,7 +774,7 @@ async fn purge_deleted_drains_a_backlog_larger_than_one_batch() {
     // The purge commits in batches so it cannot hold the writer lock for a
     // whole 100k reclaim; the loop must still drain the backlog completely.
     let store = SqliteStore::open_memory().unwrap();
-    let total = usize::try_from(super::super::maintenance::PURGE_DELETED_BATCH).unwrap() + 5;
+    let total = usize::try_from(super::super::maintenance::HARD_DELETE_BATCH).unwrap() + 5;
     for idx in 0..total {
         insert_text(&store, &format!("entry {idx}")).await;
     }
@@ -1391,4 +1444,62 @@ async fn list_source_apps_skips_deleted_and_blocked_rows() {
         .unwrap();
     }
     assert_eq!(store.list_source_apps(10).await.unwrap(), vec!["Kept"]);
+}
+
+/// A large retention trim must leave room for a capture: a writer arriving
+/// once the trim is under way — with a busy timeout far shorter than the
+/// whole trim — has to get the lock between batches, while the trim is still
+/// running, instead of waiting out the reclaim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_trim_lets_a_concurrent_writer_in_between_batches() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("nagori.sqlite");
+    let store = SqliteStore::open(&db_path).unwrap();
+    let batch = usize::try_from(super::super::maintenance::HARD_DELETE_BATCH).unwrap();
+    let total = batch * 6;
+    for idx in 0..total {
+        insert_text(&store, &format!("retention contention row {idx}")).await;
+    }
+    let writer = rusqlite::Connection::open(&db_path).unwrap();
+    writer
+        .execute_batch("PRAGMA busy_timeout = 250; CREATE TABLE probe (n INTEGER);")
+        .unwrap();
+    let initial = i64::try_from(total).unwrap();
+
+    let trimming = store.clone();
+    let trim = tokio::spawn(async move { trimming.enforce_retention_count(1).await });
+    let midway = tokio::task::spawn_blocking(move || {
+        // Wait for the first batch to commit, so the write below lands while
+        // the trim is demonstrably in progress.
+        let started = std::time::Instant::now();
+        loop {
+            let live: i64 = writer
+                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                .unwrap();
+            if live < initial {
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the trim never committed a batch"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        writer
+            .execute("INSERT INTO probe (n) VALUES (1)", [])
+            .map_err(|err| format!("a write during the trim failed: {err}"))?;
+        // The write succeeded before the trim finished: it got in between
+        // batches rather than after the whole reclaim.
+        let live: i64 = writer
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        Ok::<_, String>(live)
+    });
+
+    let live_after_write = midway.await.unwrap().unwrap();
+    assert!(
+        live_after_write > 1,
+        "the write must land before the trim completes, saw {live_after_write} rows left"
+    );
+    assert_eq!(trim.await.unwrap().unwrap(), total - 1);
 }

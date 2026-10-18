@@ -30,6 +30,15 @@
   import ActionRunPanel from './ActionRunPanel.svelte';
   import CompactPreview from './CompactPreview.svelte';
 
+  // One `nagori://ai/*` event, tagged with its channel so a held event can be
+  // replayed through the same handler as a live one.
+  type AiStreamEvent =
+    | { kind: 'delta'; payload: AiDeltaEvent }
+    | { kind: 'replace'; payload: AiReplaceEvent }
+    | { kind: 'done'; payload: AiDoneEvent }
+    | { kind: 'error'; payload: AiErrorEvent }
+    | { kind: 'cancelled'; payload: { requestId: string } };
+
   type Props = {
     target: SearchResultDto | undefined;
     open: boolean;
@@ -113,6 +122,13 @@
   // returned a request id — so we can cancel the moment that id arrives.
   let runToken = 0;
   let cancelRequested = false;
+  // The backend starts streaming before `startAiAction` returns the request
+  // id, so a fast run can emit its deltas — and even its only terminal
+  // `done` / `error` — before we know which id is ours. While a start is in
+  // flight every `nagori://ai/*` event is held here and replayed once the id
+  // arrives; dropping them instead would strand the UI in the running state.
+  let aiStarting = false;
+  let earlyAiEvents: AiStreamEvent[] = [];
   // Resolves once the request-scoped `nagori://ai/*` listeners have actually
   // attached on the backend (Tauri's `listen()` is async, so `subscribe()`
   // returning does not mean we are listening yet). `runAiAction` awaits this
@@ -280,6 +296,8 @@
   const resetRun = (): void => {
     runToken += 1;
     cancelRequested = false;
+    aiStarting = false;
+    earlyAiEvents = [];
     if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
     lastResult = undefined;
     restored = false;
@@ -380,14 +398,20 @@
         await aiListenersReady;
         if (token !== runToken) return;
       }
+      aiStarting = true;
+      earlyAiEvents = [];
       const id = await startAiAction(action, target.id);
       // Superseded while the backend was spinning up (the inspector was closed
       // or re-targeted before the id arrived): cancel the orphaned backend run
       // so it doesn't stream into a now-stale request, and don't adopt its id.
+      // The reset that superseded us already dropped the held events.
       if (token !== runToken) {
         void cancelAiAction(id);
         return;
       }
+      const early = earlyAiEvents;
+      aiStarting = false;
+      earlyAiEvents = [];
       // Cancel pressed during startup (before the id existed): honour it now
       // that the backend has a handle, and abandon this run.
       if (cancelRequested) {
@@ -398,10 +422,16 @@
         return;
       }
       aiRequestId = id;
+      // Replay what this run emitted before its id was known, in order. Events
+      // for other requests are discarded by the usual id check, and a replayed
+      // terminal event settles the run exactly as a live one would.
+      for (const event of early) routeAiEvent(event);
     } catch (err) {
       // A superseding run (or the reset) already owns the work area; don't let
       // this run's failure clobber it.
       if (token !== runToken) return;
+      aiStarting = false;
+      earlyAiEvents = [];
       runError = describeError(err);
       aiStreaming = false;
       aiRequestId = undefined;
@@ -631,8 +661,52 @@
   // `aiRequestId` is the id returned by `startAiAction` — authoritative and
   // scoped to *this* run, so we never adopt a stray `started` from another
   // run/window. `runAiAction` waits on `aiListenersReady` before starting, so
-  // even the fastest terminal event lands after every listener has attached.
+  // even the fastest terminal event lands after every listener has attached;
+  // one that lands before the id itself is held in `earlyAiEvents`.
   const isActiveRequest = (id: string): boolean => aiRequestId !== undefined && id === aiRequestId;
+
+  const applyAiEvent = (event: AiStreamEvent): void => {
+    switch (event.kind) {
+      case 'delta':
+        aiText += event.payload.text;
+        break;
+      case 'replace':
+        aiText = event.payload.text;
+        break;
+      case 'done':
+        aiText = event.payload.finalText;
+        lastResult = event.payload.finalText;
+        // Re-targeting cancels a stream, so a run that finishes belongs to
+        // the current target.
+        if (target) rememberActionResult(target.id, event.payload.finalText);
+        aiStreaming = false;
+        aiRequestId = undefined;
+        aiPendingAction = undefined;
+        flashDone();
+        break;
+      case 'error':
+        runError = event.payload.message;
+        aiStreaming = false;
+        aiRequestId = undefined;
+        aiPendingAction = undefined;
+        break;
+      case 'cancelled':
+        aiStreaming = false;
+        aiRequestId = undefined;
+        aiPendingAction = undefined;
+        break;
+    }
+  };
+
+  // Apply an event for the active run, hold it while a start is still waiting
+  // for its id, and drop anything else (another run, or a run already ended).
+  const routeAiEvent = (event: AiStreamEvent): void => {
+    if (isActiveRequest(event.payload.requestId)) {
+      applyAiEvent(event);
+    } else if (aiStarting) {
+      earlyAiEvents.push(event);
+    }
+  };
 
   // Subscribe to the request-scoped streaming events while the inspector is
   // open. Events whose `requestId` does not match the active run are discarded.
@@ -669,57 +743,31 @@
     const unsubscribers = [
       subscribe<AiDeltaEvent>(
         TAURI_EVENTS.aiDelta,
-        (payload) => {
-          if (isActiveRequest(payload.requestId)) aiText += payload.text;
-        },
+        (payload) => routeAiEvent({ kind: 'delta', payload }),
         markAttached,
         markFailed,
       ),
       subscribe<AiReplaceEvent>(
         TAURI_EVENTS.aiReplace,
-        (payload) => {
-          if (isActiveRequest(payload.requestId)) aiText = payload.text;
-        },
+        (payload) => routeAiEvent({ kind: 'replace', payload }),
         markAttached,
         markFailed,
       ),
       subscribe<AiDoneEvent>(
         TAURI_EVENTS.aiDone,
-        (payload) => {
-          if (!isActiveRequest(payload.requestId)) return;
-          aiText = payload.finalText;
-          lastResult = payload.finalText;
-          // Re-targeting cancels a stream, so a run that finishes belongs to
-          // the current target.
-          if (target) rememberActionResult(target.id, payload.finalText);
-          aiStreaming = false;
-          aiRequestId = undefined;
-          aiPendingAction = undefined;
-          flashDone();
-        },
+        (payload) => routeAiEvent({ kind: 'done', payload }),
         markAttached,
         markFailed,
       ),
       subscribe<AiErrorEvent>(
         TAURI_EVENTS.aiError,
-        (payload) => {
-          if (!isActiveRequest(payload.requestId)) return;
-          runError = payload.message;
-          aiStreaming = false;
-          aiRequestId = undefined;
-          aiPendingAction = undefined;
-        },
+        (payload) => routeAiEvent({ kind: 'error', payload }),
         markAttached,
         markFailed,
       ),
       subscribe<{ requestId: string }>(
         TAURI_EVENTS.aiCancelled,
-        (payload) => {
-          if (!isActiveRequest(payload.requestId)) return;
-          aiStreaming = false;
-          aiRequestId = undefined;
-          aiPendingAction = undefined;
-        },
+        (payload) => routeAiEvent({ kind: 'cancelled', payload }),
         markAttached,
         markFailed,
       ),

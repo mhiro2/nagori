@@ -50,16 +50,49 @@ pub enum Executor {
 /// path is misconfigured or unreadable.
 pub struct LocalContext {
     pub db_path: PathBuf,
+    /// Whether this process already holds the store's single-instance lock
+    /// (taken by `dispatch` for a direct write).
+    pub holds_store_lock: bool,
 }
 
 impl LocalContext {
-    pub fn open_store(&self) -> Result<SqliteStore> {
+    /// Open the store for a direct command.
+    ///
+    /// A clear-on-quit purge the previous owner (desktop app or daemon) left
+    /// pending is finished first, so a direct read never shows the history the
+    /// user asked to clear and a direct write is never swept by a late purge on
+    /// the next launch. The purge runs only under the single-instance lock — a
+    /// read takes it just for the purge — and re-checks the marker once it
+    /// holds it, so it can never sweep history another owner recorded after
+    /// finishing the same purge. When a running instance holds the lock, that
+    /// instance is the one finishing the purge, so the command is refused
+    /// rather than served from the history being cleared. Fail-closed like the
+    /// other hosts: a purge that cannot complete fails the command and leaves
+    /// the marker for the next attempt.
+    pub async fn open_store(&self) -> Result<SqliteStore> {
         if let Some(parent) = self.db_path.parent() {
             nagori_storage::ensure_private_directory(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        SqliteStore::open(&self.db_path)
-            .with_context(|| format!("failed to open {}", self.db_path.display()))
+        let store = SqliteStore::open(&self.db_path)
+            .with_context(|| format!("failed to open {}", self.db_path.display()))?;
+        let marker = nagori_daemon::ClearOnQuitMarker::for_db(&self.db_path);
+        if marker.is_pending() {
+            let _purge_lock = if self.holds_store_lock {
+                None
+            } else {
+                let Some(lock) = crate::try_acquire_direct_write_lock(&self.db_path)? else {
+                    anyhow::bail!(
+                        "a running nagori owns {} and has not finished clearing its history on \
+                         quit yet; retry once it has",
+                        self.db_path.display()
+                    );
+                };
+                Some(lock)
+            };
+            nagori_daemon::finish_pending_clear_on_quit(&store, &marker).await?;
+        }
+        Ok(store)
     }
 }
 

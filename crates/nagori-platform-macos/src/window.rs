@@ -261,7 +261,7 @@ fn activate_app_sync(bundle_id: &str) -> std::result::Result<(), String> {
 
 /// Bundle id of the workspace's current frontmost app, if any. A lean read used
 /// to verify a focus restore actually moved the frontmost to the target.
-fn frontmost_bundle_id() -> Option<String> {
+pub(crate) fn frontmost_bundle_id() -> Option<String> {
     let workspace = NSWorkspace::sharedWorkspace();
     let app = workspace.frontmostApplication()?;
     app.bundleIdentifier().map(|s| s.to_string())

@@ -12,7 +12,7 @@ pub async fn run(executor: &Executor, args: &IdArgs, format: OutputFormat) -> Re
         // a broken DB surfaces as a storage error rather than being shadowed
         // by input validation.
         Executor::Local(ctx) => {
-            let store = ctx.open_store()?;
+            let store = ctx.open_store().await?;
             store.mark_deleted(parse_id(&args.id)?).await?;
         }
         Executor::Ipc(ctx) => {
