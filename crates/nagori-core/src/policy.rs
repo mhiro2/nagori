@@ -760,20 +760,38 @@ fn sensitive_regexes() -> &'static [Regex] {
     })
 }
 
-fn redact_private_keys(text: &str) -> String {
+/// Private-key spans shared by the detector and the redactor, so anything
+/// classified as `PrivateKeyPattern` is also scrubbed by `redact_text`.
+///
+/// - PEM and `OpenPGP` armour: `-----BEGIN … PRIVATE KEY-----` (or
+///   `PRIVATE KEY BLOCK-----` for `gpg --export-secret-keys --armor`)
+///   through the matching END marker.
+/// - `PuTTY` `.ppk`: the `PuTTY-User-Key-File-<n>:` header through the
+///   `Private-MAC:` (v2/v3) or `Private-Hash:` (v1) trailer line.
+///
+/// The closing marker only counts at the start of a line (after optional
+/// indentation, for keys pasted into YAML or code; `\n`, `\r\n` and a bare
+/// `\r`, which `PuTTY` also accepts, all end a line): both formats carry a
+/// free-form `Comment:` header that may itself contain the marker text, and
+/// ending the span there would leave the key body in place. Both fall back
+/// to end-of-input (`\z`) when no closing line is found — a truncated key,
+/// or one whose newlines were stripped — so a key is flagged as soon as its
+/// opening marker appears and the redactor never leaves its tail behind.
+fn private_key_regex() -> &'static Regex {
     static PRIVATE_KEY: OnceLock<Regex> = OnceLock::new();
-    let regex = PRIVATE_KEY.get_or_init(|| {
-        // Match a PEM block from `-----BEGIN … PRIVATE KEY-----` through the
-        // matching `-----END … PRIVATE KEY-----`. Falls back to end-of-input
-        // (`\z`) when the END marker is missing — `contains_private_key`
-        // flags the entry as soon as BEGIN appears, so the redactor must
-        // not leave a tail through that case.
-        Regex::new(
-            r"(?s)-----BEGIN[^\r\n-]*PRIVATE KEY-----.*?(?:-----END[^\r\n-]*PRIVATE KEY-----|\z)",
-        )
+    PRIVATE_KEY.get_or_init(|| {
+        Regex::new(concat!(
+            r"(?smR)-----BEGIN[^\r\n-]*PRIVATE KEY(?: BLOCK)?-----.*?(?:^[ \t]*-----END[^\r\n-]*PRIVATE KEY(?: BLOCK)?-----|\z)",
+            r"|PuTTY-User-Key-File-\d+:.*?(?:^[ \t]*Private-(?:MAC|Hash):[^\r\n]*|\z)",
+        ))
         .expect("private-key regex compiles")
-    });
-    regex.replace_all(text, "[REDACTED]").into_owned()
+    })
+}
+
+fn redact_private_keys(text: &str) -> String {
+    private_key_regex()
+        .replace_all(text, "[REDACTED]")
+        .into_owned()
 }
 
 fn redact_full_body(text: &str) -> String {
@@ -789,7 +807,7 @@ fn redact_full_body(text: &str) -> String {
 }
 
 fn contains_private_key(text: &str) -> bool {
-    text.contains("-----BEGIN") && text.contains("PRIVATE KEY-----")
+    private_key_regex().is_match(text)
 }
 
 fn contains_api_key(text: &str) -> bool {

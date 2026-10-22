@@ -203,6 +203,43 @@ fn classifies_private_key_blob_as_secret() {
 }
 
 #[test]
+fn classifies_pgp_and_putty_private_keys_as_secret() {
+    for body in [
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBGrawpgpbody\n-----END PGP PRIVATE KEY BLOCK-----",
+        "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\nAAAAIrawppkbody\nPrivate-MAC: 0123abcd",
+        "PuTTY-User-Key-File-1: ssh-rsa\nPrivate-Hash: 0123abcd",
+    ] {
+        let result = classify_default(body);
+        assert_eq!(result.sensitivity, Sensitivity::Secret, "{body:?}");
+        assert!(
+            result
+                .reasons
+                .contains(&SensitivityReason::PrivateKeyPattern),
+            "{body:?} should report PrivateKeyPattern, got {:?}",
+            result.reasons,
+        );
+    }
+}
+
+#[test]
+fn does_not_classify_public_keys_as_private() {
+    for body in [
+        "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQINBGpublic\n-----END PGP PUBLIC KEY BLOCK-----",
+        "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----",
+        "PuTTY-User-Key-File is the header of a .ppk file",
+    ] {
+        let result = classify_default(body);
+        assert!(
+            !result
+                .reasons
+                .contains(&SensitivityReason::PrivateKeyPattern),
+            "{body:?} should not report PrivateKeyPattern, got {:?}",
+            result.reasons,
+        );
+    }
+}
+
+#[test]
 fn classifies_credit_card_with_adjacent_expiry_and_cvv_as_secret() {
     // Earlier the classifier collapsed every digit in the body into one
     // Luhn check, so "4111 1111 1111 1111 exp 12/30 cvv 123" had 22

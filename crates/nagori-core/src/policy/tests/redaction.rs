@@ -96,8 +96,8 @@ fn redacts_private_key_block() {
 
 #[test]
 fn redacts_truncated_private_key_block() {
-    // `contains_private_key` only requires both `-----BEGIN` and
-    // `PRIVATE KEY-----` to appear, so a truncated PEM (no END marker)
+    // `contains_private_key` flags the opening `-----BEGIN … PRIVATE
+    // KEY-----` marker on its own, so a truncated PEM (no END marker)
     // is still classified as Secret. Redaction must zap the whole tail
     // — leaving the body exposed would betray the user-visible "secret"
     // tag.
@@ -108,6 +108,78 @@ fn redacts_truncated_private_key_block() {
         "truncated key leaked: {redacted:?}"
     );
     assert!(redacted.contains("[REDACTED]"));
+}
+
+#[test]
+fn redacts_pgp_private_key_block() {
+    // OpenPGP armour ends its markers in `PRIVATE KEY BLOCK-----`, which the
+    // PEM-only pattern used to miss, leaving the whole secret key in history.
+    let body = "intro\n-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBGrawpgpbody\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----\noutro";
+    let redacted = redact_text(body);
+    assert_eq!(redacted, "intro\n[REDACTED]\noutro");
+}
+
+#[test]
+fn redacts_truncated_pgp_private_key_block() {
+    let body = "before\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGrawpgpbody";
+    let redacted = redact_text(body);
+    assert_eq!(redacted, "before\n[REDACTED]");
+}
+
+#[test]
+fn redacts_putty_private_key_file() {
+    // A `.ppk` is plain `Key: value` text rather than PEM armour; the span
+    // runs from the header line through the `Private-MAC:` trailer.
+    let body = "intro\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nComment: eddsa-key-20260101\nPublic-Lines: 2\nAAAAC3NzaC1lZDI1NTE5\nAAAAIpublicpart\nPrivate-Lines: 1\nAAAAIrawppkbody\nPrivate-MAC: 0123456789abcdef\noutro";
+    let redacted = redact_text(body);
+    assert_eq!(redacted, "intro\n[REDACTED]\noutro");
+}
+
+#[test]
+fn redacts_putty_v1_and_truncated_private_key_files() {
+    // PPK v1 closes with `Private-Hash:`; a copy cut off before the trailer
+    // must still lose everything after the header.
+    let v1 = "PuTTY-User-Key-File-1: ssh-rsa\nEncryption: none\nPrivate-Lines: 1\nAAAArawv1body\nPrivate-Hash: 0123abcd\nafter";
+    assert_eq!(redact_text(v1), "[REDACTED]\nafter");
+    let truncated = "key:\nPuTTY-User-Key-File-2: ssh-rsa\nPrivate-Lines: 1\nAAAArawv2body";
+    assert_eq!(redact_text(truncated), "key:\n[REDACTED]");
+}
+
+#[test]
+fn private_key_span_ignores_closing_marker_inside_a_comment_header() {
+    // OpenPGP armour and PPK both allow a free-form `Comment:` header; a
+    // closing marker written there must not end the span before the key body.
+    let pgp = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nComment: -----END PGP PRIVATE KEY BLOCK-----\n\nlQOYBGrawpgpbody\n-----END PGP PRIVATE KEY BLOCK-----\noutro";
+    assert_eq!(redact_text(pgp), "[REDACTED]\noutro");
+    let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nComment: Private-MAC: example\nPrivate-Lines: 1\nAAAAIrawppkbody\nPrivate-MAC: 0123abcd\noutro";
+    assert_eq!(redact_text(ppk), "[REDACTED]\noutro");
+}
+
+#[test]
+fn redacts_indented_private_key_block_up_to_its_closing_line() {
+    // A key pasted into YAML or code keeps its indentation; the indented
+    // END line still closes the span so the surrounding text survives.
+    let body = "ssh_key: |\n  -----BEGIN OPENSSH PRIVATE KEY-----\n  rawindentedbody\n  -----END OPENSSH PRIVATE KEY-----\nnext: value";
+    assert_eq!(redact_text(body), "ssh_key: |\n  [REDACTED]\nnext: value");
+}
+
+#[test]
+fn private_key_span_closes_on_crlf_and_bare_cr_line_breaks() {
+    // Windows copies use CRLF and PuTTY also reads bare-CR files; either way
+    // the closing line must end the span so the text after the key survives.
+    let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\rPrivate-Lines: 1\rAAAAIrawppkbody\rPrivate-MAC: abcd\rafter";
+    assert_eq!(redact_text(ppk), "[REDACTED]\rafter");
+    let pem = "intro\r\n-----BEGIN RSA PRIVATE KEY-----\r\nrawcrlfbody\r\n-----END RSA PRIVATE KEY-----\r\noutro";
+    assert_eq!(redact_text(pem), "intro\r\n[REDACTED]\r\noutro");
+}
+
+#[test]
+fn redacts_single_line_private_key_through_end_of_body() {
+    // With its newlines stripped the END marker is not on a line of its own,
+    // so the span conservatively runs to the end of the body.
+    let body =
+        "key: -----BEGIN RSA PRIVATE KEY-----rawflatbody-----END RSA PRIVATE KEY----- trailing";
+    assert_eq!(redact_text(body), "key: [REDACTED]");
 }
 
 #[test]

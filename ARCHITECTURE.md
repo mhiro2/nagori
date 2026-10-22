@@ -976,8 +976,9 @@ already run), so it never serves stale grams.
 
 ## 9. Sensitivity and redaction
 
-**Detectors** (`nagori-core::policy`): API-key-like strings, JWTs, SSH
-private keys (PEM blocks tolerate a missing END marker), AWS access
+**Detectors** (`nagori-core::policy`): API-key-like strings, JWTs,
+private keys (PEM, OpenPGP and PuTTY `.ppk`; a missing closing marker
+is tolerated), AWS access
 keys, GitHub tokens, issuer-prefixed Luhn-valid credit-card runs,
 OTP-like 6–8 digit short codes, source-app denylist matches (typed
 identifiers from the bundled password-manager preset plus free-text
@@ -1003,9 +1004,14 @@ SensitivityClassification {
 **Canonical scrubber.** `policy::redact_text` is the canonical text
 scrubber and must keep parity with the detector list. In particular:
 
-- PEM private-key blocks are matched as a span — including a missing
-  END marker, since the detector flags as soon as `-----BEGIN` and
-  `PRIVATE KEY-----` both appear.
+- Private keys are matched as a span by one regex shared with the
+  detector: PEM blocks (`-----BEGIN … PRIVATE KEY-----`), OpenPGP
+  armour (`PRIVATE KEY BLOCK-----`), and PuTTY `.ppk` files (the
+  `PuTTY-User-Key-File-<n>:` header through `Private-MAC:` /
+  `Private-Hash:`). The closing marker only counts at the start of a
+  line, so one written in a `Comment:` header cannot end the span early;
+  without a closing line the span runs to the end of the body, since the
+  detector flags as soon as the opening marker appears.
 - Credit-card candidates are 13–19 digit runs (with optional single
   spaces / dashes) delimited only by non-digits — so a number written
   straight after letters or CJK text is still a candidate — whose issuer
