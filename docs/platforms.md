@@ -76,11 +76,11 @@ can still read a clip someone else published.
 A palette paste is tied to the palette showing it was started in. Dismissing
 the palette (Escape, clicking away) before the paste reaches the clipboard
 cancels it; dismissing it while the copy is being written keeps the copy but
-skips focus restore and the keystroke; reopening the palette during the paste
-delay skips the keystroke with the "focus moved away" notice. On macOS and
-Windows, a palette opened without a recorded target app (the frontmost-app
-probe failed) copies without auto-pasting instead of typing into whatever is
-in front.
+skips focus restore and the keystroke; reopening the palette before the
+keystroke skips it with the "focus moved away" notice. On macOS and Windows, a
+palette opened without an identifiable target app (the frontmost-app probe
+failed or returned no bundle id / window handle) copies without auto-pasting
+instead of typing into whatever is in front.
 
 macOS-only capabilities: secure-input detection, sleep/wake
 `changeCount` resynchronisation, and Quick Look preview (Cmd+Y in

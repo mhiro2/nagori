@@ -1437,15 +1437,19 @@ the pair one serialised operation:
   close action, hiding for Settings) calls `end_palette_session`. A palette
   paste or copy takes a `PaletteTicket` when it starts and acts only while
   that showing is still open: it is dropped with `cancelled` when the showing
-  ended before the copy (settings load, lease wait), it neither hides,
-  re-focuses nor pastes when the showing ended during the copy (the copy has
-  landed; a reopened palette is a different showing), and it skips the
-  keystroke with `PreviousAppLost` when the palette was shown again during the
-  paste delay — the reopened palette would take the keys, which Linux cannot
-  otherwise detect. The paste ends the showing itself and takes the target
-  *before* hiding, so its own hide cannot clear the target first. On macOS and
-  Windows a showing without a target means the capture failed, and auto-paste
-  is skipped rather than typing into whatever is in front. The palette webview
+  ended before the copy (settings load, lease wait — a copy-only action
+  re-checks after its lease wait too), it neither hides, re-focuses nor pastes
+  when the showing ended during the copy (the copy has landed; a reopened
+  palette is a different showing), and it skips the keystroke with
+  `PreviousAppLost` when the palette was shown again after the hide — the
+  reopened palette would take the keys, which Linux cannot otherwise detect.
+  That last check is passed to `ClipboardLease::paste_frontmost_into_checked`,
+  which runs it after the clipboard probe as the final step before the adapter
+  call. The paste ends the showing itself and takes the target *before*
+  hiding, so its own hide cannot clear the target first. On macOS and Windows
+  a showing without a target, or with one missing the identity the adapter
+  re-checks (bundle id / window handle), means the capture failed, and
+  auto-paste is skipped rather than typing into whatever is in front. The palette webview
   keeps a matching generation (`stores/paletteSession`) so an action still
   settling its search when the user dismisses the palette never sends the
   command at all.
