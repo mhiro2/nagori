@@ -1431,6 +1431,24 @@ the pair one serialised operation:
   with a `PreviousAppLost` failure and the copy is kept, rather than typing
   the clipboard into whatever took focus. Linux Wayland records no restore
   target and relies on the compositor's own focus handoff.
+- The restore target belongs to one *showing* of the palette, not to the
+  app. `AppState::begin_palette_session` captures it and starts a new
+  generation whenever the palette opens; every dismissal (Escape, blur, the
+  close action, hiding for Settings) calls `end_palette_session`. A palette
+  paste or copy takes a `PaletteTicket` when it starts and acts only while
+  that showing is still open: it is dropped with `cancelled` when the showing
+  ended before the copy (settings load, lease wait), it neither hides,
+  re-focuses nor pastes when the showing ended during the copy (the copy has
+  landed; a reopened palette is a different showing), and it skips the
+  keystroke with `PreviousAppLost` when the palette was shown again during the
+  paste delay — the reopened palette would take the keys, which Linux cannot
+  otherwise detect. The paste ends the showing itself and takes the target
+  *before* hiding, so its own hide cannot clear the target first. On macOS and
+  Windows a showing without a target means the capture failed, and auto-paste
+  is skipped rather than typing into whatever is in front. The palette webview
+  keeps a matching generation (`stores/paletteSession`) so an action still
+  settling its search when the user dismisses the palette never sends the
+  command at all.
 - Each publish mints a `ClipboardPublish` token naming both the lease and the
   publish within it, and `ClipboardLease::paste_frontmost(publish)` refuses
   anything else. A caller that copies under one lease and pastes under another
