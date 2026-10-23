@@ -265,6 +265,7 @@
   };
 
   let searchBox: { focus: () => void; focusAndSelect: () => void } | undefined = $state();
+  let resultList: { scrollToTop: () => void } | undefined = $state();
 
   const clearSearch = (): void => {
     clearFilters();
@@ -640,18 +641,20 @@
   });
 
   // The palette window hides on blur, so gaining focus means it was shown
-  // again. See `stores/paletteSession` for the fresh-vs-resume rule.
+  // again. See `stores/paletteSession` for the fresh-vs-resume rule. Either
+  // way the cursor and the list start back at the newest entry.
   const handleShown = (): void => {
     if (takeReopenMode() === 'fresh') {
       clearFilters();
       clearMultiSelect();
       setFiltersRetained(false);
       previewExpanded = false;
-      void runQuery('');
+      void runQuery('', { cursorToTop: true });
     } else {
       setFiltersRetained(hasActiveFilters());
       void resumePendingQuery();
     }
+    resultList?.scrollToTop();
     searchBox?.focusAndSelect();
     fitToRows(paletteRowCount, true);
   };
@@ -709,6 +712,7 @@
         />
       {:else}
         <ResultList
+          bind:this={resultList}
           items={searchState.results}
           selectedIndex={searchState.selectedIndex}
           appliedQuery={searchState.appliedQuery}

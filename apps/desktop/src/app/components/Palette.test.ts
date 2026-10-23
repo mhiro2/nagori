@@ -462,9 +462,30 @@ describe('Palette', () => {
     window.dispatchEvent(new Event('focus'));
     await tick();
     expect(filterState.datePreset).toBe('none');
-    expect(runQuery).toHaveBeenCalledWith('');
+    expect(runQuery).toHaveBeenCalledWith('', { cursorToTop: true });
     expect(queryByTestId('filters-retained')).toBeNull();
     expect(document.activeElement).toBe(getByRole('combobox'));
+  });
+
+  it.each([
+    ['resumed', false],
+    ['fresh', true],
+  ])('scrolls the list back to the newest entry on a %s reopen', async (_mode, endedWithAction) => {
+    searchState.results = [resultRow('a', 'alpha'), resultRow('b', 'beta')];
+    const { container } = render(Palette);
+    const list = container.querySelector('.result-list') as HTMLElement;
+    let scrollTop = 120;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    if (endedWithAction) await runSessionEndingAction(async () => undefined);
+    window.dispatchEvent(new Event('focus'));
+    await tick();
+    expect(scrollTop).toBe(0);
   });
 
   it('gives a narrow palette to the list and folds the date presets into a menu', async () => {

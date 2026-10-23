@@ -418,6 +418,146 @@ describe('typing right before the palette hides', () => {
   });
 });
 
+const searchReturningIds = (...ids: string[]) =>
+  vi.mocked(searchClipboard).mockResolvedValue({
+    results: ids.map((id) => toResult(sampleEntry(id))),
+    totalCandidates: ids.length,
+    searchElapsedMs: 1,
+    summaryElapsedMs: 0,
+    totalElapsedMs: 1,
+  });
+
+describe('showing the palette again', () => {
+  it('a same-query refresh still follows the selected entry', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('');
+    selectByIndex(1);
+    // A capture lands on top: the cursor keeps pointing at `b`.
+    searchReturningIds('new', 'a', 'b', 'c');
+    await runQuery('');
+    expect(searchState.selectedIndex).toBe(2);
+  });
+
+  it('a reopen search lands on the first row even for the same query', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('');
+    selectByIndex(2);
+    searchReturningIds('new', 'a', 'b', 'c');
+    await runQuery('', { cursorToTop: true });
+    expect(searchState.selectedIndex).toBe(0);
+    expect(currentSelection()?.id).toBe('new');
+  });
+
+  it('a refresh that supersedes the reopen search still lands on the first row', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('');
+    selectByIndex(2);
+    let resolveReopen: ((value: Awaited<ReturnType<typeof searchClipboard>>) => void) | undefined;
+    vi.mocked(searchClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveReopen = resolve;
+      }),
+    );
+    const reopen = runQuery('', { cursorToTop: true });
+    searchReturningIds('new', 'a', 'b', 'c');
+    const refresh = runQuery('');
+    resolveReopen?.({
+      results: ['a', 'b', 'c'].map((id) => toResult(sampleEntry(id))),
+      totalCandidates: 3,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    await Promise.all([reopen, refresh]);
+    expect(currentSelection()?.id).toBe('new');
+  });
+
+  it('moving the cursor before the reopen search lands keeps the picked row', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('');
+    let resolveReopen: ((value: Awaited<ReturnType<typeof searchClipboard>>) => void) | undefined;
+    vi.mocked(searchClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveReopen = resolve;
+      }),
+    );
+    const reopen = runQuery('', { cursorToTop: true });
+    selectByIndex(1);
+    resolveReopen?.({
+      results: ['new', 'a', 'b', 'c'].map((id) => toResult(sampleEntry(id))),
+      totalCandidates: 4,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    await reopen;
+    expect(currentSelection()?.id).toBe('b');
+  });
+
+  it('only the reopen search resets the cursor; later refreshes follow it again', async () => {
+    searchReturningIds('a', 'b');
+    await runQuery('', { cursorToTop: true });
+    selectByIndex(1);
+    searchReturningIds('new', 'a', 'b');
+    await runQuery('');
+    expect(currentSelection()?.id).toBe('b');
+  });
+
+  it('a failed reopen search does not reset a later refresh', async () => {
+    searchReturningIds('a', 'b');
+    await runQuery('');
+    vi.mocked(searchClipboard).mockRejectedValueOnce({
+      code: 'storage_error',
+      message: 'boom',
+      recoverable: true,
+    });
+    await runQuery('', { cursorToTop: true });
+    selectByIndex(1);
+    searchReturningIds('new', 'a', 'b');
+    await runQuery('');
+    expect(currentSelection()?.id).toBe('b');
+  });
+
+  it('resuming moves the cursor to the first row', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('same');
+    selectByIndex(2);
+    vi.mocked(searchClipboard).mockClear();
+
+    await resumePendingQuery();
+
+    expect(searchClipboard).not.toHaveBeenCalled();
+    expect(searchState.selectedIndex).toBe(0);
+  });
+
+  it('resuming a query that still has to run lands on its first row', async () => {
+    searchReturningIds('a', 'b', 'c');
+    await runQuery('same');
+    selectByIndex(2);
+    // A capture refresh was still in flight when the palette was shown again.
+    let resolveRefresh: ((value: Awaited<ReturnType<typeof searchClipboard>>) => void) | undefined;
+    vi.mocked(searchClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+    const refresh = runQuery('same');
+    searchReturningIds('new', 'a', 'b', 'c');
+
+    const resumed = resumePendingQuery();
+    resolveRefresh?.({
+      results: ['a', 'b', 'c'].map((id) => toResult(sampleEntry(id))),
+      totalCandidates: 3,
+      searchElapsedMs: 1,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 1,
+    });
+    await Promise.all([refresh, resumed]);
+
+    expect(currentSelection()?.id).toBe('new');
+  });
+});
+
 describe('selection helpers', () => {
   beforeEach(() => {
     searchState.results = [sampleEntry('a'), sampleEntry('b'), sampleEntry('c')].map(toResult);
