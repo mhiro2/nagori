@@ -9,7 +9,7 @@ import {
   pinEntry as pinEntryCmd,
   previewEntry as previewEntryCmd,
 } from '../lib/commands';
-import { describeError } from '../lib/errors';
+import { describeError, isCancelledError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
 import type { PasteFormat, PasteOption } from '../lib/types';
 import {
@@ -41,6 +41,14 @@ const settleForAction = async (): Promise<boolean> => {
   return isPaletteSessionCurrent(session);
 };
 
+// Surface a failed session-ending action in the palette. A `cancelled` result
+// means the backend dropped the action because the palette was dismissed before
+// it could act; the palette is gone, so there is nothing to show.
+const reportSessionEndingFailure = (err: unknown): void => {
+  if (isCancelledError(err)) return;
+  searchState.errorMessage = describeError(err);
+};
+
 const oppositeFormat = (): PasteFormat | undefined => {
   const current = settingsState.settings?.pasteFormatDefault;
   if (current === undefined) return undefined;
@@ -62,7 +70,7 @@ const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => 
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -139,7 +147,7 @@ export const confirmPasteFormat = async (option: PasteOption | undefined): Promi
     await runSessionEndingAction(() => pasteEntryRepresentationCmd(targetId, option.mime));
     clearPasteDiagnostics();
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -161,7 +169,7 @@ export const copySelection = async (): Promise<void> => {
   try {
     await runSessionEndingAction(() => copyEntryCmd(target.id));
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -304,7 +312,7 @@ export const copyEntryById = async (id: string): Promise<void> => {
   try {
     await runSessionEndingAction(() => copyEntryCmd(id));
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 

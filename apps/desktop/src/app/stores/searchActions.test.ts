@@ -93,6 +93,16 @@ describe('confirmSelection', () => {
     await confirmSelection();
     expect(pasteEntryFromPalette).not.toHaveBeenCalled();
   });
+
+  it('stays quiet when the backend dropped the paste for a dismissed palette', async () => {
+    vi.mocked(pasteEntryFromPalette).mockRejectedValue({
+      code: 'cancelled',
+      message: 'cancelled',
+      recoverable: true,
+    });
+    await confirmSelection();
+    expect(searchState.errorMessage).toBeUndefined();
+  });
 });
 
 const pasteOption = (mime: string, category: PasteOption['category']): PasteOption => ({
@@ -179,6 +189,16 @@ describe('copySelection', () => {
     vi.mocked(copyEntryFromPalette).mockRejectedValue(new Error('copy failed'));
     await copySelection();
     expect(searchState.errorMessage).toBe('copy failed');
+  });
+
+  it('stays quiet when the backend dropped the copy for a dismissed palette', async () => {
+    vi.mocked(copyEntryFromPalette).mockRejectedValue({
+      code: 'cancelled',
+      message: 'cancelled',
+      recoverable: true,
+    });
+    await copySelection();
+    expect(searchState.errorMessage).toBeUndefined();
   });
 });
 
