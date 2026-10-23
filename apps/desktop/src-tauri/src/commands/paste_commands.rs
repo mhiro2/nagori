@@ -7,11 +7,12 @@ use nagori_core::{
     AppError, EntryId, MAX_COMBINED_COPY_ENTRIES, MAX_PASTE_DELAY_MS, PasteFailureReason,
     PasteFormat,
 };
+use nagori_platform::RestoreTarget;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{PasteFormatDto, PasteOptionDto};
 use crate::error::{CommandError, CommandResult};
-use crate::state::AppState;
+use crate::state::{AppState, RESTORE_TARGET_EXPECTED};
 
 use super::parse_entry_id;
 use super::window_commands::hide_main_palette;
@@ -24,16 +25,27 @@ pub async fn paste_entry(
     format: Option<PasteFormatDto>,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
+    // The palette showing this paste belongs to; a request that arrives after
+    // the palette was dismissed has nothing to paste into.
+    let Some(session) = state.palette_ticket() else {
+        return Err(CommandError::cancelled());
+    };
     // Serialize the entire focus handoff with clipboard publication. Acquiring
     // the lease before hiding the palette prevents a concurrent paste from
     // changing focus while this command waits to publish its entry.
     let mut lease = state.runtime.clipboard_lease().await;
+    // Waiting for the lease leaves time to dismiss (or dismiss and reopen) the
+    // palette; only the showing the request came from may hand over its
+    // restore target.
+    let Ok(restore_target) = state.finish_palette_session(session) else {
+        return Err(CommandError::cancelled());
+    };
     // Self-paste guard: hide the palette and re-activate the user's previous
     // frontmost app *before* we send the paste keystroke. Without this the
     // synthesised keystroke lands on Nagori's webview because its window
     // still owns focus, and we paste straight into our own search field.
     //
-    // On Linux Wayland `previous_frontmost` is always `None` (the compositor
+    // On Linux Wayland the restore target is always `None` (the compositor
     // refuses to expose a portable foreground-surface query), so we hide
     // our window and let `wtype` target whatever the compositor considers
     // focused afterwards. On Windows the snapshot now carries the HWND in
@@ -50,11 +62,7 @@ pub async fn paste_entry(
     // whatever window currently holds focus — the self-paste accident. Mirrors
     // `run_palette_paste`; checked at the auto-paste gate so the clipboard write
     // still happens (the user can paste manually).
-    let restore_target = state.take_previous_frontmost();
-    let restored = match &restore_target {
-        Some(prev) => state.window.activate_restore_target(prev).await,
-        None => Ok(()),
-    };
+    let restored = restore_focus(&state, restore_target.as_ref()).await;
     // Give the OS a tick to re-focus the target app before we send the
     // synthesised paste. 60ms is the empirical sweet spot reported by
     // the Maccy / Paste community on macOS; on Windows the same value
@@ -131,8 +139,14 @@ pub async fn paste_entry(
         // The settle delay and the copy above leave room for focus to move
         // on, and the keystroke goes to whatever is in front, so the restored
         // target is re-checked inside the synthesis call, right before the
-        // key events are posted.
-        if let Err(err) = lease.paste_frontmost_into(publish, restore_target).await {
+        // key events are posted, after making sure the palette was not shown
+        // again in the meantime.
+        let synthesis = if state.palette_shown_since(session) {
+            Err(palette_reopened_error())
+        } else {
+            lease.paste_frontmost_into(publish, restore_target).await
+        };
+        if let Err(err) = synthesis {
             tracing::warn!(error = %err, "paste_entry_synth_failed");
             let reason = paste_failure_reason(&err);
             let cmd_err: CommandError = err.into();
@@ -258,6 +272,34 @@ pub(crate) fn paste_failure_reason(err: &AppError) -> PasteFailureReason {
     }
 }
 
+/// Re-focus the app the palette was opened from. A missing target is only
+/// expected on Linux Wayland, where the compositor hands focus back by itself
+/// once the palette hides; on macOS / Windows it means the capture at open
+/// failed, so it is reported like any other failed restore — a synthesised
+/// paste would otherwise go to whichever window happens to be in front.
+async fn restore_focus(
+    state: &AppState,
+    target: Option<&RestoreTarget>,
+) -> nagori_core::Result<()> {
+    match target {
+        Some(target) => state.window.activate_restore_target(target).await,
+        None if RESTORE_TARGET_EXPECTED => Err(AppError::Platform(
+            "no paste target was recorded when the palette opened".to_owned(),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The failure reported when the palette is shown again between hiding for a
+/// paste and posting its keystroke: the reopened palette holds focus, so the
+/// paste is skipped like any other loss of the target.
+fn palette_reopened_error() -> AppError {
+    AppError::Paste {
+        reason: PasteFailureReason::PreviousAppLost,
+        message: "the palette was opened again before the paste; nothing was pasted".to_owned(),
+    }
+}
+
 /// Which representation a palette paste should write back to the clipboard.
 ///
 /// Both palette paste commands share the same hide → restore-focus →
@@ -355,19 +397,27 @@ async fn run_palette_paste(
     state: &AppState,
     copy: PaletteCopyTarget,
 ) -> CommandResult<()> {
-    let settings = match state.runtime.get_settings().await {
-        Ok(s) => s,
-        Err(err) => {
-            state.clear_previous_frontmost();
-            return Err(err.into());
-        }
+    // The palette showing this paste belongs to. A request that arrives after
+    // the palette was dismissed is dropped: there is no target to restore, and
+    // pasting anyway would type into whatever the user moved on to.
+    let Some(session) = state.palette_ticket() else {
+        return Err(CommandError::cancelled());
     };
+    // A failure here leaves the palette up with its session intact, so the
+    // user can retry against the same restore target.
+    let settings = state.runtime.get_settings().await?;
     // One lease spans the copy, the window hide, the focus restore, the paste
     // delay, and the synthesis. Nothing else in the process can publish to the
     // clipboard inside that window, and the `ClipboardPublish` it mints is what
     // authorises the synthesis below to act on this clip — see
     // `nagori_daemon::ClipboardLease`.
     let mut lease = state.runtime.clipboard_lease().await;
+    // Loading settings and waiting for the lease (another paste may hold it)
+    // leave time to press Escape or click away; drop the paste before touching
+    // the clipboard when that happened.
+    if !state.palette_session_is_current(session) {
+        return Err(CommandError::cancelled());
+    }
     let (publish, entry_id) = match copy {
         PaletteCopyTarget::Format(entry_id, format) => (
             lease
@@ -380,6 +430,14 @@ async fn run_palette_paste(
             Some(entry_id),
         ),
         PaletteCopyTarget::Text(text) => (lease.publish_text(text).await?, None),
+    };
+    // The copy can take a while (a large image, a busy store). If the palette
+    // was dismissed meanwhile, the clipboard keeps the entry but nothing else
+    // happens: no hide (a reopened palette is a new showing), no focus change,
+    // no keystroke. Otherwise this paste ends the showing and takes its target
+    // before the hide, so the hide's own dismissal cannot clear it first.
+    let Ok(restore_target) = state.finish_palette_session(session) else {
+        return Err(CommandError::cancelled());
     };
     hide_main_palette(app)?;
 
@@ -398,11 +456,7 @@ async fn run_palette_paste(
     // captured in `native_handle` via `SetForegroundWindow`; Linux Wayland
     // recorded `None`, so this is a no-op and the compositor's own
     // post-hide focus handoff already returns focus to the source surface.
-    let restore_target = state.take_previous_frontmost();
-    let restored = match &restore_target {
-        Some(prev) => state.window.activate_restore_target(prev).await,
-        None => Ok(()),
-    };
+    let restored = restore_focus(state, restore_target.as_ref()).await;
 
     // Default, alternate, and explicit representation output share this policy.
     // Focus is already handed back, so a manual ⌘V works when auto-paste is off.
@@ -431,8 +485,8 @@ async fn run_palette_paste(
         // see the real cause (same contract as the auto-paste block below).
         // The failure mode here is specifically "couldn't re-focus the source
         // app", so tag it `PreviousAppLost` regardless of the underlying
-        // adapter error. (The `None` branch above is the normal Wayland path
-        // and never reaches here.)
+        // adapter error. (A `None` target is the normal Wayland path and never
+        // reaches here; on macOS / Windows it means the capture failed.)
         let cmd_err: CommandError = err.into();
         let message = format!(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
@@ -465,7 +519,15 @@ async fn run_palette_paste(
     // the wait — the user clicking another window, an app raising a dialog —
     // so the synthesis call confirms the restored target is still in front
     // right before posting the keys and falls back to copy-only otherwise.
-    if let Err(err) = lease.paste_frontmost_into(publish, restore_target).await {
+    // Reopening the palette is checked here as well: the platform check
+    // cannot catch it on Linux, where there is no target to compare against
+    // and the keys would land in the palette's own search box.
+    let synthesis = if state.palette_shown_since(session) {
+        Err(palette_reopened_error())
+    } else {
+        lease.paste_frontmost_into(publish, restore_target).await
+    };
+    if let Err(err) = synthesis {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
@@ -492,8 +554,16 @@ pub async fn copy_entry_from_palette(
     entry_id: String,
 ) -> CommandResult<()> {
     let entry_id = parse_entry_id(&entry_id)?;
+    // Same session rule as the paste path: a copy requested from a palette
+    // that has since been dismissed is dropped, and one whose palette was
+    // dismissed (or reopened) during the copy must not hide what is on screen.
+    let Some(session) = state.palette_ticket() else {
+        return Err(CommandError::cancelled());
+    };
     state.runtime.copy_entry(entry_id).await?;
-    state.clear_previous_frontmost();
+    if state.finish_palette_session(session).is_err() {
+        return Err(CommandError::cancelled());
+    }
     hide_main_palette(&app)?;
     Ok(())
 }

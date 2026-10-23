@@ -51,7 +51,7 @@ pub(crate) fn build_test_state() -> AppState {
         preview: Arc::new(UnsupportedPreviewController),
         capture_reader: clipboard,
         background_tasks: Mutex::new(None),
-        previous_frontmost: Arc::new(Mutex::new(None)),
+        palette_session: Mutex::new(super::window_focus::PaletteSession::default()),
         last_pasted_id: Mutex::new(None),
         last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
         palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),
