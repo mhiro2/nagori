@@ -1,6 +1,7 @@
 //! The manual "Check for updates" probe and the user-confirmed in-place
 //! install surfaced in Settings → Advanced.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter};
@@ -83,7 +84,10 @@ enum UpdateProgressDto {
 /// installer and calls `std::process::exit` itself, so the cleanup is
 /// wired through `on_before_exit` there. The install runs on a blocking
 /// thread so that hook can `block_on` the cleanup without nesting inside
-/// the async runtime.
+/// the async runtime. Every restart is announced through the restart
+/// handoff marker first: Tauri spawns the new instance before this one
+/// exits, and the marker makes it wait for the single-instance lock this
+/// process holds until exit.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()> {
     if !in_place_update_supported() {
@@ -104,17 +108,30 @@ pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()
         UPDATE_INSTALL_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
     result?;
-    app.request_restart();
+    restart(&app);
     Ok(())
+}
+
+fn restart(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state.announce_restart();
+    }
+    app.request_restart();
 }
 
 async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<()> {
     use tauri_plugin_updater::UpdaterExt;
 
     let cleanup_handle = app.clone();
+    let cleanup_ran = Arc::new(AtomicBool::new(false));
+    let cleanup_flag = Arc::clone(&cleanup_ran);
     let updater = app
         .updater_builder()
-        .on_before_exit(move || crate::perform_exit_cleanup(&cleanup_handle))
+        .on_before_exit(move || {
+            cleanup_flag.store(true, Ordering::SeqCst);
+            crate::perform_exit_cleanup(&cleanup_handle);
+        })
         .build()
         .map_err(|err| CommandError::internal(format!("updater unavailable: {err}")))?;
     let update = updater
@@ -146,10 +163,19 @@ async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<(
         UPDATE_PROGRESS_EVENT,
         UpdateProgressDto::Installing,
     );
-    tauri::async_runtime::spawn_blocking(move || update.install(bytes))
+    let installed = tauri::async_runtime::spawn_blocking(move || update.install(bytes))
         .await
         .map_err(|err| CommandError::internal(format!("the install task did not complete: {err}")))?
-        .map_err(|err| CommandError::internal(format!("update install failed: {err}")))
+        .map_err(|err| CommandError::internal(format!("update install failed: {err}")));
+    if installed.is_err() && cleanup_ran.load(Ordering::SeqCst) {
+        // Windows runs the quit cleanup before launching the installer, so a
+        // launch failure leaves this process with its workers and IPC host
+        // already stopped. Restart into the current version rather than
+        // carrying on as a husk that no longer captures anything.
+        tracing::error!("update_installer_launch_failed_restarting");
+        restart(app);
+    }
+    installed
 }
 
 /// Throttles the per-chunk download callback down to an event per whole

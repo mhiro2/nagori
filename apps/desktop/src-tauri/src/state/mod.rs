@@ -10,6 +10,7 @@ use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
 mod clear_on_quit;
+mod restart_handoff;
 mod search_cancel;
 mod startup;
 #[cfg(test)]
@@ -107,6 +108,10 @@ pub struct AppState {
     /// finds it pending — left by this app, the daemon, or the CLI — finishes
     /// the purge fail-closed before any window can serve history.
     clear_on_quit_marker: Option<nagori_daemon::ClearOnQuitMarker>,
+    /// Restart marker beside this launch's instance lock, written just before
+    /// an in-app update restarts the app so the new instance waits for the
+    /// lock instead of refusing to start. `None` for `build`-only callers.
+    restart_handoff: Option<restart_handoff::RestartHandoff>,
     /// Receiver side of the startup settings-load gate. Cloned by each gated
     /// worker (capture, CLI IPC host, settings subscriber) so they await the
     /// single coordinator load instead of each re-reading the store.
@@ -300,12 +305,14 @@ impl AppState {
         // CLI derive the same way, so launching the app while a standalone
         // daemon owns the same store — even through another alias of it — is
         // refused too.
-        let instance_lock = acquire_instance_lock(&nagori_storage::store_lock_dir(db_path))?;
+        let lock_dir = nagori_storage::store_lock_dir(db_path);
+        let instance_lock = acquire_instance_lock(&lock_dir)?;
         let store = SqliteStore::open(db_path)
             .map_err(|err| annotate_startup_error(err, db_path, StartupStage::OpenDb))?;
         let mut state = Self::build(store, db_path)?;
         state.instance_lock = Some(instance_lock);
         state.clear_on_quit_marker = Some(nagori_daemon::ClearOnQuitMarker::for_db(db_path));
+        state.restart_handoff = Some(restart_handoff::RestartHandoff::for_lock_dir(&lock_dir));
         // Fail-closed: complete any clear-on-quit purge the previous session
         // could not finish before the state is handed to Tauri. A failure here
         // surfaces the startup fallback window (and leaves the marker) rather
@@ -342,6 +349,7 @@ impl AppState {
             // (tests, in-memory stores) own no on-disk directory to lock.
             instance_lock: None,
             clear_on_quit_marker: None,
+            restart_handoff: None,
             settings_load_rx,
             settings_load_tx: Mutex::new(Some(settings_load_tx)),
         })
@@ -437,7 +445,7 @@ fn resolve_default_db_path(
 /// in the fallback window (the only UI a duplicate launch reaches), so it must
 /// tell the user where the running instance is rather than failing silently.
 fn acquire_instance_lock(lock_dir: &Path) -> Result<nagori_storage::ProcessLock> {
-    match nagori_storage::ProcessLock::try_acquire(lock_dir)? {
+    match restart_handoff::acquire_lock(lock_dir)? {
         Some(lock) => Ok(lock),
         None => Err(AppError::Platform(format!(
             "another nagori process is already using the clipboard history in {}. \
