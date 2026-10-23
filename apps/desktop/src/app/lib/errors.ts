@@ -10,6 +10,12 @@ const hasStringField = <K extends string>(value: object, key: K): value is Recor
 export const isSettingsConflict = (err: unknown): boolean =>
   err !== null && typeof err === 'object' && 'code' in err && err.code === 'settings_conflict';
 
+// True for the backend `cancelled` CommandError — a command the caller already
+// moved on from. Palette actions get it when the palette was dismissed before
+// the action could act, so there is nothing to report.
+export const isCancelledError = (err: unknown): boolean =>
+  err !== null && typeof err === 'object' && 'code' in err && err.code === 'cancelled';
+
 export const describeError = (err: unknown): string => {
   const t = messages().errors;
   if (err && typeof err === 'object' && 'code' in err) {
