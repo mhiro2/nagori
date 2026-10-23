@@ -26,7 +26,11 @@
   } from '../stores/capabilities.svelte';
   import { clearCaptureSkip } from '../stores/captureSkipped.svelte';
   import { entryContextMenuState, openEntryContextMenu } from '../stores/entryContextMenu.svelte';
-  import { setFiltersRetained, takeReopenMode } from '../stores/paletteSession.svelte';
+  import {
+    endPaletteSession,
+    setFiltersRetained,
+    takeReopenMode,
+  } from '../stores/paletteSession.svelte';
   import { pasteFormatPickerState } from '../stores/pasteFormatPicker.svelte';
   import {
     confirmSelection,
@@ -616,7 +620,9 @@
           // listener (matched actions call `preventDefault`), so we must
           // drop the debounced search here too — otherwise a keystroke
           // typed milliseconds before Escape lands a `runQuery` against
-          // the now-hidden window.
+          // the now-hidden window. For the same reason it ends the session
+          // here, so an action still waiting on its search gives up.
+          endPaletteSession();
           cancelPendingQuery();
           void closePalette();
         }
