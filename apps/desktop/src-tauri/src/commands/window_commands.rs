@@ -9,14 +9,14 @@ use crate::state::AppState;
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn open_palette(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    state.remember_previous_frontmost();
+    state.begin_palette_session();
     show_main_palette(&app)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub fn close_palette(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    state.clear_previous_frontmost();
+    state.end_palette_session();
     hide_main_palette(&app)
 }
 
@@ -30,12 +30,12 @@ pub fn toggle_palette(state: State<'_, AppState>, window: WebviewWindow) -> Comm
         return Ok(());
     };
     if target.is_visible().unwrap_or(false) {
-        state.clear_previous_frontmost();
+        state.end_palette_session();
         hide_main_palette(app)
     } else {
         // Capture frontmost before we steal focus — see
-        // `AppState::remember_previous_frontmost`.
-        state.remember_previous_frontmost();
+        // `AppState::begin_palette_session`.
+        state.begin_palette_session();
         show_main_palette(app)
     }
 }
@@ -44,9 +44,11 @@ pub fn toggle_palette(state: State<'_, AppState>, window: WebviewWindow) -> Comm
 #[tauri::command]
 pub fn hide_palette(window: WebviewWindow, state: State<'_, AppState>) -> CommandResult<()> {
     // Mirror `close_palette` / `toggle_palette`: dropping the palette also
-    // discards the captured frontmost snapshot so a later open re-captures
-    // from scratch rather than restoring stale focus.
-    state.clear_previous_frontmost();
+    // ends its session, discarding the captured frontmost snapshot so a later
+    // open re-captures from scratch rather than restoring stale focus, and
+    // stopping a paste still in flight from this showing. End it before the
+    // hide so nothing observes a hidden palette with a live session.
+    state.end_palette_session();
     let app = window.app_handle();
     hide_main_palette(app)
 }
@@ -272,6 +274,10 @@ pub(crate) fn show_settings_window(app: &AppHandle) -> CommandResult<()> {
         .and_then(|()| target.set_focus())
         .map_err(|err| CommandError::internal(err.to_string()))?;
     if let Some(palette) = app.get_webview_window("main") {
+        // Hiding the palette here ends its showing like any other dismissal.
+        if let Some(state) = app.try_state::<AppState>() {
+            state.end_palette_session();
+        }
         let _ = palette.hide();
     }
     Ok(())

@@ -366,15 +366,15 @@ fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
         } if label == "main" => {
             // Prevent destruction so the webview handle stays alive for
             // the next palette toggle. Hiding mirrors what
-            // `hide_main_palette` does, and clearing the captured
-            // frontmost matches the `close_palette` / `hide_palette`
-            // command paths so a later open re-snapshots cleanly.
+            // `hide_main_palette` does, and ending the palette session
+            // matches the `close_palette` / `hide_palette` command paths so
+            // a later open re-snapshots cleanly.
             api.prevent_close();
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.end_palette_session();
+            }
             if let Some(window) = handle.get_webview_window("main") {
                 let _ = window.hide();
-            }
-            if let Some(state) = handle.try_state::<AppState>() {
-                state.clear_previous_frontmost();
             }
         }
         tauri::RunEvent::WindowEvent {
@@ -871,7 +871,7 @@ pub(crate) fn toggle_main_palette(app: &tauri::AppHandle) {
     };
     if window.is_visible().unwrap_or(false) {
         if let Some(state) = app.try_state::<AppState>() {
-            state.clear_previous_frontmost();
+            state.end_palette_session();
         }
         let _ = window.hide();
     } else {
@@ -889,9 +889,9 @@ pub(crate) fn show_main_palette(app: &tauri::AppHandle) {
     };
     // Snapshot whichever app is frontmost *before* we steal focus —
     // the paste flow needs it to re-focus the user's source app. See
-    // `AppState::remember_previous_frontmost`.
+    // `AppState::begin_palette_session`.
     if let Some(state) = app.try_state::<AppState>() {
-        state.remember_previous_frontmost();
+        state.begin_palette_session();
     }
     // Re-home the palette onto the monitor under the cursor before it
     // becomes visible — `tauri.conf.json`'s `center: true` only pins it to
