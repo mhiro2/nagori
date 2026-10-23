@@ -16,6 +16,20 @@ impl AppState {
         self.clear_on_quit_marker.as_ref()
     }
 
+    /// Tell the next launch that this process is restarting, so it waits for
+    /// the instance lock this process still holds. Best-effort: without the
+    /// marker the restarted instance shows the "already running" fallback,
+    /// which the user can dismiss and relaunch from.
+    pub(crate) fn announce_restart(&self) {
+        if let Some(Err(err)) = self
+            .restart_handoff
+            .as_ref()
+            .map(super::restart_handoff::RestartHandoff::announce)
+        {
+            tracing::warn!(error = %err, "restart_handoff_marker_write_failed");
+        }
+    }
+
     /// Finish a clear-on-quit purge a previous owner of this DB — this app,
     /// the standalone daemon, or the CLI — could not complete. Runs during
     /// `try_new_at`, before the state is handed to Tauri and before any window

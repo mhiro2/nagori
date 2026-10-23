@@ -2919,7 +2919,17 @@ change.
   `RunEvent::ExitRequested` cleanup (worker drain, IPC socket removal,
   `clear_on_quit`) runs first. The Windows NSIS path exits the process
   itself after launching the installer, so the same cleanup is wired
-  through the updater's `on_before_exit` hook there. The macOS bundle
+  through the updater's `on_before_exit` hook there; if the installer
+  then fails to launch, the command restarts into the current version
+  instead of leaving a process whose workers are already stopped. Tauri
+  spawns the restarted instance before the old one exits, and the old
+  one holds the single-instance lock until the kernel releases it, so
+  every restart first writes a `nagori.restart-pending` marker beside the
+  lock (`state::restart_handoff`). A launch that finds the lock held and
+  a marker younger than a minute waits up to 10 s for it instead of
+  showing the "already running" fallback; the marker is consumed either
+  way, and a held lock without one is refused at once as before. The
+  macOS bundle
   is ad-hoc signed, so its designated requirement is the binary's
   cdhash: every update looks like a new app to TCC and the
   Accessibility grant may have to be given again, which the button's
