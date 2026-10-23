@@ -138,11 +138,21 @@ impl AppState {
         self.with_palette_session(|session| session.finish(ticket))
     }
 
-    /// Whether the palette was shown again after the ticket's showing. A paste
-    /// that already hid the palette checks this before posting its keystroke:
-    /// a reopened palette holds focus, so the keys would land in it.
-    pub fn palette_shown_since(&self, ticket: PaletteTicket) -> bool {
-        self.with_palette_session(|session| session.shown_since(ticket))
+    /// A check for whether the palette was shown again after the ticket's
+    /// showing, detached from `self` so it can run as the paste's last step
+    /// before the keystroke: a reopened palette holds focus, so the keys would
+    /// land in it.
+    pub fn palette_reopen_probe(
+        &self,
+        ticket: PaletteTicket,
+    ) -> impl FnOnce() -> bool + Send + 'static {
+        let session = std::sync::Arc::clone(&self.palette_session);
+        move || {
+            session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shown_since(ticket)
+        }
     }
 }
 

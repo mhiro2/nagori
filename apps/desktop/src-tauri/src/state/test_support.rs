@@ -54,7 +54,8 @@ where
     use nagori_platform::UnsupportedPreviewController;
 
     let mut builder = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
-        .clipboard(clipboard.clone());
+        .clipboard(clipboard.clone())
+        .clipboard_reader(clipboard.clone());
     if let Some(paste) = paste {
         builder = builder.paste(paste);
     }
@@ -67,7 +68,7 @@ where
         preview: Arc::new(UnsupportedPreviewController),
         capture_reader: clipboard,
         background_tasks: Mutex::new(None),
-        palette_session: Mutex::new(super::window_focus::PaletteSession::default()),
+        palette_session: Arc::new(Mutex::new(super::window_focus::PaletteSession::default())),
         last_pasted_id: Mutex::new(None),
         last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
         palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),

@@ -20,7 +20,7 @@ pub use search_cancel::InflightSearch;
 use startup::{BackgroundTasks, SettingsLoadGate};
 pub(crate) use startup::{runtime_shutdown_requires_app_exit, settings_loaded_or_shutdown};
 use window_focus::PaletteSession;
-pub use window_focus::RESTORE_TARGET_EXPECTED;
+pub use window_focus::{PaletteTicket, RESTORE_TARGET_EXPECTED};
 
 /// How long a "last pasted" entry id stays valid before it falls back to
 /// the recency head. Picked at 30 min so a short break between pastes
@@ -62,7 +62,7 @@ pub struct AppState {
     /// hides. On Windows the snapshot carries the foreground HWND
     /// in `native_handle`, so `activate_restore_target` can re-foreground
     /// the original window via `SetForegroundWindow`.
-    palette_session: Mutex<PaletteSession>,
+    palette_session: Arc<Mutex<PaletteSession>>,
     /// Most recently pasted entry id, paired with the `Instant` it was
     /// recorded. Powers the "repaste last" secondary hotkey so it
     /// targets the entry the user actually pasted instead of whatever
@@ -336,7 +336,7 @@ impl AppState {
             preview: parts.preview,
             capture_reader: parts.clipboard_reader,
             background_tasks: Mutex::new(None),
-            palette_session: Mutex::new(PaletteSession::default()),
+            palette_session: Arc::new(Mutex::new(PaletteSession::default())),
             last_pasted_id: Mutex::new(None),
             last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
             palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),

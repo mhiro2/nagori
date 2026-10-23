@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::dto::{PasteFormatDto, PasteOptionDto};
 use crate::error::{CommandError, CommandResult};
-use crate::state::{AppState, RESTORE_TARGET_EXPECTED};
+use crate::state::{AppState, PaletteTicket, RESTORE_TARGET_EXPECTED};
 
 use super::parse_entry_id;
 use super::window_commands::hide_main_palette;
@@ -141,12 +141,14 @@ pub async fn paste_entry(
         // target is re-checked inside the synthesis call, right before the
         // key events are posted, after making sure the palette was not shown
         // again in the meantime.
-        let synthesis = if state.palette_shown_since(session) {
-            Err(palette_reopened_error())
-        } else {
-            lease.paste_frontmost_into(publish, restore_target).await
-        };
-        if let Err(err) = synthesis {
+        if let Err(err) = lease
+            .paste_frontmost_into_checked(
+                publish,
+                restore_target,
+                unless_palette_reopened(&state, session),
+            )
+            .await
+        {
             tracing::warn!(error = %err, "paste_entry_synth_failed");
             let reason = paste_failure_reason(&err);
             let cmd_err: CommandError = err.into();
@@ -295,13 +297,21 @@ impl PaletteWindow for AppHandle {
 /// expected on Linux Wayland, where the compositor hands focus back by itself
 /// once the palette hides; on macOS / Windows it means the capture at open
 /// failed, so it is reported like any other failed restore — a synthesised
-/// paste would otherwise go to whichever window happens to be in front.
+/// paste would otherwise go to whichever window happens to be in front. The
+/// same goes for a target missing the identity the platform re-focuses and
+/// re-checks it by (the bundle id on macOS, the window handle on Windows):
+/// the restore would do nothing and the pre-keystroke check would be skipped.
 async fn restore_focus(
     state: &AppState,
     target: Option<&RestoreTarget>,
 ) -> nagori_core::Result<()> {
     match target {
-        Some(target) => state.window.activate_restore_target(target).await,
+        Some(target) if identifies_paste_target(target) => {
+            state.window.activate_restore_target(target).await
+        }
+        Some(_) => Err(AppError::Platform(
+            "the recorded paste target cannot be identified".to_owned(),
+        )),
         None if RESTORE_TARGET_EXPECTED => Err(AppError::Platform(
             "no paste target was recorded when the palette opened".to_owned(),
         )),
@@ -309,13 +319,36 @@ async fn restore_focus(
     }
 }
 
-/// The failure reported when the palette is shown again between hiding for a
-/// paste and posting its keystroke: the reopened palette holds focus, so the
-/// paste is skipped like any other loss of the target.
-fn palette_reopened_error() -> AppError {
-    AppError::Paste {
-        reason: PasteFailureReason::PreviousAppLost,
-        message: "the palette was opened again before the paste; nothing was pasted".to_owned(),
+/// Whether `target` carries what this platform needs to re-focus it and to
+/// confirm it is still in front right before the keystroke.
+const fn identifies_paste_target(target: &RestoreTarget) -> bool {
+    if cfg!(target_os = "macos") {
+        target.source.bundle_id.is_some()
+    } else if cfg!(target_os = "windows") {
+        target.native_handle.is_some()
+    } else {
+        true
+    }
+}
+
+/// The precheck a palette paste hands to the clipboard lease: refuse when the
+/// palette was shown again between hiding for this paste and posting its
+/// keystroke. The reopened palette holds focus, so the paste is skipped like
+/// any other loss of the target.
+fn unless_palette_reopened(
+    state: &AppState,
+    session: PaletteTicket,
+) -> impl FnOnce() -> nagori_core::Result<()> + Send + 'static {
+    let reopened = state.palette_reopen_probe(session);
+    move || {
+        if reopened() {
+            return Err(AppError::Paste {
+                reason: PasteFailureReason::PreviousAppLost,
+                message: "the palette was opened again before the paste; nothing was pasted"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -538,15 +571,18 @@ async fn run_palette_paste(
     // the wait — the user clicking another window, an app raising a dialog —
     // so the synthesis call confirms the restored target is still in front
     // right before posting the keys and falls back to copy-only otherwise.
-    // Reopening the palette is checked here as well: the platform check
-    // cannot catch it on Linux, where there is no target to compare against
-    // and the keys would land in the palette's own search box.
-    let synthesis = if state.palette_shown_since(session) {
-        Err(palette_reopened_error())
-    } else {
-        lease.paste_frontmost_into(publish, restore_target).await
-    };
-    if let Err(err) = synthesis {
+    // Reopening the palette is checked as well, as the last step before the
+    // keystroke: the platform check cannot catch it on Linux, where there is
+    // no target to compare against and the keys would land in the palette's
+    // own search box.
+    if let Err(err) = lease
+        .paste_frontmost_into_checked(
+            publish,
+            restore_target,
+            unless_palette_reopened(state, session),
+        )
+        .await
+    {
         tracing::warn!(error = %err, "palette_auto_paste_failed");
         // Preserve the original `code`/`recoverable` so the frontend's
         // i18n routing and retry policy still see the underlying cause,
@@ -576,15 +612,37 @@ pub async fn copy_entry_from_palette(
     // Same session rule as the paste path: a copy requested from a palette
     // that has since been dismissed is dropped, and one whose palette was
     // dismissed (or reopened) during the copy must not hide what is on screen.
+    copy_from_palette(&app, &state, entry_id).await
+}
+
+/// The palette copy flow behind [`copy_entry_from_palette`], over the
+/// [`PaletteWindow`] seam so tests can drive it without a Tauri app.
+async fn copy_from_palette(
+    app: &impl PaletteWindow,
+    state: &AppState,
+    entry_id: EntryId,
+) -> CommandResult<()> {
     let Some(session) = state.palette_ticket() else {
         return Err(CommandError::cancelled());
     };
-    state.runtime.copy_entry(entry_id).await?;
+    // Take the lease here rather than through `runtime.copy_entry`, so the
+    // showing can be re-checked after waiting for it (another paste may hold
+    // it): a copy whose palette was dismissed meanwhile must not overwrite
+    // whatever the user copied since.
+    let mut lease = state.runtime.clipboard_lease().await;
+    if !state.palette_session_is_current(session) {
+        return Err(CommandError::cancelled());
+    }
+    // Copy-only: no paste follows, so the publish token is not needed.
+    lease
+        .copy_entry_with_format(entry_id, PasteFormat::Preserve)
+        .await
+        .map(drop)?;
+    drop(lease);
     if state.finish_palette_session(session).is_err() {
         return Err(CommandError::cancelled());
     }
-    hide_main_palette(&app)?;
-    Ok(())
+    app.hide_palette()
 }
 
 /// Concatenate the text of the selected entries with newline separators, store
@@ -655,6 +713,7 @@ mod palette_session_tests {
     use nagori_core::{ClipboardEntry, ClipboardSequence, ClipboardSnapshot, SourceApp};
     use nagori_platform::{
         ClipboardReader, ClipboardWriter, MemoryClipboard, PasteController, PasteResult,
+        SelfWriteTracking,
     };
     use tokio::sync::Notify;
 
@@ -724,19 +783,30 @@ mod palette_session_tests {
     }
 
     /// A memory clipboard whose writes can be held until the test lets them
-    /// through, standing in for a slow copy.
+    /// through, standing in for a slow copy. With `hold_probe` it instead
+    /// reports tracked self-writes and holds the pre-keystroke sequence probe.
     #[derive(Default)]
     struct HeldClipboard {
         inner: MemoryClipboard,
         hold: bool,
         entered: Notify,
         release: Notify,
+        hold_probe: bool,
+        probe_entered: Notify,
+        probe_release: Notify,
     }
 
     impl HeldClipboard {
         fn held() -> Self {
             Self {
                 hold: true,
+                ..Self::default()
+            }
+        }
+
+        fn held_probe() -> Self {
+            Self {
+                hold_probe: true,
                 ..Self::default()
             }
         }
@@ -756,7 +826,23 @@ mod palette_session_tests {
         }
 
         async fn current_sequence(&self) -> nagori_core::Result<ClipboardSequence> {
+            if self.hold_probe {
+                self.probe_entered.notify_one();
+                self.probe_release.notified().await;
+            }
             self.inner.current_sequence().await
+        }
+
+        fn matches_self_write(&self, _sequence: &ClipboardSequence) -> bool {
+            self.hold_probe
+        }
+
+        fn self_write_tracking(&self) -> SelfWriteTracking {
+            if self.hold_probe {
+                SelfWriteTracking::Stable
+            } else {
+                SelfWriteTracking::Untracked
+            }
         }
     }
 
@@ -812,8 +898,9 @@ mod palette_session_tests {
                 name: None,
                 executable_path: None,
             },
-            native_handle: None,
-            snapshot_pid: None,
+            // Windows identifies the target by its window handle.
+            native_handle: Some(1),
+            snapshot_pid: Some(1),
         }
     }
 
@@ -984,5 +1071,106 @@ mod palette_session_tests {
             result.expect("paste");
             assert_eq!(h.paste.targets(), [None]);
         }
+    }
+
+    #[tokio::test]
+    async fn skips_the_keystroke_when_the_palette_reopens_during_the_clipboard_probe() {
+        // The reopen check runs after the last await before the keystroke —
+        // here the check that the clipboard still holds this copy.
+        let h = harness(HeldClipboard::held_probe(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        tokio::select! {
+            _ = &mut paste => panic!("the paste finished before its probe was released"),
+            () = h.clipboard.probe_entered.notified() => {}
+        }
+
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        h.clipboard.probe_release.notify_one();
+
+        let err = paste.await.expect_err("the keystroke should be skipped");
+        assert_eq!(err.code, "paste_error");
+        assert_eq!(h.window.failures(), ["previousAppLost"]);
+        assert!(h.paste.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_target_without_its_identity_pastes_only_where_none_is_expected() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        // Captured, but without the bundle id (macOS) or window handle
+        // (Windows) the restore and the pre-keystroke check go by.
+        h.state.begin_palette_session_with(Some(RestoreTarget {
+            source: SourceApp {
+                bundle_id: None,
+                name: Some("Untitled".to_owned()),
+                executable_path: None,
+            },
+            native_handle: None,
+            snapshot_pid: None,
+        }));
+
+        let result = run_palette_paste(&h.window, &h.state, text("hello")).await;
+
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("hello"));
+        if RESTORE_TARGET_EXPECTED {
+            assert_eq!(
+                result.expect_err("no unchecked paste").code,
+                "platform_error"
+            );
+            assert_eq!(h.window.failures(), ["previousAppLost"]);
+            assert!(h.paste.targets().is_empty());
+        } else {
+            result.expect("paste");
+            assert_eq!(h.paste.targets().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn copies_and_hides_for_the_open_showing() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        let id = h
+            .state
+            .runtime
+            .add_text("kept".to_owned())
+            .await
+            .expect("add entry");
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+
+        copy_from_palette(&h.window, &h.state, id)
+            .await
+            .expect("copy");
+
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("kept"));
+        assert_eq!(h.window.hidden(), 1);
+        assert_eq!(h.state.palette_ticket(), None);
+    }
+
+    #[tokio::test]
+    async fn drops_a_copy_whose_palette_closes_while_it_waits_for_the_lease() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        let id = h
+            .state
+            .runtime
+            .add_text("stale".to_owned())
+            .await
+            .expect("add entry");
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let lease = h.state.runtime.clipboard_lease().await;
+        let copy = copy_from_palette(&h.window, &h.state, id);
+        tokio::pin!(copy);
+        run_until_parked(&mut copy).await;
+
+        h.state.end_palette_session();
+        drop(lease);
+
+        assert_cancelled(copy.await);
+        // Whatever the user copied after closing the palette stays put.
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        assert_eq!(h.window.hidden(), 0);
     }
 }
