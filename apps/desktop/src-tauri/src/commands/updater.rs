@@ -43,6 +43,44 @@ pub async fn check_for_updates(app: AppHandle) -> CommandResult<Option<UpdateInf
     }
 }
 
+/// GitHub release page the "View release" link in Settings → Advanced
+/// points at. The tag prefix matches `release.yaml`'s `v*` trigger.
+const RELEASE_PAGE_URL_PREFIX: &str = "https://github.com/mhiro2/nagori/releases/tag/v";
+
+/// Open the GitHub release page for `version` in the default browser.
+///
+/// The settings webview cannot open it with a plain `<a target="_blank">`:
+/// the Tauri webview drops new-window requests unless a handler is
+/// registered, so the click was a silent no-op. Routing through a command
+/// reuses the same platform opener as `open_url_external`. The renderer
+/// only sends the version string — the URL is assembled here so a
+/// compromised settings webview cannot point the opener at an arbitrary
+/// target.
+#[tauri::command]
+pub async fn open_release_page(version: String) -> CommandResult<()> {
+    let url = release_page_url(&version)?;
+    crate::commands::settings_commands::open_external_url(url).await
+}
+
+/// Build the release page URL for `version`, rejecting anything that does
+/// not look like a semver version (digits first, then only the
+/// characters semver allows in pre-release / build metadata) so the
+/// value cannot add path segments, a query, or a fragment.
+fn release_page_url(version: &str) -> Result<String, CommandError> {
+    let version = version.trim();
+    let valid = version.len() <= 64
+        && version.starts_with(|c: char| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+    if !valid {
+        return Err(CommandError::invalid_input(format!(
+            "invalid release version `{version}`"
+        )));
+    }
+    Ok(format!("{RELEASE_PAGE_URL_PREFIX}{version}"))
+}
+
 /// Whether the bundle running on the current host can be replaced in
 /// place by `update.download_and_install()`.
 ///
@@ -71,4 +109,40 @@ pub struct UpdateInfoDto {
     pub current_version: String,
     pub release_notes: Option<String>,
     pub download_supported: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_page_url_accepts_semver_versions() {
+        assert_eq!(
+            release_page_url("0.2.0").unwrap(),
+            "https://github.com/mhiro2/nagori/releases/tag/v0.2.0"
+        );
+        assert_eq!(
+            release_page_url(" 1.0.0-rc.1+build.5 ").unwrap(),
+            "https://github.com/mhiro2/nagori/releases/tag/v1.0.0-rc.1+build.5"
+        );
+    }
+
+    #[test]
+    fn release_page_url_rejects_non_version_input() {
+        for version in [
+            "",
+            "v0.2.0",
+            "0.2.0/../../evil",
+            "0.2.0?x=1",
+            "0.2.0#frag",
+            "0.2.0 extra",
+            "https://example.com",
+        ] {
+            assert!(
+                release_page_url(version).is_err(),
+                "`{version}` should be rejected"
+            );
+        }
+        assert!(release_page_url(&"1".repeat(65)).is_err());
+    }
 }

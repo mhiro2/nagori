@@ -89,6 +89,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   openUrlExternal: vi.fn(),
   previewEntry: vi.fn(),
   checkForUpdates: vi.fn(),
+  openReleasePage: vi.fn(async () => undefined),
   cliInstallStatus: vi.fn(),
   installCli: vi.fn(),
   lastHotkeyFailure: vi.fn(),

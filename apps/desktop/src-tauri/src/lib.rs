@@ -298,6 +298,7 @@ pub fn run() {
             commands::window_commands::open_settings,
             commands::window_commands::close_settings,
             commands::updater::check_for_updates,
+            commands::updater::open_release_page,
             commands::installer::cli_install_status,
             commands::installer::install_cli,
         ])
