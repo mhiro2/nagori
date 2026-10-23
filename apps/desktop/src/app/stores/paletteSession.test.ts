@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  endPaletteSession,
+  isPaletteSessionCurrent,
   noteActionEndedAfterHide,
+  paletteSessionToken,
   resetPaletteSessionForTest,
   runSessionEndingAction,
   takeReopenMode,
@@ -43,5 +46,17 @@ describe('palette session', () => {
   it('ignores a paste failure that no palette action is waiting on', () => {
     noteActionEndedAfterHide();
     expect(takeReopenMode()).toBe('resume');
+  });
+
+  it('invalidates a session token once the palette is dismissed', () => {
+    const first = paletteSessionToken();
+    expect(isPaletteSessionCurrent(first)).toBe(true);
+    endPaletteSession();
+    expect(isPaletteSessionCurrent(first)).toBe(false);
+    // The next showing hands out a token of its own, which stays current
+    // until that showing is dismissed too.
+    const second = paletteSessionToken();
+    expect(second).not.toBe(first);
+    expect(isPaletteSessionCurrent(second)).toBe(true);
   });
 });
