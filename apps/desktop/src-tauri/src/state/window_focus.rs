@@ -103,6 +103,13 @@ impl AppState {
         self.with_palette_session(|session| session.begin(snapshot));
     }
 
+    /// [`Self::begin_palette_session`] with a given restore target instead of
+    /// probing the host's frontmost app.
+    #[cfg(test)]
+    pub(crate) fn begin_palette_session_with(&self, target: Option<RestoreTarget>) {
+        self.with_palette_session(|session| session.begin(target));
+    }
+
     /// The palette is being hidden without an action: discard its restore
     /// target and stop any action still in flight for this showing.
     pub fn end_palette_session(&self) {
