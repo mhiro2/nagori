@@ -1069,3 +1069,57 @@ async fn paste_without_a_target_asks_for_no_focus_check() {
 
     assert_eq!(paste.targets(), vec![None]);
 }
+
+#[tokio::test]
+async fn a_failing_precheck_stops_the_paste_after_the_clipboard_probe() {
+    // The front-end's own check runs as the last step before the adapter call,
+    // so a change it watches for that lands while the clipboard probe is
+    // still awaiting is caught, and no keystroke goes out.
+    let (runtime, clipboard, paste) = runtime_with_fake_native();
+    clipboard.gate_sequence_probe();
+    enable_auto_paste(&runtime).await;
+    let reopened = Arc::new(AtomicBool::new(false));
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .publish_text("for the editor".to_owned())
+        .await
+        .expect("publish text");
+
+    let precheck = {
+        let reopened = Arc::clone(&reopened);
+        move || {
+            if reopened.load(Ordering::SeqCst) {
+                Err(AppError::Paste {
+                    reason: PasteFailureReason::PreviousAppLost,
+                    message: "the palette was shown again".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    };
+    let pasting = lease.paste_frontmost_into_checked(
+        publish,
+        Some(restore_target("com.example.editor")),
+        precheck,
+    );
+    tokio::pin!(pasting);
+    tokio::select! {
+        _ = &mut pasting => panic!("the paste finished before its probe was released"),
+        () = clipboard.probe_entered.notified() => {}
+    }
+    reopened.store(true, Ordering::SeqCst);
+    clipboard.probe_release.notify_one();
+
+    let err = pasting
+        .await
+        .expect_err("the precheck should stop the paste");
+    assert!(matches!(
+        err,
+        AppError::Paste {
+            reason: PasteFailureReason::PreviousAppLost,
+            ..
+        }
+    ));
+    assert_eq!(paste.calls(), 0, "no keystroke may be synthesised");
+}
