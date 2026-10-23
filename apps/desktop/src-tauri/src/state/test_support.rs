@@ -37,12 +37,28 @@ impl WindowBehavior for StubWindowBehavior {
 /// the host's real clipboard, which needs a live session (a Wayland
 /// compositor on Linux) that headless CI runners don't provide.
 pub(crate) fn build_test_state() -> AppState {
-    use nagori_platform::{MemoryClipboard, UnsupportedPreviewController};
+    let clipboard = Arc::new(nagori_platform::MemoryClipboard::new());
+    build_test_state_with(clipboard, None)
+}
 
-    let clipboard = Arc::new(MemoryClipboard::new());
-    let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
-        .clipboard(clipboard.clone())
-        .build_for_test();
+/// [`build_test_state`] over a caller-supplied clipboard and, when given,
+/// paste controller, so a test can hold a copy mid-write or record what the
+/// paste step was asked to type into.
+pub(crate) fn build_test_state_with<C>(
+    clipboard: Arc<C>,
+    paste: Option<Arc<dyn nagori_platform::PasteController>>,
+) -> AppState
+where
+    C: nagori_platform::ClipboardReader + nagori_platform::ClipboardWriter,
+{
+    use nagori_platform::UnsupportedPreviewController;
+
+    let mut builder = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+        .clipboard(clipboard.clone());
+    if let Some(paste) = paste {
+        builder = builder.paste(paste);
+    }
+    let runtime = builder.build_for_test();
     let (settings_load_tx, settings_load_rx) =
         tokio::sync::watch::channel(SettingsLoadGate::Pending);
     AppState {

@@ -13,7 +13,7 @@ mod clear_on_quit;
 mod search_cancel;
 mod startup;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod window_focus;
 
 pub use search_cancel::InflightSearch;

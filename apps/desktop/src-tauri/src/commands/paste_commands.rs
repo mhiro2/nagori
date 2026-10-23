@@ -272,6 +272,25 @@ pub(crate) fn paste_failure_reason(err: &AppError) -> PasteFailureReason {
     }
 }
 
+/// The palette window's part in a palette paste: hiding it once the copy has
+/// landed, and the `nagori://paste_failed` notice for failures that happen
+/// after the hide. The running app implements it on [`AppHandle`]; tests drive
+/// [`run_palette_paste`] with a recorder instead of a Tauri app.
+trait PaletteWindow: Sync {
+    fn hide_palette(&self) -> CommandResult<()>;
+    fn paste_failed(&self, message: &str, reason: &PasteFailureReason);
+}
+
+impl PaletteWindow for AppHandle {
+    fn hide_palette(&self) -> CommandResult<()> {
+        hide_main_palette(self)
+    }
+
+    fn paste_failed(&self, message: &str, reason: &PasteFailureReason) {
+        emit_paste_failed_with_reason(self, message, reason);
+    }
+}
+
 /// Re-focus the app the palette was opened from. A missing target is only
 /// expected on Linux Wayland, where the compositor hands focus back by itself
 /// once the palette hides; on macOS / Windows it means the capture at open
@@ -393,7 +412,7 @@ pub async fn list_paste_options(
 /// that strand behind the now-hidden window. The copy runs *before* the palette
 /// hides so a copy error still surfaces in the visible palette.
 async fn run_palette_paste(
-    app: &AppHandle,
+    app: &impl PaletteWindow,
     state: &AppState,
     copy: PaletteCopyTarget,
 ) -> CommandResult<()> {
@@ -439,7 +458,7 @@ async fn run_palette_paste(
     let Ok(restore_target) = state.finish_palette_session(session) else {
         return Err(CommandError::cancelled());
     };
-    hide_main_palette(app)?;
+    app.hide_palette()?;
 
     // Re-focus the app the user came from *regardless* of the auto-paste
     // setting. The snapshot was taken at `open_palette` time, so it is the
@@ -492,7 +511,7 @@ async fn run_palette_paste(
             "auto-paste skipped: failed to restore frontmost app — copy succeeded, paste manually. Underlying error: {}",
             cmd_err.message
         );
-        emit_paste_failed_with_reason(app, &message, &PasteFailureReason::PreviousAppLost);
+        app.paste_failed(&message, &PasteFailureReason::PreviousAppLost);
         return Err(CommandError { message, ..cmd_err });
     }
 
@@ -538,7 +557,7 @@ async fn run_palette_paste(
         let reason = paste_failure_reason(&err);
         let cmd_err: CommandError = err.into();
         let message = synthesis_failure_message(&reason, &cmd_err.message);
-        emit_paste_failed_with_reason(app, &message, &reason);
+        app.paste_failed(&message, &reason);
         return Err(CommandError { message, ..cmd_err });
     }
     if let Some(entry_id) = entry_id {
@@ -617,5 +636,353 @@ pub async fn repaste_last(state: State<'_, AppState>) -> CommandResult<()> {
         Ok(()) => Ok(()),
         Err(AppError::NotFound) => Err(CommandError::invalid_input("no recent entry to re-paste")),
         Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod palette_session_tests {
+    //! A palette paste must belong to the palette showing it started in. Each
+    //! test dismisses (or dismisses and reopens) the palette at one of the
+    //! points where the paste awaits — before it starts, on the clipboard
+    //! lease, during the copy, during the paste delay — and checks that
+    //! nothing is copied, hidden or typed for a showing that has ended.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use nagori_core::{ClipboardEntry, ClipboardSequence, ClipboardSnapshot, SourceApp};
+    use nagori_platform::{
+        ClipboardReader, ClipboardWriter, MemoryClipboard, PasteController, PasteResult,
+    };
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::state::test_support::build_test_state_with;
+
+    #[derive(Default)]
+    struct RecordingWindow {
+        hidden: AtomicUsize,
+        hid: Notify,
+        failures: Mutex<Vec<&'static str>>,
+    }
+
+    impl PaletteWindow for RecordingWindow {
+        fn hide_palette(&self) -> CommandResult<()> {
+            self.hidden.fetch_add(1, Ordering::SeqCst);
+            self.hid.notify_one();
+            Ok(())
+        }
+
+        fn paste_failed(&self, _message: &str, reason: &PasteFailureReason) {
+            self.failures.lock().unwrap().push(reason.token());
+        }
+    }
+
+    impl RecordingWindow {
+        fn hidden(&self) -> usize {
+            self.hidden.load(Ordering::SeqCst)
+        }
+
+        fn failures(&self) -> Vec<&'static str> {
+            self.failures.lock().unwrap().clone()
+        }
+    }
+
+    /// Records the target each synthesised paste was aimed at.
+    #[derive(Default)]
+    struct RecordingPaste {
+        targets: Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl PasteController for RecordingPaste {
+        async fn paste_frontmost(&self) -> nagori_core::Result<PasteResult> {
+            self.paste_frontmost_into(None).await
+        }
+
+        async fn paste_frontmost_into(
+            &self,
+            target: Option<&RestoreTarget>,
+        ) -> nagori_core::Result<PasteResult> {
+            self.targets
+                .lock()
+                .unwrap()
+                .push(target.and_then(|target| target.source.bundle_id.clone()));
+            Ok(PasteResult {
+                pasted: true,
+                message: None,
+            })
+        }
+    }
+
+    impl RecordingPaste {
+        fn targets(&self) -> Vec<Option<String>> {
+            self.targets.lock().unwrap().clone()
+        }
+    }
+
+    /// A memory clipboard whose writes can be held until the test lets them
+    /// through, standing in for a slow copy.
+    #[derive(Default)]
+    struct HeldClipboard {
+        inner: MemoryClipboard,
+        hold: bool,
+        entered: Notify,
+        release: Notify,
+    }
+
+    impl HeldClipboard {
+        fn held() -> Self {
+            Self {
+                hold: true,
+                ..Self::default()
+            }
+        }
+
+        async fn gate(&self) {
+            if self.hold {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ClipboardReader for HeldClipboard {
+        async fn current_snapshot(&self) -> nagori_core::Result<ClipboardSnapshot> {
+            self.inner.current_snapshot().await
+        }
+
+        async fn current_sequence(&self) -> nagori_core::Result<ClipboardSequence> {
+            self.inner.current_sequence().await
+        }
+    }
+
+    #[async_trait]
+    impl ClipboardWriter for HeldClipboard {
+        async fn write_entry(&self, entry: &ClipboardEntry) -> nagori_core::Result<()> {
+            self.gate().await;
+            self.inner.write_entry(entry).await
+        }
+
+        async fn write_plain(&self, entry: &ClipboardEntry) -> nagori_core::Result<()> {
+            self.gate().await;
+            self.inner.write_plain(entry).await
+        }
+
+        async fn write_text(&self, text: &str) -> nagori_core::Result<()> {
+            self.gate().await;
+            self.inner.write_text(text).await
+        }
+    }
+
+    struct Harness {
+        state: AppState,
+        window: RecordingWindow,
+        clipboard: Arc<HeldClipboard>,
+        paste: Arc<RecordingPaste>,
+    }
+
+    async fn harness(clipboard: HeldClipboard, paste_delay_ms: u64) -> Harness {
+        let clipboard = Arc::new(clipboard);
+        let paste = Arc::new(RecordingPaste::default());
+        let state = build_test_state_with(clipboard.clone(), Some(paste.clone()));
+        let mut settings = state.runtime.get_settings().await.expect("settings");
+        settings.auto_paste_enabled = true;
+        settings.paste_delay_ms = paste_delay_ms;
+        state
+            .runtime
+            .save_settings(settings)
+            .await
+            .expect("save settings");
+        Harness {
+            state,
+            window: RecordingWindow::default(),
+            clipboard,
+            paste,
+        }
+    }
+
+    fn target(bundle_id: &str) -> RestoreTarget {
+        RestoreTarget {
+            source: SourceApp {
+                bundle_id: Some(bundle_id.to_owned()),
+                name: None,
+                executable_path: None,
+            },
+            native_handle: None,
+            snapshot_pid: None,
+        }
+    }
+
+    fn text(value: &str) -> PaletteCopyTarget {
+        PaletteCopyTarget::Text(value.to_owned())
+    }
+
+    fn assert_cancelled(result: CommandResult<()>) {
+        let err = result.expect_err("the paste should have been dropped");
+        assert_eq!(err.code, "cancelled");
+    }
+
+    /// Drive `paste` until it is parked on something the test controls.
+    async fn run_until_parked<F: Future + Unpin>(paste: &mut F) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), paste)
+                .await
+                .is_err(),
+            "the paste finished instead of waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn pastes_into_the_target_its_showing_opened_with() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+
+        run_palette_paste(&h.window, &h.state, text("hello"))
+            .await
+            .expect("paste");
+
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("hello"));
+        assert_eq!(h.window.hidden(), 1);
+        assert_eq!(h.paste.targets(), [Some("com.example.editor".to_owned())]);
+        assert_eq!(h.state.palette_ticket(), None);
+    }
+
+    #[tokio::test]
+    async fn drops_a_paste_that_arrives_after_the_palette_closed() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        h.state.end_palette_session();
+
+        assert_cancelled(run_palette_paste(&h.window, &h.state, text("hello")).await);
+
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        assert_eq!(h.window.hidden(), 0);
+        assert!(h.paste.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drops_a_paste_whose_palette_closes_while_it_waits_for_the_lease() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let lease = h.state.runtime.clipboard_lease().await;
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        run_until_parked(&mut paste).await;
+
+        h.state.end_palette_session();
+        drop(lease);
+
+        assert_cancelled(paste.await);
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        assert_eq!(h.window.hidden(), 0);
+        assert!(h.paste.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reopened_palette_does_not_adopt_a_paste_from_its_last_showing() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let lease = h.state.runtime.clipboard_lease().await;
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        run_until_parked(&mut paste).await;
+
+        h.state.end_palette_session();
+        h.state
+            .begin_palette_session_with(Some(target("com.example.browser")));
+        drop(lease);
+
+        assert_cancelled(paste.await);
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        assert_eq!(h.window.hidden(), 0);
+        // The new showing keeps its own target for its own actions.
+        let ticket = h.state.palette_ticket().expect("reopened palette");
+        assert_eq!(
+            h.state
+                .finish_palette_session(ticket)
+                .expect("current showing")
+                .and_then(|t| t.source.bundle_id),
+            Some("com.example.browser".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_the_palette_alone_when_it_closes_during_the_copy() {
+        let h = harness(HeldClipboard::held(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        tokio::select! {
+            _ = &mut paste => panic!("the paste finished before its copy was released"),
+            () = h.clipboard.entered.notified() => {}
+        }
+
+        // Dismissed and shown again while the copy was being written.
+        h.state.end_palette_session();
+        h.state
+            .begin_palette_session_with(Some(target("com.example.browser")));
+        h.clipboard.release.notify_one();
+
+        assert_cancelled(paste.await);
+        // The copy itself landed, but the new showing is not hidden, nothing
+        // is typed, and its target is untouched.
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("hello"));
+        assert_eq!(h.window.hidden(), 0);
+        assert!(h.paste.targets().is_empty());
+        assert!(h.state.palette_ticket().is_some());
+    }
+
+    #[tokio::test]
+    async fn skips_the_keystroke_when_the_palette_reopens_during_the_paste_delay() {
+        let h = harness(HeldClipboard::default(), 500).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        tokio::select! {
+            _ = &mut paste => panic!("the paste finished before hiding the palette"),
+            () = h.window.hid.notified() => {}
+        }
+
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+
+        let err = paste.await.expect_err("the keystroke should be skipped");
+        assert_eq!(err.code, "paste_error");
+        assert_eq!(h.window.failures(), ["previousAppLost"]);
+        assert!(h.paste.targets().is_empty());
+        // Copy-only: the user can still paste by hand.
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn a_showing_without_a_target_pastes_only_where_none_is_expected() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state.begin_palette_session_with(None);
+
+        let result = run_palette_paste(&h.window, &h.state, text("hello")).await;
+
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("hello"));
+        if RESTORE_TARGET_EXPECTED {
+            // macOS / Windows: the capture at open failed, so the keystroke
+            // would go to whatever is in front. Copy only.
+            assert_eq!(result.expect_err("no blind paste").code, "platform_error");
+            assert_eq!(h.window.failures(), ["previousAppLost"]);
+            assert!(h.paste.targets().is_empty());
+        } else {
+            // Linux Wayland never has a target and pastes into whatever the
+            // compositor focuses after the hide.
+            result.expect("paste");
+            assert_eq!(h.paste.targets(), [None]);
+        }
     }
 }
