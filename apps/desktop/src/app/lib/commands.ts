@@ -219,6 +219,12 @@ export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_f
 export const openReleasePage = (version: string): Promise<void> =>
   invoke('open_release_page', { version });
 
+// Downloads, verifies, and installs the update the user confirmed, then
+// restarts the app. Resolves just before the restart; the backend refuses
+// when the feed no longer offers `version`.
+export const installUpdate = (version: string): Promise<void> =>
+  invoke('install_update', { version });
+
 // Read-only state of the bundled `nagori` CLI relative to `~/.local/bin` and
 // the user's shell PATH — drives the Settings → CLI install affordance.
 export const cliInstallStatus = (): Promise<CliInstallStatus> => invoke('cli_install_status');

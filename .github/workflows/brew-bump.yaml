@@ -115,6 +115,10 @@ jobs:
             depends_on arch: :arm64
             depends_on :macos
 
+            # The app installs its own updates from Settings, so keep
+            # `brew upgrade` from re-installing over an in-app update.
+            auto_updates true
+
             app "Nagori.app"
             # Link the CLI bundled inside the .app onto Homebrew's PATH so the
             # nagori command works from a terminal without the in-app installer.

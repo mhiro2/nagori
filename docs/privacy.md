@@ -350,7 +350,8 @@ the settings and capture resumes.
   models](#ai-actions-and-on-device-models-macos)). The manual
   **Check for updates now** button bypasses this toggle by design —
   it is an explicit user action and always reaches the network when
-  pressed.
+  pressed. **Install and restart** downloads the update bundle from
+  GitHub Releases only when you click it.
 - `nagori doctor` prints `auto_update_check` so operators can
   confirm at a glance whether anything is allowed to reach the
   network.

@@ -626,6 +626,13 @@ export const es: Messages = {
         'Actualización disponible: {version}. Tu modo de instalación no admite la actualización en sitio: descarga la nueva compilación desde GitHub.',
       viewRelease: 'Ver la versión',
       downloadManual: 'Descargar desde GitHub',
+      installAndRestart: 'Instalar y reiniciar',
+      installHelp: 'Descarga la actualización, comprueba su firma, reemplaza Nagori y lo reinicia.',
+      installHelpMacos:
+        'macOS trata cada actualización como una app nueva, así que puede que tengas que volver a activar Accesibilidad para Nagori para que el pegado automático siga funcionando.',
+      downloading: 'Descargando actualización…',
+      downloadingProgress: 'Descargando actualización… {percent} %',
+      installingUpdate: 'Instalando la actualización: Nagori se reiniciará en breve.',
     },
     capabilities: {
       legend: 'Capacidades de la plataforma',

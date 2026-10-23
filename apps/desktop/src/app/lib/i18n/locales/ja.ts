@@ -608,6 +608,13 @@ export const ja: Messages = {
         '新しいバージョンがあります: {version}。現在のインストール形態では自動更新ができないため、GitHub から新しいビルドをダウンロードしてください。',
       viewRelease: 'リリースを表示',
       downloadManual: 'GitHub からダウンロード',
+      installAndRestart: 'インストールして再起動',
+      installHelp: 'アップデートをダウンロードして署名を確認し、Nagori を置き換えて再起動します。',
+      installHelpMacos:
+        'macOS はアップデートごとに別のアプリとして扱うため、自動ペーストを使い続けるにはアクセシビリティの許可をもう一度オンにする必要がある場合があります。',
+      downloading: 'アップデートをダウンロード中…',
+      downloadingProgress: 'アップデートをダウンロード中… {percent}%',
+      installingUpdate: 'アップデートをインストール中です。まもなく Nagori が再起動します。',
     },
     capabilities: {
       legend: 'プラットフォーム機能',

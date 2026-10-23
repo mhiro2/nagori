@@ -132,6 +132,11 @@ export const TAURI_EVENTS = {
   aiDone: 'nagori://ai/done',
   aiError: 'nagori://ai/error',
   aiCancelled: 'nagori://ai/cancelled',
+  // Progress of a user-confirmed `install_update` run, sent to the settings
+  // webview. Payload: `{ phase: 'downloading', downloaded: number, total:
+  // number | null } | { phase: 'installing' }`. Keep in lockstep with
+  // `UPDATE_PROGRESS_EVENT` in `src-tauri/src/commands/updater.rs`.
+  updateProgress: 'nagori://update_progress',
 } as const;
 
 export type TauriEventName = (typeof TAURI_EVENTS)[keyof typeof TAURI_EVENTS];

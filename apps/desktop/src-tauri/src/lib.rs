@@ -299,6 +299,7 @@ pub fn run() {
             commands::window_commands::close_settings,
             commands::updater::check_for_updates,
             commands::updater::open_release_page,
+            commands::updater::install_update,
             commands::installer::cli_install_status,
             commands::installer::install_cli,
         ])
@@ -434,7 +435,7 @@ fn spawn_exit_on_runtime_shutdown(handle: &tauri::AppHandle) {
 /// soft-delete complete before it destroys the tokio runtime. The
 /// background drain mirrors daemon shutdown; the clear-on-quit ceiling keeps
 /// a wedged DB from freezing the quit path indefinitely.
-fn perform_exit_cleanup(handle: &tauri::AppHandle) {
+pub(crate) fn perform_exit_cleanup(handle: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if EXIT_CLEANUP_FIRED.swap(true, Ordering::SeqCst) {
         return;

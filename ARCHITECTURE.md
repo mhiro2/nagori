@@ -2906,15 +2906,31 @@ change.
   compares versions, so an Intel install from v0.1.1 or earlier gets
   `TargetsNotFound` from `check()` rather than an arm64 bundle it
   cannot launch; `spawn_startup_update_probe` logs that and stays
-  quiet, and only the manual check reports it as a failed check. The MVP surface is read-only — the
-  desktop shell calls `updater.check()` for the version comparison but
-  does not call `update.download_and_install()`; users still follow
-  the GitHub release link to upgrade. The wording differs by install
-  medium so the user sees the right next step: bundles the updater
-  *could* swap in place (`.app` / `.dmg`, NSIS, `AppImage`) show a
-  "View release" link, while `deb` installs show "Download manually"
-  to reflect that the GitHub artefact has to be re-installed by hand
-  (no in-app `dpkg` prompt). The Rust side computes the medium gate
+  quiet, and only the manual check reports it as a failed check. Checking
+  never installs anything: bundles the updater can swap in place
+  (`.app` / `.dmg`, NSIS, `AppImage`) show an **Install and restart**
+  button next to the "View release" link, and only that click runs the
+  `commands::install_update` command. It re-runs `updater.check()` and
+  refuses when the feed no longer offers the version the user
+  confirmed, downloads the bundle (streaming progress to the settings
+  webview on `nagori://update_progress`), lets the plugin verify its
+  minisign signature, installs it on a blocking thread, and restarts
+  through `AppHandle::request_restart`, so the normal
+  `RunEvent::ExitRequested` cleanup (worker drain, IPC socket removal,
+  `clear_on_quit`) runs first. The Windows NSIS path exits the process
+  itself after launching the installer, so the same cleanup is wired
+  through the updater's `on_before_exit` hook there. The macOS bundle
+  is ad-hoc signed, so its designated requirement is the binary's
+  cdhash: every update looks like a new app to TCC and the
+  Accessibility grant may have to be given again, which the button's
+  help text says up front. `deb` installs show "Download manually"
+  instead of the button, since the GitHub artefact has to be
+  re-installed by hand (no in-app `dpkg` prompt). The release page link
+  goes through `commands::open_release_page`, which builds the GitHub
+  URL from the version in Rust, because the webview ignores
+  `target="_blank"` links. The Homebrew cask declares
+  `auto_updates true` so `brew upgrade` does not fight an in-app
+  update. The Rust side computes the medium gate
   in `commands::in_place_update_supported()` by delegating to
   `tauri::utils::platform::bundle_type()` — the same signal the
   plugin uses to pick a `latest.json` entry, so the UI advertisement
