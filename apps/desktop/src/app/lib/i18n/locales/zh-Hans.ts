@@ -573,6 +573,13 @@ export const zhHans: Messages = {
         '有可用更新：{version}。当前安装形式不支持自动更新，请从 GitHub 下载新版本。',
       viewRelease: '查看版本',
       downloadManual: '从 GitHub 下载',
+      installAndRestart: '安装并重启',
+      installHelp: '下载更新并校验签名，替换 Nagori 后重新启动。',
+      installHelpMacos:
+        'macOS 会把每次更新视为一个新应用，因此可能需要重新为 Nagori 开启辅助功能权限，自动粘贴才能继续使用。',
+      downloading: '正在下载更新…',
+      downloadingProgress: '正在下载更新… {percent}%',
+      installingUpdate: '正在安装更新，Nagori 即将重新启动。',
     },
     capabilities: {
       legend: '平台功能',

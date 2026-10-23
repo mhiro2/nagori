@@ -605,6 +605,13 @@ export const ko: Messages = {
         '업데이트 사용 가능: {version}. 현재 설치 형식에서는 자동 업데이트를 사용할 수 없습니다. GitHub에서 새 빌드를 다운로드하세요.',
       viewRelease: '릴리스 보기',
       downloadManual: 'GitHub에서 다운로드',
+      installAndRestart: '설치 후 다시 시작',
+      installHelp: '업데이트를 다운로드하고 서명을 확인한 뒤 Nagori를 교체하고 다시 시작합니다.',
+      installHelpMacos:
+        'macOS는 업데이트마다 새 앱으로 취급하므로, 자동 붙여넣기를 계속 쓰려면 Nagori의 손쉬운 사용 권한을 다시 켜야 할 수 있습니다.',
+      downloading: '업데이트 다운로드 중…',
+      downloadingProgress: '업데이트 다운로드 중… {percent}%',
+      installingUpdate: '업데이트를 설치하는 중입니다. 곧 Nagori가 다시 시작됩니다.',
     },
     capabilities: {
       legend: '플랫폼 기능',

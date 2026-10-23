@@ -79,12 +79,15 @@ the palette, dispatched through `/usr/bin/qlmanage -p`; restricted to
 Public entries). The Tauri updater plugin is registered
 on every supported OS and the release workflow publishes a signed
 `latest.json` feed for macOS, Windows, and Linux, so the in-app
-availability probe runs everywhere. The current MVP surface is
-read-only — users upgrade by following the GitHub release link — and
-the wording differs by install medium: bundles that the updater could
-swap in place (`.app` / `.dmg`, NSIS, `AppImage`) show "View release",
-while `deb` installs show "Download manually" to reflect that the
-GitHub artefact has to be re-installed by hand. The macOS `.app` /
+availability probe runs everywhere. Checking never installs anything.
+Bundles the updater can swap in place (`.app` / `.dmg`, NSIS,
+`AppImage`) show an **Install and restart** button that downloads the
+update, verifies its signature, replaces the app, and restarts it;
+`deb` installs show "Download manually" instead, because the GitHub
+artefact has to be re-installed by hand. Because the macOS bundle is
+not codesigned with a Developer ID, macOS treats every update as a new
+app, so you may need to turn Accessibility on for Nagori again after
+updating to keep auto-paste working. The macOS `.app` /
 `.dmg` are not codesigned (Gatekeeper warns on first launch) and the
 NSIS bundle is not Authenticode-signed (SmartScreen warns on first
 launch).

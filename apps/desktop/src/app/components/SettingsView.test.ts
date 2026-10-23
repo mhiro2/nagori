@@ -21,6 +21,7 @@ import {
   getPermissions,
   getSettings,
   installCli,
+  installUpdate,
   openReleasePage,
   paletteShortcutBound,
   passwordManagerPreset,
@@ -33,6 +34,7 @@ import type {
   CliInstallStatus,
   PermissionStatus,
   PlatformCapabilities,
+  UpdateProgress,
 } from '../lib/types';
 import { setHotkeyFailure } from '../stores/hotkeyFailure.svelte';
 import { settingsState } from '../stores/settings.svelte';
@@ -1790,5 +1792,69 @@ describe('SettingsView update check', () => {
     await fireEvent.click(await view.findByRole('button', { name: 'View release' }));
 
     expect(await view.findByRole('alert')).toBeTruthy();
+  });
+
+  it('installs the confirmed update and reports download progress', async () => {
+    vi.mocked(checkForUpdates).mockResolvedValue(updateInfo);
+    const slot: { handler?: (payload: UpdateProgress) => void } = {};
+    vi.mocked(subscribe).mockImplementation((event, handler) => {
+      if (event === 'nagori://update_progress') {
+        slot.handler = handler;
+      }
+      return () => {};
+    });
+    // A successful install restarts the app, so the promise never settles.
+    vi.mocked(installUpdate).mockReturnValueOnce(new Promise(() => {}));
+    const view = await openAdvancedTab(macosCapabilities());
+
+    await fireEvent.click(view.getByRole('button', { name: 'Check now' }));
+    const install = await view.findByRole('button', { name: 'Install and restart' });
+    expect(view.getByText(/turn on Accessibility for Nagori again/)).toBeTruthy();
+
+    await fireEvent.click(install);
+    expect(installUpdate).toHaveBeenCalledWith('9.9.9');
+    expect((install as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByRole('button', { name: 'Check now' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(view.getByRole('status').textContent).toBe('Downloading update…');
+
+    slot.handler?.({ phase: 'downloading', downloaded: 50, total: 200 });
+    await waitFor(() => {
+      expect(view.getByRole('status').textContent).toBe('Downloading update… 25%');
+    });
+    slot.handler?.({ phase: 'installing' });
+    await waitFor(() => {
+      expect(view.getByRole('status').textContent).toBe(
+        'Installing update — Nagori will restart shortly.',
+      );
+    });
+  });
+
+  it('surfaces an install failure and lets the user retry', async () => {
+    vi.mocked(checkForUpdates).mockResolvedValue(updateInfo);
+    vi.mocked(installUpdate).mockRejectedValueOnce({
+      code: 'invalid_input',
+      message: 'the available update changed to 9.9.10; check for updates again',
+    });
+    const view = await openAdvancedTab(macosCapabilities());
+
+    await fireEvent.click(view.getByRole('button', { name: 'Check now' }));
+    const install = await view.findByRole('button', { name: 'Install and restart' });
+    await fireEvent.click(install);
+
+    const alert = await view.findByRole('alert');
+    expect(alert.textContent).toContain('changed to 9.9.10');
+    expect((install as HTMLButtonElement).disabled).toBe(false);
+    expect(view.queryByRole('status')).toBeNull();
+  });
+
+  it('offers only the GitHub download when the install cannot update in place', async () => {
+    vi.mocked(checkForUpdates).mockResolvedValue({ ...updateInfo, downloadSupported: false });
+    const view = await openAdvancedTab(linuxWaylandCapabilities());
+
+    await fireEvent.click(view.getByRole('button', { name: 'Check now' }));
+    await view.findByRole('button', { name: 'Download from GitHub' });
+    expect(view.queryByRole('button', { name: 'Install and restart' })).toBeNull();
   });
 });
