@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use nagori_core::{AppError, EntryId, Result};
 use nagori_daemon::NagoriRuntime;
-use nagori_platform::{ClipboardReader, PreviewController, RestoreTarget, WindowBehavior};
+use nagori_platform::{ClipboardReader, PreviewController, WindowBehavior};
 use nagori_platform_native::{NativeRuntimeOptions, build_native_runtime};
 use nagori_storage::SqliteStore;
 
@@ -13,12 +13,14 @@ mod clear_on_quit;
 mod search_cancel;
 mod startup;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod window_focus;
 
 pub use search_cancel::InflightSearch;
 use startup::{BackgroundTasks, SettingsLoadGate};
 pub(crate) use startup::{runtime_shutdown_requires_app_exit, settings_loaded_or_shutdown};
+use window_focus::PaletteSession;
+pub use window_focus::{PaletteTicket, RESTORE_TARGET_EXPECTED};
 
 /// How long a "last pasted" entry id stays valid before it falls back to
 /// the recency head. Picked at 30 min so a short break between pastes
@@ -48,18 +50,19 @@ pub struct AppState {
     /// silently-dead capture task.
     capture_reader: Arc<dyn ClipboardReader>,
     background_tasks: Mutex<Option<BackgroundTasks>>,
-    /// Frontmost app captured the last time the palette was opened.
-    /// Used by `paste_entry` to re-focus the user's prior app before
-    /// synthesising ⌘V — without it, the keystroke lands on the
+    /// The palette's current showing and the frontmost app captured when it
+    /// opened. Used by the paste commands to re-focus the user's prior app
+    /// before synthesising ⌘V — without it, the keystroke lands on the
     /// (still-focused) Nagori webview and we paste into our own search
-    /// box. On Linux Wayland the snapshot is always `None` (the
+    /// box — and to drop a paste whose palette was dismissed before it got
+    /// that far. On Linux Wayland the snapshot is always `None` (the
     /// compositor refuses to expose a portable frontmost-app query), so
     /// the palette skips the refocus step and relies on `wtype` to
     /// target whatever the compositor considers focused after our window
-    /// hides. On Windows the snapshot now carries the foreground HWND
+    /// hides. On Windows the snapshot carries the foreground HWND
     /// in `native_handle`, so `activate_restore_target` can re-foreground
     /// the original window via `SetForegroundWindow`.
-    pub previous_frontmost: Arc<Mutex<Option<RestoreTarget>>>,
+    palette_session: Arc<Mutex<PaletteSession>>,
     /// Most recently pasted entry id, paired with the `Instant` it was
     /// recorded. Powers the "repaste last" secondary hotkey so it
     /// targets the entry the user actually pasted instead of whatever
@@ -333,7 +336,7 @@ impl AppState {
             preview: parts.preview,
             capture_reader: parts.clipboard_reader,
             background_tasks: Mutex::new(None),
-            previous_frontmost: Arc::new(Mutex::new(None)),
+            palette_session: Arc::new(Mutex::new(PaletteSession::default())),
             last_pasted_id: Mutex::new(None),
             last_hotkey_failure: Mutex::new(HotkeyFailureCache::default()),
             palette_shortcut_bound: std::sync::atomic::AtomicBool::new(true),

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { describeError } from './errors';
+import { describeError, isCancelledError } from './errors';
 import { messages, setLocale } from './i18n/index.svelte';
 
 beforeEach(() => {
@@ -130,5 +130,14 @@ describe('describeError', () => {
   it('honours the active locale', () => {
     setLocale('ja');
     expect(describeError({ code: 'storage_error' })).toBe(t().storage);
+  });
+});
+
+describe('isCancelledError', () => {
+  it('recognises only the backend cancelled code', () => {
+    expect(isCancelledError({ code: 'cancelled', message: 'cancelled' })).toBe(true);
+    expect(isCancelledError({ code: 'paste_error', message: 'cancelled' })).toBe(false);
+    expect(isCancelledError(new Error('cancelled'))).toBe(false);
+    expect(isCancelledError(null)).toBe(false);
   });
 });

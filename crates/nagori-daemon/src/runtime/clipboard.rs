@@ -350,13 +350,31 @@ impl ClipboardLease {
         publish: ClipboardPublish,
         target: Option<RestoreTarget>,
     ) -> Result<()> {
+        self.paste_frontmost_into_checked(publish, target, || Ok(()))
+            .await
+    }
+
+    /// [`Self::paste_frontmost_into`] that also asks `precheck` whether the
+    /// paste may still go ahead, as the last step before the adapter call —
+    /// after the clipboard probe and every other await on this path.
+    ///
+    /// A front-end whose own state can make the keystroke wrong while the
+    /// paste is in flight (the desktop palette being shown again, so it would
+    /// take the keys) passes that check here; an `Err` stops the paste without
+    /// synthesising anything and is returned as is.
+    pub async fn paste_frontmost_into_checked(
+        &mut self,
+        publish: ClipboardPublish,
+        target: Option<RestoreTarget>,
+        precheck: impl FnOnce() -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         // Same completion-event wrap as `NagoriRuntime::paste_entry`: the
         // palette drives synthesis through here after its own copy step, and
         // ARCHITECTURE §17's grep recipes need a success signal too.
         // `result_code` collapses to a static label, so the event never
         // carries clipboard content.
         let started = Instant::now();
-        let result = self.paste_frontmost_inner(publish, target).await;
+        let result = self.paste_frontmost_inner(publish, target, precheck).await;
         tracing::debug!(
             result_code = result_code(&result),
             elapsed_ms = elapsed_ms(started),
@@ -369,6 +387,7 @@ impl ClipboardLease {
         &mut self,
         publish: ClipboardPublish,
         target: Option<RestoreTarget>,
+        precheck: impl FnOnce() -> Result<()> + Send + 'static,
     ) -> Result<()> {
         let ledger = self.held()?;
         if publish.lease != self.lease || publish.generation != ledger.generation {
@@ -420,6 +439,7 @@ impl ClipboardLease {
                         .to_owned(),
                 });
             }
+            precheck()?;
             let outcome = runtime
                 .paste
                 .paste_frontmost_into(target.as_ref())
