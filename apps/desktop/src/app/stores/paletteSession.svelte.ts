@@ -16,6 +16,12 @@ export type ReopenMode = 'fresh' | 'resume';
 let endedWithAction = false;
 // Session-ending IPCs still awaiting their result.
 let inFlight = 0;
+// Bumped every time the palette is dismissed. An action that awaits before
+// sending its command (settling the search, listing paste options) captures it
+// first and gives up if it moved, so an Enter / delete still waiting on a
+// search when the user pressed Escape or clicked away never runs once the
+// palette is gone. Plain counter (not reactive) — only actions compare it.
+let generation = 0;
 
 export const paletteSessionState = $state<{ filtersRetained: boolean }>({
   filtersRetained: false,
@@ -46,6 +52,19 @@ export const noteActionEndedAfterHide = (): void => {
   if (inFlight > 0) endedWithAction = true;
 };
 
+/// The current showing of the palette, to compare against later with
+/// `isPaletteSessionCurrent`.
+export const paletteSessionToken = (): number => generation;
+
+/// Whether the showing `token` was taken in is still the one on screen.
+export const isPaletteSessionCurrent = (token: number): boolean => token === generation;
+
+/// The palette is being dismissed (Escape, clicking away, the close action):
+/// actions started while it was up must not reach the backend any more.
+export const endPaletteSession = (): void => {
+  generation += 1;
+};
+
 /// Called when the palette is shown again: which kind of reopen this is.
 export const takeReopenMode = (): ReopenMode => {
   const mode: ReopenMode = endedWithAction ? 'fresh' : 'resume';
@@ -57,9 +76,10 @@ export const setFiltersRetained = (retained: boolean): void => {
   paletteSessionState.filtersRetained = retained;
 };
 
-/// Test-only reset of the module-private flag.
+/// Test-only reset of the module-private state.
 export const resetPaletteSessionForTest = (): void => {
   endedWithAction = false;
   inFlight = 0;
+  generation = 0;
   paletteSessionState.filtersRetained = false;
 };

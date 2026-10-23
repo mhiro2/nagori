@@ -64,6 +64,7 @@ import {
   openEntryContextMenu,
 } from './stores/entryContextMenu.svelte';
 import { dismissHotkeyFailure, hotkeyFailureState } from './stores/hotkeyFailure.svelte';
+import { isPaletteSessionCurrent, paletteSessionToken } from './stores/paletteSession.svelte';
 import { clearPasteDiagnostics, pasteDiagnosticsState } from './stores/pasteDiagnostics.svelte';
 import { refreshCurrent } from './stores/searchQuery.svelte';
 import { settingsState } from './stores/settings.svelte';
@@ -209,6 +210,14 @@ describe('App shell', () => {
     expect(hidePalette).toHaveBeenCalled();
   });
 
+  it('ends the palette session on Escape so a waiting action gives up', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(App);
+    const session = paletteSessionToken();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(isPaletteSessionCurrent(session)).toBe(false);
+  });
+
   it('skips the Escape handler when defaultPrevented is true', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
     render(App);
@@ -225,12 +234,22 @@ describe('App shell', () => {
     expect(hidePalette).toHaveBeenCalled();
   });
 
+  it('ends the palette session on window blur', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(App);
+    const session = paletteSessionToken();
+    await fireEvent.blur(window);
+    expect(isPaletteSessionCurrent(session)).toBe(false);
+  });
+
   it('does not hide on blur when the user is on the settings route', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
     showSettings();
     render(App);
+    const session = paletteSessionToken();
     await fireEvent.blur(window);
     expect(hidePalette).not.toHaveBeenCalled();
+    expect(isPaletteSessionCurrent(session)).toBe(true);
   });
 
   it('closes an open context menu on Escape and leaves the palette up', async () => {

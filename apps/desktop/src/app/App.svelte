@@ -20,7 +20,7 @@
     hotkeyFailureState,
     startHotkeyFailureWatcher,
   } from './stores/hotkeyFailure.svelte';
-  import { noteActionEndedAfterHide } from './stores/paletteSession.svelte';
+  import { endPaletteSession, noteActionEndedAfterHide } from './stores/paletteSession.svelte';
   import {
     clearPasteDiagnostics,
     normalizePasteReason,
@@ -71,6 +71,10 @@
       showPalette();
       return;
     }
+    // An action still waiting on its search (Enter pressed just before
+    // Escape) belongs to this showing; end it so the action gives up instead
+    // of pasting or deleting once the palette is gone.
+    endPaletteSession();
     // Drop any debounced keystroke before hiding — the timer would
     // otherwise fire ~80 ms later against a closed palette and clobber
     // `searchState.results` while the next invocation is being primed.
@@ -87,6 +91,9 @@
     // the next hotkey press feels like a fresh invocation. Settings stays
     // visible because the user explicitly navigated there.
     if (viewState.current !== 'palette') return;
+    // Clicking away dismisses the palette just like Escape does, so an action
+    // still waiting on its search must not run after the hide.
+    endPaletteSession();
     cancelPendingQuery();
     // Don't leave a paste-format picker or context menu open behind a hidden
     // palette — either would reappear (against a stale target) on the next show.

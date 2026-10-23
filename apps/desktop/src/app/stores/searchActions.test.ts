@@ -22,8 +22,9 @@ import {
   searchClipboard,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
-import type { PasteOption, SearchResultDto } from '../lib/types';
+import type { PasteOption, SearchResponse, SearchResultDto } from '../lib/types';
 import { sampleSearchResult } from '../test-helpers/fixtures';
+import { endPaletteSession, resetPaletteSessionForTest } from './paletteSession.svelte';
 import { closePasteFormatPicker, pasteFormatPickerState } from './pasteFormatPicker.svelte';
 import {
   confirmPasteFormat,
@@ -45,7 +46,7 @@ import {
   togglePinSelection,
 } from './searchActions';
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
-import { searchState } from './searchQuery.svelte';
+import { resetSearchRuntimeForTest, searchState } from './searchQuery.svelte';
 
 const result = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
   sampleSearchResult({ id: 'r1', preview: 'hello', score: 1, ...overrides });
@@ -482,5 +483,97 @@ describe('explicit-target context-menu wrappers', () => {
   it('a bulk-by-id action is a no-op for an empty id list', async () => {
     await copyEntriesByIds([]);
     expect(copyEntriesCombined).not.toHaveBeenCalled();
+  });
+});
+
+describe('dismissing the palette while an action waits on its search', () => {
+  // Hold the search an action settles before reading the selection, so the
+  // test can dismiss the palette (Escape / blur / the close action all end the
+  // session) while the action is still waiting on it.
+  const held: { resolve?: (response: SearchResponse) => void } = {};
+
+  const holdSearch = (): void => {
+    vi.mocked(searchClipboard).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          held.resolve = resolve;
+        }),
+    );
+  };
+
+  const settleSearch = (): void => {
+    held.resolve?.({
+      results: [result()],
+      totalCandidates: 1,
+      searchElapsedMs: 0,
+      summaryElapsedMs: 0,
+      totalElapsedMs: 0,
+    });
+  };
+
+  beforeEach(() => {
+    resetSearchRuntimeForTest();
+    resetPaletteSessionForTest();
+    // The typed query has not been searched yet, so every action below has to
+    // wait for its search before it can act.
+    searchState.query = 'needle';
+    holdSearch();
+  });
+
+  const cases: [string, () => Promise<void>, () => unknown][] = [
+    ['paste', () => confirmSelection(), () => pasteEntryFromPalette],
+    ['alternate-format paste', () => confirmSelectionWithAlternateFormat(), () => listPasteOptions],
+    ['copy', () => copySelection(), () => copyEntryFromPalette],
+    ['pin', () => togglePinSelection(), () => pinEntry],
+    ['delete', () => deleteSelection(), () => deleteEntry],
+  ];
+
+  it.each(cases)('drops the %s once the palette is dismissed', async (_name, run, command) => {
+    const pending = run();
+    endPaletteSession();
+    settleSearch();
+    await pending;
+    expect(command()).not.toHaveBeenCalled();
+  });
+
+  it.each(cases)('still runs the %s while the palette stays up', async (_name, run, command) => {
+    const pending = run();
+    settleSearch();
+    await pending;
+    expect(command()).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a bulk action once the palette is dismissed', async () => {
+    toggleMultiSelect('r1');
+    const pending = deleteMultiSelection();
+    endPaletteSession();
+    settleSearch();
+    await pending;
+    expect(deleteEntries).not.toHaveBeenCalled();
+    expect(multiSelectState.selected.has('r1')).toBe(true);
+  });
+
+  it('does not paste the alternate format if the palette closes while options load', async () => {
+    // The close action ends the session without dismissing the picker, so the
+    // session alone has to stop the single-format fallback paste.
+    vi.mocked(listPasteOptions).mockImplementation(async () => {
+      endPaletteSession();
+      return [pasteOption('text/plain', 'plainText')];
+    });
+    const pending = confirmSelectionWithAlternateFormat();
+    settleSearch();
+    await pending;
+    expect(listPasteOptions).toHaveBeenCalledWith('r1');
+    expect(pasteEntryFromPalette).not.toHaveBeenCalled();
+    expect(pasteFormatPickerState.open).toBe(false);
+  });
+
+  it('does not open the context-menu picker if the palette closes while options load', async () => {
+    vi.mocked(listPasteOptions).mockImplementation(async () => {
+      endPaletteSession();
+      return [pasteOption('text/html', 'html'), pasteOption('text/plain', 'plainText')];
+    });
+    await openPasteFormatPickerFor('r1');
+    expect(pasteFormatPickerState.open).toBe(false);
   });
 });

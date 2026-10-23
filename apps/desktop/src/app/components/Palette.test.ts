@@ -118,6 +118,8 @@ import type { EntryPreviewDto, PlatformCapabilities, SearchResultDto } from '../
 import { capabilitiesState, quickLookAvailable } from '../stores/capabilities.svelte';
 import { captureSkippedState, recordCaptureSkip } from '../stores/captureSkipped.svelte';
 import {
+  isPaletteSessionCurrent,
+  paletteSessionToken,
   resetPaletteSessionForTest,
   runSessionEndingAction,
 } from '../stores/paletteSession.svelte';
@@ -764,9 +766,13 @@ describe('Palette', () => {
   it('closes the palette on Escape inside the Tauri runtime', async () => {
     vi.mocked(isTauri).mockReturnValue(true);
     const { container } = render(Palette);
+    const session = paletteSessionToken();
     const input = container.querySelector('input[type="text"]');
     if (input) await fireEvent.keyDown(input, { key: 'Escape' });
     expect(closePalette).toHaveBeenCalled();
+    // Closing ends the session, so an Enter still waiting on its search
+    // does not paste into whatever the user went back to.
+    expect(isPaletteSessionCurrent(session)).toBe(false);
   });
 
   it('does not call closePalette outside Tauri', async () => {
