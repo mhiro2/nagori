@@ -28,6 +28,7 @@ export const TAURI_EVENTS = {
   aiDone: 'nagori://ai/done',
   aiError: 'nagori://ai/error',
   aiCancelled: 'nagori://ai/cancelled',
+  updateProgress: 'nagori://update_progress',
 } as const;
 
 // `lib/tauri` module shape. Defaults: running inside Tauri, subscriptions
@@ -90,6 +91,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   previewEntry: vi.fn(),
   checkForUpdates: vi.fn(),
   openReleasePage: vi.fn(async () => undefined),
+  installUpdate: vi.fn(async () => undefined),
   cliInstallStatus: vi.fn(),
   installCli: vi.fn(),
   lastHotkeyFailure: vi.fn(),

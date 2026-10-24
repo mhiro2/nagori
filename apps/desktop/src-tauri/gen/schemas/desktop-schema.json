@@ -333,6 +333,12 @@
           "markdownDescription": "Enables the install_cli command without any pre-configured scope."
         },
         {
+          "description": "Enables the install_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-install-update",
+          "markdownDescription": "Enables the install_update command without any pre-configured scope."
+        },
+        {
           "description": "Enables the last_hotkey_failure command without any pre-configured scope.",
           "type": "string",
           "const": "allow-last-hotkey-failure",
@@ -667,6 +673,12 @@
           "type": "string",
           "const": "deny-install-cli",
           "markdownDescription": "Denies the install_cli command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-install-update",
+          "markdownDescription": "Denies the install_update command without any pre-configured scope."
         },
         {
           "description": "Denies the last_hotkey_failure command without any pre-configured scope.",

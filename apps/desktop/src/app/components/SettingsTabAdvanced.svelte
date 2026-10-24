@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Messages } from '../lib/i18n/locales/en';
-  import type { AppSettings, Capability, PlatformCapabilities } from '../lib/types';
+  import type { AppSettings, Capability, PlatformCapabilities, UpdateProgress } from '../lib/types';
 
   type CapabilityRowKey = keyof Messages['settings']['capabilities']['rows'];
 
@@ -21,10 +21,14 @@
     updateReleaseVersion: string | undefined;
     updateReleaseOpenError: string | undefined;
     updateDownloadSupported: boolean;
+    updateInstalling: boolean;
+    updateInstallProgress: UpdateProgress | undefined;
+    updateInstallError: string | undefined;
     debounceNumberMs: number;
     scheduleSave: (delay: number) => void;
     runUpdateCheck: () => Promise<void>;
     openUpdateReleasePage: () => Promise<void>;
+    runInstallUpdate: () => Promise<void>;
     capabilityStatusLabel: (capability: Capability) => string;
     capabilityDetail: (capability: Capability) => string;
     showSetupButton: (capability: Capability) => boolean;
@@ -42,15 +46,32 @@
     updateReleaseVersion,
     updateReleaseOpenError,
     updateDownloadSupported,
+    updateInstalling,
+    updateInstallProgress,
+    updateInstallError,
     debounceNumberMs,
     scheduleSave,
     runUpdateCheck,
     openUpdateReleasePage,
+    runInstallUpdate,
     capabilityStatusLabel,
     capabilityDetail,
     showSetupButton,
     onOpenSetup,
   }: Props = $props();
+
+  const updateInstallStatus = $derived.by((): string => {
+    const updates = t.settings.updates;
+    if (updateInstallProgress?.phase === 'installing') return updates.installingUpdate;
+    if (updateInstallProgress?.phase === 'downloading' && updateInstallProgress.total) {
+      const percent = Math.min(
+        100,
+        Math.floor((updateInstallProgress.downloaded / updateInstallProgress.total) * 100),
+      );
+      return updates.downloadingProgress.replace('{percent}', String(percent));
+    }
+    return updates.downloading;
+  });
 </script>
 
 <fieldset>
@@ -145,7 +166,7 @@
     <button
       type="button"
       class="secondary compact"
-      disabled={updateChecking}
+      disabled={updateChecking || updateInstalling}
       onclick={runUpdateCheck}
     >
       {updateChecking ? t.settings.updates.checking : t.settings.updates.checkNow}
@@ -164,6 +185,25 @@
     </p>
     {#if updateReleaseOpenError}
       <p class="status error" role="alert">{updateReleaseOpenError}</p>
+    {/if}
+    {#if updateReleaseVersion && updateDownloadSupported}
+      <div class="actions">
+        <button type="button" disabled={updateInstalling} onclick={runInstallUpdate}>
+          {t.settings.updates.installAndRestart}
+        </button>
+      </div>
+      <p class="help">
+        {t.settings.updates.installHelp}
+        {#if capabilities?.platform === 'macos'}
+          {t.settings.updates.installHelpMacos}
+        {/if}
+      </p>
+      {#if updateInstalling}
+        <p class="status" role="status">{updateInstallStatus}</p>
+      {/if}
+      {#if updateInstallError}
+        <p class="status error" role="alert">{updateInstallError}</p>
+      {/if}
     {/if}
   {/if}
 </fieldset>

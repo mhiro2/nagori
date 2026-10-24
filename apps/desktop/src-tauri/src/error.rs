@@ -26,9 +26,6 @@ impl CommandError {
         }
     }
 
-    // Only constructed on Windows (`install_cli`) and the catch-all fallback
-    // platforms; unused on macOS and Linux, so suppress dead-code there.
-    #[allow(dead_code)]
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self {
             code: "unsupported".to_owned(),

@@ -646,6 +646,12 @@ export type Messages = {
       availableManual: string;
       viewRelease: string;
       downloadManual: string;
+      installAndRestart: string;
+      installHelp: string;
+      installHelpMacos: string;
+      downloading: string;
+      downloadingProgress: string;
+      installingUpdate: string;
     };
     capabilities: {
       legend: string;
@@ -1331,6 +1337,13 @@ export const en: Messages = {
         'Update available: {version}. Your install medium does not support in-app upgrade — download the new build from GitHub.',
       viewRelease: 'View release',
       downloadManual: 'Download from GitHub',
+      installAndRestart: 'Install and restart',
+      installHelp: 'Downloads the update, checks its signature, replaces Nagori, and restarts it.',
+      installHelpMacos:
+        'macOS treats each update as a new app, so you may need to turn on Accessibility for Nagori again to keep auto-paste working.',
+      downloading: 'Downloading update…',
+      downloadingProgress: 'Downloading update… {percent}%',
+      installingUpdate: 'Installing update — Nagori will restart shortly.',
     },
     capabilities: {
       legend: 'Platform capabilities',

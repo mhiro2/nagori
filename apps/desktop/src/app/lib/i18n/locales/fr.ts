@@ -626,6 +626,14 @@ export const fr: Messages = {
         'Mise à jour disponible : {version}. Votre mode d’installation ne permet pas la mise à jour en place — téléchargez la nouvelle build depuis GitHub.',
       viewRelease: 'Voir la version',
       downloadManual: 'Télécharger depuis GitHub',
+      installAndRestart: 'Installer et redémarrer',
+      installHelp:
+        'Télécharge la mise à jour, vérifie sa signature, remplace Nagori puis le redémarre.',
+      installHelpMacos:
+        'macOS considère chaque mise à jour comme une nouvelle app : il faudra peut-être réactiver Accessibilité pour Nagori afin que le collage automatique continue de fonctionner.',
+      downloading: 'Téléchargement de la mise à jour…',
+      downloadingProgress: 'Téléchargement de la mise à jour… {percent} %',
+      installingUpdate: 'Installation de la mise à jour — Nagori va redémarrer.',
     },
     capabilities: {
       legend: 'Capacités de la plateforme',
