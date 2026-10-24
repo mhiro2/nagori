@@ -15,11 +15,13 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import {
+  checkForUpdates,
   cliInstallStatus,
   getCapabilities,
   getPermissions,
   getSettings,
   installCli,
+  openReleasePage,
   paletteShortcutBound,
   passwordManagerPreset,
   updateSettings,
@@ -1757,5 +1759,36 @@ describe('SettingsView CLI install', () => {
 
     await findByText(/One-click install is not available on this platform/);
     expect(queryByRole('button', { name: 'Install nagori CLI' })).toBeNull();
+  });
+});
+
+describe('SettingsView update check', () => {
+  const updateInfo = { version: '9.9.9', currentVersion: '0.2.0', downloadSupported: true };
+
+  it('opens the release page through the backend instead of a webview link', async () => {
+    vi.mocked(checkForUpdates).mockResolvedValue(updateInfo);
+    const view = await openAdvancedTab(macosCapabilities());
+
+    await fireEvent.click(view.getByRole('button', { name: 'Check now' }));
+    const viewRelease = await view.findByRole('button', { name: 'View release' });
+    // A plain `<a target="_blank">` is a no-op in the Tauri webview.
+    expect(view.container.querySelector('a[target="_blank"]')).toBeNull();
+
+    await fireEvent.click(viewRelease);
+    expect(openReleasePage).toHaveBeenCalledWith('9.9.9');
+  });
+
+  it('surfaces an error when the release page cannot be opened', async () => {
+    vi.mocked(checkForUpdates).mockResolvedValue(updateInfo);
+    vi.mocked(openReleasePage).mockRejectedValueOnce({
+      code: 'internal_error',
+      message: 'open(1) exited with 1',
+    });
+    const view = await openAdvancedTab(macosCapabilities());
+
+    await fireEvent.click(view.getByRole('button', { name: 'Check now' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'View release' }));
+
+    expect(await view.findByRole('alert')).toBeTruthy();
   });
 });

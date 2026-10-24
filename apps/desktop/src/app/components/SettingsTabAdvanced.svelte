@@ -18,11 +18,13 @@
     updateChecking: boolean;
     updateStatus: string | undefined;
     updateStatusKind: 'info' | 'error';
-    updateReleaseUrl: string | undefined;
+    updateReleaseVersion: string | undefined;
+    updateReleaseOpenError: string | undefined;
     updateDownloadSupported: boolean;
     debounceNumberMs: number;
     scheduleSave: (delay: number) => void;
     runUpdateCheck: () => Promise<void>;
+    openUpdateReleasePage: () => Promise<void>;
     capabilityStatusLabel: (capability: Capability) => string;
     capabilityDetail: (capability: Capability) => string;
     showSetupButton: (capability: Capability) => boolean;
@@ -37,11 +39,13 @@
     updateChecking,
     updateStatus,
     updateStatusKind,
-    updateReleaseUrl,
+    updateReleaseVersion,
+    updateReleaseOpenError,
     updateDownloadSupported,
     debounceNumberMs,
     scheduleSave,
     runUpdateCheck,
+    openUpdateReleasePage,
     capabilityStatusLabel,
     capabilityDetail,
     showSetupButton,
@@ -150,14 +154,17 @@
   {#if updateStatus}
     <p class="status" class:error={updateStatusKind === 'error'}>
       {updateStatus}
-      {#if updateReleaseUrl}
-        <a href={updateReleaseUrl} target="_blank" rel="noopener noreferrer">
+      {#if updateReleaseVersion}
+        <button type="button" class="release-link" onclick={openUpdateReleasePage}>
           {updateDownloadSupported
             ? t.settings.updates.viewRelease
             : t.settings.updates.downloadManual}
-        </a>
+        </button>
       {/if}
     </p>
+    {#if updateReleaseOpenError}
+      <p class="status error" role="alert">{updateReleaseOpenError}</p>
+    {/if}
   {/if}
 </fieldset>
 
@@ -235,7 +242,8 @@
     color: var(--muted, rgba(255, 255, 255, 0.6));
     font-size: 0.75rem;
   }
-  .capability-setup-link {
+  .capability-setup-link,
+  .release-link {
     appearance: none;
     background: transparent;
     border: none;
@@ -247,11 +255,17 @@
     text-decoration: underline;
     cursor: pointer;
   }
+  .release-link {
+    font-size: inherit;
+  }
   .capability-setup-link:hover,
-  .capability-setup-link:focus-visible {
+  .capability-setup-link:focus-visible,
+  .release-link:hover,
+  .release-link:focus-visible {
     color: var(--accent-strong, #93c5fd);
   }
-  .capability-setup-link:focus-visible {
+  .capability-setup-link:focus-visible,
+  .release-link:focus-visible {
     outline: 2px solid var(--accent, #60a5fa);
     outline-offset: 2px;
     border-radius: 2px;

@@ -88,6 +88,7 @@ fn main() {
             "open_settings",
             "close_settings",
             "check_for_updates",
+            "open_release_page",
             "cli_install_status",
             "install_cli",
         ]));

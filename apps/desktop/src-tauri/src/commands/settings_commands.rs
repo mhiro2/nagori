@@ -349,7 +349,7 @@ fn validate_external_open(
 /// Runs on a blocking thread: `open(1)` / `xdg-open` are synchronous
 /// fork+exec+wait spawns and `ShellExecuteW` can block while it resolves a
 /// handler, so doing this inline would stall the async worker thread.
-async fn open_external_url(url: String) -> CommandResult<()> {
+pub(crate) async fn open_external_url(url: String) -> CommandResult<()> {
     tauri::async_runtime::spawn_blocking(move || open_external_url_blocking(&url))
         .await
         .map_err(|err| CommandError::internal(format!("the open task did not complete: {err}")))?

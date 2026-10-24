@@ -375,6 +375,12 @@
           "markdownDescription": "Enables the open_palette command without any pre-configured scope."
         },
         {
+          "description": "Enables the open_release_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-release-page",
+          "markdownDescription": "Enables the open_release_page command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_settings command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-settings",
@@ -703,6 +709,12 @@
           "type": "string",
           "const": "deny-open-palette",
           "markdownDescription": "Denies the open_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_release_page command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-release-page",
+          "markdownDescription": "Denies the open_release_page command without any pre-configured scope."
         },
         {
           "description": "Denies the open_settings command without any pre-configured scope.",

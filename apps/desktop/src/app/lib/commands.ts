@@ -213,6 +213,12 @@ export const previewEntry = (entryId: string): Promise<void> =>
 
 export const checkForUpdates = (): Promise<UpdateInfo | null> => invoke('check_for_updates');
 
+// Opens the GitHub release page for `version` in the default browser. The
+// backend builds the URL from the version, so the renderer cannot redirect
+// the opener elsewhere.
+export const openReleasePage = (version: string): Promise<void> =>
+  invoke('open_release_page', { version });
+
 // Read-only state of the bundled `nagori` CLI relative to `~/.local/bin` and
 // the user's shell PATH — drives the Settings → CLI install affordance.
 export const cliInstallStatus = (): Promise<CliInstallStatus> => invoke('cli_install_status');

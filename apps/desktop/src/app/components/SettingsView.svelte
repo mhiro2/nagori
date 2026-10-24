@@ -7,6 +7,7 @@
     getCapabilities,
     getSettings,
     installCli,
+    openReleasePage,
     paletteShortcutBound as paletteShortcutBoundCmd,
     passwordManagerPreset,
     purgeDeletedEntries,
@@ -503,7 +504,8 @@
   // surface is read-only — instead of wiring `download_and_install`
   // we send the user to the published release so they can download
   // the bundle themselves and verify Apple's signature dialog.
-  let updateReleaseUrl: string | undefined = $state(undefined);
+  let updateReleaseVersion: string | undefined = $state(undefined);
+  let updateReleaseOpenError: string | undefined = $state(undefined);
 
   let updateDownloadSupported = $state(true);
   let purgeDeletedBusy = $state(false);
@@ -514,7 +516,8 @@
     if (updateChecking) return;
     updateChecking = true;
     updateStatus = undefined;
-    updateReleaseUrl = undefined;
+    updateReleaseVersion = undefined;
+    updateReleaseOpenError = undefined;
     try {
       const info = await checkForUpdates();
       updateStatusKind = 'info';
@@ -528,8 +531,7 @@
         updateStatus = info.downloadSupported
           ? t.settings.updates.available.replace('{version}', info.version)
           : t.settings.updates.availableManual.replace('{version}', info.version);
-        // Always-current redirect — never needs to be edited per release.
-        updateReleaseUrl = `https://github.com/mhiro2/nagori/releases/tag/v${info.version}`;
+        updateReleaseVersion = info.version;
       } else {
         updateStatus = t.settings.updates.upToDate;
       }
@@ -538,6 +540,18 @@
       updateStatus = describeError(err);
     } finally {
       updateChecking = false;
+    }
+  };
+
+  // The webview drops `target="_blank"` navigations, so the release link
+  // goes through the backend opener instead of a plain anchor.
+  const openUpdateReleasePage = async (): Promise<void> => {
+    if (!updateReleaseVersion) return;
+    updateReleaseOpenError = undefined;
+    try {
+      await openReleasePage(updateReleaseVersion);
+    } catch (err) {
+      updateReleaseOpenError = describeError(err);
     }
   };
 
@@ -1199,11 +1213,13 @@
               {updateChecking}
               {updateStatus}
               {updateStatusKind}
-              {updateReleaseUrl}
+              {updateReleaseVersion}
+              {updateReleaseOpenError}
               {updateDownloadSupported}
               debounceNumberMs={DEBOUNCE_NUMBER_MS}
               {scheduleSave}
               {runUpdateCheck}
+              {openUpdateReleasePage}
               {capabilityStatusLabel}
               {capabilityDetail}
               {showSetupButton}
