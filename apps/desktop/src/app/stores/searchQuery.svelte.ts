@@ -98,6 +98,17 @@ let queuedSearch: { request: SearchRequest; resolve: () => void } | undefined;
 // change) leaves `appliedTicket` behind `inflight`, so an action can tell the
 // displayed list is stale rather than trusting a query-string match.
 let appliedTicket = 0;
+// Set by a search that must land with the cursor on the first row (see
+// `nextSelectedIndex`) until a result set applies, the latest search fails, or
+// the user moves the cursor.
+let cursorToTopPending = false;
+
+/// The user moved the cursor themselves, so a reopen search still on its way
+/// must not pull it back to the top: the next Enter has to act on the row they
+/// picked, which a same-query refresh follows by id like any other.
+export const releaseCursorToTop = (): void => {
+  cursorToTopPending = false;
+};
 
 // Debounce keystrokes before hitting `searchClipboard`. The backend
 // serializes SQLite work behind a single `Mutex<Connection>`, so a burst of
@@ -117,8 +128,14 @@ let pendingQueryRaw: string | undefined;
 // how a background copy turned into pasting the wrong entry. When the selected
 // entry left the list, stay at the same position (clamped) so the cursor lands
 // on its neighbour instead of jumping back to the top.
+//
+// Showing the palette again is the exception: whatever was selected last time
+// is no longer what the user is aiming at (entries copied in the meantime sit
+// above it), so the result set the reopen applies starts at the top too.
+// `cursorToTopPending` carries that over to whichever search applies next, so a
+// capture refresh that supersedes the reopen's search still lands at the top.
 const nextSelectedIndex = (nextResults: SearchResultDto[], nextQuery: string): number => {
-  if (nextQuery !== searchState.appliedQuery) return 0;
+  if (cursorToTopPending || nextQuery !== searchState.appliedQuery) return 0;
   const index = searchState.selectedIndex;
   const previous = searchState.results[index];
   if (previous === undefined) return 0;
@@ -135,6 +152,7 @@ const applyResults = (results: SearchResultDto[], query: string): void => {
   searchState.results = results;
   searchState.appliedQuery = query;
   searchState.selectedIndex = selectedIndex;
+  cursorToTopPending = false;
   reconcileMultiSelect(results.map((r) => r.id));
 };
 
@@ -285,7 +303,12 @@ const executeSearch = async (request: SearchRequest): Promise<void> => {
       searchState.lastElapsedMs = response.totalElapsedMs;
     }
   } catch (err) {
-    if (isFreshest(ticket)) searchState.errorMessage = describeError(err);
+    if (isFreshest(ticket)) {
+      searchState.errorMessage = describeError(err);
+      // The list on screen stays as it was, so a later refresh of it must not
+      // pull the cursor back to the top after the user moved it.
+      cursorToTopPending = false;
+    }
   } finally {
     searchRunning = false;
     const next = queuedSearch;
@@ -386,10 +409,14 @@ const resultsSettled = (): boolean =>
 /// the hide would otherwise reappear above the previous query's results — and
 /// a search for an older query still in flight would land on top of them.
 /// Re-issuing the box's query makes it the latest request, which supersedes
-/// any such search.
+/// any such search. The query and filters carry over; the cursor does not and
+/// starts on the first row.
 export const resumePendingQuery = async (): Promise<void> => {
-  if (resultsSettled()) return;
-  await runQuery(searchState.query);
+  if (resultsSettled()) {
+    searchState.selectedIndex = 0;
+    return;
+  }
+  await runQuery(searchState.query, { cursorToTop: true });
 };
 
 /// Cancel any debounced query without running it. Use when the palette
@@ -402,12 +429,22 @@ export const cancelPendingQuery = (): void => {
   pendingQueryRaw = undefined;
 };
 
-export const runQuery = async (raw: string): Promise<void> => {
+/// `cursorToTop` puts the cursor on the first row now and keeps it there when
+/// the results land, even for a same-query refresh (the palette being shown
+/// again).
+export const runQuery = async (
+  raw: string,
+  options: { cursorToTop?: boolean } = {},
+): Promise<void> => {
   // Any explicit run preempts a pending debounced one.
   if (pendingQueryTimer !== undefined) {
     clearTimeout(pendingQueryTimer);
     pendingQueryTimer = undefined;
     pendingQueryRaw = undefined;
+  }
+  if (options.cursorToTop === true) {
+    searchState.selectedIndex = 0;
+    cursorToTopPending = true;
   }
   setQuery(raw);
   if (raw.trim() === '') {
@@ -443,6 +480,7 @@ export const resetSearchRuntimeForTest = (): void => {
   pendingQueryRaw = undefined;
   inflight = 0;
   appliedTicket = 0;
+  cursorToTopPending = false;
   searchRunning = false;
   queuedSearch = undefined;
   expandedLimit = undefined;

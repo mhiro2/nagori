@@ -1962,17 +1962,22 @@ not duplicate runtime logic.
   `runSessionEndingAction`) starts a new paste: the query, filters, and
   multi-selection are cleared, the inspector and expanded preview close, and
   the recent list shows. One dismissed without acting (Escape, clicking away,
-  the hotkey) resumes: the query, filters, and selection are kept, and the
-  query text is selected so typing starts a new search while ↑/↓ and Enter
+  the hotkey) resumes: the query, filters, and multi-selection are kept, and
+  the query text is selected so typing starts a new search while ↑/↓ and Enter
   continue the kept one. Active filters that survive a resume get a *Kept
   from last time* note beside the clear control until a filter changes. An
   action counts as an ending once its IPC succeeds, or when the backend's
   `paste_failed` event — sent only after the palette hid and the copy landed —
   arrives while one is in flight; a bare rejection (a copy that failed before
   the hide, or one the user clicked away from) does not, so it resumes. Either
-  way focus lands in the search box, and every hide closes the action
-  inspector, cancelling its run, so nothing from the dismissed session comes
-  back.
+  way focus lands in the search box and the cursor on the first row with the
+  list scrolled to the top: the entries copied since the last showing are the
+  likeliest target, while the row highlighted back then has been pushed down by
+  them. A same-query refresh otherwise keeps the cursor on the selected entry,
+  so the reopen's search carries a `cursorToTop` flag that also covers a
+  capture refresh superseding it; moving the cursor before it lands drops the
+  flag, so Enter acts on the row the user picked. Every hide closes the action inspector,
+  cancelling its run, so nothing from the dismissed session comes back.
 - Result paging (`stores/searchQuery`, `ResultList.svelte`). Each
   search asks for 50 rows; when a page fills, a footer below the listbox
   (outside it, so the listbox only owns options) says how many entries are

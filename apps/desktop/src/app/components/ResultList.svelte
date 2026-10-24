@@ -77,6 +77,13 @@
 
   let listEl: HTMLDivElement | undefined = $state();
 
+  // The palette being shown again starts at the newest entries. Moving the
+  // cursor to row 0 only scrolls when the index changes, so a list scrolled
+  // away with the cursor already on row 0 is reset here.
+  export const scrollToTop = (): void => {
+    if (listEl) listEl.scrollTop = 0;
+  };
+
   // Remember what the previous effect run saw so this run can tell *why* it
   // fired — and only scroll when that reason warrants it:
   //   - a new query → jump to the top of the fresh result set;

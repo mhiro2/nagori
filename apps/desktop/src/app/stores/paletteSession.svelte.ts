@@ -9,7 +9,9 @@
 //   the query selected (typing replaces it, arrows / Enter continue), and any
 //   filters kept from last time are called out until the user changes them.
 //
-// Either way, focus lands in the search box.
+// Either way, focus lands in the search box and the cursor on the first row
+// with the list scrolled to the top: the entries copied since the last showing
+// are the likeliest target, not the row that was highlighted back then.
 
 export type ReopenMode = 'fresh' | 'resume';
 
