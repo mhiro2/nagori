@@ -33,18 +33,20 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         if: runner.os == 'macOS'
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@v2.9.2
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # Installed with plain apt-get rather than a caching action on purpose.
@@ -72,7 +74,7 @@ jobs:
         run: make rust-test-doc
       - name: Coverage analysis
         if: matrix.os == 'macos-26'
-        uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
+        uses: k1LoW/octocov-action@v1.5.2
         with:
           config: .octocov.yaml
 
@@ -82,15 +84,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@v2.9.2
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-nextest
       - name: Run cargo check
@@ -109,19 +113,37 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@v2.9.2
       - name: Install cargo-deny
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-deny
       - name: Run cargo-deny
         run: make deny-check
+
+  actions-lock:
+    name: Actions lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gh-actions-lock
+        run: gh extension install github/gh-actions-lock --pin v0.4.0
+      - name: Verify actions.lock
+        run: gh actions-lock --verify
 
   desktop:
     name: Desktop
@@ -129,11 +151,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
+        uses: pnpm/setup@v3.1.1
         with:
           cache: true
           require-lockfile: true
@@ -146,7 +168,7 @@ jobs:
       - name: Run tests
         run: make desktop-test-coverage
       - name: Coverage analysis
-        uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
+        uses: k1LoW/octocov-action@v1.5.2
         with:
           config: .octocov.desktop.yaml
 
@@ -156,19 +178,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
       - name: Prefer rustup proxies over preinstalled Homebrew rustup-init
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           key: release-dryrun-macos
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
+        uses: pnpm/setup@v3.1.1
         with:
           cache: true
           require-lockfile: true
