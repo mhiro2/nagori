@@ -108,10 +108,9 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           targets: ${{ matrix.target }}
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: release-${{ matrix.target }}
+      # No cargo or pnpm store cache here: anything restored into a
+      # tag-triggered build ends up in the published bundles, so a poisoned
+      # entry from another workflow run would ship to users.
       # Plain apt-get, not a caching action: see the matching note in ci.yaml
       # for why awalsh128/cache-apt-pkgs-action silently produces an empty
       # cache once the mirror supersedes a pinned transitive dependency.
@@ -155,7 +154,6 @@ jobs:
       - name: Setup pnpm with runtime
         uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
         with:
-          cache: true
           require-lockfile: true
       - name: Build bundle and upload to draft release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
