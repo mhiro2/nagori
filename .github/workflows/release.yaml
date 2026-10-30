@@ -9,8 +9,7 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
 
 defaults:
   run:
@@ -32,6 +31,8 @@ jobs:
     # draft is authored exactly once here.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     outputs:
       releaseId: ${{ steps.draft.outputs.releaseId }}
     steps:
@@ -96,19 +97,21 @@ jobs:
             bundles: nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: release-${{ matrix.target }}
+      # No cargo or pnpm store cache here: anything restored into a
+      # tag-triggered build ends up in the published bundles, so a poisoned
+      # entry from another workflow run would ship to users.
       # Plain apt-get, not a caching action: see the matching note in ci.yaml
       # for why awalsh128/cache-apt-pkgs-action silently produces an empty
       # cache once the mirror supersedes a pinned transitive dependency.
@@ -150,12 +153,11 @@ jobs:
             exit 1
           fi
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
+        uses: pnpm/setup@v3.1.1
         with:
-          cache: true
           require-lockfile: true
       - name: Build bundle and upload to draft release
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        uses: tauri-apps/tauri-action@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater signing — generate with
@@ -194,6 +196,8 @@ jobs:
     needs: bundle
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - name: Build and upload latest.json
         # `tauri-action`'s `uploadVersionJSON` does a read-modify-write on the
@@ -276,9 +280,6 @@ jobs:
     needs: updater
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # `actions: write` lets the final step dispatch brew-bump. The job-level
-    # block replaces the workflow-level `contents: write`, so both scopes are
-    # listed here.
     permissions:
       contents: write
       actions: write
