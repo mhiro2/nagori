@@ -10,20 +10,20 @@ workflows:
         - 'dtolnay/rust-toolchain@master'
         - 'k1low/octocov-action@v1.5.2'
         - 'pnpm/setup@v3.1.1'
-        - 'swatinem/rust-cache@v2.9.2'
-        - 'taiki-e/install-action@v2.87.28'
+        - 'swatinem/rust-cache@v2.9.3'
+        - 'taiki-e/install-action@v2.87.31'
     '.github/workflows/e2e-linux.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@master'
-        - 'swatinem/rust-cache@v2.9.2'
+        - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/e2e-macos.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@master'
-        - 'swatinem/rust-cache@v2.9.2'
+        - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/e2e-windows.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@master'
-        - 'swatinem/rust-cache@v2.9.2'
+        - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/release.yaml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@master'
@@ -63,14 +63,14 @@ dependencies:
         commit: 'sha1-a0881977cd8ea73b1ed212236c99ca10dcc80cf4'
         owner_id: 21320719
         repo_id: 1235693694
-    'swatinem/rust-cache@v2.9.2':
-        ref: 'v2.9.2'
-        commit: 'sha1-6323deb102c322ba6fcbdcafc7e3dddab59af2b6'
+    'swatinem/rust-cache@v2.9.3':
+        ref: 'v2.9.3'
+        commit: 'sha1-d1527c8f67ef9af357290475d4af4b0fab8f12e0'
         owner_id: 580492
         repo_id: 298565987
-    'taiki-e/install-action@v2.87.28':
-        ref: 'v2.87.28'
-        commit: 'sha1-1168f6810a3cb30a3514bf5756a3b7f0422c6df8'
+    'taiki-e/install-action@v2.87.31':
+        ref: 'v2.87.31'
+        commit: 'sha1-1e29709c0ec63babbe8f266397a465f29a825f91'
         owner_id: 43724913
         repo_id: 442947557
     'tauri-apps/tauri-action@v1.0.0':
