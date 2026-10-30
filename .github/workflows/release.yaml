@@ -9,8 +9,7 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
 
 defaults:
   run:
@@ -32,6 +31,8 @@ jobs:
     # draft is authored exactly once here.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     outputs:
       releaseId: ${{ steps.draft.outputs.releaseId }}
     steps:
@@ -96,6 +97,8 @@ jobs:
             bundles: nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,6 +197,8 @@ jobs:
     needs: bundle
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - name: Build and upload latest.json
         # `tauri-action`'s `uploadVersionJSON` does a read-modify-write on the
@@ -276,9 +281,6 @@ jobs:
     needs: updater
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # `actions: write` lets the final step dispatch brew-bump. The job-level
-    # block replaces the workflow-level `contents: write`, so both scopes are
-    # listed here.
     permissions:
       contents: write
       actions: write
