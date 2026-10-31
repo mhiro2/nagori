@@ -181,25 +181,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_cancel_after_start_eventually_cancels() {
-        // The runtime path (cancel arrives mid-stream) is best-effort by
-        // nature; assert only that it terminates and never yields more than the
-        // full input — Cancelled is the expected outcome in practice.
-        let input = "x".repeat(200);
+    async fn request_cancel_mid_stream_ends_with_cancelled_prefix() {
+        // Wait for the first snapshot so the producer is provably running, then
+        // cancel. At 2 ms per character the 5 000-character input would take
+        // ~10 s to finish, so a `Done` here means the cancel was ignored rather
+        // than a lost scheduling race.
+        let input = "x".repeat(5_000);
         let mut handle = simulate_snapshot_stream(&input);
+        let first = handle
+            .recv()
+            .await
+            .expect("producer emits a first snapshot");
+        assert!(!first.is_terminal(), "first event must be a snapshot");
         handle.request_cancel();
 
-        let mut last = None;
-        while let Some(event) = handle.recv().await {
-            last = Some(event);
-        }
-        match last {
-            Some(
-                AppleStreamEvent::Cancelled { final_text } | AppleStreamEvent::Done { final_text },
-            ) => {
-                assert!(final_text.len() <= input.len());
-            }
-            other => panic!("expected a terminal event, got {other:?}"),
-        }
+        let mut events = vec![first];
+        events.extend(drain(&mut handle).await);
+        let Some(AppleStreamEvent::Cancelled { final_text }) = events.last() else {
+            panic!("expected Cancelled terminal, got {:?}", events.last());
+        };
+        assert!(!final_text.is_empty(), "the first snapshot was emitted");
+        assert!(
+            final_text.len() < input.len(),
+            "cancel must stop the producer before the tail is emitted"
+        );
+        assert!(input.starts_with(final_text.as_str()));
+        assert_eq!(&reconstruct(&events), final_text);
     }
 }
