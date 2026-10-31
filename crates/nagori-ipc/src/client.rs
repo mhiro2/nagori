@@ -311,26 +311,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn bounded_response_reader_rejects_oversized_lines() {
-        let (mut client, mut server) = tokio::io::duplex(MAX_IPC_RESPONSE_BYTES + 128);
-        let writer = tokio::spawn(async move {
-            let payload = vec![b'a'; MAX_IPC_RESPONSE_BYTES + 1];
-            server
-                .write_all(&payload)
-                .await
-                .expect("write should succeed");
-            server.write_all(b"\n").await.expect("write should succeed");
-        });
-
-        let err = crate::framing::read_line_bounded(&mut client, MAX_IPC_RESPONSE_BYTES, None)
-            .await
-            .expect_err("oversized response should fail");
-
-        assert!(matches!(err, crate::framing::FrameError::TooLarge));
-        writer.await.expect("writer task should finish");
-    }
-
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn oversized_request_is_rejected_before_send() {
@@ -381,25 +361,62 @@ mod tests {
         assert!(matches!(err, AppError::Platform(message) if message.contains("timed out")));
     }
 
-    #[tokio::test]
-    async fn bounded_response_reader_returns_line_without_newline() {
-        let (mut client, mut server) = tokio::io::duplex(64);
-        let writer = tokio::spawn(async move {
+    /// Run `exchange_envelope` against an in-memory peer that reads the
+    /// request line and then writes `response` verbatim.
+    #[cfg(any(unix, windows))]
+    async fn exchange_with_peer_response(response: Vec<u8>) -> Result<IpcResponse> {
+        use tokio::io::AsyncBufReadExt;
+
+        let (client, server) = tokio::io::duplex(MAX_IPC_RESPONSE_BYTES + 4096);
+        let peer = tokio::spawn(async move {
+            let mut server = tokio::io::BufReader::new(server);
+            let mut request = String::new();
             server
-                .write_all(br#"{"Health":{"ok":true,"version":"test"}}"#)
+                .read_line(&mut request)
                 .await
-                .expect("write should succeed");
+                .expect("peer should read the request line");
+            assert!(request.ends_with('\n'), "request must be newline-framed");
             server
-                .write_all(b"\nextra")
+                .get_mut()
+                .write_all(&response)
                 .await
-                .expect("write should succeed");
+                .expect("peer should write the response");
+            // Keep the stream open until the client is done reading so an
+            // early EOF cannot mask a reader that ignores the line cap.
+            server
         });
+        let token = AuthToken::generate().expect("token");
+        let result = exchange_envelope(client, &token, IpcRequest::Health).await;
+        drop(peer.await.expect("peer task should finish"));
+        result
+    }
 
-        let line = crate::framing::read_line_bounded(&mut client, MAX_IPC_RESPONSE_BYTES, None)
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn exchange_rejects_a_response_over_the_line_cap() {
+        let mut response = vec![b'a'; MAX_IPC_RESPONSE_BYTES + 1];
+        response.push(b'\n');
+        let err = exchange_with_peer_response(response)
             .await
-            .expect("line should be read");
+            .expect_err("an oversized response must be refused");
+        assert!(
+            matches!(&err, AppError::Platform(message) if message.contains("too large")),
+            "got {err:?}",
+        );
+    }
 
-        assert_eq!(line, br#"{"Health":{"ok":true,"version":"test"}}"#);
-        writer.await.expect("writer task should finish");
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn exchange_decodes_the_first_line_and_ignores_trailing_bytes() {
+        let mut response = br#"{"Health":{"ok":true,"version":"test"}}"#.to_vec();
+        response.extend_from_slice(b"\nextra");
+        let response = exchange_with_peer_response(response)
+            .await
+            .expect("a well-formed response should decode");
+        let IpcResponse::Health(health) = response else {
+            panic!("expected a Health response, got {response:?}");
+        };
+        assert!(health.ok);
+        assert_eq!(health.version, "test");
     }
 }
