@@ -906,6 +906,142 @@ pub(crate) fn show_main_palette(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::tray_should_be_visible;
+    use std::collections::BTreeMap;
+
+    /// Drops `//` and `/* */` comments from TypeScript source while leaving
+    /// string literals intact, so an event URL's `nagori://` survives.
+    fn strip_ts_comments(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut chars = source.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(ch) = chars.next() {
+            if let Some(open) = quote {
+                out.push(ch);
+                if ch == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                } else if ch == open {
+                    quote = None;
+                }
+                continue;
+            }
+            match (ch, chars.peek()) {
+                ('/', Some('/')) => while chars.next_if(|&next| next != '\n').is_some() {},
+                ('/', Some('*')) => {
+                    chars.next();
+                    let mut prev = '\0';
+                    for next in chars.by_ref() {
+                        if prev == '*' && next == '/' {
+                            break;
+                        }
+                        prev = next;
+                    }
+                    out.push(' ');
+                }
+                ('\'' | '"' | '`', _) => {
+                    quote = Some(ch);
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    /// Parses the `TAURI_EVENTS` object literal of `lib/tauri.ts` into
+    /// `key -> event name`.
+    fn frontend_event_names(source: &str) -> BTreeMap<String, String> {
+        let source = strip_ts_comments(source);
+        let start = source
+            .find("export const TAURI_EVENTS = {")
+            .expect("lib/tauri.ts must declare TAURI_EVENTS");
+        let body = &source[start + "export const TAURI_EVENTS = {".len()..];
+        let end = body
+            .find("} as const")
+            .expect("TAURI_EVENTS must end with `} as const`");
+        body[..end]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let (key, value) = entry
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("unexpected TAURI_EVENTS entry: {entry}"));
+                let value = value.trim();
+                let unquoted = ['\'', '"'].into_iter().find_map(|quote| {
+                    value
+                        .strip_prefix(quote)
+                        .and_then(|value| value.strip_suffix(quote))
+                });
+                let value = unquoted.unwrap_or_else(|| {
+                    panic!("TAURI_EVENTS value must be a quoted literal: {entry}")
+                });
+                (key.trim().to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frontend_event_parser_ignores_comments_but_not_urls() {
+        let source = "export const TAURI_EVENTS = {\n  \
+            // leading comment, with: a colon\n  \
+            navigate: 'nagori://navigate', // trailing comment\n  \
+            /* block\n     comment */ pasteFailed: \"nagori://paste_failed\",\n  \
+            aiDone: 'nagori://ai/done' /* inline */,\n\
+            } as const;\n";
+        let expected: BTreeMap<String, String> = [
+            ("navigate", "nagori://navigate"),
+            ("pasteFailed", "nagori://paste_failed"),
+            ("aiDone", "nagori://ai/done"),
+        ]
+        .into_iter()
+        .map(|(key, name)| (key.to_owned(), name.to_owned()))
+        .collect();
+        assert_eq!(frontend_event_names(source), expected);
+    }
+
+    #[test]
+    fn every_emitted_event_matches_the_frontend_subscription() {
+        // The frontend subscribes through `TAURI_EVENTS`; a renamed literal on
+        // either side compiles fine and silently drops the event. Compare the
+        // whole table in both directions so a new frontend subscription
+        // without an emitter (or vice versa) fails too.
+        use crate::commands::ai_commands::{
+            AI_CANCELLED_EVENT, AI_DELTA_EVENT, AI_DONE_EVENT, AI_ERROR_EVENT, AI_REPLACE_EVENT,
+            AI_STARTED_EVENT,
+        };
+        use crate::hotkey::{HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT};
+
+        let frontend = frontend_event_names(include_str!("../../src/app/lib/tauri.ts"));
+        let backend: BTreeMap<String, String> = [
+            ("navigate", super::NAVIGATE_EVENT),
+            ("clipboardChanged", super::CLIPBOARD_CHANGED_EVENT),
+            ("captureSkipped", super::CAPTURE_SKIPPED_EVENT),
+            ("pasteFailed", super::PASTE_FAILED_EVENT),
+            (
+                "clearHistoryRequested",
+                super::CLEAR_HISTORY_REQUESTED_EVENT,
+            ),
+            ("hotkeyRegisterFailed", HOTKEY_REGISTER_FAILED_EVENT),
+            ("hotkeyRegisterResolved", HOTKEY_REGISTER_RESOLVED_EVENT),
+            (
+                "paletteShortcutChanged",
+                super::PALETTE_SHORTCUT_CHANGED_EVENT,
+            ),
+            ("settingsChanged", super::SETTINGS_CHANGED_EVENT),
+            ("aiStarted", AI_STARTED_EVENT),
+            ("aiDelta", AI_DELTA_EVENT),
+            ("aiReplace", AI_REPLACE_EVENT),
+            ("aiDone", AI_DONE_EVENT),
+            ("aiError", AI_ERROR_EVENT),
+            ("aiCancelled", AI_CANCELLED_EVENT),
+        ]
+        .into_iter()
+        .map(|(key, name)| (key.to_owned(), name.to_owned()))
+        .collect();
+        assert_eq!(frontend, backend);
+    }
 
     #[test]
     fn tray_stays_visible_while_the_palette_shortcut_is_unbound() {
