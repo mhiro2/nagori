@@ -162,6 +162,9 @@ try {
     $DaemonProc = Start-Process -FilePath $Bin -ArgumentList $daemonArgs `
         -RedirectStandardOutput $DaemonLog -RedirectStandardError $DaemonErrLog `
         -NoNewWindow -PassThru
+    # Touch the handle now so the Process object keeps it open; without
+    # that, `ExitCode` reads as $null once the daemon has exited.
+    $null = $DaemonProc.Handle
 
     Wait-For 'daemon health' { Invoke-CliSilent @('daemon', 'status'); $true }
 
@@ -671,7 +674,14 @@ try {
     if (-not $DaemonProc.HasExited) {
         throw "daemon did not exit after 'nagori daemon stop'"
     }
+    # Exiting is not enough: a panic or error on the shutdown path still
+    # ends the process, so require a clean exit status.
+    $DaemonProc.WaitForExit()
+    $daemonExitCode = $DaemonProc.ExitCode
     $DaemonProc = $null
+    if ($daemonExitCode -ne 0) {
+        throw "daemon exited with status $daemonExitCode after 'nagori daemon stop'"
+    }
 
     Write-Host 'e2e ok'
     Cleanup -ExitCode 0

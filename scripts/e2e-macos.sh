@@ -549,6 +549,14 @@ if kill -0 "${DAEMON_PID}" 2>/dev/null; then
   echo "daemon did not exit after 'nagori daemon stop'" >&2
   exit 1
 fi
+# Reap the process and surface a non-zero exit from the shutdown path,
+# which `kill -0` alone would hide.
+DAEMON_STATUS=0
+wait "${DAEMON_PID}" || DAEMON_STATUS=$?
 DAEMON_PID=""
+if (( DAEMON_STATUS != 0 )); then
+  echo "daemon exited with status ${DAEMON_STATUS} after 'nagori daemon stop'" >&2
+  exit 1
+fi
 
 echo "e2e ok"
