@@ -444,14 +444,24 @@ mod tests {
     }
 
     #[test]
-    fn make_preview_caps_at_max_chars_counting_the_ellipsis() {
-        let preview = make_preview("abcdef", 4);
-        assert_eq!(preview, "abc…");
-        assert_eq!(preview.chars().count(), 4);
-    }
-
-    #[test]
-    fn make_preview_compacts_whitespace_without_truncating_short_text() {
-        assert_eq!(make_preview("  a\t\n b  ", 180), "a b");
+    fn make_preview_compacts_whitespace_then_caps_chars_including_the_ellipsis() {
+        for (text, max_chars, expected) in [
+            // Runs of any whitespace collapse to one space and the ends trim.
+            ("  one\n\n two\tthree  ", 100, "one two three"),
+            // Compaction happens before the length check, so this fits.
+            ("a \t\n b", 3, "a b"),
+            // No truncation when the text fits exactly.
+            ("abc", 3, "abc"),
+            // The ellipsis counts toward `max_chars`, in chars not bytes.
+            ("abcdef", 4, "abc…"),
+            ("日本語テキスト", 3, "日本…"),
+            ("abc", 1, "…"),
+            // Zero cannot fit even the ellipsis.
+            ("abc", 0, ""),
+        ] {
+            let preview = make_preview(text, max_chars);
+            assert_eq!(preview, expected, "make_preview({text:?}, {max_chars})");
+            assert!(preview.chars().count() <= max_chars);
+        }
     }
 }
