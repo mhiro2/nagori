@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use nagori_core::Result;
 use nagori_platform::{
-    PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState, PermissionStatus,
-    run_blocking_with_timeout,
+    BlockingError, PermissionCheckContext, PermissionChecker, PermissionKind, PermissionState,
+    PermissionStatus, run_blocking_with_timeout,
 };
 use std::time::Duration;
 
@@ -69,58 +69,65 @@ impl PermissionChecker for MacosPermissionChecker {
         // blocking pool so a wedged WindowServer can't pin the tokio worker.
         // `accessibility_status` already runs its probe this way — this keeps
         // the request path from diverging into a bare synchronous FFI call.
-        let granted = match run_blocking_with_timeout(
-            "macos_accessibility_request",
-            PROBE_TIMEOUT,
-            move || accessibility_trusted_with_prompt(prompt),
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                // A timed-out request can't be read as granted or denied;
-                // surface the degraded row whose Setup card still deep-links
-                // the user into System Settings.
-                return Ok(PermissionStatus {
-                    kind: PermissionKind::Accessibility,
-                    state: PermissionState::Denied,
-                    message: Some(format!(
-                        "Accessibility request did not complete ({})",
-                        err.describe()
-                    )),
-                    reason_code: Some("probe_timed_out".to_owned()),
-                    setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
-                    docs_url: None,
-                });
-            }
-        };
-        Ok(if granted {
-            PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Granted,
-                message: None,
-                reason_code: None,
-                setup_route: None,
-                docs_url: None,
-            }
-        } else {
-            // `prompt = true` and `granted = false` means either:
-            //   (a) the TCC dialog is now showing and the user has not
-            //       responded yet, or
-            //   (b) TCC has already recorded a Deny / unknown identity for
-            //       this bundle so the dialog was suppressed.
-            // Either way the actionable next step is the Setup card
-            // (which deep-links into System Settings); the message stays
-            // a terse CLI-friendly summary.
-            PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Denied,
-                message: Some("Accessibility not trusted".to_owned()),
-                reason_code: Some("accessibility_not_trusted".to_owned()),
-                setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
-                docs_url: None,
-            }
-        })
+        let probe =
+            run_blocking_with_timeout("macos_accessibility_request", PROBE_TIMEOUT, move || {
+                accessibility_trusted_with_prompt(prompt)
+            })
+            .await;
+        Ok(accessibility_request_row(probe))
+    }
+}
+
+/// Map the outcome of an `AXIsProcessTrustedWithOptions` request onto the
+/// Accessibility row returned to the caller.
+fn accessibility_request_row(probe: std::result::Result<bool, BlockingError>) -> PermissionStatus {
+    match probe {
+        // A timed-out request can't be read as granted or denied; surface the
+        // degraded row whose Setup card still deep-links the user into System
+        // Settings.
+        Err(err) => PermissionStatus {
+            kind: PermissionKind::Accessibility,
+            state: PermissionState::Denied,
+            message: Some(format!(
+                "Accessibility request did not complete ({})",
+                err.describe()
+            )),
+            reason_code: Some("probe_timed_out".to_owned()),
+            setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+            docs_url: None,
+        },
+        Ok(true) => granted_accessibility_row(),
+        // `prompt = true` and `granted = false` means either:
+        //   (a) the TCC dialog is now showing and the user has not
+        //       responded yet, or
+        //   (b) TCC has already recorded a Deny / unknown identity for
+        //       this bundle so the dialog was suppressed.
+        // Either way the actionable next step is the Setup card
+        // (which deep-links into System Settings); the message stays
+        // a terse CLI-friendly summary.
+        Ok(false) => denied_accessibility_row(),
+    }
+}
+
+const fn granted_accessibility_row() -> PermissionStatus {
+    PermissionStatus {
+        kind: PermissionKind::Accessibility,
+        state: PermissionState::Granted,
+        message: None,
+        reason_code: None,
+        setup_route: None,
+        docs_url: None,
+    }
+}
+
+fn denied_accessibility_row() -> PermissionStatus {
+    PermissionStatus {
+        kind: PermissionKind::Accessibility,
+        state: PermissionState::Denied,
+        message: Some("Accessibility not trusted".to_owned()),
+        reason_code: Some("accessibility_not_trusted".to_owned()),
+        setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
+        docs_url: None,
     }
 }
 
@@ -136,58 +143,48 @@ impl PermissionChecker for MacosPermissionChecker {
 async fn accessibility_status(ctx: &PermissionCheckContext) -> PermissionStatus {
     // `AXIsProcessTrusted()` is a synchronous FFI call into the
     // Accessibility/TCC subsystem; bound it so a wedged WindowServer can't
-    // pin the runtime. A timed-out probe can't be read as either Granted or
-    // Denied, so surface a degraded row (the Setup card still deep-links the
-    // user into System Settings) rather than a misleading "granted".
-    let trusted = match run_blocking_with_timeout(
+    // pin the runtime.
+    let probe = run_blocking_with_timeout(
         "macos_accessibility_probe",
         PROBE_TIMEOUT,
         accessibility_trusted,
     )
-    .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            return PermissionStatus {
-                kind: PermissionKind::Accessibility,
-                state: PermissionState::Denied,
-                message: Some(format!(
-                    "Accessibility probe did not complete ({})",
-                    err.describe()
-                )),
-                reason_code: Some("probe_timed_out".to_owned()),
-                setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
-                docs_url: None,
-            };
-        }
-    };
-    if trusted {
-        return PermissionStatus {
+    .await;
+    accessibility_row(probe, ctx)
+}
+
+/// Map an `AXIsProcessTrusted()` probe outcome plus the persisted prompt
+/// history onto the Accessibility row. Kept free of FFI so every
+/// combination is testable regardless of the host's TCC state.
+fn accessibility_row(
+    probe: std::result::Result<bool, BlockingError>,
+    ctx: &PermissionCheckContext,
+) -> PermissionStatus {
+    match probe {
+        // A timed-out probe can't be read as either Granted or Denied, so
+        // surface a degraded row (the Setup card still deep-links the user
+        // into System Settings) rather than a misleading "granted".
+        Err(err) => PermissionStatus {
             kind: PermissionKind::Accessibility,
-            state: PermissionState::Granted,
-            message: None,
-            reason_code: None,
-            setup_route: None,
+            state: PermissionState::Denied,
+            message: Some(format!(
+                "Accessibility probe did not complete ({})",
+                err.describe()
+            )),
+            reason_code: Some("probe_timed_out".to_owned()),
+            setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
             docs_url: None,
-        };
-    }
-    if ctx.accessibility_prompted_at.is_none() {
-        return PermissionStatus {
+        },
+        Ok(true) => granted_accessibility_row(),
+        Ok(false) if ctx.accessibility_prompted_at.is_none() => PermissionStatus {
             kind: PermissionKind::Accessibility,
             state: PermissionState::NotDetermined,
             message: Some("Accessibility not prompted".to_owned()),
             reason_code: Some("accessibility_not_prompted".to_owned()),
             setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
             docs_url: None,
-        };
-    }
-    PermissionStatus {
-        kind: PermissionKind::Accessibility,
-        state: PermissionState::Denied,
-        message: Some("Accessibility not trusted".to_owned()),
-        reason_code: Some("accessibility_not_trusted".to_owned()),
-        setup_route: Some(ACCESSIBILITY_SETUP_ROUTE.to_owned()),
-        docs_url: None,
+        },
+        Ok(false) => denied_accessibility_row(),
     }
 }
 
@@ -288,75 +285,115 @@ mod tests {
     use super::*;
     use time::OffsetDateTime;
 
-    fn find_accessibility(statuses: &[PermissionStatus]) -> &PermissionStatus {
-        statuses
-            .iter()
-            .find(|s| s.kind == PermissionKind::Accessibility)
-            .expect("checker reports an Accessibility row")
-    }
-
-    #[tokio::test]
-    async fn check_reports_not_determined_without_prompt_history() {
-        // This test only proves the discrimination logic — on macOS CI
-        // the `AXIsProcessTrusted()` call returns `false` (no signed
-        // bundle), so we can assert the NotDetermined path. On non-macOS
-        // hosts the stub also returns `false`, hitting the same branch.
-        let checker = MacosPermissionChecker;
-        let ctx = PermissionCheckContext::default();
-        let statuses = checker.check(&ctx).await.expect("check ok");
-        let accessibility = find_accessibility(&statuses);
-        // `accessibility_status` probes `AXIsProcessTrusted()` under a 2 s
-        // timeout. Running under `cargo test` without a WindowServer session
-        // the FFI call can exceed that, and the production path then reports a
-        // degraded `Denied` (reason `probe_timed_out`). That bypasses the
-        // prompt-history discrimination this test covers, so skip rather than
-        // fail — the environment couldn't answer, which is not a logic bug.
-        if accessibility.state == PermissionState::Denied
-            && accessibility.reason_code.as_deref() == Some("probe_timed_out")
-        {
-            eprintln!("skipping: accessibility probe timed out in this environment");
-            return;
-        }
-        // We can't force `AXIsProcessTrusted()` to a specific value
-        // here, but the test environment never has it granted (no
-        // signed bundle on CI), so NotDetermined is the expected
-        // outcome when prompt history is empty.
-        assert!(
-            matches!(
-                accessibility.state,
-                PermissionState::NotDetermined | PermissionState::Granted
-            ),
-            "expected NotDetermined (no history) or Granted (locally-trusted dev shell), got {:?}",
-            accessibility.state,
-        );
-        if accessibility.state == PermissionState::NotDetermined {
-            assert_eq!(
-                accessibility.reason_code.as_deref(),
-                Some("accessibility_not_prompted")
-            );
-            assert_eq!(
-                accessibility.setup_route.as_deref(),
-                Some("setup/accessibility")
-            );
+    fn timeout() -> BlockingError {
+        BlockingError::Timeout {
+            op: "macos_accessibility_probe",
+            limit: PROBE_TIMEOUT,
         }
     }
 
-    #[tokio::test]
-    async fn check_reports_denied_when_prompt_history_present() {
-        let checker = MacosPermissionChecker;
-        let ctx = PermissionCheckContext {
+    #[test]
+    fn accessibility_row_combines_probe_result_with_prompt_history() {
+        let never = PermissionCheckContext::default();
+        let prompted = PermissionCheckContext {
             accessibility_prompted_at: Some(OffsetDateTime::UNIX_EPOCH),
         };
-        let statuses = checker.check(&ctx).await.expect("check ok");
-        let accessibility = find_accessibility(&statuses);
-        // Same caveat as above: on a granted dev shell this returns
-        // Granted, but the only "Denied vs NotDetermined" discrimination
-        // we want to cover here flows through the same branch — once
-        // prompted, NotDetermined must not appear.
+        let route = Some(ACCESSIBILITY_SETUP_ROUTE);
+        let cases = [
+            (Ok(true), &never, PermissionState::Granted, None, None),
+            (Ok(true), &prompted, PermissionState::Granted, None, None),
+            (
+                Ok(false),
+                &never,
+                PermissionState::NotDetermined,
+                Some("accessibility_not_prompted"),
+                route,
+            ),
+            (
+                Ok(false),
+                &prompted,
+                PermissionState::Denied,
+                Some("accessibility_not_trusted"),
+                route,
+            ),
+            (
+                Err(timeout()),
+                &never,
+                PermissionState::Denied,
+                Some("probe_timed_out"),
+                route,
+            ),
+            (
+                Err(timeout()),
+                &prompted,
+                PermissionState::Denied,
+                Some("probe_timed_out"),
+                route,
+            ),
+        ];
+        for (probe, ctx, state, reason, setup_route) in cases {
+            let label = format!("{probe:?} / prompted={:?}", ctx.accessibility_prompted_at);
+            let row = accessibility_row(probe, ctx);
+            assert_eq!(row.kind, PermissionKind::Accessibility, "{label}");
+            assert_eq!(row.state, state, "{label}");
+            assert_eq!(row.reason_code.as_deref(), reason, "{label}");
+            assert_eq!(row.setup_route.as_deref(), setup_route, "{label}");
+        }
+    }
+
+    #[test]
+    fn accessibility_request_row_reports_grant_denial_and_timeout() {
+        let granted = accessibility_request_row(Ok(true));
+        assert_eq!(granted.state, PermissionState::Granted);
+        assert_eq!(granted.reason_code, None);
+
+        let denied = accessibility_request_row(Ok(false));
+        assert_eq!(denied.state, PermissionState::Denied);
+        assert_eq!(
+            denied.reason_code.as_deref(),
+            Some("accessibility_not_trusted")
+        );
+        assert_eq!(
+            denied.setup_route.as_deref(),
+            Some(ACCESSIBILITY_SETUP_ROUTE)
+        );
+
+        let timed_out = accessibility_request_row(Err(timeout()));
+        assert_eq!(timed_out.state, PermissionState::Denied);
+        assert_eq!(timed_out.reason_code.as_deref(), Some("probe_timed_out"));
         assert!(
-            !matches!(accessibility.state, PermissionState::NotDetermined),
-            "prompt history should rule out NotDetermined, got {:?}",
-            accessibility.state,
+            timed_out
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("did not return within")),
+            "timeout row should carry the probe detail: {:?}",
+            timed_out.message
+        );
+    }
+
+    #[tokio::test]
+    async fn check_reports_every_permission_kind_in_order() {
+        // The live probes decide the Clipboard / Accessibility states, which
+        // depend on the host; the row set and the unprobed rows do not.
+        let statuses = MacosPermissionChecker
+            .check(&PermissionCheckContext::default())
+            .await
+            .expect("check ok");
+        let kinds: Vec<_> = statuses.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PermissionKind::Clipboard,
+                PermissionKind::Accessibility,
+                PermissionKind::InputMonitoring,
+                PermissionKind::Notifications,
+                PermissionKind::AutoLaunch,
+            ]
+        );
+        assert!(
+            statuses[2..]
+                .iter()
+                .all(|s| s.state == PermissionState::Unsupported)
         );
     }
 }
