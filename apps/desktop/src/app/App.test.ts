@@ -1,22 +1,10 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./lib/tauri', () => ({
-  isTauri: vi.fn(() => false),
-  currentWindowLabel: vi.fn(() => undefined),
-  subscribe: vi.fn((_event, _handler, onReady) => {
-    onReady?.();
-    return () => {};
-  }),
-  TAURI_EVENTS: {
-    navigate: 'nagori://navigate',
-    pasteFailed: 'nagori://paste_failed',
-    captureSkipped: 'nagori://capture_skipped',
-    hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
-    hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
-    settingsChanged: 'nagori://settings_changed',
-  },
-}));
+vi.mock('./lib/tauri', async () => {
+  const { tauriMock } = await import('./test-helpers/moduleMocks');
+  return tauriMock({ isTauri: vi.fn(() => false) });
+});
 
 vi.mock('./lib/commands', () => ({
   hidePalette: vi.fn(async () => undefined),
@@ -27,18 +15,17 @@ vi.mock('./lib/commands', () => ({
   notifyPasteFailure: vi.fn(async () => undefined),
 }));
 
-// The App shell wires keybindings + window blur; the route children are out
-// of scope for these tests and bring their own DOM dependencies, so stub the
-// route components down to inert anchors.
-vi.mock('./routes/PaletteRoute.svelte', async () => {
-  const Stub = (await import('./test-helpers/StubComponent.svelte')).default;
-  return { default: Stub };
-});
+// The App shell wires keybindings + window blur; the views behind each route
+// are out of scope for these tests and bring their own DOM dependencies, so
+// stub them down to inert anchors. The route wrappers stay real, and each
+// view gets its own test id so a test can tell which one the shell mounted.
+vi.mock('./components/Palette.svelte', async () => ({
+  default: (await import('./test-helpers/PaletteStub.svelte')).default,
+}));
 
-vi.mock('./routes/SettingsRoute.svelte', async () => {
-  const Stub = (await import('./test-helpers/StubComponent.svelte')).default;
-  return { default: Stub };
-});
+vi.mock('./components/SettingsView.svelte', async () => ({
+  default: (await import('./test-helpers/SettingsViewStub.svelte')).default,
+}));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
@@ -55,7 +42,7 @@ vi.mock('./stores/searchQuery.svelte', () => ({
 
 import App from './App.svelte';
 import { getPermissions, hidePalette, lastHotkeyFailure, notifyPasteFailure } from './lib/commands';
-import { isTauri, subscribe } from './lib/tauri';
+import { currentWindowLabel, isTauri, subscribe } from './lib/tauri';
 import type { AppSettings, PermissionStatus } from './lib/types';
 import { captureSkippedState, clearCaptureSkip } from './stores/captureSkipped.svelte';
 import {
@@ -71,6 +58,7 @@ import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
 beforeEach(() => {
   vi.mocked(isTauri).mockReturnValue(false);
+  vi.mocked(currentWindowLabel).mockReturnValue(undefined);
   vi.mocked(lastHotkeyFailure).mockResolvedValue(null);
   vi.mocked(subscribe).mockImplementation((_event, _handler, onReady) => {
     onReady?.();
@@ -188,13 +176,88 @@ const settingsSnapshot = (overrides: Partial<AppSettings>): AppSettings =>
 
 const grantedPermission: PermissionStatus = { kind: 'accessibility', state: 'granted' };
 
-describe('App shell', () => {
-  it('mounts the palette route by default', () => {
-    const { container } = render(App);
-    expect(container.querySelector('.app-shell')).toBeTruthy();
-    expect(viewState.current).toBe('palette');
+// Event names the shell subscribes to only on behalf of the palette window.
+const PALETTE_ONLY_EVENTS = [
+  'nagori://navigate',
+  'nagori://paste_failed',
+  'nagori://capture_skipped',
+  'nagori://settings_changed',
+];
+
+const paletteOnlySubscriptions = (): string[] =>
+  vi
+    .mocked(subscribe)
+    .mock.calls.map(([event]) => event as string)
+    .filter((event) => PALETTE_ONLY_EVENTS.includes(event));
+
+describe('App routing', () => {
+  it('mounts the palette view in the palette window', () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('main');
+    const { queryByTestId, container } = render(App);
+    expect(queryByTestId('palette-view')).not.toBeNull();
+    expect(queryByTestId('settings-view')).toBeNull();
+    expect(container.querySelector('.app-shell.settings-window')).toBeNull();
+    expect(paletteOnlySubscriptions().toSorted()).toEqual(PALETTE_ONLY_EVENTS.toSorted());
   });
 
+  it('mounts the in-window settings view when the view store starts there', () => {
+    showSettings();
+    const { queryByTestId } = render(App);
+    expect(queryByTestId('settings-view')).not.toBeNull();
+    expect(queryByTestId('palette-view')).toBeNull();
+  });
+
+  it('swaps the mounted view as the view store changes', async () => {
+    const { queryByTestId } = render(App);
+    expect(queryByTestId('palette-view')).not.toBeNull();
+
+    showSettings();
+    await waitFor(() => {
+      expect(queryByTestId('settings-view')).not.toBeNull();
+    });
+    expect(queryByTestId('palette-view')).toBeNull();
+
+    showPalette();
+    await waitFor(() => {
+      expect(queryByTestId('palette-view')).not.toBeNull();
+    });
+    expect(queryByTestId('settings-view')).toBeNull();
+  });
+
+  it('mounts only the settings view in the settings window, whatever the view store says', () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    const { queryByTestId, container } = render(App);
+    expect(viewState.current).toBe('palette');
+    expect(queryByTestId('settings-view')).not.toBeNull();
+    expect(queryByTestId('palette-view')).toBeNull();
+    expect(container.querySelector('.app-shell.settings-window')).not.toBeNull();
+  });
+
+  it('leaves blur and Escape to the OS in the settings window', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    render(App);
+    await fireEvent.blur(window);
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(hidePalette).not.toHaveBeenCalled();
+    expect(paletteOnlySubscriptions()).toEqual([]);
+  });
+
+  it('keeps hotkey failures out of the settings window as toasts', async () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    const { fire } = captureHotkeyFailureHandler();
+    const { queryByText } = render(App);
+    fire({ hotkey: 'Cmd+Shift+V', error: 'shortcut already registered' });
+    // The watcher still feeds the shared store (Settings renders it inline)...
+    await waitFor(() => {
+      expect(hotkeyFailureState.failure?.error).toBe('shortcut already registered');
+    });
+    // ...but the toast is palette-only.
+    expect(queryByText('shortcut already registered')).toBeNull();
+  });
+});
+
+describe('App shell', () => {
   it('returns to the palette when Escape fires while on the settings route', async () => {
     showSettings();
     render(App);
