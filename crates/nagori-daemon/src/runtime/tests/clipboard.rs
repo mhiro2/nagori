@@ -7,7 +7,10 @@ use nagori_core::{
 use nagori_ipc::{GetEntryRequest, IpcRequest, IpcResponse, ListPinnedRequest};
 
 use super::super::*;
-use super::{CountingPaste, runtime_with_memory_clipboard, runtime_with_paste};
+use super::{
+    CountingPaste, add_file_list_entry, add_image_entry, runtime_with_memory_clipboard,
+    runtime_with_paste,
+};
 
 #[tokio::test]
 async fn add_text_refuses_text_that_would_not_fit_the_transport_once_escaped() {
@@ -655,7 +658,9 @@ async fn copy_entries_combined_caps_the_selection_before_reading_bodies() {
 #[tokio::test]
 async fn copy_entries_combined_skips_sensitive_and_non_text_rows() {
     // Bulk copy must not concatenate a body the single-row path would have
-    // dropped to preview-only, and an image row has no text to contribute.
+    // dropped to preview-only, and image / file-list rows have no text to
+    // contribute. A mixed selection must copy only the public text rows,
+    // in selection order, without failing on the rows it skips.
     let (runtime, clipboard) = runtime_with_memory_clipboard();
     let public = runtime
         .add_text("public body".to_owned())
@@ -665,14 +670,20 @@ async fn copy_entries_combined_skips_sensitive_and_non_text_rows() {
         .add_text("token ghp_abcdefghijklmnopqrstuvwxyz123456".to_owned())
         .await
         .expect("add secret");
+    let image = add_image_entry(&runtime).await;
+    let files = add_file_list_entry(&runtime).await;
+    let second_public = runtime
+        .add_text("second body".to_owned())
+        .await
+        .expect("add second public");
 
     runtime
-        .copy_entries_combined(&[public, secret])
+        .copy_entries_combined(&[public, image, secret, files, second_public])
         .await
         .expect("combined copy should succeed");
 
     let combined = clipboard.current_text().expect("clipboard text");
-    assert_eq!(combined, "public body");
+    assert_eq!(combined, "public body\nsecond body",);
     assert!(
         !combined.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"),
         "a secret body must never be joined into a bulk copy: {combined:?}",
@@ -681,15 +692,28 @@ async fn copy_entries_combined_skips_sensitive_and_non_text_rows() {
 
 #[tokio::test]
 async fn copy_entries_combined_refuses_a_selection_with_no_copyable_text() {
+    // Live rows without a text body and ids that have vanished both
+    // contribute nothing; a selection made only of those is refused without
+    // touching the clipboard or storing a combined row.
     let (runtime, clipboard) = runtime_with_memory_clipboard();
-    let err = runtime
-        .copy_entries_combined(&[EntryId::new()])
-        .await
-        .expect_err("a selection of vanished ids must be refused");
+    let image = add_image_entry(&runtime).await;
+    let files = add_file_list_entry(&runtime).await;
+    let before = runtime.list_recent(100).await.expect("list recent").len();
 
-    assert!(
-        matches!(err, nagori_core::AppError::InvalidInput(_)),
-        "expected InvalidInput error, got {err:?}",
-    );
+    for selection in [vec![image, files], vec![EntryId::new()]] {
+        let err = runtime
+            .copy_entries_combined(&selection)
+            .await
+            .expect_err("a selection with no copyable text must be refused");
+        assert!(
+            matches!(err, nagori_core::AppError::InvalidInput(_)),
+            "expected InvalidInput error, got {err:?}",
+        );
+    }
     assert_eq!(clipboard.current_text(), None);
+    assert_eq!(
+        runtime.list_recent(100).await.expect("list recent").len(),
+        before,
+        "no combined row may be stored",
+    );
 }

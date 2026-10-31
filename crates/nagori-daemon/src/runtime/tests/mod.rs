@@ -17,7 +17,9 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use nagori_core::Result;
+use nagori_core::{
+    ClipboardContent, EntryFactory, EntryId, EntryRepository, FileListContent, ImageContent, Result,
+};
 use nagori_platform::{
     MemoryClipboard, PasteResult, PermissionCheckContext, PermissionKind, PermissionState,
     PermissionStatus,
@@ -32,6 +34,35 @@ fn runtime_with_memory_clipboard() -> (NagoriRuntime, Arc<MemoryClipboard>) {
         .clipboard(clipboard.clone())
         .build_for_test();
     (runtime, clipboard)
+}
+
+/// Inserts a minimal image entry (no text representation) and returns its id.
+async fn add_image_entry(runtime: &NagoriRuntime) -> EntryId {
+    let content = ClipboardContent::Image(ImageContent {
+        width: Some(1),
+        height: Some(1),
+        byte_count: 4,
+        mime_type: Some("image/png".to_owned()),
+        pending_bytes: Some(vec![0u8, 1, 2, 3].into()),
+    });
+    runtime
+        .store
+        .insert(EntryFactory::from_content(content, None, None))
+        .await
+        .expect("image entry should be inserted")
+}
+
+/// Inserts a file-list entry (no text body to combine) and returns its id.
+async fn add_file_list_entry(runtime: &NagoriRuntime) -> EntryId {
+    let content = ClipboardContent::FileList(FileListContent {
+        paths: vec!["/tmp/report.pdf".to_owned()],
+        display_text: "report.pdf".to_owned(),
+    });
+    runtime
+        .store
+        .insert(EntryFactory::from_content(content, None, None))
+        .await
+        .expect("file-list entry should be inserted")
 }
 
 /// A runtime wired with a `MockBackend`-backed `AppleNative` engine so AI
