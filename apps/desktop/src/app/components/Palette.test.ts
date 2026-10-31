@@ -1175,8 +1175,10 @@ describe('Palette', () => {
       confirmClearHistory: false,
     } as unknown as NonNullable<typeof settingsState.settings>;
     let fireClearRequested: (() => void) | undefined;
+    // Match the wire name the tray emits, spelled out here rather than read
+    // back from the event map, so the palette must listen on exactly it.
     vi.mocked(subscribe).mockImplementation(((name: string, handler: () => void) => {
-      if (name === TAURI_EVENTS.clearHistoryRequested) fireClearRequested = handler;
+      if (name === 'nagori://clear_history_requested') fireClearRequested = handler;
       return () => undefined;
     }) as unknown as typeof subscribe);
 
