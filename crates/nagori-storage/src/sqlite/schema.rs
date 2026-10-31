@@ -30,9 +30,11 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (106, ENABLE_FTS_SECURE_DELETE),
 ];
 
-/// Highest schema version supported by this binary. A DB whose
-/// `user_version` already exceeds this is from a newer build and we refuse
-/// to run against it rather than silently downgrade.
+/// Highest schema version supported by this binary. [`apply_migrations`]
+/// derives the same ceiling from the list it runs and refuses a DB whose
+/// `user_version` already exceeds it (a newer build) rather than silently
+/// downgrading.
+#[cfg(test)]
 pub(crate) const SCHEMA_VERSION: i64 = const_max_version(MIGRATIONS);
 
 const fn const_max_version(list: &[(i64, &str)]) -> i64 {
@@ -48,14 +50,22 @@ const fn const_max_version(list: &[(i64, &str)]) -> i64 {
 }
 
 pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
+    apply_migrations(conn, MIGRATIONS)
+}
+
+/// Migration driver behind [`run_migrations`], taking the migration list
+/// as an argument so tests can run the real apply/stamp/commit sequence
+/// against a list containing a deliberately failing step.
+pub(crate) fn apply_migrations(conn: &mut Connection, migrations: &[(i64, &str)]) -> Result<()> {
+    let schema_version = const_max_version(migrations);
     let current: i64 = conn
         .query_row("SELECT user_version FROM pragma_user_version", [], |row| {
             row.get(0)
         })
         .map_err(storage_err)?;
-    if current > SCHEMA_VERSION {
+    if current > schema_version {
         return Err(AppError::storage(format!(
-            "database schema version {current} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
+            "database schema version {current} is newer than this build supports ({schema_version}); refusing to open",
         )));
     }
     // Fresh databases sit at `user_version = 0`. Pre-release we keep a
@@ -65,7 +75,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
     // shape predates the consolidated schema — fail loud rather than
     // silently re-running the CREATE TABLE IF NOT EXISTS statements
     // against a structurally different table.
-    let first_version = MIGRATIONS.first().map_or(0, |(version, _)| *version);
+    let first_version = migrations.first().map_or(0, |(version, _)| *version);
     if current > 0 && current < first_version {
         return Err(AppError::storage(format!(
             "database schema version {current} predates the consolidated pre-release schema ({first_version}); delete the local DB and let it be recreated",
@@ -77,7 +87,7 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
         current
     };
     let mut applied_any = false;
-    for (version, sql) in MIGRATIONS {
+    for (version, sql) in migrations {
         if *version <= current {
             continue;
         }
@@ -107,9 +117,9 @@ pub(crate) fn run_migrations(conn: &mut Connection) -> Result<()> {
                 row.get(0)
             })
             .map_err(storage_err)?;
-        if locked_version > SCHEMA_VERSION {
+        if locked_version > schema_version {
             return Err(AppError::storage(format!(
-                "database schema version {locked_version} is newer than this build supports ({SCHEMA_VERSION}); refusing to open",
+                "database schema version {locked_version} is newer than this build supports ({schema_version}); refusing to open",
             )));
         }
         if *version <= locked_version {

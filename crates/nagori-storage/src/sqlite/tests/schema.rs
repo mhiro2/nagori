@@ -1,38 +1,75 @@
 use rusqlite::params;
 
-use super::super::schema::SCHEMA_VERSION;
+use super::super::schema::{self, SCHEMA_VERSION};
 use super::super::*;
 
 #[test]
-fn run_migrations_rolls_back_user_version_on_failure() {
-    // Arrange a version-3 migration whose SQL is intentionally
-    // invalid. Because the version stamp is concatenated *after*
-    // the schema body in a single `execute_batch`, SQLite must
-    // reject the whole batch and roll back the transaction — so
-    // `user_version` must stay at the last successfully applied
-    // version even though `MIGRATIONS` advertised a newer one.
+fn failed_migration_rolls_back_its_ddl_data_and_version_stamp() {
+    // Run the real migration driver over the shipped list plus two
+    // appended steps: one that succeeds and one that creates a table,
+    // writes a row and then hits invalid SQL. The successful step must
+    // stay committed at its own version, while the failing step must
+    // leave neither its DDL, its row, nor its `user_version` stamp.
     let mut conn = Connection::open_in_memory().unwrap();
-    run_migrations(&mut conn).unwrap();
-    let baseline: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(baseline, SCHEMA_VERSION);
+    let good_version = SCHEMA_VERSION + 1;
+    let bad_version = SCHEMA_VERSION + 2;
+    let mut migrations = schema::MIGRATIONS.to_vec();
+    migrations.push((good_version, "CREATE TABLE applied_step (id INTEGER);"));
+    migrations.push((
+        bad_version,
+        "CREATE TABLE half_applied (id INTEGER);
+         INSERT INTO half_applied (id) VALUES (1);
+         INSERT INTO applied_step (id) VALUES (1);
+         NOT VALID SQL;",
+    ));
 
-    let bad_version = SCHEMA_VERSION + 1;
-    let bad_migration = "CREATE TABLE valid (id INTEGER); NOT VALID SQL;";
-    let tx = conn.transaction().unwrap();
-    let stamped = format!("{bad_migration}\nPRAGMA user_version = {bad_version};");
-    let exec = tx.execute_batch(&stamped);
-    assert!(exec.is_err(), "bad migration must fail to execute");
-    drop(tx); // implicit rollback
+    let err = schema::apply_migrations(&mut conn, &migrations)
+        .expect_err("the invalid migration must surface as an error");
+    assert!(
+        matches!(err, AppError::Storage { .. }),
+        "migration failure must map to a storage error, got: {err}",
+    );
 
-    let after: i64 = conn
+    let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(
-        after, baseline,
-        "user_version must not advance when migration SQL fails"
+        version, good_version,
+        "user_version must stop at the last migration that committed",
     );
+    let table_exists = |name: &str| -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        table_exists("applied_step"),
+        "the earlier migration must stay committed"
+    );
+    assert!(
+        !table_exists("half_applied"),
+        "DDL from the failed migration must be rolled back",
+    );
+    let leaked_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM applied_step", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        leaked_rows, 0,
+        "data written by the failed migration must be rolled back",
+    );
+
+    // Re-running with the bad step fixed resumes from the committed
+    // version instead of re-applying the earlier step.
+    migrations.pop();
+    migrations.push((bad_version, "CREATE TABLE half_applied (id INTEGER);"));
+    schema::apply_migrations(&mut conn, &migrations).expect("fixed migration applies");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, bad_version);
 }
 
 #[test]
@@ -105,22 +142,26 @@ fn concurrent_migrations_do_not_double_apply() {
     );
 }
 
-#[tokio::test]
-async fn pooled_connections_enable_secure_delete() {
+#[test]
+fn every_pooled_connection_enables_secure_delete() {
     // Deleted clipboard rows must have their freed pages zeroed, not just
     // unlinked, so a hard-delete leaves nothing recoverable from the
-    // freelist. `secure_delete` is a per-connection setting, so assert it
-    // is live on a connection handed out by the pool rather than only on
-    // the one `configure_connection` was called with at open time.
-    let store = SqliteStore::open_memory().unwrap();
-    let conn = store.conn().unwrap();
-    let secure_delete: i64 = conn
-        .query_row("PRAGMA secure_delete", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(
-        secure_delete, 1,
-        "secure_delete must be ON for every pooled connection"
-    );
+    // freelist. `secure_delete` is a per-connection setting, so open a
+    // file-backed store (whose pool holds several physical connections)
+    // and hold every slot at once: acquiring them one at a time would just
+    // hand back the same idle connection.
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(temp.path().join("nagori.db")).unwrap();
+    let held: Vec<_> = (0..POOL_CAPACITY).map(|_| store.conn().unwrap()).collect();
+    for (slot, conn) in held.iter().enumerate() {
+        let secure_delete: i64 = conn
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            secure_delete, 1,
+            "secure_delete must be ON for pooled connection #{slot}",
+        );
+    }
 }
 
 /// The `(gram, entry_id)` index duplicated a strict prefix of the ngrams
