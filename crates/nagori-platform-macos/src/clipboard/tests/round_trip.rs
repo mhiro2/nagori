@@ -4,7 +4,8 @@ use super::{TINY_PNG, TINY_TIFF};
 
 use nagori_core::{
     AppError, ClipboardContent, ClipboardData, ClipboardEntry, ClipboardSnapshot, EntryFactory,
-    ImageContent, RepresentationDataRef, RepresentationRole, StoredClipboardRepresentation,
+    ImageContent, ImageFormat, RepresentationDataRef, RepresentationRole,
+    StoredClipboardRepresentation, detect_image_signature,
 };
 use nagori_platform::{ClipboardReader, ClipboardWriter};
 use objc2_app_kit::{NSPasteboardTypeFileURL, NSPasteboardTypeTIFF};
@@ -74,33 +75,38 @@ fn read_pasteboard_file_url_string() -> Option<String> {
     }
 }
 
+/// Smallest valid 1x1 red GIF (`GIF89a`).
+const TINY_GIF: &[u8] = &[
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0xf0, 0x00, 0x00, 0xff, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+];
+
+/// Smallest valid 1x1 red lossless WebP.
+const TINY_WEBP: &[u8] = &[
+    0x52, 0x49, 0x46, 0x46, 0x1c, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x0f, 0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x07, 0x10, 0xfd, 0x8f, 0xfe, 0x07, 0x22,
+    0xa2, 0xff, 0x01, 0x00,
+];
+
+/// JPEG start-of-image plus a JFIF APP0 marker: enough for the capture-side
+/// signature sniffer to admit it as `image/jpeg`.
+const JPEG_HEADER: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0x02];
+
 /// Cover PNG / TIFF / text / unsupported-mime / multi-rep cases in one
 /// test so they share a single serialized run against the system
 /// pasteboard. Splitting them into separate `#[tokio::test]`s would let
 /// cargo's thread pool race them on the singleton `NSPasteboard`.
+///
+/// It overwrites whatever the developer has copied, so it only runs on
+/// request: `cargo nextest run -p nagori-platform-macos --run-ignored only`.
+/// A host whose pasteboard cannot be opened fails instead of passing
+/// without checking anything.
 #[tokio::test]
+#[ignore = "overwrites the system pasteboard"]
 #[allow(clippy::too_many_lines)]
 async fn write_entry_round_trips_image_and_text() {
-    // This test writes to the *shared* system pasteboard, so a plain
-    // `cargo test` on a dev machine would clobber whatever the developer has
-    // copied. Gate it behind an opt-in env var so the default test run leaves
-    // the clipboard untouched; CI / e2e set `NAGORI_PASTEBOARD_TESTS=1`.
-    if std::env::var_os("NAGORI_PASTEBOARD_TESTS").is_none() {
-        eprintln!(
-            "skipping write_entry_round_trips_image_and_text: \
-             set NAGORI_PASTEBOARD_TESTS=1 to run pasteboard-clobbering tests"
-        );
-        return;
-    }
-    let clipboard = match MacosClipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(AppError::Platform(message))
-            if message.contains("selected clipboard is not supported") =>
-        {
-            return;
-        }
-        Err(err) => panic!("init MacosClipboard: {err:?}"),
-    };
+    let clipboard = MacosClipboard::new().expect("init MacosClipboard");
 
     let png_entry = image_entry(TINY_PNG.to_vec(), "image/png");
     clipboard
@@ -159,18 +165,16 @@ async fn write_entry_round_trips_image_and_text() {
     // through its UTI to confirm the publisher's match arm fires and
     // AppKit accepts the bytes verbatim.
     for (mime, uti, bytes) in [
-        (
-            "image/jpeg",
-            UTI_JPEG,
-            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0x02][..],
-        ),
-        ("image/gif", UTI_GIF, &[0xCA, 0xFE, 0xBA, 0xBE][..]),
-        (
-            "image/webp",
-            UTI_WEBP,
-            &[0x52, 0x49, 0x46, 0x46, 0x77, 0x65, 0x62, 0x70][..],
-        ),
+        ("image/jpeg", UTI_JPEG, JPEG_HEADER),
+        ("image/gif", UTI_GIF, TINY_GIF),
+        ("image/webp", UTI_WEBP, TINY_WEBP),
     ] {
+        // Fixtures must look like what capture would actually store.
+        assert_eq!(
+            detect_image_signature(bytes).map(ImageFormat::mime_type),
+            Some(mime),
+            "{mime} fixture must pass signature admission"
+        );
         let entry = image_entry(bytes.to_vec(), mime);
         clipboard
             .write_entry(&entry)
