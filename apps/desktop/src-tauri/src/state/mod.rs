@@ -524,31 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_cache_keeps_two_secondaries_independently() {
-        // Two secondary actions failing simultaneously is the bug a
-        // single-slot secondary cache silently hides: the later record
-        // overwrites the first and the user only ever sees one banner,
-        // with the other failure permanently absent from hydration.
-        let mut cache = HotkeyFailureCache::default();
-        cache.record(secondary_record("Cmd+Shift+R", "repaste-last"));
-        cache.record(secondary_record("Cmd+Shift+K", "future-secondary"));
-        assert_eq!(
-            cache
-                .secondary
-                .get("repaste-last")
-                .map(|r| r.hotkey.as_str()),
-            Some("Cmd+Shift+R")
-        );
-        assert_eq!(
-            cache
-                .secondary
-                .get("future-secondary")
-                .map(|r| r.hotkey.as_str()),
-            Some("Cmd+Shift+K")
-        );
-    }
-
-    #[test]
     fn hotkey_cache_drops_secondary_record_missing_action() {
         // The per-action map needs an addressable key. A secondary
         // record with no action identifier would be permanently

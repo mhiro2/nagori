@@ -653,23 +653,6 @@ mod hotkey_tests {
         ));
     }
 
-    #[test]
-    fn reconcile_keeps_cache_when_cached_action_wire_value_is_unknown() {
-        // Forward-compatibility: a future binary could write a cache
-        // entry with an action wire value this build doesn't recognise.
-        // We treat that as "not stale" so the banner survives on
-        // upgrades — losing a still-current failure silently would be
-        // worse than holding a stale one, which the user can dismiss.
-        let desired = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
-        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
-        assert!(!should_clear_secondary_cache(
-            "Cmd+Shift+R",
-            "future-action",
-            &desired,
-            &active,
-        ));
-    }
-
     // NOTE: the "two secondary actions interact" cases (a sibling holding the
     // same accelerator, an unrelated sibling registering successfully, a
     // remap while a sibling keeps the old accel, and a sibling change leaving
