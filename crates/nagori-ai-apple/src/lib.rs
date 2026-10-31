@@ -42,7 +42,7 @@ pub use pump::SnapshotPump;
 pub use stream::{StreamHandle, simulate_snapshot_stream};
 
 #[cfg(target_os = "macos")]
-pub use bridge::{bridge_snapshot_stream, hello};
+pub use bridge::bridge_snapshot_stream;
 
 /// Whether the Mac is on AC power: `Some(true)` on AC, `Some(false)` on
 /// battery, `None` if it could not be determined. The daemon's semantic indexer

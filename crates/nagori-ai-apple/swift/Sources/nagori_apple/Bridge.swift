@@ -9,12 +9,6 @@ import IOKit.ps
 // Swift functions directly (swift-rs#31). The Rust side declares matching
 // `extern "C"` signatures in `bridge.rs`.
 
-/// Sanity check that the Swift static library is linked and callable.
-@_cdecl("nagori_apple_hello_c")
-public func nagoriAppleHelloC() -> Int32 {
-    return 42
-}
-
 /// Probe `SystemLanguageModel.default.availability` and collapse it into a
 /// stable integer code consumed by `AppleAvailability::from_probe_code`:
 /// 0 = available, 1 = deviceNotEligible, 2 = appleIntelligenceNotEnabled,

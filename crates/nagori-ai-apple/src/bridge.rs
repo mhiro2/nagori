@@ -25,7 +25,6 @@ use crate::pump::SnapshotPump;
 use crate::stream::StreamHandle;
 
 unsafe extern "C" {
-    fn nagori_apple_hello_c() -> i32;
     fn nagori_apple_fm_availability_c() -> i32;
     fn nagori_apple_stream_snapshots_c(
         source_ptr: *const c_char,
@@ -148,14 +147,6 @@ pub(crate) fn probe_real_availability() -> AppleAvailability {
     // SAFETY: a no-argument C function returning an `i32` status code.
     let code = unsafe { nagori_apple_fm_availability_c() };
     AppleAvailability::from_probe_code(code)
-}
-
-/// Calls the Swift sanity export; returns `42` when the static library is
-/// linked and callable.
-#[must_use]
-pub fn hello() -> i32 {
-    // SAFETY: a no-argument C function returning an `i32`.
-    unsafe { nagori_apple_hello_c() }
 }
 
 /// Streams cumulative snapshots of `text` through the Swift bridge.
@@ -930,29 +921,23 @@ mod tests {
 
     use futures::StreamExt;
 
-    use super::{bridge_snapshot_stream, hello, probe_real_availability, spawn_bridge};
-    use crate::availability::AppleAvailability;
+    use super::{bridge_snapshot_stream, nagori_apple_fm_availability_c, spawn_bridge};
     use crate::event::AppleStreamEvent;
 
+    /// Live smoke test of the availability FFI. The mapping of each code is
+    /// covered by `availability::tests::probe_code_mapping`; this only checks
+    /// the framework answers with one of the codes `Bridge.swift` documents,
+    /// so a new or garbled code fails instead of silently becoming `Unknown`.
     #[test]
-    fn hello_world_bridge_is_linked() {
-        assert_eq!(hello(), 42);
-    }
-
-    #[test]
-    #[ignore = "requires Apple Intelligence enabled; probes the live framework"]
-    fn real_availability_returns_a_known_variant() {
-        // On CI / un-enabled hosts this is `AppleIntelligenceNotEnabled`; the
-        // point is that the FFI round-trips into a recognised enum value.
-        let availability = probe_real_availability();
-        assert!(matches!(
-            availability,
-            AppleAvailability::Available
-                | AppleAvailability::DeviceNotEligible
-                | AppleAvailability::AppleIntelligenceNotEnabled
-                | AppleAvailability::ModelNotReady
-                | AppleAvailability::Unknown
-        ));
+    #[ignore = "probes the live FoundationModels framework"]
+    fn real_availability_probe_returns_a_documented_code() {
+        // SAFETY: a no-argument C function returning an `i32` status code.
+        let code = unsafe { nagori_apple_fm_availability_c() };
+        eprintln!("live availability probe code: {code}");
+        assert!(
+            matches!(code, 0..=3 | 255),
+            "undocumented availability probe code {code}"
+        );
     }
 
     #[tokio::test]
