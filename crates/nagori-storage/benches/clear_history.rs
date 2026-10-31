@@ -1,16 +1,18 @@
 //! Clear-history latency harness: how long "the history disappears" takes on a
-//! large corpus, split into the two phases the UX cares about separately.
+//! large corpus, timing the shipped storage calls behind each clear path.
 //!
-//! * `hard_delete` — today's `clear_non_pinned()`: one transaction that deletes
-//!   every non-pinned row, cascading into representations / blobs / embeddings /
-//!   thumbnails / FTS + ngram index, with `secure_delete` zeroing every freed
-//!   page, then `wal_checkpoint(TRUNCATE)`. Nothing disappears from the palette
-//!   until this commits.
-//! * `tombstone` — the proposed "hide now" step: a single `UPDATE` that stamps
-//!   `deleted_at` on every non-pinned row. Every live query already filters
-//!   `deleted_at IS NULL`, so this is what the user waits for.
-//! * `purge` — the deferred reclaim (`purge_deleted()`), moved off the
-//!   interactive path by the split.
+//! * `hard_delete` — `clear_non_pinned()`, the `clear_on_quit` path: one
+//!   transaction that deletes every non-pinned row, cascading into
+//!   representations / blobs / embeddings / thumbnails / FTS + ngram index,
+//!   with `secure_delete` zeroing every freed page, then
+//!   `wal_checkpoint(TRUNCATE)`.
+//! * `tombstone` — `tombstone_non_pinned()`, the storage step the interactive
+//!   "Clear history" waits on: it hard-deletes the non-pinned secret rows
+//!   (about 1% of the corpus here) and stamps `deleted_at` on the rest in one
+//!   `BEGIN IMMEDIATE` transaction. The runtime's cache invalidation and
+//!   maintenance kick around it are not timed.
+//! * `purge` — `purge_deleted()`, the deferred reclaim the maintenance worker
+//!   runs after a tombstone clear.
 //!
 //! Run with `cargo bench -p nagori-storage --bench clear_history`.
 //! `NAGORI_CLEAR_BENCH_SIZE=20000` shrinks the corpus (default 100k).
@@ -19,7 +21,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use nagori_core::{EntryFactory, EntryRepository};
+use nagori_core::{EntryFactory, EntryRepository, Sensitivity};
 use nagori_storage::SqliteStore;
 use rusqlite::Connection;
 use tokio::runtime::{Builder, Runtime};
@@ -36,7 +38,12 @@ fn gen_text(idx: usize) -> String {
 fn populate(store: &SqliteStore, n: usize, rt: &Runtime) {
     rt.block_on(async {
         for idx in 0..n {
-            let entry = EntryFactory::from_text(gen_text(idx));
+            let mut entry = EntryFactory::from_text(gen_text(idx));
+            // ~1% secret rows, which the tombstone clear deletes outright
+            // instead of hiding, so that statement is part of the timing.
+            if idx % 100 == 50 {
+                entry.sensitivity = Sensitivity::Secret;
+            }
             let id = store.insert(entry).await.expect("insert");
             // ~1% pinned, matching the "curated snippets survive a clear"
             // shape the real corpus has.
@@ -122,7 +129,7 @@ fn main() {
         mib(db_size_bytes(&db_path))
     );
 
-    // Baseline: today's single-transaction hard delete.
+    // `clear_on_quit`: the single-transaction hard delete.
     {
         let store = SqliteStore::open(&baseline_path).expect("open baseline");
         let start = Instant::now();
@@ -130,21 +137,20 @@ fn main() {
         report("hard_delete", start.elapsed(), purged, &baseline_path);
     }
 
-    // Proposed phase 1: stamp `deleted_at` on every non-pinned live row.
+    // Interactive "Clear history": secret purge + tombstone of the rest.
     {
-        let conn = Connection::open(&db_path).expect("open for tombstone");
+        let store = SqliteStore::open(&db_path).expect("open for tombstone");
         let start = Instant::now();
-        let changed = conn
-            .execute(
-                "UPDATE entries SET deleted_at = '2026-01-01T00:00:00Z'
-                 WHERE pinned = 0 AND deleted_at IS NULL",
-                [],
-            )
-            .expect("tombstone");
+        let changed = rt.block_on(async {
+            store
+                .tombstone_non_pinned()
+                .await
+                .expect("tombstone_non_pinned")
+        });
         report("tombstone", start.elapsed(), changed, &db_path);
     }
 
-    // Proposed phase 2: the deferred reclaim, off the interactive path.
+    // The deferred reclaim that follows a tombstone clear.
     {
         let store = SqliteStore::open(&db_path).expect("reopen store");
         let start = Instant::now();
