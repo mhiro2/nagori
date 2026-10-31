@@ -421,46 +421,19 @@ describe('App shell', () => {
     expect(hotkeyFailureState.failure?.error).toBe('secondary clash');
   });
 
-  it('keeps the hotkey toast when a sibling secondary action resolves', async () => {
-    // Two secondaries can fail at the same time; the displayed banner
-    // belongs to one specific action. A resolved event scoped to a
-    // *different* secondary action must not silently wipe it — the
-    // backend cache keys per action, and the live store mirrors that
-    // discrimination so the user keeps seeing the still-failing one.
-    const { fire, fireResolved } = captureHotkeyFailureHandler();
-    render(App);
-    fire({
-      hotkey: 'Cmd+Shift+R',
-      error: 'repaste clash',
-      kind: 'secondary',
-      action: 'repaste-last',
-    });
-    await waitFor(() => {
-      expect(hotkeyFailureState.failure?.error).toBe('repaste clash');
-    });
-    fireResolved({ kind: 'secondary', action: 'clear-history' });
-    expect(hotkeyFailureState.failure?.error).toBe('repaste clash');
-    fireResolved({ kind: 'secondary', action: 'repaste-last' });
-    await waitFor(() => {
-      expect(hotkeyFailureState.failure).toBeUndefined();
-    });
-  });
-
   it('surfaces the next cached failure after a matching resolve clears the displayed one', async () => {
-    // Two secondaries fail simultaneously. The displayed banner belongs
-    // to whichever the backend's cache returned first; when that one
-    // resolves, the per-action cache still holds the other. The store
-    // must re-hydrate so the user sees the still-failing sibling
-    // instead of an empty toast slot that hides a real issue.
+    // The primary and the repaste-last secondary fail together. The banner
+    // shows the secondary; once it resolves, the backend cache still holds
+    // the primary failure, so the store must re-hydrate and show it instead
+    // of an empty toast slot that hides a real issue. The cached failure only
+    // lands once the resolve has actually cleared the displayed one.
     vi.mocked(isTauri).mockReturnValue(true);
-    // First call (initial hydration) returns null — nothing yet — so
-    // the live emit fires the banner. After the resolve, the next
-    // call returns the still-cached sibling failure.
+    // First call (initial hydration) returns null — nothing yet — so the
+    // live emit fires the banner. After the resolve, the next call returns
+    // the still-cached primary failure.
     vi.mocked(lastHotkeyFailure).mockResolvedValueOnce(null).mockResolvedValueOnce({
-      hotkey: 'Cmd+Shift+K',
-      error: 'clear-history still clashing',
-      kind: 'secondary',
-      action: 'clear-history',
+      hotkey: 'Cmd+Shift+V',
+      error: 'palette hotkey still clashing',
     });
     const { fire, fireResolved } = captureHotkeyFailureHandler();
     const { findByText } = render(App);
@@ -472,8 +445,8 @@ describe('App shell', () => {
     });
     await findByText('repaste clash');
     fireResolved({ kind: 'secondary', action: 'repaste-last' });
-    await findByText('clear-history still clashing');
-    expect(hotkeyFailureState.failure?.action).toBe('clear-history');
+    await findByText('palette hotkey still clashing');
+    expect(hotkeyFailureState.failure?.kind).toBeUndefined();
   });
 
   it('re-queries the cache when a resolve interleaves with the initial hydration', async () => {
@@ -506,15 +479,13 @@ describe('App shell', () => {
           }),
       )
       .mockResolvedValueOnce({
-        hotkey: 'Cmd+Shift+K',
-        error: 'sibling still failing',
-        kind: 'secondary',
-        action: 'clear-history',
+        hotkey: 'Cmd+Shift+V',
+        error: 'primary still failing',
       });
     const { fireResolved } = captureHotkeyFailureHandler();
     const { findByText } = render(App);
     // The initial hydration query has fired and is pending; now the
-    // resolve event arrives for an unrelated secondary action.
+    // repaste-last secondary resolves.
     fireResolved({ kind: 'secondary', action: 'repaste-last' });
     // Resolve the pending initial query with the now-stale entry for
     // the action that was just resolved.
@@ -524,8 +495,8 @@ describe('App shell', () => {
       kind: 'secondary',
       action: 'repaste-last',
     });
-    await findByText('sibling still failing');
-    expect(hotkeyFailureState.failure?.action).toBe('clear-history');
+    await findByText('primary still failing');
+    expect(hotkeyFailureState.failure?.kind).toBeUndefined();
   });
 
   it('does not let a stale cache hydration overwrite a fresh live failure', async () => {
