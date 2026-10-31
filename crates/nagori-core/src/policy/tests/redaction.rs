@@ -253,25 +253,6 @@ fn store_redacted_strips_private_key_from_persisted_body() {
 }
 
 #[test]
-fn store_redacted_strips_credit_card_from_persisted_body() {
-    let raw = "card 4111 1111 1111 1111 expires soon";
-    let mut entry = EntryFactory::from_text(raw);
-    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
-    entry.sensitivity = classifier.classify(&entry).sensitivity;
-    assert_eq!(entry.sensitivity, Sensitivity::Secret);
-
-    let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
-
-    assert_eq!(action, SecretAction::Persist);
-    let body = entry.plain_text().expect("redacted body").to_owned();
-    assert!(
-        !body.contains("4111"),
-        "credit card digits leaked into stored entry: {body:?}",
-    );
-    assert!(body.contains("[REDACTED ••••1111]"));
-}
-
-#[test]
 fn classifier_redact_applies_user_regexes() {
     // The redacted preview must run through user regex patterns too —
     // otherwise users who configure a private prefix (e.g. INTERNAL-…)
@@ -714,22 +695,20 @@ fn redact_text_scrubs_private_keys() {
 #[test]
 fn otp_redacted_preview_does_not_leak_raw_code() {
     // OTPs classify as Secret and `redacted_preview` runs through
-    // `classifier.redact`, which now strips the bare 6–8 digit body —
-    // so the preview is `[REDACTED]` rather than the raw code.
-    let entry = EntryFactory::from_text("482915");
+    // `classifier.redact`, which strips the bare 6–8 digit body — so the
+    // preview is exactly the marker, with no digit of the code left over.
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
-    let result = classifier.classify(&entry);
-    assert_eq!(result.sensitivity, Sensitivity::Secret);
-    let preview = result.redacted_preview.expect("Secret must yield preview");
-    assert!(
-        !preview.contains("482915"),
-        "OTP preview leaked the raw code: {preview:?}",
-    );
-    assert!(preview.contains("[REDACTED]"));
+    for code in ["482931", "4829157", "48291573"] {
+        let entry = EntryFactory::from_text(code);
+        let result = classifier.classify(&entry);
+        assert_eq!(result.sensitivity, Sensitivity::Secret, "code {code}");
+        let preview = result.redacted_preview.expect("Secret must yield preview");
+        assert_eq!(preview, "[REDACTED]", "code {code}");
+    }
 }
 
 #[test]
-fn store_redacted_round_trip_credit_card_strips_pan() {
+fn store_redacted_strips_pan_from_body_and_search_text() {
     // `SecretHandling::StoreRedacted` rewrites the body through
     // `classifier.redact`, which now removes Luhn-valid PANs. We assert
     // both forms of the PAN are gone *and* that no PAN-length digit run
@@ -750,7 +729,8 @@ fn store_redacted_round_trip_credit_card_strips_pan() {
     assert_eq!(action, SecretAction::Persist);
 
     let body = entry.plain_text().expect("persisted body").to_owned();
-    assert!(body.contains("[REDACTED ••••1111]"));
+    // The surrounding prose is kept verbatim; only the PAN is replaced.
+    assert_eq!(body, "card [REDACTED ••••1111] on file");
     assert!(!body.contains(pan), "spaced PAN survived: {body:?}");
     assert!(
         !body.contains(stripped.as_str()),
@@ -852,21 +832,19 @@ fn store_redacted_redacts_api_key_with_user_regex_rules() {
 
 #[test]
 fn store_redacted_does_not_mutate_private_or_public_entries() {
-    // `apply_secret_handling` is a no-op for non-Secret entries — the
-    // existing suite covers Public, this pins the Private branch so a
-    // password-manager-flagged clip (Private via SourceAppDenylist)
-    // can't accidentally fall into the redaction path.
-    let mut entry = EntryFactory::from_text("manually-flagged private body");
-    entry.sensitivity = Sensitivity::Private;
-    let body_before = entry.plain_text().unwrap_or_default().to_owned();
+    // `apply_secret_handling` is a no-op for non-Secret entries, even when the
+    // body holds something the redactor would rewrite. A Private clip (e.g.
+    // flagged by the source-app denylist) or a Public one must keep its body,
+    // search document, and representations untouched.
     let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
-    let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
-    assert_eq!(action, SecretAction::Persist);
-    assert_eq!(
-        entry.plain_text().unwrap_or_default(),
-        body_before,
-        "Private body must not be rewritten by StoreRedacted",
-    );
+    for sensitivity in [Sensitivity::Private, Sensitivity::Public] {
+        let mut entry = EntryFactory::from_text("api_key = abcdefghijk");
+        entry.sensitivity = sensitivity;
+        let before = entry.clone();
+        let action = classifier.apply_secret_handling(&mut entry, SecretHandling::StoreRedacted);
+        assert_eq!(action, SecretAction::Persist, "{sensitivity:?}");
+        assert_eq!(entry, before, "{sensitivity:?} entry must not be rewritten");
+    }
 }
 
 #[test]

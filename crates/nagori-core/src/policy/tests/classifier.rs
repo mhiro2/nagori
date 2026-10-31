@@ -396,22 +396,6 @@ fn oversized_entries_are_blocked() {
 }
 
 #[test]
-fn classifier_otp_preview_does_not_leak_digits() {
-    // OTPs now classify as Secret, so `redacted_preview` flows through
-    // `classifier.redact`. The preview must land as `[REDACTED]` rather
-    // than echoing the raw 6-digit code.
-    let entry = EntryFactory::from_text("482931");
-    let classifier = SensitivityClassifier::try_new(AppSettings::default()).unwrap();
-    let result = classifier.classify(&entry);
-    assert_eq!(result.sensitivity, Sensitivity::Secret);
-    let preview = result.redacted_preview.expect("Secret preview present");
-    assert!(
-        !preview.contains("482931"),
-        "OTP digits leaked into preview: {preview:?}",
-    );
-}
-
-#[test]
 fn assess_semantic_text_reflects_current_policy_not_stored_verdict() {
     // The semantic indexer re-assesses stored text against the *current*
     // policy before embedding: a body captured as Public must come back
