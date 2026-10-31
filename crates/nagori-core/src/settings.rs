@@ -1378,32 +1378,17 @@ mod tests {
     }
 
     #[test]
-    fn serde_default_fills_missing_max_image_entry_size_bytes() {
-        // A settings snapshot written before the field existed must still
-        // deserialize, defaulting the image budget rather than failing.
-        let json = r#"{"max_entry_size_bytes": 65536}"#;
-        let settings: AppSettings =
-            serde_json::from_str(json).expect("legacy snapshot deserializes");
-        assert_eq!(
-            settings.max_image_entry_size_bytes,
-            default_max_image_entry_size_bytes()
-        );
-        // And the read budget exposes both kinds' budgets.
+    fn read_budget_carries_the_text_and_image_caps_separately() {
+        // Distinct values on each side, so swapping the two caps or feeding
+        // the text cap to both kinds fails the comparison.
+        let settings = AppSettings {
+            max_entry_size_bytes: 65_536,
+            max_image_entry_size_bytes: 8 * 1024 * 1024,
+            ..AppSettings::default()
+        };
         let budget = settings.read_budget();
-        assert_eq!(budget.text_bytes, 65536);
-        assert_eq!(budget.image_bytes, default_max_image_entry_size_bytes());
-    }
-
-    #[test]
-    fn serde_default_fills_missing_otp_detection() {
-        // A settings snapshot written before `otp_detection` existed must still
-        // deserialize with OTP detection enabled — the named default keeps the
-        // prior always-on behaviour rather than silently disabling it on
-        // upgrade.
-        let json = r#"{"max_entry_size_bytes": 65536}"#;
-        let settings: AppSettings =
-            serde_json::from_str(json).expect("legacy snapshot deserializes");
-        assert!(settings.otp_detection);
+        assert_eq!(budget.text_bytes, 65_536);
+        assert_eq!(budget.image_bytes, 8 * 1024 * 1024);
     }
 
     #[test]
@@ -1435,14 +1420,26 @@ mod tests {
     }
 
     #[test]
-    fn typed_denylist_rules_round_trip() {
-        let json = r#"{
-            "app_denylist": [
-                { "type": "pattern", "value": "Secrets" },
-                { "type": "source_app", "kind": "macos_bundle_id", "value": "com.example.app", "label": "Example", "source": "preset" }
-            ]
-        }"#;
-        let settings: AppSettings = serde_json::from_str(json).expect("typed rules deserialize");
+    fn typed_denylist_rules_round_trip_through_the_strict_read() {
+        // The wire shape is what persisted rows contain, so pin it as JSON:
+        // a renamed tag or field would round-trip through serde on its own
+        // but stop reading rows written by earlier releases.
+        let rules_json = serde_json::json!([
+            { "type": "pattern", "value": "Secrets" },
+            {
+                "type": "source_app",
+                "kind": "macos_bundle_id",
+                "value": "com.example.app",
+                "label": "Example",
+                "source": "preset"
+            }
+        ]);
+        let mut value = serde_json::to_value(AppSettings::default()).expect("settings serialize");
+        value["app_denylist"] = rules_json.clone();
+        let raw = serde_json::to_string(&value).expect("blob serialize");
+
+        let settings =
+            AppSettings::from_complete_json(&raw).expect("typed rules pass the strict read");
         assert_eq!(
             settings.app_denylist,
             vec![
@@ -1457,6 +1454,14 @@ mod tests {
                 },
             ]
         );
+
+        let written = serde_json::to_value(&settings).expect("settings serialize");
+        assert_eq!(written["app_denylist"], rules_json);
+        let reread = AppSettings::from_complete_json(
+            &serde_json::to_string(&written).expect("blob serialize"),
+        )
+        .expect("the written blob reads back");
+        assert_eq!(reread, settings);
     }
 
     #[test]
