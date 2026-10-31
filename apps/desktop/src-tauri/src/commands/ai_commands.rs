@@ -2,10 +2,7 @@
 //! the semantic-index status/rebuild, and saving an AI result as an entry.
 
 use futures::StreamExt;
-use nagori_core::{
-    AiActionId, AiEvent, AiRequestOptions, AppError, EntryRepository, QuickActionId, RequestId,
-    is_text_safe_for_default_output,
-};
+use nagori_core::{AiActionId, AiEvent, AiRequestOptions, AppError, QuickActionId, RequestId};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::dto::{AiActionResultDto, AiAvailabilityDto, EntryDto, SemanticIndexStatusDto};
@@ -218,13 +215,5 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
         .get_entry(id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let include_text = is_text_safe_for_default_output(entry.sensitivity);
-    let entry_id = entry.id;
-    let summaries = state
-        .runtime
-        .store()
-        .list_representation_summaries(&[entry_id])
-        .await?;
-    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-    Ok(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps))
+    Ok(super::entry_commands::entry_dto_for_default_output(&state.runtime, entry).await?)
 }
