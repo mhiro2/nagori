@@ -219,6 +219,19 @@ pub const MAX_RESPONSE_TEXT_WIRE_BYTES: usize = MAX_IPC_BYTES - IPC_ENVELOPE_RES
 /// refused.
 pub const MAX_ENTRY_TEXT_WIRE_BYTES: usize = MAX_RESPONSE_TEXT_WIRE_BYTES - IPC_ROW_OVERHEAD_BYTES;
 
+// Budget invariants checked in every build, not only under `cfg(test)`:
+// - a maximum-size raw entry leaves at least 64 KiB of the IPC line for the
+//   envelope (token, request kind, quoting), so storage never accepts an
+//   entry whose raw bytes alone already breach the line cap;
+// - an all-ASCII entry at the raw ceiling is never refused by the wire
+//   budget, so the raw ceiling stays the binding one for plain text.
+const _: () = {
+    assert!(MAX_ENTRY_SIZE_BYTES < MAX_IPC_BYTES);
+    assert!(MAX_IPC_BYTES - MAX_ENTRY_SIZE_BYTES >= 64 * 1024);
+    assert!(MAX_ENTRY_SIZE_BYTES <= MAX_ENTRY_TEXT_WIRE_BYTES);
+    assert!(MAX_ENTRY_TEXT_WIRE_BYTES < MAX_IPC_BYTES);
+};
+
 /// Length `text` occupies inside a JSON string, excluding the surrounding
 /// quotes — i.e. `serde_json::to_string(text).len() - 2`.
 ///
@@ -322,10 +335,6 @@ mod tests {
     fn a_raw_size_limited_entry_of_ascii_always_fits_the_wire_budget() {
         // ASCII prose never escapes, so the raw ceiling is the binding one and
         // a maximum-size text entry must stay admissible.
-        const _: () = {
-            assert!(MAX_ENTRY_SIZE_BYTES <= MAX_ENTRY_TEXT_WIRE_BYTES);
-            assert!(MAX_ENTRY_TEXT_WIRE_BYTES < MAX_IPC_BYTES);
-        };
         let text = "a".repeat(MAX_ENTRY_SIZE_BYTES);
         assert!(entry_text_fits_wire(&text));
     }
@@ -339,18 +348,5 @@ mod tests {
         assert!(text.len() < MAX_ENTRY_SIZE_BYTES);
         assert!(json_escaped_len(&text) > MAX_IPC_BYTES);
         assert!(!entry_text_fits_wire(&text));
-    }
-
-    #[test]
-    fn entry_size_leaves_envelope_headroom_under_ipc_ceiling() {
-        // Storage validator must never accept an entry whose raw bytes alone
-        // would already breach the IPC line cap, even before envelope JSON.
-        // Wrapped in `const { ... }` so the check is enforced at compile time
-        // and survives clippy's `assertions_on_constants` lint.
-        const _: () = {
-            assert!(MAX_ENTRY_SIZE_BYTES < MAX_IPC_BYTES);
-            // Reserve at least 64 KiB for envelope (token, request kind, quoting).
-            assert!(MAX_IPC_BYTES - MAX_ENTRY_SIZE_BYTES >= 64 * 1024);
-        };
     }
 }
