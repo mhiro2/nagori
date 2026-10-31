@@ -667,56 +667,83 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_drains_in_flight_handler_within_grace() {
-        // The graceful-shutdown contract: a request that started before
-        // shutdown was signalled gets to finish (and reach the client),
-        // provided it can complete within the grace period. Without this
-        // we'd leave half-applied DB transactions when the user hits
+        // The graceful-shutdown contract: a request whose handler is already
+        // running when shutdown is signalled gets to finish (and reach the
+        // client), provided it completes within the grace period. Without
+        // this we'd leave half-applied DB transactions when the user hits
         // Ctrl-C mid-request.
+        //
+        // Every step is synchronised explicitly: the handler reports that it
+        // started, shutdown is only signalled after that, and the handler is
+        // only released once the accept loop has observed shutdown (its
+        // listener stops accepting). So the response can only arrive through
+        // the drain, never by finishing before shutdown or by racing it.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("drain.sock");
         let token = test_token();
         let listener = bind_unix(&path).expect("bind");
-        let shutdown = Arc::new(tokio::sync::Notify::new());
-        let shutdown_for_server = shutdown.clone();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let release_for_server = release.clone();
         let server_token = token.clone();
         let server = tokio::spawn(async move {
             accept_loop_with_shutdown(
                 listener,
                 server_token,
-                |_request| async move {
-                    // Outlast the `notify_waiters` below but stay well
-                    // inside the grace window so the drain can observe
-                    // the response landing.
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    IpcResponse::Ack
+                move |_request| {
+                    let started = started_tx.clone();
+                    let release = release_for_server.clone();
+                    async move {
+                        started.send(()).expect("test keeps the receiver");
+                        release
+                            .acquire()
+                            .await
+                            .expect("release semaphore stays open")
+                            .forget();
+                        IpcResponse::Ack
+                    }
                 },
-                async move { shutdown_for_server.notified().await },
-                Duration::from_secs(2),
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                Duration::from_secs(5),
                 IpcServerHealth::default(),
                 IpcServerConfig::default(),
             )
             .await
         });
 
-        // Kick off a request as its own task so the connect + write
-        // actually run before we signal shutdown — `client.send` is a
-        // lazy future, so awaiting it after `notify_waiters` would race
-        // the listener drop.
         let client = IpcClient::new(path.to_string_lossy().into_owned(), token);
         let request = tokio::spawn(async move { client.send(IpcRequest::Health).await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        shutdown.notify_waiters();
-
-        let response = tokio::time::timeout(Duration::from_secs(3), request)
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
             .await
-            .expect("response should arrive within grace + slack")
+            .expect("handler should start")
+            .expect("handler start signal");
+
+        shutdown_tx.send(()).expect("server still running");
+        // Wait until the accept loop has dropped its listener, i.e. it has
+        // left the accept stage and is draining the in-flight handler.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while tokio::net::UnixStream::connect(&path).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener should close once shutdown is observed");
+        assert!(!request.is_finished(), "the handler is still held");
+
+        release.add_permits(1);
+        let response = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("response should arrive within the grace")
             .expect("request task should not panic")
             .expect("client send should succeed");
         assert!(matches!(response, IpcResponse::Ack));
 
-        let outcome = tokio::time::timeout(Duration::from_secs(3), server)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), server)
             .await
-            .expect("server should finish within grace + slack")
+            .expect("server should finish once the handler drains")
             .expect("server task should not panic");
         assert!(
             outcome.is_ok(),
