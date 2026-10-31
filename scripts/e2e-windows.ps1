@@ -459,11 +459,26 @@ exit 1
     }
 
     Step 'image round-trip via image/png'
-    # Tiny 1x1 RGBA PNG fixture, base64-inlined so we don't keep a binary
-    # artefact in the tree. Same bytes as the Linux e2e's fixture.
-    $ImageFixture = Join-Path $WorkDir 'fixture.png'
-    $ImageBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==')
-    [IO.File]::WriteAllBytes($ImageFixture, $ImageBytes)
+    # Build the fixture bitmaps from a row-major list of opaque RRGGBB
+    # pixels. The shapes are non-square and every pixel differs, so a
+    # copy-back that flips, transposes, or substitutes the image fails the
+    # pixel comparison in the read-back below. Alpha is left opaque because
+    # the Win32 bitmap formats `GetImage` reads do not reliably carry it.
+    $BitmapHelper = @'
+function New-FixtureBitmap([int]$Width, [int]$Height, [string]$Pixels) {
+    $px = $Pixels.Split(',')
+    $bmp = New-Object System.Drawing.Bitmap($Width, $Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    for ($y = 0; $y -lt $Height; $y++) {
+        for ($x = 0; $x -lt $Width; $x++) {
+            $rgb = [Convert]::ToInt32($px[$y * $Width + $x], 16)
+            $bmp.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, ($rgb -shr 16) -band 255, ($rgb -shr 8) -band 255, $rgb -band 255))
+        }
+    }
+    return $bmp
+}
+'@
+    $ImagePixels = 'FF0000,00FF00,0000FF,FFFF00,00FFFF,FF00FF'
+    $ExpectedImage = "3x2:$ImagePixels"
 
     # `[Windows.Forms.Clipboard]::SetImage` requires STA, and pwsh 7's default
     # runspace is MTA. Spawn a short STA child via `pwsh -Sta` to push the
@@ -478,7 +493,8 @@ exit 1
 `$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
-`$bmp = [System.Drawing.Image]::FromFile('$ImageFixture')
+$BitmapHelper
+`$bmp = New-FixtureBitmap 3 2 '$ImagePixels'
 try {
     `$deadline = [DateTime]::UtcNow.AddSeconds(5)
     while ([DateTime]::UtcNow -lt `$deadline) {
@@ -526,35 +542,41 @@ try {
 
     # Read-back also needs STA. We don't compare PNG bytes because the
     # daemon's capture re-encodes `CF_DIB(V5)` into PNG via the `image`
-    # crate, so byte-identity with the fixture is broken by design. The
-    # `CF_DIBV5` portion of the multi-rep publish is what the
-    # `Get-Clipboard -Format Image` path renders, so a 1x1 bitmap on the
-    # other side is enough to know the new transactional writer worked.
+    # crate, so byte-identity with the fixture is broken by design.
+    # Decode the bitmap the clipboard hands back instead and compare its
+    # size and every pixel against the fixture.
     # `GetImage` returns `$null` if no image is on the clipboard but raises
     # `ExternalException` when the clipboard is busy. Treat both as
     # "not ready yet" and retry until the deadline.
-    $ReadScript = @"
-`$ErrorActionPreference = 'Stop'
+    $ReadScript = @'
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
-`$deadline = [DateTime]::UtcNow.AddSeconds(5)
-while ([DateTime]::UtcNow -lt `$deadline) {
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while ([DateTime]::UtcNow -lt $deadline) {
     try {
-        `$img = [System.Windows.Forms.Clipboard]::GetImage()
-        if (`$null -ne `$img) {
-            Write-Output ("{0}x{1}" -f `$img.Width, `$img.Height)
-            `$img.Dispose()
+        $img = [System.Windows.Forms.Clipboard]::GetImage()
+        if ($null -ne $img) {
+            $bmp = New-Object System.Drawing.Bitmap($img)
+            $px = for ($y = 0; $y -lt $bmp.Height; $y++) {
+                for ($x = 0; $x -lt $bmp.Width; $x++) {
+                    '{0:X6}' -f ($bmp.GetPixel($x, $y).ToArgb() -band 0xFFFFFF)
+                }
+            }
+            Write-Output ('{0}x{1}:{2}' -f $bmp.Width, $bmp.Height, ($px -join ','))
+            $bmp.Dispose()
+            $img.Dispose()
             exit 0
         }
     } catch [System.Runtime.InteropServices.ExternalException] { }
     Start-Sleep -Milliseconds 100
 }
 exit 1
-"@
+'@
     $readEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ReadScript))
-    $dim = (& pwsh -Sta -NoProfile -EncodedCommand $readEncoded | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $dim -ne '1x1') {
-        throw "image copy-back did not return a 1x1 Bitmap`n  got: '$dim'"
+    $readBack = (& pwsh -Sta -NoProfile -EncodedCommand $readEncoded | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $readBack -ne $ExpectedImage) {
+        throw "image copy-back did not return the fixture bitmap`n  expected: '$ExpectedImage'`n  got:      '$readBack'"
     }
 
     Step 'multi-representation preserve round-trip (image + text)'
@@ -567,24 +589,26 @@ exit 1
     # `write_representations` republishes the full set instead of collapsing
     # to a single rep on the way out.
     #
-    # Build a fresh 1x1 red bitmap inline rather than reusing
-    # `$ImageFixture`: the daemon's content-hash dedupe (sqlite.rs's
+    # Build a different bitmap rather than reusing the image-only
+    # fixture: the daemon's content-hash dedupe (sqlite.rs's
     # `entries.content_hash` lookup) keys an image entry on its captured
     # PNG bytes, and the prior image-only step has already inserted the
     # fixture's pixels. Re-publishing the same pixels would refresh that
     # entry's timestamps without overwriting its representation set, and
     # the multi-rep assertion below would see only `image/png` even though
-    # capture saw both reps. A distinct pixel sidesteps the dedupe and
+    # capture saw both reps. Distinct pixels sidestep the dedupe and
     # keeps the test focused on multi-rep capture/copy-back semantics
     # rather than dedupe behaviour.
     $multiText = "multi-rep marker $((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')) $((Get-Random))_$((Get-Random))"
     $EscapedMultiText = $multiText.Replace("'", "''")
+    $MultiPixels = '000080,808000,008080,800000,C0C0C0,404040'
+    $ExpectedMultiImage = "2x3:$MultiPixels"
     $PushMultiScript = @"
 `$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
-`$bmp = New-Object System.Drawing.Bitmap(1, 1, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-`$bmp.SetPixel(0, 0, [System.Drawing.Color]::Red)
+$BitmapHelper
+`$bmp = New-FixtureBitmap 2 3 '$MultiPixels'
 try {
     `$do = New-Object System.Windows.Forms.DataObject
     `$do.SetImage(`$bmp)
@@ -656,12 +680,11 @@ try {
     }
 
     # Image rep should be reachable via STA GetImage (CF_DIBV5 → CF_BITMAP
-    # synthesized). Same 1x1 fixture as the image roundtrip above; dimension
-    # is the cheapest proof the bitmap landed.
-    $readMultiEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ReadScript))
-    $dim = (& pwsh -Sta -NoProfile -EncodedCommand $readMultiEncoded | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $dim -ne '1x1') {
-        throw "multi-rep copy-back did not republish the image rep`n  got: '$dim'"
+    # synthesized) and decode to the multi-rep fixture, not the image-only
+    # one published earlier.
+    $readMulti = (& pwsh -Sta -NoProfile -EncodedCommand $readEncoded | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $readMulti -ne $ExpectedMultiImage) {
+        throw "multi-rep copy-back did not republish the image rep`n  expected: '$ExpectedMultiImage'`n  got:      '$readMulti'"
     }
 
     Step 'graceful shutdown via daemon stop'
