@@ -157,22 +157,19 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn probe_code_mapping() {
-        assert_eq!(
-            AppleAvailability::from_probe_code(0),
-            AppleAvailability::Available
-        );
-        assert_eq!(
-            AppleAvailability::from_probe_code(3),
-            AppleAvailability::ModelNotReady
-        );
-        assert_eq!(
-            AppleAvailability::from_probe_code(255),
-            AppleAvailability::Unknown
-        );
-        assert_eq!(
-            AppleAvailability::from_probe_code(-1),
-            AppleAvailability::Unknown
-        );
+        // Codes mirror `nagori_apple_fm_availability_c` in `Bridge.swift`.
+        let cases = [
+            (0, AppleAvailability::Available),
+            (1, AppleAvailability::DeviceNotEligible),
+            (2, AppleAvailability::AppleIntelligenceNotEnabled),
+            (3, AppleAvailability::ModelNotReady),
+            (4, AppleAvailability::Unknown),
+            (255, AppleAvailability::Unknown),
+            (-1, AppleAvailability::Unknown),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(AppleAvailability::from_probe_code(code), expected, "{code}");
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
