@@ -745,17 +745,80 @@ mod image_scheme_tests {
     }
 
     #[tokio::test]
-    async fn thumbnail_response_withholds_private_entry() {
-        // Sensitivity gate must apply to derived artifacts too — even if
-        // a thumbnail row somehow exists for a Private entry, dispatch
-        // must refuse to serve it.
+    async fn thumbnail_response_withholds_sensitive_entry_without_a_cached_thumbnail() {
+        // A miss must not kick generation for a withheld entry either.
         let runtime = build_runtime();
-        let id = insert(&runtime, make_image_entry(Sensitivity::Private)).await;
+        for sensitivity in [
+            Sensitivity::Private,
+            Sensitivity::Secret,
+            Sensitivity::Blocked,
+        ] {
+            let id = insert(&runtime, make_image_entry(sensitivity)).await;
 
-        let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+            let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
 
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        assert_eq!(resp.body().as_slice(), b"sensitivity withheld");
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{sensitivity:?}");
+            assert_eq!(resp.body().as_slice(), b"sensitivity withheld");
+        }
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_withholds_cached_thumbnail_once_entry_is_sensitive() {
+        // The storage write gate keeps new thumbnails off sensitive rows, so
+        // the scheme gate is the only thing standing between a thumbnail that
+        // was cached while the entry was public and the webview. Seed the
+        // cache as Public, then flip the row's sensitivity underneath it:
+        // the cache hit must still be refused. A fresh store per case keeps
+        // the identical fixture image from deduplicating onto the previous
+        // case's reclassified row.
+        for sensitivity in ["private", "secret", "blocked"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db_path = dir.path().join("nagori.sqlite");
+            let runtime = NagoriRuntime::builder(SqliteStore::open(&db_path).expect("file store"))
+                .build_for_test();
+            let id = insert(&runtime, make_image_entry(Sensitivity::Public)).await;
+            runtime
+                .store()
+                .put_thumbnail(
+                    id,
+                    nagori_core::ThumbnailRecord {
+                        payload: TINY_JPEG.to_vec(),
+                        mime_type: "image/jpeg".to_owned(),
+                        width: 1,
+                        height: 1,
+                    },
+                )
+                .await
+                .expect("seed thumbnail");
+            let served = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+            assert_eq!(
+                served.status(),
+                StatusCode::OK,
+                "fixture must hit the cache"
+            );
+
+            rusqlite::Connection::open(&db_path)
+                .expect("open db")
+                .execute(
+                    "UPDATE entries SET sensitivity = ?1 WHERE id = ?2",
+                    rusqlite::params![sensitivity, id.to_string()],
+                )
+                .expect("reclassify entry");
+            assert!(
+                runtime
+                    .store()
+                    .get_thumbnail(id)
+                    .await
+                    .expect("read thumbnail")
+                    .is_some(),
+                "the cached thumbnail must still exist for the gate to matter",
+            );
+
+            let resp = dispatch_image_path(&runtime, &format!("/thumb/{id}")).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{sensitivity}");
+            assert_eq!(resp.body().as_slice(), b"sensitivity withheld");
+        }
     }
 
     #[tokio::test]
