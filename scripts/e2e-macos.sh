@@ -492,20 +492,22 @@ READ_MULTI_SWIFT="${WORK_DIR}/read_multi.swift"
 # versions) is still matched correctly via Swift's `String.contains`. A
 # shell `awk` pass over `print`-separated output only captures the first
 # line of each rep and would falsely fail when the marker ends up on a
-# wrapped continuation line.
+# wrapped continuation line. The HTML check requires each markup fragment
+# of the fixture rather than the bare marker, so a copy-back that put the
+# plain text (or stripped tags) into the HTML slot still fails.
 cat > "${READ_MULTI_SWIFT}" <<'SWIFT'
 import AppKit
 let args = Array(CommandLine.arguments.dropFirst())
-guard args.count == 2 else {
-    FileHandle.standardError.write(Data("expected <html-suffix> <plain> args\n".utf8))
+guard args.count >= 2 else {
+    FileHandle.standardError.write(Data("expected <plain> <html-fragment>... args\n".utf8))
     exit(2)
 }
-let expectedSuffix = args[0]
-let expectedPlain = args[1]
+let expectedPlain = args[0]
+let expectedHtmlFragments = args.dropFirst()
 let pb = NSPasteboard.general
 let html = pb.string(forType: .html) ?? ""
 let plain = pb.string(forType: .string) ?? ""
-let htmlOk = html.contains(expectedSuffix)
+let htmlOk = expectedHtmlFragments.allSatisfy { html.contains($0) }
 let plainOk = plain == expectedPlain
 if htmlOk && plainOk {
     print("OK")
@@ -525,7 +527,8 @@ MULTI_READ_LOG="${WORK_DIR}/multi-readback.log"
 MULTI_OK=0
 deadline=$(( $(date +%s) + 15 ))
 while (( $(date +%s) < deadline )); do
-  if swift "${READ_MULTI_SWIFT}" "${MULTI_SUFFIX}" "${MULTI_TEXT}" \
+  if swift "${READ_MULTI_SWIFT}" "${MULTI_TEXT}" \
+       "<p>multi-rep " "<b>marker</b>" " ${MULTI_SUFFIX}</p>" \
        > "${MULTI_READ_LOG}" 2>&1; then
     MULTI_OK=1
     break
