@@ -471,11 +471,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_external_open_accepts_public_https_match() {
-        let entry = url_entry("https://example.com/foo?bar=1");
-        let canonical = validate_external_open(&entry, "https://example.com/foo?bar=1")
-            .expect("public https url is accepted");
-        assert!(canonical.starts_with("https://example.com/"));
+    fn validate_external_open_returns_the_full_canonical_url() {
+        // The returned string is what reaches the OS URL handler, so pin it
+        // whole: path, encoded query, fragment and a non-default port must
+        // survive, while the parser's normalisation (lowercased host, default
+        // port and surrounding whitespace dropped) applies.
+        for (requested, expected) in [
+            (
+                "https://example.com/foo?bar=1",
+                "https://example.com/foo?bar=1",
+            ),
+            (
+                "  https://example.com/foo?bar=1\n",
+                "https://example.com/foo?bar=1",
+            ),
+            (
+                "https://Example.COM:8443/a%20b?q=%E3%81%82&x=1#frag",
+                "https://example.com:8443/a%20b?q=%E3%81%82&x=1#frag",
+            ),
+            ("https://example.com:443/path", "https://example.com/path"),
+            ("http://example.com", "http://example.com/"),
+        ] {
+            let entry = url_entry(requested);
+            let canonical = validate_external_open(&entry, requested)
+                .unwrap_or_else(|err| panic!("{requested:?} must be accepted: {err:?}"));
+            assert_eq!(canonical, expected, "{requested:?}");
+        }
     }
 
     #[test]
