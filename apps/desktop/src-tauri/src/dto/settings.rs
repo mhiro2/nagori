@@ -665,31 +665,29 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn app_settings_dto_round_trip_preserves_every_field() {
+    /// Non-default value for every `AppSettings` field that has more than one
+    /// value, still accepted by the production `validate`, so a field the
+    /// conversion drops (or re-defaults) cannot pass as "equal to the default".
+    fn non_default_settings() -> AppSettings {
         use nagori_core::{PaletteHotkeyAction, SecondaryHotkeyAction};
         use std::collections::BTreeMap;
-        // Pin every field so a future addition that forgets one of the
-        // conversion arms (camelCase serde rename, secret_handling default,
-        // ai_provider variants, locale tag) trips this test.
         let mut palette_hotkeys = BTreeMap::new();
         palette_hotkeys.insert(PaletteHotkeyAction::Pin, "Cmd+Alt+P".to_owned());
         let mut secondary_hotkeys = BTreeMap::new();
         secondary_hotkeys.insert(SecondaryHotkeyAction::RepasteLast, "Cmd+Alt+V".to_owned());
 
-        let original = AppSettings {
+        let settings = AppSettings {
             global_hotkey: "Cmd+Shift+V".to_owned(),
             history_retention_count: 1234,
             history_retention_days: Some(7),
-            max_entry_size_bytes: 2 * 1024 * 1024,
+            max_entry_size_bytes: 256 * 1024,
             max_image_entry_size_bytes: 32 * 1024 * 1024,
             capture_kinds: [ContentKind::Text, ContentKind::Image]
                 .into_iter()
                 .collect(),
             max_total_bytes: Some(64 * 1024 * 1024),
             capture_enabled: false,
-            auto_paste_enabled: true,
+            auto_paste_enabled: false,
             paste_format_default: PasteFormat::PlainText,
             paste_delay_ms: 80,
             app_denylist: vec![
@@ -721,8 +719,8 @@ mod tests {
             appearance: Appearance::Dark,
             auto_launch: true,
             secret_handling: SecretHandling::StoreFull,
-            palette_hotkeys: palette_hotkeys.clone(),
-            secondary_hotkeys: secondary_hotkeys.clone(),
+            palette_hotkeys,
+            secondary_hotkeys,
             palette_row_count: 12,
             show_preview_pane: false,
             show_in_menu_bar: false,
@@ -739,58 +737,95 @@ mod tests {
             max_thumbnail_total_bytes: Some(32 * 1024 * 1024),
             onboarding: nagori_core::settings::OnboardingSettings {
                 accessibility_prompted_at: Some(OffsetDateTime::UNIX_EPOCH),
-                accessibility_first_granted_at: None,
-                completed_at: None,
+                accessibility_first_granted_at: Some(
+                    OffsetDateTime::UNIX_EPOCH + time::Duration::days(1),
+                ),
+                completed_at: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::days(2)),
             },
         };
 
-        let dto: AppSettingsDto = original.clone().into();
+        settings
+            .validate()
+            .expect("fixture must be a settings blob the app would accept");
+        assert_eq!(
+            fields_equal_to_default(&settings),
+            ["update_channel"],
+            "every field with an alternative value must differ from the default",
+        );
+        settings
+    }
+
+    /// Top-level (and `ai.*`) field names whose value in `settings` equals
+    /// `AppSettings::default()`.
+    fn fields_equal_to_default(settings: &AppSettings) -> Vec<String> {
+        let actual = serde_json::to_value(settings).expect("serialize settings");
+        let default = serde_json::to_value(AppSettings::default()).expect("serialize default");
+        let mut equal = Vec::new();
+        for (key, value) in actual.as_object().expect("settings object") {
+            if key == "ai" {
+                for (ai_key, ai_value) in value.as_object().expect("ai object") {
+                    if default["ai"][ai_key] == *ai_value {
+                        equal.push(format!("ai.{ai_key}"));
+                    }
+                }
+            } else if default[key] == *value {
+                equal.push(key.clone());
+            }
+        }
+        equal
+    }
+
+    #[test]
+    fn app_settings_dto_round_trip_preserves_every_field() {
+        // Go through the same JSON boundary `get_settings` / `update_settings`
+        // use, and compare the whole struct so a field missing from either
+        // conversion arm or a wrong serde rename fails here.
+        let original = non_default_settings();
+        let wire = serde_json::to_value(AppSettingsDto::from(original.clone()))
+            .expect("serialize settings dto");
+        let dto: AppSettingsDto = serde_json::from_value(wire).expect("deserialize settings dto");
         let restored: AppSettings = dto.into();
-        assert_eq!(restored.global_hotkey, original.global_hotkey);
-        assert_eq!(
-            restored.history_retention_count,
-            original.history_retention_count
-        );
-        assert_eq!(
-            restored.history_retention_days,
-            original.history_retention_days
-        );
-        assert_eq!(restored.max_entry_size_bytes, original.max_entry_size_bytes);
-        assert_eq!(
-            restored.max_image_entry_size_bytes,
-            original.max_image_entry_size_bytes
-        );
-        assert_eq!(restored.capture_kinds, original.capture_kinds);
-        assert_eq!(restored.max_total_bytes, original.max_total_bytes);
-        assert_eq!(restored.capture_enabled, original.capture_enabled);
-        assert_eq!(restored.auto_paste_enabled, original.auto_paste_enabled);
-        assert_eq!(restored.paste_format_default, original.paste_format_default);
-        assert_eq!(restored.paste_delay_ms, original.paste_delay_ms);
-        assert_eq!(restored.app_denylist, original.app_denylist);
-        assert_eq!(restored.regex_denylist, original.regex_denylist);
-        assert_eq!(restored.ai, original.ai);
-        assert_eq!(restored.cli_ipc_enabled, original.cli_ipc_enabled);
-        assert!(matches!(restored.locale, nagori_core::Locale::Ja));
-        assert!(matches!(restored.recent_order, RecentOrder::ByUseCount));
-        assert!(matches!(restored.appearance, Appearance::Dark));
-        assert_eq!(restored.auto_launch, original.auto_launch);
-        assert!(matches!(
-            restored.secret_handling,
-            SecretHandling::StoreFull
-        ));
-        assert_eq!(restored.palette_hotkeys, palette_hotkeys);
-        assert_eq!(restored.secondary_hotkeys, secondary_hotkeys);
-        assert_eq!(restored.palette_row_count, 12);
-        assert!(!restored.show_preview_pane);
-        assert!(!restored.show_in_menu_bar);
-        assert!(restored.clear_on_quit);
-        assert!(!restored.confirm_clear_history);
-        assert!(restored.permanent_delete_on_delete);
-        assert!(restored.block_sensitive_captures);
-        assert!(!restored.otp_detection);
-        assert!(!restored.capture_initial_clipboard_on_launch);
-        assert!(!restored.auto_update_check);
-        assert!(matches!(restored.update_channel, UpdateChannel::Stable));
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn app_settings_dto_rejects_a_blob_missing_a_privacy_field() {
+        // `update_settings` takes a full blob; a payload that omits a
+        // privacy-bearing field must be rejected instead of persisting the
+        // default and silently widening the policy.
+        let wire = serde_json::to_value(AppSettingsDto::from(non_default_settings()))
+            .expect("serialize settings dto");
+        for key in [
+            "maxEntrySizeBytes",
+            "maxImageEntrySizeBytes",
+            "captureKinds",
+            "captureEnabled",
+            "captureInitialClipboardOnLaunch",
+            "cliIpcEnabled",
+            "appDenylist",
+            "regexDenylist",
+            "secretHandling",
+            "blockSensitiveCaptures",
+            "otpDetection",
+            "historyRetentionCount",
+            "clearOnQuit",
+            "permanentDeleteOnDelete",
+            "autoUpdateCheck",
+        ] {
+            let mut partial = wire.clone();
+            assert!(
+                partial
+                    .as_object_mut()
+                    .expect("settings dto is an object")
+                    .remove(key)
+                    .is_some(),
+                "fixture must carry {key}",
+            );
+            assert!(
+                serde_json::from_value::<AppSettingsDto>(partial).is_err(),
+                "a blob without {key} must be rejected",
+            );
+        }
     }
 
     #[test]
