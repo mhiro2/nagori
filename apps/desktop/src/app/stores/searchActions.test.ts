@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../lib/tauri', async () => (await import('../test-helpers/moduleMocks')).tauriMock());
 
@@ -44,6 +44,7 @@ import {
   togglePinEntry,
   togglePinSelection,
 } from './searchActions';
+import { clearFilters, togglePinnedOnly } from './searchFilters.svelte';
 import { clearMultiSelect, multiSelectState, toggleMultiSelect } from './searchMultiSelect.svelte';
 import { searchState } from './searchQuery.svelte';
 
@@ -73,6 +74,29 @@ beforeEach(() => {
   pasteFormatPickerState.targetId = undefined;
   pasteFormatPickerState.options = [];
 });
+
+afterEach(() => {
+  clearFilters();
+});
+
+// Put the palette on a settled `needle` search with the pinned-only chip on,
+// so a post-action refresh has to carry both the typed query and the active
+// filters to be indistinguishable from the search the user is looking at.
+const settleOnFilteredQuery = (): void => {
+  searchState.query = 'needle';
+  searchState.appliedQuery = 'needle';
+  togglePinnedOnly();
+};
+
+const refreshReturning = (...ids: string[]): void => {
+  vi.mocked(searchClipboard).mockResolvedValue({
+    results: ids.map((id) => result({ id })),
+    totalCandidates: ids.length,
+    searchElapsedMs: 0,
+    summaryElapsedMs: 0,
+    totalElapsedMs: 0,
+  });
+};
 
 describe('confirmSelection', () => {
   it('pastes the current selection through the palette command (honouring auto-paste)', async () => {
@@ -174,6 +198,15 @@ describe('confirmPasteFormat', () => {
 });
 
 describe('copySelection', () => {
+  it('copies the selected entry', async () => {
+    searchState.results = [result({ id: 'a' }), result({ id: 'b' })];
+    searchState.selectedIndex = 1;
+    vi.mocked(copyEntryFromPalette).mockResolvedValue();
+    await copySelection();
+    expect(copyEntryFromPalette).toHaveBeenCalledWith('b');
+    expect(searchState.errorMessage).toBeUndefined();
+  });
+
   it('routes through copy_entry_from_palette and surfaces failures', async () => {
     vi.mocked(copyEntryFromPalette).mockRejectedValue(new Error('copy failed'));
     await copySelection();
@@ -183,15 +216,35 @@ describe('copySelection', () => {
 
 describe('togglePinSelection', () => {
   it('flips the pinned flag on the backend and refreshes the query', async () => {
+    settleOnFilteredQuery();
     vi.mocked(pinEntry).mockResolvedValue();
+    refreshReturning('r1', 'r2');
     await togglePinSelection();
     expect(pinEntry).toHaveBeenCalledWith('r1', true);
+    // The refresh re-runs the visible search: same query, same filters.
+    expect(searchClipboard).toHaveBeenCalledTimes(1);
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: 'needle',
+      mode: 'Auto',
+      limit: 50,
+      filters: { pinnedOnly: true },
+      requestId: expect.any(Number),
+    });
+    expect(searchState.results.map((r) => r.id)).toEqual(['r1', 'r2']);
+  });
+
+  it('unpins an already pinned selection', async () => {
+    searchState.results = [result({ pinned: true })];
+    vi.mocked(pinEntry).mockResolvedValue();
+    await togglePinSelection();
+    expect(pinEntry).toHaveBeenCalledWith('r1', false);
   });
 
   it('records the error and skips refresh when pinEntry rejects', async () => {
     vi.mocked(pinEntry).mockRejectedValue(new Error('pin denied'));
     await togglePinSelection();
     expect(searchState.errorMessage).toBe('pin denied');
+    expect(searchClipboard).not.toHaveBeenCalled();
   });
 
   it('keeps the selection on the toggled entry after the refresh re-sorts', async () => {
@@ -256,15 +309,29 @@ describe('togglePinAt', () => {
 
 describe('deleteSelection', () => {
   it('drops the entry on the backend and refreshes', async () => {
+    settleOnFilteredQuery();
     vi.mocked(deleteEntry).mockResolvedValue();
+    refreshReturning('r2');
     await deleteSelection();
     expect(deleteEntry).toHaveBeenCalledWith('r1');
+    expect(searchClipboard).toHaveBeenCalledTimes(1);
+    expect(searchClipboard).toHaveBeenCalledWith({
+      query: 'needle',
+      mode: 'Auto',
+      limit: 50,
+      filters: { pinnedOnly: true },
+      requestId: expect.any(Number),
+    });
+    // The deleted row is gone from the list the palette shows.
+    expect(searchState.results.map((r) => r.id)).toEqual(['r2']);
   });
 
   it('surfaces a delete failure without refreshing', async () => {
     vi.mocked(deleteEntry).mockRejectedValue(new Error('locked'));
     await deleteSelection();
     expect(searchState.errorMessage).toBe('locked');
+    expect(searchClipboard).not.toHaveBeenCalled();
+    expect(searchState.results.map((r) => r.id)).toEqual(['r1']);
   });
 });
 

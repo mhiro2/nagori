@@ -87,12 +87,14 @@ describe('refreshRecent', () => {
     vi.mocked(isTauri).mockReturnValue(false);
     await refreshRecent();
     expect(searchClipboard).not.toHaveBeenCalled();
-    expect(searchState.results.length).toBeGreaterThan(0);
+    expect(searchState.results.map((r) => r.id)).toEqual(['fixture-1']);
     expect(searchState.selectedIndex).toBe(0);
   });
 
   it('hydrates results from recent search inside Tauri', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a'), result('b')] }));
+    // A cursor past the end of the incoming list is pulled back onto it.
+    searchState.selectedIndex = 5;
     await refreshRecent();
     expect(searchClipboard).toHaveBeenCalledWith({
       query: '',
@@ -102,6 +104,7 @@ describe('refreshRecent', () => {
     });
     expect(searchState.results).toHaveLength(2);
     expect(searchState.results[0]?.id).toBe('a');
+    expect(searchState.selectedIndex).toBe(0);
     expect(searchState.loading).toBe(false);
   });
 
@@ -124,6 +127,8 @@ describe('runQuery', () => {
       requestId: expect.any(Number),
     });
     expect(searchState.results[0]?.id).toBe('only');
+    // The box keeps exactly what was typed; only the request is trimmed.
+    expect(searchState.query).toBe('   ');
   });
 
   it('calls searchClipboard with the typed query inside Tauri', async () => {
