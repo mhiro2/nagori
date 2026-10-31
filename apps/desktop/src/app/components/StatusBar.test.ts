@@ -139,9 +139,14 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+// The count/timing summary as one whitespace-normalised string, so a check
+// pins the whole segment (numbers *and* units) rather than a stray digit.
+const summaryText = (container: HTMLElement): string =>
+  (container.querySelector('.left .summary')?.textContent ?? '').replaceAll(/\s+/g, ' ').trim();
+
 describe('StatusBar', () => {
   it('renders the entry count and elapsed time on the happy path', () => {
-    const { getByText } = render(StatusBar, {
+    const { container } = render(StatusBar, {
       props: {
         entryCount: 7,
         elapsedMs: 12,
@@ -149,8 +154,7 @@ describe('StatusBar', () => {
         errorMessage: undefined,
       },
     });
-    expect(getByText(/7/)).toBeTruthy();
-    expect(getByText(/12/)).toBeTruthy();
+    expect(summaryText(container)).toBe('7 items · 12 ms');
   });
 
   it('hides the elapsed segment when no timing is available', () => {
@@ -166,11 +170,11 @@ describe('StatusBar', () => {
     expect(container.querySelector('.left .dot')).toBeNull();
   });
 
-  it('shows the loading hint when a search is in flight', () => {
+  it('shows the loading hint in place of the count and timing while a search is in flight', () => {
     const { container } = render(StatusBar, {
-      props: { entryCount: 0, elapsedMs: undefined, loading: true, errorMessage: undefined },
+      props: { entryCount: 7, elapsedMs: 12, loading: true, errorMessage: undefined },
     });
-    expect(container.querySelector('.left')?.textContent).toMatch(/.+/);
+    expect(summaryText(container)).toBe('Searching…');
   });
 
   it('surfaces an errorMessage in place of the count when set', () => {

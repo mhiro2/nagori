@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   collapseWhitespace,
@@ -6,28 +6,54 @@ import {
   formatRelativeTime,
   truncatePreview,
 } from './formatting';
+import { DEFAULT_LOCALE, setLocale } from './i18n/index.svelte';
 
 describe('formatRelativeTime', () => {
   const now = new Date('2026-05-05T12:00:00Z');
+  const SECOND = 1_000;
+  const MINUTE = 60 * SECOND;
+  const HOUR = 60 * MINUTE;
+  const DAY = 24 * HOUR;
+  const ago = (ms: number): string => new Date(now.getTime() - ms).toISOString();
 
-  it('returns the just-now label for sub-minute deltas', () => {
-    const ts = new Date(now.getTime() - 30_000).toISOString();
-    expect(formatRelativeTime(ts, now)).toMatch(/just now|たった今/i);
+  beforeEach(() => {
+    setLocale('en');
   });
 
-  it('returns minutes-ago for sub-hour deltas', () => {
-    const ts = new Date(now.getTime() - 5 * 60_000).toISOString();
-    expect(formatRelativeTime(ts, now)).toContain('5');
+  afterEach(() => {
+    setLocale(DEFAULT_LOCALE);
   });
 
-  it('returns hours-ago for sub-day deltas', () => {
-    const ts = new Date(now.getTime() - 3 * 60 * 60_000).toISOString();
-    expect(formatRelativeTime(ts, now)).toContain('3');
+  // Each row pins both the number and the unit, including the deltas on
+  // either side of every unit boundary.
+  it.each([
+    [0, 'just now'],
+    [59 * SECOND, 'just now'],
+    [MINUTE, '1 min ago'],
+    [5 * MINUTE, '5 min ago'],
+    [HOUR - 1, '59 min ago'],
+    [HOUR, '1 hr ago'],
+    [3 * HOUR, '3 hr ago'],
+    [DAY - 1, '23 hr ago'],
+    [DAY, '1 day ago'],
+    [4 * DAY, '4 days ago'],
+    [7 * DAY - 1, '6 days ago'],
+  ])('formats a %i ms delta as %s', (delta, expected) => {
+    expect(formatRelativeTime(ago(delta), now)).toBe(expected);
   });
 
-  it('returns days-ago when within the past week', () => {
-    const ts = new Date(now.getTime() - 4 * 24 * 60 * 60_000).toISOString();
-    expect(formatRelativeTime(ts, now)).toContain('4');
+  it('formats the units with the active locale dictionary', () => {
+    setLocale('ja');
+    expect(formatRelativeTime(ago(30 * SECOND), now)).toBe('今');
+    expect(formatRelativeTime(ago(5 * MINUTE), now)).toBe('5分前');
+    expect(formatRelativeTime(ago(3 * HOUR), now)).toBe('3時間前');
+    expect(formatRelativeTime(ago(4 * DAY), now)).toBe('4日前');
+  });
+
+  it('switches to a calendar date once the delta reaches a week', () => {
+    expect(formatRelativeTime(ago(7 * DAY), now)).toBe(
+      new Intl.DateTimeFormat('en-US').format(now.getTime() - 7 * DAY),
+    );
   });
 
   it('falls back to a locale date for older timestamps', () => {

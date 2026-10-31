@@ -11,6 +11,9 @@ import {
   messages,
   setLocale,
 } from './index.svelte';
+import { en } from './locales/en';
+import { ja } from './locales/ja';
+import { ko } from './locales/ko';
 
 beforeEach(() => {
   setLocale(DEFAULT_LOCALE);
@@ -46,13 +49,12 @@ describe('setLocale', () => {
 
   it('switches active dictionary returned by messages()', () => {
     setLocale('ko');
-    expect(messages()).toBe(messages());
-    // The Korean dictionary differs from the English one for at least one
-    // user-visible string; that's enough to confirm we picked the right map.
+    expect(messages()).toBe(ko);
+    expect(messages().settings.title).toBe('설정');
+    setLocale('ja');
+    expect(messages()).toBe(ja);
     setLocale('en');
-    const enTitle = messages().settings.title;
-    setLocale('ko');
-    expect(messages().settings.title).not.toBe(enTitle);
+    expect(messages()).toBe(en);
   });
 
   it('resolves the system preference via navigator.languages', () => {
