@@ -303,20 +303,7 @@ fn spawn_maintenance_supervisor(
                         MaintenanceService::new(store).with_search_cache(search_cache);
                     loop {
                         let settings = settings_rx.borrow().clone();
-                        let failed = match maintenance.run(&settings).await {
-                            Ok(_) => {
-                                health.record_success();
-                                false
-                            }
-                            Err(err) => {
-                                // Record before logging so a concurrent
-                                // health-probe sees the latest counter even if
-                                // tracing back-pressure delays the warn line.
-                                health.record_failure(err.to_string());
-                                warn!(error = %err, "maintenance_failed");
-                                true
-                            }
-                        };
+                        let failed = health.record_outcome(&maintenance.run(&settings).await);
                         let applied_retention = RetentionKnobs::from(&settings);
                         // Wait for the next trigger: shutdown, the periodic
                         // interval, or a settings change that actually moves a
