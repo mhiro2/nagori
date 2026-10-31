@@ -171,13 +171,17 @@ mod tests {
     }
 
     #[test]
-    fn document_grams_include_han_unigrams() {
-        // Han ideographs get a 1-gram so a lone-kanji query can match; the kana
-        // around them do not.
-        let grams = generate_document_ngrams("検索エンジン");
-        assert!(grams.contains(&"検".to_owned()));
-        assert!(grams.contains(&"索".to_owned()));
-        assert!(!grams.contains(&"エ".to_owned()));
+    fn document_grams_include_only_han_unigrams() {
+        // Han ideographs get a 1-gram so a lone-kanji query can match. Kana
+        // (checked after the Katakana fold, so `エ` would surface as `え`),
+        // ASCII, and Hangul never contribute a 1-gram.
+        let grams = generate_document_ngrams("検索エンジンaＢ한");
+        let unigrams: Vec<&str> = grams
+            .iter()
+            .map(String::as_str)
+            .filter(|g| g.chars().count() == 1)
+            .collect();
+        assert_eq!(unigrams, vec!["検", "索"]);
     }
 
     #[test]
@@ -204,14 +208,29 @@ mod tests {
 
     #[test]
     fn caps_input_to_max_chars() {
-        // Build an input longer than the cap. After truncation we should get
-        // 2 + 3 grams up to MAX_NGRAM_INPUT_CHARS, never the full corpus.
-        let body: String = "a".repeat(MAX_NGRAM_INPUT_CHARS * 2);
+        // The last two characters inside the cap are distinct sentinels, and a
+        // third sentinel sits right past it. Grams ending at the cap must be
+        // indexed; any gram reaching past it must not.
+        let mut body = "a".repeat(MAX_NGRAM_INPUT_CHARS - 2);
+        body.push_str("xy");
+        body.push('z');
+        body.push_str(&"a".repeat(MAX_NGRAM_INPUT_CHARS));
         let grams = generate_document_ngrams(&body);
-        // ASCII has no Han 1-grams, and for all-identical chars after dedup we
-        // end up with exactly two distinct grams: "aa" and "aaa". The point is
-        // just that we didn't allocate proportional to the full input length.
-        assert_eq!(grams, vec!["aa".to_owned(), "aaa".to_owned()]);
+        assert_eq!(grams, ["aa", "aaa", "aax", "ax", "axy", "xy"]);
+    }
+
+    #[test]
+    fn cap_counts_non_whitespace_chars_not_bytes() {
+        // Whitespace is dropped before the cap and multi-byte chars count as
+        // one each, so a spaced-out Han run of exactly the cap keeps its last
+        // ideograph and drops the next one.
+        let mut body: String = "検 ".repeat(MAX_NGRAM_INPUT_CHARS - 1);
+        body.push('索');
+        body.push_str(" 終");
+        let grams = generate_document_ngrams(&body);
+        assert!(grams.contains(&"索".to_owned()));
+        assert!(grams.contains(&"検索".to_owned()));
+        assert!(!grams.iter().any(|g| g.contains('終')));
     }
 
     #[test]
