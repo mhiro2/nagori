@@ -6,10 +6,10 @@ vi.mock('../lib/commands', async () =>
   (await import('../test-helpers/moduleMocks')).commandsMock(),
 );
 
-import { getEntryPreview } from '../lib/commands';
+import { getEntryPreview, getEntryPreviewFull } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { EntryPreviewDto } from '../lib/types';
-import { hydratePreview, previewState, retryPreview } from './searchPreview.svelte';
+import { expandPreview, hydratePreview, previewState, retryPreview } from './searchPreview.svelte';
 
 const preview = (id: string, truncated = false): EntryPreviewDto => ({
   id,
@@ -35,6 +35,8 @@ beforeEach(() => {
   previewState.loading = false;
   previewState.loadingVisible = false;
   previewState.errorMessage = undefined;
+  previewState.expandedLoading = false;
+  previewState.expandedErrorMessage = undefined;
 });
 
 describe('hydratePreview', () => {
@@ -181,5 +183,126 @@ describe('retryPreview', () => {
     expect(vi.mocked(getEntryPreview).mock.calls.length).toBe(calls + 1);
     expect(vi.mocked(getEntryPreview)).toHaveBeenLastCalledWith('retry-2', 'ab');
     expect(previewState.errorMessage).toBeUndefined();
+  });
+});
+
+const deferred = <T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} => {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+const fullBody = (id: string, text: string): EntryPreviewDto => ({
+  ...preview(id),
+  previewText: text,
+  body: { type: 'text', text },
+});
+
+// Show a truncated standard preview for `id`, the only state that offers
+// the expanded body.
+const showTruncated = (id: string): void => {
+  previewState.entryId = id;
+  previewState.preview = preview(id, true);
+};
+
+describe('expandPreview', () => {
+  it('replaces the truncated body with the full one', async () => {
+    showTruncated('e1');
+    const full = fullBody('e1', 'the whole thing');
+    vi.mocked(getEntryPreviewFull).mockResolvedValue(full);
+
+    const pending = expandPreview('e1');
+    expect(previewState.expandedLoading).toBe(true);
+    await pending;
+
+    expect(getEntryPreviewFull).toHaveBeenCalledWith('e1');
+    // The whole DTO is adopted: body and the now-untruncated metadata, not
+    // just the summary line.
+    expect(previewState.preview).toEqual(full);
+    expect(previewState.preview?.body).toEqual({ type: 'text', text: 'the whole thing' });
+    expect(previewState.preview?.metadata.truncated).toBe(false);
+    expect(previewState.expandedLoading).toBe(false);
+    expect(previewState.expandedErrorMessage).toBeUndefined();
+  });
+
+  it('keeps the standard body and reports the failure separately', async () => {
+    showTruncated('e1');
+    vi.mocked(getEntryPreviewFull).mockRejectedValue(new Error('body too large'));
+
+    await expandPreview('e1');
+
+    expect(previewState.preview?.metadata.truncated).toBe(true);
+    expect(previewState.expandedErrorMessage).toBe('body too large');
+    expect(previewState.errorMessage).toBeUndefined();
+    expect(previewState.expandedLoading).toBe(false);
+  });
+
+  it('drops a full body that arrives after the selection moved on', async () => {
+    showTruncated('e1');
+    const full = deferred<EntryPreviewDto>();
+    vi.mocked(getEntryPreviewFull).mockReturnValueOnce(full.promise);
+
+    const pending = expandPreview('e1');
+    showTruncated('e2');
+    full.resolve(fullBody('e1', 'stale body'));
+    await pending;
+
+    expect(previewState.preview?.id).toBe('e2');
+    expect(previewState.preview?.previewText).toBe('p');
+  });
+
+  it('drops a failure that arrives after the selection moved on', async () => {
+    showTruncated('e1');
+    const full = deferred<EntryPreviewDto>();
+    vi.mocked(getEntryPreviewFull).mockReturnValueOnce(full.promise);
+
+    const pending = expandPreview('e1');
+    showTruncated('e2');
+    full.reject(new Error('late failure'));
+    await pending;
+
+    expect(previewState.expandedErrorMessage).toBeUndefined();
+  });
+
+  it('applies only the latest of two overlapping expansions', async () => {
+    showTruncated('e1');
+    const first = deferred<EntryPreviewDto>();
+    const second = deferred<EntryPreviewDto>();
+    vi.mocked(getEntryPreviewFull)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const a = expandPreview('e1');
+    const b = expandPreview('e1');
+    second.resolve(fullBody('e1', 'latest'));
+    await b;
+    first.resolve(fullBody('e1', 'older'));
+    await a;
+
+    expect(previewState.preview?.previewText).toBe('latest');
+    expect(previewState.expandedLoading).toBe(false);
+  });
+
+  it.each([
+    ['outside the Tauri runtime', () => vi.mocked(isTauri).mockReturnValue(false)],
+    ['for an entry that is no longer selected', () => (previewState.entryId = 'other')],
+    [
+      'when the standard body is already complete',
+      () => (previewState.preview = preview('e1', false)),
+    ],
+  ])('skips the fetch %s', async (_label, arrange) => {
+    showTruncated('e1');
+    arrange();
+    await expandPreview('e1');
+    expect(getEntryPreviewFull).not.toHaveBeenCalled();
+    expect(previewState.expandedLoading).toBe(false);
   });
 });
