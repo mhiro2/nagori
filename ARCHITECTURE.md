@@ -3011,10 +3011,19 @@ redaction parity.
 round-trips, search-cache invalidation under concurrent
 mutation/search, settings watcher fan-out.
 
-**Platform.** Manual or feature-gated tests for macOS clipboard
-read/write, global hotkey registration, auto-paste, and permission
-detection. The `apps/desktop` end-to-end tests drive a real Tauri
-shell and a synthetic clipboard producer.
+**Platform.** macOS permission rows are unit-tested against injected
+accessibility probe results. Tests that overwrite the system pasteboard
+and the live Apple Intelligence tests are `#[ignore]` opt-in
+(`cargo nextest run --run-ignored only`) and fail, rather than pass
+silently, when their prerequisites are missing. The `scripts/e2e-{macos,linux,windows}` harnesses drive the CLI daemon
+and real OS clipboards; they do not launch a Tauri shell or WebView.
+Their auto-paste checks observe command completion and clipboard
+contents, not text arriving in another application's focused field.
+
+**Desktop.** Vitest runs components, stores, and helpers in jsdom with
+mocked Tauri commands and events. Rust tests exercise DTOs, command
+helpers, image response builders, startup workers, and the static
+command ACL configuration. These are not full native UI E2E tests.
 
 **Benchmarks.** Search at 1k / 10k / 100k entries, Japanese queries,
 long-text entries, repeated prefix typing. Target: top-50 results
