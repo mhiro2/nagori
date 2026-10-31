@@ -494,11 +494,21 @@ impl CaptureFailurePolicy {
     /// stays a true hard limit (a saturated `+10%` swing would otherwise
     /// push a 30 s cap to 33 s).
     fn jittered_backoff(base: Duration, consecutive_failures: u32) -> Duration {
+        Self::jittered_backoff_with_entropy(base, consecutive_failures, jitter_entropy())
+    }
+
+    /// [`Self::jittered_backoff`] with the entropy passed in, so tests can
+    /// drive the saturated `+10%` swing through the same cap the loop uses.
+    fn jittered_backoff_with_entropy(
+        base: Duration,
+        consecutive_failures: u32,
+        entropy: u64,
+    ) -> Duration {
         let scaled = Self::backoff_for_failures(base, consecutive_failures);
         if consecutive_failures < BACKOFF_AFTER_CONSECUTIVE_FAILURES {
             return scaled;
         }
-        Self::apply_jitter(scaled, jitter_entropy()).min(MAX_BACKOFF)
+        Self::apply_jitter(scaled, entropy).min(MAX_BACKOFF)
     }
 
     /// Pure jitter math, split out so tests can pin `entropy` and assert
