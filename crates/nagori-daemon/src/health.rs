@@ -76,6 +76,29 @@ impl MaintenanceHealth {
         guard.last_error = Some(message.into());
     }
 
+    /// Record one maintenance run's outcome and report whether it failed.
+    ///
+    /// Both hosts of the maintenance loop (the daemon's `serve/lifecycle.rs`
+    /// and the desktop's startup supervisor) funnel through this, so
+    /// `nagori doctor` reads the same counter and error text whichever one
+    /// ran the sweep.
+    pub fn record_outcome<T, E: std::fmt::Display>(&self, outcome: &Result<T, E>) -> bool {
+        match outcome {
+            Ok(_) => {
+                self.record_success();
+                false
+            }
+            Err(err) => {
+                // Record before logging so a concurrent health-probe sees the
+                // latest counter even if tracing back-pressure delays the warn
+                // line.
+                self.record_failure(err.to_string());
+                tracing::warn!(error = %err, "maintenance_failed");
+                true
+            }
+        }
+    }
+
     /// Wire-format snapshot suitable for inclusion in `HealthResponse` /
     /// `DoctorReport`.
     pub fn report(&self) -> MaintenanceHealthReport {
@@ -320,6 +343,33 @@ mod tests {
         health.record_failure("first");
         health.record_failure("second");
         health.record_success();
+        let report = health.report();
+        assert_eq!(report.consecutive_failures, 0);
+        assert!(!report.degraded);
+        assert!(report.last_error.is_none());
+    }
+
+    #[test]
+    fn record_outcome_tracks_failures_until_a_success() {
+        // The maintenance loops hand the raw run result here; the error's
+        // display string is what `nagori doctor` shows, and a later success
+        // must clear the degraded state reached at the threshold.
+        let health = MaintenanceHealth::new();
+        let failure: Result<(), nagori_core::AppError> =
+            Err(nagori_core::AppError::storage("disk full".to_owned()));
+        let expected = failure.as_ref().unwrap_err().to_string();
+        for attempt in 1..=MAINTENANCE_DEGRADED_THRESHOLD {
+            assert!(
+                health.record_outcome(&failure),
+                "a failed run reports failure"
+            );
+            let report = health.report();
+            assert_eq!(report.consecutive_failures, attempt);
+            assert_eq!(report.degraded, attempt >= MAINTENANCE_DEGRADED_THRESHOLD);
+            assert_eq!(report.last_error.as_deref(), Some(expected.as_str()));
+        }
+
+        assert!(!health.record_outcome(&Ok::<(), nagori_core::AppError>(())));
         let report = health.report();
         assert_eq!(report.consecutive_failures, 0);
         assert!(!report.degraded);

@@ -302,13 +302,45 @@ fn add_then_get_text_round_trip_snapshot() {
     insta::assert_snapshot!(&list_redacted, @"[id]\tText\tsnapshot value\n");
 }
 
+/// Split JSONL output into its physical records, requiring every record —
+/// including the last — to be newline-terminated and to parse as a JSON
+/// object on its own.
+fn jsonl_records(stdout: &str) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    assert!(
+        stdout.ends_with('\n'),
+        "JSONL output must end with a newline, got {stdout:?}"
+    );
+    stdout
+        .split_terminator('\n')
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("line {line:?} is not one JSON record: {err}"));
+            let serde_json::Value::Object(record) = value else {
+                panic!("JSONL record must be an object, got {line:?}");
+            };
+            record
+        })
+        .collect()
+}
+
+fn record_keys(record: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+    let mut keys = record.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
+}
+
 #[test]
-fn add_then_list_jsonl_snapshot() {
+fn add_then_list_jsonl_emits_one_newline_terminated_record_per_entry() {
+    // A body with an embedded newline must stay inside its own record (JSON
+    // escapes it) rather than splitting it across physical lines.
     let (_dir, db) = temp_db();
-    let _ = nagori(&db)
-        .args(["add", "--text", "jsonl value"])
-        .output()
-        .expect("invoke add");
+    for text in ["jsonl first", "jsonl second\nline two"] {
+        let add = nagori(&db)
+            .args(["add", "--text", text])
+            .output()
+            .expect("invoke add");
+        assert!(add.status.success(), "exit: {:?}", add.status);
+    }
 
     let list = nagori(&db)
         .args(["--jsonl", "list"])
@@ -316,21 +348,32 @@ fn add_then_list_jsonl_snapshot() {
         .expect("invoke list");
     assert!(list.status.success(), "exit: {:?}", list.status);
 
-    let stdout = stdout_string(&list);
-    // JSONL: exactly one record terminated by a newline.
-    let lines: Vec<&str> = stdout.split_inclusive('\n').collect();
-    assert_eq!(
-        lines.len(),
-        1,
-        "expected single JSONL record, got {stdout:?}"
-    );
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(lines[0].trim_end()).expect("valid JSONL record");
-    assert_eq!(parsed["text"], serde_json::json!("jsonl value"));
-    assert_eq!(parsed["preview"], serde_json::json!("jsonl value"));
-    assert_eq!(parsed["sensitivity"], serde_json::json!("Public"));
-    assert_eq!(parsed["pinned"], serde_json::json!(false));
+    let records = jsonl_records(&stdout_string(&list));
+    assert_eq!(records.len(), 2, "one record per entry");
+    let texts = records
+        .iter()
+        .map(|record| record["text"].as_str().expect("text is a string"))
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["jsonl second\nline two", "jsonl first"]);
+    for record in &records {
+        assert_eq!(
+            record_keys(record),
+            [
+                "created_at",
+                "id",
+                "kind",
+                "last_used_at",
+                "pinned",
+                "preview",
+                "sensitivity",
+                "text",
+                "updated_at",
+                "use_count",
+            ],
+        );
+        assert_eq!(record["sensitivity"], serde_json::json!("Public"));
+        assert_eq!(record["pinned"], serde_json::json!(false));
+    }
 }
 
 #[test]
@@ -567,33 +610,61 @@ fn add_then_get_json_shape_snapshot() {
 }
 
 #[test]
-fn search_jsonl_emits_one_parseable_record_per_line() {
+fn search_jsonl_emits_one_parseable_record_per_hit() {
     let (_dir, db) = temp_db();
-    let _ = nagori(&db)
-        .args(["add", "--text", "searchable jsonl payload"])
-        .output()
-        .expect("invoke add");
+    for text in ["searchable jsonl payload", "searchable second\nline two"] {
+        let add = nagori(&db)
+            .args(["add", "--text", text])
+            .output()
+            .expect("invoke add");
+        assert!(add.status.success(), "exit: {:?}", add.status);
+    }
 
     let search = nagori(&db)
         .args(["--jsonl", "search", "searchable"])
         .output()
         .expect("invoke search");
     assert!(search.status.success(), "exit: {:?}", search.status);
-    let stdout = stdout_string(&search);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "one hit → one JSONL line, got {stdout:?}");
-    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSONL record");
+    let records = jsonl_records(&stdout_string(&search));
+    assert_eq!(records.len(), 2, "one record per hit");
+    let mut previews = records
+        .iter()
+        .map(|record| record["preview"].as_str().expect("preview is a string"))
+        .collect::<Vec<_>>();
+    previews.sort_unstable();
     assert_eq!(
-        record["preview"],
-        serde_json::json!("searchable jsonl payload")
+        previews,
+        ["searchable jsonl payload", "searchable second line two"]
     );
-    assert_eq!(record["kind"], serde_json::json!("Text"));
-    assert_eq!(record["pinned"], serde_json::json!(false));
-    assert!(record["score"].is_number(), "score must be numeric");
-    assert!(
-        record["rank_reasons"].is_array() || record["rank_reasons"].is_null(),
-        "rank_reasons shape drifted: {record}"
-    );
+    for record in &records {
+        assert_eq!(
+            record_keys(record),
+            [
+                "created_at",
+                "id",
+                "kind",
+                "pinned",
+                "preview",
+                "rank_reasons",
+                "score",
+                "sensitivity",
+            ],
+        );
+        assert_eq!(record["kind"], serde_json::json!("Text"));
+        assert_eq!(record["pinned"], serde_json::json!(false));
+        assert!(record["score"].is_number(), "score must be numeric");
+        let reasons = record["rank_reasons"]
+            .as_array()
+            .unwrap_or_else(|| panic!("rank_reasons must be an array: {record:?}"));
+        assert!(
+            reasons.iter().all(serde_json::Value::is_string),
+            "rank_reasons must list reason names: {record:?}",
+        );
+        assert!(
+            !reasons.is_empty(),
+            "a hit must explain its rank: {record:?}"
+        );
+    }
 }
 
 #[test]

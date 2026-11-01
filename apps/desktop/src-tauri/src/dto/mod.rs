@@ -529,10 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn entry_dto_omits_text_for_private_or_secret_unless_caller_opts_in() {
-        // `EntryDto::from_entry` exposes the `include_text` flag so the
-        // command layer can keep raw bodies out of the default response shape
-        // for sensitive entries while still returning text on copy/paste paths.
+    fn entry_dto_projects_text_only_when_include_text_is_set() {
+        // `from_entry` does not look at sensitivity itself: the caller decides
+        // through `include_text` (see `entry_dto_for_default_output` for the
+        // sensitivity table). Pin that the flag alone drives the body.
         let mut entry = text_entry("super secret value");
         entry.sensitivity = Sensitivity::Secret;
 

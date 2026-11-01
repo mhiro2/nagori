@@ -2851,6 +2851,7 @@ dependencies = [
  "nagori-search",
  "nagori-storage",
  "png 0.18.1",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

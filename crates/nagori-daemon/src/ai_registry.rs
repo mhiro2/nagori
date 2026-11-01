@@ -367,20 +367,32 @@ mod tests {
     }
 
     #[test]
-    fn semaphores_map_each_backend() {
+    fn semaphores_serialise_within_a_backend_and_isolate_across_backends() {
+        // Each backend family is serialised to one permit, and the families
+        // must not share a semaphore: a long text generation may not block a
+        // translation or an embedding, and vice versa.
         let semaphores = AiSemaphores::default();
-        // Text generation is serialised to a single permit.
-        assert_eq!(
-            semaphores
-                .for_backend(BackendKind::TextGeneration)
-                .available_permits(),
-            1
-        );
-        assert_eq!(
-            semaphores
-                .for_backend(BackendKind::Translation)
-                .available_permits(),
-            1
-        );
+        let kinds = [
+            BackendKind::TextGeneration,
+            BackendKind::Translation,
+            BackendKind::Embedding,
+        ];
+        for held in kinds {
+            let permit = semaphores
+                .for_backend(held)
+                .try_acquire_owned()
+                .expect("an idle backend grants its permit");
+            assert!(
+                semaphores.for_backend(held).try_acquire_owned().is_err(),
+                "a second {held:?} request must wait for the first",
+            );
+            for other in kinds.into_iter().filter(|kind| *kind != held) {
+                assert!(
+                    semaphores.for_backend(other).try_acquire_owned().is_ok(),
+                    "{other:?} must stay available while {held:?} is busy",
+                );
+            }
+            drop(permit);
+        }
     }
 }

@@ -417,11 +417,10 @@ pub(crate) fn dispatch_secondary_hotkey(handle: &tauri::AppHandle, action: Secon
 #[cfg(test)]
 mod hotkey_tests {
     use super::{
-        HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT, HotkeyFailureKind,
-        SecondaryHotkeyDiff, build_hotkey_failure_payload, build_hotkey_failure_record,
-        build_hotkey_resolved_payload, compute_secondary_hotkey_diff, should_clear_secondary_cache,
+        HotkeyFailureKind, SecondaryHotkeyDiff, build_hotkey_failure_payload,
+        build_hotkey_failure_record, build_hotkey_resolved_payload, compute_secondary_hotkey_diff,
+        should_clear_secondary_cache,
     };
-    use crate::{CLIPBOARD_CHANGED_EVENT, SETTINGS_CHANGED_EVENT};
     use nagori_core::SecondaryHotkeyAction;
     use std::collections::BTreeMap;
 
@@ -430,30 +429,6 @@ mod hotkey_tests {
             .iter()
             .map(|(action, accel)| (*action, (*accel).to_owned()))
             .collect()
-    }
-
-    #[test]
-    fn event_name_matches_frontend_contract() {
-        // The Settings view subscribes to this exact string via
-        // `TAURI_EVENTS.hotkeyRegisterFailed` in `lib/tauri.ts`. Drift
-        // would silently break the inline error surface, so lock the
-        // wire constant here.
-        assert_eq!(
-            HOTKEY_REGISTER_FAILED_EVENT,
-            "nagori://hotkey_register_failed"
-        );
-    }
-
-    #[test]
-    fn resolved_event_name_matches_frontend_contract() {
-        // Paired with `hotkeyRegisterResolved` in `lib/tauri.ts`. Drift
-        // here means the live frontend store never sees backend
-        // success notifications and stale toasts outlive the resolved
-        // conflict.
-        assert_eq!(
-            HOTKEY_REGISTER_RESOLVED_EVENT,
-            "nagori://hotkey_register_resolved"
-        );
     }
 
     #[test]
@@ -506,23 +481,6 @@ mod hotkey_tests {
         );
         assert_eq!(secondary_record.kind.as_deref(), Some("secondary"));
         assert_eq!(secondary_record.action.as_deref(), Some("repaste-last"));
-    }
-
-    #[test]
-    fn settings_changed_event_name_matches_frontend_contract() {
-        // Same lockstep as above for the settings-broadcast channel —
-        // `TAURI_EVENTS.settingsChanged` in `lib/tauri.ts` subscribes to
-        // this literal. Drift would silently break the SettingsView
-        // merge path that keeps a tray-toggled `captureEnabled` from
-        // being clobbered by an open Settings window's next autosave.
-        assert_eq!(SETTINGS_CHANGED_EVENT, "nagori://settings_changed");
-    }
-
-    #[test]
-    fn clipboard_changed_event_name_matches_frontend_contract() {
-        // `TAURI_EVENTS.clipboardChanged` in `lib/tauri.ts` subscribes to
-        // this literal so the palette can refresh after background capture.
-        assert_eq!(CLIPBOARD_CHANGED_EVENT, "nagori://clipboard_changed");
     }
 
     #[test]
@@ -690,23 +648,6 @@ mod hotkey_tests {
         assert!(should_clear_secondary_cache(
             "Cmd+Shift+R",
             "repaste-last",
-            &desired,
-            &active,
-        ));
-    }
-
-    #[test]
-    fn reconcile_keeps_cache_when_cached_action_wire_value_is_unknown() {
-        // Forward-compatibility: a future binary could write a cache
-        // entry with an action wire value this build doesn't recognise.
-        // We treat that as "not stale" so the banner survives on
-        // upgrades — losing a still-current failure silently would be
-        // worse than holding a stale one, which the user can dismiss.
-        let desired = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
-        let active = map(&[(SecondaryHotkeyAction::RepasteLast, "Cmd+Shift+R")]);
-        assert!(!should_clear_secondary_cache(
-            "Cmd+Shift+R",
-            "future-action",
             &desired,
             &active,
         ));

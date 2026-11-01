@@ -89,21 +89,47 @@ fn jittered_backoff_keeps_pre_threshold_cadence_unchanged() {
 }
 
 #[test]
-fn apply_jitter_then_cap_never_exceeds_max_backoff() {
+fn jittered_backoff_caps_the_saturated_upward_swing_at_max_backoff() {
     // Once `backoff_for_failures` saturates at `MAX_BACKOFF`, the
     // jitter's `+10%` swing must not push the next sleep above the
     // documented ceiling — operators read `MAX_BACKOFF` as a hard
-    // limit, so an extra 3 seconds at the top of the curve is a
-    // surprising regression. The `apply_jitter(...).min(MAX_BACKOFF)`
-    // step in `jittered_backoff` enforces this; pin the worst case.
-    let saturated = MAX_BACKOFF;
-    let entropy_max =
-        u64::try_from(saturated.as_nanos() / 10).expect("MAX_BACKOFF/10 fits u64") * 2;
-    let with_max_jitter =
-        CaptureFailurePolicy::apply_jitter(saturated, entropy_max).min(MAX_BACKOFF);
+    // limit. Drive the production path with the entropy that selects
+    // the largest upward offset, and check the uncapped value would
+    // have overshot so the clamp is what keeps it at the ceiling.
+    let base = Duration::from_millis(500);
+    let saturating_failures = BACKOFF_AFTER_CONSECUTIVE_FAILURES + 20;
+    assert_eq!(
+        CaptureFailurePolicy::backoff_for_failures(base, saturating_failures),
+        MAX_BACKOFF,
+    );
+    let max_upward_entropy =
+        u64::try_from(MAX_BACKOFF.as_nanos() / 10).expect("MAX_BACKOFF/10 fits u64") * 2;
     assert!(
-        with_max_jitter <= MAX_BACKOFF,
-        "post-jitter clamp must respect MAX_BACKOFF: {with_max_jitter:?}",
+        CaptureFailurePolicy::apply_jitter(MAX_BACKOFF, max_upward_entropy) > MAX_BACKOFF,
+        "fixture must pick an entropy whose raw jitter overshoots the cap",
+    );
+    assert_eq!(
+        CaptureFailurePolicy::jittered_backoff_with_entropy(
+            base,
+            saturating_failures,
+            max_upward_entropy,
+        ),
+        MAX_BACKOFF,
+    );
+}
+
+#[test]
+fn jittered_backoff_applies_jitter_below_the_cap() {
+    // Below the cap the jitter must reach the sleep unchanged: the
+    // lowest offset shortens the doubled 1 s interval by 10%.
+    let base = Duration::from_millis(500);
+    assert_eq!(
+        CaptureFailurePolicy::jittered_backoff_with_entropy(
+            base,
+            BACKOFF_AFTER_CONSECUTIVE_FAILURES,
+            0,
+        ),
+        Duration::from_millis(900),
     );
 }
 

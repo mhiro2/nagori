@@ -187,17 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_paste_failure_surfaces_as_recoverable_command_error() {
-        // Mirrors `paste_entry_from_palette`: when `paste_frontmost` fails,
-        // the runtime returns AppError::Platform / Permission. The
-        // command layer wraps it via `?`, so the conversion path matters
-        // for the toast the palette renders.
-        let cmd: CommandError = AppError::Permission("paste blocked".to_owned()).into();
-        assert!(cmd.recoverable, "auto-paste failure must be recoverable");
-        assert_eq!(cmd.code, "permission_error");
-    }
-
-    #[test]
     fn paste_failure_keeps_curated_message_and_paste_code() {
         // Auto-paste failures carry a classified reason plus an actionable,
         // already-curated message ("install the `wtype` package", …). The

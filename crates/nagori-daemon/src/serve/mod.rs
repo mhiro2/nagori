@@ -60,20 +60,47 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        /// Flags when the worker's future is dropped, which is what an abort
+        /// does once it has actually been delivered.
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         // A worker that only "finishes" after an hour must be aborted once it
         // overruns the short drain grace, not awaited to completion — otherwise
         // shutdown would hang on a wedged worker. With paused time the runtime
         // advances to the nearest timer (the 50 ms grace) first, so the
         // timeout→abort path fires deterministically.
         let finished = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let flag = Arc::clone(&finished);
+        let guard = DropFlag(Arc::clone(&dropped));
         let handle = tokio::spawn(async move {
+            let _guard = guard;
+            started_tx.send(()).expect("test awaits the start signal");
             tokio::time::sleep(Duration::from_hours(1)).await;
             flag.store(true, Ordering::SeqCst);
         });
+        let abort_handle = handle.abort_handle();
+        started_rx.await.expect("worker should start");
 
         drain_one("test_worker", handle, Duration::from_millis(50)).await;
 
+        // Not merely unfinished at this instant: the task must already be
+        // torn down when the drain returns, so a detached-but-running worker
+        // (dropped `JoinHandle` without an abort) fails here.
+        assert!(
+            abort_handle.is_finished(),
+            "drain must not return while the overrunning worker is still live",
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the worker's future must be dropped by the abort",
+        );
         assert!(
             !finished.load(Ordering::SeqCst),
             "a worker that overruns the grace must be aborted before it completes",

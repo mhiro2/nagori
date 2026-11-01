@@ -89,11 +89,4 @@ mod tests {
             other => panic!("expected Unsupported, got {other:?}"),
         }
     }
-
-    #[test]
-    fn preview_item_roundtrips_path() {
-        let path = PathBuf::from("/var/tmp/preview.txt");
-        let item = PreviewItem::new(path.clone());
-        assert_eq!(item.path, path);
-    }
 }

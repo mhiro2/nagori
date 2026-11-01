@@ -2,10 +2,7 @@
 //! the semantic-index status/rebuild, and saving an AI result as an entry.
 
 use futures::StreamExt;
-use nagori_core::{
-    AiActionId, AiEvent, AiRequestOptions, AppError, EntryRepository, QuickActionId, RequestId,
-    is_text_safe_for_default_output,
-};
+use nagori_core::{AiActionId, AiEvent, AiRequestOptions, AppError, QuickActionId, RequestId};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::dto::{AiActionResultDto, AiAvailabilityDto, EntryDto, SemanticIndexStatusDto};
@@ -50,6 +47,16 @@ pub fn rebuild_semantic_index(state: State<'_, AppState>) {
     state.runtime.rebuild_semantic_index();
 }
 
+/// Streaming AI lifecycle events, each request-scoped by `requestId`. Keep the
+/// literals in lockstep with the `ai*` entries of `TAURI_EVENTS` in
+/// `lib/tauri.ts`.
+pub(crate) const AI_STARTED_EVENT: &str = "nagori://ai/started";
+pub(crate) const AI_DELTA_EVENT: &str = "nagori://ai/delta";
+pub(crate) const AI_REPLACE_EVENT: &str = "nagori://ai/replace";
+pub(crate) const AI_DONE_EVENT: &str = "nagori://ai/done";
+pub(crate) const AI_CANCELLED_EVENT: &str = "nagori://ai/cancelled";
+pub(crate) const AI_ERROR_EVENT: &str = "nagori://ai/error";
+
 /// Starts a streaming AI action. Returns the request id immediately; events
 /// arrive on the `nagori://ai/*` channel, and the run can be cancelled with
 /// [`cancel_ai_action`].
@@ -68,7 +75,7 @@ pub async fn start_ai_action(
     let request_id = run.request_id;
     let request_id_str = request_id.to_string();
     let _ = app.emit(
-        "nagori://ai/started",
+        AI_STARTED_EVENT,
         serde_json::json!({ "requestId": request_id_str }),
     );
     let app_for_task = app.clone();
@@ -105,7 +112,7 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
     let flush = |app: &AppHandle, seq: Option<u64>, text: &str| {
         if let Some(seq) = seq {
             let _ = app.emit(
-                "nagori://ai/delta",
+                AI_DELTA_EVENT,
                 serde_json::json!({ "requestId": request_id, "seq": seq, "text": text }),
             );
         }
@@ -148,7 +155,7 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
                 pending.clear();
                 pending_seq = None;
                 let _ = app.emit(
-                    "nagori://ai/replace",
+                    AI_REPLACE_EVENT,
                     serde_json::json!({ "requestId": request_id, "seq": seq, "text": text }),
                 );
             }
@@ -162,7 +169,7 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
                     pending.clear();
                 }
                 let _ = app.emit(
-                    "nagori://ai/done",
+                    AI_DONE_EVENT,
                     serde_json::json!({
                         "requestId": request_id,
                         "finalText": final_text,
@@ -174,14 +181,14 @@ async fn drive_ai_stream(app: AppHandle, request_id: String, mut events: nagori_
             }
             Some(Ok(AiEvent::Cancelled)) => {
                 let _ = app.emit(
-                    "nagori://ai/cancelled",
+                    AI_CANCELLED_EVENT,
                     serde_json::json!({ "requestId": request_id }),
                 );
                 break;
             }
             Some(Err(err)) => {
                 let _ = app.emit(
-                    "nagori://ai/error",
+                    AI_ERROR_EVENT,
                     serde_json::json!({
                         "requestId": request_id,
                         "code": err.code,
@@ -208,13 +215,5 @@ pub async fn save_ai_result(state: State<'_, AppState>, text: String) -> Command
         .get_entry(id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let include_text = is_text_safe_for_default_output(entry.sensitivity);
-    let entry_id = entry.id;
-    let summaries = state
-        .runtime
-        .store()
-        .list_representation_summaries(&[entry_id])
-        .await?;
-    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
-    Ok(EntryDto::from_entry(entry, include_text).with_representation_summaries(reps))
+    Ok(super::entry_commands::entry_dto_for_default_output(&state.runtime, entry).await?)
 }

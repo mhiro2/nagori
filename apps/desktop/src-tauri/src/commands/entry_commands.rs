@@ -4,9 +4,10 @@
 use std::time::{Duration, Instant};
 
 use nagori_core::{
-    AppError, ContentKind, EntryRepository, SearchQuery, build_file_summary,
+    AppError, ClipboardEntry, ContentKind, EntryRepository, SearchQuery, build_file_summary,
     is_text_safe_for_default_output,
 };
+use nagori_daemon::NagoriRuntime;
 use nagori_search::normalize_text;
 use tauri::State;
 
@@ -208,16 +209,8 @@ pub async fn get_entry(state: State<'_, AppState>, id: String) -> CommandResult<
     let Some(entry) = entry else {
         return Ok(None);
     };
-    let include_text = is_text_safe_for_default_output(entry.sensitivity);
-    let entry_id = entry.id;
-    let summaries = state
-        .runtime
-        .store()
-        .list_representation_summaries(&[entry_id])
-        .await?;
-    let reps = summaries.get(&entry_id).map_or(&[][..], Vec::as_slice);
     Ok(Some(
-        EntryDto::from_entry(entry, include_text).with_representation_summaries(reps),
+        entry_dto_for_default_output(&state.runtime, entry).await?,
     ))
 }
 
@@ -236,10 +229,20 @@ pub async fn add_entry(state: State<'_, AppState>, text: String) -> CommandResul
         .get_entry(id)
         .await?
         .ok_or(AppError::NotFound)?;
+    Ok(entry_dto_for_default_output(&state.runtime, entry).await?)
+}
+
+/// Project one entry for the renderer's default (non-copy) response shape:
+/// the body is included only when the entry's sensitivity allows default
+/// output, so a Private / Secret / Blocked body never rides along with a
+/// `get_entry` or an add-style command's echo.
+pub(crate) async fn entry_dto_for_default_output(
+    runtime: &NagoriRuntime,
+    entry: ClipboardEntry,
+) -> nagori_core::Result<EntryDto> {
     let include_text = is_text_safe_for_default_output(entry.sensitivity);
     let entry_id = entry.id;
-    let summaries = state
-        .runtime
+    let summaries = runtime
         .store()
         .list_representation_summaries(&[entry_id])
         .await?;
@@ -347,4 +350,49 @@ pub async fn pin_entry(state: State<'_, AppState>, id: String, pinned: bool) -> 
     let entry_id = parse_entry_id(&id)?;
     state.runtime.pin_entry(entry_id, pinned).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use nagori_core::{EntryFactory, EntryRepository, Sensitivity};
+    use nagori_daemon::NagoriRuntime;
+    use nagori_storage::SqliteStore;
+
+    use super::entry_dto_for_default_output;
+
+    #[tokio::test]
+    async fn default_output_dto_carries_the_body_only_for_safe_sensitivities() {
+        // `get_entry`, `add_entry` and `save_ai_result` all answer through
+        // this projection, so it owns the "which bodies may reach the
+        // renderer by default" table.
+        let runtime = NagoriRuntime::builder(SqliteStore::open_memory().expect("memory store"))
+            .build_for_test();
+        for (sensitivity, exposed) in [
+            (Sensitivity::Public, true),
+            (Sensitivity::Unknown, true),
+            (Sensitivity::Private, false),
+            (Sensitivity::Secret, false),
+            (Sensitivity::Blocked, false),
+        ] {
+            let body = format!("{sensitivity:?} body");
+            let mut entry = EntryFactory::from_text(&body);
+            entry.sensitivity = sensitivity;
+            let id = runtime.store().insert(entry).await.expect("insert entry");
+            let stored = runtime
+                .get_entry(id)
+                .await
+                .expect("read entry")
+                .expect("entry exists");
+
+            let dto = entry_dto_for_default_output(&runtime, stored)
+                .await
+                .expect("project entry");
+
+            assert_eq!(
+                dto.text.as_deref(),
+                exposed.then_some(body.as_str()),
+                "{sensitivity:?}",
+            );
+        }
+    }
 }

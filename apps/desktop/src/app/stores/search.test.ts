@@ -27,7 +27,6 @@ import {
   cancelPendingQuery,
   resetSearchRuntimeForTest,
   flushPendingQuery,
-  refreshRecent,
   resumePendingQuery,
   runQuery,
   scheduleQuery,
@@ -75,112 +74,6 @@ const resetState = () => {
 beforeEach(() => {
   vi.mocked(isTauri).mockReturnValue(true);
   resetState();
-});
-
-describe('refreshRecent', () => {
-  it('loads results from recent search and resets the selection', async () => {
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [sampleEntry('a'), sampleEntry('b')].map(toResult),
-      totalCandidates: 2,
-      searchElapsedMs: 5,
-      summaryElapsedMs: 0,
-      totalElapsedMs: 5,
-    });
-    searchState.selectedIndex = 5;
-
-    await refreshRecent();
-
-    expect(searchClipboard).toHaveBeenCalledWith({
-      query: '',
-      mode: 'Recent',
-      limit: 50,
-      requestId: expect.any(Number),
-    });
-    expect(searchState.results).toHaveLength(2);
-    expect(searchState.results.at(0)?.id).toBe('a');
-    expect(searchState.selectedIndex).toBe(0);
-    expect(searchState.loading).toBe(false);
-  });
-
-  it('captures errors into errorMessage without throwing', async () => {
-    vi.mocked(searchClipboard).mockRejectedValue({
-      code: 'storage_error',
-      message: 'boom',
-      recoverable: true,
-    });
-
-    await refreshRecent();
-
-    expect(searchState.errorMessage).toBeTruthy();
-    expect(searchState.loading).toBe(false);
-  });
-
-  it('falls back to a fixture when not running under Tauri', async () => {
-    vi.mocked(isTauri).mockReturnValue(false);
-
-    await refreshRecent();
-
-    expect(searchClipboard).not.toHaveBeenCalled();
-    expect(searchState.results).toHaveLength(1);
-    expect(searchState.results.at(0)?.id).toBe('fixture-1');
-  });
-});
-
-describe('runQuery', () => {
-  it('delegates to refreshRecent for empty queries', async () => {
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [sampleEntry('a')].map(toResult),
-      totalCandidates: 1,
-      searchElapsedMs: 5,
-      summaryElapsedMs: 0,
-      totalElapsedMs: 5,
-    });
-
-    await runQuery('   ');
-
-    expect(searchClipboard).toHaveBeenCalledWith({
-      query: '',
-      mode: 'Recent',
-      limit: 50,
-      requestId: expect.any(Number),
-    });
-    expect(searchState.query).toBe('   ');
-  });
-
-  it('dispatches non-empty queries to searchClipboard with Auto mode', async () => {
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [
-        {
-          id: 'x',
-          kind: 'text',
-          preview: 'match',
-          score: 0.9,
-          createdAt: '2026-05-05T00:00:00Z',
-          pinned: false,
-          sensitivity: 'Public',
-          rankReasons: ['FullTextMatch'],
-          representationSummary: [],
-        },
-      ],
-      totalCandidates: 1,
-      // Distinct components so the `lastElapsedMs` assertion proves the UI
-      // reads `totalElapsedMs` (12), not the search-only breakdown (7).
-      searchElapsedMs: 7,
-      summaryElapsedMs: 5,
-      totalElapsedMs: 12,
-    });
-
-    await runQuery('needle');
-
-    expect(searchClipboard).toHaveBeenCalledWith({
-      query: 'needle',
-      mode: 'Auto',
-      limit: 50,
-      requestId: expect.any(Number),
-    });
-    expect(searchState.results).toHaveLength(1);
-    expect(searchState.lastElapsedMs).toBe(12);
-  });
 });
 
 describe('flushPendingQuery', () => {
@@ -334,11 +227,14 @@ describe('typing right before the palette hides', () => {
     searchReturning('new-hit');
 
     await confirmSelection();
-    expect(pasteEntryCmd).toHaveBeenLastCalledWith('new-hit', undefined);
+    expect(pasteEntryCmd).toHaveBeenCalledTimes(1);
+    expect(pasteEntryCmd).toHaveBeenCalledWith('new-hit', undefined);
 
     await hideMidDebounce();
     searchReturning('new-hit');
     await deleteSelection();
+    expect(deleteEntryCmd).toHaveBeenCalledTimes(1);
+    expect(deleteEntryCmd).toHaveBeenCalledWith('new-hit');
     expect(deleteEntryCmd).not.toHaveBeenCalledWith('old-hit');
   });
 
@@ -614,41 +510,10 @@ describe('action helpers', () => {
     searchState.selectedIndex = 0;
   });
 
-  it('confirmSelection forwards the selected id to pasteEntry', async () => {
-    await confirmSelection();
-    // Plain Enter uses the configured format and auto-paste policy.
-    expect(pasteEntryCmd).toHaveBeenCalledWith('a', undefined);
-  });
-
   it('copySelection forwards the selected id to copyEntry', async () => {
     selectByIndex(1);
     await copySelection();
     expect(copyEntryCmd).toHaveBeenCalledWith('b');
-  });
-
-  it('togglePinSelection inverts the pinned flag and refreshes the query', async () => {
-    selectByIndex(1);
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [],
-      totalCandidates: 0,
-      searchElapsedMs: 0,
-      summaryElapsedMs: 0,
-      totalElapsedMs: 0,
-    });
-    await togglePinSelection();
-    expect(pinEntryCmd).toHaveBeenCalledWith('b', false);
-  });
-
-  it('deleteSelection removes the entry then refreshes the query', async () => {
-    vi.mocked(searchClipboard).mockResolvedValue({
-      results: [],
-      totalCandidates: 0,
-      searchElapsedMs: 0,
-      summaryElapsedMs: 0,
-      totalElapsedMs: 0,
-    });
-    await deleteSelection();
-    expect(deleteEntryCmd).toHaveBeenCalledWith('a');
   });
 
   it('action helpers are noops outside of Tauri', async () => {

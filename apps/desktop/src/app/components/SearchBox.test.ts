@@ -2,9 +2,13 @@ import { cleanup, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { DEFAULT_LOCALE, setLocale } from '../lib/i18n/index.svelte';
 import SearchBox from './SearchBox.svelte';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLocale(DEFAULT_LOCALE);
+});
 
 describe('SearchBox', () => {
   it('delegates each typed character to onInput, ending with the full needle', async () => {
@@ -30,18 +34,18 @@ describe('SearchBox', () => {
     expect(document.activeElement).toBe(getByRole('combobox'));
   });
 
-  it('falls back to the locale placeholder when none is provided', () => {
-    const { getByRole } = render(SearchBox, {
-      props: { value: '', onInput: () => {} },
-    });
-    const input = getByRole('combobox') as HTMLInputElement;
-    expect(input.placeholder.length).toBeGreaterThan(0);
-  });
-
-  it('uses the explicit placeholder prop when supplied', () => {
-    const { getByPlaceholderText } = render(SearchBox, {
-      props: { value: '', placeholder: 'Filter…', onInput: () => {} },
-    });
-    expect(getByPlaceholderText('Filter…')).toBeTruthy();
-  });
+  it.each([
+    ['en', undefined, 'Search history…'],
+    ['ja', undefined, '履歴を検索…'],
+    ['ja', 'Filter…', 'Filter…'],
+  ] as const)(
+    'with the %s locale and placeholder prop %s shows %s',
+    (locale, placeholder, expected) => {
+      setLocale(locale);
+      const { getByRole } = render(SearchBox, {
+        props: { value: '', onInput: () => {}, ...(placeholder ? { placeholder } : {}) },
+      });
+      expect((getByRole('combobox') as HTMLInputElement).placeholder).toBe(expected);
+    },
+  );
 });

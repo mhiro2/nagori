@@ -11,24 +11,12 @@ import { vi } from 'vitest';
 //
 // Pass overrides for anything a test needs to deviate from the defaults.
 
-// Mirror of `lib/tauri`'s TAURI_EVENTS map. A literal copy (rather than a
-// re-export) because importing the real module here would defeat the mock.
-export const TAURI_EVENTS = {
-  navigate: 'nagori://navigate',
-  clipboardChanged: 'nagori://clipboard_changed',
-  captureSkipped: 'nagori://capture_skipped',
-  pasteFailed: 'nagori://paste_failed',
-  hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
-  hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
-  paletteShortcutChanged: 'nagori://palette_shortcut_changed',
-  settingsChanged: 'nagori://settings_changed',
-  aiStarted: 'nagori://ai/started',
-  aiDelta: 'nagori://ai/delta',
-  aiReplace: 'nagori://ai/replace',
-  aiDone: 'nagori://ai/done',
-  aiError: 'nagori://ai/error',
-  aiCancelled: 'nagori://ai/cancelled',
-} as const;
+// The real `lib/tauri` event-name map. Taken from the actual module (not a
+// hand-kept copy) so a component subscribing to a key the production map
+// lacks — or a renamed wire value — fails against the mock too, instead of
+// two missing keys comparing equal as `undefined`.
+export const { TAURI_EVENTS } =
+  await vi.importActual<typeof import('../lib/tauri')>('../lib/tauri');
 
 // `lib/tauri` module shape. Defaults: running inside Tauri, subscriptions
 // attach instantly (onReady fires synchronously, like the real wrapper after

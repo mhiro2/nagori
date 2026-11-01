@@ -775,20 +775,45 @@ fn representation_set_hash_diverges_on_any_distinguishing_field() {
 
 #[test]
 fn representation_set_hash_resists_mime_delimiter_injection() {
-    use crate::RepresentationRole::Primary;
+    use crate::RepresentationRole::{Alternative, Primary};
     // A producer-supplied mime carrying the `|`/`\n` field/record delimiters
-    // must not let one rep set forge the encoding of a different one. The
-    // length prefix on `mime` keeps the two distinct.
-    let injected = super::compute_representation_set_hash(&[text_rep(
-        Primary,
-        "x|0|7|deadbeef\nalternative",
-        0,
-        "p",
-    )]);
-    let benign = super::compute_representation_set_hash(&[text_rep(Primary, "x", 0, "p")]);
+    // must not let one rep set forge the encoding of a different one. Build
+    // a single rep whose mime spells out "the rest of the first rep, then a
+    // whole second rep", so that without the mime length prefix both sets
+    // would encode to the same bytes.
+    let pair = [
+        text_rep(Primary, "x", 0, "p"),
+        text_rep(Alternative, "y", 1, "q"),
+    ];
+    let forged_mime = format!("x|{}\nalternative|1|y", ContentHash::sha256(b"p").value);
+    let forged = [text_rep(Primary, &forged_mime, 0, "q")];
+
+    // Sanity-check the fixture: the unprefixed `role|ordinal|mime|hash`
+    // encoding really does collide, so the assertion below exercises the
+    // length prefix rather than an incidental difference.
+    let unprefixed = |reps: &[crate::StoredClipboardRepresentation]| {
+        reps.iter()
+            .map(|r| {
+                let crate::RepresentationDataRef::InlineText(text) = &r.data else {
+                    unreachable!("fixture only uses inline text")
+                };
+                format!(
+                    "{}|{}|{}|{}",
+                    r.role.as_str(),
+                    r.ordinal,
+                    r.mime_type,
+                    ContentHash::sha256(text.as_bytes()).value
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(unprefixed(&pair), unprefixed(&forged));
+
     assert_ne!(
-        injected.value, benign.value,
-        "a mime with embedded delimiters must not collide with a plain mime"
+        super::compute_representation_set_hash(&pair).value,
+        super::compute_representation_set_hash(&forged).value,
+        "a mime with embedded delimiters must not forge a different rep set"
     );
 }
 

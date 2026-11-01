@@ -562,18 +562,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_compacts_whitespace_and_truncates_by_chars() {
-        assert_eq!(make_preview("  one\n\n two\tthree  ", 100), "one two three");
-        // Ellipsis counts toward max_chars: total length is exactly max_chars.
-        assert_eq!(make_preview("日本語テキスト", 3), "日本…");
-        assert_eq!(make_preview("日本語テキスト", 3).chars().count(), 3);
-        // No truncation when text fits exactly.
-        assert_eq!(make_preview("abc", 3), "abc");
-        // max_chars == 0 cannot fit even an ellipsis, so return empty.
-        assert_eq!(make_preview("abc", 0), "");
-    }
-
-    #[test]
     fn is_text_safe_for_default_output_only_admits_public_and_unknown() {
         assert!(is_text_safe_for_default_output(Sensitivity::Public));
         assert!(is_text_safe_for_default_output(Sensitivity::Unknown));

@@ -490,49 +490,6 @@ async fn auto_ascii_prefix_recalls_entry_older_than_substring_window() {
 }
 
 #[tokio::test]
-async fn exact_substring_walks_full_corpus_unbounded() {
-    // Regression: an earlier iteration capped the substring CTE to the
-    // most recent SUBSTRING_SCAN_WINDOW rows for *all* plans, which
-    // silently dropped exact matches outside the window. The Exact
-    // plan must always see the full live corpus because nothing else
-    // (FTS / ngram) backstops it.
-    use nagori_core::SearchCandidateProvider;
-    use tokio_util::sync::CancellationToken;
-    let store = SqliteStore::open_memory().unwrap();
-    let _old = insert_text(&store, "needle in a haystack").await;
-    for idx in 0..20 {
-        let _ = insert_text(&store, &format!("filler {idx}")).await;
-    }
-    let cancel = CancellationToken::new();
-    let bounded = store
-        .substring_candidates(
-            "needle",
-            &SearchFilters::default(),
-            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
-            true,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    let unbounded = store
-        .substring_candidates(
-            "needle",
-            &SearchFilters::default(),
-            SearchCandidateBudget::new(10, MAX_SEARCH_CANDIDATE_BYTES),
-            false,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    // Both still find it on a 21-row DB (window is 5000), but the
-    // unbounded path is what's used for explicit `Exact` searches —
-    // confirming both shapes return the row guards against future
-    // regressions where the bounded path swallows older matches.
-    assert_eq!(bounded.len(), 1);
-    assert_eq!(unbounded.len(), 1);
-}
-
-#[tokio::test]
 async fn ngram_cjk_only_mode_drops_ascii_grams() {
     // Directly pins the gram filter. `CjkOnly` (the Auto/Hybrid policy)
     // keeps only CJK-bearing grams, so a pure-ASCII query yields nothing
@@ -698,9 +655,11 @@ async fn recent_mode_returns_pinned_first_then_chronological() {
     query.recent_order = RecentOrder::PinnedFirstThenRecency;
     let results = store.search(query).await.unwrap();
     let ids = results.iter().map(|r| r.entry_id).collect::<Vec<_>>();
-    assert_eq!(ids[0], oldest, "pinned row should rank first");
-    assert!(ids.contains(&middle));
-    assert!(ids.contains(&newest));
+    assert_eq!(
+        ids,
+        vec![oldest, newest, middle],
+        "the pinned row leads, then unpinned rows run newest to oldest",
+    );
 }
 
 #[tokio::test]

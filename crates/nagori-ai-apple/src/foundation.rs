@@ -392,22 +392,25 @@ mod tests {
         );
     }
 
-    /// Drives one action against the live on-device model, returning the final
-    /// text — or `None` when Apple Intelligence is unavailable (e.g. CI), so the
-    /// caller can skip without failing a headless run. Exercises the full FFI →
-    /// `LanguageModelSession` → stream path on a machine where the model is ready,
-    /// and checks the reconstructed deltas match the authoritative final text.
+    /// Drives one action against the live on-device model and returns the final
+    /// text. Exercises the full FFI → `LanguageModelSession` → stream path and
+    /// checks the reconstructed deltas match the authoritative final text.
+    ///
+    /// Only the `#[ignore]`d live tests call this, so running them on a host
+    /// without Apple Intelligence is a failed precondition rather than a pass.
     #[cfg(test)]
-    async fn drive_real_action(action: AiActionId, input: &str) -> Option<String> {
+    async fn drive_real_action(action: AiActionId, input: &str) -> String {
         use futures::StreamExt;
         use nagori_core::{AiEvent, AiRequestOptions, RequestId};
         use tokio_util::sync::CancellationToken;
 
         let backend = AppleFoundationBackend::new();
-        if backend.availability().await != BackendAvailability::Available {
-            eprintln!("skipping real {action:?}: Apple Intelligence unavailable");
-            return None;
-        }
+        let availability = backend.availability().await;
+        assert_eq!(
+            availability,
+            BackendAvailability::Available,
+            "live {action:?} test needs Apple Intelligence enabled and the model ready"
+        );
 
         let req = TextGenerationRequest {
             request_id: RequestId::new(),
@@ -441,7 +444,7 @@ mod tests {
             buf, final_text,
             "reconstructed deltas must match final text"
         );
-        Some(final_text)
+        final_text
     }
 
     const SAMPLE_TEXT: &str = "Nagori is a local-first clipboard history manager. It captures \
@@ -450,26 +453,23 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
-    async fn real_summarize_streams_to_done_when_available() {
-        if let Some(text) = drive_real_action(AiActionId::Summarize, SAMPLE_TEXT).await {
-            assert!(!text.trim().is_empty(), "summary should be non-empty");
-        }
+    async fn real_summarize_streams_to_done() {
+        let text = drive_real_action(AiActionId::Summarize, SAMPLE_TEXT).await;
+        assert!(!text.trim().is_empty(), "summary should be non-empty");
     }
 
     #[tokio::test]
     #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
-    async fn real_rewrite_streams_to_done_when_available() {
-        if let Some(text) = drive_real_action(AiActionId::Rewrite, SAMPLE_TEXT).await {
-            assert!(!text.trim().is_empty(), "rewrite should be non-empty");
-        }
+    async fn real_rewrite_streams_to_done() {
+        let text = drive_real_action(AiActionId::Rewrite, SAMPLE_TEXT).await;
+        assert!(!text.trim().is_empty(), "rewrite should be non-empty");
     }
 
     #[tokio::test]
     #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
-    async fn real_format_markdown_streams_to_done_when_available() {
-        if let Some(text) = drive_real_action(AiActionId::FormatMarkdown, SAMPLE_TEXT).await {
-            assert!(!text.trim().is_empty(), "markdown should be non-empty");
-        }
+    async fn real_format_markdown_streams_to_done() {
+        let text = drive_real_action(AiActionId::FormatMarkdown, SAMPLE_TEXT).await;
+        assert!(!text.trim().is_empty(), "markdown should be non-empty");
     }
 
     /// Guided generation routes through Apple's `@Generable` path and yields a
@@ -477,21 +477,19 @@ mod tests {
     /// are model-dependent so we only require a non-empty result.
     #[tokio::test]
     #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
-    async fn real_extract_tasks_streams_to_done_when_available() {
+    async fn real_extract_tasks_streams_to_done() {
         let input = "Remember to email the report to Sam, then book the meeting room \
                      and update the budget spreadsheet before Friday.";
-        if let Some(text) = drive_real_action(AiActionId::ExtractTasks, input).await {
-            assert!(!text.trim().is_empty(), "task list should be non-empty");
-        }
+        let text = drive_real_action(AiActionId::ExtractTasks, input).await;
+        assert!(!text.trim().is_empty(), "task list should be non-empty");
     }
 
     #[tokio::test]
     #[ignore = "requires Apple Intelligence enabled; drives the live on-device model"]
-    async fn real_explain_code_streams_to_done_when_available() {
+    async fn real_explain_code_streams_to_done() {
         let input = "fn add(a: i32, b: i32) -> i32 { a + b }";
-        if let Some(text) = drive_real_action(AiActionId::ExplainCode, input).await {
-            assert!(!text.trim().is_empty(), "explanation should be non-empty");
-        }
+        let text = drive_real_action(AiActionId::ExplainCode, input).await;
+        assert!(!text.trim().is_empty(), "explanation should be non-empty");
     }
 
     /// `Translate` is refused as a capability mismatch *before* the OS
@@ -518,21 +516,32 @@ mod tests {
 
     #[test]
     fn availability_maps_every_apple_state() {
-        assert_eq!(
-            map_availability(AppleAvailability::Available),
-            BackendAvailability::Available
-        );
-        assert_eq!(
-            map_availability(AppleAvailability::AppleIntelligenceNotEnabled),
-            BackendAvailability::Unavailable(BackendUnavailableReason::NotEnabled)
-        );
-        assert_eq!(
-            map_availability(AppleAvailability::DeviceNotEligible),
-            BackendAvailability::Unavailable(BackendUnavailableReason::DeviceNotEligible)
-        );
-        assert_eq!(
-            map_availability(AppleAvailability::Unknown),
-            BackendAvailability::Unavailable(BackendUnavailableReason::Unknown)
-        );
+        let unavailable = BackendAvailability::Unavailable;
+        let cases = [
+            (AppleAvailability::Available, BackendAvailability::Available),
+            (
+                AppleAvailability::DeviceNotEligible,
+                unavailable(BackendUnavailableReason::DeviceNotEligible),
+            ),
+            (
+                AppleAvailability::AppleIntelligenceNotEnabled,
+                unavailable(BackendUnavailableReason::NotEnabled),
+            ),
+            (
+                AppleAvailability::ModelNotReady,
+                unavailable(BackendUnavailableReason::ModelNotReady),
+            ),
+            (
+                AppleAvailability::RateLimited,
+                unavailable(BackendUnavailableReason::RateLimited),
+            ),
+            (
+                AppleAvailability::Unknown,
+                unavailable(BackendUnavailableReason::Unknown),
+            ),
+        ];
+        for (apple, expected) in cases {
+            assert_eq!(map_availability(apple), expected, "{apple:?}");
+        }
     }
 }

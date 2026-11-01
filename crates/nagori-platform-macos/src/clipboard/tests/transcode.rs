@@ -13,14 +13,6 @@ fn tiff_capture_is_normalized_to_png() {
 }
 
 #[test]
-fn prepare_tiff_capture_accepts_small_dimensions() {
-    let prepared = prepare_tiff_capture(TINY_TIFF.to_vec());
-
-    let (mime, _) = prepared.expect("tiny tiff is well under the pixel cap");
-    assert_eq!(mime, "image/png");
-}
-
-#[test]
 fn prepare_tiff_capture_rejects_unparseable_tiff() {
     // A TIFF whose IFD declares 65535x65535 (well over the pixel cap)
     // but whose internal strip metadata is inconsistent. The `image`

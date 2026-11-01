@@ -1,15 +1,46 @@
-use nagori_core::{SearchQuery, SettingsRepository};
+use nagori_core::{EntryFactory, EntryId, EntryRepository, SearchQuery, SettingsRepository};
+use time::OffsetDateTime;
 
 use super::super::*;
 use super::runtime_with_memory_clipboard;
+
+/// Insert straight into the store, bypassing the runtime so its search
+/// cache is not invalidated, with an explicit creation time.
+async fn insert_into_store(
+    runtime: &NagoriRuntime,
+    text: &str,
+    created_at: OffsetDateTime,
+) -> EntryId {
+    let mut entry = EntryFactory::from_text(text);
+    entry.metadata.created_at = created_at;
+    entry.metadata.updated_at = created_at;
+    runtime
+        .store()
+        .insert(entry)
+        .await
+        .expect("store insert should succeed")
+}
 
 #[tokio::test]
 async fn search_before_watch_seed_reads_persisted_recent_order() {
     // The settings watch starts at `AppSettings::default()` until the startup
     // refresh lands. A search racing that window must not serve the default
-    // order: it refreshes the watch from the store itself, after which the
-    // fast path takes over.
+    // order: it refreshes the watch from the store itself and orders the very
+    // first results by the persisted preference.
     let (runtime, _) = runtime_with_memory_clipboard();
+    let now = OffsetDateTime::now_utc();
+    // Under the default recency order the newer, never-used row would lead;
+    // only the persisted `ByUseCount` puts the older, heavily used row first.
+    let frequent =
+        insert_into_store(&runtime, "older frequent", now - time::Duration::hours(2)).await;
+    let fresh = insert_into_store(&runtime, "newer unused", now - time::Duration::hours(1)).await;
+    for _ in 0..3 {
+        runtime
+            .store()
+            .increment_use_count(frequent)
+            .await
+            .expect("use count should bump");
+    }
     let persisted = AppSettings {
         recent_order: nagori_core::RecentOrder::ByUseCount,
         ..Default::default()
@@ -23,10 +54,16 @@ async fn search_before_watch_seed_reads_persisted_recent_order() {
         .expect("settings should persist");
     assert!(!runtime.settings_watch_seeded());
 
-    runtime
+    let results = runtime
         .search(SearchQuery::new("", String::new(), 5))
         .await
         .expect("search should succeed");
+    let ids = results.iter().map(|r| r.entry_id).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![frequent, fresh],
+        "the first search must already honour the persisted use-count order",
+    );
 
     // The fallback read seeded the watch with the persisted value, so later
     // searches use the snapshot.
@@ -59,12 +96,20 @@ async fn search_cache_serves_repeat_empty_query_without_round_tripping_storage()
         "first search should populate the cache"
     );
 
+    // Diverge the store from the cache behind the runtime's back: a row
+    // written straight to storage does not invalidate the cache, so a repeat
+    // search that re-queried SQLite would now see two rows.
+    let _hidden = insert_into_store(&runtime, "bravo", OffsetDateTime::now_utc()).await;
+
     let second = runtime
         .search(SearchQuery::new("", String::new(), 10))
         .await
         .expect("repeat search");
-    assert_eq!(second.len(), 1);
-    assert_eq!(second[0].entry_id, first[0].entry_id);
+    assert_eq!(
+        second.iter().map(|r| r.entry_id).collect::<Vec<_>>(),
+        vec![first[0].entry_id],
+        "the repeat search must be served from the cache, not storage",
+    );
 }
 
 #[tokio::test]

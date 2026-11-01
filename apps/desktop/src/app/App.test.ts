@@ -1,22 +1,10 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./lib/tauri', () => ({
-  isTauri: vi.fn(() => false),
-  currentWindowLabel: vi.fn(() => undefined),
-  subscribe: vi.fn((_event, _handler, onReady) => {
-    onReady?.();
-    return () => {};
-  }),
-  TAURI_EVENTS: {
-    navigate: 'nagori://navigate',
-    pasteFailed: 'nagori://paste_failed',
-    captureSkipped: 'nagori://capture_skipped',
-    hotkeyRegisterFailed: 'nagori://hotkey_register_failed',
-    hotkeyRegisterResolved: 'nagori://hotkey_register_resolved',
-    settingsChanged: 'nagori://settings_changed',
-  },
-}));
+vi.mock('./lib/tauri', async () => {
+  const { tauriMock } = await import('./test-helpers/moduleMocks');
+  return tauriMock({ isTauri: vi.fn(() => false) });
+});
 
 vi.mock('./lib/commands', () => ({
   hidePalette: vi.fn(async () => undefined),
@@ -27,18 +15,17 @@ vi.mock('./lib/commands', () => ({
   notifyPasteFailure: vi.fn(async () => undefined),
 }));
 
-// The App shell wires keybindings + window blur; the route children are out
-// of scope for these tests and bring their own DOM dependencies, so stub the
-// route components down to inert anchors.
-vi.mock('./routes/PaletteRoute.svelte', async () => {
-  const Stub = (await import('./test-helpers/StubComponent.svelte')).default;
-  return { default: Stub };
-});
+// The App shell wires keybindings + window blur; the views behind each route
+// are out of scope for these tests and bring their own DOM dependencies, so
+// stub them down to inert anchors. The route wrappers stay real, and each
+// view gets its own test id so a test can tell which one the shell mounted.
+vi.mock('./components/Palette.svelte', async () => ({
+  default: (await import('./test-helpers/PaletteStub.svelte')).default,
+}));
 
-vi.mock('./routes/SettingsRoute.svelte', async () => {
-  const Stub = (await import('./test-helpers/StubComponent.svelte')).default;
-  return { default: Stub };
-});
+vi.mock('./components/SettingsView.svelte', async () => ({
+  default: (await import('./test-helpers/SettingsViewStub.svelte')).default,
+}));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {}),
@@ -55,7 +42,7 @@ vi.mock('./stores/searchQuery.svelte', () => ({
 
 import App from './App.svelte';
 import { getPermissions, hidePalette, lastHotkeyFailure, notifyPasteFailure } from './lib/commands';
-import { isTauri, subscribe } from './lib/tauri';
+import { currentWindowLabel, isTauri, subscribe } from './lib/tauri';
 import type { AppSettings, PermissionStatus } from './lib/types';
 import { captureSkippedState, clearCaptureSkip } from './stores/captureSkipped.svelte';
 import {
@@ -71,6 +58,7 @@ import { showPalette, showSettings, viewState } from './stores/view.svelte';
 
 beforeEach(() => {
   vi.mocked(isTauri).mockReturnValue(false);
+  vi.mocked(currentWindowLabel).mockReturnValue(undefined);
   vi.mocked(lastHotkeyFailure).mockResolvedValue(null);
   vi.mocked(subscribe).mockImplementation((_event, _handler, onReady) => {
     onReady?.();
@@ -188,13 +176,88 @@ const settingsSnapshot = (overrides: Partial<AppSettings>): AppSettings =>
 
 const grantedPermission: PermissionStatus = { kind: 'accessibility', state: 'granted' };
 
-describe('App shell', () => {
-  it('mounts the palette route by default', () => {
-    const { container } = render(App);
-    expect(container.querySelector('.app-shell')).toBeTruthy();
-    expect(viewState.current).toBe('palette');
+// Event names the shell subscribes to only on behalf of the palette window.
+const PALETTE_ONLY_EVENTS = [
+  'nagori://navigate',
+  'nagori://paste_failed',
+  'nagori://capture_skipped',
+  'nagori://settings_changed',
+];
+
+const paletteOnlySubscriptions = (): string[] =>
+  vi
+    .mocked(subscribe)
+    .mock.calls.map(([event]) => event as string)
+    .filter((event) => PALETTE_ONLY_EVENTS.includes(event));
+
+describe('App routing', () => {
+  it('mounts the palette view in the palette window', () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('main');
+    const { queryByTestId, container } = render(App);
+    expect(queryByTestId('palette-view')).not.toBeNull();
+    expect(queryByTestId('settings-view')).toBeNull();
+    expect(container.querySelector('.app-shell.settings-window')).toBeNull();
+    expect(paletteOnlySubscriptions().toSorted()).toEqual(PALETTE_ONLY_EVENTS.toSorted());
   });
 
+  it('mounts the in-window settings view when the view store starts there', () => {
+    showSettings();
+    const { queryByTestId } = render(App);
+    expect(queryByTestId('settings-view')).not.toBeNull();
+    expect(queryByTestId('palette-view')).toBeNull();
+  });
+
+  it('swaps the mounted view as the view store changes', async () => {
+    const { queryByTestId } = render(App);
+    expect(queryByTestId('palette-view')).not.toBeNull();
+
+    showSettings();
+    await waitFor(() => {
+      expect(queryByTestId('settings-view')).not.toBeNull();
+    });
+    expect(queryByTestId('palette-view')).toBeNull();
+
+    showPalette();
+    await waitFor(() => {
+      expect(queryByTestId('palette-view')).not.toBeNull();
+    });
+    expect(queryByTestId('settings-view')).toBeNull();
+  });
+
+  it('mounts only the settings view in the settings window, whatever the view store says', () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    const { queryByTestId, container } = render(App);
+    expect(viewState.current).toBe('palette');
+    expect(queryByTestId('settings-view')).not.toBeNull();
+    expect(queryByTestId('palette-view')).toBeNull();
+    expect(container.querySelector('.app-shell.settings-window')).not.toBeNull();
+  });
+
+  it('leaves blur and Escape to the OS in the settings window', async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    render(App);
+    await fireEvent.blur(window);
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(hidePalette).not.toHaveBeenCalled();
+    expect(paletteOnlySubscriptions()).toEqual([]);
+  });
+
+  it('keeps hotkey failures out of the settings window as toasts', async () => {
+    vi.mocked(currentWindowLabel).mockReturnValue('settings');
+    const { fire } = captureHotkeyFailureHandler();
+    const { queryByText } = render(App);
+    fire({ hotkey: 'Cmd+Shift+V', error: 'shortcut already registered' });
+    // The watcher still feeds the shared store (Settings renders it inline)...
+    await waitFor(() => {
+      expect(hotkeyFailureState.failure?.error).toBe('shortcut already registered');
+    });
+    // ...but the toast is palette-only.
+    expect(queryByText('shortcut already registered')).toBeNull();
+  });
+});
+
+describe('App shell', () => {
   it('returns to the palette when Escape fires while on the settings route', async () => {
     showSettings();
     render(App);
@@ -358,46 +421,19 @@ describe('App shell', () => {
     expect(hotkeyFailureState.failure?.error).toBe('secondary clash');
   });
 
-  it('keeps the hotkey toast when a sibling secondary action resolves', async () => {
-    // Two secondaries can fail at the same time; the displayed banner
-    // belongs to one specific action. A resolved event scoped to a
-    // *different* secondary action must not silently wipe it — the
-    // backend cache keys per action, and the live store mirrors that
-    // discrimination so the user keeps seeing the still-failing one.
-    const { fire, fireResolved } = captureHotkeyFailureHandler();
-    render(App);
-    fire({
-      hotkey: 'Cmd+Shift+R',
-      error: 'repaste clash',
-      kind: 'secondary',
-      action: 'repaste-last',
-    });
-    await waitFor(() => {
-      expect(hotkeyFailureState.failure?.error).toBe('repaste clash');
-    });
-    fireResolved({ kind: 'secondary', action: 'clear-history' });
-    expect(hotkeyFailureState.failure?.error).toBe('repaste clash');
-    fireResolved({ kind: 'secondary', action: 'repaste-last' });
-    await waitFor(() => {
-      expect(hotkeyFailureState.failure).toBeUndefined();
-    });
-  });
-
   it('surfaces the next cached failure after a matching resolve clears the displayed one', async () => {
-    // Two secondaries fail simultaneously. The displayed banner belongs
-    // to whichever the backend's cache returned first; when that one
-    // resolves, the per-action cache still holds the other. The store
-    // must re-hydrate so the user sees the still-failing sibling
-    // instead of an empty toast slot that hides a real issue.
+    // The primary and the repaste-last secondary fail together. The banner
+    // shows the secondary; once it resolves, the backend cache still holds
+    // the primary failure, so the store must re-hydrate and show it instead
+    // of an empty toast slot that hides a real issue. The cached failure only
+    // lands once the resolve has actually cleared the displayed one.
     vi.mocked(isTauri).mockReturnValue(true);
-    // First call (initial hydration) returns null — nothing yet — so
-    // the live emit fires the banner. After the resolve, the next
-    // call returns the still-cached sibling failure.
+    // First call (initial hydration) returns null — nothing yet — so the
+    // live emit fires the banner. After the resolve, the next call returns
+    // the still-cached primary failure.
     vi.mocked(lastHotkeyFailure).mockResolvedValueOnce(null).mockResolvedValueOnce({
-      hotkey: 'Cmd+Shift+K',
-      error: 'clear-history still clashing',
-      kind: 'secondary',
-      action: 'clear-history',
+      hotkey: 'Cmd+Shift+V',
+      error: 'palette hotkey still clashing',
     });
     const { fire, fireResolved } = captureHotkeyFailureHandler();
     const { findByText } = render(App);
@@ -409,8 +445,8 @@ describe('App shell', () => {
     });
     await findByText('repaste clash');
     fireResolved({ kind: 'secondary', action: 'repaste-last' });
-    await findByText('clear-history still clashing');
-    expect(hotkeyFailureState.failure?.action).toBe('clear-history');
+    await findByText('palette hotkey still clashing');
+    expect(hotkeyFailureState.failure?.kind).toBeUndefined();
   });
 
   it('re-queries the cache when a resolve interleaves with the initial hydration', async () => {
@@ -443,15 +479,13 @@ describe('App shell', () => {
           }),
       )
       .mockResolvedValueOnce({
-        hotkey: 'Cmd+Shift+K',
-        error: 'sibling still failing',
-        kind: 'secondary',
-        action: 'clear-history',
+        hotkey: 'Cmd+Shift+V',
+        error: 'primary still failing',
       });
     const { fireResolved } = captureHotkeyFailureHandler();
     const { findByText } = render(App);
     // The initial hydration query has fired and is pending; now the
-    // resolve event arrives for an unrelated secondary action.
+    // repaste-last secondary resolves.
     fireResolved({ kind: 'secondary', action: 'repaste-last' });
     // Resolve the pending initial query with the now-stale entry for
     // the action that was just resolved.
@@ -461,8 +495,8 @@ describe('App shell', () => {
       kind: 'secondary',
       action: 'repaste-last',
     });
-    await findByText('sibling still failing');
-    expect(hotkeyFailureState.failure?.action).toBe('clear-history');
+    await findByText('primary still failing');
+    expect(hotkeyFailureState.failure?.kind).toBeUndefined();
   });
 
   it('does not let a stale cache hydration overwrite a fresh live failure', async () => {

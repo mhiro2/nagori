@@ -188,14 +188,33 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn no_first_read_budget_waits_for_a_slow_peer() {
+        // With `None`, the first read has no per-read budget: a peer that
+        // stays silent for an hour of (paused, auto-advanced) time and then
+        // sends a line is still read, rather than tripping any timeout.
+        use tokio::io::AsyncWriteExt;
+
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        let peer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_hours(1)).await;
+            writer.write_all(b"late\n").await.expect("write");
+        });
+        let line = read_line_bounded(&mut reader, TEST_CAP, None)
+            .await
+            .expect("a slow peer must not time out without a budget");
+        assert_eq!(line, b"late");
+        peer.await.expect("peer task");
+    }
+
     #[tokio::test]
-    async fn no_first_read_budget_never_trips_the_timeout_branch() {
-        // With `None`, the first read has no per-read budget — a reader that
-        // immediately hits EOF returns an empty line rather than a timeout.
+    async fn eof_before_any_byte_yields_an_empty_line() {
+        // A peer that closes without writing produces an empty line, which
+        // callers treat as a closed connection.
         let mut input: &[u8] = b"";
         let line = read_line_bounded(&mut input, TEST_CAP, None)
             .await
-            .expect("EOF with no budget yields an empty line");
+            .expect("EOF yields an empty line");
         assert!(line.is_empty());
     }
 }

@@ -19,27 +19,37 @@ fn file_url_items(urls: &[String]) -> objc2::rc::Retained<NSArray<NSPasteboardIt
     NSArray::from_retained_slice(&items)
 }
 
+/// Removes the backing file when the test ends, including on a failed assert.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).ok();
+    }
+}
+
 /// A Finder copy usually lands a *file reference URL*
 /// (`file:///.file/id=…`) on the pasteboard rather than a path URL.
 /// `collect_file_url_paths` must resolve it to the real filesystem path
 /// instead of surfacing the literal `/.file/id=…` handle.
+///
+/// The temp directory must be on a volume that vends reference URLs (APFS /
+/// HFS+ do); a volume that cannot is a failed precondition, not a pass.
 #[test]
 fn file_reference_url_is_resolved_to_real_path() {
     // A reference URL only resolves while its target exists, so back it
     // with a real file. A unique name keeps parallel test binaries apart.
-    let path = std::env::temp_dir().join(format!("nagori-file-ref-{}", std::process::id()));
-    std::fs::write(&path, b"nagori").expect("write temp file");
-    let real = std::fs::canonicalize(&path).expect("canonicalize temp file");
+    let file =
+        TempFile(std::env::temp_dir().join(format!("nagori-file-ref-{}", std::process::id())));
+    std::fs::write(&file.0, b"nagori").expect("write temp file");
+    let real = std::fs::canonicalize(&file.0).expect("canonicalize temp file");
 
     // Mint the reference URL the way Finder does and grab its string form.
-    let path_str = path.to_str().expect("temp path is valid UTF-8");
+    let path_str = file.0.to_str().expect("temp path is valid UTF-8");
     let path_url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
-    let Some(reference) = path_url.fileReferenceURL() else {
-        // Some volumes (e.g. network mounts on CI) can't vend reference
-        // URLs; there's nothing to assert in that environment.
-        std::fs::remove_file(&path).ok();
-        return;
-    };
+    let reference = path_url
+        .fileReferenceURL()
+        .expect("the temp directory's volume must vend file reference URLs");
     let reference_string = reference
         .absoluteString()
         .expect("reference URL has an absolute string")
@@ -52,12 +62,10 @@ fn file_reference_url_is_resolved_to_real_path() {
     let items = file_url_items(&[reference_string]);
     let captured = collect_file_url_paths(&items, Some(64 * 1024));
     let FileUrlPaths::Captured(paths) = captured else {
-        std::fs::remove_file(&path).ok();
         panic!("a single resolvable file reference URL must be captured");
     };
     assert_eq!(paths.len(), 1, "expected exactly one resolved path");
     let resolved = std::fs::canonicalize(&paths[0]).expect("resolved path exists");
-    std::fs::remove_file(&path).ok();
 
     assert!(
         !paths[0].contains("/.file/id="),

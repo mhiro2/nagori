@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use nagori_core::{
-    AiActionId, AiEvent, AiOverallStatus, AiRequestOptions, ClipboardContent, EntryFactory,
-    EntryId, EntryRepository,
-};
+use nagori_core::{AiActionId, AiEvent, AiOverallStatus, AiRequestOptions};
 use nagori_platform::MemoryClipboard;
 
 use super::super::*;
 use super::{
-    ai_enabled_settings, runtime_with_memory_clipboard, runtime_with_mock_ai,
+    add_image_entry, ai_enabled_settings, runtime_with_memory_clipboard, runtime_with_mock_ai,
     runtime_with_mock_translator,
 };
 
@@ -37,22 +34,6 @@ async fn quick_actions_run_under_defaults() {
             .await
             .unwrap_or_else(|err| panic!("{action:?} must run under defaults; got {err:?}"));
     }
-}
-
-/// Inserts a minimal image entry (no text representation) and returns its id.
-async fn add_image_entry(runtime: &NagoriRuntime) -> EntryId {
-    let content = ClipboardContent::Image(nagori_core::ImageContent {
-        width: Some(1),
-        height: Some(1),
-        byte_count: 4,
-        mime_type: Some("image/png".to_owned()),
-        pending_bytes: Some(vec![0u8, 1, 2, 3].into()),
-    });
-    runtime
-        .store
-        .insert(EntryFactory::from_content(content, None, None))
-        .await
-        .expect("image entry should be inserted")
 }
 
 #[tokio::test]
