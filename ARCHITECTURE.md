@@ -2935,7 +2935,15 @@ change.
   showing the "already running" fallback. Only the launch that ends up
   with the lock (or gives up waiting) removes the marker, so a second
   launch racing the restart cannot consume it, and a held lock without
-  one is refused at once as before. The
+  one is refused at once as before. The bundle swap runs on a blocking
+  thread the quit cleanup does not wait for, so a quit requested while
+  it runs is prevented and carried out once the swap returns (exiting
+  instead of restarting), and a swap is not started once the app is
+  already quitting; otherwise a quit could cut an `AppImage` write short
+  or, on Windows, exit before the installer launches. On Windows a
+  successful swap never returns and the installer's relaunch flag is set
+  before it starts, so a quit deferred there still ends with the
+  installer starting the updated app. The
   macOS bundle
   is ad-hoc signed, so its designated requirement is the binary's
   cdhash: every update looks like a new app to TCC and the

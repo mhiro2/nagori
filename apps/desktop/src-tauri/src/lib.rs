@@ -360,7 +360,18 @@ const CLEAR_ON_QUIT_PURGE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 ///   strictly synchronous and safe to run inline.
 fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     match event {
-        tauri::RunEvent::ExitRequested { .. } => perform_exit_cleanup(handle),
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            // A quit while an update replaces the bundle waits for the swap;
+            // `install_update` exits once it is done.
+            if commands::updater::defer_exit_for_update_install(
+                *code == Some(tauri::RESTART_EXIT_CODE),
+            ) {
+                tracing::info!("exit_deferred_until_update_install_finishes");
+                api.prevent_exit();
+                return;
+            }
+            perform_exit_cleanup(handle);
+        }
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },

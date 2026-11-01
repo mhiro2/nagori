@@ -1,8 +1,8 @@
 //! The manual "Check for updates" probe and the user-confirmed in-place
 //! install surfaced in Settings → Advanced.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::{AppHandle, Emitter};
 
@@ -54,6 +54,9 @@ pub(crate) const UPDATE_PROGRESS_EVENT: &str = "nagori://update_progress";
 /// second settings invoke) cannot start a parallel download and install.
 static UPDATE_INSTALL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Keeps the bundle swap and app exit apart; see `InstallExitGate`.
+static INSTALL_EXIT_GATE: Mutex<InstallExitGate> = Mutex::new(InstallExitGate::new());
+
 /// Minimum byte step between progress events when the server sends no
 /// `Content-Length`, so the webview is not flooded with one event per chunk.
 const UNKNOWN_TOTAL_PROGRESS_STEP: u64 = 1024 * 1024;
@@ -88,6 +91,10 @@ enum UpdateProgressDto {
 /// handoff marker first: Tauri spawns the new instance before this one
 /// exits, and the marker makes it wait for the single-instance lock this
 /// process holds until exit.
+///
+/// A quit requested while the bundle is being replaced waits for the swap to
+/// finish (see `InstallExitGate`) and then exits instead of restarting, and
+/// an install is not started once the app is already quitting.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()> {
     if !in_place_update_supported() {
@@ -107,9 +114,20 @@ pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()
         tracing::warn!(code = %err.code, message = %err.message, "update_install_failed");
         UPDATE_INSTALL_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
-    result?;
-    restart(&app);
-    Ok(())
+    result
+}
+
+fn install_exit_gate() -> std::sync::MutexGuard<'static, InstallExitGate> {
+    INSTALL_EXIT_GATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Called from `RunEvent::ExitRequested`. Returns `true` when the exit must
+/// be prevented because an update is replacing the bundle right now; the
+/// quit is then carried out once the install step returns.
+pub(crate) fn defer_exit_for_update_install(restart: bool) -> bool {
+    install_exit_gate().request_exit(restart)
 }
 
 fn restart(app: &AppHandle) {
@@ -158,6 +176,11 @@ async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<(
         )
         .await
         .map_err(|err| CommandError::internal(format!("update download failed: {err}")))?;
+    if !install_exit_gate().begin_install() {
+        return Err(CommandError::internal(
+            "the app is quitting; the update was not installed",
+        ));
+    }
     let _ = app.emit_to(
         "settings",
         UPDATE_PROGRESS_EVENT,
@@ -165,9 +188,19 @@ async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<(
     );
     let installed = tauri::async_runtime::spawn_blocking(move || update.install(bytes))
         .await
-        .map_err(|err| CommandError::internal(format!("the install task did not complete: {err}")))?
-        .map_err(|err| CommandError::internal(format!("update install failed: {err}")));
-    if installed.is_err() && cleanup_ran.load(Ordering::SeqCst) {
+        .map_err(|err| CommandError::internal(format!("the install task did not complete: {err}")))
+        .and_then(|result| {
+            result.map_err(|err| CommandError::internal(format!("update install failed: {err}")))
+        });
+    let quit_deferred = install_exit_gate().finish_install();
+    if quit_deferred {
+        // The user quit while the bundle was being replaced. Honour that now
+        // that the swap is complete (or failed) instead of restarting.
+        tracing::info!("update_install_honouring_deferred_quit");
+        app.exit(0);
+    } else if installed.is_ok() {
+        restart(app);
+    } else if cleanup_ran.load(Ordering::SeqCst) {
         // Windows runs the quit cleanup before launching the installer, so a
         // launch failure leaves this process with its workers and IPC host
         // already stopped. Restart into the current version rather than
@@ -176,6 +209,63 @@ async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<(
         restart(app);
     }
     installed
+}
+
+/// Serializes the bundle swap against app exit.
+///
+/// The swap runs on a blocking thread the quit cleanup does not wait for, so
+/// a quit landing mid-swap could end the process with a half-written
+/// `AppImage`, or (on Windows, where the swap step runs the quit cleanup and
+/// then launches the installer) exit before the installer is launched. While
+/// `installing`, a non-restart exit is prevented and remembered instead;
+/// once an exit is under way, a new swap is refused. A successful Windows
+/// swap never returns (the plugin exits after launching the installer), and
+/// the installer's relaunch flag is fixed before the swap starts, so there a
+/// deferred quit only keeps the installer launch intact: the installer still
+/// starts the updated app.
+#[derive(Debug, Default)]
+struct InstallExitGate {
+    installing: bool,
+    exiting: bool,
+    quit_deferred: bool,
+}
+
+impl InstallExitGate {
+    const fn new() -> Self {
+        Self {
+            installing: false,
+            exiting: false,
+            quit_deferred: false,
+        }
+    }
+
+    /// Whether the swap may start; `false` once the app is exiting.
+    const fn begin_install(&mut self) -> bool {
+        if self.exiting {
+            return false;
+        }
+        self.installing = true;
+        true
+    }
+
+    /// End the swap, returning whether a quit was deferred during it.
+    const fn finish_install(&mut self) -> bool {
+        self.installing = false;
+        let deferred = self.quit_deferred;
+        self.quit_deferred = false;
+        deferred
+    }
+
+    /// Returns `true` when this exit must be prevented. A restart is never
+    /// prevented: it only comes from this module once the swap is over.
+    const fn request_exit(&mut self, restart: bool) -> bool {
+        if self.installing && !restart {
+            self.quit_deferred = true;
+            return true;
+        }
+        self.exiting = true;
+        false
+    }
 }
 
 /// Throttles the per-chunk download callback down to an event per whole
@@ -275,6 +365,36 @@ pub struct UpdateInfoDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_during_the_swap_is_deferred_until_it_finishes() {
+        let mut gate = InstallExitGate::new();
+        assert!(gate.begin_install());
+        assert!(
+            gate.request_exit(false),
+            "a quit mid-swap must be prevented"
+        );
+        assert!(gate.finish_install(), "the deferred quit is reported");
+        assert!(
+            !gate.request_exit(false),
+            "a quit after the swap goes through"
+        );
+    }
+
+    #[test]
+    fn swap_is_refused_once_the_app_is_exiting() {
+        let mut gate = InstallExitGate::new();
+        assert!(!gate.request_exit(false));
+        assert!(!gate.begin_install());
+    }
+
+    #[test]
+    fn restart_is_never_deferred_and_a_clean_swap_reports_no_quit() {
+        let mut gate = InstallExitGate::new();
+        assert!(gate.begin_install());
+        assert!(!gate.request_exit(true));
+        assert!(!gate.finish_install());
+    }
 
     #[test]
     fn download_progress_reports_each_percent_once() {
