@@ -634,6 +634,8 @@ export const fr: Messages = {
       downloading: 'Téléchargement de la mise à jour…',
       downloadingProgress: 'Téléchargement de la mise à jour… {percent} %',
       installingUpdate: 'Installation de la mise à jour — Nagori va redémarrer.',
+      installChanged: 'La mise à jour disponible a changé. Recherchez à nouveau les mises à jour.',
+      installInProgress: "Une mise à jour est déjà en cours d'installation.",
     },
     capabilities: {
       legend: 'Capacités de la plateforme',

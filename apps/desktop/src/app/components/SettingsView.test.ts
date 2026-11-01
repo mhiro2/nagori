@@ -1834,7 +1834,7 @@ describe('SettingsView update check', () => {
   it('surfaces an install failure and lets the user retry', async () => {
     vi.mocked(checkForUpdates).mockResolvedValue(updateInfo);
     vi.mocked(installUpdate).mockRejectedValueOnce({
-      code: 'invalid_input',
+      code: 'update_changed',
       message: 'the available update changed to 9.9.10; check for updates again',
     });
     const view = await openAdvancedTab(macosCapabilities());
@@ -1844,7 +1844,7 @@ describe('SettingsView update check', () => {
     await fireEvent.click(install);
 
     const alert = await view.findByRole('alert');
-    expect(alert.textContent).toContain('changed to 9.9.10');
+    expect(alert.textContent).toBe('The available update changed. Check for updates again.');
     expect((install as HTMLButtonElement).disabled).toBe(false);
     expect(view.queryByRole('status')).toBeNull();
   });

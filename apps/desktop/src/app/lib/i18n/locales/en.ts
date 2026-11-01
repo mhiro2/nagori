@@ -652,6 +652,8 @@ export type Messages = {
       downloading: string;
       downloadingProgress: string;
       installingUpdate: string;
+      installChanged: string;
+      installInProgress: string;
     };
     capabilities: {
       legend: string;
@@ -1344,6 +1346,8 @@ export const en: Messages = {
       downloading: 'Downloading update…',
       downloadingProgress: 'Downloading update… {percent}%',
       installingUpdate: 'Installing update — Nagori will restart shortly.',
+      installChanged: 'The available update changed. Check for updates again.',
+      installInProgress: 'An update is already being installed.',
     },
     capabilities: {
       legend: 'Platform capabilities',

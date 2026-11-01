@@ -562,6 +562,16 @@
 
   // On success the backend restarts the app, so the in-flight state is only
   // ever cleared on failure.
+  // The backend refuses with these codes when the confirmed version is gone
+  // from the feed or another install is still running; both deserve a
+  // translated next step rather than the backend's English message.
+  const describeInstallError = (err: unknown): string => {
+    const code = err !== null && typeof err === 'object' && 'code' in err ? err.code : undefined;
+    if (code === 'update_changed') return t.settings.updates.installChanged;
+    if (code === 'update_in_progress') return t.settings.updates.installInProgress;
+    return describeError(err);
+  };
+
   const runInstallUpdate = async (): Promise<void> => {
     if (!updateReleaseVersion || updateInstalling) return;
     updateInstalling = true;
@@ -572,7 +582,7 @@
     } catch (err) {
       updateInstalling = false;
       updateInstallProgress = undefined;
-      updateInstallError = describeError(err);
+      updateInstallError = describeInstallError(err);
     }
   };
 

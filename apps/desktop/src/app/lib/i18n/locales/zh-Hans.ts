@@ -580,6 +580,8 @@ export const zhHans: Messages = {
       downloading: '正在下载更新…',
       downloadingProgress: '正在下载更新… {percent}%',
       installingUpdate: '正在安装更新，Nagori 即将重新启动。',
+      installChanged: '可用的更新已变化，请重新检查更新。',
+      installInProgress: '已有更新正在安装。',
     },
     capabilities: {
       legend: '平台功能',

@@ -633,6 +633,8 @@ export const es: Messages = {
       downloading: 'Descargando actualización…',
       downloadingProgress: 'Descargando actualización… {percent} %',
       installingUpdate: 'Instalando la actualización: Nagori se reiniciará en breve.',
+      installChanged: 'La actualización disponible ha cambiado. Vuelve a buscar actualizaciones.',
+      installInProgress: 'Ya se está instalando una actualización.',
     },
     capabilities: {
       legend: 'Capacidades de la plataforma',

@@ -612,6 +612,8 @@ export const ko: Messages = {
       downloading: '업데이트 다운로드 중…',
       downloadingProgress: '업데이트 다운로드 중… {percent}%',
       installingUpdate: '업데이트를 설치하는 중입니다. 곧 Nagori가 다시 시작됩니다.',
+      installChanged: '제공되는 업데이트가 바뀌었습니다. 업데이트를 다시 확인하세요.',
+      installInProgress: '이미 업데이트를 설치하는 중입니다.',
     },
     capabilities: {
       legend: '플랫폼 기능',

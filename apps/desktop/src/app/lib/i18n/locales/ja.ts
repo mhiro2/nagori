@@ -615,6 +615,9 @@ export const ja: Messages = {
       downloading: 'アップデートをダウンロード中…',
       downloadingProgress: 'アップデートをダウンロード中… {percent}%',
       installingUpdate: 'アップデートをインストール中です。まもなく Nagori が再起動します。',
+      installChanged:
+        '提供中のアップデートが変わりました。もう一度アップデートを確認してください。',
+      installInProgress: 'アップデートはすでにインストール中です。',
     },
     capabilities: {
       legend: 'プラットフォーム機能',

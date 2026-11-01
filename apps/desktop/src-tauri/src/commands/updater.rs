@@ -57,6 +57,12 @@ static UPDATE_INSTALL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Keeps the bundle swap and app exit apart; see `InstallExitGate`.
 static INSTALL_EXIT_GATE: Mutex<InstallExitGate> = Mutex::new(InstallExitGate::new());
 
+/// `CommandError` code for a confirmed version the feed no longer offers.
+const UPDATE_CHANGED_CODE: &str = "update_changed";
+
+/// `CommandError` code for a second install while one is still running.
+const UPDATE_IN_PROGRESS_CODE: &str = "update_in_progress";
+
 /// Minimum byte step between progress events when the server sends no
 /// `Content-Length`, so the webview is not flooded with one event per chunk.
 const UNKNOWN_TOTAL_PROGRESS_STEP: u64 = 1024 * 1024;
@@ -103,7 +109,8 @@ pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()
         ));
     }
     if UPDATE_INSTALL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return Err(CommandError::invalid_input(
+        return Err(update_error(
+            UPDATE_IN_PROGRESS_CODE,
             "an update is already being installed",
         ));
     }
@@ -115,6 +122,14 @@ pub async fn install_update(app: AppHandle, version: String) -> CommandResult<()
         UPDATE_INSTALL_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
     result
+}
+
+fn update_error(code: &str, message: impl Into<String>) -> CommandError {
+    CommandError {
+        code: code.to_owned(),
+        message: message.into(),
+        recoverable: true,
+    }
 }
 
 fn install_exit_gate() -> std::sync::MutexGuard<'static, InstallExitGate> {
@@ -156,12 +171,15 @@ async fn install_update_inner(app: &AppHandle, version: &str) -> CommandResult<(
         .check()
         .await
         .map_err(|err| CommandError::internal(format!("update check failed: {err}")))?
-        .ok_or_else(|| CommandError::invalid_input("no update is available any more"))?;
+        .ok_or_else(|| update_error(UPDATE_CHANGED_CODE, "no update is available any more"))?;
     if update.version != version {
-        return Err(CommandError::invalid_input(format!(
-            "the available update changed to {}; check for updates again",
-            update.version
-        )));
+        return Err(update_error(
+            UPDATE_CHANGED_CODE,
+            format!(
+                "the available update changed to {}; check for updates again",
+                update.version
+            ),
+        ));
     }
 
     let mut progress = DownloadProgress::default();

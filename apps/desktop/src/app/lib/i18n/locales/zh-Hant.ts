@@ -580,6 +580,8 @@ export const zhHant: Messages = {
       downloading: '正在下載更新…',
       downloadingProgress: '正在下載更新… {percent}%',
       installingUpdate: '正在安裝更新，Nagori 即將重新啟動。',
+      installChanged: '可用的更新已變更，請重新檢查更新。',
+      installInProgress: '已有更新正在安裝。',
     },
     capabilities: {
       legend: '平台功能',
