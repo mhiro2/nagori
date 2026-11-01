@@ -7,7 +7,10 @@
 //! held. The old process announces the restart with a marker file next to the
 //! lock, and a launch that finds a fresh marker waits briefly for the lock
 //! instead of refusing to start. Without a marker a held lock is refused
-//! straight away, as for any duplicate launch.
+//! straight away, as for any duplicate launch. The marker is only removed by
+//! the launch that ends up with the lock (or gives up waiting on it), so a
+//! second launch racing the restart cannot consume it and leave the
+//! restarted instance refused at once.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -46,18 +49,23 @@ impl RestartHandoff {
         std::fs::write(&self.path, b"")
     }
 
-    /// Consume the marker, returning whether it was written within
-    /// `MARKER_MAX_AGE` of `now`. The marker is removed either way so it can
-    /// only ever delay one launch.
-    fn take_fresh(&self, now: SystemTime) -> bool {
-        let Ok(modified) = std::fs::metadata(&self.path).and_then(|meta| meta.modified()) else {
-            return false;
-        };
-        if let Err(err) = std::fs::remove_file(&self.path) {
-            tracing::warn!(error = %err, "restart_handoff_marker_remove_failed");
+    /// Whether a marker written within `MARKER_MAX_AGE` of `now` exists.
+    fn is_fresh(&self, now: SystemTime) -> bool {
+        std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age <= MARKER_MAX_AGE)
+            })
+    }
+
+    /// Remove the marker, if any, so it cannot delay a later launch.
+    fn clear(&self) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(error = %err, "restart_handoff_marker_remove_failed"),
         }
-        now.duration_since(modified)
-            .is_ok_and(|age| age <= MARKER_MAX_AGE)
     }
 }
 
@@ -73,13 +81,17 @@ fn acquire_lock_with(
     wait: Duration,
     now: SystemTime,
 ) -> Result<Option<ProcessLock>> {
+    let handoff = RestartHandoff::for_lock_dir(lock_dir);
     if let Some(lock) = ProcessLock::try_acquire(lock_dir)? {
         // A marker left behind by a restart that found the lock free straight
         // away must not delay a later launch.
-        let _ = RestartHandoff::for_lock_dir(lock_dir).take_fresh(now);
+        handoff.clear();
         return Ok(Some(lock));
     }
-    if !RestartHandoff::for_lock_dir(lock_dir).take_fresh(now) {
+    if !handoff.is_fresh(now) {
+        // Leave a missing-or-stale marker alone: the owner may be writing a
+        // fresh one right now, and a stale one is ignored anyway until the
+        // next lock owner clears it.
         return Ok(None);
     }
     tracing::info!("restart_handoff_waiting_for_instance_lock");
@@ -87,9 +99,13 @@ fn acquire_lock_with(
     while Instant::now() < deadline {
         std::thread::sleep(LOCK_POLL_INTERVAL);
         if let Some(lock) = ProcessLock::try_acquire(lock_dir)? {
+            handoff.clear();
             return Ok(Some(lock));
         }
     }
+    // The old owner never let go; the handoff failed, so stop delaying
+    // later launches.
+    handoff.clear();
     Ok(None)
 }
 
@@ -135,6 +151,29 @@ mod tests {
     }
 
     #[test]
+    fn a_racing_launch_does_not_consume_the_marker_while_waiting() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let held = hold(temp.path());
+        RestartHandoff::for_lock_dir(temp.path())
+            .announce()
+            .expect("write marker");
+        let racer_dir = temp.path().to_path_buf();
+        let racer = std::thread::spawn(move || {
+            acquire_lock_with(&racer_dir, Duration::from_secs(5), SystemTime::now())
+                .expect("lock io")
+        });
+
+        // While the racing launch waits, the marker is still there for the
+        // restarted instance to find.
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(temp.path().join(MARKER_FILE_NAME).exists());
+        drop(held);
+
+        assert!(racer.join().expect("racer thread").is_some());
+        assert!(!temp.path().join(MARKER_FILE_NAME).exists());
+    }
+
+    #[test]
     fn wait_gives_up_when_the_old_owner_never_exits() {
         let temp = tempfile::tempdir().expect("temp dir");
         let _held = hold(temp.path());
@@ -163,7 +202,8 @@ mod tests {
 
         assert!(lock.is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(!temp.path().join(MARKER_FILE_NAME).exists());
+        // Left for the next lock owner to clear.
+        assert!(temp.path().join(MARKER_FILE_NAME).exists());
     }
 
     #[test]

@@ -2932,8 +2932,10 @@ change.
   every restart first writes a `nagori.restart-pending` marker beside the
   lock (`state::restart_handoff`). A launch that finds the lock held and
   a marker younger than a minute waits up to 10 s for it instead of
-  showing the "already running" fallback; the marker is consumed either
-  way, and a held lock without one is refused at once as before. The
+  showing the "already running" fallback. Only the launch that ends up
+  with the lock (or gives up waiting) removes the marker, so a second
+  launch racing the restart cannot consume it, and a held lock without
+  one is refused at once as before. The
   macOS bundle
   is ad-hoc signed, so its designated requirement is the binary's
   cdhash: every update looks like a new app to TCC and the
