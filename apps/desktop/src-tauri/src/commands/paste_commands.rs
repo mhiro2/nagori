@@ -331,6 +331,36 @@ const fn identifies_paste_target(target: &RestoreTarget) -> bool {
     }
 }
 
+/// The check a palette copy hands to the clipboard lease to run right before
+/// the write: refuse once the palette it was started from has been dismissed,
+/// so a slow read does not land over whatever the user copied since.
+fn unless_palette_dismissed(
+    state: &AppState,
+    session: PaletteTicket,
+) -> impl Fn() -> nagori_core::Result<()> + Send + Sync + 'static {
+    let open = state.palette_session_probe(session);
+    move || {
+        if open() {
+            Ok(())
+        } else {
+            Err(AppError::Conflict(
+                "the palette was dismissed before the copy; nothing was copied".to_owned(),
+            ))
+        }
+    }
+}
+
+/// A failed palette copy: `cancelled` once the palette is gone (whether the
+/// check above refused the write or the copy failed after a dismissal — there
+/// is nothing left to report into), otherwise the copy's own error.
+fn copy_failure(state: &AppState, session: PaletteTicket, err: AppError) -> CommandError {
+    if state.palette_session_is_current(session) {
+        err.into()
+    } else {
+        CommandError::cancelled()
+    }
+}
+
 /// The precheck a palette paste hands to the clipboard lease: refuse when the
 /// palette was shown again between hiding for this paste and posting its
 /// keystroke. The reopened palette holds focus, so the paste is skipped like
@@ -470,21 +500,23 @@ async fn run_palette_paste(
     if !state.palette_session_is_current(session) {
         return Err(CommandError::cancelled());
     }
-    let (publish, entry_id) = match copy {
-        PaletteCopyTarget::Format(entry_id, format) => (
-            lease
-                .copy_entry_with_format(entry_id, format.unwrap_or(settings.paste_format_default))
-                .await?,
-            Some(entry_id),
-        ),
-        PaletteCopyTarget::Representation(entry_id, mime) => (
-            lease.copy_entry_representation(entry_id, &mime).await?,
-            Some(entry_id),
-        ),
-        PaletteCopyTarget::Text(text) => (lease.publish_text(text).await?, None),
+    // Reading the entry and preparing the write (a large image) take time as
+    // well; the lease asks once more right before writing.
+    lease.require_before_publish(unless_palette_dismissed(state, session));
+    let copied = match copy {
+        PaletteCopyTarget::Format(entry_id, format) => lease
+            .copy_entry_with_format(entry_id, format.unwrap_or(settings.paste_format_default))
+            .await
+            .map(|publish| (publish, Some(entry_id))),
+        PaletteCopyTarget::Representation(entry_id, mime) => lease
+            .copy_entry_representation(entry_id, &mime)
+            .await
+            .map(|publish| (publish, Some(entry_id))),
+        PaletteCopyTarget::Text(text) => lease.publish_text(text).await.map(|p| (p, None)),
     };
-    // The copy can take a while (a large image, a busy store). If the palette
-    // was dismissed meanwhile, the clipboard keeps the entry but nothing else
+    let (publish, entry_id) = copied.map_err(|err| copy_failure(state, session, err))?;
+    // The write itself can take a while (a large image). If the palette was
+    // dismissed while it ran, the clipboard keeps the entry but nothing else
     // happens: no hide (a reopened palette is a new showing), no focus change,
     // no keystroke. Otherwise this paste ends the showing and takes its target
     // before the hide, so the hide's own dismissal cannot clear it first.
@@ -633,11 +665,13 @@ async fn copy_from_palette(
     if !state.palette_session_is_current(session) {
         return Err(CommandError::cancelled());
     }
+    lease.require_before_publish(unless_palette_dismissed(state, session));
     // Copy-only: no paste follows, so the publish token is not needed.
     lease
         .copy_entry_with_format(entry_id, PasteFormat::Preserve)
         .await
-        .map(drop)?;
+        .map(drop)
+        .map_err(|err| copy_failure(state, session, err))?;
     drop(lease);
     if state.finish_palette_session(session).is_err() {
         return Err(CommandError::cancelled());
@@ -713,7 +747,7 @@ mod palette_session_tests {
     use nagori_core::{ClipboardEntry, ClipboardSequence, ClipboardSnapshot, SourceApp};
     use nagori_platform::{
         ClipboardReader, ClipboardWriter, MemoryClipboard, PasteController, PasteResult,
-        SelfWriteTracking,
+        PreparedClipboardWrite, SelfWriteTracking,
     };
     use tokio::sync::Notify;
 
@@ -783,12 +817,15 @@ mod palette_session_tests {
     }
 
     /// A memory clipboard whose writes can be held until the test lets them
-    /// through, standing in for a slow copy. With `hold_probe` it instead
-    /// reports tracked self-writes and holds the pre-keystroke sequence probe.
+    /// through, standing in for a slow copy. With `hold_preparation` it holds
+    /// the step before the write instead (reading a large entry), and with
+    /// `hold_probe` it reports tracked self-writes and holds the
+    /// pre-keystroke sequence probe.
     #[derive(Default)]
     struct HeldClipboard {
         inner: MemoryClipboard,
         hold: bool,
+        hold_preparation: bool,
         entered: Notify,
         release: Notify,
         hold_probe: bool,
@@ -800,6 +837,13 @@ mod palette_session_tests {
         fn held() -> Self {
             Self {
                 hold: true,
+                ..Self::default()
+            }
+        }
+
+        fn held_preparation() -> Self {
+            Self {
+                hold_preparation: true,
                 ..Self::default()
             }
         }
@@ -861,6 +905,19 @@ mod palette_session_tests {
         async fn write_text(&self, text: &str) -> nagori_core::Result<()> {
             self.gate().await;
             self.inner.write_text(text).await
+        }
+
+        async fn prepare_plain(
+            self: Arc<Self>,
+            entry: ClipboardEntry,
+        ) -> nagori_core::Result<PreparedClipboardWrite> {
+            if self.hold_preparation {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(PreparedClipboardWrite::new(async move {
+                self.write_plain(&entry).await
+            }))
         }
     }
 
@@ -1026,6 +1083,29 @@ mod palette_session_tests {
         assert_eq!(h.window.hidden(), 0);
         assert!(h.paste.targets().is_empty());
         assert!(h.state.palette_ticket().is_some());
+    }
+
+    #[tokio::test]
+    async fn drops_a_paste_whose_palette_closes_while_its_copy_is_prepared() {
+        let h = harness(HeldClipboard::held_preparation(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let paste = run_palette_paste(&h.window, &h.state, text("hello"));
+        tokio::pin!(paste);
+        tokio::select! {
+            _ = &mut paste => panic!("the paste finished before its copy was prepared"),
+            () = h.clipboard.entered.notified() => {}
+        }
+
+        h.state.end_palette_session();
+        h.clipboard.release.notify_one();
+
+        assert_cancelled(paste.await);
+        // The user may have copied something else since dismissing the
+        // palette; the prepared write must not land over it.
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        assert_eq!(h.window.hidden(), 0);
+        assert!(h.paste.targets().is_empty());
     }
 
     #[tokio::test]

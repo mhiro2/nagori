@@ -138,6 +138,23 @@ impl AppState {
         self.with_palette_session(|session| session.finish(ticket))
     }
 
+    /// [`Self::palette_session_is_current`] detached from `self`, so the
+    /// clipboard lease can ask it as the last step before a palette copy is
+    /// written: reading a large entry gives the user time to dismiss the
+    /// palette and copy something else.
+    pub fn palette_session_probe(
+        &self,
+        ticket: PaletteTicket,
+    ) -> impl Fn() -> bool + Send + Sync + 'static {
+        let session = std::sync::Arc::clone(&self.palette_session);
+        move || {
+            session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_current(ticket)
+        }
+    }
+
     /// A check for whether the palette was shown again after the ticket's
     /// showing, detached from `self` so it can run as the paste's last step
     /// before the keystroke: a reopened palette holds focus, so the keys would
