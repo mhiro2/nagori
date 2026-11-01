@@ -305,6 +305,9 @@ impl ClipboardLease {
     /// [`NagoriRuntime::copy_entries_combined`] for the admission rules.
     pub async fn copy_entries_combined(&mut self, ids: &[EntryId]) -> Result<ClipboardPublish> {
         let combined = self.runtime.build_combined_copy(ids).await?;
+        // Ask the publish check before storing the combined clip too, so a
+        // copy refused after reading every entry leaves no history row behind.
+        self.check_before_publish()?;
         // A retention sweep or IPC clear can race between the insert and the
         // publish and remove the just-inserted row. Retry once before giving
         // up — the user pressed bulk-copy expecting the OS clipboard to

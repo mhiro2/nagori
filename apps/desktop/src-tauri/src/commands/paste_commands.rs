@@ -451,8 +451,24 @@ pub async fn paste_text_from_palette(
 /// history. The palette stays open so the result can still be saved.
 #[tauri::command]
 pub async fn copy_text_from_palette(state: State<'_, AppState>, text: String) -> CommandResult<()> {
-    state.runtime.copy_text(text).await?;
-    Ok(())
+    copy_text_while_palette_open(&state, text).await
+}
+
+/// The flow behind [`copy_text_from_palette`]. Same rule as the palette paste
+/// and copy: once the palette is dismissed (before the request, while it waits
+/// for the lease, or while the write is prepared) the result is not written
+/// over what the user copied since.
+async fn copy_text_while_palette_open(state: &AppState, text: String) -> CommandResult<()> {
+    let Some(session) = state.palette_ticket() else {
+        return Err(CommandError::cancelled());
+    };
+    let mut lease = state.runtime.clipboard_lease().await;
+    lease.require_before_publish(unless_palette_dismissed(state, session));
+    lease
+        .publish_text(text)
+        .await
+        .map(drop)
+        .map_err(|err| copy_failure(state, session, err))
 }
 
 /// List the distinct representations the selected entry can be pasted as,
@@ -714,8 +730,26 @@ pub async fn copy_entries_combined(
             )));
         }
     }
-    state.runtime.copy_entries_combined(&entry_ids).await?;
-    Ok(())
+    copy_combined_while_palette_open(&state, &entry_ids).await
+}
+
+/// The flow behind [`copy_entries_combined`]. A bulk copy reads every selected
+/// entry first; like the single copy, it is dropped when the palette is
+/// dismissed before the write, without storing the combined clip.
+async fn copy_combined_while_palette_open(
+    state: &AppState,
+    entry_ids: &[EntryId],
+) -> CommandResult<()> {
+    let Some(session) = state.palette_ticket() else {
+        return Err(CommandError::cancelled());
+    };
+    let mut lease = state.runtime.clipboard_lease().await;
+    lease.require_before_publish(unless_palette_dismissed(state, session));
+    lease
+        .copy_entries_combined(entry_ids)
+        .await
+        .map(drop)
+        .map_err(|err| copy_failure(state, session, err))
 }
 
 /// Re-paste the entry the user most recently pasted via the palette,
@@ -1227,6 +1261,67 @@ mod palette_session_tests {
         assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("kept"));
         assert_eq!(h.window.hidden(), 1);
         assert_eq!(h.state.palette_ticket(), None);
+    }
+
+    #[tokio::test]
+    async fn drops_a_quick_action_copy_whose_palette_closes_while_it_waits_for_the_lease() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let lease = h.state.runtime.clipboard_lease().await;
+        let copy = copy_text_while_palette_open(&h.state, "result".to_owned());
+        tokio::pin!(copy);
+        run_until_parked(&mut copy).await;
+
+        h.state.end_palette_session();
+        drop(lease);
+
+        assert_cancelled(copy.await);
+        assert_eq!(h.clipboard.inner.current_text(), None);
+    }
+
+    #[tokio::test]
+    async fn copies_a_quick_action_result_and_keeps_the_palette_open() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+
+        copy_text_while_palette_open(&h.state, "result".to_owned())
+            .await
+            .expect("copy");
+
+        assert_eq!(h.clipboard.inner.current_text().as_deref(), Some("result"));
+        assert!(h.state.palette_ticket().is_some());
+    }
+
+    #[tokio::test]
+    async fn drops_a_combined_copy_whose_palette_closes_while_it_waits_for_the_lease() {
+        let h = harness(HeldClipboard::default(), 0).await;
+        let mut ids = Vec::new();
+        for text in ["first", "second"] {
+            ids.push(
+                h.state
+                    .runtime
+                    .add_text(text.to_owned())
+                    .await
+                    .expect("add entry"),
+            );
+        }
+        h.state
+            .begin_palette_session_with(Some(target("com.example.editor")));
+        let lease = h.state.runtime.clipboard_lease().await;
+        let copy = copy_combined_while_palette_open(&h.state, &ids);
+        tokio::pin!(copy);
+        run_until_parked(&mut copy).await;
+
+        h.state.end_palette_session();
+        drop(lease);
+
+        assert_cancelled(copy.await);
+        assert_eq!(h.clipboard.inner.current_text(), None);
+        // The combined clip is not stored either.
+        let entries = h.state.runtime.list_recent(10).await.expect("list");
+        assert_eq!(entries.len(), 2);
     }
 
     #[tokio::test]

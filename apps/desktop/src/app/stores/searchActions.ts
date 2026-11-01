@@ -286,6 +286,9 @@ const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Prom
   try {
     await perform(ids);
   } catch (err) {
+    // The palette was dismissed before the copy could land: it is gone, so
+    // there is nothing to report or refresh.
+    if (isCancelledError(err)) return;
     actionError = describeError(err);
   }
   if (actionError === undefined) clearMultiSelect();
@@ -383,6 +386,9 @@ const runBulkActionOnIds = async (
   try {
     await perform(ids);
   } catch (err) {
+    // The palette was dismissed before the copy could land: it is gone, so
+    // there is nothing to report or refresh.
+    if (isCancelledError(err)) return;
     actionError = describeError(err);
   }
   if (actionError === undefined) clearMultiSelect();

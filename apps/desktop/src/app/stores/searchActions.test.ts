@@ -418,6 +418,21 @@ describe('multi-select bulk actions', () => {
     expect(multiSelectState.selected.has('a')).toBe(true);
   });
 
+  it('stays quiet when a bulk copy is dropped because the palette was dismissed', async () => {
+    searchState.results = [result({ id: 'a' })];
+    toggleMultiSelect('a');
+    vi.mocked(copyEntriesCombined).mockRejectedValue({
+      code: 'cancelled',
+      message: 'cancelled',
+      recoverable: true,
+    });
+    await copyMultiSelection();
+    expect(searchState.errorMessage).toBeUndefined();
+    // No refresh against the dismissed palette either.
+    expect(searchClipboard).not.toHaveBeenCalled();
+    expect(multiSelectState.selected.has('a')).toBe(true);
+  });
+
   it('routes deletion through delete_entries and clears the slot', async () => {
     searchState.results = [result({ id: 'a' }), result({ id: 'b' })];
     toggleMultiSelect('a');
