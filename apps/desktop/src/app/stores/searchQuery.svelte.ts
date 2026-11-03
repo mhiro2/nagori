@@ -172,10 +172,11 @@ const limitScope = (query: string, filters: SearchFilters | undefined): string =
 
 // The fast `Auto` search only substring-scans the newest entries (FTS and the
 // CJK n-gram index cover the rest), so an older entry matched by an identifier
-// fragment, a cut-off URL path or a single kana can be missed. When that search
-// comes back empty the palette offers `Exact`, an unbounded substring scan of
-// the whole history. Like the expanded limit, the choice is scoped to the query
-// + filter set it was made for: refreshes keep it, a new query drops it.
+// fragment, a cut-off URL path or a single kana can be missed. The palette
+// offers `Exact`, an unbounded substring scan of the whole history, both when
+// that search comes back empty and below a list that does not hold the wanted
+// entry. Like the expanded limit, the choice is scoped to the query + filter
+// set it was made for: refreshes keep it, a new query drops it.
 let fullHistoryScope: string | undefined;
 
 const modeFor = (query: string): SearchMode => {
@@ -218,17 +219,17 @@ export const loadMoreResults = async (): Promise<void> => {
   await runQuery(searchState.query);
 };
 
-/// Whether the empty result set on screen came from the fast search and a
-/// full-history search could still find something.
+/// Whether the result set on screen came from the fast search for a typed
+/// query, so a full-history search could still find more — older entries the
+/// bounded scan skipped, whether or not the fast search found anything.
 export const canSearchFullHistory = (): boolean =>
   searchState.appliedQuery.trim() !== '' &&
   !searchState.fullHistory &&
-  searchState.results.length === 0 &&
   searchState.errorMessage === undefined;
 
 /// Re-run the current query as an unbounded substring scan of the whole
-/// history. Ignored unless the fast search for the list on screen came back
-/// empty and no newer search is pending.
+/// history. Ignored unless the list on screen came from the fast search and no
+/// newer search is pending.
 export const searchFullHistory = async (): Promise<void> => {
   if (!canSearchFullHistory()) return;
   if (pendingQueryTimer !== undefined || searchRunning || appliedTicket !== inflight) return;

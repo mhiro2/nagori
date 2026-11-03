@@ -277,9 +277,10 @@
     searchBox?.focus();
   };
 
-  // The empty state (and its button) unmounts while the wider search loads,
-  // so hand focus to the search box first: otherwise it drops to the body and
-  // the next Enter would act on whichever row the new results highlight.
+  // The empty state or list footer (and its button) unmounts once the wider
+  // search lands, so hand focus to the search box first: otherwise it drops
+  // to the body and the next Enter would act on whichever row the new results
+  // highlight.
   const startFullHistorySearch = (): void => {
     searchBox?.focus();
     void searchFullHistory();
@@ -732,6 +733,8 @@
           limitReached={resultLimitReached()}
           paged={resultsPaged()}
           onLoadMore={() => void loadMoreResults()}
+          canSearchFullHistory={canSearchFullHistory()}
+          onSearchFullHistory={startFullHistorySearch}
           listboxId={RESULT_LISTBOX_ID}
           compact={showPreviewPane}
         />

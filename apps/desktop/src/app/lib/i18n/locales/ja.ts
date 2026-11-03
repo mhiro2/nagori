@@ -16,6 +16,7 @@ export const ja: Messages = {
         'クイック検索では見つかりませんでした。古い項目の中まで探すには、すべての履歴を検索してください。',
       searchFullHistory: 'すべての履歴を検索',
       noFullHistoryMatches: 'この文字列を含む項目はありません。',
+      notInResults: 'この中にありませんか？',
       noFilterMatches: 'フィルタに一致する項目がありません。',
       capturePaused: '取り込みは一時停止中です。下のボタンで再開できます。',
       retry: '再試行',

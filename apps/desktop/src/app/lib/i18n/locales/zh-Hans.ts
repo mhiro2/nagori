@@ -15,6 +15,7 @@ export const zhHans: Messages = {
       noQuickMatches: '快速搜索未找到结果。搜索全部历史即可同时查找较早的项目。',
       searchFullHistory: '搜索全部历史',
       noFullHistoryMatches: '没有项目包含此文本。',
+      notInResults: '列表中没有？',
       noFilterMatches: '没有符合筛选条件的条目。',
       capturePaused: '捕获已暂停。请在下方恢复以保存新条目。',
       retry: '重试',

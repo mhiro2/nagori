@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
+import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { FileEntry } from '../lib/types';
@@ -1172,6 +1173,49 @@ describe('PreviewPane', () => {
     expect(container.querySelector('mark.current')?.getAttribute('data-match')).toBe('2');
     expect(scroll).toHaveBeenCalled();
     scroll.mockRestore();
+  });
+
+  it('scrolls the body to a first match below the fold, but not one already in view', async () => {
+    // Lay the first match out 900px down in a long body and at the top of a
+    // short one; jsdom has no layout of its own.
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const wrap = this.closest<HTMLElement>('.body-wrap');
+        const long = (wrap?.textContent?.length ?? 0) > 200;
+        const top = this.dataset.match === '0' && long ? 900 - (wrap?.scrollTop ?? 0) : 0;
+        return {
+          top,
+          bottom: top,
+          left: 0,
+          right: 0,
+          width: 0,
+          height: 0,
+          x: 0,
+          y: top,
+        } as DOMRect;
+      });
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
+    const props = { item: sampleItem(), loading: false, errorMessage: undefined, query: 'needle' };
+    const { container, rerender } = render(PreviewPane, {
+      props: { ...props, preview: samplePreview({ previewText: 'needle near the top' }) },
+    });
+    await tick();
+    const wrap = container.querySelector<HTMLElement>('.body-wrap');
+    expect(wrap?.scrollTop).toBe(0);
+
+    const deep = `${'line\n'.repeat(60)}needle`;
+    await rerender({ ...props, preview: samplePreview({ previewText: deep }) });
+    await vi.waitFor(() => expect(wrap?.scrollTop).toBe(800));
+
+    // A slow refetch of the same body shows the loading state, which drops the
+    // body's scroll; the body coming back reveals the match again.
+    await rerender({ ...props, loading: true, preview: samplePreview({ previewText: deep }) });
+    await rerender({ ...props, loading: false, preview: samplePreview({ previewText: deep }) });
+    const back = container.querySelector<HTMLElement>('.body-wrap');
+    await vi.waitFor(() => expect(back?.scrollTop).toBe(800));
+    rect.mockRestore();
+    height.mockRestore();
   });
 
   it('skips the match stepper for a short body with a single match', () => {

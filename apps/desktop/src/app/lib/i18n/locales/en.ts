@@ -21,6 +21,9 @@ export type Messages = {
       searchFullHistory: string;
       // The full-history search found nothing either.
       noFullHistoryMatches: string;
+      // Lead-in under a non-empty quick-search result list, beside the
+      // full-history search button.
+      notInResults: string;
       noFilterMatches: string;
       capturePaused: string;
       retry: string;
@@ -760,6 +763,7 @@ export const en: Messages = {
         'The quick search found nothing. Search all history to also look inside older entries.',
       searchFullHistory: 'Search all history',
       noFullHistoryMatches: 'No entries contain this text.',
+      notInResults: 'Not in this list?',
       noFilterMatches: 'No entries match these filters.',
       capturePaused: 'Capture is paused. Resume capture below to save new entries.',
       retry: 'Try again',

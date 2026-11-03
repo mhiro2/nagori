@@ -16,6 +16,7 @@ export const ko: Messages = {
         '빠른 검색으로 찾지 못했습니다. 오래된 항목까지 찾으려면 전체 기록을 검색하세요.',
       searchFullHistory: '전체 기록 검색',
       noFullHistoryMatches: '이 텍스트를 포함한 항목이 없습니다.',
+      notInResults: '목록에 없나요?',
       noFilterMatches: '필터와 일치하는 항목이 없습니다.',
       capturePaused: '캡처가 일시 중지되었습니다. 아래에서 다시 시작하세요.',
       retry: '다시 시도',

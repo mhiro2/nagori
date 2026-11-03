@@ -17,6 +17,7 @@ export const de: Messages = {
         'Die Schnellsuche hat nichts gefunden. Durchsuche den gesamten Verlauf, um auch ältere Einträge zu prüfen.',
       searchFullHistory: 'Gesamten Verlauf durchsuchen',
       noFullHistoryMatches: 'Kein Eintrag enthält diesen Text.',
+      notInResults: 'Nicht dabei?',
       noFilterMatches: 'Keine Einträge entsprechen diesen Filtern.',
       capturePaused:
         'Die Erfassung ist pausiert. Setzen Sie sie unten fort, um neue Einträge zu speichern.',

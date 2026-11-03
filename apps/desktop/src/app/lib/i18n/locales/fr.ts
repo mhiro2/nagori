@@ -17,6 +17,7 @@ export const fr: Messages = {
         'La recherche rapide n’a rien trouvé. Cherchez dans tout l’historique pour inclure aussi les éléments plus anciens.',
       searchFullHistory: 'Chercher dans tout l’historique',
       noFullHistoryMatches: 'Aucun élément ne contient ce texte.',
+      notInResults: 'Pas dans la liste ?',
       noFilterMatches: 'Aucune entrée ne correspond à ces filtres.',
       capturePaused:
         'La capture est en pause. Reprenez-la ci-dessous pour enregistrer de nouvelles entrées.',

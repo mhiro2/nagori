@@ -180,6 +180,11 @@ OS-downloaded language packs / embedding assets. See
 - Japanese / CJK partial-match search: kana-insensitive (a Katakana clip is
   found by a Hiragana query and vice versa) with single-kanji recall, on top of
   full-text and ASCII fuzzy matching.
+- Search rows that show why they matched: when the match sits deep in a long
+  clip, the row shows the passage around it (the matching line for code)
+  instead of the clip's opening, the preview opens scrolled to the first
+  match, and *Search all history* stays one click away under any quick-search
+  result list.
 - Recall-oriented result rows: a language badge on code (JSON / SQL / Rust / …,
   detected on-device), a strong-brand badge on known URLs (GitHub / YouTube /
   …, from the hostname alone — no network), and pixel dimensions, file size,

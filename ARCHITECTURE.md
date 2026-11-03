@@ -811,6 +811,28 @@ so its extra cost is bounded by the slot and index-map overhead of at most the
 same rows. Duplicate branch hits merge their strongest `TextMatch` while FTS
 and ngram signals remain attached by entry id.
 
+**Match excerpts.** A stored preview is the head of the body, so rows that
+share an opening (meeting notes, log dumps) all read the same even when each
+matched further down. After ranking and truncation, `SearchService` asks the
+provider's `match_windows` for the final page only — Public / Unknown rows of
+the text-shaped kinds (`Text`, `Code`, `RichText`, `Unknown`), for text plans
+(never `Recent` or `Semantic`). For each row `SQLite` reads the plain body
+once, looks for the whole normalized query and then up to three of its words
+(longest first) with `instr(lower(body), term)`, and returns only a bounded
+window around the first hit; a match within the first
+`MATCH_EXCERPT_HEAD_CHARS` characters is already visible and is skipped.
+`MatchWindow::excerpt` (core) compacts the window into a one-line excerpt
+that leads with a little context (`…接続プールの上限を20に変更…`), narrowing
+code to the line holding the match, and the excerpt replaces the row's
+`preview`. Masked rows keep their redacted preview because the excerpt would
+come from the stored body (the window query re-checks the row's current
+sensitivity, since a re-capture can raise it after the candidate was read);
+URL rows keep the URL the row parses; images and
+file lists keep their own projections. `lower()` folds ASCII only, so
+character offsets stay exact, and a match that exists only after NFKC
+folding (full-width Latin) or kana folding simply keeps the head preview.
+The lookup is cosmetic: a failure leaves the head previews in place.
+
 **Bounded admission + cancellation.** Each candidate fetch runs through
 `SqliteStore::run_search_blocking`, which adds two guards over the plain
 blocking path. *Bounded admission*: a search-admission semaphore
@@ -893,9 +915,9 @@ costs for entries older than it: Auto still recalls whole identifiers,
 CJK, but misses the tail of a `snake_case` identifier (`order_tot`), the
 middle of a camelCase one (`UserProfile`), a cut-off URL path
 (`github.com/acme/wid`) and a single kana, all of which `Exact` recalls.
-The palette therefore offers a full-history `Exact` search when Auto comes
-back empty (see the full-history bullet in
-[section 12](#12-tauri-boundary-and-frontend)).
+The palette therefore offers a full-history `Exact` search, both when Auto
+comes back empty and below a non-empty Auto result list (see the
+full-history bullet in [section 12](#12-tauri-boundary-and-frontend)).
 
 **Recent-search cache.** A bounded LRU
 (`nagori-daemon::search_cache::RecentSearchCache`, default capacity 32)
@@ -1919,7 +1941,10 @@ not duplicate runtime logic.
   selected row that grows to two lines was considered and rejected: the rows
   below would shift under a stationary pointer (and hover selects), the list
   height is sized from a fixed per-row height, and the pane already shows
-  the extra detail for the highlighted row. The row's preview text
+  the extra detail for the highlighted row. For a query-driven row the
+  preview text is the backend's match excerpt when the match sits past the
+  head of the body (see *Match excerpts* in [section 8](#8-search)), so the
+  row shows the matched passage instead of a shared opening. The row's preview text
   is run through the shared `lib/highlightQuery` helper — a
   case-insensitive raw-substring scan (one pass per whitespace term,
   overlapping ranges merged) — so exact / substring / CJK hits are marked
@@ -2019,15 +2044,20 @@ not duplicate runtime logic.
   *Show more*, focus moves to the first newly loaded row (found by id, since
   the re-rank may place it above the old end). At the 200-row cap the footer drops the
   button and suggests narrowing with the query or filters.
-- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`).
-  When the fast Auto search for a non-empty query returns nothing, the
-  empty state says the quick search found nothing and offers *Search all
-  history*, which re-runs the query as `SearchMode::Exact` — an unbounded
-  substring scan that also finds fragments the bounded window misses. The
-  choice is scoped like the expanded limit: same-scope refreshes keep the
-  wider search, a new query or filter change returns to Auto. The status
-  bar marks results that came from it, and an empty full-history result
-  says no entry contains the text instead of offering the search again.
+- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`,
+  `ResultList.svelte`). When the fast Auto search for a non-empty query
+  returns nothing, the empty state says the quick search found nothing and
+  offers *Search all history*, which re-runs the query as
+  `SearchMode::Exact` — an unbounded substring scan that also finds
+  fragments the bounded window misses. A non-empty Auto result list offers
+  the same search in a footer (*Not in this list?*), so an old identifier
+  or URL fragment stays reachable while recent look-alikes fill the list;
+  the search box takes focus first, because the footer unmounts once the
+  wider results land. The choice is scoped like the expanded limit:
+  same-scope refreshes keep the wider search, a new query or filter change
+  returns to Auto. The status bar marks results that came from it, and an
+  empty full-history result says no entry contains the text instead of
+  offering the search again.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
@@ -2040,7 +2070,9 @@ not duplicate runtime logic.
   carries its match ordinal; when there are several matches, or one in a
   body longer than 20 lines, a stepper (*N matches*, ↑ / ↓ buttons with a
   polite position readout) scrolls to the previous / next match and styles
-  it as current. A failed preview fetch shows its error with *Try again*
+  it as current. A new body or query scrolls the body's own scroller so the
+  first match is in view when it lies outside it, leaving a body whose first
+  match is already visible at its start. A failed preview fetch shows its error with *Try again*
   (`retryPreview`, which forces `hydratePreview` past its settled-state
   guard — a failed query-only refetch keeps the old body on screen, which the
   guard would otherwise treat as done). When a search query matches text

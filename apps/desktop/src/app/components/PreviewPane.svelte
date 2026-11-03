@@ -237,11 +237,29 @@
   );
   let currentMatch = $state<number | undefined>(undefined);
   let bodyWrapEl: HTMLDivElement | undefined = $state();
+  // A new body or query starts unstepped, scrolled so the first match is in
+  // view: a match deep in a long body would otherwise sit below the fold with
+  // only the stepper hinting it exists. Only the body's own scroller moves,
+  // and only when the match is outside it, so a match near the top leaves the
+  // body at its start. A slow refetch swaps the body for the loading state,
+  // which resets its scroll, so the body coming back counts as new too.
   $effect(() => {
     void bodyText;
     void query;
     currentMatch = undefined;
+    if (!loading && matchCount > 0) void revealFirstMatch();
   });
+  const revealFirstMatch = async (): Promise<void> => {
+    await tick();
+    const wrap = bodyWrapEl;
+    const first = wrap?.querySelector<HTMLElement>('[data-match="0"]');
+    if (!wrap || !first) return;
+    const top =
+      first.getBoundingClientRect().top - wrap.getBoundingClientRect().top + wrap.scrollTop;
+    const visible =
+      top >= wrap.scrollTop && top + first.offsetHeight <= wrap.scrollTop + wrap.clientHeight;
+    if (!visible) wrap.scrollTop = Math.max(0, top - wrap.clientHeight / 3);
+  };
   const stepMatch = async (step: 1 | -1): Promise<void> => {
     if (matchCount === 0) return;
     const from = currentMatch ?? (step === 1 ? -1 : 0);

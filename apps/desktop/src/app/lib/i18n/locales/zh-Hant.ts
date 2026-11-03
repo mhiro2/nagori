@@ -15,6 +15,7 @@ export const zhHant: Messages = {
       noQuickMatches: '快速搜尋找不到結果。搜尋全部紀錄即可一併查找較舊的項目。',
       searchFullHistory: '搜尋全部紀錄',
       noFullHistoryMatches: '沒有項目包含此文字。',
+      notInResults: '清單中沒有？',
       noFilterMatches: '沒有符合篩選條件的項目。',
       capturePaused: '擷取已暫停。請在下方恢復以儲存新項目。',
       retry: '重試',
