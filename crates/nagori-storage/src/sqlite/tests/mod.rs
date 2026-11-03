@@ -10,6 +10,7 @@ mod representations;
 mod schema;
 mod search;
 mod settings;
+mod text_recognition;
 mod thumbnails;
 
 use nagori_core::{EntryFactory, EntryId, EntryRepository};

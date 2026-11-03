@@ -9,4 +9,6 @@ mod sqlite;
 pub use process_lock::{ProcessLock, resolve_db_path, store_lock_dir};
 #[cfg(feature = "semantic-index")]
 pub use sqlite::{PendingEmbedding, SemanticIndexCounts};
-pub use sqlite::{SqliteStore, ensure_private_directory};
+pub use sqlite::{
+    PendingTextRecognition, SqliteStore, TextRecognitionOutcome, ensure_private_directory,
+};

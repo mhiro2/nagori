@@ -425,7 +425,9 @@ where
     /// Only Public / Unknown rows qualify: Private and Secret previews are
     /// masked, and an excerpt built from the stored body would bypass that.
     /// URL rows keep their full URL (the row parses it for the domain), and
-    /// images and file lists have their own projections. Excerpts are
+    /// file lists have their own projection. An image's excerpt comes from
+    /// the text recognized in it, so a screenshot found by its text shows the
+    /// passage that matched. Excerpts are
     /// cosmetic, so a failed lookup leaves the head previews in place rather
     /// than failing the search.
     async fn apply_match_excerpts(
@@ -624,7 +626,11 @@ const fn shows_match_excerpt(result: &SearchResult) -> bool {
         Sensitivity::Public | Sensitivity::Unknown
     ) && matches!(
         result.content_kind,
-        ContentKind::Text | ContentKind::Code | ContentKind::RichText | ContentKind::Unknown
+        ContentKind::Text
+            | ContentKind::Code
+            | ContentKind::RichText
+            | ContentKind::Unknown
+            | ContentKind::Image
     )
 }
 

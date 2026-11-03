@@ -344,6 +344,9 @@ async fn capabilities_handler_returns_builder_value() {
         ai_actions: Capability::Unsupported {
             reason: NO_AI_ENGINE_REASON.to_owned(),
         },
+        image_text_recognition: Capability::Unsupported {
+            reason: nagori_platform::NO_TEXT_RECOGNIZER_REASON.to_owned(),
+        },
     };
     let runtime = NagoriRuntime::builder(store)
         .clipboard(Arc::new(MemoryClipboard::new()))

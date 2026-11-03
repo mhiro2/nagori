@@ -223,7 +223,10 @@ fn spawn_capture_supervisor(
                 tokio::spawn(async move {
                     let settings = settings_rx.borrow().clone();
                     let semantic_notifier: Arc<dyn Fn(nagori_core::EntryId) + Send + Sync> =
-                        Arc::new(move |_entry_id| notify_runtime.notify_semantic_capture());
+                        Arc::new(move |_entry_id| {
+                            notify_runtime.notify_semantic_capture();
+                            notify_runtime.notify_text_recognition_capture();
+                        });
                     let mut capture =
                         CaptureLoop::new(reader, store.clone(), store.clone(), settings)
                             .with_search_cache(search_cache)
@@ -382,7 +385,9 @@ fn spawn_ai_watchdog_supervisor(
     })
 }
 
-/// Supervise the background semantic-index worker.
+/// Supervise the background index workers: the semantic index and the image
+/// text index. They share one supervisor (each idles cheaply while its
+/// setting is off), so a panic in either respawns both.
 fn spawn_semantic_supervisor(
     runtime: NagoriRuntime,
     grace: Duration,
@@ -394,9 +399,16 @@ fn spawn_semantic_supervisor(
             WorkerRestart::OnExit,
             shutdown,
             grace,
-            move |worker_shutdown| {
+            move |worker_shutdown: ShutdownHandle| {
                 let runtime = runtime.clone();
-                tokio::spawn(async move { runtime.run_semantic_indexer(worker_shutdown).await })
+                tokio::spawn(async move {
+                    tokio::join!(
+                        runtime
+                            .clone()
+                            .run_semantic_indexer(worker_shutdown.clone()),
+                        runtime.run_text_recognition_indexer(worker_shutdown),
+                    );
+                })
             },
         )
         .await;

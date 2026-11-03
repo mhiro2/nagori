@@ -253,6 +253,9 @@ where
     if let Some(probe) = power_probe() {
         builder = builder.power_probe(probe);
     }
+    if let Some(recognizer) = default_text_recognizer() {
+        builder = builder.text_recognizer(recognizer);
+    }
     if let Some(socket_path) = options.socket_path {
         builder = builder.socket_path(socket_path);
     }
@@ -275,6 +278,21 @@ fn power_probe() -> Option<nagori_daemon::semantic_index::PowerProbe> {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn power_probe() -> Option<nagori_daemon::semantic_index::PowerProbe> {
+    None
+}
+
+/// The host's on-device image text recognizer: Vision on macOS, `None`
+/// elsewhere (the `image_text_recognition` capability then reports
+/// `Unsupported`).
+#[cfg(target_os = "macos")]
+// The non-macOS sibling returns `None`, so the signature must be `Option`.
+#[allow(clippy::unnecessary_wraps)]
+fn default_text_recognizer() -> Option<Arc<dyn nagori_core::TextRecognizer>> {
+    Some(Arc::new(nagori_ai_apple::AppleTextRecognizer::new()))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn default_text_recognizer() -> Option<Arc<dyn nagori_core::TextRecognizer>> {
     None
 }
 

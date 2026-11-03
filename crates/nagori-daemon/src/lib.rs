@@ -8,6 +8,7 @@ pub mod runtime;
 pub mod search_cache;
 pub mod semantic_index;
 pub mod serve;
+pub mod text_recognition;
 pub mod thumbnails;
 
 pub use capture_loop::{CaptureLoop, CapturePauseEpoch, CaptureSkipKind, CaptureSkipNotice};

@@ -3,6 +3,7 @@ mod convert;
 mod entry;
 mod label;
 mod maintenance;
+mod ocr;
 mod permissions;
 mod pool;
 mod schema;
@@ -22,6 +23,7 @@ use rusqlite::Connection;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+pub use ocr::{PendingTextRecognition, TextRecognitionOutcome};
 pub use permissions::ensure_private_directory;
 #[cfg(feature = "semantic-index")]
 pub use semantic::{PendingEmbedding, SemanticIndexCounts};

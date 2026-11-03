@@ -11,6 +11,7 @@ mod lifecycle;
 mod permissions;
 mod search;
 mod settings;
+mod text_recognition;
 
 use std::sync::{
     Arc,

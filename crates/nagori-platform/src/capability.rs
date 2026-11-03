@@ -192,7 +192,19 @@ pub struct PlatformCapabilities {
     /// `Unsupported`. Live model readiness (e.g. Apple Intelligence
     /// downloaded) stays on the separate `AiAvailabilityReport` channel.
     pub ai_actions: Capability,
+    /// On-device text recognition in images (the "extract text" action and
+    /// image text search). macOS ships it through the Vision framework;
+    /// Windows and Linux report `Unsupported`. Like `ai_actions`, the
+    /// runtime reconciles this row against the **actually wired**
+    /// `TextRecognizer`, and the desktop hides the image text surfaces
+    /// when it is `Unsupported`.
+    pub image_text_recognition: Capability,
 }
+
+/// Reason surfaced for [`PlatformCapabilities::image_text_recognition`]
+/// when no text recognizer is wired on the host.
+pub const NO_TEXT_RECOGNIZER_REASON: &str =
+    "on-device text recognition in images is not available on this platform yet";
 
 /// Reason surfaced for [`PlatformCapabilities::ai_actions`] when no
 /// model-backed AI engine is wired on the host.
@@ -233,6 +245,7 @@ pub fn unsupported_capabilities() -> PlatformCapabilities {
         update_check: unsupported(),
         preview_quick_look: unsupported(),
         ai_actions: unsupported(),
+        image_text_recognition: unsupported(),
     }
 }
 

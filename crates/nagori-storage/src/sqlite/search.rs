@@ -55,6 +55,10 @@ const LABEL_MATCH_SQL: &str = "CASE
 /// Locate the first of [`MAX_EXCERPT_TERMS`] query terms in one entry's plain
 /// text and project a bounded window around it.
 ///
+/// An image's text is the text recognized in it (when image text search has
+/// read it), and an image has no head preview to show the match in, so every
+/// match in it yields a window.
+///
 /// The service only asks for rows whose candidate was Public / Unknown, but
 /// the candidate was read earlier: a re-capture can have raised the row to a
 /// masked class since, so the current sensitivity is checked here again. Each
@@ -65,23 +69,30 @@ const LABEL_MATCH_SQL: &str = "CASE
 /// (full-width Latin, for example) finds nothing and the row keeps its head
 /// preview. Unused term slots are bound to NULL, which `instr` maps to NULL.
 const MATCH_WINDOW_SQL: &str = "WITH src AS MATERIALIZED (
-         SELECT {plain} AS plain FROM entries e
+         SELECT CASE WHEN e.content_kind = 'image'
+                     THEN (SELECT r.text FROM entry_text_recognition r
+                           WHERE r.entry_id = e.id AND r.status = 'recognized'
+                             AND r.content_hash = e.content_hash)
+                     ELSE {plain} END AS plain,
+                e.content_kind = 'image' AS image
+         FROM entries e
          WHERE e.id = ?1 AND e.deleted_at IS NULL
            AND e.sensitivity IN ('public', 'unknown')
      ), low AS MATERIALIZED (
-         SELECT plain, lower(plain) AS l FROM src WHERE plain IS NOT NULL
+         SELECT plain, image, lower(plain) AS l FROM src WHERE plain IS NOT NULL
      ), pos AS MATERIALIZED (
-         SELECT plain, instr(l, ?2) AS p1, instr(l, ?3) AS p2,
+         SELECT plain, image, instr(l, ?2) AS p1, instr(l, ?3) AS p2,
                 instr(l, ?4) AS p3, instr(l, ?5) AS p4
          FROM low
      ), hit AS MATERIALIZED (
-         SELECT plain,
+         SELECT plain, image,
                 CASE WHEN p1 > 0 THEN 0 WHEN p2 > 0 THEN 1
                      WHEN p3 > 0 THEN 2 ELSE 3 END AS term_index,
                 COALESCE(NULLIF(p1, 0), NULLIF(p2, 0), NULLIF(p3, 0), NULLIF(p4, 0)) AS p
          FROM pos
      ), win AS MATERIALIZED (
-         SELECT plain, term_index, p, max(1, p - ?6) AS start FROM hit WHERE p > ?7
+         SELECT plain, term_index, p, max(1, p - ?6) AS start FROM hit
+         WHERE p > CASE WHEN image THEN 0 ELSE ?7 END
      )
      SELECT term_index,
             p - start AS match_start,

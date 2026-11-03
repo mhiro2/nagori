@@ -22,7 +22,8 @@
 //! documented here rather than expressed in the capability matrix.
 
 use nagori_platform::{
-    Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
+    Capability, NO_AI_ENGINE_REASON, NO_TEXT_RECOGNIZER_REASON, Platform, PlatformCapabilities,
+    SupportTier,
 };
 
 #[must_use]
@@ -72,6 +73,9 @@ pub fn report_capabilities() -> PlatformCapabilities {
         // a provider (e.g. OpenAI-compatible) is wired.
         ai_actions: Capability::Unsupported {
             reason: NO_AI_ENGINE_REASON.to_owned(),
+        },
+        image_text_recognition: Capability::Unsupported {
+            reason: NO_TEXT_RECOGNIZER_REASON.to_owned(),
         },
     }
 }

@@ -6,6 +6,8 @@
 //!
 //! - [`AppleFoundationBackend`] implements `nagori-ai`'s `TextGenerator` over
 //!   `SystemLanguageModel`, streaming on-device summaries (macOS only).
+//! - [`AppleTextRecognizer`] implements `nagori-core`'s `TextRecognizer` over
+//!   the Vision framework's `VNRecognizeTextRequest` (macOS only).
 //! - [`AppleTranslateBackend`] implements `nagori-ai`'s `Translator` over the
 //!   `Translation` framework's `TranslationSession`, with source-language
 //!   detection via `NLLanguageRecognizer` (macOS only).
@@ -23,6 +25,7 @@
 mod availability;
 mod delta;
 mod event;
+mod ocr;
 mod pump;
 mod stream;
 
@@ -38,6 +41,9 @@ mod translate;
 pub use availability::{AppleAvailability, AvailabilitySource, MockReason, probe};
 pub use delta::{SnapshotDelta, diff_snapshot};
 pub use event::AppleStreamEvent;
+#[cfg(target_os = "macos")]
+pub use ocr::AppleTextRecognizer;
+pub use ocr::parse_recognized_lines;
 pub use pump::SnapshotPump;
 pub use stream::{StreamHandle, simulate_snapshot_stream};
 
