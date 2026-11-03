@@ -10,7 +10,7 @@
     saveAiResult,
     startAiAction,
   } from '../lib/commands';
-  import { describeError } from '../lib/errors';
+  import { describeError, isCancelledError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
   import { isTauri, subscribe, TAURI_EVENTS } from '../lib/tauri';
   import type {
@@ -527,7 +527,8 @@
         setOk(false);
       }, FLASH_MS);
     } catch (err) {
-      if (!isCurrent()) return;
+      // `cancelled`: the palette was dismissed before the copy could land.
+      if (!isCurrent() || isCancelledError(err)) return;
       setOk(false);
       setError(describeError(err));
     }

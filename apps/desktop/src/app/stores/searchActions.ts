@@ -9,10 +9,14 @@ import {
   pinEntry as pinEntryCmd,
   previewEntry as previewEntryCmd,
 } from '../lib/commands';
-import { describeError } from '../lib/errors';
+import { describeError, isCancelledError } from '../lib/errors';
 import { isTauri } from '../lib/tauri';
 import type { PasteFormat, PasteOption } from '../lib/types';
-import { runSessionEndingAction } from './paletteSession.svelte';
+import {
+  isPaletteSessionCurrent,
+  paletteSessionToken,
+  runSessionEndingAction,
+} from './paletteSession.svelte';
 import { clearPasteDiagnostics } from './pasteDiagnostics.svelte';
 import {
   closePasteFormatPicker,
@@ -24,6 +28,26 @@ import { clearMultiSelect, multiSelectState } from './searchMultiSelect.svelte';
 import { cancelPendingQuery, flushPendingQuery, runQuery, searchState } from './searchQuery.svelte';
 import { currentSelection } from './searchSelection';
 import { settingsState } from './settings.svelte';
+
+// Settle the pending/in-flight search before an action reads the selection,
+// and report whether it may still act: the results must reflect the typed query
+// (otherwise a stale row would be the target), and the palette the action was
+// started in must still be up. The search can take long enough for the user to
+// press Escape or click away, and a dismissed palette must not go on to paste,
+// copy, pin, or delete what was selected in it.
+const settleForAction = async (): Promise<boolean> => {
+  const session = paletteSessionToken();
+  if (!(await flushPendingQuery())) return false;
+  return isPaletteSessionCurrent(session);
+};
+
+// Surface a failed session-ending action in the palette. A `cancelled` result
+// means the backend dropped the action because the palette was dismissed before
+// it could act; the palette is gone, so there is nothing to show.
+const reportSessionEndingFailure = (err: unknown): void => {
+  if (isCancelledError(err)) return;
+  searchState.errorMessage = describeError(err);
+};
 
 const oppositeFormat = (): PasteFormat | undefined => {
   const current = settingsState.settings?.pasteFormatDefault;
@@ -46,7 +70,7 @@ const pasteEntryId = async (id: string, format?: PasteFormat): Promise<void> => 
     // StatusBar chip so it doesn't linger across a now-working paste.
     clearPasteDiagnostics();
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -57,7 +81,7 @@ export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
   // query that the 80 ms debounce hasn't replaced yet. Bail if the results
   // could not be settled (search errored / superseded) so we never paste a
   // stale row.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const target = currentSelection();
   if (!target) return;
   // Plain Enter honours the user's auto-paste setting (no forced synthesis).
@@ -74,17 +98,19 @@ export const confirmSelection = async (format?: PasteFormat): Promise<void> => {
 // paste. Shared by the keyboard chord and the right-click menu so both honour
 // the same ≥2-options gate against the same captured id.
 const offerAlternateFormat = async (id: string): Promise<void> => {
-  // Capture the dismiss generation before the query so a palette hide
-  // (blur / Escape) landing while it is in flight bails this opener instead of
-  // popping the picker open on a hidden window against a now-stale entry.
+  // Capture the dismiss generation and the palette session before the query so
+  // a palette hide (blur / Escape) landing while it is in flight bails this
+  // opener instead of popping the picker open on a hidden window, or pasting
+  // in its place, against a now-stale entry.
   const generation = pasteFormatPickerGeneration();
+  const session = paletteSessionToken();
   let options: PasteOption[] = [];
   try {
     options = await listPasteOptions(id);
   } catch {
     options = [];
   }
-  if (pasteFormatPickerGeneration() !== generation) return;
+  if (pasteFormatPickerGeneration() !== generation || !isPaletteSessionCurrent(session)) return;
   if (options.length >= 2) {
     openPasteFormatPicker(id, options);
   } else {
@@ -97,7 +123,7 @@ export const confirmSelectionWithAlternateFormat = async (): Promise<void> => {
   if (!isTauri()) return;
   // As in `confirmSelection`: act on the freshest query results, not a row the
   // debounce is about to replace; bail if they could not be settled.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const target = currentSelection();
   if (!target) return;
   await offerAlternateFormat(target.id);
@@ -121,7 +147,7 @@ export const confirmPasteFormat = async (option: PasteOption | undefined): Promi
     await runSessionEndingAction(() => pasteEntryRepresentationCmd(targetId, option.mime));
     clearPasteDiagnostics();
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -134,7 +160,7 @@ export const copySelection = async (): Promise<void> => {
   if (!isTauri()) return;
   // Settle the pending/in-flight search so we copy the typed query's entry,
   // not a row the debounce is about to replace; bail if it could not settle.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const target = currentSelection();
   if (!target) return;
   // Same hide-on-return contract as `confirmSelection` — cancel before
@@ -143,7 +169,7 @@ export const copySelection = async (): Promise<void> => {
   try {
     await runSessionEndingAction(() => copyEntryCmd(target.id));
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -172,7 +198,7 @@ export const togglePinSelection = async (): Promise<void> => {
   // needs the same freshness gate as paste/copy/delete: a ⌘P fired during the
   // debounce window must not pin a stale row the user can no longer see. Bail
   // if the typed query's results could not be settled.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const target = currentSelection();
   if (!target) return;
   await applyPinToggle(target);
@@ -189,7 +215,7 @@ export const deleteSelection = async (): Promise<void> => {
   // Delete is destructive, so it especially must target the typed query's
   // entry — settle the pending/in-flight search before reading the selection,
   // and bail entirely if the results could not be settled.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const target = currentSelection();
   if (!target) return;
   try {
@@ -252,7 +278,7 @@ const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Prom
   // reconciled against the result list, so flushing keeps the bulk copy/delete
   // scoped to the entries visible for the query the user actually typed. Bail
   // if the results could not be settled rather than acting on a stale set.
-  if (!(await flushPendingQuery())) return;
+  if (!(await settleForAction())) return;
   const ids = orderedMultiSelection();
   if (ids.length === 0) return;
   const queryBeforeAction = searchState.query;
@@ -260,6 +286,9 @@ const runBulkAction = async (perform: (ids: string[]) => Promise<unknown>): Prom
   try {
     await perform(ids);
   } catch (err) {
+    // The palette was dismissed before the copy could land: it is gone, so
+    // there is nothing to report or refresh.
+    if (isCancelledError(err)) return;
     actionError = describeError(err);
   }
   if (actionError === undefined) clearMultiSelect();
@@ -286,7 +315,7 @@ export const copyEntryById = async (id: string): Promise<void> => {
   try {
     await runSessionEndingAction(() => copyEntryCmd(id));
   } catch (err) {
-    searchState.errorMessage = describeError(err);
+    reportSessionEndingFailure(err);
   }
 };
 
@@ -306,16 +335,17 @@ export const pasteEntryById = async (id: string): Promise<void> => {
 // predictable. `listPasteOptions` stays the authority on what is pasteable.
 export const openPasteFormatPickerFor = async (id: string): Promise<void> => {
   if (!isTauri()) return;
-  // Bail if a palette hide bumps the dismiss generation while the options query
-  // is in flight, matching `offerAlternateFormat`.
+  // Bail if a palette hide bumps the dismiss generation or ends the session
+  // while the options query is in flight, matching `offerAlternateFormat`.
   const generation = pasteFormatPickerGeneration();
+  const session = paletteSessionToken();
   let options: PasteOption[] = [];
   try {
     options = await listPasteOptions(id);
   } catch {
     options = [];
   }
-  if (pasteFormatPickerGeneration() !== generation) return;
+  if (pasteFormatPickerGeneration() !== generation || !isPaletteSessionCurrent(session)) return;
   openPasteFormatPicker(id, options);
 };
 
@@ -356,6 +386,9 @@ const runBulkActionOnIds = async (
   try {
     await perform(ids);
   } catch (err) {
+    // The palette was dismissed before the copy could land: it is gone, so
+    // there is nothing to report or refresh.
+    if (isCancelledError(err)) return;
     actionError = describeError(err);
   }
   if (actionError === undefined) clearMultiSelect();

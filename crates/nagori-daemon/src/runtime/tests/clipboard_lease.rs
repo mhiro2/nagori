@@ -1069,3 +1069,111 @@ async fn paste_without_a_target_asks_for_no_focus_check() {
 
     assert_eq!(paste.targets(), vec![None]);
 }
+
+#[tokio::test]
+async fn a_failing_precheck_stops_the_paste_after_the_clipboard_probe() {
+    // The front-end's own check runs as the last step before the adapter call,
+    // so a change it watches for that lands while the clipboard probe is
+    // still awaiting is caught, and no keystroke goes out.
+    let (runtime, clipboard, paste) = runtime_with_fake_native();
+    clipboard.gate_sequence_probe();
+    enable_auto_paste(&runtime).await;
+    let reopened = Arc::new(AtomicBool::new(false));
+    let mut lease = runtime.clipboard_lease().await;
+    let publish = lease
+        .publish_text("for the editor".to_owned())
+        .await
+        .expect("publish text");
+
+    let precheck = {
+        let reopened = Arc::clone(&reopened);
+        move || {
+            if reopened.load(Ordering::SeqCst) {
+                Err(AppError::Paste {
+                    reason: PasteFailureReason::PreviousAppLost,
+                    message: "the palette was shown again".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    };
+    let pasting = lease.paste_frontmost_into_checked(
+        publish,
+        Some(restore_target("com.example.editor")),
+        precheck,
+    );
+    tokio::pin!(pasting);
+    tokio::select! {
+        _ = &mut pasting => panic!("the paste finished before its probe was released"),
+        () = clipboard.probe_entered.notified() => {}
+    }
+    reopened.store(true, Ordering::SeqCst);
+    clipboard.probe_release.notify_one();
+
+    let err = pasting
+        .await
+        .expect_err("the precheck should stop the paste");
+    assert!(matches!(
+        err,
+        AppError::Paste {
+            reason: PasteFailureReason::PreviousAppLost,
+            ..
+        }
+    ));
+    assert_eq!(paste.calls(), 0, "no keystroke may be synthesised");
+}
+
+#[tokio::test]
+async fn a_failing_publish_check_stops_the_copy_after_its_preparation() {
+    // The front-end's check runs after the entry has been read and the write
+    // prepared, so a change it watches for that lands during that work keeps
+    // the clipboard untouched.
+    let (runtime, clipboard, _paste) = runtime_with_fake_native();
+    let id = runtime
+        .add_text("abandoned clip".to_owned())
+        .await
+        .expect("add entry");
+    clipboard.gate_preparation();
+    let dismissed = Arc::new(AtomicBool::new(false));
+    let mut lease = runtime.clipboard_lease().await;
+    lease.require_before_publish({
+        let dismissed = Arc::clone(&dismissed);
+        move || {
+            if dismissed.load(Ordering::SeqCst) {
+                Err(AppError::Conflict("the palette was dismissed".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+    });
+
+    let copying = lease.copy_entry_with_format(id, PasteFormat::Preserve);
+    tokio::pin!(copying);
+    tokio::select! {
+        _ = &mut copying => panic!("the copy finished before its preparation was released"),
+        () = clipboard.preparation_entered.notified() => {}
+    }
+    dismissed.store(true, Ordering::SeqCst);
+    clipboard.finish_preparation();
+
+    let err = copying
+        .await
+        .expect_err("the publish check should stop the copy");
+    assert!(matches!(err, AppError::Conflict(_)));
+    assert!(clipboard.writes().is_empty(), "nothing may be published");
+}
+
+#[tokio::test]
+async fn a_passing_publish_check_lets_text_through() {
+    let (runtime, clipboard, _paste) = runtime_with_fake_native();
+    let mut lease = runtime.clipboard_lease().await;
+    lease.require_before_publish(|| Ok(()));
+
+    let _publish = lease
+        .publish_text("kept".to_owned())
+        .await
+        .expect("publish text");
+
+    assert_eq!(clipboard.writes(), vec!["kept".to_owned()]);
+}

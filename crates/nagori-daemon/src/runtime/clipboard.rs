@@ -198,6 +198,9 @@ pub struct ClipboardLease {
     /// lost guard fails every later step closed rather than proceeding
     /// unserialised.
     ledger: Option<OwnedMutexGuard<PublishLedger>>,
+    /// Asked right before each publish whether it may still go ahead; set by
+    /// [`Self::require_before_publish`].
+    publish_check: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ClipboardLease {
@@ -205,6 +208,7 @@ impl std::fmt::Debug for ClipboardLease {
         f.debug_struct("ClipboardLease")
             .field("lease", &self.lease)
             .field("held", &self.ledger.is_some())
+            .field("publish_check", &self.publish_check.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -230,6 +234,26 @@ enum PublishVerification {
 }
 
 impl ClipboardLease {
+    /// Have every later publish on this lease ask `check` whether it may still
+    /// go ahead, as the last step before the clipboard write — after the
+    /// entry has been read from storage and the write prepared, which can take
+    /// a while for a large image.
+    ///
+    /// A front-end whose own state can make the copy unwanted while it is
+    /// being prepared (the desktop palette being dismissed, so the user may
+    /// have copied something else since) passes that check here; an `Err`
+    /// stops the publish without touching the clipboard and is returned as is.
+    pub fn require_before_publish(
+        &mut self,
+        check: impl Fn() -> Result<()> + Send + Sync + 'static,
+    ) {
+        self.publish_check = Some(Box::new(check));
+    }
+
+    fn check_before_publish(&self) -> Result<()> {
+        self.publish_check.as_ref().map_or(Ok(()), |check| check())
+    }
+
     /// Copy an entry back to the clipboard, re-offering every stored
     /// representation ([`PasteFormat::Preserve`]) or just its plain text.
     ///
@@ -248,6 +272,7 @@ impl ClipboardLease {
         // over the user's clipboard much later.
         let prepared = self.runtime.prepare_entry_publish(id, format).await?;
         let write = self.runtime.prepare_clipboard_write(prepared).await?;
+        self.check_before_publish()?;
         let write_started_at = SystemTime::now();
         self.guarded(move |_, _| write.publish()).await?;
         let publish = self.record_publish(write_started_at)?;
@@ -268,6 +293,7 @@ impl ClipboardLease {
             .prepare_representation_publish(id, mime)
             .await?;
         let write = self.runtime.prepare_clipboard_write(prepared).await?;
+        self.check_before_publish()?;
         let write_started_at = SystemTime::now();
         self.guarded(move |_, _| write.publish()).await?;
         let publish = self.record_publish(write_started_at)?;
@@ -279,6 +305,9 @@ impl ClipboardLease {
     /// [`NagoriRuntime::copy_entries_combined`] for the admission rules.
     pub async fn copy_entries_combined(&mut self, ids: &[EntryId]) -> Result<ClipboardPublish> {
         let combined = self.runtime.build_combined_copy(ids).await?;
+        // Ask the publish check before storing the combined clip too, so a
+        // copy refused after reading every entry leaves no history row behind.
+        self.check_before_publish()?;
         // A retention sweep or IPC clear can race between the insert and the
         // publish and remove the just-inserted row. Retry once before giving
         // up — the user pressed bulk-copy expecting the OS clipboard to
@@ -317,6 +346,7 @@ impl ClipboardLease {
             .runtime
             .prepare_clipboard_write(PreparedPublish::Plain(entry))
             .await?;
+        self.check_before_publish()?;
         let write_started_at = SystemTime::now();
         self.guarded(move |_, _| write.publish()).await?;
         self.record_publish(write_started_at)
@@ -350,13 +380,31 @@ impl ClipboardLease {
         publish: ClipboardPublish,
         target: Option<RestoreTarget>,
     ) -> Result<()> {
+        self.paste_frontmost_into_checked(publish, target, || Ok(()))
+            .await
+    }
+
+    /// [`Self::paste_frontmost_into`] that also asks `precheck` whether the
+    /// paste may still go ahead, as the last step before the adapter call —
+    /// after the clipboard probe and every other await on this path.
+    ///
+    /// A front-end whose own state can make the keystroke wrong while the
+    /// paste is in flight (the desktop palette being shown again, so it would
+    /// take the keys) passes that check here; an `Err` stops the paste without
+    /// synthesising anything and is returned as is.
+    pub async fn paste_frontmost_into_checked(
+        &mut self,
+        publish: ClipboardPublish,
+        target: Option<RestoreTarget>,
+        precheck: impl FnOnce() -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         // Same completion-event wrap as `NagoriRuntime::paste_entry`: the
         // palette drives synthesis through here after its own copy step, and
         // ARCHITECTURE §17's grep recipes need a success signal too.
         // `result_code` collapses to a static label, so the event never
         // carries clipboard content.
         let started = Instant::now();
-        let result = self.paste_frontmost_inner(publish, target).await;
+        let result = self.paste_frontmost_inner(publish, target, precheck).await;
         tracing::debug!(
             result_code = result_code(&result),
             elapsed_ms = elapsed_ms(started),
@@ -369,6 +417,7 @@ impl ClipboardLease {
         &mut self,
         publish: ClipboardPublish,
         target: Option<RestoreTarget>,
+        precheck: impl FnOnce() -> Result<()> + Send + 'static,
     ) -> Result<()> {
         let ledger = self.held()?;
         if publish.lease != self.lease || publish.generation != ledger.generation {
@@ -420,6 +469,7 @@ impl ClipboardLease {
                         .to_owned(),
                 });
             }
+            precheck()?;
             let outcome = runtime
                 .paste
                 .paste_frontmost_into(target.as_ref())
@@ -519,6 +569,7 @@ impl NagoriRuntime {
             runtime: self.clone(),
             lease,
             ledger: Some(ledger),
+            publish_check: None,
         }
     }
 

@@ -811,6 +811,26 @@ describe('ActionInspector', () => {
     expect(getByTestId('action-result').textContent).toBe('result body');
   });
 
+  it('stays quiet when the copy is dropped because the palette was dismissed', async () => {
+    const user = userEvent.setup();
+    vi.mocked(copyTextFromPalette).mockRejectedValueOnce({
+      code: 'cancelled',
+      message: 'cancelled',
+      recoverable: true,
+    });
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+
+    const { getByTestId, getByRole, queryByRole } = render(ActionInspector, {
+      props: { open: true, target: sample({ id: 'a' }), onClose: () => {} },
+    });
+    await user.click(getByTestId('quick-FormatJson'));
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    await flush();
+
+    expect(copyTextFromPalette).toHaveBeenLastCalledWith('result body');
+    expect(queryByRole('alert')).toBeNull();
+  });
+
   it('does not replace a successful copy retry with an older failure', async () => {
     const user = userEvent.setup();
     let rejectCopy: ((reason: Error) => void) | undefined;
