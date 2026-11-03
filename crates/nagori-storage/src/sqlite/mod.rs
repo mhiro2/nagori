@@ -1,6 +1,7 @@
 mod audit;
 mod convert;
 mod entry;
+mod label;
 mod maintenance;
 mod permissions;
 mod pool;

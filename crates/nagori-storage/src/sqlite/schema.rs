@@ -28,6 +28,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (104, SCOPE_FTS_UPDATE_TRIGGER),
     (105, ADD_SEMANTIC_POLICY_TRACKING),
     (106, ENABLE_FTS_SECURE_DELETE),
+    (107, ADD_ENTRY_LABELS),
 ];
 
 /// Highest schema version supported by this binary. [`apply_migrations`]
@@ -589,4 +590,22 @@ CREATE TABLE IF NOT EXISTS semantic_exclusions (
 const ENABLE_FTS_SECURE_DELETE: &str = r"
 INSERT INTO search_fts(search_fts, rank) VALUES ('secure-delete', 1);
 INSERT INTO search_fts(search_fts) VALUES ('rebuild');
+";
+
+/// User-given names and aliases for entries (`EntryLabel`).
+///
+/// Kept out of `entries` and `search_documents` so renaming never rewrites the
+/// body index and replacing a body never drops the name. `search_text` holds
+/// the newline-delimited normalized name and aliases the label search branch
+/// scans; the table only ever holds the handful of entries a user named, so
+/// that scan stays cheap without an index. Rows go with their entry through
+/// `ON DELETE CASCADE`.
+const ADD_ENTRY_LABELS: &str = r"
+CREATE TABLE IF NOT EXISTS entry_labels (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    search_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ";

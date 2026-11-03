@@ -688,6 +688,7 @@ mod tests {
                 language: None,
                 image_width: None,
                 image_height: None,
+                label: None,
             })
             .collect();
         let dtos = search_dtos_within_budget(results, &HashMap::new());

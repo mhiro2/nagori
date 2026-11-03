@@ -527,6 +527,9 @@ pub struct SearchResultDto {
     pub image_width: Option<u32>,
     #[serde(default)]
     pub image_height: Option<u32>,
+    /// User-given name (see `nagori_core::EntryLabel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub representation_summary: Vec<RepresentationSummaryDto>,
 }
@@ -552,6 +555,7 @@ impl From<SearchResult> for SearchResultDto {
                 .map(|tag| truncate_on_char_boundary(tag, MAX_DTO_LANGUAGE_BYTES).to_owned()),
             image_width: value.image_width,
             image_height: value.image_height,
+            label: value.label,
             representation_summary: Vec::new(),
         }
     }
@@ -930,6 +934,7 @@ mod tests {
             language: Some("\u{1}".repeat(MAX_DTO_LANGUAGE_BYTES + 64)),
             image_width: Some(u32::MAX),
             image_height: Some(u32::MAX),
+            label: None,
         };
         let summaries: Vec<_> = (0..MAX_DTO_REPRESENTATION_SUMMARIES + 4)
             .map(|_| RepresentationSummary {

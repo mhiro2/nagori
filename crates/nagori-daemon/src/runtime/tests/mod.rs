@@ -6,6 +6,7 @@ mod ai;
 mod clipboard;
 mod clipboard_lease;
 mod ipc;
+mod labels;
 mod lifecycle;
 mod permissions;
 mod search;

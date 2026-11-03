@@ -388,6 +388,7 @@ mod tests {
                 language: None,
                 image_width: None,
                 image_height: None,
+                label: None,
             }],
         );
         cache

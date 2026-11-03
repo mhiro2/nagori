@@ -95,23 +95,8 @@ pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidat
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
         })
         .transpose()?;
-    let text_match = match row.get::<_, i64>("text_match")? {
-        0 => TextMatch::None,
-        1 => TextMatch::Substring,
-        2 => TextMatch::Prefix,
-        3 => TextMatch::Exact,
-        value => {
-            let index = row.as_ref().column_index("text_match")?;
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                index,
-                rusqlite::types::Type::Integer,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid text_match value {value}"),
-                )),
-            ));
-        }
-    };
+    let text_match = text_match_column(row, "text_match")?;
+    let label_match = text_match_column(row, "label_match")?;
     let (image_width, image_height) = match &content {
         Some(ClipboardContent::Image(image)) => (image.width, image.height),
         _ => (None, None),
@@ -147,7 +132,29 @@ pub(crate) fn row_to_candidate(row: &Row<'_>) -> rusqlite::Result<SearchCandidat
         source_app_name: row.get("source_app_name")?,
         image_width,
         image_height,
+        label: row.get("label")?,
+        label_match,
     })
+}
+
+fn text_match_column(row: &Row<'_>, column: &str) -> rusqlite::Result<TextMatch> {
+    match row.get::<_, i64>(column)? {
+        0 => Ok(TextMatch::None),
+        1 => Ok(TextMatch::Substring),
+        2 => Ok(TextMatch::Prefix),
+        3 => Ok(TextMatch::Exact),
+        value => {
+            let index = row.as_ref().column_index(column)?;
+            Err(rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid {column} value {value}"),
+                )),
+            ))
+        }
+    }
 }
 
 pub(crate) const fn kind_to_str(kind: ContentKind) -> &'static str {

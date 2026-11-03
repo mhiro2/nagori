@@ -1503,3 +1503,72 @@ async fn retention_trim_lets_a_concurrent_writer_in_between_batches() {
     );
     assert_eq!(trim.await.unwrap().unwrap(), total - 1);
 }
+
+#[tokio::test]
+async fn replace_content_rewrites_body_and_index_but_keeps_identity() {
+    use nagori_core::{EntryLabel, SearchQuery};
+
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(&store, "Dear team, the release is on Monday.").await;
+    store.set_pinned(id, true).await.unwrap();
+    store
+        .set_label(id, Some(EntryLabel::new("release note", &[]).unwrap()))
+        .await
+        .unwrap();
+    let before = store.get(id).await.unwrap().unwrap();
+
+    let mut replacement = EntryFactory::from_text("Dear team, the release moved to Friday.");
+    replacement.search.normalized_text = normalize_text(replacement.plain_text().unwrap());
+    store.replace_content(id, replacement).await.unwrap();
+
+    let after = store.get(id).await.unwrap().unwrap();
+    assert_eq!(
+        after.plain_text(),
+        Some("Dear team, the release moved to Friday.")
+    );
+    assert_eq!(after.metadata.created_at, before.metadata.created_at);
+    assert!(after.lifecycle.pinned);
+    assert_eq!(
+        store.get_label(id).await.unwrap().unwrap().name,
+        "release note"
+    );
+    let reps = store.list_representations(id).await.unwrap();
+    assert_eq!(reps.len(), 1);
+    assert_eq!(reps[0].mime_type, "text/plain");
+    assert!(matches!(
+        &reps[0].data,
+        nagori_core::RepresentationDataRef::InlineText(text)
+            if text == "Dear team, the release moved to Friday."
+    ));
+
+    let old = store
+        .search(SearchQuery::new("monday", "monday", 10))
+        .await
+        .unwrap();
+    assert!(
+        old.iter().all(|r| r.entry_id != id),
+        "old body still indexed"
+    );
+    let new = store
+        .search(SearchQuery::new("friday", "friday", 10))
+        .await
+        .unwrap();
+    assert_eq!(new[0].entry_id, id);
+}
+
+#[tokio::test]
+async fn replace_content_refuses_a_body_another_entry_holds() {
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(&store, "first").await;
+    insert_text(&store, "second").await;
+    let mut replacement = EntryFactory::from_text("second");
+    replacement.search.normalized_text = normalize_text("second");
+    assert!(matches!(
+        store.replace_content(id, replacement).await,
+        Err(AppError::InvalidInput(_))
+    ));
+    assert_eq!(
+        store.get(id).await.unwrap().unwrap().plain_text(),
+        Some("first")
+    );
+}

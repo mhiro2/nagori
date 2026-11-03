@@ -1206,3 +1206,116 @@ async fn match_windows_recheck_the_current_sensitivity() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn named_entries_are_found_by_name_or_alias_ahead_of_body_matches() {
+    use nagori_core::EntryLabel;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let named = insert_text(&store, "SELECT * FROM incidents WHERE resolved = 0").await;
+    let body = insert_text(&store, "notes about the incident query we ran").await;
+    store
+        .set_label(
+            named,
+            Some(EntryLabel::new("障害調査SQL", &["incident query".to_owned()]).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let by_alias = store
+        .search(SearchQuery::new(
+            "incident query",
+            normalize_text("incident query"),
+            10,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(by_alias[0].entry_id, named, "{by_alias:?}");
+    assert_eq!(by_alias[0].label.as_deref(), Some("障害調査SQL"));
+    assert!(by_alias[0].rank_reason.contains(&RankReason::NameMatch));
+    assert!(by_alias.iter().any(|r| r.entry_id == body));
+
+    // A name prefix finds the entry even though its body never mentions it.
+    let by_name = store
+        .search(SearchQuery::new("障害", normalize_text("障害"), 10))
+        .await
+        .unwrap();
+    assert_eq!(by_name.len(), 1);
+    assert_eq!(by_name[0].entry_id, named);
+
+    // Recent listings carry the name too; clearing it drops the name hit.
+    let recent = store.search(SearchQuery::new("", "", 10)).await.unwrap();
+    let listed = recent.iter().find(|r| r.entry_id == named).unwrap();
+    assert_eq!(listed.label.as_deref(), Some("障害調査SQL"));
+    store.set_label(named, None).await.unwrap();
+    assert!(store.get_label(named).await.unwrap().is_none());
+    let cleared = store
+        .search(SearchQuery::new("障害", normalize_text("障害"), 10))
+        .await
+        .unwrap();
+    assert!(cleared.is_empty());
+}
+
+#[tokio::test]
+async fn label_search_skips_deleted_entries() {
+    use nagori_core::EntryLabel;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(&store, "body").await;
+    store
+        .set_label(id, Some(EntryLabel::new("weekly report", &[]).unwrap()))
+        .await
+        .unwrap();
+    store.mark_deleted(id).await.unwrap();
+    let results = store
+        .search(SearchQuery::new("weekly", normalize_text("weekly"), 10))
+        .await
+        .unwrap();
+    assert!(results.is_empty());
+    assert!(matches!(
+        store
+            .set_label(id, Some(EntryLabel::new("x", &[]).unwrap()))
+            .await,
+        Err(AppError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn label_branch_keeps_whole_name_hits_ahead_of_newer_partial_ones() {
+    use nagori_core::{EntryLabel, SearchCandidateProvider, TextMatch};
+
+    let store = SqliteStore::open_memory().unwrap();
+    let exact = insert_text(&store, "old body").await;
+    store
+        .set_label(exact, Some(EntryLabel::new("deploy", &[]).unwrap()))
+        .await
+        .unwrap();
+    backdate_entry(
+        &store,
+        exact,
+        OffsetDateTime::now_utc() - time::Duration::days(30),
+    );
+    for i in 0..5 {
+        let id = insert_text(&store, &format!("newer body {i}")).await;
+        store
+            .set_label(
+                id,
+                Some(EntryLabel::new(&format!("redeploy {i}"), &[]).unwrap()),
+            )
+            .await
+            .unwrap();
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let hits = store
+        .label_candidates(
+            "deploy",
+            &SearchFilters::default(),
+            SearchCandidateBudget::new(1, MAX_SEARCH_CANDIDATE_BYTES),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].entry_id, exact);
+    assert_eq!(hits[0].label_match, TextMatch::Exact);
+}

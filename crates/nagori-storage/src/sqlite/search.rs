@@ -43,6 +43,15 @@ const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
             WHEN 'unknown' THEN json_extract(e.content_json, '$.Unknown.plain_text')
         END";
 
+/// Strongest relationship between the query and a label's
+/// newline-delimited `search_text` (see `EntryLabel::search_text`): a whole
+/// name or alias, a name or alias prefix, or any substring.
+const LABEL_MATCH_SQL: &str = "CASE
+            WHEN instr(l.search_text, char(10) || ? || char(10)) > 0 THEN 3
+            WHEN instr(l.search_text, char(10) || ?) > 0 THEN 2
+            ELSE 1
+        END";
+
 /// Locate the first of [`MAX_EXCERPT_TERMS`] query terms in one entry's plain
 /// text and project a bounded window around it.
 ///
@@ -97,6 +106,12 @@ const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
 /// legacy or interrupted databases usable without reopening the candidate-
 /// memory failure mode.
 fn candidate_columns(text_match_sql: &str) -> String {
+    candidate_columns_with_label(text_match_sql, "0")
+}
+
+/// [`candidate_columns`] with an explicit label-match expression, for the
+/// label branch: the only one that binds the query against `entry_labels`.
+fn candidate_columns_with_label(text_match_sql: &str, label_match_sql: &str) -> String {
     // A stored `d.preview` is already `make_preview`-shaped and at most
     // `PREVIEW_MAX_CHARS` long, so the trim and cap are no-ops for it. The
     // fallback body is raw text: leading whitespace is trimmed in SQL, interior
@@ -117,7 +132,10 @@ fn candidate_columns(text_match_sql: &str) -> String {
          COALESCE(length(d.normalized_text), 0) AS normalized_char_count,
          {text_match_sql} AS text_match,
          CASE WHEN e.content_kind = 'image'
-              THEN e.content_json END AS candidate_content_json"
+              THEN e.content_json END AS candidate_content_json,
+         (SELECT substr(l.name, 1, {CANDIDATE_METADATA_MAX_CHARS})
+          FROM entry_labels l WHERE l.entry_id = e.id) AS label,
+         {label_match_sql} AS label_match"
     )
 }
 
@@ -633,6 +651,62 @@ impl SearchCandidateProvider for SqliteStore {
                 }
             }
             Ok(hits.into_vec())
+        })
+        .await
+    }
+
+    async fn label_candidates(
+        &self,
+        normalized: &str,
+        filters: &SearchFilters,
+        budget: SearchCandidateBudget,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchCandidate>> {
+        let filter = build_filter_fragment(filters)?;
+        let normalized = normalized.to_owned();
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
+        self.run_search_blocking(cancel, move |conn| {
+            // Strongest name relationship first, so a whole-name hit is never
+            // cut by the `LIMIT` behind newer partial ones.
+            let columns = candidate_columns_with_label(TEXT_MATCH_SQL, LABEL_MATCH_SQL);
+            let sql = format!(
+                "SELECT {columns}
+                 FROM entry_labels l
+                 JOIN entries e ON e.id = l.entry_id
+                 LEFT JOIN search_documents d ON d.entry_id = e.id
+                 WHERE e.deleted_at IS NULL
+                   AND e.sensitivity != 'blocked'
+                   AND instr(l.search_text, ?) > 0
+                   {extra}
+                 ORDER BY label_match DESC, e.pinned DESC, e.created_at DESC
+                 LIMIT ?",
+                extra = filter.sql,
+            );
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
+            let mut bound: Vec<&dyn ToSql> = vec![
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+            ];
+            bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
+            bound.push(&limit_i64);
+            let mut candidates = ByteBoundedVec::new(max_count, max_bytes);
+            for row in stmt
+                .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
+                .map_err(storage_err)?
+            {
+                let candidate = row.map_err(storage_err)?;
+                let owned_bytes = candidate.owned_byte_count();
+                if !candidates.push(candidate, owned_bytes) {
+                    break;
+                }
+            }
+            Ok(candidates.into_vec())
         })
         .await
     }

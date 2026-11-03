@@ -201,6 +201,12 @@ pub struct SearchCandidate {
     /// Pixel dimensions for `Image` rows; see [`SearchResult::image_width`].
     pub image_width: Option<u32>,
     pub image_height: Option<u32>,
+    /// User-given name; see [`SearchResult::label`].
+    pub label: Option<String>,
+    /// Strongest relationship between the query and the entry's name or one
+    /// of its aliases. Only the label branch computes it; other branches
+    /// leave it `None` and the merge keeps the strongest signal.
+    pub label_match: TextMatch,
 }
 
 impl SearchCandidate {
@@ -237,6 +243,8 @@ impl SearchCandidate {
                 .map(|value| cap_candidate_string(value, CANDIDATE_METADATA_MAX_CHARS)),
             image_width,
             image_height,
+            label: None,
+            label_match: TextMatch::None,
         }
     }
 
@@ -250,6 +258,7 @@ impl SearchCandidate {
             .capacity()
             .saturating_add(self.language.as_ref().map_or(0, String::capacity))
             .saturating_add(self.source_app_name.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.label.as_ref().map_or(0, String::capacity))
     }
 }
 
@@ -302,10 +311,16 @@ pub struct SearchResult {
     pub image_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_height: Option<u32>,
+    /// User-given name (see [`crate::EntryLabel`]), shown ahead of the
+    /// preview so a named entry reads by its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RankReason {
+    /// The query matched the entry's user-given name or one of its aliases.
+    NameMatch,
     ExactMatch,
     PrefixMatch,
     SubstringMatch,
