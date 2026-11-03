@@ -185,6 +185,10 @@ OS-downloaded language packs / embedding assets. See
   instead of the clip's opening, the preview opens scrolled to the first
   match, and *Search all history* stays one click away under any quick-search
   result list.
+- Named pins and edit-before-paste: give a clip your own name and aliases
+  ("PR review request", "shipping address") to find it by those words, edit a
+  clip or an action result in the action panel and paste the edit once, or
+  update the saved clip with it.
 - Recall-oriented result rows: a language badge on code (JSON / SQL / Rust / …,
   detected on-device), a strong-brand badge on known URLs (GitHub / YouTube /
   …, from the hostname alone — no network), and pixel dimensions, file size,

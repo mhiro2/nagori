@@ -50,6 +50,8 @@ deleted; nothing leaves the machine.
 | `get_ai_availability` | palette + settings | Point-in-time AI provider status. |
 | `get_semantic_index_status` | settings | Semantic index build progress. |
 | `cli_install_status` | settings | Whether the CLI is linked onto `PATH`. |
+| `get_entry_label` | palette | An entry's user-given name and aliases, for the name editor. |
+| `get_editable_entry_text` | palette | Full body of a `Public` / `Unknown` text entry for the inspector's editor; refused for masked and non-text entries. |
 | `run_quick_action` | palette | Deterministic text transform; returns text, persists nothing. |
 | `start_ai_action` | palette | Streams on-device model output via events; persists nothing (`save_ai_result` promotes it). |
 | `cancel_ai_action` | palette | Cancels an in-flight streaming run. |
@@ -65,6 +67,8 @@ Mutates local state — the clipboard, history rows, pins, or settings.
 | `copy_entries_combined` | palette | Join selected text and copy it. **Also inserts a new history entry** for the joined text (surfaced in the palette's multi-select hint). Duplicate ids are collapsed, the selection is capped at 100 entries, and the join is refused once it would exceed `max_entry_size_bytes` or the transport ceiling the joined text would occupy once JSON-escaped — an over-limit selection touches neither the database nor the clipboard. |
 | `add_entry` | internal | Insert a manually-supplied text entry. |
 | `pin_entry` | palette | Toggle an entry's pin flag. |
+| `set_entry_label` | palette | Name an entry (which also pins it) with optional aliases, or clear its name. |
+| `update_entry_text` | palette | Replace a `Public` / `Unknown` text entry's body with an edited one, classified and policy-checked like a new entry; the old body's representations, index rows, thumbnail and embedding go with it. |
 | `set_capture_enabled` | palette | Persist the capture pause/resume toggle. |
 | `update_settings` | settings | Persist settings (compare-and-swap on the revision token). |
 | `save_ai_result` | palette | Promote a generated AI result to a new history entry. |

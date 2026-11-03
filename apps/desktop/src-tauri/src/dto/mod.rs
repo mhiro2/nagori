@@ -138,6 +138,23 @@ impl PasteOptionDto {
     }
 }
 
+/// An entry's user-given name and aliases (`nagori_core::EntryLabel`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryLabelDto {
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+impl From<nagori_core::EntryLabel> for EntryLabelDto {
+    fn from(label: nagori_core::EntryLabel) -> Self {
+        Self {
+            name: label.name,
+            aliases: label.aliases,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryDto {
@@ -244,6 +261,9 @@ pub struct SearchResultDto {
     pub image_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_height: Option<u32>,
+    /// User-given name, shown ahead of the preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub representation_summary: Vec<RepresentationSummaryDto>,
     /// Basename-first file summary for `FileList` rows; absent for other kinds
     /// and for sensitive file lists (which fall back to the redacted preview).
@@ -272,6 +292,7 @@ impl From<SearchResult> for SearchResultDto {
             language: value.language,
             image_width: value.image_width,
             image_height: value.image_height,
+            label: value.label,
             representation_summary: Vec::new(),
             file_summary: None,
         }
@@ -563,6 +584,7 @@ mod tests {
             language: None,
             image_width: None,
             image_height: None,
+            label: None,
         };
         let dto = SearchResultDto::from(result);
         assert_eq!(dto.preview, nagori_core::BLOCKED_PREVIEW_PLACEHOLDER);

@@ -539,6 +539,14 @@ detector that triggered (`ApiKeyPattern`, `JwtPattern`, …).
 
 **`EntryLifecycle`** — `pinned`, `archived`, `deleted_at`, `expires_at`.
 
+**`EntryLabel`** — a user-given `name` plus `aliases` (extra words that should
+find the entry), validated and tidied by `EntryLabel::new` (trimmed, inner
+whitespace collapsed, duplicate aliases dropped, at most 80 characters each and
+8 aliases). It is not part of `ClipboardEntry`: it lives in its own table so a
+rename never rewrites the body index and a body edit never drops the name.
+Naming an entry also pins it (`NagoriRuntime::set_entry_label`), since a name
+exists to recall the entry later.
+
 **`ClipboardSnapshot`** + **`ClipboardRepresentation`** — raw OS read.
 The platform adapter returns this; the factory turns it into a domain
 entry.
@@ -617,6 +625,7 @@ are forward-only; downgrades are not supported.
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
+| `entry_labels` | User-given name and aliases per entry (`EntryLabel`), keyed by `entry_id` with `ON DELETE CASCADE`. `search_text` holds the newline-delimited normalized name and aliases (with a leading and trailing newline), which the label search branch scans to classify a whole-term, prefix, or substring hit. Only the entries a user named have a row, so the scan needs no index. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. FTS5's `secure-delete` option is on (persisted in `search_fts_config`), so a delete rewrites the segment holding the removed tokens instead of only appending a delete marker that leaves them readable in `search_fts_data`. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
@@ -811,6 +820,17 @@ so its extra cost is bounded by the slot and index-map overhead of at most the
 same rows. Duplicate branch hits merge their strongest `TextMatch` while FTS
 and ngram signals remain attached by entry id.
 
+**Names.** Every text plan also runs a label branch
+(`SearchCandidateProvider::label_candidates`) next to the substring / FTS /
+ngram branches: it scans `entry_labels.search_text` for the normalized query
+over the whole live history (names are few, so no recent window applies) and
+tags each hit with a `label_match` (`Exact` for a whole name or alias, `Prefix`,
+or `Substring`). The merge keeps the strongest `label_match` per entry, and the
+ranker adds a name bonus large enough that a name hit outranks a body hit of the
+same strength, with `RankReason::NameMatch`. Every candidate projection carries
+the entry's name (a primary-key lookup), so named rows show it in recent
+listings too.
+
 **Match excerpts.** A stored preview is the head of the body, so rows that
 share an opening (meeting notes, log dumps) all read the same even when each
 matched further down. After ranking and truncation, `SearchService` asks the
@@ -951,7 +971,7 @@ daemon is alive.
 with the index scores and metadata signals:
 
 ```text
-score = exact_match + prefix + substring + fts + ngram
+score = name_match + exact_match + prefix + substring + fts + ngram
       + recency + frequency + pin + source_bonus
 ```
 
@@ -2220,6 +2240,26 @@ not duplicate runtime logic.
   operation's error; starting another quick/AI action, changing target, or
   closing the panel clears the feedback. Run and attempt tokens prevent late
   copy/save completions or success timers from changing a newer result's state.
+  A settled result can be edited in place: *Edit* swaps the result for a
+  textarea whose text the result buttons then use, so a translated name or a
+  SQL value can be fixed before pasting without leaving the palette. Two
+  picker items work on the entry itself rather than transforming it. *Edit
+  text* loads the entry's full body (`get_editable_entry_text`, refused for
+  masked and non-text entries, so the button is disabled with a reason for
+  those) straight into the editor; *Paste* then pastes the edited copy once,
+  and *Update item* (`update_entry_text`) replaces the stored body instead —
+  the new body is classified and policy-checked like a new entry, and the
+  entry keeps its id, pin, name, use count and source while its
+  representations, search document, thumbnail and embedding are rebuilt or
+  dropped (`SqliteStore::replace_content`; an embedding still being computed
+  for the old body is not written back, since vector writes require the
+  entry's current content hash), turning it into a plain text entry, and the
+  preview on screen is re-read (`reloadPreview`).
+  *Update item* is offered only for the entry's own body, never for a
+  transform result. *Name…* (`EntryLabelForm.svelte`) opens a small form for
+  the name and comma-separated aliases (`get_entry_label` /
+  `set_entry_label`); saving pins the entry and refreshes the list, where
+  `ResultItem.svelte` leads a named row with its name in bold.
   Clearing the whole history is not offered here — that destructive action
   lives on the tray menu and the palette's own `clear-history` chord, both
   behind the confirmation dialog described below.

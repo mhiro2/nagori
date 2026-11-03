@@ -12,6 +12,30 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
 afterEach(cleanup);
 
 describe('ResultItem', () => {
+  it('leads a named row with its name and marks a name match', () => {
+    const { getByTestId, container } = render(ResultItem, {
+      props: {
+        item: sample({ label: 'PR review request', preview: 'Could you review #123?' }),
+        index: 0,
+        selected: false,
+        query: 'review',
+        onSelect: vi.fn(),
+        onConfirm: vi.fn(),
+      },
+    });
+    const label = getByTestId('entry-label');
+    expect(label.textContent).toBe('PR review request');
+    expect(label.querySelector('mark')?.textContent).toBe('review');
+    expect(container.querySelector('.preview')?.textContent).toBe('Could you review #123?');
+  });
+
+  it('shows no name slot for an unnamed row', () => {
+    const { queryByTestId } = render(ResultItem, {
+      props: { item: sample(), index: 0, selected: false, onSelect: vi.fn(), onConfirm: vi.fn() },
+    });
+    expect(queryByTestId('entry-label')).toBeNull();
+  });
+
   it('selects the row when keyboard focus enters it', () => {
     const onSelect = vi.fn();
     const { getByRole } = render(ResultItem, {

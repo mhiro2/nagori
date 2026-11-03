@@ -243,6 +243,11 @@
       {@render kindBadge()}
     {/if}
 
+    {#if item.label}
+      <span class="entry-label" data-testid="entry-label"
+        ><HighlightedText text={item.label} {query} /></span
+      >
+    {/if}
     {#if url}
       <span class="preview url">
         {#if urlBrand}<span class="brand-badge" data-testid="url-brand">{urlBrand}</span>{/if}
@@ -453,6 +458,17 @@
     color: var(--muted, rgba(255, 255, 255, 0.5));
     font-size: 0.7rem;
     letter-spacing: 0.04em;
+  }
+  /* A user-given name leads the row: it is the word the user recalls the
+     entry by, so it keeps up to 40% of the width ahead of the body. */
+  .entry-label {
+    flex: none;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--fg, #f5f5f5);
   }
   .preview {
     flex: 1;

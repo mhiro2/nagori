@@ -122,6 +122,8 @@ export type Messages = {
   // Short labels for `RankReason` variants. Shared by the per-row reason chip
   // (ResultItem) and the full labelled list in the preview footer.
   rankReason: {
+    // The query matched the entry's user-given name or an alias.
+    name: string;
     exact: string;
     prefix: string;
     substring: string;
@@ -349,6 +351,29 @@ export type Messages = {
     // Pastes the result into the source app without storing it.
     pasteResult: string;
     pasteFailed: string;
+    // Picker items: name the entry (pins it), and load its own body into the
+    // editor; `notEditable` explains why a masked entry cannot be edited.
+    nameEntry: string;
+    editText: string;
+    notEditable: string;
+    // Result header: switch the result to the editor, the editor's accessible
+    // name, and replacing the stored body with the edit.
+    editResult: string;
+    editorLabel: string;
+    updateEntry: string;
+    updated: string;
+    updateFailed: string;
+    nameForm: {
+      title: string;
+      name: string;
+      aliases: string;
+      aliasesHint: string;
+      save: string;
+      remove: string;
+      cancel: string;
+      // Shown when naming an unnamed entry: naming also pins it.
+      pinNote: string;
+    };
   };
   // The "paste as <format>" picker, surfaced from the alternate-format chord
   // when the selected entry offers more than one pasteable representation.
@@ -846,6 +871,7 @@ export const en: Messages = {
     },
   },
   rankReason: {
+    name: 'Name',
     exact: 'Exact',
     prefix: 'Prefix',
     substring: 'Match',
@@ -1013,6 +1039,24 @@ export const en: Messages = {
     previousResult: 'Previous result',
     pasteResult: 'Paste',
     pasteFailed: 'Could not paste the result.',
+    nameEntry: 'Name…',
+    editText: 'Edit text',
+    notEditable: "Masked items can't be edited.",
+    editResult: 'Edit',
+    editorLabel: 'Editable result text',
+    updateEntry: 'Update item',
+    updated: 'Updated',
+    updateFailed: "Couldn't update the item:",
+    nameForm: {
+      title: 'Name this item',
+      name: 'Name',
+      aliases: 'Also found by',
+      aliasesHint: 'Separate words with commas.',
+      save: 'Save name',
+      remove: 'Remove name',
+      cancel: 'Cancel',
+      pinNote: 'Naming an item also pins it.',
+    },
   },
   pastePicker: {
     title: 'Paste as',

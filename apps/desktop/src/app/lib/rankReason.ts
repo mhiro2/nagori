@@ -10,6 +10,7 @@ import type { RankReason } from './types';
 // itself. Ordered strongest-first so the row chip shows the most precise
 // signal when several stack (e.g. an exact hit is also a prefix + substring).
 const MATCH_REASON_PRIORITY: readonly RankReason[] = [
+  'NameMatch',
   'ExactMatch',
   'PrefixMatch',
   'SubstringMatch',
@@ -36,6 +37,7 @@ export const rankReasonLabel = (reason: RankReason, labels: Messages['rankReason
   // A `Record` keyed by every variant so adding a `RankReason` is a compile
   // error here until it gains a label.
   const byReason: Record<RankReason, string> = {
+    NameMatch: labels.name,
     ExactMatch: labels.exact,
     PrefixMatch: labels.prefix,
     SubstringMatch: labels.substring,

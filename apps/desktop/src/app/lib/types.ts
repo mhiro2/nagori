@@ -17,6 +17,7 @@ export type Sensitivity = 'Unknown' | 'Public' | 'Private' | 'Secret' | 'Blocked
 export type SearchMode = 'Auto' | 'Recent' | 'Exact' | 'Fuzzy' | 'FullText' | 'Semantic';
 
 export type RankReason =
+  | 'NameMatch'
   | 'ExactMatch'
   | 'PrefixMatch'
   | 'SubstringMatch'
@@ -149,11 +150,20 @@ export type SearchResultDto = {
   // the probe landed.
   imageWidth?: number;
   imageHeight?: number;
+  // User-given name, shown ahead of the preview. Absent for unnamed entries.
+  label?: string;
   representationSummary: RepresentationSummary[];
   // Basename-first projection for `fileList` rows, hydrated by the backend.
   // Absent for other kinds and for sensitive file lists (those fall back to
   // the redacted `preview`).
   fileSummary?: FileSummary;
+};
+
+// An entry's user-given name and the extra words that find it. Mirrors
+// `EntryLabelDto`.
+export type EntryLabel = {
+  name: string;
+  aliases: string[];
 };
 
 // Width-independent summary of a captured file list. Strings are already

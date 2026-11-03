@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-entry-text"
+description = "Enables the update_entry_text command without any pre-configured scope."
+commands.allow = ["update_entry_text"]
+
+[[permission]]
+identifier = "deny-update-entry-text"
+description = "Denies the update_entry_text command without any pre-configured scope."
+commands.deny = ["update_entry_text"]

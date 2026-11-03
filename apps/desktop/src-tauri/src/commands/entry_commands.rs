@@ -4,14 +4,16 @@
 use std::time::{Duration, Instant};
 
 use nagori_core::{
-    AppError, ClipboardEntry, ContentKind, EntryRepository, SearchQuery, build_file_summary,
-    is_text_safe_for_default_output,
+    AppError, ClipboardEntry, ContentKind, EntryLabel, EntryRepository, SearchQuery,
+    build_file_summary, is_text_safe_for_default_output,
 };
 use nagori_daemon::NagoriRuntime;
 use nagori_search::normalize_text;
 use tauri::State;
 
-use crate::dto::{EntryDto, FileSummaryDto, SearchRequestDto, SearchResponseDto, SearchResultDto};
+use crate::dto::{
+    EntryDto, EntryLabelDto, FileSummaryDto, SearchRequestDto, SearchResponseDto, SearchResultDto,
+};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -349,6 +351,62 @@ pub(crate) async fn clear_non_pinned_and_previews(state: &AppState) -> Result<us
 pub async fn pin_entry(state: State<'_, AppState>, id: String, pinned: bool) -> CommandResult<()> {
     let entry_id = parse_entry_id(&id)?;
     state.runtime.pin_entry(entry_id, pinned).await?;
+    Ok(())
+}
+
+/// The user-given name and aliases of an entry, for the palette's name
+/// editor. `None` when the entry has no name.
+#[tauri::command]
+pub async fn get_entry_label(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<Option<EntryLabelDto>> {
+    let entry_id = parse_entry_id(&id)?;
+    Ok(state
+        .runtime
+        .get_entry_label(entry_id)
+        .await?
+        .map(EntryLabelDto::from))
+}
+
+/// Name an entry (which also pins it), or clear its name with `name: None`.
+#[tauri::command]
+pub async fn set_entry_label(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+    aliases: Vec<String>,
+) -> CommandResult<()> {
+    let entry_id = parse_entry_id(&id)?;
+    let label = name
+        .map(|name| EntryLabel::new(&name, &aliases))
+        .transpose()?;
+    state.runtime.set_entry_label(entry_id, label).await?;
+    Ok(())
+}
+
+/// The full body of a text entry for the inspector's editor. Refused for
+/// masked and non-text entries, like `update_entry_text`.
+#[tauri::command]
+pub async fn get_editable_entry_text(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<String> {
+    let entry_id = parse_entry_id(&id)?;
+    Ok(state.runtime.editable_entry_text(entry_id).await?)
+}
+
+/// Replace a text entry's stored body with an edited one (the "update the
+/// saved item" path; pasting an edited copy once goes through
+/// `paste_text_from_palette` and stores nothing).
+#[tauri::command]
+pub async fn update_entry_text(
+    state: State<'_, AppState>,
+    id: String,
+    text: String,
+) -> CommandResult<()> {
+    let entry_id = parse_entry_id(&id)?;
+    state.runtime.update_entry_text(entry_id, text).await?;
     Ok(())
 }
 

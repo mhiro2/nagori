@@ -1,8 +1,11 @@
 <script lang="ts">
   // The shared work area for every action outcome. Deterministic results,
   // streaming AI partials, and the final AI text all land in the same `<pre>`
-  // so the result never jumps position between "running" and "done". The
-  // parent drives the phase; this component only renders it.
+  // so the result never jumps position between "running" and "done". A
+  // settled result can be edited in place (the `<pre>` becomes a textarea), so
+  // a translated name or a SQL value can be fixed before pasting without a
+  // trip to another editor. The parent drives the phase and owns the text;
+  // this component only renders it.
   type RunPhase = 'idle' | 'running' | 'result' | 'error';
 
   type Labels = {
@@ -15,6 +18,10 @@
     done: string;
     previousResult: string;
     paste: string;
+    edit: string;
+    editorLabel: string;
+    update: string;
+    updated: string;
   };
 
   type Props = {
@@ -36,6 +43,15 @@
     // The result was kept from earlier in this palette session.
     restored?: boolean;
     canPaste?: boolean;
+    // The settled result is shown in an editable textarea.
+    editing?: boolean;
+    // The result is the entry's own body, so the edit can replace it.
+    canUpdate?: boolean;
+    updateOk?: boolean;
+    updating?: boolean;
+    onStartEdit?: () => void;
+    onEditText?: (text: string) => void;
+    onUpdate?: () => void;
     onCopy: () => void;
     onSave: () => void;
     onCancel: () => void;
@@ -56,6 +72,13 @@
     canSave,
     restored = false,
     canPaste = false,
+    editing = false,
+    canUpdate = false,
+    updateOk = false,
+    updating = false,
+    onStartEdit,
+    onEditText,
+    onUpdate,
     onCopy,
     onSave,
     onCancel,
@@ -82,6 +105,18 @@
             >{doneFlash ? labels.done : restored ? labels.previousResult : labels.result}</span
           >
           <div class="run-actions">
+            {#if !editing && onStartEdit}
+              <button type="button" class="ghost" onclick={onStartEdit}>{labels.edit}</button>
+            {/if}
+            {#if canUpdate && onUpdate}
+              <button
+                type="button"
+                class="ghost"
+                data-testid="action-update-entry"
+                disabled={updating}
+                onclick={onUpdate}>{updateOk ? labels.updated : labels.update}</button
+              >
+            {/if}
             {#if canPaste && onPaste}
               <button type="button" class="ghost" onclick={onPaste}>{labels.paste}</button>
             {/if}
@@ -94,7 +129,15 @@
           </div>
         {/if}
       </header>
-      {#if text}
+      {#if phase === 'result' && editing}
+        <textarea
+          class="result editor"
+          data-testid="action-result-editor"
+          aria-label={labels.editorLabel}
+          spellcheck="false"
+          value={text}
+          oninput={(event) => onEditText?.(event.currentTarget.value)}></textarea>
+      {:else if text}
         <pre class="result" data-testid="action-result">{text}</pre>
       {/if}
     {/if}
@@ -151,6 +194,8 @@
   }
   .run-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 0.4rem;
   }
   .ghost {
@@ -191,6 +236,13 @@
     flex: 1;
     min-height: 6rem;
     overflow: auto;
+  }
+  .editor {
+    resize: none;
+  }
+  .editor:focus-visible {
+    outline: 2px solid var(--accent, #6c8dff);
+    outline-offset: 1px;
   }
   .error {
     margin: 0;

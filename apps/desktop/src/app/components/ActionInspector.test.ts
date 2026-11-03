@@ -92,19 +92,34 @@ vi.mock('../stores/capabilities.svelte', () => ({
   aiActionsSupported: vi.fn(() => true),
 }));
 
+// Naming and updating an entry refresh the palette list; the list itself is
+// out of scope here.
+vi.mock('../stores/searchQuery.svelte', () => ({
+  refreshCurrent: vi.fn(async () => undefined),
+}));
+vi.mock('../stores/searchPreview.svelte', () => ({
+  reloadPreview: vi.fn(async () => undefined),
+}));
+
 import {
   cancelAiAction,
   copyTextFromPalette,
   getAiAvailability,
+  getEditableEntryText,
+  getEntryLabel,
   pasteTextFromPalette,
   runQuickAction,
   saveAiResult,
+  setEntryLabel,
   startAiAction,
+  updateEntryText,
 } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { EntryDto, SearchResultDto } from '../lib/types';
 import { forgetActionResult } from '../stores/actionResult.svelte';
 import { aiActionsSupported } from '../stores/capabilities.svelte';
+import { reloadPreview } from '../stores/searchPreview.svelte';
+import { refreshCurrent } from '../stores/searchQuery.svelte';
 import { sampleSearchResult } from '../test-helpers/fixtures';
 import ActionInspector from './ActionInspector.svelte';
 
@@ -390,18 +405,118 @@ describe('ActionInspector', () => {
     ).toBeTruthy();
   });
 
-  it('disables every action with a reason for an image target', async () => {
+  it('disables every content action with a reason for an image target', async () => {
     const { getByTestId } = render(ActionInspector, {
       props: { open: true, target: sample({ kind: 'image' }), onClose: () => {} },
     });
     await flush();
     const picker = getByTestId('action-picker');
-    const buttons = within(picker).getAllByRole('button');
+    const buttons = within(picker)
+      .getAllByRole('button')
+      .filter((btn) => btn.dataset.testid !== 'entry-name');
     expect(buttons.length).toBeGreaterThan(0);
     for (const btn of buttons) {
       expect((btn as HTMLButtonElement).disabled).toBe(true);
       expect(btn.getAttribute('title')).toBe("Actions don't apply to images.");
     }
+    // Any entry can be named, an image included.
+    expect((getByTestId('entry-name') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('edits the entry body, pastes the edit once, and can update the item', async () => {
+    const user = userEvent.setup();
+    vi.mocked(getEditableEntryText).mockResolvedValue('SELECT * FROM t WHERE id = 1');
+    const { getByTestId, getByRole, queryByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('entry-edit'));
+    expect(getEditableEntryText).toHaveBeenCalledWith('entry-id');
+    const editor = getByTestId('action-result-editor') as HTMLTextAreaElement;
+    expect(editor.value).toBe('SELECT * FROM t WHERE id = 1');
+
+    await user.clear(editor);
+    await user.type(editor, 'SELECT * FROM t WHERE id = 42');
+    await user.click(getByRole('button', { name: /^Paste$/ }));
+    expect(pasteTextFromPalette).toHaveBeenLastCalledWith('SELECT * FROM t WHERE id = 42');
+    expect(updateEntryText).not.toHaveBeenCalled();
+
+    await user.click(getByTestId('action-update-entry'));
+    expect(updateEntryText).toHaveBeenCalledWith('entry-id', 'SELECT * FROM t WHERE id = 42');
+    expect(refreshCurrent).toHaveBeenCalled();
+    expect(reloadPreview).toHaveBeenCalledWith('entry-id');
+    expect(getByTestId('action-update-entry').textContent).toBe('Updated');
+
+    // Typing while an update is in flight: the saved text is not what the
+    // editor shows, so it must not read as updated.
+    let finish: (() => void) | undefined;
+    vi.mocked(updateEntryText).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    await user.type(editor, ' LIMIT 1');
+    await user.click(getByTestId('action-update-entry'));
+    await user.type(editor, '0');
+    finish?.();
+    await flush();
+    expect(getByTestId('action-update-entry').textContent).toBe('Update item');
+
+    // A transform result is editable too, but it is not the entry's body, so
+    // it can only be pasted, copied or saved as a new item.
+    vi.mocked(runQuickAction).mockResolvedValue({ text: 'result body', warnings: [] });
+    await user.click(getByTestId('quick-FormatJson'));
+    expect(queryByTestId('action-update-entry')).toBeNull();
+    await user.click(getByRole('button', { name: /^Edit$/ }));
+    expect((getByTestId('action-result-editor') as HTMLTextAreaElement).value).toBe('result body');
+    expect(queryByTestId('action-update-entry')).toBeNull();
+  });
+
+  it('does not offer editing for a masked entry', async () => {
+    const { getByTestId } = render(ActionInspector, {
+      props: { open: true, target: sample({ sensitivity: 'Private' }), onClose: () => {} },
+    });
+    await flush();
+    const edit = getByTestId('entry-edit') as HTMLButtonElement;
+    expect(edit.disabled).toBe(true);
+    expect(edit.getAttribute('title')).toBe("Masked items can't be edited.");
+  });
+
+  it('names an entry with aliases and can remove the name', async () => {
+    const user = userEvent.setup();
+    const { getByTestId, getByRole, queryByTestId, rerender } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await user.click(getByTestId('entry-name'));
+    expect(getEntryLabel).toHaveBeenCalledWith('entry-id');
+    expect(getByTestId('entry-label-form').textContent).toContain('Naming an item also pins it.');
+    await user.type(getByTestId('entry-label-name'), 'PR review request');
+    await user.type(getByTestId('entry-label-aliases'), 'レビュー依頼、 review ,');
+    await user.click(getByRole('button', { name: 'Save name' }));
+    expect(setEntryLabel).toHaveBeenCalledWith('entry-id', 'PR review request', [
+      'レビュー依頼',
+      'review',
+    ]);
+    expect(queryByTestId('entry-label-form')).toBeNull();
+    expect(refreshCurrent).toHaveBeenCalled();
+
+    // A save still in flight when the form is reopened leaves the new form
+    // usable.
+    vi.mocked(setEntryLabel).mockImplementationOnce(() => new Promise<void>(() => {}));
+    await user.click(getByTestId('entry-name'));
+    await user.type(getByTestId('entry-label-name'), 'x');
+    await user.click(getByRole('button', { name: 'Save name' }));
+    await user.click(getByRole('button', { name: 'Cancel' }));
+    await user.click(getByTestId('entry-name'));
+    await user.type(getByTestId('entry-label-name'), 'y');
+    expect((getByRole('button', { name: 'Save name' }) as HTMLButtonElement).disabled).toBe(false);
+
+    // Reopening the form on a named entry starts from its name and offers
+    // removal.
+    vi.mocked(getEntryLabel).mockResolvedValue({ name: 'PR review request', aliases: ['review'] });
+    await rerender({ open: true, target: sample({ id: 'other' }), onClose: () => {} });
+    await user.click(getByTestId('entry-name'));
+    expect((getByTestId('entry-label-name') as HTMLInputElement).value).toBe('PR review request');
+    expect((getByTestId('entry-label-aliases') as HTMLInputElement).value).toBe('review');
+    await user.click(getByRole('button', { name: 'Remove name' }));
+    expect(setEntryLabel).toHaveBeenLastCalledWith('other', null, []);
   });
 
   it('suppresses the AI-unavailable footnote when the kind gates every AI action off', async () => {
