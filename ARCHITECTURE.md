@@ -539,6 +539,14 @@ detector that triggered (`ApiKeyPattern`, `JwtPattern`, …).
 
 **`EntryLifecycle`** — `pinned`, `archived`, `deleted_at`, `expires_at`.
 
+**`RecognizedText`** / **`TextRecognizer`** — text recognized in an image,
+line by line, each line with a `TextBounds` box as fractions of the image
+size (top-left origin), and the on-device recognizer seam that produces it.
+`nagori-ai-apple::AppleTextRecognizer` implements it over Vision's
+`VNRecognizeTextRequest` (accurate level, Japanese and English, language
+correction on) through a synchronous Swift export that hands the lines back
+as a tab-separated frame.
+
 **`EntryLabel`** — a user-given `name` plus `aliases` (extra words that should
 find the entry), validated and tidied by `EntryLabel::new` (trimmed, inner
 whitespace collapsed, duplicate aliases dropped, at most 80 characters each and
@@ -625,6 +633,7 @@ are forward-only; downgrades are not supported.
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
+| `entry_text_recognition` | Text recognized in image entries, keyed by `entry_id` with `ON DELETE CASCADE`. `content_hash` pins a row to the image bytes it was read from, `status` records an image that could not be read (`failed`) so the background indexer does not retry it, and `text` / `lines_json` hold the recognized text already shaped by the privacy policy. The same text is written into the image's `search_documents.normalized_text`, which is how an image is found by what it shows. |
 | `entry_labels` | User-given name and aliases per entry (`EntryLabel`), keyed by `entry_id` with `ON DELETE CASCADE`. `search_text` holds the newline-delimited normalized name and aliases (with a leading and trailing newline), which the label search branch scans to classify a whole-term, prefix, or substring hit. Only the entries a user named have a row, so the scan needs no index. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. FTS5's `secure-delete` option is on (persisted in `search_fts_config`), so a delete rewrites the segment holding the removed tokens instead of only appending a delete marker that leaves them readable in `search_fts_data`. |
@@ -831,11 +840,44 @@ same strength, with `RankReason::NameMatch`. Every candidate projection carries
 the entry's name (a primary-key lookup), so named rows show it in recent
 listings too.
 
+**Image text.** With *Search text in images* on (`AiSettings::
+image_text_index_enabled`, off by default), the daemon's background indexer
+(`NagoriRuntime::run_text_recognition_indexer`, supervised together with the
+semantic indexer and woken by captures) reads every Public / Unknown image
+entry that has no recognition for its current bytes, newest first, through
+the wired `TextRecognizer`, and `SqliteStore::record_text_recognition`
+stores the result and rewrites the image's search document with the
+normalized text — so every text plan (substring, FTS, CJK ngram) finds the
+image without a separate branch. The recognized text runs through the
+capture classifier first (`shape_recognized_text`): text that reads as
+private or secret is redacted as a whole (so a secret spanning lines, such
+as a PEM block, is caught) and split back over the recognized lines, and
+because the picture itself still shows that content the entry's
+sensitivity is raised to match (`Blocked` maps to `Secret`) and its cached
+thumbnail is dropped — whether or not the text is stored — and the desktop
+is told to refresh, so the preview stops showing the image. Each row
+carries the content-policy fingerprint it was shaped under
+(`AppSettings::semantic_policy_hash`): a policy edit un-indexes the stale
+rows and the images are read again. Masked images are never read (the
+payload read itself re-checks readability), an outcome recorded after the
+entry's bytes or sensitivity changed is discarded, a failed duplicate read
+never replaces a stored recognition, and turning the setting off erases
+every row, restores the image documents, and truncates the WAL like other
+purges. Storing and erasing are ordered by a runtime `RwLock` gate under
+which a store re-checks the setting, so a read that finishes after the
+setting was turned off is never written back. The explicit *Extract text*
+action (`NagoriRuntime::recognize_entry_text`) works with the setting off
+too: it answers from the stored recognition when there is one for the
+current policy, reads the image otherwise, and stores the text only while
+the setting is on.
+
 **Match excerpts.** A stored preview is the head of the body, so rows that
 share an opening (meeting notes, log dumps) all read the same even when each
 matched further down. After ranking and truncation, `SearchService` asks the
 provider's `match_windows` for the final page only — Public / Unknown rows of
-the text-shaped kinds (`Text`, `Code`, `RichText`, `Unknown`), for text plans
+the text-shaped kinds (`Text`, `Code`, `RichText`, `Unknown`) plus images,
+whose text is their recognized text (an image has no head preview, so every
+match in it yields an excerpt), for text plans
 (never `Recent` or `Semantic`). For each row `SQLite` reads the plain body
 once, looks for the whole normalized query and then up to three of its words
 (longest first) with `instr(lower(body), term)`, and returns only a bounded
@@ -1308,6 +1350,7 @@ struct PlatformCapabilities {
     global_hotkey: Capability, frontmost_app: Capability,
     permissions_ui: Capability, update_check: Capability,
     preview_quick_look: Capability, ai_actions: Capability,
+    image_text_recognition: Capability,
 }
 
 enum Capability {
@@ -1321,9 +1364,11 @@ enum Capability {
 
 `nagori_platform_native::capabilities()` aggregates per-OS reporters
 (`nagori_platform_{macos,windows,linux}`) at build time and caches the
-matrix on the `NagoriRuntime`. One row is reconciled rather than static:
+matrix on the `NagoriRuntime`. Two rows are reconciled rather than static:
 `NagoriRuntimeBuilder` overwrites `ai_actions` from whether an `ai_engine`
-is actually wired (`Available` if so, else `Unsupported`). That keeps the
+is actually wired (`Available` if so, else `Unsupported`), and
+`image_text_recognition` the same way from whether a `TextRecognizer` is
+wired (Vision on macOS, through `nagori-platform-native`). That keeps the
 matrix honest about a host's *real* AI backend — it is the single switch,
 so a host that gains one (today macOS; a future cross-OS provider) lights
 the desktop's AI surfaces up with no second edit, and a host with none
@@ -2256,7 +2301,18 @@ not duplicate runtime logic.
   entry's current content hash), turning it into a plain text entry, and the
   preview on screen is re-read (`reloadPreview`).
   *Update item* is offered only for the entry's own body, never for a
-  transform result. *Name…* (`EntryLabelForm.svelte`) opens a small form for
+  transform result. *Extract text* (shown where the
+  `image_text_recognition` capability is available, enabled for readable
+  image entries) reads the image on device (`recognize_image_text`) and
+  lands the text in the same editable work area, so a line of a screenshot
+  can be copied, pasted or saved as a new item; an image with no text says
+  so. In the preview, an image's recognized lines that match the query are
+  outlined on the inline picture (the expanded view letterboxes the image
+  and skips them), and the recognized text is listed under it as
+  selectable text that opens on its own when it holds the match; image
+  result rows show the matched passage of that text next to the pixel
+  dimensions. *Settings → AI → Search text in images* turns the background
+  indexer on. *Name…* (`EntryLabelForm.svelte`) opens a small form for
   the name and comma-separated aliases (`get_entry_label` /
   `set_entry_label`); saving pins the entry and refreshes the list, where
   `ResultItem.svelte` leads a named row with its name in bold.

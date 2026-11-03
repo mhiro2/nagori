@@ -413,6 +413,39 @@ operational signals, **not** the text being translated. This is Apple
 platform behaviour that Nagori cannot opt out of on the user's behalf;
 it applies whenever the Translate action runs.
 
+### Text in images (macOS)
+
+**Search text in images** (Settings → AI, off by default) and the action
+panel's **Extract text** read the text in image entries with the macOS
+Vision framework, on this device; no image or text leaves it, and the
+setting is independent of the Apple Intelligence toggle. The recognized
+text is stored in the same SQLite database (`entry_text_recognition`) and
+indexed for search, with the same at-rest posture as the rest of your
+history.
+
+Recognized text goes through the same classifier as a copied clip, and
+the text and the picture are protected separately:
+
+- **The text.** When the recognized text reads as secret or private (the
+  built-in detectors plus your `regex_denylist`), each line is redacted
+  before it is stored, indexed, or shown, so a key visible in a
+  screenshot is not searchable or copyable from its text.
+- **The picture.** Redacting the text does not remove what the picture
+  shows, so the image entry's sensitivity is raised with it — also when
+  **Extract text** runs with **Search text in images** off: it is then
+  masked like any private or secret entry — no thumbnail or inline
+  preview, and deleting it erases it at once.
+
+Images that are already masked (private or secret) are never read.
+Stored text remembers the privacy rules it was checked under: editing
+your `regex_denylist` or the other content rules takes the old text out
+of the index, and the images are read again under the new rules.
+Turning **Search text in images** off stops the background reading and
+erases every recognized text from the database and the search index
+(including the write-ahead log); **Extract text** still works while it is
+off, but then shows the text without storing it. A recognition row is
+removed with its image.
+
 ### Semantic index data at rest
 
 When the semantic index toggle is on, embeddings are computed

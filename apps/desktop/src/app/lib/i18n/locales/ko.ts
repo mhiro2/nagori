@@ -160,6 +160,7 @@ export const ko: Messages = {
       loading: '이미지 불러오는 중…',
       unavailable: '이미지를 표시할 수 없습니다.',
       alt: '클립보드 이미지 미리보기',
+      recognizedText: '이미지 속 텍스트',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -281,6 +282,10 @@ export const ko: Messages = {
     pasteFailed: '결과를 붙여넣지 못했습니다.',
     nameEntry: '이름 지정…',
     editText: '텍스트 편집',
+    extractText: '텍스트 추출',
+    notReadable: '마스킹된 이미지는 읽지 않습니다.',
+    noTextFound: '이 이미지에서 텍스트를 찾지 못했습니다.',
+    imageOnly: '텍스트는 이미지에서만 추출할 수 있습니다.',
     notEditable: '마스킹된 항목은 편집할 수 없습니다.',
     editResult: '편집',
     editorLabel: '편집 가능한 결과 텍스트',
@@ -408,6 +413,9 @@ export const ko: Messages = {
       semanticIndexAcPowerOnly: 'AC 전원 연결 시에만 인덱싱',
       semanticIndexAcPowerOnlyHelp:
         '배터리 사용 중에는 백그라운드 임베딩을 일시 중지하여 전력을 아낍니다. 끄면 배터리에서도 인덱싱합니다.',
+      imageTextIndex: '이미지 속 텍스트 검색',
+      imageTextIndexHelp:
+        '이 기기에서 이미지 속 텍스트를 백그라운드로 인식해 스크린샷을 보이는 텍스트로 찾을 수 있게 합니다. 비밀로 보이는 텍스트는 가리고 해당 이미지는 마스킹합니다. 끄면 인식한 텍스트를 지웁니다.',
       semanticIndexRebuild: '인덱스 다시 만들기',
       semanticIndexStatus: '인덱스 상태',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

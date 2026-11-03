@@ -66,6 +66,7 @@ const baseSettings = (): AppSettings => ({
     requestTimeoutMs: 30000,
     semanticIndexEnabled: false,
     semanticIndexAcPowerOnly: true,
+    imageTextIndexEnabled: false,
     onboardingDismissed: false,
     allowOpenaiFallbackPrompt: true,
   },
@@ -125,6 +126,7 @@ const macosCapabilities = (): PlatformCapabilities => ({
   updateCheck: { status: 'available' },
   previewQuickLook: { status: 'available' },
   aiActions: { status: 'available' },
+  imageTextRecognition: { status: 'unsupported', reason: 'n/a' },
 });
 
 const windowsCapabilities = (): PlatformCapabilities => ({
@@ -158,6 +160,10 @@ const windowsCapabilities = (): PlatformCapabilities => ({
   aiActions: {
     status: 'unsupported',
     reason: 'no model-backed AI backend is wired for this platform yet',
+  },
+  imageTextRecognition: {
+    status: 'unsupported',
+    reason: 'on-device text recognition in images is not available on this platform yet',
   },
 });
 
@@ -200,6 +206,10 @@ const linuxWaylandCapabilities = (): PlatformCapabilities => ({
   aiActions: {
     status: 'unsupported',
     reason: 'no model-backed AI backend is wired for this platform yet',
+  },
+  imageTextRecognition: {
+    status: 'unsupported',
+    reason: 'on-device text recognition in images is not available on this platform yet',
   },
 });
 

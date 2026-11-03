@@ -151,6 +151,7 @@ export const zhHans: Messages = {
       loading: '正在加载图像…',
       unavailable: '图像不可用。',
       alt: '剪贴板图像预览',
+      recognizedText: '图片中的文字',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -265,6 +266,10 @@ export const zhHans: Messages = {
     pasteFailed: '无法粘贴结果。',
     nameEntry: '命名…',
     editText: '编辑文本',
+    extractText: '提取文字',
+    notReadable: '不会读取已遮盖的图片。',
+    noTextFound: '未在此图片中找到文字。',
+    imageOnly: '只能从图片中提取文字。',
     notEditable: '已遮盖的项目无法编辑。',
     editResult: '编辑',
     editorLabel: '可编辑的结果文本',
@@ -384,6 +389,9 @@ export const zhHans: Messages = {
       semanticIndexAcPowerOnly: '仅在接通电源时建立索引',
       semanticIndexAcPowerOnlyHelp:
         '使用电池时暂停后台嵌入以省电。关闭后在电池供电时也会建立索引。',
+      imageTextIndex: '搜索图片中的文字',
+      imageTextIndexHelp:
+        '在本设备上于后台识别图片中的文字，以便按截图中显示的文字查找。看似机密的文字会被遮盖，相应图片也会被遮盖。关闭后会清除已识别的文字。',
       semanticIndexRebuild: '重建索引',
       semanticIndexStatus: '索引状态',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

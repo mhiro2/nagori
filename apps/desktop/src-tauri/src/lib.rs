@@ -265,6 +265,7 @@ pub fn run() {
             commands::paste_commands::notify_paste_failure,
             commands::preview::get_entry_preview,
             commands::preview::get_entry_preview_full,
+            commands::preview::recognize_image_text,
             commands::preview::preview_entry,
             commands::entry_commands::add_entry,
             commands::entry_commands::delete_entry,

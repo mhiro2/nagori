@@ -90,6 +90,7 @@ vi.mock('../lib/commands', async () =>
 // AI-action tests render the buttons; the gating test flips it to false.
 vi.mock('../stores/capabilities.svelte', () => ({
   aiActionsSupported: vi.fn(() => true),
+  imageTextRecognitionSupported: vi.fn(() => false),
 }));
 
 // Naming and updating an entry refresh the palette list; the list itself is
@@ -108,6 +109,7 @@ import {
   getEditableEntryText,
   getEntryLabel,
   pasteTextFromPalette,
+  recognizeImageText,
   runQuickAction,
   saveAiResult,
   setEntryLabel,
@@ -117,7 +119,7 @@ import {
 import { isTauri } from '../lib/tauri';
 import type { EntryDto, SearchResultDto } from '../lib/types';
 import { forgetActionResult } from '../stores/actionResult.svelte';
-import { aiActionsSupported } from '../stores/capabilities.svelte';
+import { aiActionsSupported, imageTextRecognitionSupported } from '../stores/capabilities.svelte';
 import { reloadPreview } from '../stores/searchPreview.svelte';
 import { refreshCurrent } from '../stores/searchQuery.svelte';
 import { sampleSearchResult } from '../test-helpers/fixtures';
@@ -467,6 +469,64 @@ describe('ActionInspector', () => {
     await user.click(getByRole('button', { name: /^Edit$/ }));
     expect((getByTestId('action-result-editor') as HTMLTextAreaElement).value).toBe('result body');
     expect(queryByTestId('action-update-entry')).toBeNull();
+  });
+
+  it('extracts the text of an image into an editable result', async () => {
+    vi.mocked(imageTextRecognitionSupported).mockReturnValue(true);
+    vi.mocked(recognizeImageText).mockResolvedValue({
+      text: 'error: connection refused',
+      lines: [],
+      masked: false,
+    });
+    const user = userEvent.setup();
+    const { getByTestId, getByRole } = render(ActionInspector, {
+      props: { open: true, target: sample({ kind: 'image' }), onClose: () => {} },
+    });
+    await flush();
+    const extract = getByTestId('entry-extract-text') as HTMLButtonElement;
+    expect(extract.disabled).toBe(false);
+    await user.click(extract);
+    expect(recognizeImageText).toHaveBeenCalledWith('entry-id');
+    expect(getByTestId('action-result').textContent).toBe('error: connection refused');
+    await user.click(getByRole('button', { name: /^Copy$/ }));
+    expect(copyTextFromPalette).toHaveBeenLastCalledWith('error: connection refused');
+
+    // An image with no text says so instead of showing an empty result.
+    expect(reloadPreview).not.toHaveBeenCalled();
+
+    vi.mocked(recognizeImageText).mockResolvedValue({ text: '  ', lines: [], masked: false });
+    await user.click(extract);
+    expect(getByRole('alert').textContent).toBe('No text was found in this image.');
+
+    // Text that masked the image refreshes the list and the preview.
+    vi.mocked(recognizeImageText).mockResolvedValue({
+      text: 'token [REDACTED]',
+      lines: [],
+      masked: true,
+    });
+    await user.click(extract);
+    expect(refreshCurrent).toHaveBeenCalled();
+    expect(reloadPreview).toHaveBeenCalledWith('entry-id');
+    vi.mocked(imageTextRecognitionSupported).mockReturnValue(false);
+  });
+
+  it('offers text extraction only for readable images on a supporting host', async () => {
+    vi.mocked(imageTextRecognitionSupported).mockReturnValue(true);
+    const { getByTestId, rerender } = render(ActionInspector, {
+      props: { open: true, target: sample(), onClose: () => {} },
+    });
+    await flush();
+    const extract = (): HTMLButtonElement => getByTestId('entry-extract-text') as HTMLButtonElement;
+    expect(extract().disabled).toBe(true);
+    expect(extract().getAttribute('title')).toBe('Only images carry text to extract.');
+    await rerender({
+      open: true,
+      target: sample({ kind: 'image', sensitivity: 'Private' }),
+      onClose: () => {},
+    });
+    expect(extract().disabled).toBe(true);
+    expect(extract().getAttribute('title')).toBe("Masked images aren't read.");
+    vi.mocked(imageTextRecognitionSupported).mockReturnValue(false);
   });
 
   it('does not offer editing for a masked entry', async () => {

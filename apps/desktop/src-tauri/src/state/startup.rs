@@ -338,10 +338,11 @@ fn spawn_capture_supervisor(
                             crate::CLIPBOARD_CHANGED_EVENT,
                             serde_json::json!({ "entryId": entry_id.to_string() }),
                         );
-                        // Nudge the semantic indexer so the fresh clip is
-                        // embedded promptly (no-op when the index is disabled
-                        // / unsupported).
+                        // Nudge the semantic and image-text indexers so the
+                        // fresh clip is indexed promptly (no-op when an index
+                        // is disabled / unsupported).
                         runtime_for_notify.notify_semantic_capture();
+                        runtime_for_notify.notify_text_recognition_capture();
                     });
                     let app_for_skip_event = app.clone();
                     let capture_skip_notifier = Arc::new(move |notice: CaptureSkipNotice| {
@@ -492,7 +493,9 @@ fn spawn_maintenance_supervisor(
     })
 }
 
-/// Supervise the background semantic-index worker.
+/// Supervise the background index workers: the semantic index and the image
+/// text index. They share one supervisor (each idles cheaply while its
+/// setting is off), so a panic in either respawns both.
 fn spawn_semantic_supervisor(
     runtime: NagoriRuntime,
     shutdown: ShutdownHandle,
@@ -503,9 +506,16 @@ fn spawn_semantic_supervisor(
             WorkerRestart::OnExit,
             shutdown,
             WORKER_DRAIN_GRACE,
-            move |worker_shutdown| {
+            move |worker_shutdown: ShutdownHandle| {
                 let runtime = runtime.clone();
-                tokio::spawn(async move { runtime.run_semantic_indexer(worker_shutdown).await })
+                tokio::spawn(async move {
+                    tokio::join!(
+                        runtime
+                            .clone()
+                            .run_semantic_indexer(worker_shutdown.clone()),
+                        runtime.run_text_recognition_indexer(worker_shutdown),
+                    );
+                })
             },
         )
         .await;

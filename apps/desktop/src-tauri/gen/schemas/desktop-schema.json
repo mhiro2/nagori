@@ -471,6 +471,12 @@
           "markdownDescription": "Enables the rebuild_semantic_index command without any pre-configured scope."
         },
         {
+          "description": "Enables the recognize_image_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-recognize-image-text",
+          "markdownDescription": "Enables the recognize_image_text command without any pre-configured scope."
+        },
+        {
           "description": "Enables the repaste_last command without any pre-configured scope.",
           "type": "string",
           "const": "allow-repaste-last",
@@ -835,6 +841,12 @@
           "type": "string",
           "const": "deny-rebuild-semantic-index",
           "markdownDescription": "Denies the rebuild_semantic_index command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the recognize_image_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-recognize-image-text",
+          "markdownDescription": "Denies the recognize_image_text command without any pre-configured scope."
         },
         {
           "description": "Denies the repaste_last command without any pre-configured scope.",

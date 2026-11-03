@@ -92,6 +92,11 @@ pub enum PreviewBodyDto {
         byte_count: usize,
         width: Option<u32>,
         height: Option<u32>,
+        // Text recognized in the image, line by line with its box, when image
+        // text search or the extract action has read it. Lets the preview
+        // mark where a search match sits in the picture.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        recognized_lines: Vec<RecognizedLineDto>,
     },
     FileList {
         // Per-file basename-first decomposition, capped at
@@ -215,7 +220,60 @@ pub const MAX_PREVIEW_LINES: usize = 4_000;
 /// would block the renderer on multi-MB clips.
 pub const MAX_PREVIEW_FULL_BYTES: usize = 1024 * 1024;
 
+/// One line of text recognized in an image, with its box as fractions of
+/// the image size (top-left origin).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecognizedLineDto {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The result of extracting the text from an image: the joined text plus the
+/// lines with their boxes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecognizedTextDto {
+    pub text: String,
+    pub lines: Vec<RecognizedLineDto>,
+    /// The image was masked because its text read as private or secret, so
+    /// the list and preview showing it should refresh.
+    pub masked: bool,
+}
+
+impl From<nagori_core::RecognizedLine> for RecognizedLineDto {
+    fn from(line: nagori_core::RecognizedLine) -> Self {
+        Self {
+            text: line.text,
+            x: line.bounds.x,
+            y: line.bounds.y,
+            width: line.bounds.width,
+            height: line.bounds.height,
+        }
+    }
+}
+
 impl EntryPreviewDto {
+    /// Attach the text recognized in an image body. A no-op for every other
+    /// body (including the masked placeholder a sensitive image gets), so the
+    /// lines never ride along with a preview that hides the picture.
+    #[must_use]
+    pub fn with_recognized_text(mut self, recognized: Option<nagori_core::RecognizedText>) -> Self {
+        if let (
+            PreviewBodyDto::Image {
+                recognized_lines, ..
+            },
+            Some(recognized),
+        ) = (&mut self.body, recognized)
+        {
+            *recognized_lines = recognized.lines.into_iter().map(Into::into).collect();
+        }
+        self
+    }
+
     // Default constructor used by tests and as the documented entry point;
     // production code paths supply an optional query via
     // `from_entry_with_query` so the elided-match hint can flow through. `home`
@@ -314,6 +372,7 @@ impl EntryPreviewDto {
                     byte_count: value.byte_count,
                     width: value.width,
                     height: value.height,
+                    recognized_lines: Vec::new(),
                 },
                 ClipboardContent::FileList(value) => {
                     let (entries, common_parent_display) = build_file_entries(&value.paths, home);
@@ -755,6 +814,7 @@ mod tests {
                 byte_count,
                 width,
                 height,
+                ..
             } => {
                 assert_eq!(mime_type.as_deref(), Some("image/png"));
                 assert_eq!(byte_count, bytes.len());

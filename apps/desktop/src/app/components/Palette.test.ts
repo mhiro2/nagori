@@ -40,6 +40,7 @@ vi.mock('../stores/capabilities.svelte', () => ({
   // this. Default false — matching the real helper when no capability
   // snapshot is loaded — so these tests exercise the quick-action path.
   aiActionsSupported: vi.fn(() => false),
+  imageTextRecognitionSupported: vi.fn(() => false),
 }));
 
 vi.mock('../stores/searchPreview.svelte', () => ({

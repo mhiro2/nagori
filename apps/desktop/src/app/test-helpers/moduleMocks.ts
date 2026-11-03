@@ -61,6 +61,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   setEntryLabel: vi.fn(async () => undefined),
   getEditableEntryText: vi.fn(),
   updateEntryText: vi.fn(async () => undefined),
+  recognizeImageText: vi.fn(),
   runQuickAction: vi.fn(),
   startAiAction: vi.fn(),
   cancelAiAction: vi.fn(),

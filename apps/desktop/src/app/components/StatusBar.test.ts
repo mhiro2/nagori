@@ -48,6 +48,7 @@ const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapab
     updateCheck: cap,
     previewQuickLook: cap,
     aiActions: cap,
+    imageTextRecognition: { status: 'unsupported', reason: 'n/a' },
   };
 };
 
@@ -95,6 +96,7 @@ const baseSettings = (overrides: Partial<AppSettings> = {}): AppSettings => ({
     requestTimeoutMs: 30000,
     semanticIndexEnabled: false,
     semanticIndexAcPowerOnly: true,
+    imageTextIndexEnabled: false,
     onboardingDismissed: false,
     allowOpenaiFallbackPrompt: true,
   },

@@ -67,6 +67,7 @@ Mutates local state — the clipboard, history rows, pins, or settings.
 | `copy_entries_combined` | palette | Join selected text and copy it. **Also inserts a new history entry** for the joined text (surfaced in the palette's multi-select hint). Duplicate ids are collapsed, the selection is capped at 100 entries, and the join is refused once it would exceed `max_entry_size_bytes` or the transport ceiling the joined text would occupy once JSON-escaped — an over-limit selection touches neither the database nor the clipboard. |
 | `add_entry` | internal | Insert a manually-supplied text entry. |
 | `pin_entry` | palette | Toggle an entry's pin flag. |
+| `recognize_image_text` | palette | Recognize the text in a `Public` / `Unknown` image entry on device (Vision on macOS). Answered from the stored recognition when there is one; while *Search text in images* is on, a fresh recognition is stored and indexed (and can raise the entry's sensitivity, see [privacy.md](privacy.md#text-in-images-macos)). |
 | `set_entry_label` | palette | Name an entry (which also pins it) with optional aliases, or clear its name. |
 | `update_entry_text` | palette | Replace a `Public` / `Unknown` text entry's body with an edited one, classified and policy-checked like a new entry; the old body's representations, index rows, thumbnail and embedding go with it. |
 | `set_capture_enabled` | palette | Persist the capture pause/resume toggle. |

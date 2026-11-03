@@ -55,6 +55,7 @@ fn main() {
             "notify_paste_failure",
             "get_entry_preview",
             "get_entry_preview_full",
+            "recognize_image_text",
             "preview_entry",
             "add_entry",
             "delete_entry",

@@ -29,6 +29,35 @@ describe('ResultItem', () => {
     expect(container.querySelector('.preview')?.textContent).toBe('Could you review #123?');
   });
 
+  it('shows the matched passage of the recognized text in an image row', () => {
+    const props = {
+      index: 0,
+      selected: false,
+      query: 'refused',
+      onSelect: vi.fn(),
+      onConfirm: vi.fn(),
+    };
+    const { getByTestId, queryByTestId, rerender } = render(ResultItem, {
+      props: {
+        ...props,
+        item: sample({
+          kind: 'image',
+          imageWidth: 800,
+          imageHeight: 600,
+          preview: '…error: connection refused',
+        }),
+      },
+    });
+    const excerpt = getByTestId('image-text-excerpt');
+    expect(excerpt.textContent).toBe('…error: connection refused');
+    expect(excerpt.querySelector('mark')?.textContent).toBe('refused');
+    void rerender({
+      ...props,
+      item: sample({ kind: 'image', imageWidth: 800, imageHeight: 600, preview: '' }),
+    });
+    expect(queryByTestId('image-text-excerpt')).toBeNull();
+  });
+
   it('shows no name slot for an unnamed row', () => {
     const { queryByTestId } = render(ResultItem, {
       props: { item: sample(), index: 0, selected: false, onSelect: vi.fn(), onConfirm: vi.fn() },

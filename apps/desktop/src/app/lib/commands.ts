@@ -13,6 +13,7 @@ import type {
   DataDirSyncWarning,
   EntryDto,
   EntryLabel,
+  RecognizedText,
   EntryPreviewDto,
   HotkeyFailure,
   PasteFormat,
@@ -119,6 +120,11 @@ export const getEditableEntryText = (id: string): Promise<string> =>
 // `pasteTextFromPalette` and stores nothing).
 export const updateEntryText = (id: string, text: string): Promise<void> =>
   invoke('update_entry_text', { id, text });
+
+// Recognizes the text in an image entry on device. Rejected for masked and
+// non-image entries, and where the host has no recognizer.
+export const recognizeImageText = (entryId: string): Promise<RecognizedText> =>
+  invoke('recognize_image_text', { entryId });
 
 export const runQuickAction = (action: QuickActionId, entryId: string): Promise<AiActionResult> =>
   invoke('run_quick_action', { action, entryId });

@@ -70,6 +70,7 @@ const baseSettings = (onboarding: OnboardingSettings): AppSettings => ({
     requestTimeoutMs: 30000,
     semanticIndexEnabled: false,
     semanticIndexAcPowerOnly: true,
+    imageTextIndexEnabled: false,
     onboardingDismissed: false,
     allowOpenaiFallbackPrompt: true,
   },
@@ -114,6 +115,7 @@ const capabilities = (platform: PlatformCapabilities['platform']): PlatformCapab
     updateCheck: cap,
     previewQuickLook: cap,
     aiActions: cap,
+    imageTextRecognition: { status: 'unsupported', reason: 'n/a' },
   };
 };
 

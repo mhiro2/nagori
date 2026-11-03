@@ -266,8 +266,11 @@
           >{/if}
         {#if imageDims}<span class="img-dims" data-testid="image-dims">{imageDims}</span>{/if}
         {#if imageSize}<span class="img-size">{imageSize}</span>{/if}
-        {#if !imageDims && !imageSize}<span class="img-fallback"
-            ><HighlightedText text={previewText} {query} /></span
+        {#if previewText}<!-- An image carries no preview text of its own, so a
+               non-empty preview is the passage of its recognized text that
+               matched the search. --><span
+            class="img-fallback"
+            data-testid="image-text-excerpt"><HighlightedText text={previewText} {query} /></span
           >{/if}
       </span>
     {:else if fileSummary}
@@ -582,6 +585,12 @@
   .preview.image .img-dims {
     color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
     font-weight: 600;
+  }
+  .preview.image .img-fallback {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .shot-badge {
     flex: none;

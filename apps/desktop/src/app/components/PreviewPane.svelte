@@ -11,6 +11,7 @@
   import { additionalClipboardCategories, hasAccompanyingImage } from '../lib/representations';
   import type { EntryPreviewDto, SearchResultDto } from '../lib/types';
   import { capabilitiesState } from '../stores/capabilities.svelte';
+  import HighlightedText from './HighlightedText.svelte';
   import PreviewBodyFileList from './PreviewBodyFileList.svelte';
   import PreviewBodyImage from './PreviewBodyImage.svelte';
   import PreviewBodyText from './PreviewBodyText.svelte';
@@ -222,6 +223,13 @@
       : null,
   );
 
+  // Text recognized in an image body, joined line by line.
+  const recognizedImageText = $derived(
+    preview?.body.type === 'image' && preview.body.recognizedLines?.length
+      ? preview.body.recognizedLines.map((line) => line.text).join('\n')
+      : undefined,
+  );
+
   // Search-match stepping for text and code bodies. The marks carry their
   // match ordinal (`data-match`), so stepping only has to scroll the first
   // piece of the target match into view; the body styles it as current. The
@@ -411,7 +419,24 @@
           loadingText={t.preview.image.loading}
           platform={imagePlatform}
           {bindings}
+          {query}
         />
+        {#if !expanded && recognizedImageText}
+          <!-- The recognized text sits under the picture as plain, selectable
+               text, so part of it can be copied while looking at the image.
+               It opens on its own when it holds the search match. -->
+          <details
+            class="image-text"
+            data-testid="preview-image-text"
+            open={matchRanges(recognizedImageText, query ?? '').length > 0}
+          >
+            <summary>{t.preview.image.recognizedText}</summary>
+            <pre class="image-text-body"><HighlightedText
+                text={recognizedImageText}
+                {query}
+              /></pre>
+          </details>
+        {/if}
       {:else if preview && preview.body.type === 'fileList'}
         <PreviewBodyFileList
           entries={preview.body.entries}
@@ -637,6 +662,21 @@
   }
   .state.error p {
     margin: 0 0 0.5rem;
+  }
+  .image-text {
+    margin: 0.5rem 0.25rem 0.25rem;
+    font-size: 0.8125rem;
+  }
+  .image-text summary {
+    color: var(--muted, rgba(255, 255, 255, 0.6));
+    cursor: pointer;
+  }
+  .image-text-body {
+    margin: 0.35rem 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
   }
   .match-nav {
     display: flex;

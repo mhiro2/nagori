@@ -167,6 +167,7 @@ export const fr: Messages = {
       loading: 'Chargement de l’image…',
       unavailable: 'Image indisponible.',
       alt: 'Aperçu de l’image du presse-papiers',
+      recognizedText: "Texte dans l'image",
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -296,6 +297,10 @@ export const fr: Messages = {
     pasteFailed: 'Impossible de coller le résultat.',
     nameEntry: 'Nommer…',
     editText: 'Modifier le texte',
+    extractText: 'Extraire le texte',
+    notReadable: 'Les images masquées ne sont pas lues.',
+    noTextFound: "Aucun texte n'a été trouvé dans cette image.",
+    imageOnly: 'Seules les images contiennent du texte à extraire.',
     notEditable: 'Les éléments masqués ne peuvent pas être modifiés.',
     editResult: 'Modifier',
     editorLabel: 'Texte du résultat modifiable',
@@ -425,6 +430,9 @@ export const fr: Messages = {
       semanticIndexAcPowerOnly: 'Indexer uniquement sur secteur',
       semanticIndexAcPowerOnlyHelp:
         'Suspend l’embedding en arrière-plan sur batterie pour économiser l’énergie. Désactivez pour indexer aussi sur batterie.',
+      imageTextIndex: 'Rechercher le texte des images',
+      imageTextIndexHelp:
+        "Reconnaît le texte des images en arrière-plan sur cet appareil, pour retrouver une capture d'écran par le texte qu'elle montre. Le texte qui semble secret est masqué, ainsi que son image. La désactivation efface le texte reconnu.",
       semanticIndexRebuild: 'Reconstruire l’index',
       semanticIndexStatus: 'État de l’index',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

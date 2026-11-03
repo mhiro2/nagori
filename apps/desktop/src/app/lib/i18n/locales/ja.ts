@@ -160,6 +160,7 @@ export const ja: Messages = {
       loading: '画像を読み込み中…',
       unavailable: '画像を表示できません。',
       alt: 'クリップボード画像のプレビュー',
+      recognizedText: '画像内の文字',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -282,6 +283,10 @@ export const ja: Messages = {
     pasteFailed: '結果をペーストできませんでした。',
     nameEntry: '名前を付ける…',
     editText: 'テキストを編集',
+    extractText: '文字を抽出',
+    notReadable: 'マスクされた画像は読み取りません。',
+    noTextFound: 'この画像に文字は見つかりませんでした。',
+    imageOnly: '文字を抽出できるのは画像だけです。',
     notEditable: 'マスクされた項目は編集できません。',
     editResult: '編集',
     editorLabel: '編集できる結果テキスト',
@@ -409,6 +414,9 @@ export const ja: Messages = {
       semanticIndexAcPowerOnly: '電源接続中のみインデックスを作成',
       semanticIndexAcPowerOnlyHelp:
         'バッテリー駆動中はバックグラウンドの埋め込み生成を一時停止して節電します。オフにするとバッテリー駆動中も作成します。',
+      imageTextIndex: '画像内の文字を検索',
+      imageTextIndexHelp:
+        '画像内の文字をこの端末上でバックグラウンド認識し、スクリーンショットを写っている文字で探せるようにします。機密情報らしい文字は伏せ字にし、その画像はマスクします。オフにすると認識した文字を消去します。',
       semanticIndexRebuild: 'インデックスを再構築',
       semanticIndexStatus: 'インデックスの状態',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

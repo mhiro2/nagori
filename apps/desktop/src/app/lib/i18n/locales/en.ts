@@ -190,6 +190,8 @@ export type Messages = {
       loading: string;
       unavailable: string;
       alt: string;
+      // Heading of the recognized-text section under an image preview.
+      recognizedText: string;
     };
     fileList: {
       summary: (shown: number, total: number) => string;
@@ -355,6 +357,14 @@ export type Messages = {
     // editor; `notEditable` explains why a masked entry cannot be edited.
     nameEntry: string;
     editText: string;
+    // Reads the text in an image entry on device; `notReadable` explains why a
+    // masked image is not read.
+    extractText: string;
+    notReadable: string;
+    // The extract action read the image but found no text.
+    noTextFound: string;
+    // Why extract-text is disabled on a non-image entry.
+    imageOnly: string;
     notEditable: string;
     // Result header: switch the result to the editor, the editor's accessible
     // name, and replacing the stored body with the edit.
@@ -482,6 +492,8 @@ export type Messages = {
       semanticIndexHelp: string;
       semanticIndexAcPowerOnly: string;
       semanticIndexAcPowerOnlyHelp: string;
+      imageTextIndex: string;
+      imageTextIndexHelp: string;
       semanticIndexRebuild: string;
       semanticIndexStatus: string;
       // Progress detail shown while the index is still building, so "Indexing…"
@@ -923,6 +935,7 @@ export const en: Messages = {
       loading: 'Loading image…',
       unavailable: 'Image unavailable.',
       alt: 'Clipboard image preview',
+      recognizedText: 'Text in image',
     },
     fileList: {
       summary: (shown, total) =>
@@ -1041,6 +1054,10 @@ export const en: Messages = {
     pasteFailed: 'Could not paste the result.',
     nameEntry: 'Name…',
     editText: 'Edit text',
+    extractText: 'Extract text',
+    notReadable: "Masked images aren't read.",
+    noTextFound: 'No text was found in this image.',
+    imageOnly: 'Only images carry text to extract.',
     notEditable: "Masked items can't be edited.",
     editResult: 'Edit',
     editorLabel: 'Editable result text',
@@ -1168,6 +1185,9 @@ export const en: Messages = {
       semanticIndexAcPowerOnly: 'Index only while on AC power',
       semanticIndexAcPowerOnlyHelp:
         'Pause background embedding while on battery to save power. Turn off to index on battery too.',
+      imageTextIndex: 'Search text in images',
+      imageTextIndexHelp:
+        'Recognizes text in images on this device in the background, so screenshots are found by the text they show. Text that looks secret is redacted and its image is masked. Turning this off erases the recognized text.',
       semanticIndexRebuild: 'Rebuild index',
       semanticIndexStatus: 'Index status',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

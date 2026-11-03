@@ -853,6 +853,41 @@ describe('PreviewPane', () => {
     expect(summary).toContain('218');
   });
 
+  it('lists the recognized text under an image and opens it on a match', () => {
+    const preview = samplePreview({
+      previewText: '',
+      body: {
+        type: 'image',
+        byteCount: 100,
+        recognizedLines: [
+          { text: 'Terminal', x: 0, y: 0, width: 0.3, height: 0.1 },
+          { text: 'error: connection refused', x: 0, y: 0.5, width: 0.6, height: 0.1 },
+        ],
+      },
+    });
+    const props = {
+      item: sampleItem({ kind: 'image' }),
+      preview,
+      loading: false,
+      errorMessage: undefined,
+    };
+    const { getByTestId, rerender, queryByTestId } = render(PreviewPane, {
+      props: { ...props, query: 'refused' },
+    });
+    const section = getByTestId('preview-image-text') as HTMLDetailsElement;
+    expect(section.open).toBe(true);
+    expect(section.querySelector('pre')?.textContent).toBe('Terminal\nerror: connection refused');
+    expect(section.querySelector('mark')?.textContent).toBe('refused');
+    void rerender({ ...props, query: 'nothing' });
+    expect((getByTestId('preview-image-text') as HTMLDetailsElement).open).toBe(false);
+
+    void rerender({
+      ...props,
+      preview: samplePreview({ previewText: '', body: { type: 'image', byteCount: 100 } }),
+    });
+    expect(queryByTestId('preview-image-text')).toBeNull();
+  });
+
   it('renders an <img> with the platform-default thumbnail URL by default', () => {
     const { container } = render(PreviewPane, {
       props: {

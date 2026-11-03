@@ -9,7 +9,7 @@ use nagori_daemon::NagoriRuntime;
 use nagori_platform::PreviewItem;
 use tauri::State;
 
-use crate::dto::EntryPreviewDto;
+use crate::dto::{EntryPreviewDto, RecognizedTextDto};
 use crate::error::{CommandError, CommandResult};
 use crate::state::AppState;
 
@@ -36,11 +36,45 @@ pub async fn get_entry_preview(
     // shortening, never a privacy boundary — the body is already gated to
     // non-sensitive entries before any raw path is surfaced.
     let home = dirs::home_dir().map(|path| path.to_string_lossy().into_owned());
-    Ok(EntryPreviewDto::from_entry_with_query(
-        &entry,
-        query.as_deref(),
-        home.as_deref(),
-    ))
+    // Only Public / Unknown images expose an image body; `with_recognized_text`
+    // ignores any other body, and masked images are never read anyway.
+    let recognized = if matches!(
+        entry.sensitivity,
+        Sensitivity::Public | Sensitivity::Unknown
+    ) && matches!(entry.content, nagori_core::ClipboardContent::Image(_))
+    {
+        state
+            .runtime
+            .store()
+            .get_text_recognition(
+                entry_id,
+                state.runtime.current_settings().semantic_policy_hash(),
+            )
+            .await?
+    } else {
+        None
+    };
+    Ok(
+        EntryPreviewDto::from_entry_with_query(&entry, query.as_deref(), home.as_deref())
+            .with_recognized_text(recognized),
+    )
+}
+
+/// Recognize the text in an image entry on device (the action inspector's
+/// *Extract text*). Answered from the stored recognition when the image was
+/// already read; refused for masked and non-image entries.
+#[tauri::command]
+pub async fn recognize_image_text(
+    state: State<'_, AppState>,
+    entry_id: String,
+) -> CommandResult<RecognizedTextDto> {
+    let entry_id = parse_entry_id(&entry_id)?;
+    let extracted = state.runtime.recognize_entry_text(entry_id).await?;
+    Ok(RecognizedTextDto {
+        text: extracted.text.text(),
+        lines: extracted.text.lines.into_iter().map(Into::into).collect(),
+        masked: extracted.masked,
+    })
 }
 
 /// Larger 1 MiB preview body for the expanded preview pane. Sensitivity

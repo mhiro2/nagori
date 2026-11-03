@@ -167,6 +167,7 @@ export const es: Messages = {
       loading: 'Cargando imagen…',
       unavailable: 'Imagen no disponible.',
       alt: 'Vista previa de imagen del portapapeles',
+      recognizedText: 'Texto en la imagen',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -295,6 +296,10 @@ export const es: Messages = {
     pasteFailed: 'No se pudo pegar el resultado.',
     nameEntry: 'Nombrar…',
     editText: 'Editar texto',
+    extractText: 'Extraer texto',
+    notReadable: 'Las imágenes enmascaradas no se leen.',
+    noTextFound: 'No se encontró texto en esta imagen.',
+    imageOnly: 'Solo se puede extraer texto de imágenes.',
     notEditable: 'Los elementos enmascarados no se pueden editar.',
     editResult: 'Editar',
     editorLabel: 'Texto del resultado editable',
@@ -424,6 +429,9 @@ export const es: Messages = {
       semanticIndexAcPowerOnly: 'Indexar solo con corriente alterna',
       semanticIndexAcPowerOnlyHelp:
         'Pausa el embedding en segundo plano con batería para ahorrar energía. Desactívalo para indexar también con batería.',
+      imageTextIndex: 'Buscar texto en imágenes',
+      imageTextIndexHelp:
+        'Reconoce el texto de las imágenes en segundo plano en este dispositivo para encontrar capturas por el texto que muestran. El texto que parece secreto se oculta y su imagen se enmascara. Al desactivarlo se borra el texto reconocido.',
       semanticIndexRebuild: 'Reconstruir índice',
       semanticIndexStatus: 'Estado del índice',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

@@ -8,6 +8,7 @@
     getEditableEntryText,
     getEntryLabel,
     pasteTextFromPalette,
+    recognizeImageText,
     runQuickAction,
     saveAiResult,
     setEntryLabel,
@@ -29,7 +30,7 @@
     SearchResultDto,
   } from '../lib/types';
   import { rememberActionResult, rememberedActionResult } from '../stores/actionResult.svelte';
-  import { aiActionsSupported } from '../stores/capabilities.svelte';
+  import { aiActionsSupported, imageTextRecognitionSupported } from '../stores/capabilities.svelte';
   import { runSessionEndingAction } from '../stores/paletteSession.svelte';
   import { reloadPreview } from '../stores/searchPreview.svelte';
   import { refreshCurrent } from '../stores/searchQuery.svelte';
@@ -91,7 +92,9 @@
 
   const t = $derived(messages());
 
-  let pending: QuickActionId | undefined = $state(undefined);
+  // The deterministic run in flight: a quick action, or `extract` while an
+  // image's text is being recognized.
+  let pending: QuickActionId | 'extract' | undefined = $state(undefined);
   let lastResult: string | undefined = $state(undefined);
   let runError: string | undefined = $state(undefined);
   let copyOk = $state(false);
@@ -514,6 +517,56 @@
     }
   };
 
+  // Read the text in an image entry on device. The text lands in the work
+  // area like a transform result, so it can be edited, pasted, copied, or
+  // saved as a new item.
+  const startExtractText = async (): Promise<void> => {
+    if (!target || !isTauri() || busy) return;
+    const token = ++runToken;
+    restored = false;
+    runError = undefined;
+    resetResultFeedback();
+    leaveEditAndNaming();
+    pending = 'extract';
+    // Recognition can take seconds (the first one loads the model), so arm
+    // the same delayed running indicator as a quick action.
+    if (quickRunningTimer !== undefined) clearTimeout(quickRunningTimer);
+    quickRunningVisible = false;
+    quickRunningTimer = setTimeout(() => {
+      quickRunningTimer = undefined;
+      quickRunningVisible = true;
+    }, QUICK_RUNNING_DELAY_MS);
+    try {
+      const recognized = await recognizeImageText(target.id);
+      if (token !== runToken) return;
+      // Its text read as private or secret, so the image is masked now:
+      // refresh the list and the preview so the picture stops showing.
+      if (recognized.masked) {
+        void refreshCurrent();
+        void reloadPreview(target.id);
+      }
+      if (recognized.text.trim() === '') {
+        runError = t.actionMenu.noTextFound;
+        lastResult = undefined;
+      } else {
+        lastResult = recognized.text;
+      }
+    } catch (err) {
+      if (token !== runToken) return;
+      runError = describeError(err);
+      lastResult = undefined;
+    } finally {
+      if (token === runToken) {
+        pending = undefined;
+        if (quickRunningTimer !== undefined) {
+          clearTimeout(quickRunningTimer);
+          quickRunningTimer = undefined;
+        }
+        quickRunningVisible = false;
+      }
+    }
+  };
+
   const startEditResult = (): void => {
     if (lastResult === undefined) return;
     editing = true;
@@ -638,6 +691,28 @@
         run: () => void startEditEntry(),
       };
     })(),
+    ...(imageTextRecognitionSupported()
+      ? [
+          (() => {
+            const kindOk = !target || target.kind === 'image';
+            const sensitivityOk = !target || editableSensitivity(target);
+            return {
+              key: 'entry-extract-text',
+              label: t.actionMenu.extractText,
+              isAi: false,
+              disabled: !target || busy || !kindOk || !sensitivityOk,
+              reason:
+                target && !kindOk
+                  ? t.actionMenu.imageOnly
+                  : target && !sensitivityOk
+                    ? t.actionMenu.notReadable
+                    : undefined,
+              pending: pending === 'extract',
+              run: () => void startExtractText(),
+            };
+          })(),
+        ]
+      : []),
     ...QUICK_ACTION_IDS.map((id) => {
       const applies = !target || actionAppliesToKind(target.kind, id);
       return {

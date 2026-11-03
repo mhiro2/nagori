@@ -212,6 +212,10 @@ OS-downloaded language packs / embedding assets. See
 - macOS on-device AI actions (opt-in, off by default): summarize, rewrite,
   reformat Markdown, extract tasks, explain code, and translate — backed by
   Apple's on-device models, running entirely on your Mac.
+- Text in images (macOS): extract the text of a screenshot on device, and
+  opt in to *Search text in images* to find screenshots by the text they
+  show — matches are outlined in the preview, and text that looks secret is
+  redacted with its image masked.
 - Optional on-device semantic search (opt-in, macOS): matches entries by
   meaning using Apple's on-device embeddings, indexed locally.
 - Rich previews: image thumbnails with an expanded zoom / pan view

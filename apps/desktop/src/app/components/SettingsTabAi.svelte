@@ -8,6 +8,7 @@
     AppSettings,
     SemanticIndexStatus,
   } from '../lib/types';
+  import { imageTextRecognitionSupported } from '../stores/capabilities.svelte';
 
   type Props = {
     settings: AppSettings;
@@ -176,6 +177,22 @@
     </div>
   {/if}
 </fieldset>
+
+{#if imageTextRecognitionSupported()}
+  <fieldset>
+    <legend>{t.settings.ai.imageTextIndex}</legend>
+    <label>
+      <input
+        type="checkbox"
+        data-testid="image-text-index-toggle"
+        bind:checked={settings.ai.imageTextIndexEnabled}
+        onchange={() => scheduleSave(0)}
+      />
+      {t.settings.ai.imageTextIndex}
+    </label>
+    <p class="help">{t.settings.ai.imageTextIndexHelp}</p>
+  </fieldset>
+{/if}
 
 <style>
   .help {

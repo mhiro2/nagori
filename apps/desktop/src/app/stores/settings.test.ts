@@ -40,6 +40,7 @@ const baseSettings = (): AppSettings => ({
     requestTimeoutMs: 30000,
     semanticIndexEnabled: false,
     semanticIndexAcPowerOnly: true,
+    imageTextIndexEnabled: false,
     onboardingDismissed: false,
     allowOpenaiFallbackPrompt: true,
   },
