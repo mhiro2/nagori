@@ -1078,3 +1078,131 @@ async fn dense_ngram_path_handles_a_zero_candidate_budget() {
         Some(0),
     );
 }
+
+#[tokio::test]
+async fn search_rows_show_an_excerpt_around_a_late_match() {
+    let store = SqliteStore::open_memory().unwrap();
+    let opening = "議事録 2026年11月 定例 参加者 全員 本日の議題と前回の宿題の確認";
+    let id = insert_text(
+        &store,
+        &format!("{opening}\n\n接続プールの上限を20に変更する件で合意した"),
+    )
+    .await;
+    let head = insert_text(&store, "接続プールの待機時間を調査").await;
+
+    let results = store
+        .search(SearchQuery::new(
+            "接続プール",
+            normalize_text("接続プール"),
+            10,
+        ))
+        .await
+        .unwrap();
+    let late = results.iter().find(|r| r.entry_id == id).unwrap();
+    assert!(late.preview.starts_with('…'), "{}", late.preview);
+    assert!(
+        late.preview
+            .contains("接続プールの上限を20に変更する件で合意した"),
+        "{}",
+        late.preview,
+    );
+    assert!(!late.preview.contains("議事録"), "{}", late.preview);
+    // A match already visible in the head keeps the head preview.
+    let early = results.iter().find(|r| r.entry_id == head).unwrap();
+    assert_eq!(early.preview, "接続プールの待機時間を調査");
+}
+
+#[tokio::test]
+async fn excerpt_matches_ascii_case_insensitively_and_keeps_original_case() {
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(
+        &store,
+        "Weekly status report for the platform team.\nNotes: the ConnectionPool limit was raised to 20.",
+    )
+    .await;
+
+    let results = store
+        .search(SearchQuery::new(
+            "connectionpool",
+            normalize_text("connectionpool"),
+            10,
+        ))
+        .await
+        .unwrap();
+    let row = results.iter().find(|r| r.entry_id == id).unwrap();
+    assert!(
+        row.preview.contains("ConnectionPool limit"),
+        "{}",
+        row.preview
+    );
+    assert!(row.preview.starts_with('…'), "{}", row.preview);
+}
+
+#[tokio::test]
+async fn excerpt_is_not_built_for_masked_rows_or_recent_listings() {
+    let store = SqliteStore::open_memory().unwrap();
+    let text = format!("{} needle-value", "filler text ".repeat(10));
+    let mut secret = EntryFactory::from_text(&text);
+    secret.search.normalized_text = normalize_text(&text);
+    secret.search.preview = "[REDACTED]".to_owned();
+    secret.sensitivity = nagori_core::Sensitivity::Private;
+    let secret_id = store.insert(secret).await.unwrap();
+    // Distinct body: an identical one would dedup into the masked row.
+    let public_id = insert_text(&store, &format!("{text} (public copy)")).await;
+
+    let results = store
+        .search(SearchQuery::new(
+            "needle-value",
+            normalize_text("needle-value"),
+            10,
+        ))
+        .await
+        .unwrap();
+    let masked = results.iter().find(|r| r.entry_id == secret_id).unwrap();
+    assert_eq!(masked.preview, "[REDACTED]");
+    let public = results.iter().find(|r| r.entry_id == public_id).unwrap();
+    assert!(public.preview.starts_with('…'), "{}", public.preview);
+
+    let recent = store.search(SearchQuery::new("", "", 10)).await.unwrap();
+    let listed = recent.iter().find(|r| r.entry_id == public_id).unwrap();
+    assert!(
+        listed.preview.starts_with("filler text"),
+        "{}",
+        listed.preview
+    );
+}
+
+#[tokio::test]
+async fn match_windows_recheck_the_current_sensitivity() {
+    use nagori_core::SearchCandidateProvider;
+
+    let store = SqliteStore::open_memory().unwrap();
+    let id = insert_text(
+        &store,
+        &format!("{} needle-value", "filler text ".repeat(10)),
+    )
+    .await;
+    let terms = vec!["needle-value".to_owned()];
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let windows = store.match_windows(&[id], &terms, &cancel).await.unwrap();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].match_chars, "needle-value".chars().count());
+
+    // A re-capture raised the row to a masked class after its candidate was
+    // read: the window lookup must not hand its stored body out.
+    store
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE entries SET sensitivity = 'private' WHERE id = ?1",
+            [id.to_string()],
+        )
+        .unwrap();
+    assert!(
+        store
+            .match_windows(&[id], &terms, &cancel)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

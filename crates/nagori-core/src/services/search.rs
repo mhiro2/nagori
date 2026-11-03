@@ -5,8 +5,8 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    EntryId, RecentOrder, Result, SearchCandidate, SearchFilters, SearchMode, SearchQuery,
-    SearchResult,
+    ContentKind, EntryId, MatchWindow, RecentOrder, Result, SearchCandidate, SearchFilters,
+    SearchMode, SearchQuery, SearchResult, Sensitivity, excerpt_terms,
     text::{has_cjk, normalize_text},
 };
 
@@ -193,6 +193,28 @@ pub trait SearchCandidateProvider: Send + Sync {
         mode: NgramQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>>;
+
+    /// Literal-match windows for the final, already-truncated result page.
+    ///
+    /// For each entry, the provider looks for the first of `terms` that occurs
+    /// in the entry's displayable plain text (case-insensitively for ASCII)
+    /// and returns a bounded slice around it; entries whose match already sits
+    /// within [`crate::MATCH_EXCERPT_HEAD_CHARS`] of the start, or that hold no
+    /// literal match, are left out. The service only asks for rows whose
+    /// candidate was unredacted, but an implementation must re-check the
+    /// row's current sensitivity: a re-capture can raise it to a masked class
+    /// after the candidate was read. The default returns nothing, which keeps
+    /// every row on its head preview. See [`Self::recent_entries`] for
+    /// `cancel`.
+    async fn match_windows(
+        &self,
+        entry_ids: &[EntryId],
+        terms: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<MatchWindow>> {
+        let _ = (entry_ids, terms, cancel);
+        Ok(Vec::new())
+    }
 }
 
 /// Final scoring step. Implementations may drop a candidate (`None`) when the
@@ -369,7 +391,61 @@ where
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(limit);
+        if matches!(
+            plan,
+            SearchPlan::Exact | SearchPlan::FullText | SearchPlan::Fuzzy | SearchPlan::Hybrid
+        ) {
+            self.apply_match_excerpts(&normalized, &mut results, &cancel)
+                .await;
+        }
         Ok(results)
+    }
+
+    /// Replace the head preview of each eligible row with an excerpt around
+    /// its literal match, so rows that share an opening (meeting notes, log
+    /// dumps) still show why they matched.
+    ///
+    /// Only Public / Unknown rows qualify: Private and Secret previews are
+    /// masked, and an excerpt built from the stored body would bypass that.
+    /// URL rows keep their full URL (the row parses it for the domain), and
+    /// images and file lists have their own projections. Excerpts are
+    /// cosmetic, so a failed lookup leaves the head previews in place rather
+    /// than failing the search.
+    async fn apply_match_excerpts(
+        &self,
+        normalized: &str,
+        results: &mut [SearchResult],
+        cancel: &CancellationToken,
+    ) {
+        let entry_ids: Vec<EntryId> = results
+            .iter()
+            .filter(|result| shows_match_excerpt(result))
+            .map(|result| result.entry_id)
+            .collect();
+        let terms = excerpt_terms(normalized);
+        if entry_ids.is_empty() || terms.is_empty() {
+            return;
+        }
+        let Ok(windows) = self
+            .provider
+            .match_windows(&entry_ids, &terms, cancel)
+            .await
+        else {
+            return;
+        };
+        let windows: HashMap<EntryId, MatchWindow> = windows
+            .into_iter()
+            .map(|window| (window.entry_id, window))
+            .collect();
+        for result in results {
+            if let Some(excerpt) = windows
+                .get(&result.entry_id)
+                .filter(|_| shows_match_excerpt(result))
+                .and_then(|window| window.excerpt(result.content_kind))
+            {
+                result.preview = excerpt;
+            }
+        }
     }
 
     /// Fan the substring/FTS/ngram fetches out concurrently for the active
@@ -499,6 +575,16 @@ where
         }
         results
     }
+}
+
+const fn shows_match_excerpt(result: &SearchResult) -> bool {
+    matches!(
+        result.sensitivity,
+        Sensitivity::Public | Sensitivity::Unknown
+    ) && matches!(
+        result.content_kind,
+        ContentKind::Text | ContentKind::Code | ContentKind::RichText | ContentKind::Unknown
+    )
 }
 
 fn push_or_merge(

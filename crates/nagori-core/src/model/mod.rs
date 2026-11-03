@@ -8,6 +8,7 @@ use crate::limits::ReadBudget;
 mod ai;
 pub mod code_language;
 mod content;
+mod excerpt;
 mod file_path;
 mod file_summary;
 mod paste_option;
@@ -17,6 +18,7 @@ mod semantic;
 
 pub use ai::*;
 pub use content::*;
+pub use excerpt::*;
 pub use file_path::*;
 pub use file_summary::*;
 pub use paste_option::*;

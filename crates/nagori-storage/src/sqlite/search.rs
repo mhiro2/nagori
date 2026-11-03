@@ -3,9 +3,10 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use nagori_core::{
     CANDIDATE_METADATA_MAX_CHARS, ClipboardEntry, EntryId, FtsCandidate, FtsQueryMode,
-    NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder, Result, SearchCandidate,
-    SearchCandidateBudget, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
-    SearchRepository, SearchResult, SearchService,
+    MATCH_EXCERPT_HEAD_CHARS, MATCH_WINDOW_AFTER_CHARS, MATCH_WINDOW_BEFORE_CHARS,
+    MAX_EXCERPT_TERMS, MatchWindow, NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder,
+    Result, SearchCandidate, SearchCandidateBudget, SearchCandidateProvider, SearchDocument,
+    SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_document_ngrams, generate_query_ngrams, has_cjk,
@@ -41,6 +42,44 @@ const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
             WHEN 'rich_text' THEN json_extract(e.content_json, '$.RichText.plain_text')
             WHEN 'unknown' THEN json_extract(e.content_json, '$.Unknown.plain_text')
         END";
+
+/// Locate the first of [`MAX_EXCERPT_TERMS`] query terms in one entry's plain
+/// text and project a bounded window around it.
+///
+/// The service only asks for rows whose candidate was Public / Unknown, but
+/// the candidate was read earlier: a re-capture can have raised the row to a
+/// masked class since, so the current sensitivity is checked here again. Each
+/// stage is `MATERIALIZED` so the body is read and lowercased once and every
+/// `instr` runs once; only the window crosses into Rust. `lower()` folds
+/// ASCII only, so it keeps character offsets aligned with the original text
+/// and the match offset is exact; a term that only matches after NFKC folding
+/// (full-width Latin, for example) finds nothing and the row keeps its head
+/// preview. Unused term slots are bound to NULL, which `instr` maps to NULL.
+const MATCH_WINDOW_SQL: &str = "WITH src AS MATERIALIZED (
+         SELECT {plain} AS plain FROM entries e
+         WHERE e.id = ?1 AND e.deleted_at IS NULL
+           AND e.sensitivity IN ('public', 'unknown')
+     ), low AS MATERIALIZED (
+         SELECT plain, lower(plain) AS l FROM src WHERE plain IS NOT NULL
+     ), pos AS MATERIALIZED (
+         SELECT plain, instr(l, ?2) AS p1, instr(l, ?3) AS p2,
+                instr(l, ?4) AS p3, instr(l, ?5) AS p4
+         FROM low
+     ), hit AS MATERIALIZED (
+         SELECT plain,
+                CASE WHEN p1 > 0 THEN 0 WHEN p2 > 0 THEN 1
+                     WHEN p3 > 0 THEN 2 ELSE 3 END AS term_index,
+                COALESCE(NULLIF(p1, 0), NULLIF(p2, 0), NULLIF(p3, 0), NULLIF(p4, 0)) AS p
+         FROM pos
+     ), win AS MATERIALIZED (
+         SELECT plain, term_index, p, max(1, p - ?6) AS start FROM hit WHERE p > ?7
+     )
+     SELECT term_index,
+            p - start AS match_start,
+            start = 1 AS starts_body,
+            start + ?8 > length(plain) AS ends_body,
+            substr(plain, start, ?8) AS window
+     FROM win";
 
 /// Multiplier applied to `PREVIEW_MAX_CHARS` when scanning a fallback body for
 /// its preview, leaving room for whitespace runs that `make_preview` collapses.
@@ -594,6 +633,81 @@ impl SearchCandidateProvider for SqliteStore {
                 }
             }
             Ok(hits.into_vec())
+        })
+        .await
+    }
+
+    async fn match_windows(
+        &self,
+        entry_ids: &[EntryId],
+        terms: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<MatchWindow>> {
+        let entry_ids = entry_ids.to_vec();
+        let mut slots: [Option<String>; MAX_EXCERPT_TERMS] = Default::default();
+        for (slot, term) in slots.iter_mut().zip(terms) {
+            *slot = Some(term.clone());
+        }
+        let longest = slots
+            .iter()
+            .flatten()
+            .map(|term| term.chars().count())
+            .max()
+            .unwrap_or(0);
+        let before = i64::try_from(MATCH_WINDOW_BEFORE_CHARS).unwrap_or(i64::MAX);
+        let head = i64::try_from(MATCH_EXCERPT_HEAD_CHARS).unwrap_or(i64::MAX);
+        let span = i64::try_from(MATCH_WINDOW_BEFORE_CHARS + longest + MATCH_WINDOW_AFTER_CHARS)
+            .unwrap_or(i64::MAX);
+        self.run_search_blocking(cancel, move |conn| {
+            let sql = MATCH_WINDOW_SQL.replace("{plain}", FALLBACK_PLAIN_TEXT_SQL);
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
+            let mut windows = Vec::new();
+            for entry_id in entry_ids {
+                let row = stmt
+                    .query_row(
+                        params![
+                            entry_id.to_string(),
+                            slots[0],
+                            slots[1],
+                            slots[2],
+                            slots[3],
+                            before,
+                            head,
+                            span,
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, bool>(2)?,
+                                row.get::<_, bool>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(storage_err)?;
+                let Some((term_index, match_start, starts_body, ends_body, text)) = row else {
+                    continue;
+                };
+                let (Ok(term_index), Ok(match_start)) =
+                    (usize::try_from(term_index), usize::try_from(match_start))
+                else {
+                    continue;
+                };
+                let Some(term) = slots.get(term_index).and_then(Option::as_ref) else {
+                    continue;
+                };
+                windows.push(MatchWindow {
+                    entry_id,
+                    text,
+                    match_start,
+                    match_chars: term.chars().count(),
+                    starts_body,
+                    ends_body,
+                });
+            }
+            Ok(windows)
         })
         .await
     }
