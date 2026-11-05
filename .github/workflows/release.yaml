@@ -153,7 +153,7 @@ jobs:
             exit 1
           fi
       - name: Setup pnpm with runtime
-        uses: pnpm/setup@v3.1.1
+        uses: pnpm/setup@v3.1.2
         with:
           require-lockfile: true
       - name: Build bundle and upload to draft release
