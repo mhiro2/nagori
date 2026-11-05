@@ -245,16 +245,30 @@
   const PREVIEW_DEBOUNCE_MS = 60;
   let previewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   let lastPreviewKey: string | undefined;
+  // The selected entry's sensitivity as of the last hydrate. A refresh that
+  // reports it changed for the same entry (an image masked because its text
+  // read as secret) re-reads the preview past its settled-state guard, so a
+  // picture that is now masked stops showing.
+  let lastPreviewSensitivity: { id: string | undefined; sensitivity: string | undefined } = {
+    id: undefined,
+    sensitivity: undefined,
+  };
   $effect(() => {
     const id = selected?.id;
     const query = searchState.query;
-    const key = `${id ?? ''}\0${query}`;
+    const sensitivity = selected?.sensitivity;
+    const key = `${id ?? ''}\0${query}\0${sensitivity ?? ''}`;
     if (key === lastPreviewKey) return;
     lastPreviewKey = key;
+    const force =
+      id !== undefined &&
+      lastPreviewSensitivity.id === id &&
+      lastPreviewSensitivity.sensitivity !== sensitivity;
+    lastPreviewSensitivity = { id, sensitivity };
     if (previewDebounceTimer !== undefined) clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
       previewDebounceTimer = undefined;
-      void hydratePreview(id, query);
+      void hydratePreview(id, query, { force });
     }, PREVIEW_DEBOUNCE_MS);
   });
   onDestroy(() => {
@@ -277,9 +291,10 @@
     searchBox?.focus();
   };
 
-  // The empty state (and its button) unmounts while the wider search loads,
-  // so hand focus to the search box first: otherwise it drops to the body and
-  // the next Enter would act on whichever row the new results highlight.
+  // The empty state or list footer (and its button) unmounts once the wider
+  // search lands, so hand focus to the search box first: otherwise it drops
+  // to the body and the next Enter would act on whichever row the new results
+  // highlight.
   const startFullHistorySearch = (): void => {
     searchBox?.focus();
     void searchFullHistory();
@@ -732,6 +747,8 @@
           limitReached={resultLimitReached()}
           paged={resultsPaged()}
           onLoadMore={() => void loadMoreResults()}
+          canSearchFullHistory={canSearchFullHistory()}
+          onSearchFullHistory={startFullHistorySearch}
           listboxId={RESULT_LISTBOX_ID}
           compact={showPreviewPane}
         />

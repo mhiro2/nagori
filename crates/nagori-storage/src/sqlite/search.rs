@@ -3,9 +3,10 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use nagori_core::{
     CANDIDATE_METADATA_MAX_CHARS, ClipboardEntry, EntryId, FtsCandidate, FtsQueryMode,
-    NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder, Result, SearchCandidate,
-    SearchCandidateBudget, SearchCandidateProvider, SearchDocument, SearchFilters, SearchQuery,
-    SearchRepository, SearchResult, SearchService,
+    MATCH_EXCERPT_HEAD_CHARS, MATCH_WINDOW_AFTER_CHARS, MATCH_WINDOW_BEFORE_CHARS,
+    MAX_EXCERPT_TERMS, MatchWindow, NgramCandidate, NgramQueryMode, PREVIEW_MAX_CHARS, RecentOrder,
+    Result, SearchCandidate, SearchCandidateBudget, SearchCandidateProvider, SearchDocument,
+    SearchFilters, SearchQuery, SearchRepository, SearchResult, SearchService,
 };
 use nagori_search::{
     DefaultRanker, MAX_NGRAM_INPUT_CHARS, generate_document_ngrams, generate_query_ngrams, has_cjk,
@@ -42,6 +43,64 @@ const FALLBACK_PLAIN_TEXT_SQL: &str = "CASE e.content_kind
             WHEN 'unknown' THEN json_extract(e.content_json, '$.Unknown.plain_text')
         END";
 
+/// Strongest relationship between the query and a label's
+/// newline-delimited `search_text` (see `EntryLabel::search_text`): a whole
+/// name or alias, a name or alias prefix, or any substring.
+const LABEL_MATCH_SQL: &str = "CASE
+            WHEN instr(l.search_text, char(10) || ? || char(10)) > 0 THEN 3
+            WHEN instr(l.search_text, char(10) || ?) > 0 THEN 2
+            ELSE 1
+        END";
+
+/// Locate the first of [`MAX_EXCERPT_TERMS`] query terms in one entry's plain
+/// text and project a bounded window around it.
+///
+/// An image's text is the text recognized in it (when image text search has
+/// read it), and an image has no head preview to show the match in, so every
+/// match in it yields a window.
+///
+/// The service only asks for rows whose candidate was Public / Unknown, but
+/// the candidate was read earlier: a re-capture can have raised the row to a
+/// masked class since, so the current sensitivity is checked here again. Each
+/// stage is `MATERIALIZED` so the body is read and lowercased once and every
+/// `instr` runs once; only the window crosses into Rust. `lower()` folds
+/// ASCII only, so it keeps character offsets aligned with the original text
+/// and the match offset is exact; a term that only matches after NFKC folding
+/// (full-width Latin, for example) finds nothing and the row keeps its head
+/// preview. Unused term slots are bound to NULL, which `instr` maps to NULL.
+const MATCH_WINDOW_SQL: &str = "WITH src AS MATERIALIZED (
+         SELECT CASE WHEN e.content_kind = 'image'
+                     THEN (SELECT r.text FROM entry_text_recognition r
+                           WHERE r.entry_id = e.id AND r.status = 'recognized'
+                             AND r.content_hash = e.content_hash)
+                     ELSE {plain} END AS plain,
+                e.content_kind = 'image' AS image
+         FROM entries e
+         WHERE e.id = ?1 AND e.deleted_at IS NULL
+           AND e.sensitivity IN ('public', 'unknown')
+     ), low AS MATERIALIZED (
+         SELECT plain, image, lower(plain) AS l FROM src WHERE plain IS NOT NULL
+     ), pos AS MATERIALIZED (
+         SELECT plain, image, instr(l, ?2) AS p1, instr(l, ?3) AS p2,
+                instr(l, ?4) AS p3, instr(l, ?5) AS p4
+         FROM low
+     ), hit AS MATERIALIZED (
+         SELECT plain, image,
+                CASE WHEN p1 > 0 THEN 0 WHEN p2 > 0 THEN 1
+                     WHEN p3 > 0 THEN 2 ELSE 3 END AS term_index,
+                COALESCE(NULLIF(p1, 0), NULLIF(p2, 0), NULLIF(p3, 0), NULLIF(p4, 0)) AS p
+         FROM pos
+     ), win AS MATERIALIZED (
+         SELECT plain, term_index, p, max(1, p - ?6) AS start FROM hit
+         WHERE p > CASE WHEN image THEN 0 ELSE ?7 END
+     )
+     SELECT term_index,
+            p - start AS match_start,
+            start = 1 AS starts_body,
+            start + ?8 > length(plain) AS ends_body,
+            substr(plain, start, ?8) AS window
+     FROM win";
+
 /// Multiplier applied to `PREVIEW_MAX_CHARS` when scanning a fallback body for
 /// its preview, leaving room for whitespace runs that `make_preview` collapses.
 const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
@@ -58,6 +117,12 @@ const FALLBACK_PREVIEW_OVERSCAN: usize = 4;
 /// legacy or interrupted databases usable without reopening the candidate-
 /// memory failure mode.
 fn candidate_columns(text_match_sql: &str) -> String {
+    candidate_columns_with_label(text_match_sql, "0")
+}
+
+/// [`candidate_columns`] with an explicit label-match expression, for the
+/// label branch: the only one that binds the query against `entry_labels`.
+fn candidate_columns_with_label(text_match_sql: &str, label_match_sql: &str) -> String {
     // A stored `d.preview` is already `make_preview`-shaped and at most
     // `PREVIEW_MAX_CHARS` long, so the trim and cap are no-ops for it. The
     // fallback body is raw text: leading whitespace is trimmed in SQL, interior
@@ -78,7 +143,10 @@ fn candidate_columns(text_match_sql: &str) -> String {
          COALESCE(length(d.normalized_text), 0) AS normalized_char_count,
          {text_match_sql} AS text_match,
          CASE WHEN e.content_kind = 'image'
-              THEN e.content_json END AS candidate_content_json"
+              THEN e.content_json END AS candidate_content_json,
+         (SELECT substr(l.name, 1, {CANDIDATE_METADATA_MAX_CHARS})
+          FROM entry_labels l WHERE l.entry_id = e.id) AS label,
+         {label_match_sql} AS label_match"
     )
 }
 
@@ -594,6 +662,137 @@ impl SearchCandidateProvider for SqliteStore {
                 }
             }
             Ok(hits.into_vec())
+        })
+        .await
+    }
+
+    async fn label_candidates(
+        &self,
+        normalized: &str,
+        filters: &SearchFilters,
+        budget: SearchCandidateBudget,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchCandidate>> {
+        let filter = build_filter_fragment(filters)?;
+        let normalized = normalized.to_owned();
+        let limit_i64 = clamp_limit(budget.max_count());
+        let max_count = usize::try_from(limit_i64).unwrap_or(0);
+        let max_bytes = budget.max_bytes();
+        self.run_search_blocking(cancel, move |conn| {
+            // Strongest name relationship first, so a whole-name hit is never
+            // cut by the `LIMIT` behind newer partial ones.
+            let columns = candidate_columns_with_label(TEXT_MATCH_SQL, LABEL_MATCH_SQL);
+            let sql = format!(
+                "SELECT {columns}
+                 FROM entry_labels l
+                 JOIN entries e ON e.id = l.entry_id
+                 LEFT JOIN search_documents d ON d.entry_id = e.id
+                 WHERE e.deleted_at IS NULL
+                   AND e.sensitivity != 'blocked'
+                   AND instr(l.search_text, ?) > 0
+                   {extra}
+                 ORDER BY label_match DESC, e.pinned DESC, e.created_at DESC
+                 LIMIT ?",
+                extra = filter.sql,
+            );
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
+            let mut bound: Vec<&dyn ToSql> = vec![
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+                &normalized as &dyn ToSql,
+            ];
+            bound.extend(filter.params.iter().map(|p| &**p as &dyn ToSql));
+            bound.push(&limit_i64);
+            let mut candidates = ByteBoundedVec::new(max_count, max_bytes);
+            for row in stmt
+                .query_map(rusqlite::params_from_iter(bound), row_to_candidate)
+                .map_err(storage_err)?
+            {
+                let candidate = row.map_err(storage_err)?;
+                let owned_bytes = candidate.owned_byte_count();
+                if !candidates.push(candidate, owned_bytes) {
+                    break;
+                }
+            }
+            Ok(candidates.into_vec())
+        })
+        .await
+    }
+
+    async fn match_windows(
+        &self,
+        entry_ids: &[EntryId],
+        terms: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<MatchWindow>> {
+        let entry_ids = entry_ids.to_vec();
+        let mut slots: [Option<String>; MAX_EXCERPT_TERMS] = Default::default();
+        for (slot, term) in slots.iter_mut().zip(terms) {
+            *slot = Some(term.clone());
+        }
+        let longest = slots
+            .iter()
+            .flatten()
+            .map(|term| term.chars().count())
+            .max()
+            .unwrap_or(0);
+        let before = i64::try_from(MATCH_WINDOW_BEFORE_CHARS).unwrap_or(i64::MAX);
+        let head = i64::try_from(MATCH_EXCERPT_HEAD_CHARS).unwrap_or(i64::MAX);
+        let span = i64::try_from(MATCH_WINDOW_BEFORE_CHARS + longest + MATCH_WINDOW_AFTER_CHARS)
+            .unwrap_or(i64::MAX);
+        self.run_search_blocking(cancel, move |conn| {
+            let sql = MATCH_WINDOW_SQL.replace("{plain}", FALLBACK_PLAIN_TEXT_SQL);
+            let mut stmt = conn.prepare_cached(&sql).map_err(storage_err)?;
+            let mut windows = Vec::new();
+            for entry_id in entry_ids {
+                let row = stmt
+                    .query_row(
+                        params![
+                            entry_id.to_string(),
+                            slots[0],
+                            slots[1],
+                            slots[2],
+                            slots[3],
+                            before,
+                            head,
+                            span,
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, bool>(2)?,
+                                row.get::<_, bool>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(storage_err)?;
+                let Some((term_index, match_start, starts_body, ends_body, text)) = row else {
+                    continue;
+                };
+                let (Ok(term_index), Ok(match_start)) =
+                    (usize::try_from(term_index), usize::try_from(match_start))
+                else {
+                    continue;
+                };
+                let Some(term) = slots.get(term_index).and_then(Option::as_ref) else {
+                    continue;
+                };
+                windows.push(MatchWindow {
+                    entry_id,
+                    text,
+                    match_start,
+                    match_chars: term.chars().count(),
+                    starts_body,
+                    ends_body,
+                });
+            }
+            Ok(windows)
         })
         .await
     }

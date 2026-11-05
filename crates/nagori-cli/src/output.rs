@@ -101,7 +101,7 @@ pub(crate) fn print_search_results(
     format: OutputFormat,
 ) -> Result<()> {
     let make_value = |result: &nagori_core::SearchResult| -> Result<serde_json::Value> {
-        Ok(serde_json::json!({
+        let mut value = serde_json::json!({
             "id": result.entry_id,
             "kind": result.content_kind,
             "preview": result.preview,
@@ -110,7 +110,12 @@ pub(crate) fn print_search_results(
             "pinned": result.pinned,
             "sensitivity": result.sensitivity,
             "rank_reasons": result.rank_reason,
-        }))
+        });
+        // Present only for named entries, matching the IPC DTO's shape.
+        if let Some(label) = &result.label {
+            value["label"] = serde_json::Value::from(label.as_str());
+        }
+        Ok(value)
     };
     match format {
         OutputFormat::Json => {

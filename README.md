@@ -180,6 +180,15 @@ OS-downloaded language packs / embedding assets. See
 - Japanese / CJK partial-match search: kana-insensitive (a Katakana clip is
   found by a Hiragana query and vice versa) with single-kanji recall, on top of
   full-text and ASCII fuzzy matching.
+- Search rows that show why they matched: when the match sits deep in a long
+  clip, the row shows the passage around it (the matching line for code)
+  instead of the clip's opening, the preview opens scrolled to the first
+  match, and *Search all history* stays one click away under any quick-search
+  result list.
+- Named pins and edit-before-paste: give a clip your own name and aliases
+  ("PR review request", "shipping address") to find it by those words, edit a
+  clip or an action result in the action panel and paste the edit once, or
+  update the saved clip with it.
 - Recall-oriented result rows: a language badge on code (JSON / SQL / Rust / …,
   detected on-device), a strong-brand badge on known URLs (GitHub / YouTube /
   …, from the hostname alone — no network), and pixel dimensions, file size,
@@ -203,6 +212,10 @@ OS-downloaded language packs / embedding assets. See
 - macOS on-device AI actions (opt-in, off by default): summarize, rewrite,
   reformat Markdown, extract tasks, explain code, and translate — backed by
   Apple's on-device models, running entirely on your Mac.
+- Text in images (macOS): extract the text of a screenshot on device, and
+  opt in to *Search text in images* to find screenshots by the text they
+  show — matches are outlined in the preview, and text that looks secret is
+  redacted with its image masked.
 - Optional on-device semantic search (opt-in, macOS): matches entries by
   meaning using Apple's on-device embeddings, indexed locally.
 - Rich previews: image thumbnails with an expanded zoom / pan view

@@ -17,6 +17,7 @@ export type Sensitivity = 'Unknown' | 'Public' | 'Private' | 'Secret' | 'Blocked
 export type SearchMode = 'Auto' | 'Recent' | 'Exact' | 'Fuzzy' | 'FullText' | 'Semantic';
 
 export type RankReason =
+  | 'NameMatch'
   | 'ExactMatch'
   | 'PrefixMatch'
   | 'SubstringMatch'
@@ -60,6 +61,9 @@ export type AiSettings = {
   requestTimeoutMs: number;
   semanticIndexEnabled: boolean;
   semanticIndexAcPowerOnly: boolean;
+  // Recognize text in images in the background so screenshots are found by
+  // the text they show. Turning it off erases the recognized text.
+  imageTextIndexEnabled: boolean;
   onboardingDismissed: boolean;
   allowOpenaiFallbackPrompt: boolean;
 };
@@ -149,11 +153,38 @@ export type SearchResultDto = {
   // the probe landed.
   imageWidth?: number;
   imageHeight?: number;
+  // User-given name, shown ahead of the preview. Absent for unnamed entries.
+  label?: string;
   representationSummary: RepresentationSummary[];
   // Basename-first projection for `fileList` rows, hydrated by the backend.
   // Absent for other kinds and for sensitive file lists (those fall back to
   // the redacted `preview`).
   fileSummary?: FileSummary;
+};
+
+// One line of text recognized in an image. The box is a fraction of the
+// image size with a top-left origin. Mirrors `RecognizedLineDto`.
+export type RecognizedLine = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+// Text extracted from an image. Mirrors `RecognizedTextDto`.
+export type RecognizedText = {
+  text: string;
+  lines: RecognizedLine[];
+  // The image was masked because its text read as private or secret.
+  masked: boolean;
+};
+
+// An entry's user-given name and the extra words that find it. Mirrors
+// `EntryLabelDto`.
+export type EntryLabel = {
+  name: string;
+  aliases: string[];
 };
 
 // Width-independent summary of a captured file list. Strings are already
@@ -254,6 +285,8 @@ export type EntryPreviewBody =
       byteCount: number;
       width?: number | null;
       height?: number | null;
+      // Text recognized in the image, when it has been read.
+      recognizedLines?: RecognizedLine[];
     }
   | {
       type: 'fileList';
@@ -564,6 +597,10 @@ export type PlatformCapabilities = {
   // Reflects the actually-wired engine (today macOS only); the desktop
   // hides every AI surface when this is `unsupported`.
   aiActions: Capability;
+  // On-device text recognition in images (Vision on macOS). The desktop hides
+  // the extract-text action and the image text search setting when this is
+  // `unsupported`.
+  imageTextRecognition: Capability;
 };
 
 export type CommandError = {

@@ -28,6 +28,8 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (104, SCOPE_FTS_UPDATE_TRIGGER),
     (105, ADD_SEMANTIC_POLICY_TRACKING),
     (106, ENABLE_FTS_SECURE_DELETE),
+    (107, ADD_ENTRY_LABELS),
+    (108, ADD_ENTRY_TEXT_RECOGNITION),
 ];
 
 /// Highest schema version supported by this binary. [`apply_migrations`]
@@ -589,4 +591,49 @@ CREATE TABLE IF NOT EXISTS semantic_exclusions (
 const ENABLE_FTS_SECURE_DELETE: &str = r"
 INSERT INTO search_fts(search_fts, rank) VALUES ('secure-delete', 1);
 INSERT INTO search_fts(search_fts) VALUES ('rebuild');
+";
+
+/// User-given names and aliases for entries (`EntryLabel`).
+///
+/// Kept out of `entries` and `search_documents` so renaming never rewrites the
+/// body index and replacing a body never drops the name. `search_text` holds
+/// the newline-delimited normalized name and aliases the label search branch
+/// scans; the table only ever holds the handful of entries a user named, so
+/// that scan stays cheap without an index. Rows go with their entry through
+/// `ON DELETE CASCADE`.
+const ADD_ENTRY_LABELS: &str = r"
+CREATE TABLE IF NOT EXISTS entry_labels (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    search_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+/// Text recognized in image entries (on-device OCR).
+///
+/// One row per image the recognizer has processed, keyed by `entry_id` with
+/// `ON DELETE CASCADE`. `content_hash` pins the row to the image bytes it was
+/// recognized from, so a row is redone only when the bytes change. `status`
+/// records an image the recognizer could not read (`failed`) so the
+/// background indexer does not retry it on every pass. `text` and
+/// `lines_json` hold the recognized text already shaped by the privacy
+/// policy (redacted when it reads as secret or private); the same text feeds
+/// the image's search document, so the image is found by what it shows.
+/// `policy_hash` fingerprints the content policy the text was shaped under
+/// (`AppSettings::semantic_policy_hash`), so a later `regex_denylist` or
+/// detector change re-reads the image instead of serving text the new
+/// policy would redact.
+const ADD_ENTRY_TEXT_RECOGNITION: &str = r"
+CREATE TABLE IF NOT EXISTS entry_text_recognition (
+    entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('recognized', 'failed')),
+    text TEXT NOT NULL DEFAULT '',
+    lines_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
 ";

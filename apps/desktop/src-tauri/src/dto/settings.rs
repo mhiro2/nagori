@@ -66,6 +66,7 @@ pub struct AiSettingsDto {
     pub request_timeout_ms: u64,
     pub semantic_index_enabled: bool,
     pub semantic_index_ac_power_only: bool,
+    pub image_text_index_enabled: bool,
     pub onboarding_dismissed: bool,
     pub allow_openai_fallback_prompt: bool,
 }
@@ -80,6 +81,7 @@ impl From<AiSettings> for AiSettingsDto {
             request_timeout_ms: value.request_timeout_ms,
             semantic_index_enabled: value.semantic_index_enabled,
             semantic_index_ac_power_only: value.semantic_index_ac_power_only,
+            image_text_index_enabled: value.image_text_index_enabled,
             onboarding_dismissed: value.onboarding_dismissed,
             allow_openai_fallback_prompt: value.allow_openai_fallback_prompt,
         }
@@ -96,6 +98,7 @@ impl From<AiSettingsDto> for AiSettings {
             request_timeout_ms: value.request_timeout_ms,
             semantic_index_enabled: value.semantic_index_enabled,
             semantic_index_ac_power_only: value.semantic_index_ac_power_only,
+            image_text_index_enabled: value.image_text_index_enabled,
             onboarding_dismissed: value.onboarding_dismissed,
             allow_openai_fallback_prompt: value.allow_openai_fallback_prompt,
         }
@@ -710,6 +713,7 @@ mod tests {
                 request_timeout_ms: 12_345,
                 semantic_index_enabled: true,
                 semantic_index_ac_power_only: false,
+                image_text_index_enabled: true,
                 onboarding_dismissed: true,
                 allow_openai_fallback_prompt: false,
             },

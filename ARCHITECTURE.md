@@ -539,6 +539,22 @@ detector that triggered (`ApiKeyPattern`, `JwtPattern`, …).
 
 **`EntryLifecycle`** — `pinned`, `archived`, `deleted_at`, `expires_at`.
 
+**`RecognizedText`** / **`TextRecognizer`** — text recognized in an image,
+line by line, each line with a `TextBounds` box as fractions of the image
+size (top-left origin), and the on-device recognizer seam that produces it.
+`nagori-ai-apple::AppleTextRecognizer` implements it over Vision's
+`VNRecognizeTextRequest` (accurate level, Japanese and English, language
+correction on) through a synchronous Swift export that hands the lines back
+as a tab-separated frame.
+
+**`EntryLabel`** — a user-given `name` plus `aliases` (extra words that should
+find the entry), validated and tidied by `EntryLabel::new` (trimmed, inner
+whitespace collapsed, duplicate aliases dropped, at most 80 characters each and
+8 aliases). It is not part of `ClipboardEntry`: it lives in its own table so a
+rename never rewrites the body index and a body edit never drops the name.
+Naming an entry also pins it (`NagoriRuntime::set_entry_label`), since a name
+exists to recall the entry later.
+
 **`ClipboardSnapshot`** + **`ClipboardRepresentation`** — raw OS read.
 The platform adapter returns this; the factory turns it into a domain
 entry.
@@ -617,6 +633,8 @@ are forward-only; downgrades are not supported.
 | `entries` | Full entry rows. Owns metadata only; the payload bytes (text, image, etc.) live in `entry_representations`. The `representation_set_hash` column carries the joint hash of the entry's representations and is the unique dedupe key over live rows, so two snapshots with the same primary text but different HTML/RTF/file-list alternatives land in distinct rows. The denormalised `total_byte_count` column is maintained by triggers on `entry_representations` so the retention/byte-budget paths read a single column instead of joining and summing. |
 | `entry_representations` | Per-representation payload rows owned by an entry (`entry_id` FK with `ON DELETE CASCADE`). Each row carries `role`, `mime_type`, `platform_format`, `ordinal`, exactly one of inline `text_content` or `payload_blob`, and a denormalised `byte_count` used by the retention budget. Snapshot captures persist one row per validated representation: `role = 'primary'` for the chosen body, `role = 'plain_fallback'` for the sibling `text/plain` of a paired `RichText`, and `role = 'alternative'` for the remainder (HTML, RTF, image bytes, file URLs). Synthesised entries (CLI `add_text`, redacted Secret rows) still write a single `primary` row. `(entry_id, role, ordinal)` is unique. |
 | `entry_thumbnails` | Derived 512px raster previews for `Image`-kind entries (and file lists that carried an accompanying image render) (JPEG for opaque sources, PNG for sources carrying alpha so transparent pixels survive into the inline preview), keyed by `entry_id` with `ON DELETE CASCADE`. Strictly a cache: rows are generated lazily on the first preview request, are regenerable from the primary representation, and an LRU sweep keyed on `last_accessed_at` (touched on every `get_thumbnail` hit) enforces `AppSettings::max_thumbnail_total_bytes` (default 64 MiB). Kept in a dedicated table (rather than in `entry_representations`) so a paste / copy-back can never accidentally hand a downscaled raster to the host clipboard. |
+| `entry_text_recognition` | Text recognized in image entries, keyed by `entry_id` with `ON DELETE CASCADE`. `content_hash` pins a row to the image bytes it was read from, `status` records an image that could not be read (`failed`) so the background indexer does not retry it, and `text` / `lines_json` hold the recognized text already shaped by the privacy policy. The same text is written into the image's `search_documents.normalized_text`, which is how an image is found by what it shows. |
+| `entry_labels` | User-given name and aliases per entry (`EntryLabel`), keyed by `entry_id` with `ON DELETE CASCADE`. `search_text` holds the newline-delimited normalized name and aliases (with a leading and trailing newline), which the label search branch scans to classify a whole-term, prefix, or substring hit. Only the entries a user named have a row, so the scan needs no index. |
 | `search_documents` | Title, preview, normalized text per entry — the source of truth for what FTS / ngrams index. Carries an explicit `doc_id INTEGER PRIMARY KEY` so the rowid is stable across `VACUUM` and the FTS5 external-content pointer remains valid. `ngram_index_version` records which gram-generator revision built the row's grams so an upgrade can rebuild stale rows in the background. |
 | `search_fts` | FTS5 external-content virtual table (`content = 'search_documents'`, `content_rowid = 'doc_id'`) over `title` / `preview` / `normalized_text` (`unicode61`). Kept in sync by `AFTER INSERT/DELETE/UPDATE` triggers on `search_documents`; application code never writes to it directly. FTS5's `secure-delete` option is on (persisted in `search_fts_config`), so a delete rewrites the segment holding the removed tokens instead of only appending a delete marker that leaves them readable in `search_fts_data`. |
 | `ngrams` | `(gram, entry_id, position)` triples for CJK partial-match lookup, capped at `MAX_NGRAM_INPUT_CHARS` (4096) characters per entry. `entry_id` FK to `entries(id)` with `ON DELETE CASCADE` so hard-deletes don't leak posting rows. |
@@ -811,6 +829,72 @@ so its extra cost is bounded by the slot and index-map overhead of at most the
 same rows. Duplicate branch hits merge their strongest `TextMatch` while FTS
 and ngram signals remain attached by entry id.
 
+**Names.** Every text plan also runs a label branch
+(`SearchCandidateProvider::label_candidates`) next to the substring / FTS /
+ngram branches: it scans `entry_labels.search_text` for the normalized query
+over the whole live history (names are few, so no recent window applies) and
+tags each hit with a `label_match` (`Exact` for a whole name or alias, `Prefix`,
+or `Substring`). The merge keeps the strongest `label_match` per entry, and the
+ranker adds a name bonus large enough that a name hit outranks a body hit of the
+same strength, with `RankReason::NameMatch`. Every candidate projection carries
+the entry's name (a primary-key lookup), so named rows show it in recent
+listings too.
+
+**Image text.** With *Search text in images* on (`AiSettings::
+image_text_index_enabled`, off by default), the daemon's background indexer
+(`NagoriRuntime::run_text_recognition_indexer`, supervised together with the
+semantic indexer and woken by captures) reads every Public / Unknown image
+entry that has no recognition for its current bytes, newest first, through
+the wired `TextRecognizer`, and `SqliteStore::record_text_recognition`
+stores the result and rewrites the image's search document with the
+normalized text — so every text plan (substring, FTS, CJK ngram) finds the
+image without a separate branch. The recognized text runs through the
+capture classifier first (`shape_recognized_text`): text that reads as
+private or secret is redacted as a whole (so a secret spanning lines, such
+as a PEM block, is caught) and split back over the recognized lines, and
+because the picture itself still shows that content the entry's
+sensitivity is raised to match (`Blocked` maps to `Secret`) and its cached
+thumbnail is dropped — whether or not the text is stored — and the desktop
+is told to refresh, so the preview stops showing the image. Each row
+carries the content-policy fingerprint it was shaped under
+(`AppSettings::semantic_policy_hash`): a policy edit un-indexes the stale
+rows and the images are read again. Masked images are never read (the
+payload read itself re-checks readability), an outcome recorded after the
+entry's bytes or sensitivity changed is discarded, a failed duplicate read
+never replaces a stored recognition, and turning the setting off erases
+every row, restores the image documents, and truncates the WAL like other
+purges. Storing and erasing are ordered by a runtime `RwLock` gate under
+which a store re-checks the setting, so a read that finishes after the
+setting was turned off is never written back. The explicit *Extract text*
+action (`NagoriRuntime::recognize_entry_text`) works with the setting off
+too: it answers from the stored recognition when there is one for the
+current policy, reads the image otherwise, and stores the text only while
+the setting is on.
+
+**Match excerpts.** A stored preview is the head of the body, so rows that
+share an opening (meeting notes, log dumps) all read the same even when each
+matched further down. After ranking and truncation, `SearchService` asks the
+provider's `match_windows` for the final page only — Public / Unknown rows of
+the text-shaped kinds (`Text`, `Code`, `RichText`, `Unknown`) plus images,
+whose text is their recognized text (an image has no head preview, so every
+match in it yields an excerpt), for text plans
+(never `Recent` or `Semantic`). For each row `SQLite` reads the plain body
+once, looks for the whole normalized query and then up to three of its words
+(longest first) with `instr(lower(body), term)`, and returns only a bounded
+window around the first hit; a match within the first
+`MATCH_EXCERPT_HEAD_CHARS` characters is already visible and is skipped.
+`MatchWindow::excerpt` (core) compacts the window into a one-line excerpt
+that leads with a little context (`…接続プールの上限を20に変更…`), narrowing
+code to the line holding the match, and the excerpt replaces the row's
+`preview`. Masked rows keep their redacted preview because the excerpt would
+come from the stored body (the window query re-checks the row's current
+sensitivity, since a re-capture can raise it after the candidate was read);
+URL rows keep the URL the row parses; images and
+file lists keep their own projections. `lower()` folds ASCII only, so
+character offsets stay exact, and a match that exists only after NFKC
+folding (full-width Latin) or kana folding simply keeps the head preview.
+The lookup is cosmetic: a failure leaves the head previews in place.
+
 **Bounded admission + cancellation.** Each candidate fetch runs through
 `SqliteStore::run_search_blocking`, which adds two guards over the plain
 blocking path. *Bounded admission*: a search-admission semaphore
@@ -893,9 +977,9 @@ costs for entries older than it: Auto still recalls whole identifiers,
 CJK, but misses the tail of a `snake_case` identifier (`order_tot`), the
 middle of a camelCase one (`UserProfile`), a cut-off URL path
 (`github.com/acme/wid`) and a single kana, all of which `Exact` recalls.
-The palette therefore offers a full-history `Exact` search when Auto comes
-back empty (see the full-history bullet in
-[section 12](#12-tauri-boundary-and-frontend)).
+The palette therefore offers a full-history `Exact` search, both when Auto
+comes back empty and below a non-empty Auto result list (see the
+full-history bullet in [section 12](#12-tauri-boundary-and-frontend)).
 
 **Recent-search cache.** A bounded LRU
 (`nagori-daemon::search_cache::RecentSearchCache`, default capacity 32)
@@ -929,7 +1013,7 @@ daemon is alive.
 with the index scores and metadata signals:
 
 ```text
-score = exact_match + prefix + substring + fts + ngram
+score = name_match + exact_match + prefix + substring + fts + ngram
       + recency + frequency + pin + source_bonus
 ```
 
@@ -1266,6 +1350,7 @@ struct PlatformCapabilities {
     global_hotkey: Capability, frontmost_app: Capability,
     permissions_ui: Capability, update_check: Capability,
     preview_quick_look: Capability, ai_actions: Capability,
+    image_text_recognition: Capability,
 }
 
 enum Capability {
@@ -1279,9 +1364,11 @@ enum Capability {
 
 `nagori_platform_native::capabilities()` aggregates per-OS reporters
 (`nagori_platform_{macos,windows,linux}`) at build time and caches the
-matrix on the `NagoriRuntime`. One row is reconciled rather than static:
+matrix on the `NagoriRuntime`. Two rows are reconciled rather than static:
 `NagoriRuntimeBuilder` overwrites `ai_actions` from whether an `ai_engine`
-is actually wired (`Available` if so, else `Unsupported`). That keeps the
+is actually wired (`Available` if so, else `Unsupported`), and
+`image_text_recognition` the same way from whether a `TextRecognizer` is
+wired (Vision on macOS, through `nagori-platform-native`). That keeps the
 matrix honest about a host's *real* AI backend — it is the single switch,
 so a host that gains one (today macOS; a future cross-OS provider) lights
 the desktop's AI surfaces up with no second edit, and a host with none
@@ -1919,7 +2006,10 @@ not duplicate runtime logic.
   selected row that grows to two lines was considered and rejected: the rows
   below would shift under a stationary pointer (and hover selects), the list
   height is sized from a fixed per-row height, and the pane already shows
-  the extra detail for the highlighted row. The row's preview text
+  the extra detail for the highlighted row. For a query-driven row the
+  preview text is the backend's match excerpt when the match sits past the
+  head of the body (see *Match excerpts* in [section 8](#8-search)), so the
+  row shows the matched passage instead of a shared opening. The row's preview text
   is run through the shared `lib/highlightQuery` helper — a
   case-insensitive raw-substring scan (one pass per whitespace term,
   overlapping ranges merged) — so exact / substring / CJK hits are marked
@@ -2019,15 +2109,20 @@ not duplicate runtime logic.
   *Show more*, focus moves to the first newly loaded row (found by id, since
   the re-rank may place it above the old end). At the 200-row cap the footer drops the
   button and suggests narrowing with the query or filters.
-- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`).
-  When the fast Auto search for a non-empty query returns nothing, the
-  empty state says the quick search found nothing and offers *Search all
-  history*, which re-runs the query as `SearchMode::Exact` — an unbounded
-  substring scan that also finds fragments the bounded window misses. The
-  choice is scoped like the expanded limit: same-scope refreshes keep the
-  wider search, a new query or filter change returns to Auto. The status
-  bar marks results that came from it, and an empty full-history result
-  says no entry contains the text instead of offering the search again.
+- Full-history search (`stores/searchQuery`, `SearchEmptyState.svelte`,
+  `ResultList.svelte`). When the fast Auto search for a non-empty query
+  returns nothing, the empty state says the quick search found nothing and
+  offers *Search all history*, which re-runs the query as
+  `SearchMode::Exact` — an unbounded substring scan that also finds
+  fragments the bounded window misses. A non-empty Auto result list offers
+  the same search in a footer (*Not in this list?*), so an old identifier
+  or URL fragment stays reachable while recent look-alikes fill the list;
+  the search box takes focus first, because the footer unmounts once the
+  wider results land. The choice is scoped like the expanded limit:
+  same-scope refreshes keep the wider search, a new query or filter change
+  returns to Auto. The status bar marks results that came from it, and an
+  empty full-history result says no entry contains the text instead of
+  offering the search again.
 - `PreviewPane.svelte` — hydrates full preview lazily through
   `get_entry_preview` (head+tail-truncated at 128 KiB / 4 000 lines so the
   end of large bodies stays visible). Includes a token-based syntax
@@ -2040,7 +2135,9 @@ not duplicate runtime logic.
   carries its match ordinal; when there are several matches, or one in a
   body longer than 20 lines, a stepper (*N matches*, ↑ / ↓ buttons with a
   polite position readout) scrolls to the previous / next match and styles
-  it as current. A failed preview fetch shows its error with *Try again*
+  it as current. A new body or query scrolls the body's own scroller so the
+  first match is in view when it lies outside it, leaving a body whose first
+  match is already visible at its start. A failed preview fetch shows its error with *Try again*
   (`retryPreview`, which forces `hydratePreview` past its settled-state
   guard — a failed query-only refetch keeps the old body on screen, which the
   guard would otherwise treat as done). When a search query matches text
@@ -2188,6 +2285,37 @@ not duplicate runtime logic.
   operation's error; starting another quick/AI action, changing target, or
   closing the panel clears the feedback. Run and attempt tokens prevent late
   copy/save completions or success timers from changing a newer result's state.
+  A settled result can be edited in place: *Edit* swaps the result for a
+  textarea whose text the result buttons then use, so a translated name or a
+  SQL value can be fixed before pasting without leaving the palette. Two
+  picker items work on the entry itself rather than transforming it. *Edit
+  text* loads the entry's full body (`get_editable_entry_text`, refused for
+  masked and non-text entries, so the button is disabled with a reason for
+  those) straight into the editor; *Paste* then pastes the edited copy once,
+  and *Update item* (`update_entry_text`) replaces the stored body instead —
+  the new body is classified and policy-checked like a new entry, and the
+  entry keeps its id, pin, name, use count and source while its
+  representations, search document, thumbnail and embedding are rebuilt or
+  dropped (`SqliteStore::replace_content`; an embedding still being computed
+  for the old body is not written back, since vector writes require the
+  entry's current content hash), turning it into a plain text entry, and the
+  preview on screen is re-read (`reloadPreview`).
+  *Update item* is offered only for the entry's own body, never for a
+  transform result. *Extract text* (shown where the
+  `image_text_recognition` capability is available, enabled for readable
+  image entries) reads the image on device (`recognize_image_text`) and
+  lands the text in the same editable work area, so a line of a screenshot
+  can be copied, pasted or saved as a new item; an image with no text says
+  so. In the preview, an image's recognized lines that match the query are
+  outlined on the inline picture (the expanded view letterboxes the image
+  and skips them), and the recognized text is listed under it as
+  selectable text that opens on its own when it holds the match; image
+  result rows show the matched passage of that text next to the pixel
+  dimensions. *Settings → AI → Search text in images* turns the background
+  indexer on. *Name…* (`EntryLabelForm.svelte`) opens a small form for
+  the name and comma-separated aliases (`get_entry_label` /
+  `set_entry_label`); saving pins the entry and refreshes the list, where
+  `ResultItem.svelte` leads a named row with its name in bold.
   Clearing the whole history is not offered here — that destructive action
   lives on the tray menu and the palette's own `clear-history` chord, both
   behind the confirmation dialog described below.

@@ -1,7 +1,7 @@
 //! Build script for `nagori-ai-apple`.
 //!
 //! On macOS it compiles the bundled Swift package (which links the
-//! `FoundationModels` / Translation / `NaturalLanguage` frameworks) into a
+//! `FoundationModels` / Translation / `NaturalLanguage` / Vision frameworks) into a
 //! static library and links it into the host crate. On every other platform it
 //! is a no-op so the crate still compiles as a plain-Rust workspace member (mock
 //! fixtures, longest-common-prefix delta, and the simulated stream driver all
@@ -45,6 +45,8 @@ fn link_swift() {
     println!("cargo:rustc-link-lib=framework=NaturalLanguage");
     // IOKit backs the AC-power probe the semantic indexer's battery guard uses.
     println!("cargo:rustc-link-lib=framework=IOKit");
+    // Vision backs on-device text recognition in images.
+    println!("cargo:rustc-link-lib=framework=Vision");
 
     // Rebuild when the Swift sources change.
     println!("cargo:rerun-if-changed=swift/Sources");

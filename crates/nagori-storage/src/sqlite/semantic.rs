@@ -517,11 +517,19 @@ impl SqliteStore {
                 .map_err(storage_err)?;
             check_policy_guard(&tx, expected_policy_hash.as_deref())?;
             {
+                // Only store a vector for the body it was embedded from: the
+                // entry's body can be replaced while a batch is in flight, and
+                // writing the old body's vector back would keep (and, if the
+                // new body is never embedded, strand) data derived from text
+                // the entry no longer holds.
                 let mut stmt = tx
                     .prepare_cached(
                         "INSERT INTO entry_embeddings
                             (entry_id, vector, dimension, content_hash, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         SELECT ?1, ?2, ?3, ?4, ?5
+                         WHERE EXISTS (
+                             SELECT 1 FROM entries WHERE id = ?1 AND content_hash = ?4
+                         )
                          ON CONFLICT(entry_id) DO UPDATE SET
                             vector = excluded.vector,
                             dimension = excluded.dimension,
@@ -827,6 +835,7 @@ impl SqliteStore {
                         language,
                         image_width,
                         image_height,
+                        label: None,
                     })
                 })
                 .map_err(storage_err)?;
@@ -884,6 +893,33 @@ mod tests {
 
         store.semantic_clear().await.unwrap();
         assert!(store.semantic_meta().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_skips_a_vector_whose_body_was_replaced_mid_batch() {
+        let store = SqliteStore::open_memory().unwrap();
+        let id = insert_text(&store, "old body").await;
+        let old_hash = store.semantic_pending(10).await.unwrap()[0]
+            .content_hash
+            .clone();
+        // The body changes while the old body's vector is being computed.
+        store
+            .replace_content(id, EntryFactory::from_text("new body"))
+            .await
+            .unwrap();
+        store
+            .semantic_upsert(id, old_hash, vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        assert_eq!(store.semantic_counts().await.unwrap().indexed, 0);
+        let rows: i64 = store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM entry_embeddings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "the old body's vector must not be written back");
     }
 
     #[tokio::test]
@@ -1543,11 +1579,16 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
 
-        // Overwriting with a stale hash (entry awaiting re-embedding) drops the
-        // vector from search results rather than ranking on outdated content.
+        // Once the entry's body (and so its hash) moves on, the stored vector
+        // is stale while the entry awaits re-embedding: it drops out of search
+        // results rather than ranking on outdated content.
         store
-            .semantic_upsert(id, "stale".to_owned(), vec![1.0, 0.0, 0.0])
-            .await
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE entries SET content_hash = 'changed' WHERE id = ?1",
+                [id.to_string()],
+            )
             .unwrap();
         let hits = store
             .semantic_search(vec![1.0, 0.0, 0.0], SearchFilters::default(), 10, None)

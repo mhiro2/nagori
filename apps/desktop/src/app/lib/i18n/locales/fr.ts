@@ -17,6 +17,7 @@ export const fr: Messages = {
         'La recherche rapide n’a rien trouvé. Cherchez dans tout l’historique pour inclure aussi les éléments plus anciens.',
       searchFullHistory: 'Chercher dans tout l’historique',
       noFullHistoryMatches: 'Aucun élément ne contient ce texte.',
+      notInResults: 'Pas dans la liste ?',
       noFilterMatches: 'Aucune entrée ne correspond à ces filtres.',
       capturePaused:
         'La capture est en pause. Reprenez-la ci-dessous pour enregistrer de nouvelles entrées.',
@@ -103,6 +104,7 @@ export const fr: Messages = {
     },
   },
   rankReason: {
+    name: 'Nom',
     exact: 'Exact',
     prefix: 'Préfixe',
     substring: 'Correspondance',
@@ -165,6 +167,7 @@ export const fr: Messages = {
       loading: 'Chargement de l’image…',
       unavailable: 'Image indisponible.',
       alt: 'Aperçu de l’image du presse-papiers',
+      recognizedText: "Texte dans l'image",
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -292,6 +295,28 @@ export const fr: Messages = {
     previousResult: 'Résultat précédent',
     pasteResult: 'Coller',
     pasteFailed: 'Impossible de coller le résultat.',
+    nameEntry: 'Nommer…',
+    editText: 'Modifier le texte',
+    extractText: 'Extraire le texte',
+    notReadable: 'Les images masquées ne sont pas lues.',
+    noTextFound: "Aucun texte n'a été trouvé dans cette image.",
+    imageOnly: 'Seules les images contiennent du texte à extraire.',
+    notEditable: 'Les éléments masqués ne peuvent pas être modifiés.',
+    editResult: 'Modifier',
+    editorLabel: 'Texte du résultat modifiable',
+    updateEntry: "Mettre à jour l'élément",
+    updated: 'Mis à jour',
+    updateFailed: "Impossible de mettre à jour l'élément :",
+    nameForm: {
+      title: 'Nommer cet élément',
+      name: 'Nom',
+      aliases: 'Trouvé aussi avec',
+      aliasesHint: 'Séparez les mots par des virgules.',
+      save: 'Enregistrer le nom',
+      remove: 'Supprimer le nom',
+      cancel: 'Annuler',
+      pinNote: 'Nommer un élément l’épingle aussi.',
+    },
   },
   pastePicker: {
     title: 'Coller en tant que',
@@ -405,6 +430,9 @@ export const fr: Messages = {
       semanticIndexAcPowerOnly: 'Indexer uniquement sur secteur',
       semanticIndexAcPowerOnlyHelp:
         'Suspend l’embedding en arrière-plan sur batterie pour économiser l’énergie. Désactivez pour indexer aussi sur batterie.',
+      imageTextIndex: 'Rechercher le texte des images',
+      imageTextIndexHelp:
+        "Reconnaît le texte des images en arrière-plan sur cet appareil, pour retrouver une capture d'écran par le texte qu'elle montre. Le texte qui semble secret est masqué, ainsi que son image. La désactivation efface le texte reconnu.",
       semanticIndexRebuild: 'Reconstruire l’index',
       semanticIndexStatus: 'État de l’index',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

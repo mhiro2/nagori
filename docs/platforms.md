@@ -301,6 +301,12 @@ one being unavailable does not disable the others:
   by macOS on first use). The embedder is pinned to one language/model
   so every stored vector shares a comparable space.
 
+- **Text in images** (the action panel's *Extract text* and
+  *Search text in images*) uses the Vision framework's text recognizer,
+  also **independent of Apple Intelligence** and available on every
+  supported macOS. Windows and Linux report the `image_text_recognition`
+  capability as unsupported, and those surfaces are hidden there.
+
 All model and language assets are downloaded and managed by macOS, not
 bundled with Nagori. On macOS, when a capability is unavailable (e.g.
 Apple Intelligence not yet enabled) its AI action buttons are disabled

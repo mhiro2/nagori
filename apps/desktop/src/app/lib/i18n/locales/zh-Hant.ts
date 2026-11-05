@@ -15,6 +15,7 @@ export const zhHant: Messages = {
       noQuickMatches: '快速搜尋找不到結果。搜尋全部紀錄即可一併查找較舊的項目。',
       searchFullHistory: '搜尋全部紀錄',
       noFullHistoryMatches: '沒有項目包含此文字。',
+      notInResults: '清單中沒有？',
       noFilterMatches: '沒有符合篩選條件的項目。',
       capturePaused: '擷取已暫停。請在下方恢復以儲存新項目。',
       retry: '重試',
@@ -89,6 +90,7 @@ export const zhHant: Messages = {
     blocked: { label: '已隱藏', description: '遭隱私規則封鎖：內容已隱藏，無法貼上。' },
   },
   rankReason: {
+    name: '名稱',
     exact: '精確',
     prefix: '前綴',
     substring: '符合',
@@ -149,6 +151,7 @@ export const zhHant: Messages = {
       loading: '正在載入影像…',
       unavailable: '影像無法使用。',
       alt: '剪貼簿影像預覽',
+      recognizedText: '圖片中的文字',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -261,6 +264,28 @@ export const zhHant: Messages = {
     previousResult: '上次的結果',
     pasteResult: '貼上',
     pasteFailed: '無法貼上結果。',
+    nameEntry: '命名…',
+    editText: '編輯文字',
+    extractText: '擷取文字',
+    notReadable: '不會讀取已遮蔽的圖片。',
+    noTextFound: '未在此圖片中找到文字。',
+    imageOnly: '只能從圖片中擷取文字。',
+    notEditable: '已遮蔽的項目無法編輯。',
+    editResult: '編輯',
+    editorLabel: '可編輯的結果文字',
+    updateEntry: '更新項目',
+    updated: '已更新',
+    updateFailed: '無法更新項目：',
+    nameForm: {
+      title: '為此項目命名',
+      name: '名稱',
+      aliases: '其他搜尋字詞',
+      aliasesHint: '多個字詞請以逗號分隔。',
+      save: '儲存名稱',
+      remove: '移除名稱',
+      cancel: '取消',
+      pinNote: '命名的項目也會被釘選。',
+    },
   },
   pastePicker: {
     title: '貼上格式',
@@ -366,6 +391,9 @@ export const zhHant: Messages = {
       semanticIndexAcPowerOnly: '僅在接上電源時建立索引',
       semanticIndexAcPowerOnlyHelp:
         '使用電池時暫停背景嵌入以節省電力。關閉後在電池供電時也會建立索引。',
+      imageTextIndex: '搜尋圖片中的文字',
+      imageTextIndexHelp:
+        '在本裝置上於背景辨識圖片中的文字，以便依截圖顯示的文字尋找。看似機密的文字會被遮蔽，該圖片也會被遮蔽。關閉後會清除已辨識的文字。',
       semanticIndexRebuild: '重建索引',
       semanticIndexStatus: '索引狀態',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

@@ -16,6 +16,7 @@ export const ja: Messages = {
         'クイック検索では見つかりませんでした。古い項目の中まで探すには、すべての履歴を検索してください。',
       searchFullHistory: 'すべての履歴を検索',
       noFullHistoryMatches: 'この文字列を含む項目はありません。',
+      notInResults: 'この中にありませんか？',
       noFilterMatches: 'フィルタに一致する項目がありません。',
       capturePaused: '取り込みは一時停止中です。下のボタンで再開できます。',
       retry: '再試行',
@@ -98,6 +99,7 @@ export const ja: Messages = {
     },
   },
   rankReason: {
+    name: '名前',
     exact: '完全一致',
     prefix: '前方一致',
     substring: '部分一致',
@@ -158,6 +160,7 @@ export const ja: Messages = {
       loading: '画像を読み込み中…',
       unavailable: '画像を表示できません。',
       alt: 'クリップボード画像のプレビュー',
+      recognizedText: '画像内の文字',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -278,6 +281,28 @@ export const ja: Messages = {
     previousResult: '前回の結果',
     pasteResult: 'ペースト',
     pasteFailed: '結果をペーストできませんでした。',
+    nameEntry: '名前を付ける…',
+    editText: 'テキストを編集',
+    extractText: '文字を抽出',
+    notReadable: 'マスクされた画像は読み取りません。',
+    noTextFound: 'この画像に文字は見つかりませんでした。',
+    imageOnly: '文字を抽出できるのは画像だけです。',
+    notEditable: 'マスクされた項目は編集できません。',
+    editResult: '編集',
+    editorLabel: '編集できる結果テキスト',
+    updateEntry: '項目を更新',
+    updated: '更新しました',
+    updateFailed: '項目を更新できませんでした:',
+    nameForm: {
+      title: 'この項目に名前を付ける',
+      name: '名前',
+      aliases: '別名（この語でも検索）',
+      aliasesHint: '複数ある場合はカンマで区切ります。',
+      save: '名前を保存',
+      remove: '名前を削除',
+      cancel: 'キャンセル',
+      pinNote: '名前を付けた項目はピン留めされます。',
+    },
   },
   pastePicker: {
     title: 'ペースト形式',
@@ -389,6 +414,9 @@ export const ja: Messages = {
       semanticIndexAcPowerOnly: '電源接続中のみインデックスを作成',
       semanticIndexAcPowerOnlyHelp:
         'バッテリー駆動中はバックグラウンドの埋め込み生成を一時停止して節電します。オフにするとバッテリー駆動中も作成します。',
+      imageTextIndex: '画像内の文字を検索',
+      imageTextIndexHelp:
+        '画像内の文字をこの端末上でバックグラウンド認識し、スクリーンショットを写っている文字で探せるようにします。機密情報らしい文字は伏せ字にし、その画像はマスクします。オフにすると認識した文字を消去します。',
       semanticIndexRebuild: 'インデックスを再構築',
       semanticIndexStatus: 'インデックスの状態',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

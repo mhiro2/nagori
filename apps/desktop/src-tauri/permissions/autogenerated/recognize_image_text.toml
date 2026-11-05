@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recognize-image-text"
+description = "Enables the recognize_image_text command without any pre-configured scope."
+commands.allow = ["recognize_image_text"]
+
+[[permission]]
+identifier = "deny-recognize-image-text"
+description = "Denies the recognize_image_text command without any pre-configured scope."
+commands.deny = ["recognize_image_text"]

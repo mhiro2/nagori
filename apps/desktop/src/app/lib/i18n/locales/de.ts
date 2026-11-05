@@ -17,6 +17,7 @@ export const de: Messages = {
         'Die Schnellsuche hat nichts gefunden. Durchsuche den gesamten Verlauf, um auch ältere Einträge zu prüfen.',
       searchFullHistory: 'Gesamten Verlauf durchsuchen',
       noFullHistoryMatches: 'Kein Eintrag enthält diesen Text.',
+      notInResults: 'Nicht dabei?',
       noFilterMatches: 'Keine Einträge entsprechen diesen Filtern.',
       capturePaused:
         'Die Erfassung ist pausiert. Setzen Sie sie unten fort, um neue Einträge zu speichern.',
@@ -104,6 +105,7 @@ export const de: Messages = {
     },
   },
   rankReason: {
+    name: 'Name',
     exact: 'Exakt',
     prefix: 'Präfix',
     substring: 'Treffer',
@@ -166,6 +168,7 @@ export const de: Messages = {
       loading: 'Bild wird geladen …',
       unavailable: 'Bild nicht verfügbar.',
       alt: 'Bildvorschau aus der Zwischenablage',
+      recognizedText: 'Text im Bild',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -293,6 +296,28 @@ export const de: Messages = {
     previousResult: 'Vorheriges Ergebnis',
     pasteResult: 'Einfügen',
     pasteFailed: 'Das Ergebnis konnte nicht eingefügt werden.',
+    nameEntry: 'Benennen…',
+    editText: 'Text bearbeiten',
+    extractText: 'Text erkennen',
+    notReadable: 'Maskierte Bilder werden nicht gelesen.',
+    noTextFound: 'In diesem Bild wurde kein Text gefunden.',
+    imageOnly: 'Text lässt sich nur aus Bildern erkennen.',
+    notEditable: 'Maskierte Einträge können nicht bearbeitet werden.',
+    editResult: 'Bearbeiten',
+    editorLabel: 'Bearbeitbarer Ergebnistext',
+    updateEntry: 'Eintrag aktualisieren',
+    updated: 'Aktualisiert',
+    updateFailed: 'Eintrag konnte nicht aktualisiert werden:',
+    nameForm: {
+      title: 'Diesen Eintrag benennen',
+      name: 'Name',
+      aliases: 'Auch gefunden über',
+      aliasesHint: 'Begriffe mit Kommas trennen.',
+      save: 'Name speichern',
+      remove: 'Name entfernen',
+      cancel: 'Abbrechen',
+      pinNote: 'Ein benannter Eintrag wird auch angeheftet.',
+    },
   },
   pastePicker: {
     title: 'Einfügen als',
@@ -406,6 +431,9 @@ export const de: Messages = {
       semanticIndexAcPowerOnly: 'Nur bei Netzstrom indizieren',
       semanticIndexAcPowerOnlyHelp:
         'Pausiert das Embedding im Hintergrund im Akkubetrieb, um Strom zu sparen. Ausschalten, um auch im Akkubetrieb zu indizieren.',
+      imageTextIndex: 'Text in Bildern durchsuchen',
+      imageTextIndexHelp:
+        'Erkennt Text in Bildern im Hintergrund auf diesem Gerät, damit Bildschirmfotos über den gezeigten Text gefunden werden. Geheim wirkender Text wird geschwärzt und das Bild maskiert. Beim Ausschalten wird der erkannte Text gelöscht.',
       semanticIndexRebuild: 'Index neu aufbauen',
       semanticIndexStatus: 'Indexstatus',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

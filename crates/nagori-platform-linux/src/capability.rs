@@ -32,7 +32,8 @@
 //! don't disagree on a flaky compositor.
 
 use nagori_platform::{
-    Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
+    Capability, NO_AI_ENGINE_REASON, NO_TEXT_RECOGNIZER_REASON, Platform, PlatformCapabilities,
+    SupportTier,
 };
 
 use crate::paste::LinuxAutoPaste;
@@ -109,6 +110,9 @@ pub fn report_capabilities_for(auto_paste: LinuxAutoPaste) -> PlatformCapabiliti
         // a provider (e.g. OpenAI-compatible) is wired.
         ai_actions: Capability::Unsupported {
             reason: NO_AI_ENGINE_REASON.to_owned(),
+        },
+        image_text_recognition: Capability::Unsupported {
+            reason: NO_TEXT_RECOGNIZER_REASON.to_owned(),
         },
     }
 }

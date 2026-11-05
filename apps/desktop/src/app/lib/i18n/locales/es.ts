@@ -17,6 +17,7 @@ export const es: Messages = {
         'La búsqueda rápida no encontró nada. Busca en todo el historial para revisar también los elementos antiguos.',
       searchFullHistory: 'Buscar en todo el historial',
       noFullHistoryMatches: 'Ningún elemento contiene este texto.',
+      notInResults: '¿No está en la lista?',
       noFilterMatches: 'No hay entradas que coincidan con estos filtros.',
       capturePaused: 'La captura está pausada. Reanúdala abajo para guardar nuevas entradas.',
       retry: 'Reintentar',
@@ -103,6 +104,7 @@ export const es: Messages = {
     },
   },
   rankReason: {
+    name: 'Nombre',
     exact: 'Exacto',
     prefix: 'Prefijo',
     substring: 'Coincidencia',
@@ -165,6 +167,7 @@ export const es: Messages = {
       loading: 'Cargando imagen…',
       unavailable: 'Imagen no disponible.',
       alt: 'Vista previa de imagen del portapapeles',
+      recognizedText: 'Texto en la imagen',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -291,6 +294,28 @@ export const es: Messages = {
     previousResult: 'Resultado anterior',
     pasteResult: 'Pegar',
     pasteFailed: 'No se pudo pegar el resultado.',
+    nameEntry: 'Nombrar…',
+    editText: 'Editar texto',
+    extractText: 'Extraer texto',
+    notReadable: 'Las imágenes enmascaradas no se leen.',
+    noTextFound: 'No se encontró texto en esta imagen.',
+    imageOnly: 'Solo se puede extraer texto de imágenes.',
+    notEditable: 'Los elementos enmascarados no se pueden editar.',
+    editResult: 'Editar',
+    editorLabel: 'Texto del resultado editable',
+    updateEntry: 'Actualizar elemento',
+    updated: 'Actualizado',
+    updateFailed: 'No se pudo actualizar el elemento:',
+    nameForm: {
+      title: 'Nombrar este elemento',
+      name: 'Nombre',
+      aliases: 'También se encuentra con',
+      aliasesHint: 'Separa las palabras con comas.',
+      save: 'Guardar nombre',
+      remove: 'Quitar nombre',
+      cancel: 'Cancelar',
+      pinNote: 'Nombrar un elemento también lo fija.',
+    },
   },
   pastePicker: {
     title: 'Pegar como',
@@ -404,6 +429,9 @@ export const es: Messages = {
       semanticIndexAcPowerOnly: 'Indexar solo con corriente alterna',
       semanticIndexAcPowerOnlyHelp:
         'Pausa el embedding en segundo plano con batería para ahorrar energía. Desactívalo para indexar también con batería.',
+      imageTextIndex: 'Buscar texto en imágenes',
+      imageTextIndexHelp:
+        'Reconoce el texto de las imágenes en segundo plano en este dispositivo para encontrar capturas por el texto que muestran. El texto que parece secreto se oculta y su imagen se enmascara. Al desactivarlo se borra el texto reconocido.',
       semanticIndexRebuild: 'Reconstruir índice',
       semanticIndexStatus: 'Estado del índice',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

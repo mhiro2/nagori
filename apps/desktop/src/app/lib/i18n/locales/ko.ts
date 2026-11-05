@@ -16,6 +16,7 @@ export const ko: Messages = {
         '빠른 검색으로 찾지 못했습니다. 오래된 항목까지 찾으려면 전체 기록을 검색하세요.',
       searchFullHistory: '전체 기록 검색',
       noFullHistoryMatches: '이 텍스트를 포함한 항목이 없습니다.',
+      notInResults: '목록에 없나요?',
       noFilterMatches: '필터와 일치하는 항목이 없습니다.',
       capturePaused: '캡처가 일시 중지되었습니다. 아래에서 다시 시작하세요.',
       retry: '다시 시도',
@@ -98,6 +99,7 @@ export const ko: Messages = {
     },
   },
   rankReason: {
+    name: '이름',
     exact: '정확',
     prefix: '접두',
     substring: '부분',
@@ -158,6 +160,7 @@ export const ko: Messages = {
       loading: '이미지 불러오는 중…',
       unavailable: '이미지를 표시할 수 없습니다.',
       alt: '클립보드 이미지 미리보기',
+      recognizedText: '이미지 속 텍스트',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -277,6 +280,28 @@ export const ko: Messages = {
     previousResult: '이전 결과',
     pasteResult: '붙여넣기',
     pasteFailed: '결과를 붙여넣지 못했습니다.',
+    nameEntry: '이름 지정…',
+    editText: '텍스트 편집',
+    extractText: '텍스트 추출',
+    notReadable: '마스킹된 이미지는 읽지 않습니다.',
+    noTextFound: '이 이미지에서 텍스트를 찾지 못했습니다.',
+    imageOnly: '텍스트는 이미지에서만 추출할 수 있습니다.',
+    notEditable: '마스킹된 항목은 편집할 수 없습니다.',
+    editResult: '편집',
+    editorLabel: '편집 가능한 결과 텍스트',
+    updateEntry: '항목 업데이트',
+    updated: '업데이트됨',
+    updateFailed: '항목을 업데이트하지 못했습니다:',
+    nameForm: {
+      title: '이 항목에 이름 지정',
+      name: '이름',
+      aliases: '다른 검색어',
+      aliasesHint: '여러 개는 쉼표로 구분합니다.',
+      save: '이름 저장',
+      remove: '이름 삭제',
+      cancel: '취소',
+      pinNote: '이름을 지정하면 항목이 고정됩니다.',
+    },
   },
   pastePicker: {
     title: '붙여넣기 형식',
@@ -388,6 +413,9 @@ export const ko: Messages = {
       semanticIndexAcPowerOnly: 'AC 전원 연결 시에만 인덱싱',
       semanticIndexAcPowerOnlyHelp:
         '배터리 사용 중에는 백그라운드 임베딩을 일시 중지하여 전력을 아낍니다. 끄면 배터리에서도 인덱싱합니다.',
+      imageTextIndex: '이미지 속 텍스트 검색',
+      imageTextIndexHelp:
+        '이 기기에서 이미지 속 텍스트를 백그라운드로 인식해 스크린샷을 보이는 텍스트로 찾을 수 있게 합니다. 비밀로 보이는 텍스트는 가리고 해당 이미지는 마스킹합니다. 끄면 인식한 텍스트를 지웁니다.',
       semanticIndexRebuild: '인덱스 다시 만들기',
       semanticIndexStatus: '인덱스 상태',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

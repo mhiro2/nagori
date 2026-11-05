@@ -12,6 +12,8 @@ import type {
   CliInstallStatus,
   DataDirSyncWarning,
   EntryDto,
+  EntryLabel,
+  RecognizedText,
   EntryPreviewDto,
   HotkeyFailure,
   PasteFormat,
@@ -101,6 +103,28 @@ export const copyEntriesCombined = (ids: string[]): Promise<void> =>
 
 export const pinEntry = (id: string, pinned: boolean): Promise<void> =>
   invoke('pin_entry', { id, pinned });
+
+export const getEntryLabel = (id: string): Promise<EntryLabel | null> =>
+  invoke('get_entry_label', { id });
+
+// Names the entry (which also pins it); `name: null` clears the name.
+export const setEntryLabel = (id: string, name: string | null, aliases: string[]): Promise<void> =>
+  invoke('set_entry_label', { id, name, aliases });
+
+// The full body of a text entry for the inspector's editor. Rejected for
+// masked and non-text entries.
+export const getEditableEntryText = (id: string): Promise<string> =>
+  invoke('get_editable_entry_text', { id });
+
+// Replaces the stored body of a text entry (pasting an edited copy once uses
+// `pasteTextFromPalette` and stores nothing).
+export const updateEntryText = (id: string, text: string): Promise<void> =>
+  invoke('update_entry_text', { id, text });
+
+// Recognizes the text in an image entry on device. Rejected for masked and
+// non-image entries, and where the host has no recognizer.
+export const recognizeImageText = (entryId: string): Promise<RecognizedText> =>
+  invoke('recognize_image_text', { entryId });
 
 export const runQuickAction = (action: QuickActionId, entryId: string): Promise<AiActionResult> =>
   invoke('run_quick_action', { action, entryId });

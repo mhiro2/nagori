@@ -156,6 +156,14 @@ export const retryPreview = async (): Promise<void> => {
   await hydratePreview(previewState.entryId, previewState.query, { force: true });
 };
 
+/// Re-read the preview of an entry whose body just changed (an edit replaced
+/// it), when it is the one on screen. The settled-state guard would otherwise
+/// keep showing the old body for the same entry + query.
+export const reloadPreview = async (entryId: string): Promise<void> => {
+  if (previewState.entryId !== entryId) return;
+  await hydratePreview(entryId, previewState.query, { force: true });
+};
+
 /// Replace the current standard-cap preview with the expanded 1 MiB body.
 /// No-op when the entry id no longer matches the active selection, when
 /// the backend is unavailable, or when the body was not truncated in the

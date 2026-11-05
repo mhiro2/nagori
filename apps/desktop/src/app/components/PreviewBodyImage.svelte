@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
 
+  import { matchRanges } from '../lib/highlightQuery';
   import { buildImageUrl } from '../lib/imageUrl';
   import {
     isImeComposing,
@@ -9,7 +10,7 @@
     resolveAction,
   } from '../lib/keybindings';
   import type { Binding } from '../lib/keybindings';
-  import type { Platform } from '../lib/types';
+  import type { Platform, RecognizedLine } from '../lib/types';
 
   type ImageBody = {
     type: 'image';
@@ -17,6 +18,7 @@
     byteCount: number;
     width?: number | null;
     height?: number | null;
+    recognizedLines?: RecognizedLine[];
   };
 
   type Props = {
@@ -35,6 +37,9 @@
     // so a user who remaps an action onto `Cmd+=`/`-`/`0` gets that action,
     // not a double-fire of zoom + the action (both listen on `window`).
     bindings?: readonly Binding[] | undefined;
+    // The search query the result list was produced for. Lines of recognized
+    // text that match it are outlined on the inline image.
+    query?: string | undefined;
   };
 
   let {
@@ -46,7 +51,17 @@
     loadingText,
     platform,
     bindings,
+    query,
   }: Props = $props();
+
+  // Recognized lines that contain the query, outlined over the inline image
+  // so the user sees where in the screenshot the match is. The inline <img>
+  // is sized to its content (no letterboxing), so fractional boxes map onto
+  // it directly; the expanded view letterboxes with `object-fit` and skips
+  // the outlines.
+  const matchedBoxes = $derived(
+    (body.recognizedLines ?? []).filter((line) => matchRanges(line.text, query ?? '').length > 0),
+  );
 
   // Zoom for the expanded original payload, as a multiple of the fit-to-pane
   // size. Trackpad pinch / Ctrl-wheel drive it continuously; the keyboard
@@ -292,17 +307,36 @@
   <div class="image-viewer" class:expanded>
     <div class="image-frame" class:expanded class:loaded={imageLoaded} bind:this={frameEl}>
       <div class="image-stage" style:--zoom-pct={zoomStagePercent}>
-        <img
-          class="image"
-          src={imageSrc}
-          alt={altText}
-          loading="lazy"
-          decoding="async"
-          width={imageDimensions?.width}
-          height={imageDimensions?.height}
-          onload={() => (imageLoaded = true)}
-          onerror={handleImageError}
-        />
+        {#snippet picture()}
+          <img
+            class="image"
+            src={imageSrc}
+            alt={altText}
+            loading="lazy"
+            decoding="async"
+            width={imageDimensions?.width}
+            height={imageDimensions?.height}
+            onload={() => (imageLoaded = true)}
+            onerror={handleImageError}
+          />
+        {/snippet}
+        {#if expanded}
+          {@render picture()}
+        {:else}
+          <span class="image-box">
+            {@render picture()}
+            {#each matchedBoxes as box, i (i)}
+              <span
+                class="text-match"
+                data-testid="image-text-match"
+                style:left={`${box.x * 100}%`}
+                style:top={`${box.y * 100}%`}
+                style:width={`${box.width * 100}%`}
+                style:height={`${box.height * 100}%`}
+              ></span>
+            {/each}
+          </span>
+        {/if}
       </div>
       {#if !imageLoaded}
         <!-- Explicit "loading" caption over the checkerboard skeleton. While a
@@ -391,6 +425,21 @@
      scrolls once zoomed past fit. */
   .image-stage {
     display: contents;
+  }
+  /* Inline only: a box exactly the size of the rendered image, so the match
+     outlines can be placed in fractions of it. */
+  .image-box {
+    position: relative;
+    display: block;
+    max-width: 100%;
+    line-height: 0;
+  }
+  .text-match {
+    position: absolute;
+    border: 2px solid var(--accent, #6c8dff);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--accent, #6c8dff) 18%, transparent);
+    pointer-events: none;
   }
   .image-viewer.expanded .image-stage {
     display: grid;

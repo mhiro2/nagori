@@ -574,6 +574,12 @@ pub struct AiSettings {
     /// Default `true` so laptops don't drain the battery building embeddings;
     /// turning it off lets the indexer run on battery too.
     pub semantic_index_ac_power_only: bool,
+    /// Whether text in image entries is recognized on device in the background
+    /// so screenshots are found by the text they show. Default `false`
+    /// (opt-in); turning it off erases the recognized text from the index.
+    /// Independent of `enabled`: recognition uses the OS text recognizer, not
+    /// a language model.
+    pub image_text_index_enabled: bool,
     /// Whether the onboarding banner has been shown and dismissed. Sticky —
     /// not reset when availability changes, so the user's "later" is honoured.
     pub onboarding_dismissed: bool,
@@ -592,6 +598,7 @@ impl Default for AiSettings {
             request_timeout_ms: 30_000,
             semantic_index_enabled: false,
             semantic_index_ac_power_only: true,
+            image_text_index_enabled: false,
             onboarding_dismissed: false,
             allow_openai_fallback_prompt: true,
         }

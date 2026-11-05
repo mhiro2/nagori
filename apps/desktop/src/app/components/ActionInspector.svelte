@@ -5,10 +5,15 @@
     cancelAiAction,
     copyTextFromPalette,
     getAiAvailability,
+    getEditableEntryText,
+    getEntryLabel,
     pasteTextFromPalette,
+    recognizeImageText,
     runQuickAction,
     saveAiResult,
+    setEntryLabel,
     startAiAction,
+    updateEntryText,
   } from '../lib/commands';
   import { describeError, isCancelledError } from '../lib/errors';
   import { messages } from '../lib/i18n/index.svelte';
@@ -20,15 +25,19 @@
     AiErrorEvent,
     AiReplaceEvent,
     ContentKind,
+    EntryLabel,
     QuickActionId,
     SearchResultDto,
   } from '../lib/types';
   import { rememberActionResult, rememberedActionResult } from '../stores/actionResult.svelte';
-  import { aiActionsSupported } from '../stores/capabilities.svelte';
+  import { aiActionsSupported, imageTextRecognitionSupported } from '../stores/capabilities.svelte';
   import { runSessionEndingAction } from '../stores/paletteSession.svelte';
+  import { reloadPreview } from '../stores/searchPreview.svelte';
+  import { refreshCurrent } from '../stores/searchQuery.svelte';
   import ActionPicker from './ActionPicker.svelte';
   import ActionRunPanel from './ActionRunPanel.svelte';
   import CompactPreview from './CompactPreview.svelte';
+  import EntryLabelForm from './EntryLabelForm.svelte';
 
   // One `nagori://ai/*` event, tagged with its channel so a held event can be
   // replayed through the same handler as a live one.
@@ -83,7 +92,9 @@
 
   const t = $derived(messages());
 
-  let pending: QuickActionId | undefined = $state(undefined);
+  // The deterministic run in flight: a quick action, or `extract` while an
+  // image's text is being recognized.
+  let pending: QuickActionId | 'extract' | undefined = $state(undefined);
   let lastResult: string | undefined = $state(undefined);
   let runError: string | undefined = $state(undefined);
   let copyOk = $state(false);
@@ -96,6 +107,24 @@
   let restored = $state(false);
   let pasteError = $state<string | undefined>(undefined);
   let panelEl: HTMLElement | undefined = $state();
+
+  // Editing: the settled result shows in a textarea. `editedEntryId` is set
+  // when the work area holds the target's own body (the Edit action), which
+  // is the only case where the edit may replace the stored entry; edits of a
+  // transform result are pasted, copied, or saved as a new item instead.
+  let editing = $state(false);
+  let editedEntryId = $state<string | undefined>(undefined);
+  let updating = $state(false);
+  let updateOk = $state(false);
+  let updateError = $state<string | undefined>(undefined);
+  let updateFlashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Naming: the work area shows the name form instead of a result. The label
+  // is loaded first so the form opens on the current name.
+  let naming = $state(false);
+  let namingLabel = $state<EntryLabel | null>(null);
+  let namingBusy = $state(false);
+  let namingError = $state<string | undefined>(undefined);
 
   let quickRunningVisible = $state(false);
   let quickRunningTimer: ReturnType<typeof setTimeout> | undefined;
@@ -149,10 +178,15 @@
   const resetResultFeedback = (): void => {
     copyOk = false;
     saveOk = false;
+    updateOk = false;
     copyError = undefined;
     saveError = undefined;
     pasteError = undefined;
+    updateError = undefined;
     saving = false;
+    updating = false;
+    if (updateFlashTimer !== undefined) clearTimeout(updateFlashTimer);
+    updateFlashTimer = undefined;
     if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
     if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
     copyFlashTimer = undefined;
@@ -296,6 +330,11 @@
   const resetRun = (): void => {
     runToken += 1;
     cancelRequested = false;
+    editing = false;
+    editedEntryId = undefined;
+    naming = false;
+    namingBusy = false;
+    namingError = undefined;
     aiStarting = false;
     earlyAiEvents = [];
     if (aiRequestId !== undefined) void cancelAiAction(aiRequestId);
@@ -334,6 +373,7 @@
     const token = ++runToken;
     const entryId = target.id;
     restored = false;
+    leaveEditAndNaming();
     pending = id;
     runError = undefined;
     resetResultFeedback();
@@ -378,6 +418,7 @@
     const token = ++runToken;
     runError = undefined;
     resetResultFeedback();
+    leaveEditAndNaming();
     lastResult = undefined;
     restored = false;
     aiText = '';
@@ -439,6 +480,175 @@
     }
   };
 
+  const leaveEditAndNaming = (): void => {
+    editing = false;
+    editedEntryId = undefined;
+    naming = false;
+    namingError = undefined;
+  };
+
+  // Text-shaped entries whose body the palette may show can be edited; images
+  // and file lists carry no editable text, and masked bodies never reach the
+  // renderer.
+  const editableKind = (kind: ContentKind): boolean => kind !== 'image' && kind !== 'fileList';
+  const editableSensitivity = (item: SearchResultDto): boolean =>
+    item.sensitivity === 'Public' || item.sensitivity === 'Unknown';
+
+  // Load the target's own body into the editor. Pasting it from there pastes
+  // the edited copy once; *Update item* replaces the stored body.
+  const startEditEntry = async (): Promise<void> => {
+    if (!target || !isTauri() || busy) return;
+    const token = ++runToken;
+    const entryId = target.id;
+    restored = false;
+    runError = undefined;
+    resetResultFeedback();
+    naming = false;
+    try {
+      const text = await getEditableEntryText(entryId);
+      if (token !== runToken) return;
+      lastResult = text;
+      editing = true;
+      editedEntryId = entryId;
+    } catch (err) {
+      if (token !== runToken) return;
+      runError = describeError(err);
+      lastResult = undefined;
+    }
+  };
+
+  // Read the text in an image entry on device. The text lands in the work
+  // area like a transform result, so it can be edited, pasted, copied, or
+  // saved as a new item.
+  const startExtractText = async (): Promise<void> => {
+    if (!target || !isTauri() || busy) return;
+    const token = ++runToken;
+    restored = false;
+    runError = undefined;
+    resetResultFeedback();
+    leaveEditAndNaming();
+    pending = 'extract';
+    // Recognition can take seconds (the first one loads the model), so arm
+    // the same delayed running indicator as a quick action.
+    if (quickRunningTimer !== undefined) clearTimeout(quickRunningTimer);
+    quickRunningVisible = false;
+    quickRunningTimer = setTimeout(() => {
+      quickRunningTimer = undefined;
+      quickRunningVisible = true;
+    }, QUICK_RUNNING_DELAY_MS);
+    try {
+      const recognized = await recognizeImageText(target.id);
+      if (token !== runToken) return;
+      // Its text read as private or secret, so the image is masked now:
+      // refresh the list and the preview so the picture stops showing.
+      if (recognized.masked) {
+        void refreshCurrent();
+        void reloadPreview(target.id);
+      }
+      if (recognized.text.trim() === '') {
+        runError = t.actionMenu.noTextFound;
+        lastResult = undefined;
+      } else {
+        lastResult = recognized.text;
+      }
+    } catch (err) {
+      if (token !== runToken) return;
+      runError = describeError(err);
+      lastResult = undefined;
+    } finally {
+      if (token === runToken) {
+        pending = undefined;
+        if (quickRunningTimer !== undefined) {
+          clearTimeout(quickRunningTimer);
+          quickRunningTimer = undefined;
+        }
+        quickRunningVisible = false;
+      }
+    }
+  };
+
+  const startEditResult = (): void => {
+    if (lastResult === undefined) return;
+    editing = true;
+  };
+
+  const editText = (text: string): void => {
+    lastResult = text;
+    updateOk = false;
+    if (target && editedEntryId === undefined) rememberActionResult(target.id, text);
+  };
+
+  const updateEntry = async (): Promise<void> => {
+    const text = lastResult;
+    const entryId = editedEntryId;
+    if (text === undefined || entryId === undefined || !isTauri() || updating) return;
+    const token = runToken;
+    updating = true;
+    updateError = undefined;
+    try {
+      await updateEntryText(entryId, text);
+      if (token !== runToken) return;
+      void reloadPreview(entryId);
+      void refreshCurrent();
+      // The editor stays live while the update is in flight: confirm only
+      // the text that was saved, not one typed after it was sent.
+      if (lastResult !== text) return;
+      updateOk = true;
+      if (updateFlashTimer !== undefined) clearTimeout(updateFlashTimer);
+      updateFlashTimer = setTimeout(() => {
+        updateFlashTimer = undefined;
+        updateOk = false;
+      }, FLASH_MS);
+    } catch (err) {
+      if (token === runToken) updateError = describeError(err);
+    } finally {
+      if (token === runToken) updating = false;
+    }
+  };
+
+  const startNaming = async (): Promise<void> => {
+    if (!target || !isTauri() || busy) return;
+    const token = ++runToken;
+    const entryId = target.id;
+    lastResult = undefined;
+    restored = false;
+    runError = undefined;
+    resetResultFeedback();
+    editing = false;
+    editedEntryId = undefined;
+    namingError = undefined;
+    // A save from an earlier form may still be in flight; its completion is
+    // fenced by `runToken`, so this form starts unblocked.
+    namingBusy = false;
+    try {
+      const label = await getEntryLabel(entryId);
+      if (token !== runToken) return;
+      namingLabel = label;
+      naming = true;
+    } catch (err) {
+      if (token !== runToken) return;
+      runError = describeError(err);
+    }
+  };
+
+  const submitName = async (name: string | null, aliases: string[]): Promise<void> => {
+    if (!target || namingBusy) return;
+    const token = runToken;
+    const entryId = target.id;
+    namingBusy = true;
+    namingError = undefined;
+    try {
+      await setEntryLabel(entryId, name, aliases);
+      if (token !== runToken) return;
+      naming = false;
+      void refreshCurrent();
+    } catch (err) {
+      if (token === runToken) namingError = describeError(err);
+    } finally {
+      if (token === runToken) namingBusy = false;
+    }
+  };
+
   const cancelAi = (): void => {
     if (aiRequestId !== undefined) {
       void cancelAiAction(aiRequestId);
@@ -454,6 +664,55 @@
   // that cannot — wrong content kind, AI off or unavailable — follow, still
   // listed with their reason so the full set stays discoverable.
   const allPickerItems = $derived([
+    {
+      key: 'entry-name',
+      label: t.actionMenu.nameEntry,
+      isAi: false,
+      disabled: !target || busy,
+      reason: undefined,
+      pending: false,
+      run: () => void startNaming(),
+    },
+    (() => {
+      const kindOk = !target || editableKind(target.kind);
+      const sensitivityOk = !target || editableSensitivity(target);
+      return {
+        key: 'entry-edit',
+        label: t.actionMenu.editText,
+        isAi: false,
+        disabled: !target || busy || !kindOk || !sensitivityOk,
+        reason:
+          target && !kindOk
+            ? inapplicableReason(target.kind)
+            : target && !sensitivityOk
+              ? t.actionMenu.notEditable
+              : undefined,
+        pending: false,
+        run: () => void startEditEntry(),
+      };
+    })(),
+    ...(imageTextRecognitionSupported()
+      ? [
+          (() => {
+            const kindOk = !target || target.kind === 'image';
+            const sensitivityOk = !target || editableSensitivity(target);
+            return {
+              key: 'entry-extract-text',
+              label: t.actionMenu.extractText,
+              isAi: false,
+              disabled: !target || busy || !kindOk || !sensitivityOk,
+              reason:
+                target && !kindOk
+                  ? t.actionMenu.imageOnly
+                  : target && !sensitivityOk
+                    ? t.actionMenu.notReadable
+                    : undefined,
+              pending: pending === 'extract',
+              run: () => void startExtractText(),
+            };
+          })(),
+        ]
+      : []),
     ...QUICK_ACTION_IDS.map((id) => {
       const applies = !target || actionAppliesToKind(target.kind, id);
       return {
@@ -492,9 +751,12 @@
   ]);
   // Nothing in the list can run on this target's content kind (an image or a
   // file list): say so up front instead of leaving only per-button tooltips.
+  // Naming applies to every kind, so only the content actions count here.
   const noneApplicableReason = $derived(
     target &&
-      allPickerItems.every((item) => !actionAppliesToKind(target.kind, actionIdOf(item.key)))
+      allPickerItems
+        .filter((item) => !item.key.startsWith('entry-'))
+        .every((item) => !actionAppliesToKind(target.kind, actionIdOf(item.key)))
       ? inapplicableReason(target.kind)
       : undefined,
   );
@@ -812,6 +1074,7 @@
       runToken += 1;
       if (copyFlashTimer !== undefined) clearTimeout(copyFlashTimer);
       if (saveFlashTimer !== undefined) clearTimeout(saveFlashTimer);
+      if (updateFlashTimer !== undefined) clearTimeout(updateFlashTimer);
       if (quickRunningTimer !== undefined) clearTimeout(quickRunningTimer);
       if (doneFlashTimer !== undefined) clearTimeout(doneFlashTimer);
     };
@@ -872,7 +1135,11 @@
 
       <div class="divider"></div>
 
-      <ActionPicker items={pickerItems} aiBadge={t.actionMenu.aiBadge} compact={phase !== 'idle'} />
+      <ActionPicker
+        items={pickerItems}
+        aiBadge={t.actionMenu.aiBadge}
+        compact={phase !== 'idle' || naming}
+      />
 
       {#if noneApplicableReason}
         <p class="ai-reason" data-testid="actions-none-applicable">{noneApplicableReason}</p>
@@ -889,6 +1156,23 @@
     {/if}
     {#if pasteError !== undefined}
       <p class="result-error" role="alert">{t.actionMenu.pasteFailed} {pasteError}</p>
+    {/if}
+    {#if updateError !== undefined}
+      <p class="result-error" role="alert">{t.actionMenu.updateFailed} {updateError}</p>
+    {/if}
+
+    {#if naming && target}
+      {#key target.id}
+        <EntryLabelForm
+          initial={namingLabel}
+          labels={t.actionMenu.nameForm}
+          busy={namingBusy}
+          errorMessage={namingError}
+          onSave={(name, aliases) => void submitName(name, aliases)}
+          onRemove={() => void submitName(null, [])}
+          onCancel={() => (naming = false)}
+        />
+      {/key}
     {/if}
 
     <ActionRunPanel
@@ -908,8 +1192,19 @@
         done: t.actionMenu.done,
         previousResult: t.actionMenu.previousResult,
         paste: t.actionMenu.pasteResult,
+        edit: t.actionMenu.editResult,
+        editorLabel: t.actionMenu.editorLabel,
+        update: t.actionMenu.updateEntry,
+        updated: t.actionMenu.updated,
       }}
       {restored}
+      {editing}
+      canUpdate={editing && editedEntryId !== undefined && editedEntryId === target?.id}
+      {updateOk}
+      {updating}
+      onStartEdit={startEditResult}
+      onEditText={editText}
+      onUpdate={() => void updateEntry()}
       {copyOk}
       {saveOk}
       {saving}

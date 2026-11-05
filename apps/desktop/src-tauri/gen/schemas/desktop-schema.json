@@ -285,10 +285,22 @@
           "markdownDescription": "Enables the get_capabilities command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_editable_entry_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-editable-entry-text",
+          "markdownDescription": "Enables the get_editable_entry_text command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_entry command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-entry",
           "markdownDescription": "Enables the get_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_entry_label command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-entry-label",
+          "markdownDescription": "Enables the get_entry_label command without any pre-configured scope."
         },
         {
           "description": "Enables the get_entry_preview command without any pre-configured scope.",
@@ -459,6 +471,12 @@
           "markdownDescription": "Enables the rebuild_semantic_index command without any pre-configured scope."
         },
         {
+          "description": "Enables the recognize_image_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-recognize-image-text",
+          "markdownDescription": "Enables the recognize_image_text command without any pre-configured scope."
+        },
+        {
           "description": "Enables the repaste_last command without any pre-configured scope.",
           "type": "string",
           "const": "allow-repaste-last",
@@ -501,6 +519,12 @@
           "markdownDescription": "Enables the set_confirm_clear_history command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_entry_label command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-entry-label",
+          "markdownDescription": "Enables the set_entry_label command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_ai_action command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-ai-action",
@@ -511,6 +535,12 @@
           "type": "string",
           "const": "allow-toggle-palette",
           "markdownDescription": "Enables the toggle_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_entry_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-entry-text",
+          "markdownDescription": "Enables the update_entry_text command without any pre-configured scope."
         },
         {
           "description": "Enables the update_settings command without any pre-configured scope.",
@@ -627,10 +657,22 @@
           "markdownDescription": "Denies the get_capabilities command without any pre-configured scope."
         },
         {
+          "description": "Denies the get_editable_entry_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-editable-entry-text",
+          "markdownDescription": "Denies the get_editable_entry_text command without any pre-configured scope."
+        },
+        {
           "description": "Denies the get_entry command without any pre-configured scope.",
           "type": "string",
           "const": "deny-get-entry",
           "markdownDescription": "Denies the get_entry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_entry_label command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-entry-label",
+          "markdownDescription": "Denies the get_entry_label command without any pre-configured scope."
         },
         {
           "description": "Denies the get_entry_preview command without any pre-configured scope.",
@@ -801,6 +843,12 @@
           "markdownDescription": "Denies the rebuild_semantic_index command without any pre-configured scope."
         },
         {
+          "description": "Denies the recognize_image_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-recognize-image-text",
+          "markdownDescription": "Denies the recognize_image_text command without any pre-configured scope."
+        },
+        {
           "description": "Denies the repaste_last command without any pre-configured scope.",
           "type": "string",
           "const": "deny-repaste-last",
@@ -843,6 +891,12 @@
           "markdownDescription": "Denies the set_confirm_clear_history command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_entry_label command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-entry-label",
+          "markdownDescription": "Denies the set_entry_label command without any pre-configured scope."
+        },
+        {
           "description": "Denies the start_ai_action command without any pre-configured scope.",
           "type": "string",
           "const": "deny-start-ai-action",
@@ -853,6 +907,12 @@
           "type": "string",
           "const": "deny-toggle-palette",
           "markdownDescription": "Denies the toggle_palette command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_entry_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-entry-text",
+          "markdownDescription": "Denies the update_entry_text command without any pre-configured scope."
         },
         {
           "description": "Denies the update_settings command without any pre-configured scope.",

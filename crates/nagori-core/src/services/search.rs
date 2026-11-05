@@ -5,8 +5,8 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    EntryId, RecentOrder, Result, SearchCandidate, SearchFilters, SearchMode, SearchQuery,
-    SearchResult,
+    ContentKind, EntryId, MatchWindow, RecentOrder, Result, SearchCandidate, SearchFilters,
+    SearchMode, SearchQuery, SearchResult, Sensitivity, excerpt_terms,
     text::{has_cjk, normalize_text},
 };
 
@@ -193,6 +193,45 @@ pub trait SearchCandidateProvider: Send + Sync {
         mode: NgramQueryMode,
         cancel: &CancellationToken,
     ) -> Result<Vec<NgramCandidate>>;
+
+    /// Entries whose user-given name or alias contains `normalized`, each
+    /// carrying its [`SearchCandidate::label_match`]. Names are few and short,
+    /// so implementations scan every live label rather than a recent window:
+    /// a named entry must stay reachable by its name however old it is. The
+    /// default returns nothing (providers without label storage). See
+    /// [`Self::recent_entries`] for `cancel`.
+    async fn label_candidates(
+        &self,
+        normalized: &str,
+        filters: &SearchFilters,
+        budget: SearchCandidateBudget,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<SearchCandidate>> {
+        let _ = (normalized, filters, budget, cancel);
+        Ok(Vec::new())
+    }
+
+    /// Literal-match windows for the final, already-truncated result page.
+    ///
+    /// For each entry, the provider looks for the first of `terms` that occurs
+    /// in the entry's displayable plain text (case-insensitively for ASCII)
+    /// and returns a bounded slice around it; entries whose match already sits
+    /// within [`crate::MATCH_EXCERPT_HEAD_CHARS`] of the start, or that hold no
+    /// literal match, are left out. The service only asks for rows whose
+    /// candidate was unredacted, but an implementation must re-check the
+    /// row's current sensitivity: a re-capture can raise it to a masked class
+    /// after the candidate was read. The default returns nothing, which keeps
+    /// every row on its head preview. See [`Self::recent_entries`] for
+    /// `cancel`.
+    async fn match_windows(
+        &self,
+        entry_ids: &[EntryId],
+        terms: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<MatchWindow>> {
+        let _ = (entry_ids, terms, cancel);
+        Ok(Vec::new())
+    }
 }
 
 /// Final scoring step. Implementations may drop a candidate (`None`) when the
@@ -326,11 +365,11 @@ where
             }
         }
 
-        let (substring_hits, fts_hits, ngram_hits) = self
+        let (label_hits, substring_hits, fts_hits, ngram_hits) = self
             .fetch_candidates(plan, &normalized, filters, candidate_limit, &cancel)
             .await?;
 
-        for candidate in substring_hits {
+        for candidate in label_hits.into_iter().chain(substring_hits) {
             push_or_merge(&mut candidates, &mut candidate_indexes, candidate);
         }
         for hit in fts_hits {
@@ -369,7 +408,63 @@ where
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(limit);
+        if matches!(
+            plan,
+            SearchPlan::Exact | SearchPlan::FullText | SearchPlan::Fuzzy | SearchPlan::Hybrid
+        ) {
+            self.apply_match_excerpts(&normalized, &mut results, &cancel)
+                .await;
+        }
         Ok(results)
+    }
+
+    /// Replace the head preview of each eligible row with an excerpt around
+    /// its literal match, so rows that share an opening (meeting notes, log
+    /// dumps) still show why they matched.
+    ///
+    /// Only Public / Unknown rows qualify: Private and Secret previews are
+    /// masked, and an excerpt built from the stored body would bypass that.
+    /// URL rows keep their full URL (the row parses it for the domain), and
+    /// file lists have their own projection. An image's excerpt comes from
+    /// the text recognized in it, so a screenshot found by its text shows the
+    /// passage that matched. Excerpts are
+    /// cosmetic, so a failed lookup leaves the head previews in place rather
+    /// than failing the search.
+    async fn apply_match_excerpts(
+        &self,
+        normalized: &str,
+        results: &mut [SearchResult],
+        cancel: &CancellationToken,
+    ) {
+        let entry_ids: Vec<EntryId> = results
+            .iter()
+            .filter(|result| shows_match_excerpt(result))
+            .map(|result| result.entry_id)
+            .collect();
+        let terms = excerpt_terms(normalized);
+        if entry_ids.is_empty() || terms.is_empty() {
+            return;
+        }
+        let Ok(windows) = self
+            .provider
+            .match_windows(&entry_ids, &terms, cancel)
+            .await
+        else {
+            return;
+        };
+        let windows: HashMap<EntryId, MatchWindow> = windows
+            .into_iter()
+            .map(|window| (window.entry_id, window))
+            .collect();
+        for result in results {
+            if let Some(excerpt) = windows
+                .get(&result.entry_id)
+                .filter(|_| shows_match_excerpt(result))
+                .and_then(|window| window.excerpt(result.content_kind))
+            {
+                result.preview = excerpt;
+            }
+        }
     }
 
     /// Fan the substring/FTS/ngram fetches out concurrently for the active
@@ -389,7 +484,15 @@ where
         filters: &SearchFilters,
         candidate_limit: usize,
         cancel: &CancellationToken,
-    ) -> Result<(Vec<SearchCandidate>, Vec<FtsCandidate>, Vec<NgramCandidate>)> {
+    ) -> Result<(
+        Vec<SearchCandidate>,
+        Vec<SearchCandidate>,
+        Vec<FtsCandidate>,
+        Vec<NgramCandidate>,
+    )> {
+        // Every text plan looks at names: a name is the user's own word for
+        // the entry, so it must win whichever matcher the plan uses.
+        let want_label = !matches!(plan, SearchPlan::Recent | SearchPlan::Semantic);
         let want_substring = matches!(
             plan,
             SearchPlan::Exact | SearchPlan::Fuzzy | SearchPlan::Hybrid
@@ -418,8 +521,10 @@ where
         } else {
             FtsQueryMode::WholeToken
         };
-        let branch_count =
-            usize::from(want_substring) + usize::from(want_fts) + usize::from(want_ngram);
+        let branch_count = usize::from(want_label)
+            + usize::from(want_substring)
+            + usize::from(want_fts)
+            + usize::from(want_ngram);
         let branch_bytes = MAX_SEARCH_CANDIDATE_BYTES
             .checked_div(branch_count)
             .unwrap_or(0);
@@ -437,6 +542,15 @@ where
         //   ≤ 8 chars only), so substring is the de-facto matcher there
         //   and bounding it would regress non-CJK fuzzy searches.
         let bounded_substring = matches!(plan, SearchPlan::Hybrid);
+        let label_fut = async {
+            if want_label {
+                self.provider
+                    .label_candidates(normalized, filters, branch_budget, cancel)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        };
         let substring_fut = async {
             if want_substring {
                 self.provider
@@ -471,7 +585,12 @@ where
             }
         };
 
-        Ok(tokio::try_join!(substring_fut, fts_fut, ngram_fut)?)
+        Ok(tokio::try_join!(
+            label_fut,
+            substring_fut,
+            fts_fut,
+            ngram_fut
+        )?)
     }
 
     fn rank_all(
@@ -501,13 +620,29 @@ where
     }
 }
 
+const fn shows_match_excerpt(result: &SearchResult) -> bool {
+    matches!(
+        result.sensitivity,
+        Sensitivity::Public | Sensitivity::Unknown
+    ) && matches!(
+        result.content_kind,
+        ContentKind::Text
+            | ContentKind::Code
+            | ContentKind::RichText
+            | ContentKind::Unknown
+            | ContentKind::Image
+    )
+}
+
 fn push_or_merge(
     candidates: &mut Vec<SearchCandidate>,
     candidate_indexes: &mut HashMap<EntryId, usize>,
     candidate: SearchCandidate,
 ) {
     if let Some(&index) = candidate_indexes.get(&candidate.entry_id) {
-        candidates[index].text_match = candidates[index].text_match.max(candidate.text_match);
+        let kept = &mut candidates[index];
+        kept.text_match = kept.text_match.max(candidate.text_match);
+        kept.label_match = kept.label_match.max(candidate.label_match);
         return;
     }
     candidate_indexes.insert(candidate.entry_id, candidates.len());
@@ -518,13 +653,14 @@ fn push_or_merge(
 mod tests {
     use std::sync::Mutex;
 
-    use crate::{EntryFactory, RankReason, model::SearchResult};
+    use crate::{EntryFactory, RankReason, TextMatch, model::SearchResult};
 
     use super::*;
 
     #[derive(Default)]
     struct StubProvider {
         recent: Vec<SearchCandidate>,
+        label: Vec<SearchCandidate>,
         substring: Vec<SearchCandidate>,
         fts: Vec<FtsCandidate>,
         ngram: Vec<NgramCandidate>,
@@ -548,6 +684,18 @@ mod tests {
             *self.recent_limit.lock().unwrap() = Some(budget.max_count());
             self.branch_budgets.lock().unwrap().push(budget);
             Ok(self.recent.clone())
+        }
+
+        // Not recorded in `seen` / `branch_budgets`: those pin the body
+        // branches each plan dispatches, which the label branch rides beside.
+        async fn label_candidates(
+            &self,
+            _normalized: &str,
+            _filters: &SearchFilters,
+            _budget: SearchCandidateBudget,
+            _cancel: &CancellationToken,
+        ) -> Result<Vec<SearchCandidate>> {
+            Ok(self.label.clone())
         }
 
         async fn substring_candidates(
@@ -621,6 +769,7 @@ mod tests {
                 preview: candidate.preview,
                 image_width: None,
                 image_height: None,
+                label: None,
             })
         }
     }
@@ -753,19 +902,78 @@ mod tests {
         let q = SearchQuery::new("検索", "検索".to_owned(), MAX_RESULT_LIMIT);
         svc.search(q).await.unwrap();
 
+        // Substring, FTS and ngram (recorded) plus the label branch share one
+        // budget four ways.
         let budgets = provider.branch_budgets.lock().unwrap().clone();
         assert_eq!(budgets.len(), 3);
         assert!(budgets.iter().all(|budget| {
             budget.max_count() == MAX_RESULT_LIMIT * CANDIDATE_OVERSAMPLE
-                && budget.max_bytes() == MAX_SEARCH_CANDIDATE_BYTES / 3
+                && budget.max_bytes() == MAX_SEARCH_CANDIDATE_BYTES / 4
         }));
         assert!(
             budgets
                 .iter()
                 .map(|budget| budget.max_bytes())
                 .sum::<usize>()
+                + MAX_SEARCH_CANDIDATE_BYTES / 4
                 <= MAX_SEARCH_CANDIDATE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn label_hits_merge_their_match_into_body_hits() {
+        // Scores each candidate by its label match so the merge is observable.
+        struct LabelRanker;
+        impl Ranker for LabelRanker {
+            fn rank(
+                &self,
+                query: &str,
+                candidate: SearchCandidate,
+                fts_score: f32,
+                ngram_overlap: f32,
+                now: OffsetDateTime,
+                recent_order: RecentOrder,
+            ) -> Option<SearchResult> {
+                let label_score = match candidate.label_match {
+                    TextMatch::Exact => 3.0,
+                    TextMatch::Prefix => 2.0,
+                    TextMatch::Substring => 1.0,
+                    TextMatch::None => 0.0,
+                };
+                SumRanker
+                    .rank(
+                        query,
+                        candidate,
+                        fts_score,
+                        ngram_overlap,
+                        now,
+                        recent_order,
+                    )
+                    .map(|result| SearchResult {
+                        score: label_score,
+                        ..result
+                    })
+            }
+        }
+        let named = entry("SELECT 1");
+        let mut label_hit = named.clone();
+        label_hit.label_match = TextMatch::Exact;
+        let provider = StubProvider {
+            label: vec![label_hit],
+            substring: vec![named.clone(), entry("other")],
+            ..Default::default()
+        };
+        let results = SearchService::new(&provider, &LabelRanker)
+            .search(SearchQuery::new("sql", "sql".to_owned(), 10))
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "the label hit and its body hit are one row"
+        );
+        assert_eq!(results[0].entry_id, named.entry_id);
+        assert!((results[0].score - 3.0).abs() < f32::EPSILON);
     }
 
     #[tokio::test]

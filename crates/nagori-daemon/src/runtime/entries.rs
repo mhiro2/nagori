@@ -3,10 +3,10 @@
 use std::time::Instant;
 
 use nagori_core::{
-    AppError, AuditLog, ClipboardEntry, EntryFactory, EntryId, EntryRepository,
-    MAX_ENTRY_TEXT_WIRE_BYTES, PasteFormat, PasteOption, Result, SecretAction, SecretDropReason,
-    Sensitivity, SensitivityClassifier, SensitivityReason, SettingsRepository, build_paste_options,
-    entry_text_fits_wire, json_escaped_len,
+    AppError, AuditLog, ClipboardContent, ClipboardEntry, EntryFactory, EntryId, EntryLabel,
+    EntryRepository, MAX_ENTRY_TEXT_WIRE_BYTES, PasteFormat, PasteOption, Result, SecretAction,
+    SecretDropReason, Sensitivity, SensitivityClassifier, SensitivityReason, SettingsRepository,
+    build_paste_options, entry_text_fits_wire, json_escaped_len,
 };
 
 use crate::ipc_handler::result_code;
@@ -15,6 +15,101 @@ use super::{NagoriRuntime, elapsed_ms};
 
 impl NagoriRuntime {
     pub async fn add_text(&self, text: String) -> Result<EntryId> {
+        let entry = self.prepare_text_entry(text).await?;
+        // Invalidate before *and* after: the pre-call closes the window
+        // where a concurrent `search` could still serve a pre-insert hit
+        // between commit and the post-call.
+        self.invalidate_search_cache();
+        let id = self.store.insert(entry).await?;
+        self.invalidate_search_cache();
+        Ok(id)
+    }
+
+    /// Replace the body of a text-shaped entry with `text`, keeping its id,
+    /// pin, name, use count and source.
+    ///
+    /// This is the "update the saved snippet" path, as opposed to pasting an
+    /// edited copy once: the new body runs through the same classification
+    /// and policy checks as [`Self::add_text`], and the entry ends up as a
+    /// plain text entry (rich formatting and alternative representations of
+    /// the old body are dropped with it). Only entries whose body the default
+    /// output may show (Public / Unknown) can be edited, so this never
+    /// round-trips a masked body the caller could not read.
+    ///
+    /// # Errors
+    ///
+    /// [`AppError::NotFound`] for a missing or deleted entry,
+    /// [`AppError::InvalidInput`] for an entry that is not text-shaped or is
+    /// masked, or whose new body another entry already holds, and the
+    /// [`Self::add_text`] policy errors for the new body.
+    pub async fn update_entry_text(&self, id: EntryId, text: String) -> Result<()> {
+        self.editable_entry(id).await?;
+        let replacement = self.prepare_text_entry(text).await?;
+        self.invalidate_search_cache();
+        self.store.replace_content(id, replacement).await?;
+        self.invalidate_search_cache();
+        Ok(())
+    }
+
+    /// The full plain-text body of an entry the user may edit, for an
+    /// editor to start from. Same gate as [`Self::update_entry_text`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::update_entry_text`].
+    pub async fn editable_entry_text(&self, id: EntryId) -> Result<String> {
+        let entry = self.editable_entry(id).await?;
+        Ok(entry.plain_text().unwrap_or_default().to_owned())
+    }
+
+    async fn editable_entry(&self, id: EntryId) -> Result<ClipboardEntry> {
+        let entry = self.store.get(id).await?.ok_or(AppError::NotFound)?;
+        if !matches!(
+            entry.content,
+            ClipboardContent::Text(_)
+                | ClipboardContent::Url(_)
+                | ClipboardContent::Code(_)
+                | ClipboardContent::RichText(_)
+                | ClipboardContent::Unknown(_)
+        ) {
+            return Err(AppError::InvalidInput(
+                "only text entries can be edited".to_owned(),
+            ));
+        }
+        if !matches!(
+            entry.sensitivity,
+            Sensitivity::Public | Sensitivity::Unknown
+        ) {
+            return Err(AppError::InvalidInput(
+                "masked entries cannot be edited".to_owned(),
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// Set or clear an entry's user-given name. Naming an entry also pins
+    /// it: a name exists to recall the entry later, which only works if the
+    /// entry survives retention and history clears.
+    pub async fn set_entry_label(&self, id: EntryId, label: Option<EntryLabel>) -> Result<()> {
+        self.invalidate_search_cache();
+        let pin = label.is_some();
+        self.store.set_label(id, label).await?;
+        if pin {
+            self.store.set_pinned(id, true).await?;
+        }
+        self.invalidate_search_cache();
+        Ok(())
+    }
+
+    pub async fn get_entry_label(&self, id: EntryId) -> Result<Option<EntryLabel>> {
+        self.store.get_label(id).await
+    }
+
+    /// Build a classified, policy-checked text entry for `text`, or the
+    /// policy error that refuses it. Shared by [`Self::add_text`] and
+    /// [`Self::update_entry_text`] so an edited body can never bypass a check
+    /// a new one would face.
+    async fn prepare_text_entry(&self, text: String) -> Result<ClipboardEntry> {
         // Fail closed: if we can't load settings, refuse the write rather than
         // silently substituting defaults (that would re-enable a wider
         // denylist / weaker secret_handling than the user configured).
@@ -113,13 +208,7 @@ impl NagoriRuntime {
                 json_escaped_len(stored_text)
             )));
         }
-        // Invalidate before *and* after: the pre-call closes the window
-        // where a concurrent `search` could still serve a pre-insert hit
-        // between commit and the post-call.
-        self.invalidate_search_cache();
-        let id = self.store.insert(entry).await?;
-        self.invalidate_search_cache();
-        Ok(id)
+        Ok(entry)
     }
 
     pub async fn copy_entry(&self, id: EntryId) -> Result<()> {

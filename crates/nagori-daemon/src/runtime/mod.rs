@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nagori_ai::{AiActionEngine, QuickActionRunner};
-use nagori_core::{AppError, AppSettings};
+use nagori_core::{AppError, AppSettings, TextRecognizer};
 use nagori_ipc::IpcServerHealth;
 use nagori_platform::{
     Capability, ClipboardReader, ClipboardWriter, MemoryClipboard, NO_AI_ENGINE_REASON,
-    NoopPasteController, PasteController, PermissionChecker, PlatformCapabilities,
-    unsupported_capabilities,
+    NO_TEXT_RECOGNIZER_REASON, NoopPasteController, PasteController, PermissionChecker,
+    PlatformCapabilities, unsupported_capabilities,
 };
 use nagori_storage::SqliteStore;
 use tokio::sync::{Mutex as AsyncMutex, watch};
@@ -156,6 +156,16 @@ pub struct NagoriRuntime {
     /// coarse state, a wake signal new captures fire, a rebuild flag, and the
     /// AC-power probe its battery guard reads. See `semantic_index.rs`.
     pub(crate) semantic: Arc<crate::semantic_index::SemanticState>,
+    /// On-device image text recognizer (Vision on macOS), when the host
+    /// has one, plus the wake signal captures fire for its background
+    /// indexer. See `text_recognition.rs`.
+    pub(crate) text_recognizer: Option<Arc<dyn TextRecognizer>>,
+    pub(crate) text_recognition_wake: Arc<tokio::sync::Notify>,
+    /// Orders storing recognized text against erasing it: a store holds it
+    /// shared while it re-checks the setting and writes, the indexer holds
+    /// it exclusively while it clears, so a read that finishes after the
+    /// user turned image text search off can never write its text back.
+    pub(crate) text_recognition_gate: Arc<tokio::sync::RwLock<()>>,
     /// Monotonic counter bumped whenever an external IPC client mutates the
     /// corpus (add / delete / pin / clear, plus the use-count bumps of
     /// copy / paste). A UI host subscribes via
@@ -193,6 +203,7 @@ impl NagoriRuntime {
             db_path: None,
             capabilities: None,
             power_probe: None,
+            text_recognizer: None,
         }
     }
 
@@ -370,6 +381,7 @@ pub struct NagoriRuntimeBuilder {
     db_path: Option<std::path::PathBuf>,
     capabilities: Option<PlatformCapabilities>,
     power_probe: Option<crate::semantic_index::PowerProbe>,
+    text_recognizer: Option<Arc<dyn TextRecognizer>>,
 }
 
 impl NagoriRuntimeBuilder {
@@ -455,6 +467,15 @@ impl NagoriRuntimeBuilder {
         self
     }
 
+    /// Wire the host's on-device image text recognizer. Unset, the
+    /// `image_text_recognition` capability reports `Unsupported` and image
+    /// text extraction / search are refused.
+    #[must_use]
+    pub fn text_recognizer(mut self, recognizer: Arc<dyn TextRecognizer>) -> Self {
+        self.text_recognizer = Some(recognizer);
+        self
+    }
+
     /// Build a production runtime.
     ///
     /// Requires `clipboard` and `paste` adapters — those are platform
@@ -533,6 +554,15 @@ impl NagoriRuntimeBuilder {
                 reason: NO_AI_ENGINE_REASON.to_owned(),
             }
         };
+        // Same single switch for image text recognition: the wired recognizer
+        // decides, not the static per-OS report.
+        capabilities.image_text_recognition = if self.text_recognizer.is_some() {
+            Capability::Available
+        } else {
+            Capability::Unsupported {
+                reason: NO_TEXT_RECOGNIZER_REASON.to_owned(),
+            }
+        };
         let capabilities = Arc::new(capabilities);
         NagoriRuntime {
             store: self.store,
@@ -561,6 +591,9 @@ impl NagoriRuntimeBuilder {
             update_probe: Arc::new(UpdateProbeState::default()),
             settings_write_lock: Arc::new(AsyncMutex::new(())),
             semantic: Arc::new(crate::semantic_index::SemanticState::new(self.power_probe)),
+            text_recognizer: self.text_recognizer,
+            text_recognition_wake: Arc::new(tokio::sync::Notify::new()),
+            text_recognition_gate: Arc::new(tokio::sync::RwLock::new(())),
             external_mutations_tx,
             external_mutations_rx,
             maintenance_kick_tx,

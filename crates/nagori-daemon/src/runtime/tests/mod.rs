@@ -6,10 +6,12 @@ mod ai;
 mod clipboard;
 mod clipboard_lease;
 mod ipc;
+mod labels;
 mod lifecycle;
 mod permissions;
 mod search;
 mod settings;
+mod text_recognition;
 
 use std::sync::{
     Arc,

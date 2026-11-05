@@ -185,6 +185,7 @@ pub struct PlatformCapabilitiesDto {
     pub update_check: CapabilityDto,
     pub preview_quick_look: CapabilityDto,
     pub ai_actions: CapabilityDto,
+    pub image_text_recognition: CapabilityDto,
 }
 
 impl From<PlatformCapabilities> for PlatformCapabilitiesDto {
@@ -205,6 +206,7 @@ impl From<PlatformCapabilities> for PlatformCapabilitiesDto {
             update_check: value.update_check.into(),
             preview_quick_look: value.preview_quick_look.into(),
             ai_actions: value.ai_actions.into(),
+            image_text_recognition: value.image_text_recognition.into(),
         }
     }
 }

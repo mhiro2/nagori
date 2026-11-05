@@ -12,6 +12,59 @@ const sample = (overrides: Partial<SearchResultDto> = {}): SearchResultDto =>
 afterEach(cleanup);
 
 describe('ResultItem', () => {
+  it('leads a named row with its name and marks a name match', () => {
+    const { getByTestId, container } = render(ResultItem, {
+      props: {
+        item: sample({ label: 'PR review request', preview: 'Could you review #123?' }),
+        index: 0,
+        selected: false,
+        query: 'review',
+        onSelect: vi.fn(),
+        onConfirm: vi.fn(),
+      },
+    });
+    const label = getByTestId('entry-label');
+    expect(label.textContent).toBe('PR review request');
+    expect(label.querySelector('mark')?.textContent).toBe('review');
+    expect(container.querySelector('.preview')?.textContent).toBe('Could you review #123?');
+  });
+
+  it('shows the matched passage of the recognized text in an image row', () => {
+    const props = {
+      index: 0,
+      selected: false,
+      query: 'refused',
+      onSelect: vi.fn(),
+      onConfirm: vi.fn(),
+    };
+    const { getByTestId, queryByTestId, rerender } = render(ResultItem, {
+      props: {
+        ...props,
+        item: sample({
+          kind: 'image',
+          imageWidth: 800,
+          imageHeight: 600,
+          preview: '…error: connection refused',
+        }),
+      },
+    });
+    const excerpt = getByTestId('image-text-excerpt');
+    expect(excerpt.textContent).toBe('…error: connection refused');
+    expect(excerpt.querySelector('mark')?.textContent).toBe('refused');
+    void rerender({
+      ...props,
+      item: sample({ kind: 'image', imageWidth: 800, imageHeight: 600, preview: '' }),
+    });
+    expect(queryByTestId('image-text-excerpt')).toBeNull();
+  });
+
+  it('shows no name slot for an unnamed row', () => {
+    const { queryByTestId } = render(ResultItem, {
+      props: { item: sample(), index: 0, selected: false, onSelect: vi.fn(), onConfirm: vi.fn() },
+    });
+    expect(queryByTestId('entry-label')).toBeNull();
+  });
+
   it('selects the row when keyboard focus enters it', () => {
     const onSelect = vi.fn();
     const { getByRole } = render(ResultItem, {

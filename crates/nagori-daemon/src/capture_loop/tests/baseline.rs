@@ -39,6 +39,7 @@ async fn capture_once_invalidates_attached_search_cache() {
             language: None,
             image_width: None,
             image_height: None,
+            label: None,
         }],
     );
     assert_eq!(cache.lock().unwrap().len(), 1);

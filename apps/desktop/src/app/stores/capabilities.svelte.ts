@@ -47,3 +47,9 @@ export const quickLookAvailable = (): boolean =>
 export const aiActionsSupported = (): boolean =>
   capabilitiesState.capabilities?.aiActions.status !== undefined &&
   capabilitiesState.capabilities.aiActions.status !== 'unsupported';
+
+// Whether this host can recognize text in images (Vision on macOS). Gates the
+// extract-text action and the image text search setting; `false` until the
+// capability snapshot loads.
+export const imageTextRecognitionSupported = (): boolean =>
+  capabilitiesState.capabilities?.imageTextRecognition?.status === 'available';

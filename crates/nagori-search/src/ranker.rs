@@ -38,6 +38,19 @@ impl Ranker for DefaultRanker {
 
         let mut score = 0.0;
         let mut reasons = Vec::new();
+        // A name is the user's own word for the entry, so a name hit outranks
+        // any body match of the same strength: an exact name beats an exact
+        // body (195), and even a name substring clears a body prefix.
+        let name_bonus = match candidate.label_match {
+            TextMatch::Exact => 260.0,
+            TextMatch::Prefix => 180.0,
+            TextMatch::Substring => 120.0,
+            TextMatch::None => 0.0,
+        };
+        if name_bonus > 0.0 {
+            score += name_bonus;
+            reasons.push(RankReason::NameMatch);
+        }
         match candidate.text_match {
             TextMatch::Exact => {
                 score += 100.0 + 60.0 + 35.0;
@@ -177,6 +190,7 @@ fn result(candidate: SearchCandidate, score: f32, rank_reason: Vec<RankReason>) 
         language: candidate.language,
         image_width: candidate.image_width,
         image_height: candidate.image_height,
+        label: candidate.label,
     }
 }
 
@@ -512,5 +526,51 @@ mod tests {
         assert!(result.score > 0.0);
         assert!(!result.rank_reason.contains(&RankReason::FullTextMatch));
         assert!(!result.rank_reason.contains(&RankReason::NgramMatch));
+    }
+
+    #[test]
+    fn a_name_hit_outranks_a_body_hit_of_the_same_strength() {
+        let now = OffsetDateTime::now_utc();
+        let body = rank(
+            "report",
+            entry("report"),
+            0.0,
+            0.0,
+            now,
+            RecentOrder::ByRecency,
+        )
+        .expect("exact body hit");
+        for (label_match, beats_exact_body) in [
+            (TextMatch::Exact, true),
+            (TextMatch::Prefix, false),
+            (TextMatch::Substring, false),
+        ] {
+            let mut named = entry("unrelated body");
+            named.label = Some("Weekly report".to_owned());
+            named.label_match = label_match;
+            let result = rank("report", named, 0.0, 0.0, now, RecentOrder::ByRecency)
+                .expect("name hit survives");
+            assert!(result.rank_reason.contains(&RankReason::NameMatch));
+            assert_eq!(result.label.as_deref(), Some("Weekly report"));
+            assert_eq!(
+                result.score > body.score,
+                beats_exact_body,
+                "{label_match:?}"
+            );
+        }
+        // Even a name substring clears a body prefix hit.
+        let prefix = rank(
+            "rep",
+            entry("report"),
+            0.0,
+            0.0,
+            now,
+            RecentOrder::ByRecency,
+        )
+        .unwrap();
+        let mut named = entry("unrelated body");
+        named.label_match = TextMatch::Substring;
+        let name_substring = rank("rep", named, 0.0, 0.0, now, RecentOrder::ByRecency).unwrap();
+        assert!(name_substring.score > prefix.score);
     }
 }

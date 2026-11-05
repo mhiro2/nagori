@@ -51,6 +51,9 @@ pub fn report_capabilities() -> PlatformCapabilities {
         // actually-wired engine; live model readiness (Apple Intelligence
         // downloaded) rides the separate `AiAvailabilityReport` channel.
         ai_actions: Capability::Available,
+        // Vision's text recognizer ships with every supported macOS; the
+        // runtime re-confirms this against the wired recognizer.
+        image_text_recognition: Capability::Available,
     }
 }
 

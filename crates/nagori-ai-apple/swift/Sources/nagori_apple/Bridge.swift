@@ -4,6 +4,7 @@ import FoundationModels
 import Translation
 import NaturalLanguage
 import IOKit.ps
+import Vision
 
 // All exports use the C ABI (`@_cdecl`) because `swift-rs` cannot export async
 // Swift functions directly (swift-rs#31). The Rust side declares matching
@@ -700,4 +701,59 @@ public func nagoriAppleEmbedC(
         work.cancel()
         deliver(6, vector: nil)
     }
+}
+
+// MARK: - Vision text recognition bridge
+
+/// Recognizes the text in one encoded image (PNG / JPEG / TIFF / …) on device
+/// and delivers it through `onResult`, invoked synchronously before return, as
+/// one line per recognized text line: `x\ty\twidth\theight\ttext`. The box is
+/// normalized to the image size with a top-left origin (Vision reports a
+/// bottom-left one); tabs and line breaks inside the text become spaces so the
+/// framing stays unambiguous. The buffer is valid only for the call. Returns 0
+/// on success (including an image with no text) and 1 when the image cannot be
+/// decoded or the request fails.
+@_cdecl("nagori_apple_recognize_text_c")
+public func nagoriAppleRecognizeTextC(
+    dataPtr: UnsafePointer<UInt8>?,
+    dataLen: Int,
+    ctx: UnsafeMutableRawPointer?,
+    onResult: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
+) -> Int32 {
+    guard let dataPtr, dataLen > 0 else {
+        return 1
+    }
+    let data = Data(bytes: dataPtr, count: dataLen)
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    // Japanese first: its model also reads Latin text, so mixed Japanese and
+    // English screenshots (error dialogs, code next to prose) come out whole.
+    request.recognitionLanguages = ["ja-JP", "en-US"]
+    let handler = VNImageRequestHandler(data: data, options: [:])
+    do {
+        try handler.perform([request])
+    } catch {
+        return 1
+    }
+    var out = ""
+    for observation in request.results ?? [] {
+        guard let candidate = observation.topCandidates(1).first else {
+            continue
+        }
+        let text = candidate.string
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        if text.trimmingCharacters(in: .whitespaces).isEmpty {
+            continue
+        }
+        let box = observation.boundingBox
+        out += "\(box.minX)\t\(1 - box.maxY)\t\(box.width)\t\(box.height)\t\(text)\n"
+    }
+    let bytes = Array(out.utf8)
+    bytes.withUnsafeBufferPointer { buf in
+        onResult(ctx, buf.baseAddress, buf.count)
+    }
+    return 0
 }

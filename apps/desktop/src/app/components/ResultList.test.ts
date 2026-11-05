@@ -210,6 +210,30 @@ describe('ResultList', () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
+  it('offers a full-history search below a quick-search list', async () => {
+    const onSearchFullHistory = vi.fn();
+    const props = {
+      items: [sample({ id: 'a' })],
+      selectedIndex: 0,
+      onSelect: () => {},
+      onConfirm: () => {},
+      onSearchFullHistory,
+    };
+    const { getByRole, getByText, queryByRole, rerender } = render(ResultList, {
+      props: { ...props, canSearchFullHistory: true },
+    });
+    expect(getByText('Not in this list?')).toBeTruthy();
+    const button = getByRole('button', { name: 'Search all history' });
+    expect(
+      within(getByRole('listbox')).queryByRole('button', { name: 'Search all history' }),
+    ).toBeNull();
+    await fireEvent.click(button);
+    expect(onSearchFullHistory).toHaveBeenCalledTimes(1);
+
+    await rerender({ ...props, canSearchFullHistory: false });
+    expect(queryByRole('button', { name: 'Search all history' })).toBeNull();
+  });
+
   it('suggests narrowing the search once the cap is reached', () => {
     const { getByText, queryByRole } = render(ResultList, {
       props: {

@@ -36,6 +36,28 @@ function stubFrameGeometry(frame: HTMLElement, size = 200): void {
 }
 
 describe('PreviewBodyImage', () => {
+  it('outlines recognized lines that match the query on the inline image', () => {
+    const body = {
+      ...baseProps.body,
+      recognizedLines: [
+        { text: 'Terminal', x: 0, y: 0, width: 0.3, height: 0.1 },
+        { text: 'error: connection refused', x: 0.1, y: 0.5, width: 0.6, height: 0.08 },
+      ],
+    };
+    const { getAllByTestId, queryAllByTestId, rerender } = render(PreviewBodyImage, {
+      props: { ...baseProps, body, expanded: false, query: 'refused' },
+    });
+    const boxes = getAllByTestId('image-text-match');
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]?.style.left).toBe('10%');
+    expect(boxes[0]?.style.top).toBe('50%');
+    expect(boxes[0]?.style.width).toBe('60%');
+
+    // The expanded view letterboxes the image, so it skips the outlines.
+    void rerender({ ...baseProps, body, expanded: true, query: 'refused' });
+    expect(queryAllByTestId('image-text-match')).toHaveLength(0);
+  });
+
   it('shows the loading caption until the image decodes', () => {
     // jsdom never fires <img> load, so the overlay stands in for the gap while
     // a thumbnail is (re)generated — verifying the worded status is present.

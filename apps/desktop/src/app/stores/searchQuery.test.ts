@@ -532,14 +532,25 @@ describe('full-history search', () => {
     expect(lastMode()).toBe('Auto');
   });
 
-  it('is not offered for a non-empty result, the recent listing or a failed search', async () => {
-    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('a')] }));
+  it('is offered below a non-empty quick result and widens it', async () => {
+    vi.mocked(searchClipboard).mockResolvedValue(response({ results: [result('recent')] }));
     await runQuery('foo');
+    expect(canSearchFullHistory()).toBe(true);
+
+    vi.mocked(searchClipboard).mockResolvedValue(
+      response({ results: [result('recent'), result('old')] }),
+    );
+    await searchFullHistory();
+    expect(lastMode()).toBe('Exact');
+    expect(searchState.results.map((r) => r.id)).toEqual(['recent', 'old']);
+    // Already widened: nothing further to offer.
     expect(canSearchFullHistory()).toBe(false);
     const calls = vi.mocked(searchClipboard).mock.calls.length;
     await searchFullHistory();
     expect(vi.mocked(searchClipboard).mock.calls.length).toBe(calls);
+  });
 
+  it('is not offered for the recent listing or a failed search', async () => {
     vi.mocked(searchClipboard).mockResolvedValue(response({ results: [] }));
     await runQuery('');
     expect(canSearchFullHistory()).toBe(false);

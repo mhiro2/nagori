@@ -14,8 +14,8 @@ pub use blocking::{
     run_blocking_with_timeout,
 };
 pub use capability::{
-    Capability, NO_AI_ENGINE_REASON, Platform, PlatformCapabilities, SupportTier,
-    unsupported_capabilities,
+    Capability, NO_AI_ENGINE_REASON, NO_TEXT_RECOGNIZER_REASON, Platform, PlatformCapabilities,
+    SupportTier, unsupported_capabilities,
 };
 pub use clipboard::{
     CapturedSnapshot, ClipboardExclusionKind, ClipboardReader, ClipboardWriter, MemoryClipboard,

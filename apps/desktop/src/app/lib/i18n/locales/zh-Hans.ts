@@ -15,6 +15,7 @@ export const zhHans: Messages = {
       noQuickMatches: '快速搜索未找到结果。搜索全部历史即可同时查找较早的项目。',
       searchFullHistory: '搜索全部历史',
       noFullHistoryMatches: '没有项目包含此文本。',
+      notInResults: '列表中没有？',
       noFilterMatches: '没有符合筛选条件的条目。',
       capturePaused: '捕获已暂停。请在下方恢复以保存新条目。',
       retry: '重试',
@@ -89,6 +90,7 @@ export const zhHans: Messages = {
     blocked: { label: '已隐藏', description: '被隐私规则拦截：内容已隐藏，无法粘贴。' },
   },
   rankReason: {
+    name: '名称',
     exact: '精确',
     prefix: '前缀',
     substring: '匹配',
@@ -149,6 +151,7 @@ export const zhHans: Messages = {
       loading: '正在加载图像…',
       unavailable: '图像不可用。',
       alt: '剪贴板图像预览',
+      recognizedText: '图片中的文字',
     },
     fileList: {
       summary: (shown: number, total: number): string =>
@@ -261,6 +264,28 @@ export const zhHans: Messages = {
     previousResult: '上次的结果',
     pasteResult: '粘贴',
     pasteFailed: '无法粘贴结果。',
+    nameEntry: '命名…',
+    editText: '编辑文本',
+    extractText: '提取文字',
+    notReadable: '不会读取已遮盖的图片。',
+    noTextFound: '未在此图片中找到文字。',
+    imageOnly: '只能从图片中提取文字。',
+    notEditable: '已遮盖的项目无法编辑。',
+    editResult: '编辑',
+    editorLabel: '可编辑的结果文本',
+    updateEntry: '更新项目',
+    updated: '已更新',
+    updateFailed: '无法更新项目：',
+    nameForm: {
+      title: '为此项目命名',
+      name: '名称',
+      aliases: '其他搜索词',
+      aliasesHint: '多个词请用逗号分隔。',
+      save: '保存名称',
+      remove: '移除名称',
+      cancel: '取消',
+      pinNote: '命名的项目会同时被固定。',
+    },
   },
   pastePicker: {
     title: '粘贴格式',
@@ -364,6 +389,9 @@ export const zhHans: Messages = {
       semanticIndexAcPowerOnly: '仅在接通电源时建立索引',
       semanticIndexAcPowerOnlyHelp:
         '使用电池时暂停后台嵌入以省电。关闭后在电池供电时也会建立索引。',
+      imageTextIndex: '搜索图片中的文字',
+      imageTextIndexHelp:
+        '在本设备上于后台识别图片中的文字，以便按截图中显示的文字查找。看似机密的文字会被遮盖，相应图片也会被遮盖。关闭后会清除已识别的文字。',
       semanticIndexRebuild: '重建索引',
       semanticIndexStatus: '索引状态',
       semanticIndexProgress: ({ percent, indexed, total, pending }) =>

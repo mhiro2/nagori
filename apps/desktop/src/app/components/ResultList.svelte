@@ -33,6 +33,10 @@
     // final count is still announced.
     paged?: boolean;
     onLoadMore?: () => void;
+    // The list came from the fast search for a typed query: a footer offers
+    // re-running it over the whole history for an entry the list misses.
+    canSearchFullHistory?: boolean;
+    onSearchFullHistory?: () => void;
     // DOM id of the listbox, referenced by the search combobox.
     listboxId?: string;
     // Forwarded to every row: see `ResultItem`'s `compact`.
@@ -54,6 +58,8 @@
     limitReached = false,
     paged = false,
     onLoadMore,
+    canSearchFullHistory = false,
+    onSearchFullHistory,
     listboxId,
     compact = false,
   }: Props = $props();
@@ -200,6 +206,20 @@
       {/if}
     </div>
   {/if}
+  {#if items.length > 0 && canSearchFullHistory && onSearchFullHistory}
+    <div class="limit-notice full-history-notice">
+      <span>{t.palette.emptyStates.notInResults}</span>
+      <button
+        type="button"
+        class="load-more"
+        disabled={locked}
+        data-testid="result-list-full-history"
+        onclick={onSearchFullHistory}
+      >
+        {t.palette.emptyStates.searchFullHistory}
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -223,6 +243,9 @@
     color: var(--muted);
     font-size: 0.75rem;
     text-align: center;
+  }
+  .full-history-notice {
+    padding-top: 0.25rem;
   }
   .load-more {
     padding: 0.25rem 0.65rem;

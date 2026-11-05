@@ -9,7 +9,13 @@ vi.mock('../lib/commands', async () =>
 import { getEntryPreview, getEntryPreviewFull } from '../lib/commands';
 import { isTauri } from '../lib/tauri';
 import type { EntryPreviewDto } from '../lib/types';
-import { expandPreview, hydratePreview, previewState, retryPreview } from './searchPreview.svelte';
+import {
+  expandPreview,
+  hydratePreview,
+  previewState,
+  reloadPreview,
+  retryPreview,
+} from './searchPreview.svelte';
 
 const preview = (id: string, truncated = false): EntryPreviewDto => ({
   id,
@@ -304,5 +310,22 @@ describe('expandPreview', () => {
     await expandPreview('e1');
     expect(getEntryPreviewFull).not.toHaveBeenCalled();
     expect(previewState.expandedLoading).toBe(false);
+  });
+});
+
+describe('reloadPreview', () => {
+  it('re-reads the settled preview of the entry on screen only', async () => {
+    vi.mocked(getEntryPreview).mockResolvedValue(preview('a'));
+    await hydratePreview('a', 'q');
+    expect(getEntryPreview).toHaveBeenCalledTimes(1);
+
+    const edited = { ...preview('a'), previewText: 'edited' };
+    vi.mocked(getEntryPreview).mockResolvedValue(edited);
+    await reloadPreview('b');
+    expect(getEntryPreview).toHaveBeenCalledTimes(1);
+    await reloadPreview('a');
+    expect(getEntryPreview).toHaveBeenCalledTimes(2);
+    expect(getEntryPreview).toHaveBeenLastCalledWith('a', 'q');
+    expect(previewState.preview?.previewText).toBe('edited');
   });
 });
