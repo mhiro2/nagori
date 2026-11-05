@@ -454,6 +454,10 @@ export type AppSettings = {
   revision?: number;
 };
 
+export type UpdateProgress =
+  | { phase: 'downloading'; downloaded: number; total: number | null }
+  | { phase: 'installing' };
+
 export type UpdateInfo = {
   version: string;
   currentVersion: string;

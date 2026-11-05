@@ -299,6 +299,7 @@ pub fn run() {
             commands::window_commands::close_settings,
             commands::updater::check_for_updates,
             commands::updater::open_release_page,
+            commands::updater::install_update,
             commands::installer::cli_install_status,
             commands::installer::install_cli,
         ])
@@ -359,7 +360,18 @@ const CLEAR_ON_QUIT_PURGE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 ///   strictly synchronous and safe to run inline.
 fn on_run_event(handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     match event {
-        tauri::RunEvent::ExitRequested { .. } => perform_exit_cleanup(handle),
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            // A quit while an update replaces the bundle waits for the swap;
+            // `install_update` exits once it is done.
+            if commands::updater::defer_exit_for_update_install(
+                *code == Some(tauri::RESTART_EXIT_CODE),
+            ) {
+                tracing::info!("exit_deferred_until_update_install_finishes");
+                api.prevent_exit();
+                return;
+            }
+            perform_exit_cleanup(handle);
+        }
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -434,7 +446,7 @@ fn spawn_exit_on_runtime_shutdown(handle: &tauri::AppHandle) {
 /// soft-delete complete before it destroys the tokio runtime. The
 /// background drain mirrors daemon shutdown; the clear-on-quit ceiling keeps
 /// a wedged DB from freezing the quit path indefinitely.
-fn perform_exit_cleanup(handle: &tauri::AppHandle) {
+pub(crate) fn perform_exit_cleanup(handle: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if EXIT_CLEANUP_FIRED.swap(true, Ordering::SeqCst) {
         return;
@@ -1011,6 +1023,7 @@ mod tests {
             AI_CANCELLED_EVENT, AI_DELTA_EVENT, AI_DONE_EVENT, AI_ERROR_EVENT, AI_REPLACE_EVENT,
             AI_STARTED_EVENT,
         };
+        use crate::commands::updater::UPDATE_PROGRESS_EVENT;
         use crate::hotkey::{HOTKEY_REGISTER_FAILED_EVENT, HOTKEY_REGISTER_RESOLVED_EVENT};
 
         let frontend = frontend_event_names(include_str!("../../src/app/lib/tauri.ts"));
@@ -1036,6 +1049,7 @@ mod tests {
             ("aiDone", AI_DONE_EVENT),
             ("aiError", AI_ERROR_EVENT),
             ("aiCancelled", AI_CANCELLED_EVENT),
+            ("updateProgress", UPDATE_PROGRESS_EVENT),
         ]
         .into_iter()
         .map(|(key, name)| (key.to_owned(), name.to_owned()))

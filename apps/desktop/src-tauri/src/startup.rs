@@ -171,8 +171,8 @@ async fn await_startup_outcome(
 /// result via an OS notification (consistent with how capture / AI
 /// transitions are signalled). The notification is best-effort —
 /// permission may be denied, and a transient network failure should not
-/// pop a scary banner. The download/install hand-off remains
-/// user-confirmed via the manual `commands::check_for_updates` trigger.
+/// pop a scary banner. Installing stays a separate, user-confirmed
+/// click in Settings (`commands::install_update`).
 pub(crate) fn spawn_startup_update_probe(app: &tauri::AppHandle) {
     use tauri_plugin_notification::NotificationExt;
     use tauri_plugin_updater::UpdaterExt;
@@ -193,8 +193,13 @@ pub(crate) fn spawn_startup_update_probe(app: &tauri::AppHandle) {
                     .builder()
                     .title("Nagori update available")
                     .body(format!(
-                        "Version {} is ready. Open Settings → Advanced → Updates to learn more.",
-                        update.version
+                        "Version {} is ready. Open Settings → Advanced → Updates to {}.",
+                        update.version,
+                        if crate::commands::updater::in_place_update_supported() {
+                            "install it"
+                        } else {
+                            "download it"
+                        }
                     ))
                     .show();
             }

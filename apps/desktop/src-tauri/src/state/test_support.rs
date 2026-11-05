@@ -75,6 +75,7 @@ where
         inflight_search: super::InflightSearch::default(),
         instance_lock: None,
         clear_on_quit_marker: None,
+        restart_handoff: None,
         settings_load_rx,
         settings_load_tx: Mutex::new(Some(settings_load_tx)),
     }

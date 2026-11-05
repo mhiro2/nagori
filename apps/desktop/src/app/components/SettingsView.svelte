@@ -7,6 +7,7 @@
     getCapabilities,
     getSettings,
     installCli,
+    installUpdate,
     openReleasePage,
     paletteShortcutBound as paletteShortcutBoundCmd,
     passwordManagerPreset,
@@ -37,6 +38,7 @@
     type PaletteHotkeyAction,
     type PlatformCapabilities,
     type SecondaryHotkeyAction,
+    type UpdateProgress,
   } from '../lib/types';
   import SetupRoute from '../routes/SetupRoute.svelte';
   import { refreshCapabilities } from '../stores/capabilities.svelte';
@@ -500,24 +502,27 @@
   let updateChecking = $state(false);
   let updateStatus: string | undefined = $state(undefined);
   let updateStatusKind: 'info' | 'error' = $state('info');
-  // Populated when `runUpdateCheck` finds a newer release. The MVP
-  // surface is read-only — instead of wiring `download_and_install`
-  // we send the user to the published release so they can download
-  // the bundle themselves and verify Apple's signature dialog.
+  // Populated when `runUpdateCheck` finds a newer release. Installing it is
+  // always a separate, explicit click (`runInstallUpdate`); the release
+  // page link stays available alongside it.
   let updateReleaseVersion: string | undefined = $state(undefined);
   let updateReleaseOpenError: string | undefined = $state(undefined);
 
   let updateDownloadSupported = $state(true);
+  let updateInstalling = $state(false);
+  let updateInstallProgress: UpdateProgress | undefined = $state(undefined);
+  let updateInstallError: string | undefined = $state(undefined);
   let purgeDeletedBusy = $state(false);
   let purgeDeletedStatus: string | undefined = $state(undefined);
   let purgeDeletedStatusKind: 'info' | 'error' = $state('info');
 
   const runUpdateCheck = async (): Promise<void> => {
-    if (updateChecking) return;
+    if (updateChecking || updateInstalling) return;
     updateChecking = true;
     updateStatus = undefined;
     updateReleaseVersion = undefined;
     updateReleaseOpenError = undefined;
+    updateInstallError = undefined;
     try {
       const info = await checkForUpdates();
       updateStatusKind = 'info';
@@ -552,6 +557,32 @@
       await openReleasePage(updateReleaseVersion);
     } catch (err) {
       updateReleaseOpenError = describeError(err);
+    }
+  };
+
+  // On success the backend restarts the app, so the in-flight state is only
+  // ever cleared on failure.
+  // The backend refuses with these codes when the confirmed version is gone
+  // from the feed or another install is still running; both deserve a
+  // translated next step rather than the backend's English message.
+  const describeInstallError = (err: unknown): string => {
+    const code = err !== null && typeof err === 'object' && 'code' in err ? err.code : undefined;
+    if (code === 'update_changed') return t.settings.updates.installChanged;
+    if (code === 'update_in_progress') return t.settings.updates.installInProgress;
+    return describeError(err);
+  };
+
+  const runInstallUpdate = async (): Promise<void> => {
+    if (!updateReleaseVersion || updateInstalling) return;
+    updateInstalling = true;
+    updateInstallProgress = undefined;
+    updateInstallError = undefined;
+    try {
+      await installUpdate(updateReleaseVersion);
+    } catch (err) {
+      updateInstalling = false;
+      updateInstallProgress = undefined;
+      updateInstallError = describeInstallError(err);
     }
   };
 
@@ -1037,6 +1068,9 @@
     // waiting on the first-launch heuristic — which would land on
     // General once `accessibilityFirstGrantedAt` is stamped, even if
     // the grant has since been revoked.
+    const offUpdateProgress = subscribe<UpdateProgress>(TAURI_EVENTS.updateProgress, (payload) => {
+      if (updateInstalling) updateInstallProgress = payload;
+    });
     const offNavigate = subscribe<string>(TAURI_EVENTS.navigate, (payload) => {
       if (typeof payload !== 'string') return;
       const tab = payload as Tab;
@@ -1056,6 +1090,7 @@
     return () => {
       offSettings();
       offShortcut();
+      offUpdateProgress();
       offNavigate();
     };
   });
@@ -1216,10 +1251,14 @@
               {updateReleaseVersion}
               {updateReleaseOpenError}
               {updateDownloadSupported}
+              {updateInstalling}
+              {updateInstallProgress}
+              {updateInstallError}
               debounceNumberMs={DEBOUNCE_NUMBER_MS}
               {scheduleSave}
               {runUpdateCheck}
               {openUpdateReleasePage}
+              {runInstallUpdate}
               {capabilityStatusLabel}
               {capabilityDetail}
               {showSetupButton}

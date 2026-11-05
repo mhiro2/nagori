@@ -628,6 +628,16 @@ export const de: Messages = {
         'Update verfügbar: {version}. Die Installationsart unterstützt kein In-place-Update — bitte den neuen Build von GitHub herunterladen.',
       viewRelease: 'Release anzeigen',
       downloadManual: 'Von GitHub herunterladen',
+      installAndRestart: 'Installieren und neu starten',
+      installHelp:
+        'Lädt das Update herunter, prüft seine Signatur, ersetzt Nagori und startet es neu.',
+      installHelpMacos:
+        'macOS behandelt jedes Update als neue App. Damit automatisches Einfügen weiter funktioniert, musst du Nagori unter Bedienungshilfen eventuell erneut aktivieren.',
+      downloading: 'Update wird heruntergeladen …',
+      downloadingProgress: 'Update wird heruntergeladen … {percent} %',
+      installingUpdate: 'Update wird installiert – Nagori startet gleich neu.',
+      installChanged: 'Das verfügbare Update hat sich geändert. Suche erneut nach Updates.',
+      installInProgress: 'Ein Update wird bereits installiert.',
     },
     capabilities: {
       legend: 'Plattformfähigkeiten',

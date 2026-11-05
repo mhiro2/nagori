@@ -78,6 +78,7 @@ export const commandsMock = (overrides: Record<string, unknown> = {}): Record<st
   previewEntry: vi.fn(),
   checkForUpdates: vi.fn(),
   openReleasePage: vi.fn(async () => undefined),
+  installUpdate: vi.fn(async () => undefined),
   cliInstallStatus: vi.fn(),
   installCli: vi.fn(),
   lastHotkeyFailure: vi.fn(),
