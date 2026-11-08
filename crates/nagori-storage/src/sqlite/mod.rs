@@ -180,15 +180,17 @@ impl SqliteStore {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             // Declared first so it drops *last*: drop order is the reverse of
-            // declaration (`_progress`, then `conn`, then `_permit`), so the
+            // declaration (`progress`, then `conn`, then `_permit`), so the
             // admission permit is released only after the pooled connection has
             // been returned.
             let _permit = permit;
-            let conn = store.conn()?;
+            let mut conn = store.conn()?;
             // Removed before `conn` returns to the pool (and before `_permit`
-            // releases), even if `f` panics — see [`ProgressGuard`].
-            let _progress = ProgressGuard::install(&conn, cancel)?;
-            f(&conn)
+            // releases), even if `f` panics — see [`ProgressGuard`]. The
+            // guard holds the connection's unique borrow, so `f` reaches the
+            // connection through it.
+            let progress = ProgressGuard::install(&mut conn, cancel)?;
+            f(&progress)
         })
         .await
         .map_err(|err| AppError::storage_with(format!("blocking task failed: {err}"), err))?
@@ -206,15 +208,27 @@ const SEARCH_PROGRESS_OPS: std::ffi::c_int = 1024;
 /// pooled connection. Drop runs during unwinding too, so a panicking query
 /// closure can't leave a stale handler that aborts the connection's next
 /// borrower.
+///
+/// `Connection::progress_handler` takes `&mut self`, so the guard keeps the
+/// connection's unique borrow for its whole lifetime and hands out shared
+/// access through `Deref`.
 struct ProgressGuard<'a> {
-    conn: &'a Connection,
+    conn: &'a mut Connection,
 }
 
 impl<'a> ProgressGuard<'a> {
-    fn install(conn: &'a Connection, cancel: CancellationToken) -> Result<Self> {
+    fn install(conn: &'a mut Connection, cancel: CancellationToken) -> Result<Self> {
         conn.progress_handler(SEARCH_PROGRESS_OPS, Some(move || cancel.is_cancelled()))
             .map_err(storage_err)?;
         Ok(Self { conn })
+    }
+}
+
+impl std::ops::Deref for ProgressGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn
     }
 }
 
