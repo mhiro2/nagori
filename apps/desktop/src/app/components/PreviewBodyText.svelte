@@ -72,7 +72,7 @@
       >{#each tokens as tok, idx (idx)}{@render token(tok)}{/each}</code
     ></pre>
 {:else}
-  <pre class="body"><HighlightedText {text} {query} {currentMatch} /></pre>
+  <pre class="body prose"><HighlightedText {text} {query} {currentMatch} /></pre>
 {/if}
 
 <style>
@@ -89,6 +89,14 @@
        height before the offscreen subtree is rendered. */
     content-visibility: auto;
     contain-intrinsic-size: auto 1rem;
+  }
+  /* Non-code bodies (prose, notes, messages) read in the UI font rather than
+     monospace, slightly larger and with more leading for long Japanese / CJK
+     text. `pre-wrap` still keeps the copied line breaks and spacing. */
+  .body.prose {
+    font-family: inherit;
+    font-size: 0.875rem;
+    line-height: 1.6;
   }
   .body.code code {
     font: inherit;
