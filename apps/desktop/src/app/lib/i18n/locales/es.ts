@@ -351,10 +351,10 @@ export const es: Messages = {
   setup: {
     title: 'Configurar Nagori',
     intro:
-      'Concede los permisos que Nagori necesita para pegar en otras apps. Puedes cambiarlos más adelante en Ajustes del Sistema.',
+      'Concede los permisos que Nagori necesita para pegar en otras apps. Puedes cambiarlos más adelante en Ajustes del Sistema. Sin ellos, puedes buscar en el historial y copiar elementos para pegarlos tú mismo.',
     accessibility: {
       title: 'Accesibilidad',
-      required: 'Obligatorio',
+      required: 'Necesario para el pegado automático',
       description:
         'Habilitar Accesibilidad permite que Nagori pegue entradas del historial directamente en la app activa. Pulsa «Conceder Accesibilidad» para abrir el diálogo de macOS y activa el interruptor de Nagori.',
       descriptionLinux:

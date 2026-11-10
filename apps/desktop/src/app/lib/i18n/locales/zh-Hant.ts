@@ -320,10 +320,11 @@ export const zhHant: Messages = {
   },
   setup: {
     title: '設定 Nagori',
-    intro: '授予 Nagori 向其他應用程式貼上所需的權限。您稍後可在系統設定中變更。',
+    intro:
+      '授予 Nagori 向其他應用程式貼上所需的權限。您稍後可在系統設定中變更。即使不授予，也可以搜尋歷史記錄並複製項目後手動貼上。',
     accessibility: {
       title: '輔助使用',
-      required: '必要',
+      required: '自動貼上所需',
       description:
         '啟用輔助使用後，Nagori 可將歷史條目直接貼上到目前的應用程式。點按「授予輔助使用…」開啟 macOS 對話框，並開啟 Nagori 開關。',
       descriptionLinux:

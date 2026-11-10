@@ -1109,10 +1109,10 @@ export const en: Messages = {
   setup: {
     title: 'Set up Nagori',
     intro:
-      'Grant the permissions Nagori needs to paste into other apps. You can change these later in System Settings.',
+      'Grant the permissions Nagori needs to paste into other apps. You can change these later in System Settings. Without them you can still search your history and copy items to paste yourself.',
     accessibility: {
       title: 'Accessibility',
-      required: 'Required',
+      required: 'Required for auto-paste',
       description:
         'Enabling Accessibility lets Nagori paste history entries directly into the focused app. Click Grant Accessibility to open the macOS dialog, then turn the Nagori switch on.',
       descriptionLinux:

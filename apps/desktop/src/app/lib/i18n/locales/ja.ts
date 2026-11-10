@@ -338,10 +338,10 @@ export const ja: Messages = {
   setup: {
     title: 'Nagori をセットアップ',
     intro:
-      'Nagori が他のアプリへ自動ペーストするために必要な権限を許可します。あとから システム設定 で変更できます。',
+      'Nagori が他のアプリへ自動ペーストするために必要な権限を許可します。あとから システム設定 で変更できます。許可しなくても、履歴の検索とコピーは使えます（貼り付けは手動になります）。',
     accessibility: {
       title: 'アクセシビリティ',
-      required: '必須',
+      required: '自動ペーストに必要',
       description:
         'アクセシビリティを有効にすると、Nagori が履歴をフォーカス中のアプリへ直接ペーストできます。「アクセシビリティを許可…」を押して macOS のダイアログを表示し、Nagori のスイッチをオンにしてください。',
       descriptionLinux:
