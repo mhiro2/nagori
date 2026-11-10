@@ -320,10 +320,11 @@ export const zhHans: Messages = {
   },
   setup: {
     title: '设置 Nagori',
-    intro: '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。',
+    intro:
+      '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。即使不授予，也可以搜索历史记录并复制项目后手动粘贴。',
     accessibility: {
       title: '辅助功能',
-      required: '必需',
+      required: '自动粘贴所需',
       description:
         '启用辅助功能后，Nagori 可直接将历史条目粘贴到当前应用。点击“授予辅助功能…”打开 macOS 对话框，然后开启 Nagori 开关。',
       descriptionLinux:

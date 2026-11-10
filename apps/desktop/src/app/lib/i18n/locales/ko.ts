@@ -337,10 +337,10 @@ export const ko: Messages = {
   setup: {
     title: 'Nagori 설정',
     intro:
-      'Nagori가 다른 앱에 붙여넣기 위해 필요한 권한을 허용하세요. 시스템 설정에서 나중에 변경할 수 있습니다.',
+      'Nagori가 다른 앱에 붙여넣기 위해 필요한 권한을 허용하세요. 시스템 설정에서 나중에 변경할 수 있습니다. 허용하지 않아도 기록을 검색하고 항목을 복사해 직접 붙여넣을 수 있습니다.',
     accessibility: {
       title: '접근성',
-      required: '필수',
+      required: '자동 붙여넣기에 필요',
       description:
         '접근성을 허용하면 Nagori가 기록을 포커스된 앱에 직접 붙여넣을 수 있습니다. “접근성 허용…”을 눌러 macOS 대화상자를 열고 Nagori 스위치를 켜세요.',
       descriptionLinux:

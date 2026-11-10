@@ -353,10 +353,10 @@ export const de: Messages = {
   setup: {
     title: 'Nagori einrichten',
     intro:
-      'Erteilen Sie die Berechtigungen, die Nagori zum Einfügen in andere Apps benötigt. Sie können sie später in den Systemeinstellungen ändern.',
+      'Erteilen Sie die Berechtigungen, die Nagori zum Einfügen in andere Apps benötigt. Sie können sie später in den Systemeinstellungen ändern. Auch ohne sie können Sie den Verlauf durchsuchen und Einträge kopieren, um sie selbst einzufügen.',
     accessibility: {
       title: 'Bedienungshilfen',
-      required: 'Erforderlich',
+      required: 'Für automatisches Einfügen erforderlich',
       description:
         'Mit aktivierten Bedienungshilfen kann Nagori Verlaufseinträge direkt in die aktive App einfügen. Klicken Sie auf „Bedienungshilfen erteilen“, um den macOS-Dialog zu öffnen, und aktivieren Sie den Schalter für Nagori.',
       descriptionLinux:
