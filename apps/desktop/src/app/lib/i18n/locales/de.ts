@@ -420,7 +420,7 @@ export const de: Messages = {
       enabledHelp:
         'Modellgestützte Aktionen wie Zusammenfassen laufen vollständig auf dem Gerät über Apple Intelligence. Standardmäßig aus.',
       provider: 'Anbieter',
-      providerDisabled: 'Deaktiviert',
+      providerDisabled: 'Keiner',
       providerApple: 'Apple (auf dem Gerät)',
       allowStreaming: 'Ergebnisse beim Erzeugen streamen',
       allowStreamingHelp:
@@ -443,11 +443,14 @@ export const de: Messages = {
       semanticIndexStatePaused: 'Pausiert (Akkubetrieb)',
       semanticIndexStateUnavailable: 'Embedding-Modell nicht verfügbar',
       semanticIndexStateUnsupported: 'Auf diesem Gerät nicht unterstützt',
-      semanticIndexStateDisabled: 'Deaktiviert',
+      semanticIndexStateDisabled: 'Aus',
       status: 'Verfügbarkeit',
       statusAvailable: 'Verfügbar',
       statusUnavailable: 'Nicht verfügbar',
-      statusDisabled: 'Deaktiviert',
+      statusDisabled: 'Aus',
+      statusChecking: 'Wird geprüft …',
+      statusUnknown: 'Konnte nicht geprüft werden',
+      statusNoProvider: 'Wählen Sie einen Anbieter, um KI-Aktionen zu nutzen',
     },
     capture: {
       legend: 'Erfassung',

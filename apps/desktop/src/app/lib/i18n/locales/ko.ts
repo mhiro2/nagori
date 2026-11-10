@@ -402,7 +402,7 @@ export const ko: Messages = {
       enabledHelp:
         '요약 같은 모델 기반 동작은 Apple Intelligence를 통해 기기에서 실행됩니다. 기본값은 꺼짐입니다.',
       provider: '공급자',
-      providerDisabled: '사용 안 함',
+      providerDisabled: '없음',
       providerApple: 'Apple(온디바이스)',
       allowStreaming: '생성되는 대로 결과 스트리밍',
       allowStreamingHelp:
@@ -425,11 +425,14 @@ export const ko: Messages = {
       semanticIndexStatePaused: '일시 중지됨(배터리 사용 중)',
       semanticIndexStateUnavailable: '임베딩 모델을 사용할 수 없음',
       semanticIndexStateUnsupported: '이 기기에서 지원되지 않음',
-      semanticIndexStateDisabled: '사용 안 함',
+      semanticIndexStateDisabled: '꺼짐',
       status: '사용 가능 여부',
       statusAvailable: '사용 가능',
       statusUnavailable: '사용 불가',
-      statusDisabled: '사용 안 함',
+      statusDisabled: '꺼짐',
+      statusChecking: '확인 중…',
+      statusUnknown: '확인할 수 없음',
+      statusNoProvider: 'AI 동작을 사용하려면 공급자를 선택하세요',
     },
     capture: {
       legend: '캡처',

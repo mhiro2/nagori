@@ -419,7 +419,7 @@ export const fr: Messages = {
       enabledHelp:
         'Les actions basées sur un modèle comme Résumer s’exécutent entièrement sur l’appareil via Apple Intelligence. Désactivé par défaut.',
       provider: 'Fournisseur',
-      providerDisabled: 'Désactivé',
+      providerDisabled: 'Aucun',
       providerApple: 'Apple (sur l’appareil)',
       allowStreaming: 'Diffuser les résultats au fil de la génération',
       allowStreamingHelp:
@@ -447,6 +447,9 @@ export const fr: Messages = {
       statusAvailable: 'Disponible',
       statusUnavailable: 'Indisponible',
       statusDisabled: 'Désactivé',
+      statusChecking: 'Vérification…',
+      statusUnknown: 'Vérification impossible',
+      statusNoProvider: 'Choisissez un fournisseur pour utiliser les actions IA',
     },
     capture: {
       legend: 'Capture',

@@ -515,6 +515,13 @@ export type Messages = {
       statusAvailable: string;
       statusUnavailable: string;
       statusDisabled: string;
+      // Shown while AI is on but the availability probe has not answered
+      // for the current settings yet.
+      statusChecking: string;
+      // The availability probe failed, so the state is not known.
+      statusUnknown: string;
+      // AI is on but no provider is selected, so no action can run.
+      statusNoProvider: string;
     };
     capture: {
       legend: string;
@@ -1174,7 +1181,7 @@ export const en: Messages = {
       enabledHelp:
         'Model-backed actions like Summarize run fully on-device via Apple Intelligence. Off by default.',
       provider: 'Provider',
-      providerDisabled: 'Disabled',
+      providerDisabled: 'None',
       providerApple: 'Apple (on-device)',
       allowStreaming: 'Stream results as they generate',
       allowStreamingHelp:
@@ -1197,11 +1204,14 @@ export const en: Messages = {
       semanticIndexStatePaused: 'Paused (on battery)',
       semanticIndexStateUnavailable: 'Embedding model unavailable',
       semanticIndexStateUnsupported: 'Not supported on this device',
-      semanticIndexStateDisabled: 'Disabled',
+      semanticIndexStateDisabled: 'Off',
       status: 'Availability',
       statusAvailable: 'Available',
       statusUnavailable: 'Unavailable',
-      statusDisabled: 'Disabled',
+      statusDisabled: 'Off',
+      statusChecking: 'Checking…',
+      statusUnknown: 'Could not check',
+      statusNoProvider: 'Choose a provider to use AI actions',
     },
     capture: {
       legend: 'Capture',

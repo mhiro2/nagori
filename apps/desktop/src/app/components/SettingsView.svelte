@@ -446,12 +446,15 @@
   // back into `buildSnapshotPayload` whenever it needs a fresh payload
   // so the snapshot still composes live form state with the pinned
   // `lastBlurred…` set.
+  // Counts successful saves so tabs that probe stored settings can re-probe.
+  let savedRevision = $state(0);
   const save = new SettingsSaveController({
     buildSnapshot: () => buildSnapshotPayload(),
     updateSettings: saveSettings,
     describeError,
     onSaveSuccess: () => {
       error = undefined;
+      savedRevision += 1;
     },
   });
   const scheduleSave = (delay: number): void => {
@@ -1223,7 +1226,7 @@
           {/if}
 
           {#if activeTab === 'ai'}
-            <SettingsTabAi bind:settings {t} {scheduleSave} />
+            <SettingsTabAi bind:settings {t} {scheduleSave} {savedRevision} />
           {/if}
 
           {#if activeTab === 'cli'}
