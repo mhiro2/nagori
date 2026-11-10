@@ -418,7 +418,7 @@ export const es: Messages = {
       enabledHelp:
         'Las acciones con modelo como Resumir se ejecutan totalmente en el dispositivo mediante Apple Intelligence. Desactivado por defecto.',
       provider: 'Proveedor',
-      providerDisabled: 'Desactivado',
+      providerDisabled: 'Ninguno',
       providerApple: 'Apple (en el dispositivo)',
       allowStreaming: 'Transmitir los resultados a medida que se generan',
       allowStreamingHelp:
@@ -446,6 +446,9 @@ export const es: Messages = {
       statusAvailable: 'Disponible',
       statusUnavailable: 'No disponible',
       statusDisabled: 'Desactivado',
+      statusChecking: 'Comprobando…',
+      statusUnknown: 'No se pudo comprobar',
+      statusNoProvider: 'Elige un proveedor para usar las acciones de IA',
     },
     capture: {
       legend: 'Captura',
