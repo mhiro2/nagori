@@ -262,9 +262,9 @@
     color: var(--muted, rgba(255, 255, 255, 0.7));
   }
   .capability-status[data-status='available'] {
-    color: #4ade80;
-    border-color: rgba(74, 222, 128, 0.4);
-    background: rgba(74, 222, 128, 0.08);
+    color: var(--success, #34c759);
+    border-color: var(--success-border, rgba(48, 209, 88, 0.45));
+    background: var(--success-bg, rgba(48, 209, 88, 0.07));
   }
   .capability-status[data-status='unsupported'] {
     color: var(--danger, #f87171);
@@ -289,7 +289,7 @@
     border: none;
     padding: 0;
     margin: 0;
-    color: var(--accent, #60a5fa);
+    color: var(--accent, #6c8dff);
     font: inherit;
     font-size: 0.75rem;
     text-decoration: underline;
