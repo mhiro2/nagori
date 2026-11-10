@@ -100,11 +100,11 @@
   .body.code :where(mark.match) {
     padding: 0 0.05em;
     border-radius: 2px;
-    background: color-mix(in srgb, var(--accent, #6c8dff) 32%, transparent);
+    background: color-mix(in srgb, var(--accent-wash, #6c8dff) 32%, transparent);
     color: inherit;
   }
   .body.code :where(mark.match.current) {
-    background: color-mix(in srgb, var(--accent, #6c8dff) 60%, transparent);
+    background: color-mix(in srgb, var(--accent-wash, #6c8dff) 60%, transparent);
     outline: 1px solid var(--accent, #6c8dff);
   }
   .body :global(.kw) {

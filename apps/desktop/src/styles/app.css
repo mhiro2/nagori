@@ -14,6 +14,10 @@
   --muted: rgba(255, 255, 255, 0.5);
   --border: rgba(255, 255, 255, 0.08);
   --accent: #6c8dff;
+  /* Hue for translucent accent washes (search-match marks, badges, OCR
+     boxes). Kept at the dark-theme blue in every theme: the deeper
+     light-theme --accent would darken the marks under syntax-coloured text. */
+  --accent-wash: #6c8dff;
   --warning: #f59e0b;
   --danger: #f87171;
   /* Secondary tokens. Components reference these but historically carried only
@@ -24,6 +28,9 @@
      defined only in the light blocks, so dark keeps each site's own fallback. */
   --fg-secondary: rgba(255, 255, 255, 0.72);
   --accent-fg: #14161a;
+  /* Tick drawn on a filled --accent box, in --accent-fg. A data URI cannot
+     read a custom property, so each theme carries its own stroke colour. */
+  --accent-check-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6.5' fill='none' stroke='%2314161a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   --accent-soft: #b3a4f0;
   --accent-strong: #93c5fd;
   --bg-accent-soft: rgba(106, 166, 255, 0.16);
@@ -60,6 +67,13 @@
   --muted: rgba(0, 0, 0, 0.55);
   --border: rgba(0, 0, 0, 0.1);
   --fg-secondary: rgba(0, 0, 0, 0.72);
+  /* The dark-theme #6c8dff and #f87171 read at ~2.9:1 and ~2.7:1 as text on
+     #fafafa; these reach ~6:1. The darker accent also fills buttons and
+     checkboxes, so the text and tick drawn on it turn white. */
+  --accent: #3156b8;
+  --accent-fg: #ffffff;
+  --accent-check-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6.5' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --danger: #b91c1c;
   --accent-soft: #6a4fd6;
   --accent-strong: #1d4ed8;
   --bg-accent-soft: rgba(108, 141, 255, 0.14);
@@ -103,6 +117,10 @@
     --muted: rgba(0, 0, 0, 0.55);
     --border: rgba(0, 0, 0, 0.1);
     --fg-secondary: rgba(0, 0, 0, 0.72);
+    --accent: #3156b8;
+    --accent-fg: #ffffff;
+    --accent-check-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6.5' fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --danger: #b91c1c;
     --accent-soft: #6a4fd6;
     --accent-strong: #1d4ed8;
     --bg-accent-soft: rgba(108, 141, 255, 0.14);
