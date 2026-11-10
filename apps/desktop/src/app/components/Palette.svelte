@@ -422,9 +422,9 @@
   };
 
   // Below this palette width the side-by-side preview would squeeze the list
-  // to a sliver (the pane alone is 320px and the window can be 480px), so the
-  // list takes the full width and the preview is reached through the
-  // deliberate expanded-preview toggle instead. The filter row collapses its
+  // to a sliver (the pane alone is at least 260px and the window can be
+  // 480px), so the list takes the full width and the preview is reached
+  // through the deliberate expanded-preview toggle instead. The filter row collapses its
   // date presets at the same point. `0` means "not measured yet" (and jsdom),
   // which keeps the wide layout.
   const NARROW_PALETTE_WIDTH = 680;

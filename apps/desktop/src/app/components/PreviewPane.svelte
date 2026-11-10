@@ -556,7 +556,11 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    width: 320px;
+    /* The list carries the palette, so the side pane takes a share of the
+       width instead of a fixed 320px: ~270px in the default 720px window
+       (the list gains ~50px), never under 260px at the 680px two-column
+       threshold, and up to 360px in a wide window. */
+    width: clamp(260px, 38%, 360px);
     padding: 1rem;
     border-left: 1px solid var(--border, rgba(255, 255, 255, 0.08));
     background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
