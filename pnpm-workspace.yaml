@@ -26,9 +26,9 @@ catalogs:
   tooling:
     "@types/node": 24.19.2
     esbuild: 0.28.2
-    oxfmt: 0.75.0
-    oxlint: 1.90.0
-    oxlint-tsgolint: 7.0.2005
+    oxfmt: 0.76.0
+    oxlint: 1.91.0
+    oxlint-tsgolint: 7.0.2006
     typescript: 7.0.2
 
 # Keep the root TypeScript 7 devDependency from satisfying peer ranges in
