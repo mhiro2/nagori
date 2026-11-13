@@ -46,7 +46,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@v2.88.0
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # Installed with plain apt-get rather than a caching action on purpose.
@@ -94,7 +94,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.88.0
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-nextest
       - name: Run cargo check
@@ -123,7 +123,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.88.0
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-deny
       - name: Run cargo-deny
