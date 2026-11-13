@@ -2059,7 +2059,8 @@ not duplicate runtime logic.
   a window shrunk on a small screen grows back on a larger one. A notice
   appearing in the status bar does not re-fit the window.
 - Narrow layout (`Palette.svelte`, `FilterChips.svelte`). The window can be
-  as narrow as 480px while the side preview pane alone is 320px, so below a
+  as narrow as 480px while the side preview pane takes 38% of the palette
+  width (clamped to 260–360px, so ~270px in the default 720px window), so below a
   measured palette width of 680px (`bind:clientWidth`) the list takes the
   full width: the side preview steps aside (the expanded preview stays one
   deliberate toggle away — the `open-preview` chord or the status-bar
