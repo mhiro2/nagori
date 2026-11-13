@@ -438,7 +438,7 @@
     position: absolute;
     border: 2px solid var(--accent, #6c8dff);
     border-radius: 3px;
-    background: color-mix(in srgb, var(--accent, #6c8dff) 18%, transparent);
+    background: color-mix(in srgb, var(--accent-wash, #6c8dff) 18%, transparent);
     pointer-events: none;
   }
   .image-viewer.expanded .image-stage {

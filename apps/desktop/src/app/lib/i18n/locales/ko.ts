@@ -337,10 +337,10 @@ export const ko: Messages = {
   setup: {
     title: 'Nagori 설정',
     intro:
-      'Nagori가 다른 앱에 붙여넣기 위해 필요한 권한을 허용하세요. 시스템 설정에서 나중에 변경할 수 있습니다.',
+      'Nagori가 다른 앱에 붙여넣기 위해 필요한 권한을 허용하세요. 시스템 설정에서 나중에 변경할 수 있습니다. 허용하지 않아도 기록을 검색하고 항목을 복사해 직접 붙여넣을 수 있습니다.',
     accessibility: {
       title: '접근성',
-      required: '필수',
+      required: '자동 붙여넣기에 필요',
       description:
         '접근성을 허용하면 Nagori가 기록을 포커스된 앱에 직접 붙여넣을 수 있습니다. “접근성 허용…”을 눌러 macOS 대화상자를 열고 Nagori 스위치를 켜세요.',
       descriptionLinux:
@@ -402,7 +402,7 @@ export const ko: Messages = {
       enabledHelp:
         '요약 같은 모델 기반 동작은 Apple Intelligence를 통해 기기에서 실행됩니다. 기본값은 꺼짐입니다.',
       provider: '공급자',
-      providerDisabled: '사용 안 함',
+      providerDisabled: '없음',
       providerApple: 'Apple(온디바이스)',
       allowStreaming: '생성되는 대로 결과 스트리밍',
       allowStreamingHelp:
@@ -425,11 +425,14 @@ export const ko: Messages = {
       semanticIndexStatePaused: '일시 중지됨(배터리 사용 중)',
       semanticIndexStateUnavailable: '임베딩 모델을 사용할 수 없음',
       semanticIndexStateUnsupported: '이 기기에서 지원되지 않음',
-      semanticIndexStateDisabled: '사용 안 함',
+      semanticIndexStateDisabled: '꺼짐',
       status: '사용 가능 여부',
       statusAvailable: '사용 가능',
       statusUnavailable: '사용 불가',
-      statusDisabled: '사용 안 함',
+      statusDisabled: '꺼짐',
+      statusChecking: '확인 중…',
+      statusUnknown: '확인할 수 없음',
+      statusNoProvider: 'AI 동작을 사용하려면 공급자를 선택하세요',
     },
     capture: {
       legend: '캡처',

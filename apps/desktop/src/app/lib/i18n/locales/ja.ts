@@ -338,10 +338,10 @@ export const ja: Messages = {
   setup: {
     title: 'Nagori をセットアップ',
     intro:
-      'Nagori が他のアプリへ自動ペーストするために必要な権限を許可します。あとから システム設定 で変更できます。',
+      'Nagori が他のアプリへ自動ペーストするために必要な権限を許可します。あとから システム設定 で変更できます。許可しなくても、履歴の検索と、コピーして手動で貼り付ける使い方はできます。',
     accessibility: {
       title: 'アクセシビリティ',
-      required: '必須',
+      required: '自動ペーストに必要',
       description:
         'アクセシビリティを有効にすると、Nagori が履歴をフォーカス中のアプリへ直接ペーストできます。「アクセシビリティを許可…」を押して macOS のダイアログを表示し、Nagori のスイッチをオンにしてください。',
       descriptionLinux:
@@ -403,7 +403,7 @@ export const ja: Messages = {
       enabledHelp:
         '要約などのモデル連携アクションは Apple Intelligence によりデバイス上で実行されます。既定では無効です。',
       provider: 'プロバイダ',
-      providerDisabled: '無効',
+      providerDisabled: '使用しない',
       providerApple: 'Apple（オンデバイス）',
       allowStreaming: '生成中の結果をストリーミング表示',
       allowStreamingHelp:
@@ -426,11 +426,14 @@ export const ja: Messages = {
       semanticIndexStatePaused: '一時停止（バッテリー駆動中）',
       semanticIndexStateUnavailable: '埋め込みモデルを利用できません',
       semanticIndexStateUnsupported: 'このデバイスでは非対応',
-      semanticIndexStateDisabled: '無効',
+      semanticIndexStateDisabled: 'オフ',
       status: '利用可否',
       statusAvailable: '利用可能',
       statusUnavailable: '利用不可',
-      statusDisabled: '無効',
+      statusDisabled: 'オフ',
+      statusChecking: '確認中…',
+      statusUnknown: '確認できません',
+      statusNoProvider: 'AI アクションを使うにはプロバイダを選択してください',
     },
     capture: {
       legend: 'キャプチャ',

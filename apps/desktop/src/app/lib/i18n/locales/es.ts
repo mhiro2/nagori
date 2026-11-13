@@ -351,10 +351,10 @@ export const es: Messages = {
   setup: {
     title: 'Configurar Nagori',
     intro:
-      'Concede los permisos que Nagori necesita para pegar en otras apps. Puedes cambiarlos más adelante en Ajustes del Sistema.',
+      'Concede los permisos que Nagori necesita para pegar en otras apps. Puedes cambiarlos más adelante en Ajustes del Sistema. Sin ellos, puedes buscar en el historial y copiar elementos para pegarlos tú mismo.',
     accessibility: {
       title: 'Accesibilidad',
-      required: 'Obligatorio',
+      required: 'Necesario para el pegado automático',
       description:
         'Habilitar Accesibilidad permite que Nagori pegue entradas del historial directamente en la app activa. Pulsa «Conceder Accesibilidad» para abrir el diálogo de macOS y activa el interruptor de Nagori.',
       descriptionLinux:
@@ -418,7 +418,7 @@ export const es: Messages = {
       enabledHelp:
         'Las acciones con modelo como Resumir se ejecutan totalmente en el dispositivo mediante Apple Intelligence. Desactivado por defecto.',
       provider: 'Proveedor',
-      providerDisabled: 'Desactivado',
+      providerDisabled: 'Ninguno',
       providerApple: 'Apple (en el dispositivo)',
       allowStreaming: 'Transmitir los resultados a medida que se generan',
       allowStreamingHelp:
@@ -446,6 +446,9 @@ export const es: Messages = {
       statusAvailable: 'Disponible',
       statusUnavailable: 'No disponible',
       statusDisabled: 'Desactivado',
+      statusChecking: 'Comprobando…',
+      statusUnknown: 'No se pudo comprobar',
+      statusNoProvider: 'Elige un proveedor para usar las acciones de IA',
     },
     capture: {
       legend: 'Captura',

@@ -317,7 +317,11 @@
     color: var(--fg, #f5f5f5);
     border-color: var(--border-strong, rgba(255, 255, 255, 0.24));
   }
-  .trigger.active {
+  /* Listed with the hover / open states so their --fg text, which outranks a
+     bare `.active`, does not land on the filled accent. */
+  .trigger.active,
+  .trigger.active:hover:not(:disabled),
+  .trigger.active[aria-expanded='true'] {
     color: var(--accent-fg, #14161a);
     background: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
@@ -443,12 +447,12 @@
   }
   /* Checked checkbox: filled accent box with a centered SVG tick. An SVG
      (positioned `center`) can't drift off-axis the way a rotated-border tick
-     does; its stroke is --accent-fg (#14161a), matching .chip.active's
-     text-on-accent colour in both themes. */
+     does; --accent-check-icon strokes it in --accent-fg, matching .chip.active's
+     text-on-accent colour in each theme. */
   .indicator.checkbox.on {
     background-color: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-6.5' fill='none' stroke='%2314161a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-image: var(--accent-check-icon);
     background-repeat: no-repeat;
     background-position: center;
     background-size: 0.75rem;

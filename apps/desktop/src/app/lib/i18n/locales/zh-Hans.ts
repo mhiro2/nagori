@@ -320,10 +320,11 @@ export const zhHans: Messages = {
   },
   setup: {
     title: '设置 Nagori',
-    intro: '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。',
+    intro:
+      '授予 Nagori 向其他应用粘贴所需的权限。你可以稍后在系统设置中更改。即使不授予，也可以搜索历史记录并复制项目后手动粘贴。',
     accessibility: {
       title: '辅助功能',
-      required: '必需',
+      required: '自动粘贴所需',
       description:
         '启用辅助功能后，Nagori 可直接将历史条目粘贴到当前应用。点击“授予辅助功能…”打开 macOS 对话框，然后开启 Nagori 开关。',
       descriptionLinux:
@@ -379,7 +380,7 @@ export const zhHans: Messages = {
       enabled: '启用 AI 操作',
       enabledHelp: '总结等基于模型的操作通过 Apple Intelligence 完全在设备上运行。默认关闭。',
       provider: '提供方',
-      providerDisabled: '已禁用',
+      providerDisabled: '不使用',
       providerApple: 'Apple（设备端）',
       allowStreaming: '在生成时流式显示结果',
       allowStreamingHelp: '在模型生成时显示部分输出。关闭后仅显示最终结果。',
@@ -401,11 +402,14 @@ export const zhHans: Messages = {
       semanticIndexStatePaused: '已暂停（使用电池）',
       semanticIndexStateUnavailable: '嵌入模型不可用',
       semanticIndexStateUnsupported: '此设备不支持',
-      semanticIndexStateDisabled: '已禁用',
+      semanticIndexStateDisabled: '已关闭',
       status: '可用性',
       statusAvailable: '可用',
       statusUnavailable: '不可用',
-      statusDisabled: '已禁用',
+      statusDisabled: '已关闭',
+      statusChecking: '正在检查…',
+      statusUnknown: '无法检查',
+      statusNoProvider: '请选择提供方以使用 AI 操作',
     },
     capture: {
       legend: '捕获',
