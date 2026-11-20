@@ -1069,8 +1069,8 @@ describe('SettingsView', () => {
     await findByRole('button', { name: 'Back to palette' });
     // Trigger the first save (autoPasteEnabled is the second checkbox).
     const checkboxes = Array.from(
-      container.querySelectorAll('input[type="checkbox"]'),
-    ) as HTMLInputElement[];
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    );
     const autoPaste = checkboxes[1];
     if (!autoPaste) throw new Error('expected at least two checkboxes');
     await fireEvent.click(autoPaste);
@@ -1122,8 +1122,8 @@ describe('SettingsView', () => {
 
     await findByRole('button', { name: 'Back to palette' });
     const checkboxes = Array.from(
-      container.querySelectorAll('input[type="checkbox"]'),
-    ) as HTMLInputElement[];
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    );
     const autoPaste = checkboxes[1];
     if (!autoPaste) throw new Error('expected at least two checkboxes');
     await fireEvent.click(autoPaste);
@@ -1175,8 +1175,8 @@ describe('SettingsView', () => {
 
     await findByRole('button', { name: 'Back to palette' });
     const checkboxes = Array.from(
-      container.querySelectorAll('input[type="checkbox"]'),
-    ) as HTMLInputElement[];
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    );
     const autoPaste = checkboxes[1];
     if (!autoPaste) throw new Error('expected at least two checkboxes');
     // User flips autoPaste (dirty edit). Dispatched as L.
@@ -1276,8 +1276,8 @@ describe('SettingsView', () => {
     await findByRole('button', { name: 'Back to palette' });
     // First save fails — autoPasteEnabled flip dispatches and rejects.
     const checkboxes = Array.from(
-      container.querySelectorAll('input[type="checkbox"]'),
-    ) as HTMLInputElement[];
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    );
     const autoPaste = checkboxes[1];
     if (!autoPaste) throw new Error('expected at least two checkboxes');
     await fireEvent.click(autoPaste);
@@ -1325,8 +1325,8 @@ describe('SettingsView', () => {
 
     await findByRole('button', { name: 'Back to palette' });
     const checkboxes = Array.from(
-      container.querySelectorAll('input[type="checkbox"]'),
-    ) as HTMLInputElement[];
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    );
     const autoPaste = checkboxes[1];
     if (!autoPaste) throw new Error('expected at least two checkboxes');
     // L = post-click snapshot (autoPasteEnabled = false).

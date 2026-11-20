@@ -284,15 +284,15 @@ describe('PreviewPane', () => {
     // Open the confirm dialog by clicking the trigger button; the
     // window-level Enter listener short-circuits while the dialog is
     // already open, so we have a clean baseline.
-    const trigger = container.querySelector(
+    const trigger = container.querySelector<HTMLButtonElement>(
       '[data-testid="preview-url-open-button"]',
-    ) as HTMLButtonElement | null;
+    );
     expect(trigger).not.toBeNull();
     trigger!.click();
     await Promise.resolve();
-    const cancel = container.querySelector(
+    const cancel = container.querySelector<HTMLButtonElement>(
       '[data-testid="preview-url-confirm-cancel"]',
-    ) as HTMLButtonElement | null;
+    );
     expect(cancel).not.toBeNull();
     cancel!.focus();
     cancel!.dispatchEvent(
@@ -1335,9 +1335,7 @@ describe('PreviewPane', () => {
         expandedLoading: true,
       },
     });
-    const btn = container.querySelector(
-      '[data-testid="preview-expand-button"]',
-    ) as HTMLButtonElement | null;
+    const btn = container.querySelector<HTMLButtonElement>('[data-testid="preview-expand-button"]');
     expect(btn).toBeTruthy();
     expect(btn?.disabled).toBe(true);
   });
@@ -1364,9 +1362,7 @@ describe('PreviewPane', () => {
         onExpandBody,
       },
     });
-    const btn = container.querySelector(
-      '[data-testid="preview-expand-button"]',
-    ) as HTMLButtonElement | null;
+    const btn = container.querySelector<HTMLButtonElement>('[data-testid="preview-expand-button"]');
     btn?.click();
     await Promise.resolve();
     expect(onExpandBody).toHaveBeenCalledWith('entry-id');
