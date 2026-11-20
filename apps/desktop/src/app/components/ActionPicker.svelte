@@ -105,7 +105,7 @@
     flex: none;
     padding: 0.05rem 0.4rem;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent, #6c8dff) 22%, transparent);
+    background: color-mix(in srgb, var(--accent-wash, #6c8dff) 22%, transparent);
     color: var(--accent, #6c8dff);
     font-size: 0.625rem;
     font-weight: 600;

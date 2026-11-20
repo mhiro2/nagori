@@ -14,25 +14,43 @@
     settings: AppSettings;
     t: Messages;
     scheduleSave: (delay: number) => void;
+    // Bumped by the parent after each successful settings save. The probe
+    // reads the stored settings, so a toggle answered before its save lands
+    // would describe the previous state; re-probing on each save catches up.
+    savedRevision?: number;
   };
 
-  let { settings = $bindable(), t, scheduleSave }: Props = $props();
+  let { settings = $bindable(), t, scheduleSave, savedRevision = 0 }: Props = $props();
 
   let availability = $state<AiAvailability | undefined>(undefined);
+  let availabilityFailed = $state(false);
   let semanticStatus = $state<SemanticIndexStatus | undefined>(undefined);
 
-  // Re-probe availability whenever AI is enabled (or the tab re-renders with
-  // it on), so the status line reflects the live Apple Intelligence state.
+  // Re-probe availability whenever AI is turned on, the provider changes or a
+  // save lands, so the status line reflects the live Apple Intelligence state.
+  // A probe that a newer one has replaced drops its answer.
+  let probeSeq = 0;
   $effect(() => {
-    if (!isTauri() || !settings.ai.enabled) {
+    const enabled = settings.ai.enabled;
+    void settings.ai.provider;
+    void savedRevision;
+    probeSeq += 1;
+    const seq = probeSeq;
+    if (!isTauri() || !enabled) {
       availability = undefined;
+      availabilityFailed = false;
       return;
     }
     void (async () => {
       try {
-        availability = await getAiAvailability();
+        const next = await getAiAvailability();
+        if (seq !== probeSeq) return;
+        availability = next;
+        availabilityFailed = false;
       } catch {
+        if (seq !== probeSeq) return;
         availability = undefined;
+        availabilityFailed = true;
       }
     })();
   });
@@ -57,15 +75,24 @@
     return () => clearInterval(timer);
   });
 
+  // The AI switch and the provider are both user choices; the status line
+  // only reports what the probe found for them. A probe that has not answered,
+  // failed, or still describes the previous provider or switch position is
+  // not reported as "off".
   const statusLabel = $derived.by(() => {
     if (!settings.ai.enabled) return t.settings.ai.statusDisabled;
-    switch (availability?.overallStatus) {
+    if (settings.ai.provider === 'disabled') return t.settings.ai.statusNoProvider;
+    if (availabilityFailed) return t.settings.ai.statusUnknown;
+    if (!availability || availability.provider !== settings.ai.provider) {
+      return t.settings.ai.statusChecking;
+    }
+    switch (availability.overallStatus) {
       case 'available':
         return t.settings.ai.statusAvailable;
       case 'unavailable':
         return t.settings.ai.statusUnavailable;
       default:
-        return t.settings.ai.statusDisabled;
+        return t.settings.ai.statusChecking;
     }
   });
 
@@ -138,7 +165,9 @@
   </label>
   <p class="help">{t.settings.ai.allowStreamingHelp}</p>
 
-  <p class="status">{t.settings.ai.status}: {statusLabel}</p>
+  <p class="status" data-testid="ai-status" aria-live="polite">
+    {t.settings.ai.status}: {statusLabel}
+  </p>
 </fieldset>
 
 <fieldset>

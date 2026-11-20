@@ -219,6 +219,7 @@
   }
   .title-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
   }
@@ -227,12 +228,14 @@
     font-size: 1rem;
     font-weight: 600;
   }
+  /* Neutral, not warning-coloured: the pill says what the permission is for,
+     and Nagori still searches and copies without it. */
   .required-pill {
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem 0.45rem;
     border-radius: 9999px;
-    background: var(--warning-bg, rgba(245, 158, 11, 0.18));
-    color: var(--warning, #f59e0b);
-    font-size: 0.7rem;
+    background: var(--surface-muted, rgba(255, 255, 255, 0.06));
+    color: var(--fg-secondary, rgba(255, 255, 255, 0.72));
+    font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.02em;
   }

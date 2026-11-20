@@ -156,7 +156,7 @@
   }
   .primary {
     border-color: var(--accent, #6c8dff);
-    background: color-mix(in srgb, var(--accent, #6c8dff) 22%, transparent);
+    background: color-mix(in srgb, var(--accent-wash, #6c8dff) 22%, transparent);
   }
   .ghost:focus-visible,
   .primary:focus-visible {

@@ -446,12 +446,15 @@
   // back into `buildSnapshotPayload` whenever it needs a fresh payload
   // so the snapshot still composes live form state with the pinned
   // `lastBlurred…` set.
+  // Counts successful saves so tabs that probe stored settings can re-probe.
+  let savedRevision = $state(0);
   const save = new SettingsSaveController({
     buildSnapshot: () => buildSnapshotPayload(),
     updateSettings: saveSettings,
     describeError,
     onSaveSuccess: () => {
       error = undefined;
+      savedRevision += 1;
     },
   });
   const scheduleSave = (delay: number): void => {
@@ -1223,7 +1226,7 @@
           {/if}
 
           {#if activeTab === 'ai'}
-            <SettingsTabAi bind:settings {t} {scheduleSave} />
+            <SettingsTabAi bind:settings {t} {scheduleSave} {savedRevision} />
           {/if}
 
           {#if activeTab === 'cli'}
@@ -1320,7 +1323,7 @@
     text-align: right;
   }
   .save-status[data-status='saved'] {
-    color: #4ade80;
+    color: var(--success, #34c759);
   }
   .save-status[data-status='error'] {
     color: var(--danger, #f87171);
@@ -1511,7 +1514,7 @@
   .tab-content :global(input[type='checkbox']:checked) {
     background-color: var(--accent, #6c8dff);
     border-color: var(--accent, #6c8dff);
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3.5 3.5L13 5.5'/></svg>");
+    background-image: var(--accent-check-icon);
   }
   .tab-content :global(input[type='checkbox']:focus-visible) {
     outline: 2px solid var(--accent, #6c8dff);
@@ -1539,9 +1542,9 @@
     border: 1px solid transparent;
     border-radius: 6px;
     background: var(--accent, #6c8dff);
-    /* On-accent foreground, not --bg: --accent stays blue in both themes, so
-       --bg text (near-white in light) drops to ~2.9:1 on it. --accent-fg is
-       #14161a in both themes — identical to --bg in dark, legible in light. */
+    /* On-accent foreground, not --bg: --accent-fg pairs with each theme's
+       accent (dark text on the dark-theme blue, white on the deeper light-theme
+       blue), where --bg would be near-white on both. */
     color: var(--accent-fg, #14161a);
     font: inherit;
     font-weight: 600;
