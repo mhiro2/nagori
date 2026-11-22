@@ -267,8 +267,126 @@ const fn accessibility_trusted_with_prompt(_prompt: bool) -> bool {
     false
 }
 
+/// Process that owns the system "would like to control this computer using
+/// accessibility features" dialog.
+#[cfg(any(target_os = "macos", test))]
+const ACCESSIBILITY_PROMPT_OWNER: &str = "universalAccessAuthWarn";
+
+/// How often the window list is re-read while waiting for the dialog.
+const PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Tells whether an Accessibility request brought up the system dialog.
+///
+/// `AXIsProcessTrustedWithOptions(prompt: true)` returns before the dialog is
+/// on screen and gives no sign of whether macOS will show it at all: it stays
+/// silent once TCC has an answer for this code signature, and asks again after
+/// the signature changes (every update of an ad-hoc signed build). The dialog
+/// carries its own "Open System Settings" button, so a caller that would
+/// otherwise open the Accessibility pane itself uses this to avoid stacking a
+/// second window on top of it.
+///
+/// Start the watch *before* the request: the dialogs already on screen then
+/// (another app's request the user has not answered yet) are remembered and
+/// not mistaken for ours.
+#[derive(Debug)]
+pub struct AccessibilityPromptWatch {
+    already_open: Vec<i64>,
+}
+
+impl AccessibilityPromptWatch {
+    /// Record the Accessibility dialogs that are on screen right now.
+    pub async fn start() -> Self {
+        let already_open = run_blocking_with_timeout(
+            "macos_accessibility_prompt_baseline",
+            PROBE_TIMEOUT,
+            accessibility_prompt_windows,
+        )
+        .await
+        .unwrap_or_default();
+        Self { already_open }
+    }
+
+    /// Whether a dialog that was not there at [`Self::start`] comes up within
+    /// `wait`. Returns as soon as one is seen; a probe that cannot complete
+    /// reads as "not shown" so the caller still gives the user a route to the
+    /// pane.
+    pub async fn shown_within(self, wait: Duration) -> bool {
+        run_blocking_with_timeout(
+            "macos_accessibility_prompt_probe",
+            wait + PROBE_TIMEOUT,
+            move || {
+                let deadline = std::time::Instant::now() + wait;
+                loop {
+                    if has_new_window(&accessibility_prompt_windows(), &self.already_open) {
+                        return true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(PROMPT_POLL_INTERVAL);
+                }
+            },
+        )
+        .await
+        .unwrap_or(false)
+    }
+}
+
+/// Whether `current` holds a window that `already_open` does not.
+fn has_new_window(current: &[i64], already_open: &[i64]) -> bool {
+    current.iter().any(|window| !already_open.contains(window))
+}
+
+/// Keep the window numbers whose owner is the Accessibility dialog.
+#[cfg(any(target_os = "macos", test))]
+fn prompt_window_numbers<I, S>(windows: I) -> Vec<i64>
+where
+    I: IntoIterator<Item = (S, i64)>,
+    S: AsRef<str>,
+{
+    windows
+        .into_iter()
+        .filter(|(owner, _)| owner.as_ref() == ACCESSIBILITY_PROMPT_OWNER)
+        .map(|(_, number)| number)
+        .collect()
+}
+
+/// Window numbers of the Accessibility dialogs currently on screen. Owner
+/// names and window numbers are readable without the Screen Recording
+/// permission (only window titles and contents are gated).
+#[cfg(target_os = "macos")]
+fn accessibility_prompt_windows() -> Vec<i64> {
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+
+    let raw = unsafe {
+        ffi::CGWindowListCopyWindowInfo(ffi::WINDOW_LIST_OPTION_ON_SCREEN_ONLY, ffi::NULL_WINDOW_ID)
+    };
+    if raw.is_null() {
+        return Vec::new();
+    }
+    let windows: CFArray<CFDictionary<CFString, CFType>> =
+        unsafe { CFArray::wrap_under_create_rule(raw) };
+    let owner_key = unsafe { CFString::wrap_under_get_rule(ffi::kCGWindowOwnerName) };
+    let number_key = unsafe { CFString::wrap_under_get_rule(ffi::kCGWindowNumber) };
+    prompt_window_numbers(windows.iter().filter_map(|window| {
+        let owner = window.find(&owner_key)?.downcast::<CFString>()?.to_string();
+        let number = window.find(&number_key)?.downcast::<CFNumber>()?.to_i64()?;
+        Some((owner, number))
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn accessibility_prompt_windows() -> Vec<i64> {
+    Vec::new()
+}
+
 #[cfg(target_os = "macos")]
 mod ffi {
+    use core_foundation::array::CFArrayRef;
     use core_foundation::dictionary::CFDictionaryRef;
     use core_foundation::string::CFStringRef;
 
@@ -278,12 +396,45 @@ mod ffi {
         pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
         pub static kAXTrustedCheckOptionPrompt: CFStringRef;
     }
+
+    /// `kCGWindowListOptionOnScreenOnly`.
+    pub const WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1;
+    /// `kCGNullWindowID`.
+    pub const NULL_WINDOW_ID: u32 = 0;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        pub fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFArrayRef;
+        pub static kCGWindowOwnerName: CFStringRef;
+        pub static kCGWindowNumber: CFStringRef;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use time::OffsetDateTime;
+
+    #[test]
+    fn only_windows_owned_by_the_dialog_process_count() {
+        let windows = [
+            ("Finder", 10),
+            ("universalAccessAuthWarn", 11),
+            ("System Settings", 12),
+        ];
+        assert_eq!(prompt_window_numbers(windows), vec![11]);
+        assert!(prompt_window_numbers(Vec::<(String, i64)>::new()).is_empty());
+    }
+
+    #[test]
+    fn a_dialog_open_before_the_request_is_not_taken_for_ours() {
+        // Another app's dialog was already up and ours never appeared.
+        assert!(!has_new_window(&[11], &[11]));
+        assert!(!has_new_window(&[], &[11]));
+        // Ours came up next to it, or on its own.
+        assert!(has_new_window(&[11, 12], &[11]));
+        assert!(has_new_window(&[12], &[]));
+    }
 
     fn timeout() -> BlockingError {
         BlockingError::Timeout {
