@@ -316,6 +316,26 @@ describe('SettingsView', () => {
     expect(privacyTab.getAttribute('aria-selected')).toBe('true');
   });
 
+  it('keeps the header and the tab bar outside the scrolling region', async () => {
+    const { container, findByRole } = render(SettingsView);
+    const tab = await findByRole('tab', { name: 'Privacy' });
+    const body = container.querySelector<HTMLElement>('.settings > .body');
+    expect(body).toBeTruthy();
+    expect(body?.contains(tab)).toBe(false);
+    expect(body?.contains(container.querySelector('.settings h1'))).toBe(false);
+    expect(body?.querySelector('form')).toBeTruthy();
+  });
+
+  it('returns to the top of the scrolling region when the tab changes', async () => {
+    const { container, findByRole } = render(SettingsView);
+    const privacyTab = await findByRole('tab', { name: 'Privacy' });
+    const body = container.querySelector<HTMLElement>('.settings > .body');
+    if (!body) throw new Error('scrolling region missing');
+    body.scrollTop = 180;
+    await fireEvent.click(privacyTab);
+    await waitFor(() => expect(body.scrollTop).toBe(0));
+  });
+
   it('lands on the Setup tab on first launch where setup is needed (macOS)', async () => {
     // Onboarding incomplete + macOS auto-paste needs Accessibility, so the
     // first-launch heuristic should resolve onto the Setup tab once the

@@ -169,12 +169,18 @@ pub async fn set_confirm_clear_history(
 ///
 /// When `prompt = true` and TCC has *already* been asked previously
 /// (i.e. `accessibility_prompted_at` is already `Some` before this
-/// call), the OS suppresses the inline dialog. Falling back to `open(1)`
-/// on the Privacy pane in that case gives the user a one-click route
-/// to flip the toggle manually. On the very first prompt the inline
+/// call), the OS usually suppresses the inline dialog. Falling back to
+/// `open(1)` on the Privacy pane in that case gives the user a one-click
+/// route to flip the toggle manually. On the very first prompt the inline
 /// dialog is shown by the OS itself, so we deliberately skip the
 /// fallback to avoid stacking a System Settings window on top of the
 /// TCC dialog.
+///
+/// "Usually", because TCC keys its answer on the code signature: after an
+/// update of an ad-hoc signed build the OS asks again even though we have
+/// prompted before. So the fallback first waits briefly for the dialog and
+/// only opens the pane when none came up — the dialog has its own button
+/// to System Settings.
 ///
 /// Windows / Linux: no analogous user-toggleable permission exists, so
 /// the command returns the same curated status the doctor / Capability
@@ -182,6 +188,12 @@ pub async fn set_confirm_clear_history(
 /// for Linux). Returning a structured status rather than an
 /// `Unsupported` error keeps the frontend code path symmetrical with
 /// macOS.
+/// How long to wait for the system Accessibility dialog before concluding the
+/// OS suppressed it. The dialog is up within a few hundred milliseconds of the
+/// request when it is going to appear at all.
+#[cfg(target_os = "macos")]
+const ACCESSIBILITY_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn request_accessibility(
@@ -198,8 +210,21 @@ pub async fn request_accessibility(
         .onboarding
         .accessibility_prompted_at
         .is_some();
+    // Started before the request so a dialog another app already has on
+    // screen is not mistaken for the one this request may bring up.
+    let prompt_watch = if prompt && previously_prompted {
+        Some(nagori_platform_macos::AccessibilityPromptWatch::start().await)
+    } else {
+        None
+    };
     let status = state.runtime.request_accessibility(prompt).await?;
-    if prompt && previously_prompted && status.state != nagori_platform::PermissionState::Granted {
+    let dialog_missing = match prompt_watch {
+        Some(watch) if status.state != nagori_platform::PermissionState::Granted => {
+            !watch.shown_within(ACCESSIBILITY_PROMPT_WAIT).await
+        }
+        _ => false,
+    };
+    if dialog_missing {
         // TCC suppressed the dialog because it remembers a prior
         // Deny / dismiss; the Privacy pane is the user's only
         // remaining route. Surface a failed `open(1)` as a command

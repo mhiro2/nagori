@@ -1873,7 +1873,13 @@ focus, not domain logic:
   next actionable step. On the *first* prompt we deliberately skip the
   `open` fallback so the OS dialog stays foregrounded; once the marker
   is set, subsequent clicks of the Setup card route to System Settings
-  directly. Windows/Linux return a synthetic Granted (UIPI caveat) /
+  directly. The fallback first waits up to a second for the OS dialog
+  (a window owned by `universalAccessAuthWarn` that was not on screen
+  before the request) and skips the
+  `open` when it appears: TCC keys its answer on the code signature, so
+  after an update of an ad-hoc signed build the OS asks again despite
+  the marker, and opening the pane as well would stack two windows.
+  Windows/Linux return a synthetic Granted (UIPI caveat) /
   wtype-presence row.
 
 Both are deliberately scoped to UI focus / shell integration and do

@@ -16,7 +16,7 @@ pub use capability::report_capabilities;
 pub use clipboard::MacosClipboard;
 pub use hotkey::MacosHotkeyManager;
 pub use paste::MacosPasteController;
-pub use permissions::MacosPermissionChecker;
+pub use permissions::{AccessibilityPromptWatch, MacosPermissionChecker};
 pub use preview::MacosPreviewController;
 #[cfg(target_os = "macos")]
 pub use window::MacosWindowBehavior;

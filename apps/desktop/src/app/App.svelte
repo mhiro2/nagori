@@ -399,6 +399,9 @@
      the title bar and leak the window background through the corners. */
   .app-shell.settings-window {
     border-radius: 0;
+    /* `hidden` still leaves a scroll container that a focus move can scroll
+       with no way for the user to scroll it back; `clip` cannot scroll. */
+    overflow: clip;
   }
   .toast-stack {
     position: absolute;
