@@ -269,6 +269,40 @@
   // hides rather than spamming the user with a non-actionable error.
   let capabilities: PlatformCapabilities | null = $state(null);
   let activeTab: Tab = $state('general');
+  // The scrolling region below the header and tab bar, and the form inside it.
+  let bodyEl: HTMLDivElement | undefined = $state();
+  let formEl: HTMLFormElement | undefined = $state();
+  // Every tab starts at its top rather than inheriting the previous tab's
+  // scroll offset.
+  $effect(() => {
+    void activeTab;
+    if (bodyEl) bodyEl.scrollTop = 0;
+  });
+  // Pull the scroll offset back into range whenever the content shrinks (the
+  // Setup card drops its screenshot and buttons once the permission is
+  // granted) and whenever the window is shown again: the window is hidden
+  // rather than destroyed on close, so an offset left beyond the content
+  // would otherwise survive every re-open with nothing left to scroll.
+  const clampBodyScroll = (): void => {
+    const el = bodyEl;
+    if (!el) return;
+    el.scrollTop = Math.min(el.scrollTop, Math.max(0, el.scrollHeight - el.clientHeight));
+  };
+  $effect(() => {
+    const form = formEl;
+    if (!form || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(clampBodyScroll);
+    observer.observe(form);
+    return () => observer.disconnect();
+  });
+  const clampBodyScrollWhenShown = (): void => {
+    if (document.visibilityState === 'visible') clampBodyScroll();
+  };
+  $effect(() => {
+    if (!bodyEl) return;
+    document.addEventListener('visibilitychange', clampBodyScrollWhenShown);
+    return () => document.removeEventListener('visibilitychange', clampBodyScrollWhenShown);
+  });
   // A tab asked for before the capability snapshot loaded — by the
   // first-launch Setup heuristic or a `navigate` hint. It is parked here
   // and applied once capabilities arrive, so (a) a gated tab never flashes
@@ -1167,113 +1201,121 @@
         </button>
       {/each}
     </div>
-
-    <form onsubmit={(e) => e.preventDefault()}>
-      {#if activeTab === 'setup'}
-        <SetupRoute />
-      {:else}
-        <!--
-          Wrapper that anchors the shared form-control CSS to the non-Setup
-          tabs only. `:global(...)` selectors below traverse into the tab
-          child components, so anchoring on `.settings` would also reach
-          into `PermissionCard` (rendered by SetupRoute) and override its
-          button styling. The setup branch never renders this wrapper, so
-          its scoped CSS stays isolated.
-        -->
-        <div class="tab-content">
-          {#if activeTab === 'general'}
-            <SettingsTabGeneral
-              bind:settings
-              {capabilities}
-              {hotkeyError}
-              {paletteHotkeyFailed}
-              {t}
-              debounceNumberMs={DEBOUNCE_NUMBER_MS}
-              paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}
-              secondaryHotkeyActions={SECONDARY_HOTKEY_ACTIONS}
-              {scheduleSave}
-              {clampRowCount}
-              {onLocaleChange}
-              {onAppearanceChange}
-              {onGlobalHotkeyChange}
-              {onPaletteHotkeyChange}
-              {onSecondaryHotkeyChange}
-            />
-          {/if}
-
-          {#if activeTab === 'privacy'}
-            <SettingsTabPrivacy
-              bind:settings
-              {t}
-              frontmostAppCapability={capabilities?.frontmostApp}
-              bind:appDenylistPresetEnabled
-              {passwordManagerPresetStatus}
-              onRetryPasswordManagerPreset={retryPasswordManagerPreset}
-              bind:appDenylistPatternsText
-              bind:regexDenylistText
-              {regexDenylistErrors}
-              {purgeDeletedBusy}
-              {purgeDeletedStatus}
-              {purgeDeletedStatusKind}
-              debounceNumberMs={DEBOUNCE_NUMBER_MS}
-              debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
-              {scheduleSave}
-              {onPasswordManagerPresetToggle}
-              {describeRegexError}
-              {toggleCaptureKind}
-              {runPurgeDeletedEntries}
-            />
-          {/if}
-
-          {#if activeTab === 'ai'}
-            <SettingsTabAi bind:settings {t} {scheduleSave} {savedRevision} />
-          {/if}
-
-          {#if activeTab === 'cli'}
-            <SettingsTabCli
-              bind:settings
-              {t}
-              {cliStatus}
-              {cliInstalling}
-              {cliStatusMessage}
-              {cliStatusKind}
-              {scheduleSave}
-              {runCliInstall}
-            />
-          {/if}
-
-          {#if activeTab === 'advanced'}
-            <SettingsTabAdvanced
-              bind:settings
-              {t}
-              {capabilities}
-              {capabilityRows}
-              {updateChecking}
-              {updateStatus}
-              {updateStatusKind}
-              {updateReleaseVersion}
-              {updateReleaseOpenError}
-              {updateDownloadSupported}
-              {updateInstalling}
-              {updateInstallProgress}
-              {updateInstallError}
-              debounceNumberMs={DEBOUNCE_NUMBER_MS}
-              {scheduleSave}
-              {runUpdateCheck}
-              {openUpdateReleasePage}
-              {runInstallUpdate}
-              {capabilityStatusLabel}
-              {capabilityDetail}
-              {showSetupButton}
-              onOpenSetup={() => (activeTab = 'setup')}
-            />
-          {/if}
-        </div>
-      {/if}
-    </form>
-  {:else if !loading && !error}
-    <p class="status hint">{t.settings.tauriRequired}</p>
   {/if}
+
+  <!--
+    Only this region scrolls. The header and the tab bar stay outside it so
+    they remain visible and clickable whatever the scroll offset is.
+  -->
+  <div class="body" bind:this={bodyEl}>
+    {#if settings}
+      <form bind:this={formEl} onsubmit={(e) => e.preventDefault()}>
+        {#if activeTab === 'setup'}
+          <SetupRoute />
+        {:else}
+          <!--
+            Wrapper that anchors the shared form-control CSS to the non-Setup
+            tabs only. `:global(...)` selectors below traverse into the tab
+            child components, so anchoring on `.settings` would also reach
+            into `PermissionCard` (rendered by SetupRoute) and override its
+            button styling. The setup branch never renders this wrapper, so
+            its scoped CSS stays isolated.
+          -->
+          <div class="tab-content">
+            {#if activeTab === 'general'}
+              <SettingsTabGeneral
+                bind:settings
+                {capabilities}
+                {hotkeyError}
+                {paletteHotkeyFailed}
+                {t}
+                debounceNumberMs={DEBOUNCE_NUMBER_MS}
+                paletteHotkeyActions={PALETTE_HOTKEY_ACTIONS}
+                secondaryHotkeyActions={SECONDARY_HOTKEY_ACTIONS}
+                {scheduleSave}
+                {clampRowCount}
+                {onLocaleChange}
+                {onAppearanceChange}
+                {onGlobalHotkeyChange}
+                {onPaletteHotkeyChange}
+                {onSecondaryHotkeyChange}
+              />
+            {/if}
+
+            {#if activeTab === 'privacy'}
+              <SettingsTabPrivacy
+                bind:settings
+                {t}
+                frontmostAppCapability={capabilities?.frontmostApp}
+                bind:appDenylistPresetEnabled
+                {passwordManagerPresetStatus}
+                onRetryPasswordManagerPreset={retryPasswordManagerPreset}
+                bind:appDenylistPatternsText
+                bind:regexDenylistText
+                {regexDenylistErrors}
+                {purgeDeletedBusy}
+                {purgeDeletedStatus}
+                {purgeDeletedStatusKind}
+                debounceNumberMs={DEBOUNCE_NUMBER_MS}
+                debounceTextareaMs={DEBOUNCE_TEXTAREA_MS}
+                {scheduleSave}
+                {onPasswordManagerPresetToggle}
+                {describeRegexError}
+                {toggleCaptureKind}
+                {runPurgeDeletedEntries}
+              />
+            {/if}
+
+            {#if activeTab === 'ai'}
+              <SettingsTabAi bind:settings {t} {scheduleSave} {savedRevision} />
+            {/if}
+
+            {#if activeTab === 'cli'}
+              <SettingsTabCli
+                bind:settings
+                {t}
+                {cliStatus}
+                {cliInstalling}
+                {cliStatusMessage}
+                {cliStatusKind}
+                {scheduleSave}
+                {runCliInstall}
+              />
+            {/if}
+
+            {#if activeTab === 'advanced'}
+              <SettingsTabAdvanced
+                bind:settings
+                {t}
+                {capabilities}
+                {capabilityRows}
+                {updateChecking}
+                {updateStatus}
+                {updateStatusKind}
+                {updateReleaseVersion}
+                {updateReleaseOpenError}
+                {updateDownloadSupported}
+                {updateInstalling}
+                {updateInstallProgress}
+                {updateInstallError}
+                debounceNumberMs={DEBOUNCE_NUMBER_MS}
+                {scheduleSave}
+                {runUpdateCheck}
+                {openUpdateReleasePage}
+                {runInstallUpdate}
+                {capabilityStatusLabel}
+                {capabilityDetail}
+                {showSetupButton}
+                onOpenSetup={() => (activeTab = 'setup')}
+              />
+            {/if}
+          </div>
+        {/if}
+      </form>
+    {:else if !loading && !error}
+      <p class="status hint">{t.settings.tauriRequired}</p>
+    {/if}
+  </div>
 </section>
 
 <style>
@@ -1283,9 +1325,21 @@
     align-items: stretch;
     gap: 1rem;
     height: 100%;
-    padding: 1.5rem;
+    padding-top: 1.5rem;
     background: var(--bg, #14161a);
     color: var(--fg, #f5f5f5);
+    /* `clip`, not `hidden`: the section itself must never become a scroll
+       container. Scrolling belongs to `.body` alone. */
+    overflow: clip;
+  }
+  /* The one scrolling region. It spans the full window width so the
+     scrollbar sits at the window edge; the negative margin swallows the
+     flex gap so content scrolls away directly under the tab bar. */
+  .body {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-top: -1rem;
+    padding: 1rem 1.5rem 1.5rem;
     overflow: auto;
   }
   /* On wide windows the form would otherwise stretch edge-to-edge,
@@ -1293,8 +1347,13 @@
      and center the content so each row stays scannable. */
   .settings > .head,
   .settings > .tabs,
-  .settings > .status,
-  .settings > form {
+  .settings > .status {
+    width: calc(100% - 3rem);
+    max-width: 52rem;
+    margin-inline: auto;
+  }
+  .body > form,
+  .body > .status {
     width: 100%;
     max-width: 52rem;
     margin-inline: auto;
