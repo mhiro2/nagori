@@ -1,6 +1,6 @@
 use nagori_core::{
     AiActionId, AiAvailabilityReport, AiOutput, AiRequestOptions, AppSettings, ClipboardEntry,
-    ContentKind, EntryId, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
+    ContentKind, EntryId, MAX_DTO_LABEL_BYTES, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
     MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, PREVIEW_MAX_CHARS,
     PasteFormat, QuickActionId, RankReason, RepresentationRole, RepresentationSummary,
     RetentionDays, SearchResult, Sensitivity, safe_preview_for_dto, truncate_on_char_boundary,
@@ -555,7 +555,10 @@ impl From<SearchResult> for SearchResultDto {
                 .map(|tag| truncate_on_char_boundary(tag, MAX_DTO_LANGUAGE_BYTES).to_owned()),
             image_width: value.image_width,
             image_height: value.image_height,
-            label: value.label,
+            label: value
+                .label
+                .as_deref()
+                .map(|label| truncate_on_char_boundary(label, MAX_DTO_LABEL_BYTES).to_owned()),
             representation_summary: Vec::new(),
         }
     }

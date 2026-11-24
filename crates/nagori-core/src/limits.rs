@@ -161,6 +161,24 @@ pub const MAX_DTO_LANGUAGE_BYTES: usize = 32;
 /// the dominant cost of a response.
 pub const MAX_DTO_REPRESENTATION_SUMMARIES: usize = 8;
 
+/// Longest user-given name a search-result DTO carries.
+///
+/// Names are validated at [`crate::LABEL_MAX_CHARS`] characters when set, but a
+/// hand-edited row is not bound by that, so the DTO truncates the name like the
+/// other row-supplied strings.
+pub const MAX_DTO_LABEL_BYTES: usize = crate::LABEL_MAX_CHARS * 4;
+
+/// Bytes charged for the fixed part of one representation summary's JSON.
+///
+/// Covers the field names, the role, a `u64` byte count and the separators:
+/// `{"mime_type":"","role":"plain_fallback","byte_count":18446744073709551615},`
+/// is 75 bytes.
+pub const IPC_SUMMARY_SCALAR_BYTES: usize = 80;
+
+/// Bytes charged for one rank reason in a search row, the longest variant name
+/// plus its quotes and separator with room to spare.
+pub const IPC_RANK_REASON_BYTES: usize = 24;
+
 /// Bytes charged for the fixed-width part of one entry row's JSON.
 ///
 /// The id, the three RFC 3339 timestamps, the flags, the counts, and every
@@ -181,7 +199,7 @@ pub const IPC_ROW_OVERHEAD_BYTES: usize = IPC_ROW_SCALAR_BYTES
     + crate::PREVIEW_MAX_CHARS * 4 * 6
     + MAX_DTO_SOURCE_APP_NAME_BYTES * 6
     + MAX_DTO_LANGUAGE_BYTES * 6
-    + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + 64);
+    + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + IPC_SUMMARY_SCALAR_BYTES);
 
 /// Longest prefix of `text` that is at most `max_bytes` long and ends on a
 /// character boundary. Used to enforce the DTO string caps without splitting a
