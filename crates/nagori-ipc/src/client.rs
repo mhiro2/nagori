@@ -179,7 +179,7 @@ impl IpcClient {
 /// Common write-envelope-then-read-line helper used by every transport. The
 /// stream type is the only thing that varies between unix-socket and
 /// named-pipe paths, so isolating the wire-format work here keeps the
-/// envelope shape, length-prefix, and bounded reader identical across
+/// envelope shape, newline delimiter, and bounded reader identical across
 /// platforms (any divergence would be a wire-compat bug).
 #[cfg(any(unix, windows))]
 async fn exchange_envelope<S>(

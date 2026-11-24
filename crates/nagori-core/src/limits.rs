@@ -14,11 +14,12 @@ pub const MAX_IPC_BYTES: usize = 1024 * 1024;
 
 /// Upper bound for the user-tunable `max_entry_size_bytes` setting.
 ///
-/// Set to ~75% of [`MAX_IPC_BYTES`] so that even with JSON escaping (worst
-/// case 6× expansion for control characters, ~1.1× typical for ASCII text)
-/// and the envelope overhead, an entry that storage accepts can still cross
-/// the IPC boundary. Values above this would create a class of entries that
-/// the daemon stores but neither the desktop nor the CLI can read back.
+/// Set to ~75% of [`MAX_IPC_BYTES`], leaving room for typical JSON escaping
+/// (~1.1× for ASCII text) and the envelope overhead. Escape-dense text can
+/// still expand past the frame (up to 6× for control characters), so
+/// admission also checks the escaped length against
+/// [`MAX_ENTRY_TEXT_WIRE_BYTES`]. Together they keep the daemon from storing
+/// entries that neither the desktop nor the CLI can read back.
 pub const MAX_ENTRY_SIZE_BYTES: usize = (MAX_IPC_BYTES * 3) / 4;
 
 /// Hard cap on how many entries one "copy selection as one clip" action may
@@ -232,7 +233,7 @@ pub const MAX_RESPONSE_TEXT_WIRE_BYTES: usize = MAX_IPC_BYTES - IPC_ENVELOPE_RES
 ///
 /// Admission measures [`json_escaped_len`] against this ceiling so that
 /// "storage accepted it" implies "a single-entry response fits the frame".
-/// Text that escapes to no more than ~1.32x its raw size (all ASCII prose,
+/// Text that escapes to no more than ~1.31x its raw size (all ASCII prose,
 /// JSON, source code, CJK) is unaffected; only escape-dense payloads are
 /// refused.
 pub const MAX_ENTRY_TEXT_WIRE_BYTES: usize = MAX_RESPONSE_TEXT_WIRE_BYTES - IPC_ROW_OVERHEAD_BYTES;

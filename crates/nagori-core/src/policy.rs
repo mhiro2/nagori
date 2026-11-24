@@ -505,8 +505,9 @@ fn sensitivity_from_reasons(reasons: &[SensitivityReason]) -> Sensitivity {
         )
     }) {
         // OTP joins the Secret bucket (rather than Private) so the
-        // durable body goes through `apply_secret_handling` and lands
-        // as `[REDACTED]` under the default `StoreRedacted`. Without
+        // durable body goes through `apply_secret_handling`; under the
+        // default `StoreRedacted` a bare code redacts to nothing but the
+        // marker and is dropped as fully redacted. Without
         // this, an OTP-shaped clip leaked the raw 6–8 digit code into
         // SQLite even though the preview was scrubbed — a regression
         // the README's "OTPs are redacted or blocked entirely" claim
