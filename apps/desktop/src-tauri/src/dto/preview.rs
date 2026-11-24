@@ -521,7 +521,8 @@ fn elided_match_hint(
 /// every keystroke dominated the preview cost. When the stored
 /// `normalized_body` (the search document, `normalize_text` of the same plain
 /// text) is available, the check instead normalizes only the visible head and
-/// tail — bounded by the preview cap — and counts occurrences: a term occurs in
+/// tail — bounded by the preview cap — and counts occurrences, overlapping ones
+/// included: a term occurs in
 /// the hidden window when the whole body holds more of it than the visible
 /// parts do. A match straddling a cut counts as hidden, which errs toward
 /// warning. Rows without a search document fall back to normalizing the
@@ -553,9 +554,25 @@ fn elided_region_matches(
     let head = normalize_text(&raw[..head_end]);
     let tail = normalize_text(&raw[tail_start..]);
     terms.all(|term| {
-        let total = normalized_body.matches(term).count();
-        total > 0 && total > head.matches(term).count() + tail.matches(term).count()
+        let total = overlapping_matches(normalized_body, term);
+        total > 0 && total > overlapping_matches(&head, term) + overlapping_matches(&tail, term)
     })
+}
+
+/// Occurrences of `needle` in `haystack`, overlapping ones included.
+///
+/// `str::matches` skips overlaps, so a self-overlapping term undercounts the
+/// body: `aa` occurs once in `xaaa` but once in its visible tail `aa` too,
+/// which hid the occurrence that straddles the cut.
+fn overlapping_matches(haystack: &str, needle: &str) -> usize {
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(needle) {
+        count += 1;
+        let at = from + found;
+        from = at + haystack[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    count
 }
 
 /// How far `elided_region_matches` looks from a cut for a normalization seam.
@@ -1152,6 +1169,14 @@ mod tests {
             &normalized_body,
             "b"
         ));
+    }
+
+    #[test]
+    fn elided_match_counts_a_self_overlapping_hit_straddling_a_cut() {
+        let raw = "xaaa";
+        let normalized_body = normalize_text(raw);
+        assert!(elided_region_matches(raw, (1, 2), &normalized_body, "aa"));
+        assert!(!elided_region_matches(raw, (0, 1), &normalized_body, "aa"));
     }
 
     #[test]
