@@ -70,8 +70,11 @@ impl MatchWindow {
                 end = match_end + newline;
             }
         }
-        let cut_before = start > 0 || !self.starts_body;
-        let cut_after = end < chars.len() || !self.ends_body;
+        // A code line cut only from blank lines or indentation hides nothing
+        // worth an ellipsis.
+        let has_text = |part: &[char]| part.iter().any(|c| !c.is_whitespace());
+        let cut_before = has_text(&chars[..start]) || !self.starts_body;
+        let cut_after = has_text(&chars[end..]) || !self.ends_body;
 
         let before = compact(&chars[start..self.match_start]);
         let rest = compact(&chars[self.match_start..end]);
@@ -106,6 +109,10 @@ impl MatchWindow {
         if rest.len() > room || cut_after {
             let keep = rest.len().min(room - 1);
             out.extend_from_slice(&rest[..keep]);
+            // A cut that lands on a word break would leave `word …`.
+            if out.last() == Some(&' ') {
+                out.pop();
+            }
             out.push(ELLIPSIS);
         } else {
             out.extend_from_slice(&rest);
@@ -228,7 +235,8 @@ mod tests {
         let text = format!("{} needle {}", "a".repeat(40), "b ".repeat(400));
         let w = window(&text, "needle", true, true);
         let excerpt = w.excerpt(ContentKind::Text).unwrap();
-        assert_eq!(excerpt.chars().count(), PREVIEW_MAX_CHARS);
+        assert!(excerpt.chars().count() <= PREVIEW_MAX_CHARS);
+        assert!(excerpt.chars().count() >= PREVIEW_MAX_CHARS - 1);
         assert!(excerpt.ends_with('…'));
         assert!(excerpt.contains("needle"));
     }
@@ -245,6 +253,38 @@ mod tests {
             w.excerpt(ContentKind::Code).unwrap(),
             "…pool.set_max_connections(20);…",
         );
+    }
+
+    #[test]
+    fn code_excerpt_skips_the_ellipsis_when_only_blank_lines_were_cut() {
+        let w = window(
+            "fn main() {\n    let pool = Pool::new();\n    pool.set_max_connections(20);\n",
+            "set_max_connections",
+            true,
+            true,
+        );
+        assert_eq!(
+            w.excerpt(ContentKind::Code).unwrap(),
+            "…pool.set_max_connections(20);",
+        );
+        let w = window(
+            &format!("\n\n\n{}set_max_connections(20)", " ".repeat(32)),
+            "set_max_connections",
+            true,
+            true,
+        );
+        assert_eq!(
+            w.excerpt(ContentKind::Code).unwrap(),
+            "set_max_connections(20)"
+        );
+    }
+
+    #[test]
+    fn excerpt_cut_at_a_word_break_does_not_leave_a_space_before_the_ellipsis() {
+        let text = format!("M{} {}", "b".repeat(177), "c".repeat(10));
+        let w = window(&text, "M", true, true);
+        let excerpt = w.excerpt(ContentKind::Text).unwrap();
+        assert!(excerpt.ends_with("b…"), "{excerpt}");
     }
 
     #[test]
