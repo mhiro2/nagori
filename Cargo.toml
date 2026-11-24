@@ -43,6 +43,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 parking_lot = "0.13"
 png = "0.18"
 regex = "1"
+# Parses user `regex_denylist` patterns to measure their group nesting; the
+# same crate `regex` already builds on, without its Unicode tables.
+regex-syntax = { version = "0.8", default-features = false, features = ["std"] }
 # Only the daemon's GitHub update probe (one GET in `runtime/doctor.rs`) uses
 # this directly, so default features stay off (no http2/charset/proxy). The
 # version tracks the 0.13 line `tauri-plugin-updater` resolves to, so the
