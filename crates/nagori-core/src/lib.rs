@@ -45,4 +45,4 @@ pub use settings::{
     SecretHandling, SourceAppIdKind, UpdateChannel, password_manager_preset_rules, validate_hotkey,
 };
 pub use storage_location::{CloudSyncMatch, CloudSyncProvider, detect_cloud_sync};
-pub use text::{has_cjk, normalize_text};
+pub use text::{has_cjk, is_normalization_boundary, normalize_text};

@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use nagori_core::{
     ClipboardContent, ClipboardEntry, EntryId, Sensitivity, extension_of, find_common_parent,
-    fold_home, is_text_safe_for_default_output, normalize_text, parent_for_display,
-    safe_preview_for_dto, split_path,
+    fold_home, is_normalization_boundary, is_text_safe_for_default_output, normalize_text,
+    parent_for_display, safe_preview_for_dto, split_path,
 };
 use serde::Serialize;
 
@@ -526,6 +526,13 @@ fn elided_match_hint(
 /// parts do. A match straddling a cut counts as hidden, which errs toward
 /// warning. Rows without a search document fall back to normalizing the
 /// window.
+///
+/// NFKC composes across a byte cut (`か` before the cut and a combining
+/// `U+3099` after it become `が` in the body), so the visible parts are
+/// normalized only up to the nearest seam where each side normalizes on its
+/// own as it does in the body (see [`is_normalization_boundary`]). Text
+/// between a cut and its seam counts as hidden. A cut with no seam nearby
+/// (a long run of combining marks) is reported as a possible hit.
 fn elided_region_matches(
     raw: &str,
     (start, end): (usize, usize),
@@ -537,12 +544,51 @@ fn elided_region_matches(
         let normalized_region = normalize_text(&raw[start..end]);
         return terms.all(|term| normalized_region.contains(term));
     }
-    let head = normalize_text(&raw[..start]);
-    let tail = normalize_text(&raw[end..]);
+    let (Some(head_end), Some(tail_start)) = (
+        normalization_boundary_before(raw, start),
+        normalization_boundary_after(raw, end),
+    ) else {
+        return true;
+    };
+    let head = normalize_text(&raw[..head_end]);
+    let tail = normalize_text(&raw[tail_start..]);
     terms.all(|term| {
         let total = normalized_body.matches(term).count();
         total > 0 && total > head.matches(term).count() + tail.matches(term).count()
     })
+}
+
+/// How far `elided_region_matches` looks from a cut for a normalization seam.
+const NORMALIZATION_BOUNDARY_SCAN_BYTES: usize = 1024;
+
+/// The nearest normalization boundary at or before the char boundary `from`,
+/// within `NORMALIZATION_BOUNDARY_SCAN_BYTES`.
+fn normalization_boundary_before(raw: &str, from: usize) -> Option<usize> {
+    let floor = from.saturating_sub(NORMALIZATION_BOUNDARY_SCAN_BYTES);
+    let mut at = from;
+    while !is_normalization_boundary(raw, at) {
+        let (prev, _) = raw[..at].char_indices().next_back()?;
+        if prev < floor {
+            return None;
+        }
+        at = prev;
+    }
+    Some(at)
+}
+
+/// The nearest normalization boundary at or after the char boundary `from`,
+/// within `NORMALIZATION_BOUNDARY_SCAN_BYTES`.
+fn normalization_boundary_after(raw: &str, from: usize) -> Option<usize> {
+    let ceiling = from.saturating_add(NORMALIZATION_BOUNDARY_SCAN_BYTES);
+    let mut at = from;
+    while !is_normalization_boundary(raw, at) {
+        let next = at + raw[at..].chars().next()?.len_utf8();
+        if next > ceiling {
+            return None;
+        }
+        at = next;
+    }
+    Some(at)
 }
 
 /// Cap a preview body by line count first, then by byte length. Returns a
@@ -1083,6 +1129,64 @@ mod tests {
         assert!(result.text.len() <= MAX_PREVIEW_BYTES);
         assert!(result.text.lines().count() <= MAX_PREVIEW_LINES + 2);
         assert!(result.text.ends_with('z'));
+    }
+
+    #[test]
+    fn elided_match_counts_a_hit_whose_cut_splits_a_composing_sequence() {
+        // NFD `か` + U+3099 composes to `が` in the body, so normalizing the
+        // head on its own saw one more `か` than the body holds there and hid
+        // the `か` inside the elided window.
+        let raw = "aか\u{3099}か b";
+        let start = "aか".len();
+        let end = "aか\u{3099}か".len();
+        let normalized_body = normalize_text(raw);
+        assert!(elided_region_matches(
+            raw,
+            (start, end),
+            &normalized_body,
+            "か"
+        ));
+        assert!(!elided_region_matches(
+            raw,
+            (start, end),
+            &normalized_body,
+            "b"
+        ));
+    }
+
+    #[test]
+    fn elided_match_counts_hits_straddling_a_cut_next_to_a_composed_one() {
+        // A cut that splits a composing sequence must not let the head's
+        // extra count cancel a match straddling the other cut.
+        let raw = format!(
+            "{}bか\u{3099}{}bか{}",
+            "x".repeat(2_000),
+            "y".repeat(2_000),
+            "z".repeat(2_000)
+        );
+        let start = 2_000 + "bか".len();
+        let end = raw.rfind('か').expect("second か");
+        let normalized_body = normalize_text(&raw);
+        assert!(elided_region_matches(
+            &raw,
+            (start, end),
+            &normalized_body,
+            "bか"
+        ));
+        // A match straddling a cut in a body without whitespace.
+        let straddling = format!("{}needle{}", "x".repeat(2_000), "y".repeat(2_000));
+        assert!(elided_region_matches(
+            &straddling,
+            (2_000 + "nee".len(), straddling.len() - 1_000),
+            &normalize_text(&straddling),
+            "needle"
+        ));
+        assert!(!elided_region_matches(
+            &straddling,
+            (2_000 + "nee".len(), straddling.len() - 1_000),
+            &normalize_text(&straddling),
+            "absent"
+        ));
     }
 
     fn file_list_entry(paths: Vec<String>, sequence: &str) -> nagori_core::ClipboardEntry {
