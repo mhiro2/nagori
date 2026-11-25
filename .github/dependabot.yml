@@ -8,7 +8,14 @@ updates:
     cooldown:
       default-days: 7
     groups:
-      github-actions:
+      gha-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      gha-security:
+        applies-to: security-updates
         patterns:
           - "*"
 
@@ -42,6 +49,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /
@@ -85,3 +96,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
