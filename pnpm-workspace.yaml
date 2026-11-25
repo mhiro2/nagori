@@ -20,9 +20,9 @@ catalogs:
     "@testing-library/jest-dom": 7.0.1
     "@testing-library/svelte": 5.4.2
     "@testing-library/user-event": 14.6.12
-    "@vitest/coverage-v8": 5.1.0
+    "@vitest/coverage-v8": 5.1.1
     jsdom: 31.0.0
-    vitest: 5.1.0
+    vitest: 5.1.1
   tooling:
     "@types/node": 24.19.2
     esbuild: 0.28.2
